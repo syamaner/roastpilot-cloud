@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Component plan (roastpilot-plan)
+    url: https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/plan.md
+    about: Architecture, schema, epics, cost model — the source of truth this repo implements.
+  - name: Factory spec (roastpilot-plan)
+    url: https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md
+    about: How issues flow through triage and implementation, and what the readiness labels mean.

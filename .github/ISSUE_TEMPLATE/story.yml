@@ -1,0 +1,54 @@
+name: Story
+description: A thin, implementable slice of an epic (factory intake — triage judges it against this bar)
+title: "[Cx-Sx] "
+labels: ["needs-triage"]
+body:
+  - type: input
+    id: plan-link
+    attributes:
+      label: Plan link
+      description: Which epic and section of the component plan this implements (link to roastpilot-plan lines).
+      placeholder: "https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/plan.md — epic C2, §4"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkboxes; each one independently verifiable. Triage will not pass a story whose criteria cannot be tested.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: in-scope
+    attributes:
+      label: In-scope surface
+      description: Files / areas this story is expected to touch.
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this story deliberately does not do (and which story does).
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification notes
+      description: Which suite proves this (unit / contract vs ROASTPILOT_DEV / Playwright e2e / grants), plus anything manual.
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size declaration
+      description: Target ≤ ~400 changed lines. If you cannot honestly pick the first option, split the story before filing.
+      options:
+        - "Thin slice (≤ ~400 lines expected)"
+        - "Larger — needs splitting (triage will bounce this to ready-to-spec)"
+    validations:
+      required: true
