@@ -86,7 +86,7 @@ describe("main — valid verdict path", () => {
         jsonResponse([{ name: "needs-triage" }, { name: "epic:F1" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),
@@ -129,7 +129,7 @@ describe("main — valid verdict path", () => {
         jsonResponse([{ name: "needs-triage" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
             id: 99,
@@ -152,6 +152,98 @@ describe("main — valid verdict path", () => {
     );
     expect(post).toBeUndefined();
   });
+
+  it("finds a prior triage comment on page 2 (>100 comments) instead of double-posting", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the bar.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      id: i,
+      body: `unrelated human comment ${i}`,
+      user: { type: "User" },
+    }));
+    const page2 = [
+      {
+        id: 999,
+        body: `prior verdict\n${TRIAGE_COMMENT_MARKER}`,
+        user: { type: "Bot" },
+      },
+    ];
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
+        jsonResponse(page1),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=2": () =>
+        jsonResponse(page2),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/999": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const page2Fetch = calls.find((c) =>
+      c.url.includes("comments?per_page=100&page=2"),
+    );
+    expect(page2Fetch).toBeDefined();
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch).toBeDefined();
+    const post = calls.find(
+      (c) => c.method === "POST" && c.url.includes("/comments"),
+    );
+    expect(post).toBeUndefined();
+  });
+
+  it("stops after the last (partial) page and posts a new comment when no marker was found anywhere", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the bar.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User" } }]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // Only one page fetched (fewer than per_page results = last page); no
+    // page=2 request should have been made.
+    expect(calls.some((c) => c.url.includes("page=2"))).toBe(false);
+    const post = calls.find(
+      (c) => c.method === "POST" && c.url.includes("/comments"),
+    );
+    expect(post).toBeDefined();
+  });
 });
 
 describe("main — input validation and transport edge cases", () => {
@@ -165,6 +257,41 @@ describe("main — input validation and transport edge cases", () => {
     await expect(main()).rejects.toThrow(/owner\/repo/);
   });
 
+  it("rejects an oversized artifact via stat, before ever reading its contents into memory", async () => {
+    // A runaway or adversarial multi-GB artifact must be rejected up
+    // front. This test uses a smaller-but-still-over-the-limit file (the
+    // point under test is the code path, not literally reproducing GB
+    // scale) and asserts on the rejection reason, since we can't directly
+    // observe "readFile was never called" from a black-box run.
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(verdictPath, "x".repeat(25_000));
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain(
+      "exceeds the 20000-byte limit",
+    );
+    const put = calls.find((c) => c.method === "PUT");
+    expect((put?.body as { labels: string[] }).labels).toEqual([
+      "needs-triage",
+    ]);
+  });
+
   it("treats an artifact that exists but isn't valid JSON as a fail-closed case", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(verdictPath, "{ this is not json");
@@ -175,7 +302,7 @@ describe("main — input validation and transport edge cases", () => {
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),
@@ -238,7 +365,7 @@ describe("main — input validation and transport edge cases", () => {
         jsonResponse([]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         new Response(null, { status: 204 }),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),
@@ -259,7 +386,7 @@ describe("main — fail-closed paths", () => {
         jsonResponse([{ name: "epic:F1" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),
@@ -289,7 +416,7 @@ describe("main — fail-closed paths", () => {
         jsonResponse([{ name: "ready-to-implement" }, { name: "epic:C2" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),
@@ -325,7 +452,7 @@ describe("main — fail-closed paths", () => {
         jsonResponse([]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 1 }, 201),

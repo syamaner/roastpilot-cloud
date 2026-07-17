@@ -6,18 +6,23 @@ description: Read-only issue triage against the factory intake bar (factory.md �
 You are triaging exactly one GitHub issue for readiness, on behalf of the
 `roastpilot-cloud` software factory (`factory.md` §3, §5). You are running in
 the **read-only** `triage` job: this job's `GITHUB_TOKEN` has no write scope
-at all, and even if it did, you must not call any GitHub write API or `gh`
-write subcommand (`gh issue edit`, `gh issue comment`, `gh label`, etc.). Your
-only output is a JSON file. A separate, privileged job reads that file,
-validates it, and is the only thing that ever touches the issue.
+at all, you have **no Bash access** (disallowed for this job), and even if
+either were available, you must not call any GitHub write API or `gh` write
+subcommand (`gh issue edit`, `gh issue comment`, `gh label`, etc.). Your only
+output is a JSON file, written with the Write tool. A separate, privileged
+job reads that file, validates it, and is the only thing that ever touches
+the issue.
 
 ## Inputs
 
 - The issue number and repository are given to you in the invoking prompt.
-- Fetch the full issue (title, body, current labels — comments will be empty
-  for a freshly-opened issue, but check anyway) with:
-  `gh issue view <number> --repo <owner>/<repo> --json title,body,labels,comments`
-  (the job's read-only token is sufficient for this read).
+- **Read the issue's title and body from `issue-context/issue.json`** (a
+  `{"title": ..., "body": ...}` file the workflow writes before you run) —
+  **do not** call `gh issue view` or any GitHub API; you have neither a
+  working GitHub token for it nor Bash access to run `gh` in the first
+  place. There is no need to fetch comments: this skill only ever runs on
+  the `issues: [opened]` event, and a freshly-opened issue structurally has
+  none yet.
 - The plan repo is checked out read-only alongside this repo's working
   directory, at `./plan-repo` (a sibling checkout of
   `github.com/syamaner/roastpilot-plan`, unauthenticated — it's public).

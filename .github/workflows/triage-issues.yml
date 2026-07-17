@@ -83,6 +83,38 @@ jobs:
         # needs no credential at all.
         run: git clone --depth 1 https://github.com/syamaner/roastpilot-plan plan-repo
 
+      - name: Write issue context for the triage skill
+        # The skill must not call `gh issue view` (or any GitHub API): this
+        # job's token is read-only-scoped by design (see the github_token
+        # note below), and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 above means
+        # even a read-scoped token could be stripped from any Bash
+        # subprocess Claude spawns. `claude-code-action` in agent mode
+        # (custom `prompt:`, no @mention trigger) also does NOT auto-inject
+        # the issue body into Claude's context the way tag-mode does
+        # (confirmed by reading generatePrompt() in the action's own
+        # source at the pinned SHA) — so without this step, the skill would
+        # have no way to see the issue at all. This step writes the title
+        # and body to a file the skill reads with the Read tool instead —
+        # no Bash, no API call, no token, needed for the skill to see them.
+        #
+        # Safe against both injection classes an untrusted issue
+        # title/body could otherwise trigger: the values are taken from
+        # `env:` (GitHub Actions substitutes them as literal env-var
+        # values, never re-interpreted as shell syntax — unlike inlining
+        # `${{ github.event.issue.* }}` directly into a `run:` script body,
+        # which IS shell-reinterpreted and is the classic pwn-request
+        # vector), and `jq -n --arg` JSON-encodes them properly (unlike
+        # hand-building a JSON string via interpolation, which a title or
+        # body containing a `"` or `\` would corrupt or manipulate).
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          mkdir -p issue-context
+          jq -n --arg title "$ISSUE_TITLE" --arg body "$ISSUE_BODY" \
+            '{title: $title, body: $body}' > issue-context/issue.json
+
       - name: Run the triage skill
         id: triage
         uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
@@ -111,12 +143,22 @@ jobs:
           allowed_bots: ""
           allowed_non_write_users: ""
           show_full_output: false
+          # The skill only ever needs to Read issue-context/issue.json,
+          # Read files under plan-repo/, and Write
+          # triage-output/verdict.json — all "file operations", one of the
+          # base tool categories the action documents as always available.
+          # It never needed Bash even before this fix; disallowing it
+          # explicitly removes an entire tool surface rather than relying
+          # on whatever the undocumented default happens to be.
+          claude_args: '--disallowedTools "Bash"'
           prompt: |
             Use the triage skill at .claude/skills/triage/SKILL.md to
             evaluate issue #${{ github.event.issue.number }} in
             ${{ github.repository }}. Follow that file exactly, including
             its "what you must never do" section — you hold no writable
-            GitHub token in this job, and must not attempt to use one.
+            GitHub token in this job and no Bash access, and must not
+            attempt to use either. The issue's title and body are at
+            issue-context/issue.json; read that file, not the GitHub API.
             Write your JSON verdict to triage-output/verdict.json and do
             nothing else.
 

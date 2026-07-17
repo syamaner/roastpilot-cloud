@@ -29,8 +29,9 @@
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import {
+  MAX_PAYLOAD_BYTES,
   validateTriageVerdict,
   type TriageVerdictValidationResult,
 } from "./triage-verdict-schema.mts";
@@ -91,15 +92,47 @@ async function githubRequest<T>(
   return (await response.json()) as T;
 }
 
-/** Reads and JSON-parses the verdict artifact, tolerating a missing file. */
+/**
+ * Reads and JSON-parses the verdict artifact, tolerating a missing file.
+ *
+ * Checks the file's size via `stat` BEFORE reading its contents into
+ * memory or handing them to `JSON.parse` — a runaway or adversarial
+ * multi-GB artifact must be rejected without ever being fully read, or it
+ * could OOM/stall this privileged job before the fail-closed path even
+ * runs. The same {@link MAX_PAYLOAD_BYTES} bound the schema validator uses
+ * for the in-memory verdict applies here to the on-disk file.
+ */
 async function readVerdictArtifact(path: string): Promise<unknown> {
-  let raw: string;
+  let fileStat: Awaited<ReturnType<typeof stat>>;
   try {
-    raw = await readFile(path, "utf8");
+    fileStat = await stat(path);
   } catch (err) {
     throw new Error(
       `triage artifact not found at ${path} (triage job likely failed or ` +
         `produced no output): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (fileStat.size > MAX_PAYLOAD_BYTES) {
+    throw new Error(
+      `triage artifact at ${path} is ${fileStat.size} bytes, exceeds the ` +
+        `${MAX_PAYLOAD_BYTES}-byte limit — rejected before being read into ` +
+        `memory`,
+    );
+  }
+
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    // Narrow TOCTOU race (stat succeeds, the file vanishes/becomes
+    // unreadable before readFile runs) — not meaningfully triggerable in
+    // this single-shot CI job, so not exercised by a unit test; kept as a
+    // defensive branch so a real occurrence still fails closed with a
+    // clear error instead of an unhandled rejection.
+    throw new Error(
+      `triage artifact at ${path} could not be read after a successful ` +
+        `stat (possible race with another process): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   try {
@@ -111,6 +144,54 @@ async function readVerdictArtifact(path: string): Promise<unknown> {
   }
 }
 
+const COMMENT_PAGE_SIZE = 100;
+/**
+ * Upper bound on how many comment pages to scan looking for a prior
+ * triage comment (~5,000 comments) — pathologically high for a factory
+ * issue, but a sane cap against an unbounded loop rather than trusting the
+ * API to always terminate cleanly.
+ */
+const MAX_COMMENT_PAGES = 50;
+
+/**
+ * Finds this job's own prior triage comment, if any, paginating through
+ * every page of comments rather than only the first. An issue with more
+ * than one page of comments (>100) could otherwise have its marker
+ * comment missed, causing a duplicate post on a rerun instead of an edit.
+ */
+async function findExistingTriageComment(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<number | null> {
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const comments = await githubRequest<GitHubComment[]>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
+    );
+    const existing: ExistingComment[] = comments.map((c) => ({
+      id: c.id,
+      body: c.body,
+      authorType: c.user?.type ?? null,
+    }));
+    const found = findExistingTriageCommentId(existing);
+    if (found !== null) {
+      return found;
+    }
+    if (comments.length < COMMENT_PAGE_SIZE) {
+      return null; // Last page: no more comments to check.
+    }
+  }
+  console.warn(
+    `Scanned ${MAX_COMMENT_PAGES} pages of comments on #${issueNumber} ` +
+      `without finding a prior triage comment; posting a new one rather ` +
+      `than risking missing a marker beyond this page limit.`,
+  );
+  return null;
+}
+
 async function upsertComment(
   token: string,
   owner: string,
@@ -118,17 +199,12 @@ async function upsertComment(
   issueNumber: number,
   body: string,
 ): Promise<void> {
-  const comments = await githubRequest<GitHubComment[]>(
+  const existingId = await findExistingTriageComment(
     token,
-    "GET",
-    `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`,
+    owner,
+    repo,
+    issueNumber,
   );
-  const existing: ExistingComment[] = comments.map((c) => ({
-    id: c.id,
-    body: c.body,
-    authorType: c.user?.type ?? null,
-  }));
-  const existingId = findExistingTriageCommentId(existing);
 
   if (existingId !== null) {
     await githubRequest(
