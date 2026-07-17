@@ -26,8 +26,8 @@ factory pipeline/security model/label taxonomy: `factory.md`.
 | Story | Issue | Status |
 |---|---|---|
 | F1-S1 Labels, issue templates, milestones, story issues for C1/F1 | — (no issue; done at prep, 16 Jul 2026) | Done |
-| F1-S2 `triage-issues.yml` + triage skill (seed/triage/apply, JSON contract, concurrency) | [#5](https://github.com/syamaner/roastpilot-cloud/issues/5) | In progress |
-| F1-S3 `implement-ready-issues.yml` (read-only agent + privileged publisher, dispatch-first) | — | Not started |
+| F1-S2 `triage-issues.yml` + triage skill (seed/triage/apply, JSON contract, concurrency) | [#5](https://github.com/syamaner/roastpilot-cloud/issues/5) | Done — merged via #19 (5 review rounds + a `workflow_dispatch` probe, #20, that empirically settled the verdict-write permission rule — `Edit(path)`, not `Write(path)`, no pre-touch needed). A live dry-run against a real issue is the operator's next step. |
+| F1-S3 `implement-ready-issues.yml` (read-only agent + privileged publisher, dispatch-first) | — | Next up. #19's arc surfaced a load-bearing fact for this story: agent mode grants no file-write permission by default, and `Edit(path)` (not `Write(path)`) is what this action's SDK actually matches on for a scoped grant — the implement agent will write patch files and hit the same mechanism. |
 | F1-S4 Review workflow port + repo `AGENTS.md` review rubric section | — | Not started |
 | F1-S5 `to-issues` skill + dry-run decomposition of C2 (PM-reviewed) | — | Not started |
 | F1-S6 End-to-end dry run + factory runbook | — | Not started |
