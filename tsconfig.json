@@ -4,6 +4,11 @@
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "skipLibCheck": true,
+    // Needed for scripts/factory/*.mts: those scripts run directly under
+    // Node's native TypeScript support (`node scripts/factory/foo.mts`),
+    // which requires explicit `.mts` extensions on relative ESM imports.
+    // Safe alongside `noEmit: true` (the flag's actual requirement).
+    "allowImportingTsExtensions": true,
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
