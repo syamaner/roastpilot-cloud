@@ -75,8 +75,8 @@ story):
 ```bash
 cd snowflake
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-schemachange render migrations/<file>.sql              # offline: renders Jinja, no connection — this is what CI runs
-python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table   # applies to SNOWFLAKE_DATABASE (default ROASTPILOT_DEV)
+python3 validate_migrations.py          # offline: filename + Jinja-render check, no connection — this is what CI runs
+python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table   # NOT bare `schemachange` — with_connection_env.py bridges the `snow` CLI's config.toml into the SNOWFLAKE_* env vars schemachange reads; applies to SNOWFLAKE_DATABASE (default ROASTPILOT_DEV)
 ```
 
 CI does not connect to Snowflake yet (offline render/lint only); a
@@ -188,6 +188,14 @@ inline.
   reviewer data, IP addresses, visibility, or deletion → **`privacy-auditor`**.
 
 **Also verify**: tests assert real behavior, not a smoke check; new code is
-covered or carries a documented reason for an uncovered line; the diff
-doesn't touch `.github/**`, CODEOWNERS, or branch-protection config (the
-factory's pipeline-poisoning guard, factory.md §13).
+covered or carries a documented reason for an uncovered line.
+
+**Pipeline self-modification (factory.md §13):** a **factory-autonomous
+implementing agent** (an F1-stage-2 chained `ready-to-implement` run, once
+that chaining is enabled) must never touch `.github/**`, CODEOWNERS, or
+branch-protection config in its patch — that diff is a review blocker on any
+such PR, full stop. This does **not** ban `.github/**` changes in general:
+F1 itself (building the factory workflows) and any human-directed
+branch-protection or CI change are conventional, human-reviewed work and are
+expected to touch these paths. The invariant is "an autonomous agent can't
+grant itself more pipeline power," not "pipeline files are frozen."

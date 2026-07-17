@@ -13,8 +13,13 @@ safe.
 
 Check every one of these, with file/line evidence:
 
-1. **No grants to `PUBLIC`.** Grep every migration for `grant ... to public`
-   (case-insensitive) — any hit is a blocker regardless of what it grants.
+1. **No grants to `PUBLIC`.** Snowflake grant syntax names `PUBLIC` as a
+   role, not a bare keyword — `GRANT SELECT ON VIEW ... TO ROLE PUBLIC;` is
+   the form to catch, and older/bare `TO PUBLIC` is also valid syntax.  Grep
+   every migration case-insensitively for both `to role public` and
+   `to public` — any hit is a blocker regardless of what it grants. A grep
+   for only `to public` (missing the `to role` form) will miss the far more
+   common real-world syntax; don't rely on that alone.
 2. **`PUBLIC_WEB` surface stays exactly two secure views (roast-by-slug,
    reviews-by-roast) plus `EXECUTE` on `SUBMIT_REVIEW`.** Diff the full set
    of objects `PUBLIC_WEB` can touch against that list — a new grant, a
@@ -29,8 +34,14 @@ Check every one of these, with file/line evidence:
    - Idempotency uses `MERGE ... ON idempotency_key`, never assumes a unique
      constraint blocks a duplicate insert.
    - Any new range/enum rule (ratings, sliders, visibility values) exists in
-     **both** the Zod schema and the Pydantic model, and the two reject the
-     same malformed inputs — read both sides, don't take one on faith.
+     **both** the Zod schema in this repo (`lib/`) and the matching Pydantic
+     model. The Pydantic half lives in the **agent repo**
+     (`roastpilot-agent`, `cloud_sync` module, plan.md §5/§9), not here — if
+     the diff under review only touches this repo's Zod schema, you cannot
+     confirm parity from this repo's source alone. Flag explicitly that a
+     matching `roastpilot-agent` change is needed and that parity is
+     verified by the cross-repo contract test (plan.md §10, "Cross-repo" row)
+     rather than assuming it from this diff.
    - A declared PK/FK/CHECK in a migration is documentation only; flag any
      comment or code that treats it as enforcement.
 5. **Cascades stay complete.** `delete_roast` (or any new cascade) removes
@@ -44,9 +55,10 @@ Check every one of these, with file/line evidence:
 7. **Celsius.** No Fahrenheit value or conversion introduced anywhere in the
    schema or migration.
 8. **Migration hygiene.** Filename matches `V<version>__description.sql` /
-   `R__description.sql`; the migration renders offline
-   (`schemachange render migrations/<file>.sql`) without a Jinja error; one
-   logical change per migration.
+   `R__description.sql`; the migration renders offline without a Jinja error
+   (`cd snowflake && python3 validate_migrations.py` — the same offline
+   check CI runs, no connection or secret needed); one logical change per
+   migration.
 
 Report findings as a numbered list, each with severity (blocker / concern /
 note), the invariant violated, and the exact location. An empty findings
