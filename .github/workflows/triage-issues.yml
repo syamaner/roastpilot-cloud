@@ -225,5 +225,12 @@ jobs:
           # never from the verdict artifact itself. apply-triage-verdict.mts
           # rejects any verdict whose self-reported issue_number disagrees.
           TRUSTED_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # The `triage` step uploads its artifact with `if: always()`, so a
+          # schema-valid verdict can exist even from a run that did NOT
+          # succeed (timeout, internal error, a forbidden-tool attempt).
+          # The script checks this BEFORE trusting the artifact at all —
+          # job success is a second, independent gate, not implied by
+          # schema validity.
+          TRIAGE_JOB_RESULT: ${{ needs.triage.result }}
           VERDICT_PATH: triage-output/verdict.json
         run: node --experimental-strip-types scripts/factory/apply-triage-verdict.mts

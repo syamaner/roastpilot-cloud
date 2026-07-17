@@ -26,6 +26,14 @@
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
  * - `TRUSTED_ISSUE_NUMBER` — from `github.event.issue.number`, never from
  *   the verdict artifact.
+ * - `TRIAGE_JOB_RESULT` — `needs.triage.result` from the workflow. A verdict
+ *   artifact is only ever trusted when this is exactly `"success"` — the
+ *   `triage` step uploads its artifact with `if: always()` (so a failed run
+ *   still leaves something to diagnose), which means a schema-valid verdict
+ *   can exist on disk even though the job that wrote it did NOT succeed
+ *   (timeout, internal error, a forbidden-tool attempt). Schema validity
+ *   alone is not sufficient grounds to apply a verdict; job success is a
+ *   second, independent gate checked BEFORE the artifact is even read.
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
@@ -224,10 +232,18 @@ async function upsertComment(
 }
 
 /**
- * Applies a validated verdict: swaps the readiness label and upserts the
- * tracking comment. Deliberately never calls the issue-close API, for any
- * readiness value including `wontfix` — see
- * {@link buildVerdictCommentBody}'s docstring for why.
+ * Applies a validated verdict: upserts the tracking comment, THEN swaps the
+ * readiness label — comment first, label flip last, deliberately. The
+ * label is the write that can make the issue look buildable (F1-S3 trusts
+ * `ready-to-implement`); the comment is purely informational. Posting the
+ * comment first means a comment failure leaves the label exactly as it
+ * was (fail closed — no readiness change without an explanation already
+ * in place), while a label-write failure after a successful comment at
+ * least leaves the explanation behind for a human to act on.
+ *
+ * Deliberately never calls the issue-close API, for any readiness value
+ * including `wontfix` — see {@link buildVerdictCommentBody}'s docstring for
+ * why.
  */
 async function applyValidVerdict(
   token: string,
@@ -236,6 +252,14 @@ async function applyValidVerdict(
   result: Extract<TriageVerdictValidationResult, { ok: true }>,
 ): Promise<void> {
   const { verdict } = result;
+
+  await upsertComment(
+    token,
+    owner,
+    repo,
+    verdict.issue_number,
+    buildVerdictCommentBody(verdict),
+  );
 
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
     token,
@@ -251,14 +275,6 @@ async function applyValidVerdict(
     "PUT",
     `/repos/${owner}/${repo}/issues/${verdict.issue_number}/labels`,
     { labels: newLabelSet },
-  );
-
-  await upsertComment(
-    token,
-    owner,
-    repo,
-    verdict.issue_number,
-    buildVerdictCommentBody(verdict),
   );
 
   console.log(
@@ -280,6 +296,19 @@ async function applyFallback(
   // leaving that in place while triage has just failed would let F1-S3
   // pick it up as buildable despite no successful triage having run. Reset
   // to needs-triage explicitly, the same way `seed` would have, every time.
+  //
+  // Deliberately labels-first here — the MIRROR IMAGE of
+  // applyValidVerdict's comment-first ordering, not an inconsistency. The
+  // dangerous write on THIS path is a stale ready-to-implement surviving a
+  // failed reset; the comment is secondary. Resetting the label first
+  // means a comment failure afterward leaves the safe needs-triage state
+  // already in place. Reordering to comment-first would risk the opposite
+  // of applyValidVerdict's fix: a comment claiming "reset to needs-triage"
+  // could post successfully and THEN the actual reset PUT could fail,
+  // leaving a stale ready-to-implement label alongside a comment that
+  // incorrectly claims it's safe — worse than either order failing
+  // silently, since it actively misleads a reader who trusts the comment
+  // over the label.
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
     token,
     "GET",
@@ -319,6 +348,22 @@ export async function main(): Promise<void> {
   }
   const trustedIssueNumber = Number(requireEnv("TRUSTED_ISSUE_NUMBER"));
   const verdictPath = process.env.VERDICT_PATH ?? "triage-output/verdict.json";
+
+  // Gate on triage job success BEFORE ever reading the artifact. A verdict
+  // is applied only when (triage succeeded AND the artifact is valid) —
+  // schema validity alone is not enough, since `if: always()` means the
+  // artifact can exist and be well-formed even from a run that failed
+  // partway through after writing it.
+  const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
+  if (triageJobResult !== "success") {
+    await applyFallback(token, owner, repo, trustedIssueNumber, [
+      `triage job result was "${triageJobResult}", not "success" — the ` +
+        `verdict artifact (even if present and schema-valid) is not ` +
+        `trusted; only a successful triage run's verdict is ever applied`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
 
   let raw: unknown;
   let readError: string | null = null;
