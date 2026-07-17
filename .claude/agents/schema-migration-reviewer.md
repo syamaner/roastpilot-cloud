@@ -22,10 +22,13 @@ Check every one of these, with file/line evidence:
    identifier-boundary pattern instead, e.g.:
 
    ```
-   grep -inE 'to (role )?public([^_a-z0-9]|$)' migrations/*.sql
+   grep -inE 'to (role )?public([^_a-z0-9]|$)' snowflake/migrations/*.sql
    ```
 
-   Any hit from that pattern is a blocker regardless of what it grants.
+   Use the full `snowflake/migrations/*.sql` path — reviews run from the
+   repo root, and a bare `migrations/*.sql` scans a directory that doesn't
+   exist from there, silently matching nothing and defeating the check. Any
+   hit from that pattern is a blocker regardless of what it grants.
 2. **`PUBLIC_WEB` surface stays exactly two secure views (roast-by-slug,
    reviews-by-roast) plus the right to call `SUBMIT_REVIEW`.** In Snowflake
    that right is granted as `USAGE ON PROCEDURE` — `EXECUTE` is not a

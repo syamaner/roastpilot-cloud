@@ -66,7 +66,7 @@ npm install
 npm run dev          # local dev server
 npm run lint         # eslint
 npm run typecheck    # tsc --noEmit
-npm run test          # vitest run (add --coverage to match CI)
+npm run test          # vitest run (npm run test -- --coverage to match CI — the `--` is required, `npm run test --coverage` silently drops the flag)
 npm run test:e2e     # playwright (requires: npx playwright install chromium)
 npm run build
 ```
@@ -194,16 +194,17 @@ inline.
 **Also verify**: tests assert real behavior, not a smoke check; new code is
 covered or carries a documented reason for an uncovered line.
 
-**Pipeline self-modification (factory.md §13):** a **factory-autonomous
-implementing agent** (an F1-stage-2 chained `ready-to-implement` run, once
-that chaining is enabled) must never touch `.github/**`, CODEOWNERS,
-branch-protection config, **or the privileged glue/publisher scripts** (the
-label-write, branch-push, PR-create, and comment-post logic the factory's
-privileged jobs run — per factory.md's read-only-agent/privileged-publisher
-split, these scripts may live outside `.github/**`) in its patch — that diff
-is a review blocker on any such PR, full stop. This does **not** ban these
-paths from changing in general: F1 itself (building the factory workflows
-and glue scripts) and any human-directed branch-protection or CI change are
-conventional, human-reviewed work and are expected to touch them. The
-invariant is "an autonomous agent can't grant itself more pipeline power,"
-not "pipeline files are frozen."
+**Pipeline self-modification (factory.md §13):** any **factory
+implementing-agent patch** — a manually-dispatched stage-1 run or an
+F1-stage-2 chained `ready-to-implement` run alike, i.e. anything the
+privileged publisher pushes on an agent's behalf — must never touch
+`.github/**`, CODEOWNERS, branch-protection config, **or the privileged
+glue/publisher scripts** (the label-write, branch-push, PR-create, and
+comment-post logic the factory's privileged jobs run — per factory.md's
+read-only-agent/privileged-publisher split, these scripts may live outside
+`.github/**`). That diff is a review blocker on any such PR, full stop. This
+does **not** ban these paths from changing in general: F1 itself (building
+the factory workflows and glue scripts) and any human-directed
+branch-protection or CI change are conventional, human-reviewed work and are
+expected to touch them. The invariant is "a factory implementing agent can't
+grant itself more pipeline power," not "pipeline files are frozen."
