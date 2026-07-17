@@ -61,13 +61,33 @@ jobs:
     permissions:
       contents: read
       issues: read
-    env:
-      # Best-effort scrub of Anthropic/cloud/GitHub-Actions secrets from
-      # subprocess environments Claude spawns — closes the path where a
-      # prompt-injected agent copies its own token env into the verdict
-      # artifact/reasoning text it writes (flagged independently by both
-      # the adversarial security review and Codex).
-      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    # No CLAUDE_CODE_SUBPROCESS_ENV_SCRUB here — deliberately removed after
+    # a live dry-run (test issue #21, run 29620166240) showed it breaks
+    # this job outright: it requires bubblewrap for subprocess isolation,
+    # which the standard GitHub-hosted ubuntu runner does not have, so
+    # Claude Code's own install failed ("Failed to install Claude Code
+    # after 3 attempts") and every triage run fell straight to the
+    # fail-closed fallback — correctly (needs-triage held, no false
+    # buildable label), but the workflow never actually triaged anything.
+    #
+    # It's also redundant, not just broken: ENV_SCRUB's whole purpose was
+    # scrubbing secrets from subprocess environments the agent's Bash tool
+    # spawns — but `--disallowedTools "Bash"` (round 2, below) already
+    # removed the agent's ability to spawn a subprocess at ALL. There is no
+    # subprocess env left to scrub, and none of the agent's remaining tools
+    # read its own process environment (Read only reads files; issue
+    # content comes from issue-context/issue.json, not env vars; `.git/**`
+    # is separately denied). So the token-exfiltration path ENV_SCRUB
+    # guarded against is already closed by the no-Bash grant, and ENV_SCRUB
+    # itself was pure downside here.
+    #
+    # Load-bearing for later factory jobs: if a future agent job DOES
+    # enable Bash (or any other tool that can spawn a subprocess), it must
+    # either install bubblewrap first or re-add
+    # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB — the secret-scrubbing protection
+    # ENV_SCRUB provides is not automatic, and dropping it safely here
+    # relied specifically on Bash being fully disallowed, not on some
+    # general safety margin.
     steps:
       - name: Checkout roastpilot-cloud (read-only)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -86,9 +106,8 @@ jobs:
       - name: Write issue context for the triage skill
         # The skill must not call `gh issue view` (or any GitHub API): this
         # job's token is read-only-scoped by design (see the github_token
-        # note below), and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 above means
-        # even a read-scoped token could be stripped from any Bash
-        # subprocess Claude spawns. `claude-code-action` in agent mode
+        # note below), and it has no Bash access at all to run `gh` with
+        # in the first place (round 2). `claude-code-action` in agent mode
         # (custom `prompt:`, no @mention trigger) also does NOT auto-inject
         # the issue body into Claude's context the way tag-mode does
         # (confirmed by reading generatePrompt() in the action's own
