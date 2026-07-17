@@ -30,3 +30,15 @@ taxonomy and what each readiness state means.
 
 Design principles: the cloud never controls the roaster, is never required
 for an active roast, and never makes safety decisions.
+
+## Development
+
+```bash
+npm install
+npm run dev        # serves the placeholder page at http://localhost:3000
+npm run lint
+npm run typecheck
+npm run test        # Vitest unit tests
+npm run test:e2e    # Playwright boot smoke spec (requires: npx playwright install chromium)
+npm run build
+```
