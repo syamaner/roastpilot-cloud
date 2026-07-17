@@ -42,3 +42,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# snowflake/ tooling (schemachange is a Python tool, isolated from npm)
+/snowflake/.venv
+__pycache__/
+*.pyc
