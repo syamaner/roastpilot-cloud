@@ -114,6 +114,11 @@ jobs:
           mkdir -p issue-context
           jq -n --arg title "$ISSUE_TITLE" --arg body "$ISSUE_BODY" \
             '{title: $title, body: $body}' > issue-context/issue.json
+          # Pre-create the verdict output directory: Bash is disallowed for
+          # the skill (below), so it cannot mkdir this itself, and we'd
+          # rather not depend on whichever way the Write tool does or
+          # doesn't auto-create parent directories.
+          mkdir -p triage-output
 
       - name: Run the triage skill
         id: triage
@@ -137,30 +142,71 @@ jobs:
           # inherits the `contents: read, issues: read` ceiling declared
           # above. (This is also why this job requests no `id-token: write`
           # permission: the OIDC exchange path is never reached.)
+          #
+          # That same read-only github_token is what makes the fix below
+          # matter: `prepareAgentMode()` unconditionally calls
+          # `configureGitAuth()` (src/modes/agent/index.ts ->
+          # src/github/operations/git-config.ts), which — because we don't
+          # set allowed_non_write_users (see the note above that input)
+          # — embeds this token in PLAINTEXT into .git/config via
+          # `git remote set-url origin https://x-access-token:<token>@...`
+          # (the credential-helper branch that keeps it out of .git/config
+          # only runs when ALLOWED_NON_WRITE_USERS is set, which we
+          # deliberately never do). A prompt-injected issue body could try
+          # to get the skill to Read .git/config and copy the token into
+          # its `reasoning`, which `apply` then dutifully posts as a public
+          # comment. The token itself is short-lived and read-only-scoped
+          # (bounded blast radius), but a leaked credential in a public
+          # comment is a real finding regardless — see disallowedTools
+          # below, not allowed_non_write_users (which would widen who can
+          # trigger this job at all — the opposite direction from what we
+          # want).
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Explicit allowlists, never '*' (the CVE this pin fixes was
           # exactly an allowlist-bypass on bot/non-write-user gating).
           allowed_bots: ""
           allowed_non_write_users: ""
           show_full_output: false
-          # The skill only ever needs to Read issue-context/issue.json,
-          # Read files under plan-repo/, and Write
-          # triage-output/verdict.json — all "file operations", one of the
-          # base tool categories the action documents as always available.
-          # It never needed Bash even before this fix; disallowing it
-          # explicitly removes an entire tool surface rather than relying
-          # on whatever the undocumented default happens to be.
-          claude_args: '--disallowedTools "Bash"'
+          # Two grants, both traced against the action's own source at the
+          # pinned SHA rather than assumed from its docs (which describe
+          # tag-mode defaults that do NOT apply here):
+          #
+          # allowedTools — agent mode (src/modes/agent/index.ts,
+          # prepareAgentMode()) sets NO --permission-mode and grants NO
+          # base tools of its own; unlike tag mode (src/modes/tag/index.ts),
+          # it passes only whatever claude_args the caller supplies,
+          # verbatim. Tag mode's own comment on why it sets
+          # `--permission-mode acceptEdits` says it plainly: "Headless SDK
+          # has no prompt handler, so anything that falls through to 'ask'
+          # is denied." Write is exactly such a tool. Without an explicit
+          # grant, the skill's Write of triage-output/verdict.json would be
+          # silently denied — no artifact, every issue fail-closes to
+          # needs-triage, and the workflow never actually triages anything.
+          # Grant Write ONLY for the one file the skill is allowed to
+          # produce (base-action/src/parse-sdk-options.ts confirms
+          # `Tool(path/pattern)` scoping round-trips through claude_args
+          # intact) rather than a blanket Write grant or `acceptEdits`
+          # (which would auto-allow edits anywhere in $GITHUB_WORKSPACE,
+          # including this repo's own source).
+          #
+          # disallowedTools — closes the .git/config token-leak path above
+          # by denying read access to .git/** specifically (Grep too, since
+          # it returns matching file content, not just Read) — a
+          # path-scoped restriction, not a broader tool ban, so the skill
+          # keeps normal Read access to issue-context/ and plan-repo/.
+          claude_args: '--allowedTools "Write(triage-output/verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**)"'
           prompt: |
             Use the triage skill at .claude/skills/triage/SKILL.md to
             evaluate issue #${{ github.event.issue.number }} in
             ${{ github.repository }}. Follow that file exactly, including
             its "what you must never do" section — you hold no writable
-            GitHub token in this job and no Bash access, and must not
-            attempt to use either. The issue's title and body are at
-            issue-context/issue.json; read that file, not the GitHub API.
-            Write your JSON verdict to triage-output/verdict.json and do
-            nothing else.
+            GitHub token in this job, no Bash access, and no access to
+            anything under .git/, and must not attempt to use any of them.
+            The issue's title and body are at issue-context/issue.json;
+            read that file, not the GitHub API. The triage-output/
+            directory already exists; write your JSON verdict to
+            triage-output/verdict.json (the only path you may write to)
+            and do nothing else.
 
       - name: Upload verdict artifact
         # Runs even if the skill step failed or produced nothing — the
