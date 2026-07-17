@@ -1,0 +1,28 @@
+# schemachange configuration for roastpilot-cloud (Snowflake DDL migrations).
+#
+# No account/user/role/warehouse/auth here at all: connection identity comes
+# entirely from SNOWFLAKE_* environment variables at deploy time (schemachange's
+# native ENV layer), sourced from the named `roastpilot` connection in
+# ~/.snowflake/config.toml via with_connection_env.py — see README.md for why
+# (schemachange 4.3.3's own connections.toml reader expects a flat layout the
+# `snow` CLI's config.toml doesn't use, verified empirically).
+#
+# Only the change-history table is decided here, as a Jinja `env_var()`
+# render var with a sane default, so a future environment (CI's DEV-scoped
+# key, or the C7 prod cutover) is a matter of exporting SNOWFLAKE_DATABASE,
+# never editing this file.
+
+config-version: 1
+
+root-folder: migrations
+
+# Change-history table lives inside the target database rather than
+# schemachange's default separate METADATA database, so ROASTPILOT_DEV (or
+# whichever database SNOWFLAKE_DATABASE points at) stays self-contained.
+# Deliberately NOT a `snowflake-database:` key here: schemachange warns that
+# YAML-set snowflake-database/-role/-warehouse/etc. are deprecated in favor
+# of connections.toml or the CLI/env layer, so the target database for both
+# the change-history table and the migration DDL itself is set via the
+# SNOWFLAKE_DATABASE env var (or --snowflake-database) at deploy time —
+# see README.md.
+change-history-table: '{{ env_var("SNOWFLAKE_DATABASE", "ROASTPILOT_DEV") }}.METADATA.CHANGE_HISTORY'

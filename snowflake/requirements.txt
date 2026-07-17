@@ -1,0 +1,4 @@
+# Python tooling for Snowflake DDL migrations. This repo is otherwise
+# Next.js/TypeScript; schemachange is isolated to this file + a venv under
+# snowflake/, never added to package.json. See README.md for setup.
+schemachange==4.3.3
