@@ -15,9 +15,9 @@ Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table).
 | Story | Issue | Status |
 |---|---|---|
 | C1-S1 Next.js scaffold + CI gates | [#1](https://github.com/syamaner/roastpilot-cloud/issues/1) | Done — merged via #15 |
-| C1-S2 Snowflake account, `ROASTPILOT_DEV`, schemachange bootstrap, resource monitor | [#2](https://github.com/syamaner/roastpilot-cloud/issues/2) | In progress |
+| C1-S2 Snowflake account, `ROASTPILOT_DEV`, schemachange bootstrap, resource monitor | [#2](https://github.com/syamaner/roastpilot-cloud/issues/2) | In progress — PR open, [#17](https://github.com/syamaner/roastpilot-cloud/pull/17) |
 | C1-S3 Vercel project + preview deploys | [#3](https://github.com/syamaner/roastpilot-cloud/issues/3) | Open, ready-to-implement |
-| C1-S4 AGENTS.md, state docs, sub-agents, branch protection | [#4](https://github.com/syamaner/roastpilot-cloud/issues/4) | In progress (this PR covers the docs/sub-agent half; branch protection is applied separately by the lead) |
+| C1-S4 AGENTS.md, state docs, sub-agents, branch protection | [#4](https://github.com/syamaner/roastpilot-cloud/issues/4) | In progress |
 
 Check `gh issue view <n>` for current state before relying on this table —
 it is a pointer, not a live sync.
