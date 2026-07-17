@@ -115,9 +115,12 @@ jobs:
           jq -n --arg title "$ISSUE_TITLE" --arg body "$ISSUE_BODY" \
             '{title: $title, body: $body}' > issue-context/issue.json
           # Pre-create the verdict output directory: Bash is disallowed for
-          # the skill (below), so it cannot mkdir this itself, and we'd
-          # rather not depend on whichever way the Write tool does or
-          # doesn't auto-create parent directories.
+          # the skill (below), so it cannot mkdir this itself. The verdict
+          # FILE itself does not need to be pre-created — a round-5 probe
+          # confirmed Edit(triage-output/verdict.json) (see the claude_args
+          # comment below) creates a brand-new file from nothing — but we
+          # still don't know (and haven't needed to test) whether it would
+          # also create a missing parent directory, so keep this mkdir.
           mkdir -p triage-output
 
       - name: Run the triage skill
@@ -167,9 +170,14 @@ jobs:
           allowed_bots: ""
           allowed_non_write_users: ""
           show_full_output: false
-          # Two grants, both traced against the action's own source at the
-          # pinned SHA rather than assumed from its docs (which describe
-          # tag-mode defaults that do NOT apply here):
+          # Two grants. disallowedTools was traced against the action's own
+          # source at the pinned SHA (see below); allowedTools was traced
+          # AND THEN EMPIRICALLY VERIFIED, because static source-reading
+          # alone gave two contradictory answers in a row (one review said
+          # Write(path) should work, a later one claimed Write(path) rules
+          # are accepted-but-never-matched and Edit(path) is required).
+          # Docs weren't trustworthy either — they describe tag-mode
+          # defaults that do NOT apply to agent mode.
           #
           # allowedTools — agent mode (src/modes/agent/index.ts,
           # prepareAgentMode()) sets NO --permission-mode and grants NO
@@ -178,23 +186,36 @@ jobs:
           # verbatim. Tag mode's own comment on why it sets
           # `--permission-mode acceptEdits` says it plainly: "Headless SDK
           # has no prompt handler, so anything that falls through to 'ask'
-          # is denied." Write is exactly such a tool. Without an explicit
-          # grant, the skill's Write of triage-output/verdict.json would be
-          # silently denied — no artifact, every issue fail-closes to
-          # needs-triage, and the workflow never actually triages anything.
-          # Grant Write ONLY for the one file the skill is allowed to
-          # produce (base-action/src/parse-sdk-options.ts confirms
-          # `Tool(path/pattern)` scoping round-trips through claude_args
-          # intact) rather than a blanket Write grant or `acceptEdits`
-          # (which would auto-allow edits anywhere in $GITHUB_WORKSPACE,
-          # including this repo's own source).
+          # is denied." Without an explicit grant, the skill's write of
+          # triage-output/verdict.json would be silently denied — no
+          # artifact, every issue fail-closes to needs-triage, and the
+          # workflow never actually triages anything.
+          #
+          # Settled by a throwaway workflow_dispatch probe (F1-S2/#5 round
+          # 5) against the real SDK at this exact pinned action SHA:
+          # `Edit(triage-output/verdict.json)` succeeds — creates a
+          # brand-new file (it did not need to exist first; no need to
+          # pre-`touch` it) with the requested content, zero permission
+          # denials. `Write(triage-output/verdict.json)`, tried in the
+          # prior round, is what a static reading of parse-sdk-options.ts's
+          # `Tool(path/pattern)` comment suggested and is NOT what the SDK
+          # actually matches on for this action version — Edit is. Worth
+          # remembering for any other factory workflow that grants a
+          # scoped file-write permission in agent mode: reach for
+          # `Edit(path)`, not `Write(path)`, and don't assume the target
+          # file needs to pre-exist.
+          #
+          # Grant Edit ONLY for the one file the skill is allowed to
+          # produce — not a blanket Edit grant or `acceptEdits` (which
+          # would auto-allow edits anywhere in $GITHUB_WORKSPACE, including
+          # this repo's own source).
           #
           # disallowedTools — closes the .git/config token-leak path above
           # by denying read access to .git/** specifically (Grep too, since
           # it returns matching file content, not just Read) — a
           # path-scoped restriction, not a broader tool ban, so the skill
           # keeps normal Read access to issue-context/ and plan-repo/.
-          claude_args: '--allowedTools "Write(triage-output/verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**)"'
+          claude_args: '--allowedTools "Edit(triage-output/verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**)"'
           prompt: |
             Use the triage skill at .claude/skills/triage/SKILL.md to
             evaluate issue #${{ github.event.issue.number }} in

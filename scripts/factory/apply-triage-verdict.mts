@@ -68,7 +68,7 @@ interface GitHubIssueLabel {
 interface GitHubComment {
   readonly id: number;
   readonly body: string;
-  readonly user: { readonly type: string } | null;
+  readonly user: { readonly type: string; readonly login: string } | null;
 }
 
 /** Thin wrapper: authenticated JSON request against the GitHub REST API. */
@@ -183,6 +183,7 @@ async function findExistingTriageComment(
       id: c.id,
       body: c.body,
       authorType: c.user?.type ?? null,
+      authorLogin: c.user?.login ?? null,
     }));
     const found = findExistingTriageCommentId(existing);
     if (found !== null) {

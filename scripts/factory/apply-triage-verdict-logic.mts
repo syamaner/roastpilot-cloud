@@ -45,23 +45,38 @@ export function computeNewLabelSet(
   return Array.from(new Set([...kept, newReadiness]));
 }
 
+/**
+ * The exact GitHub identity that posts on behalf of this workflow's
+ * `secrets.GITHUB_TOKEN` — the only comment author {@link findExistingTriageCommentId}
+ * will ever treat as "our own prior comment".
+ */
+export const TRIAGE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
+
 /** A comment as returned by the GitHub REST API, narrowed to the fields we use. */
 export interface ExistingComment {
   readonly id: number;
   readonly body: string;
   /** GitHub's `user.type`, e.g. `"Bot"` for the Actions token's identity. */
   readonly authorType: string | null;
+  /** GitHub's `user.login`, e.g. `"github-actions[bot]"`. */
+  readonly authorLogin: string | null;
 }
 
 /**
  * Finds the previous triage comment this job posted on an earlier run, if
  * any, so a re-run edits it instead of posting a duplicate.
  *
- * Scoped to bot-authored comments containing the marker — not just any
- * comment containing the marker substring. A verdict's `reasoning` text is
- * untrusted and could itself contain the marker string (accidentally or as
- * a deliberate decoy); scoping to `authorType === "Bot"` stops that from
- * being mistaken for our own tracking comment.
+ * Scoped to comments authored by exactly {@link TRIAGE_COMMENT_AUTHOR_LOGIN}
+ * (the `secrets.GITHUB_TOKEN` identity) — not just any bot. `authorType ===
+ * "Bot"` alone is too broad: a different GitHub App or bot installed on
+ * this repo could also carry `type: "Bot"`, and if it ever posted a comment
+ * containing our marker string (whether by planting it deliberately or by
+ * innocently echoing back content that happens to include it), matching on
+ * type alone would let that comment be mistaken for our own and get
+ * silently overwritten (PATCHed) by this job. Matching on the exact login
+ * closes that off. (A verdict's `reasoning` text is separately untrusted
+ * and could itself contain the marker string — that risk is what the type
+ * check originally guarded against, and the login check subsumes it.)
  *
  * @param comments - Comments currently on the issue.
  * @returns The existing comment's id, or `null` if none found.
@@ -70,7 +85,10 @@ export function findExistingTriageCommentId(
   comments: readonly ExistingComment[],
 ): number | null {
   const match = comments.find(
-    (c) => c.authorType === "Bot" && c.body.includes(TRIAGE_COMMENT_MARKER),
+    (c) =>
+      c.authorType === "Bot" &&
+      c.authorLogin === TRIAGE_COMMENT_AUTHOR_LOGIN &&
+      c.body.includes(TRIAGE_COMMENT_MARKER),
   );
   return match ? match.id : null;
 }

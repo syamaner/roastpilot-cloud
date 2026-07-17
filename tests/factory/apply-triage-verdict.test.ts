@@ -175,7 +175,7 @@ describe("main — valid verdict path", () => {
           {
             id: 99,
             body: `previous verdict\n${TRIAGE_COMMENT_MARKER}`,
-            user: { type: "Bot" },
+            user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
@@ -194,6 +194,49 @@ describe("main — valid verdict path", () => {
     expect(post).toBeUndefined();
   });
 
+  it("P3: posts a new comment rather than PATCHing another bot's comment, even with a matching marker and type Bot", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the bar.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            // Same marker, same authorType, but NOT our workflow's own
+            // token identity — must not be mistaken for our prior comment.
+            body: `decoy\n${TRIAGE_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "some-other-app[bot]" },
+          },
+        ]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 100 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    const post = calls.find(
+      (c) => c.method === "POST" && c.url.includes("/comments"),
+    );
+    expect(post).toBeDefined();
+  });
+
   it("finds a prior triage comment on page 2 (>100 comments) instead of double-posting", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
@@ -210,13 +253,13 @@ describe("main — valid verdict path", () => {
     const page1 = Array.from({ length: 100 }, (_, i) => ({
       id: i,
       body: `unrelated human comment ${i}`,
-      user: { type: "User" },
+      user: { type: "User", login: "someone" },
     }));
     const page2 = [
       {
         id: 999,
         body: `prior verdict\n${TRIAGE_COMMENT_MARKER}`,
-        user: { type: "Bot" },
+        user: { type: "Bot", login: "github-actions[bot]" },
       },
     ];
 
@@ -268,7 +311,7 @@ describe("main — valid verdict path", () => {
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User" } }]),
+        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User", login: "someone" } }]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
         jsonResponse({ id: 2 }, 201),
     });

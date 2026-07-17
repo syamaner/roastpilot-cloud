@@ -53,21 +53,32 @@ describe("computeNewLabelSet", () => {
 });
 
 describe("findExistingTriageCommentId", () => {
-  it("finds a prior bot comment carrying the marker", () => {
+  it("finds a prior comment from exactly github-actions[bot] carrying the marker", () => {
     const comments: ExistingComment[] = [
-      { id: 1, body: "unrelated human comment", authorType: "User" },
+      {
+        id: 1,
+        body: "unrelated human comment",
+        authorType: "User",
+        authorLogin: "someone",
+      },
       {
         id: 2,
         body: `**Automated triage verdict**\n\n${TRIAGE_COMMENT_MARKER}`,
         authorType: "Bot",
+        authorLogin: "github-actions[bot]",
       },
     ];
     expect(findExistingTriageCommentId(comments)).toBe(2);
   });
 
-  it("returns null when no bot comment carries the marker", () => {
+  it("returns null when no matching comment carries the marker", () => {
     const comments: ExistingComment[] = [
-      { id: 1, body: "unrelated", authorType: "User" },
+      {
+        id: 1,
+        body: "unrelated",
+        authorType: "User",
+        authorLogin: "someone",
+      },
     ];
     expect(findExistingTriageCommentId(comments)).toBeNull();
   });
@@ -75,21 +86,45 @@ describe("findExistingTriageCommentId", () => {
   it("does NOT treat a human comment containing the marker string as our own comment", () => {
     // Defends against a decoy: an untrusted commenter (or a verdict's own
     // reasoning text, echoed back some other way) planting the literal
-    // marker string in a non-bot comment. Only a Bot-authored comment
-    // counts, regardless of body content.
+    // marker string in a non-bot comment. Only a github-actions[bot]
+    // comment counts, regardless of body content.
     const comments: ExistingComment[] = [
       {
         id: 1,
         body: `I think this is ready. ${TRIAGE_COMMENT_MARKER}`,
         authorType: "User",
+        authorLogin: "someone",
       },
     ];
     expect(findExistingTriageCommentId(comments)).toBeNull();
   });
 
-  it("ignores a bot comment that doesn't carry the marker", () => {
+  it("does NOT treat another bot's comment containing the marker as our own, even with type Bot", () => {
+    // The P3 hardening: authorType === "Bot" alone is too broad — a
+    // DIFFERENT installed GitHub App or bot could also carry type "Bot"
+    // and, deliberately or otherwise, post a comment containing our
+    // marker string. Matching on type alone would let apply mistake it
+    // for its own prior comment and PATCH (overwrite) it. Only the exact
+    // login this workflow's own token posts as counts.
     const comments: ExistingComment[] = [
-      { id: 1, body: "some other automated comment", authorType: "Bot" },
+      {
+        id: 1,
+        body: `Some other automated comment. ${TRIAGE_COMMENT_MARKER}`,
+        authorType: "Bot",
+        authorLogin: "dependabot[bot]",
+      },
+    ];
+    expect(findExistingTriageCommentId(comments)).toBeNull();
+  });
+
+  it("ignores a matching-login comment that doesn't carry the marker", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 1,
+        body: "some other automated comment",
+        authorType: "Bot",
+        authorLogin: "github-actions[bot]",
+      },
     ];
     expect(findExistingTriageCommentId(comments)).toBeNull();
   });
