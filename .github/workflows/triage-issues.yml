@@ -1,0 +1,171 @@
+name: Triage Issues
+
+# factory.md §3/§6: seed (dumb, always leaves a known inbox state) -> triage
+# (read-only agent, judges readiness) -> apply (privileged, deterministic,
+# validates before ANY write). Staged autonomy (§3): this wires
+# triage -> apply only; it never chains into implementation (F1-S3).
+
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: triage-issue-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+# Default-deny; every job declares exactly the scopes it needs.
+permissions: {}
+
+jobs:
+  # --- seed: dumb, deterministic, no agent involved. Applies `needs-triage`
+  # if the issue has no readiness label yet, so the inbox is in a known
+  # state even if `triage` or `apply` fails outright. ---
+  seed:
+    name: Seed inbox label
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Apply needs-triage if no readiness label is present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # factory.md §4's exact taxonomy.
+          readiness='["needs-triage","ready-to-implement","ready-to-spec","needs-info","wait-to-implement","wontfix"]'
+          current_labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels -q '[.labels[].name]')
+          has_readiness=$(jq -n --argjson current "$current_labels" --argjson readiness "$readiness" \
+            '[$current[] | select(. as $l | $readiness | index($l))] | length > 0')
+          if [ "$has_readiness" = "true" ]; then
+            echo "Readiness label already present on #$ISSUE_NUMBER; leaving as-is."
+          else
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label needs-triage
+            echo "Seeded needs-triage on #$ISSUE_NUMBER."
+          fi
+
+  # --- triage: read-only agent job. Runs the .claude/skills/triage skill,
+  # which judges the issue and writes ONLY a JSON verdict file — it never
+  # calls a GitHub write API itself. ---
+  triage:
+    name: Triage (read-only)
+    needs: seed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout roastpilot-cloud (read-only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout plan repo (public, unauthenticated, read-only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: syamaner/roastpilot-plan
+          path: plan-repo
+          # Explicit empty token: this is a public repo, cloned
+          # unauthenticated. Never let a scoped credential for THIS repo
+          # leak into a checkout of a different one.
+          token: ""
+          persist-credentials: false
+
+      - name: Run the triage skill
+        id: triage
+        uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # SECURITY-CRITICAL, and the one place this workflow deliberately
+          # diverges from claude-code-review.yml's precedent: without an
+          # explicit `github_token`, claude-code-action authenticates via
+          # OIDC token-exchange for a *separately issued* GitHub App token
+          # that ALWAYS carries contents/pull_requests/issues WRITE
+          # (`DEFAULT_PERMISSIONS` in the action's src/github/token.ts,
+          # which `additional_permissions` can only add to, never narrow) —
+          # completely independent of this job's own `permissions:` block
+          # above. That's fine, and exactly what claude-code-review.yml
+          # wants, for a job whose whole purpose is posting review
+          # comments. It is NOT fine here: this job must hold no writable
+          # GitHub credential at all (factory.md §8). Passing `github_token`
+          # explicitly makes the action use THIS job's own token instead —
+          # short-circuiting the OIDC/App-token exchange entirely — so it
+          # inherits the `contents: read, issues: read` ceiling declared
+          # above. (This is also why this job requests no `id-token: write`
+          # permission: the OIDC exchange path is never reached.)
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Explicit allowlists, never '*' (the CVE this pin fixes was
+          # exactly an allowlist-bypass on bot/non-write-user gating).
+          allowed_bots: ""
+          allowed_non_write_users: ""
+          show_full_output: false
+          prompt: |
+            Use the triage skill at .claude/skills/triage/SKILL.md to
+            evaluate issue #${{ github.event.issue.number }} in
+            ${{ github.repository }}. Follow that file exactly, including
+            its "what you must never do" section — you hold no writable
+            GitHub token in this job, and must not attempt to use one.
+            Write your JSON verdict to triage-output/verdict.json and do
+            nothing else.
+
+      - name: Upload verdict artifact
+        # Runs even if the skill step failed or produced nothing — the
+        # apply job's own validation treats a missing/empty artifact as a
+        # fail-closed case (needs-triage stays, a human is told why).
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: triage-verdict
+          path: triage-output/verdict.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  # --- apply: privileged job. Runs a deterministic script — never agent
+  # output as code — that validates the verdict artifact against the exact
+  # schema/taxonomy BEFORE any write, then swaps the readiness label and
+  # upserts the triage comment (idempotent: edits its own prior comment on
+  # a re-run instead of duplicate-posting). On a missing or invalid
+  # verdict, the `needs-triage` label seeded above is left untouched. ---
+  apply:
+    name: Apply triage verdict (privileged)
+    needs: triage
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout apply-job scripts only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/factory
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Download verdict artifact
+        # May legitimately not exist (triage failed / produced no file) —
+        # the script's own readVerdictArtifact() handles that as a
+        # fail-closed case, so a missing download here must not fail the
+        # step.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: triage-verdict
+          path: triage-output
+
+      - name: Validate and apply the triage verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Trusted issue number, from the workflow's own event context —
+          # never from the verdict artifact itself. apply-triage-verdict.mts
+          # rejects any verdict whose self-reported issue_number disagrees.
+          TRUSTED_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          VERDICT_PATH: triage-output/verdict.json
+        run: node --experimental-strip-types scripts/factory/apply-triage-verdict.mts

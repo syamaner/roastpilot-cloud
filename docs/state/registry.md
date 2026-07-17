@@ -5,19 +5,32 @@ repo, then the GitHub issue, before starting any story.
 
 ## Active epic
 
-**C1 Scaffold** (conventional build, per D98). Next epic in sequence: **F1
-Factory**.
+**F1 Factory** (conventional build, per D98 — the factory itself is built by
+hand before any issue is triaged/implemented automatically). C1 Scaffold is
+complete.
 
-Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table).
+Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table);
+factory pipeline/security model/label taxonomy: `factory.md`.
 
-## C1 story status
+## C1 story status — complete
 
 | Story | Issue | Status |
 |---|---|---|
 | C1-S1 Next.js scaffold + CI gates | [#1](https://github.com/syamaner/roastpilot-cloud/issues/1) | Done — merged via #15 |
-| C1-S2 Snowflake account, `ROASTPILOT_DEV`, schemachange bootstrap, resource monitor | [#2](https://github.com/syamaner/roastpilot-cloud/issues/2) | In progress — PR open, [#17](https://github.com/syamaner/roastpilot-cloud/pull/17) |
-| C1-S3 Vercel project + preview deploys | [#3](https://github.com/syamaner/roastpilot-cloud/issues/3) | Open, ready-to-implement |
-| C1-S4 AGENTS.md, state docs, sub-agents, branch protection | [#4](https://github.com/syamaner/roastpilot-cloud/issues/4) | In progress |
+| C1-S2 Snowflake account, `ROASTPILOT_DEV`, schemachange bootstrap, resource monitor | [#2](https://github.com/syamaner/roastpilot-cloud/issues/2) | Done — merged via #17 |
+| C1-S3 Vercel project + preview deploys | [#3](https://github.com/syamaner/roastpilot-cloud/issues/3) | Done — operator-configured (Vercel dashboard, GitHub integration; no code, no PR) |
+| C1-S4 AGENTS.md, state docs, sub-agents, branch protection | [#4](https://github.com/syamaner/roastpilot-cloud/issues/4) | Done — merged via #16 |
+
+## F1 story status
+
+| Story | Issue | Status |
+|---|---|---|
+| F1-S1 Labels, issue templates, milestones, story issues for C1/F1 | — (no issue; done at prep, 16 Jul 2026) | Done |
+| F1-S2 `triage-issues.yml` + triage skill (seed/triage/apply, JSON contract, concurrency) | [#5](https://github.com/syamaner/roastpilot-cloud/issues/5) | In progress |
+| F1-S3 `implement-ready-issues.yml` (read-only agent + privileged publisher, dispatch-first) | — | Not started |
+| F1-S4 Review workflow port + repo `AGENTS.md` review rubric section | — | Not started |
+| F1-S5 `to-issues` skill + dry-run decomposition of C2 (PM-reviewed) | — | Not started |
+| F1-S6 End-to-end dry run + factory runbook | — | Not started |
 
 Check `gh issue view <n>` for current state before relying on this table —
 it is a pointer, not a live sync.
