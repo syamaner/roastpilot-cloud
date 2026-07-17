@@ -12,11 +12,14 @@
  * GitHub only as a JSON request body over `fetch` — never through a shell
  * command — so there is no shell-interpolation injection surface.
  *
- * On a missing or invalid verdict, the seeded `needs-triage` label (applied
- * by the `seed` job before `triage` ever ran) is left untouched — the
- * fail-safe resting state — and this script exits non-zero purely for
- * workflow-run visibility (so a broken triage run shows red in Actions,
- * not just a silent no-op).
+ * On a missing or invalid verdict, readiness is explicitly RESET to
+ * `needs-triage` (not just left as whatever it already was — a rerun could
+ * find a stale `ready-to-implement` from an earlier valid verdict or manual
+ * pre-labelling, and leaving that in place while triage has just failed
+ * would let a later implement stage build it despite no successful triage
+ * having run) — the fail-safe resting state — and this script exits
+ * non-zero purely for workflow-run visibility (so a broken triage run shows
+ * red in Actions, not just a silent no-op).
  *
  * Required environment variables:
  * - `GH_TOKEN` — the job's `permissions: issues: write` token.
@@ -144,6 +147,12 @@ async function upsertComment(
   }
 }
 
+/**
+ * Applies a validated verdict: swaps the readiness label and upserts the
+ * tracking comment. Deliberately never calls the issue-close API, for any
+ * readiness value including `wontfix` — see
+ * {@link buildVerdictCommentBody}'s docstring for why.
+ */
 async function applyValidVerdict(
   token: string,
   owner: string,
@@ -189,6 +198,28 @@ async function applyFallback(
   issueNumber: number,
   errors: readonly string[],
 ): Promise<void> {
+  // Fail closed on readiness, not just on comment content: a rerun could
+  // find the issue already carrying a stale ready-to-implement (from an
+  // earlier, since-superseded valid verdict, or manual pre-labelling) —
+  // leaving that in place while triage has just failed would let F1-S3
+  // pick it up as buildable despite no successful triage having run. Reset
+  // to needs-triage explicitly, the same way `seed` would have, every time.
+  const currentLabels = await githubRequest<GitHubIssueLabel[]>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${issueNumber}/labels?per_page=100`,
+  );
+  const resetLabelSet = computeNewLabelSet(
+    currentLabels.map((l) => l.name),
+    "needs-triage",
+  );
+  await githubRequest(
+    token,
+    "PUT",
+    `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+    { labels: resetLabelSet },
+  );
+
   await upsertComment(
     token,
     owner,
@@ -197,8 +228,8 @@ async function applyFallback(
     buildFallbackCommentBody(errors),
   );
   console.error(
-    `Triage verdict for #${issueNumber} was invalid; needs-triage label left ` +
-      `unchanged. Errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`,
+    `Triage verdict for #${issueNumber} was invalid; readiness reset to ` +
+      `needs-triage. Errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`,
   );
 }
 

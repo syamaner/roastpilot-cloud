@@ -171,6 +171,10 @@ describe("main — input validation and transport edge cases", () => {
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
@@ -185,6 +189,10 @@ describe("main — input validation and transport edge cases", () => {
     expect((post?.body as { body: string }).body).toContain(
       "not valid JSON",
     );
+    const put = calls.find((c) => c.method === "PUT");
+    expect((put?.body as { labels: string[] }).labels).toEqual([
+      "needs-triage",
+    ]);
   });
 
   it("surfaces a GitHub API error response with status and body", async () => {
@@ -243,10 +251,14 @@ describe("main — input validation and transport edge cases", () => {
 });
 
 describe("main — fail-closed paths", () => {
-  it("leaves labels untouched and posts a fallback comment when the verdict is missing", async () => {
+  it("resets readiness to needs-triage and posts a fallback comment when the verdict is missing", async () => {
     process.env.VERDICT_PATH = join(workdir, "does-not-exist.json");
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "epic:F1" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
@@ -257,12 +269,43 @@ describe("main — fail-closed paths", () => {
     await main();
 
     expect(process.exitCode).toBe(1);
-    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put).toBeDefined();
+    expect((put?.body as { labels: string[] }).labels.sort()).toEqual(
+      ["epic:F1", "needs-triage"].sort(),
+    );
     const post = calls.find((c) => c.method === "POST");
     expect((post?.body as { body: string }).body).toContain("needs-triage");
   });
 
-  it("leaves labels untouched and posts a fallback comment on a malformed/injected verdict", async () => {
+  it("STRIPS a stale ready-to-implement (e.g. from a superseded earlier verdict) back to needs-triage on a rerun's malformed verdict", async () => {
+    // The scenario FIX 1 exists for: an earlier successful run left
+    // ready-to-implement on the issue; a later rerun's triage output is
+    // broken. The stale ready-to-implement must not survive.
+    process.env.VERDICT_PATH = join(workdir, "does-not-exist.json");
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }, { name: "epic:C2" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const put = calls.find((c) => c.method === "PUT");
+    const labels = (put?.body as { labels: string[] }).labels;
+    expect(labels).not.toContain("ready-to-implement");
+    expect(labels).toContain("needs-triage");
+    expect(labels).toContain("epic:C2");
+  });
+
+  it("resets readiness to needs-triage on a malformed/injected verdict, and never writes to any issue but the trusted one", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -278,6 +321,10 @@ describe("main — fail-closed paths", () => {
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100": () =>
         jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
@@ -292,6 +339,9 @@ describe("main — fail-closed paths", () => {
     // "unexpected fetch call" if the script tried, which would surface as
     // an unhandled rejection/test failure.
     expect(calls.every((c) => c.url.includes("/issues/42/"))).toBe(true);
-    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    const put = calls.find((c) => c.method === "PUT");
+    expect((put?.body as { labels: string[] }).labels).toEqual([
+      "needs-triage",
+    ]);
   });
 });

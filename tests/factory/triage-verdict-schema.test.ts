@@ -22,10 +22,13 @@ function validVerdict(overrides: Record<string, unknown> = {}) {
 describe("validateTriageVerdict — accepts well-formed verdicts", () => {
   it("accepts a minimal valid verdict for every readiness label", () => {
     for (const readiness of READINESS_LABELS) {
-      const result = validateTriageVerdict(
-        validVerdict({ readiness }),
-        TRUSTED_ISSUE,
-      );
+      // needs-info requires at least one question (cross-field rule below);
+      // every other label is fine with none.
+      const overrides =
+        readiness === "needs-info"
+          ? { readiness, missing_info_questions: ["What defines done here?"] }
+          : { readiness };
+      const result = validateTriageVerdict(validVerdict(overrides), TRUSTED_ISSUE);
       expect(result.ok).toBe(true);
     }
   });
@@ -127,6 +130,28 @@ describe("validateTriageVerdict — rejects malformed/adversarial input", () => 
       TRUSTED_ISSUE,
     );
     expect(result.ok).toBe(false);
+  });
+
+  it("rejects readiness needs-info paired with an empty missing_info_questions", () => {
+    const result = validateTriageVerdict(
+      validVerdict({ readiness: "needs-info", missing_info_questions: [] }),
+      TRUSTED_ISSUE,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/needs-info/);
+    }
+  });
+
+  it("accepts readiness other than needs-info with an empty missing_info_questions", () => {
+    const result = validateTriageVerdict(
+      validVerdict({
+        readiness: "ready-to-implement",
+        missing_info_questions: [],
+      }),
+      TRUSTED_ISSUE,
+    );
+    expect(result.ok).toBe(true);
   });
 
   it("rejects a missing_info_questions entry over the max length", () => {

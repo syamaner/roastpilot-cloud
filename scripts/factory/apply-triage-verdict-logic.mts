@@ -78,6 +78,12 @@ export function findExistingTriageCommentId(
 /**
  * Builds the comment body posted for a verdict that passed validation.
  *
+ * Deliberately never closes the issue, for any readiness including
+ * `wontfix` — closing is a consequential, human decision (the same
+ * philosophy as "the factory never merges", factory.md §2). For `wontfix`
+ * specifically, the comment says so explicitly rather than leaving the
+ * absence of a close action to read as an oversight.
+ *
  * @param verdict - The validated verdict.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
@@ -93,6 +99,15 @@ export function buildVerdictCommentBody(verdict: TriageVerdict): string {
     for (const q of verdict.missing_info_questions) {
       lines.push(`- ${q}`);
     }
+  }
+
+  if (verdict.readiness === "wontfix") {
+    lines.push(
+      "",
+      "_This is only a label change — the factory does not close issues. " +
+        "A maintainer should confirm this assessment and close the issue " +
+        "if appropriate._",
+    );
   }
 
   lines.push(

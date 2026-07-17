@@ -116,6 +116,21 @@ describe("buildVerdictCommentBody", () => {
     const body = buildVerdictCommentBody(verdict);
     expect(body).not.toContain("Questions for a human");
   });
+
+  it("tells a human to confirm and close on a wontfix verdict, never closing itself", () => {
+    const body = buildVerdictCommentBody({
+      ...verdict,
+      readiness: "wontfix",
+      reasoning: "Superseded by #500.",
+    });
+    expect(body).toContain("maintainer should confirm");
+    expect(body).toContain("does not close issues");
+  });
+
+  it("omits the wontfix close-confirmation note for other readiness values", () => {
+    const body = buildVerdictCommentBody(verdict);
+    expect(body).not.toContain("does not close issues");
+  });
 });
 
 describe("buildFallbackCommentBody", () => {

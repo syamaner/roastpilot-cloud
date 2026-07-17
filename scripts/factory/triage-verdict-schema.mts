@@ -186,6 +186,17 @@ export function validateTriageVerdict(
         );
       }
     });
+
+    // Cross-field: a needs-info verdict is meaningless without at least one
+    // question — the skill's whole point in choosing this readiness is that
+    // it couldn't proceed without an answer. An empty array here means the
+    // verdict didn't do the one thing needs-info exists for.
+    if (readiness === "needs-info" && questions.length === 0) {
+      errors.push(
+        "readiness is needs-info but missing_info_questions is empty — " +
+          "at least one question is required",
+      );
+    }
   }
 
   if (errors.length > 0) {

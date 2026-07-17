@@ -22,6 +22,11 @@ jobs:
   # state even if `triage` or `apply` fails outright. ---
   seed:
     name: Seed inbox label
+    # §13 point 9's manual kill-switch, cheap version: a repo variable the
+    # whole factory reuses (F1-S10 formalises the pattern further). Set
+    # `FACTORY_PAUSED` to the literal string 'true' to halt every job below
+    # without disabling the workflow file itself.
+    if: vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -51,26 +56,32 @@ jobs:
   triage:
     name: Triage (read-only)
     needs: seed
+    if: vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: read
+    env:
+      # Best-effort scrub of Anthropic/cloud/GitHub-Actions secrets from
+      # subprocess environments Claude spawns — closes the path where a
+      # prompt-injected agent copies its own token env into the verdict
+      # artifact/reasoning text it writes (flagged independently by both
+      # the adversarial security review and Codex).
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     steps:
       - name: Checkout roastpilot-cloud (read-only)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Checkout plan repo (public, unauthenticated, read-only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: syamaner/roastpilot-plan
-          path: plan-repo
-          # Explicit empty token: this is a public repo, cloned
-          # unauthenticated. Never let a scoped credential for THIS repo
-          # leak into a checkout of a different one.
-          token: ""
-          persist-credentials: false
+      - name: Clone plan repo (public, unauthenticated, read-only)
+        # A plain `git clone`, not actions/checkout: actions/checkout's
+        # `token` input is not truthy-optional — passing `token: ""` does
+        # not produce an unauthenticated clone, it breaks the step (and
+        # every triage run would silently fall into the no-plan-context
+        # fallback). The plan repo is public, so an unauthenticated clone
+        # needs no credential at all.
+        run: git clone --depth 1 https://github.com/syamaner/roastpilot-plan plan-repo
 
       - name: Run the triage skill
         id: triage
@@ -125,12 +136,17 @@ jobs:
   # output as code — that validates the verdict artifact against the exact
   # schema/taxonomy BEFORE any write, then swaps the readiness label and
   # upserts the triage comment (idempotent: edits its own prior comment on
-  # a re-run instead of duplicate-posting). On a missing or invalid
-  # verdict, the `needs-triage` label seeded above is left untouched. ---
+  # a re-run instead of duplicate-posting). On a missing or invalid verdict,
+  # readiness is explicitly RESET to `needs-triage` (fail closed — a rerun
+  # must not leave a stale ready-to-implement in place just because this
+  # run's triage failed). ---
   apply:
     name: Apply triage verdict (privileged)
     needs: triage
-    if: always()
+    # always() so a triage failure still reaches the fallback path (needs
+    # -triage reset + explanatory comment); still gated on the pause flag,
+    # since always() alone would otherwise ignore it.
+    if: always() && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
