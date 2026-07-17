@@ -18,9 +18,12 @@ rubric below) before it opens.
   `ROASTPILOT_AGENT` or `PUBLIC_WEB`; a migration that grants to `PUBLIC` is a
   blocker regardless of what it grants.
 - **`PUBLIC_WEB`'s surface stays exactly two secure views (roast-by-slug,
-  reviews-by-roast) plus `EXECUTE` on `SUBMIT_REVIEW`.** Nothing else, ever —
-  a compromised web app must not be able to read a base table or call another
-  proc.
+  reviews-by-roast) plus the right to call `SUBMIT_REVIEW`.** That right is
+  granted as `USAGE ON PROCEDURE` (Snowflake's actual call privilege —
+  `EXECUTE` is not a procedure object-privilege), together with the
+  prerequisite `USAGE` on the containing database/schema and the shared
+  warehouse. Nothing beyond that, ever — a compromised web app must not be
+  able to read a base table or call another proc.
 - **Secure views embed `visibility <> 'private'`.** The filter lives in the
   view definition, not in application code that might forget to add a
   `WHERE` clause.
@@ -136,10 +139,11 @@ exception. The load-bearing points:
   `required_conversation_resolution`). Fix it, or state in-thread why it's
   not being actioned.
 - **Codex is advisory-but-triaged, not a required check.** Trigger it once
-  on the final commit (`@codex review`), then wait for a verdict that
-  postdates that commit — a 👀 reaction (started), a posted review
-  (findings), or a 👍 (nothing found) — before merging. Do not arm auto-merge
-  on green CI alone.
+  on the final commit (`@codex review`). A 👀 reaction means the review is
+  **in progress — keep waiting** (bounded ~30 min from the 👀); it does
+  **not** clear the merge by itself. Only a **posted review** (findings) or
+  a **👍** (nothing found), postdating the final commit, satisfies the wait.
+  Do not arm auto-merge on green CI alone.
 - **`pr-triage` adjudicates independently of the author.** Under the factory,
   the author is always an agent; it never self-triages its own PR's review
   comments (D23). The lead (or the `pr-triage` sub-agent) decides what counts
@@ -192,10 +196,14 @@ covered or carries a documented reason for an uncovered line.
 
 **Pipeline self-modification (factory.md §13):** a **factory-autonomous
 implementing agent** (an F1-stage-2 chained `ready-to-implement` run, once
-that chaining is enabled) must never touch `.github/**`, CODEOWNERS, or
-branch-protection config in its patch — that diff is a review blocker on any
-such PR, full stop. This does **not** ban `.github/**` changes in general:
-F1 itself (building the factory workflows) and any human-directed
-branch-protection or CI change are conventional, human-reviewed work and are
-expected to touch these paths. The invariant is "an autonomous agent can't
-grant itself more pipeline power," not "pipeline files are frozen."
+that chaining is enabled) must never touch `.github/**`, CODEOWNERS,
+branch-protection config, **or the privileged glue/publisher scripts** (the
+label-write, branch-push, PR-create, and comment-post logic the factory's
+privileged jobs run — per factory.md's read-only-agent/privileged-publisher
+split, these scripts may live outside `.github/**`) in its patch — that diff
+is a review blocker on any such PR, full stop. This does **not** ban these
+paths from changing in general: F1 itself (building the factory workflows
+and glue scripts) and any human-directed branch-protection or CI change are
+conventional, human-reviewed work and are expected to touch them. The
+invariant is "an autonomous agent can't grant itself more pipeline power,"
+not "pipeline files are frozen."

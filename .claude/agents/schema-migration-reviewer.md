@@ -15,15 +15,28 @@ Check every one of these, with file/line evidence:
 
 1. **No grants to `PUBLIC`.** Snowflake grant syntax names `PUBLIC` as a
    role, not a bare keyword — `GRANT SELECT ON VIEW ... TO ROLE PUBLIC;` is
-   the form to catch, and older/bare `TO PUBLIC` is also valid syntax.  Grep
-   every migration case-insensitively for both `to role public` and
-   `to public` — any hit is a blocker regardless of what it grants. A grep
-   for only `to public` (missing the `to role` form) will miss the far more
-   common real-world syntax; don't rely on that alone.
+   the form to catch, and older/bare `TO PUBLIC` is also valid syntax. A
+   naive substring grep for `to role public` also matches the **legitimate**
+   `PUBLIC_WEB` role (`TO ROLE PUBLIC_WEB` contains that substring) — do not
+   flag `PUBLIC_WEB` or any other `PUBLIC`-prefixed role name. Use an
+   identifier-boundary pattern instead, e.g.:
+
+   ```
+   grep -inE 'to (role )?public([^_a-z0-9]|$)' migrations/*.sql
+   ```
+
+   Any hit from that pattern is a blocker regardless of what it grants.
 2. **`PUBLIC_WEB` surface stays exactly two secure views (roast-by-slug,
-   reviews-by-roast) plus `EXECUTE` on `SUBMIT_REVIEW`.** Diff the full set
-   of objects `PUBLIC_WEB` can touch against that list — a new grant, a
-   widened view, or a new callable proc for that role is a blocker.
+   reviews-by-roast) plus the right to call `SUBMIT_REVIEW`.** In Snowflake
+   that right is granted as `USAGE ON PROCEDURE` — `EXECUTE` is not a
+   procedure object-privilege, so a migration granting `EXECUTE` on the proc
+   is itself a bug, not a widened surface. `PUBLIC_WEB` also needs the
+   prerequisite `USAGE` on the containing database/schema and the shared
+   warehouse — **allow** those, they are not surface creep. What's a
+   blocker: any grant to `PUBLIC_WEB` beyond the two views, `USAGE ON
+   PROCEDURE SUBMIT_REVIEW`, and the prerequisite `USAGE` grants — a new
+   table/view grant, a new callable proc, or any `INSERT`/`UPDATE`/`DELETE`
+   privilege.
 3. **Secure views embed `visibility <> 'private'`.** Read the view
    definition itself; a view that relies on the caller to add that `WHERE`
    clause is wrong, because the whole point is that a compromised web app
