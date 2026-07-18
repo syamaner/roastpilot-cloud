@@ -444,15 +444,31 @@ jobs:
         # bypassable — nothing stops the agent from editing .gitignore
         # itself to un-ignore them (`.gitignore` isn't in the
         # disallowedTools protected-path list; it's an ordinary file), at
-        # which point `git add -A` would stage them. Pathspec excludes
-        # (`:!path`) are evaluated by `git add` directly against the
-        # literal paths given here, independent of .gitignore's content —
-        # empirically verified (scratch repo test) that they still
-        # exclude issue-context/ and patch-output/ even after `.gitignore`
-        # is tampered with to un-ignore them. `.gitignore`'s existing
-        # entries are kept as defense-in-depth (cheap, and they also keep
-        # these paths out of a plain `git status`/`git diff` a human runs
-        # locally).
+        # which point `git add -A` would stage them.
+        #
+        # FIX (live dispatch test finding, fix-forward off main): the
+        # first fix for that used `git add -A -- ':!issue-context'
+        # ':!patch-output'` (pathspec excludes) — this FAILED on the real
+        # runner: `git add` refuses (exit 1, "The following paths are
+        # ignored ... Use -f") when a pathspec NAMES a path that a
+        # committed `.gitignore` already ignores, even when the pathspec
+        # is an EXCLUDE (`:!path`), because this repo's own `.gitignore`
+        # already ignores `/issue-context` and `/patch-output`. Scratch-
+        # repo verification at the time missed this: it never had a
+        # PRE-EXISTING `.gitignore` ignoring those exact paths at the
+        # moment the pathspec-exclude `git add` ran, so the collision
+        # never triggered there. Fixed per Codex's own originally-
+        # suggested alternative: physically remove the scratch
+        # directories before staging, rather than naming them in a
+        # pathspec at all. This has the SAME security property (nothing
+        # under either directory can ever be staged) and is immune to the
+        # agent editing `.gitignore` for the same reason as before — the
+        # directories are simply gone from disk by the time `git add -A`
+        # runs, so `.gitignore`'s content is irrelevant either way —
+        # empirically verified (scratch repo, WITH a pre-existing
+        # `.gitignore` ignoring both dirs this time) both that the
+        # collision reproduces with the old pathspec form and that this
+        # form avoids it entirely.
         #
         # FIX (Codex round 3, P2): `git diff --cached` (no `--binary`)
         # emits a "Binary files a/X and b/Y differ" PLACEHOLDER for a
@@ -469,8 +485,9 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          rm -rf issue-context patch-output
+          git add -A
           mkdir -p patch-output
-          git add -A -- ':!issue-context' ':!patch-output'
           git diff --cached --binary > patch-output/patch.diff
           echo "Patch: $(wc -c < patch-output/patch.diff) bytes, $(git diff --cached --name-only | wc -l) file(s) changed"
 
