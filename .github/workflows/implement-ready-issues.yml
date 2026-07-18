@@ -283,7 +283,21 @@ jobs:
           use_commit_signing: true
           allowed_bots: ""
           allowed_non_write_users: ""
-          show_full_output: false
+          # DIAGNOSTIC (temporary): flipped true to investigate the live
+          # dispatch test finding that the agent completed a full,
+          # successful session (is_error: false, 20 turns) but wrote
+          # nothing to the working tree — capture reported "0 bytes, 0
+          # file(s) changed". `false`'s summary-only output
+          # (init + final result) already showed
+          # `permission_denials_count: 0`, meaning no tool call of any
+          # kind was denied during the session — but that alone doesn't
+          # show WHETHER the agent ever attempted an Edit/Write in the
+          # first place, only that if it did, nothing blocked it. This
+          # flag surfaces the full tool-use stream so that can be seen
+          # directly rather than inferred. Revert to `false` once
+          # diagnosed — full output is otherwise unnecessary log surface
+          # on a public repo.
+          show_full_output: true
           # --permission-mode acceptEdits: auto-allows Edit/Write/
           # MultiEdit inside $GITHUB_WORKSPACE (denied outside it) — this
           # is claude-code-action's own tag-mode default, set explicitly
