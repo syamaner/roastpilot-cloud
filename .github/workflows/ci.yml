@@ -45,18 +45,16 @@ jobs:
         # narrowly scoped to fork PRs against an already-connected upstream
         # OSS repo, which doesn't apply here), so this needs a real
         # `CODECOV_TOKEN` even though the repo is public — same as the
-        # agent repo's convention. Operator dependency: connect
-        # codecov.io to this repo and add the resulting token as the
-        # `CODECOV_TOKEN` repo secret. `fail_ci_if_error: false` so this
-        # step doesn't red the required `gates` check while that
-        # connection is still pending; the coverage statuses
-        # (`codecov/patch`, `codecov/project`) simply won't post until
-        # then, and only get added to branch protection once they do.
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
+        # agent repo's convention. The operator has connected codecov.io to
+        # this repo and added `CODECOV_TOKEN` as a repo secret, so
+        # `fail_ci_if_error: true`: a broken upload should be visible (a
+        # red `gates` check), not silently swallowed now that the
+        # connection is expected to actually work.
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   playwright:
     name: Playwright smoke
