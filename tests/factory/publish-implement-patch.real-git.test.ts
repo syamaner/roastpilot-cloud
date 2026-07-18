@@ -652,6 +652,47 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
     expect(summary).toContain('implement job result was "failure"');
   });
 
+  it("still writes the rejected-publish summary even when postFailureComment itself throws (Codex P2, post-#46-merge fix-forward)", async () => {
+    // Reproduces the exact gap: on a rejected publish, the ONLY other
+    // signal is the failure comment. If posting that comment throws (rate
+    // limit, outage, permissions), the summary write must not be
+    // contingent on it succeeding — this is precisely the path where the
+    // mint-vs-fallback diagnostic matters most (no PR exists to carry any
+    // other signal).
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        // Simulates the comment-post call itself failing for real.
+        return new Response("rate limited", { status: 429 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // main() itself REJECTS here — postFailureComment's error propagates
+    // out of the catch block (no internal try/catch of its own), and only
+    // the top-level self-invoke wrapper (`if (import.meta.url === ...)`,
+    // not exercised when a test imports `main` directly) would translate
+    // that into `process.exitCode = 1`. The load-bearing assertion is
+    // that the summary is ALREADY on disk by the time this rejection
+    // happens — proving the reorder fix, not that main() somehow
+    // swallows the comment-post failure (it doesn't, and shouldn't).
+    await expect(main()).rejects.toThrow(/429/);
+
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("none — publish rejected");
+    expect(summary).toContain('implement job result was "failure"');
+  });
+
   it("summary says the label FAILED to apply — never claims it landed — when the label call genuinely fails (Codex P2, #46 reshape)", async () => {
     const summaryPath = join(scratchDir, "step-summary.md");
     await fsWriteFile(summaryPath, "");
