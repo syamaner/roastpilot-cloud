@@ -773,6 +773,27 @@ jobs:
       - name: Mint factory App token
         id: factory_token
         if: ${{ vars.FACTORY_PUBLISHER_APP_ID != '' }}
+        # Adjudicated fix (Codex round-3 P2, #40 rework): minting is
+        # best-effort. Without continue-on-error, a half-configured
+        # rollout — FACTORY_PUBLISHER_APP_ID set but
+        # FACTORY_PUBLISHER_PRIVATE_KEY missing/invalid, or the App
+        # lacking a requested permission — would fail THIS step, and
+        # because a failed non-continue-on-error step halts the job, the
+        # entire publish job would die before the `steps.factory_token.
+        # outputs.token || secrets.GITHUB_TOKEN` fallback three steps down
+        # ever runs: no warning, no label, no failure comment, nothing —
+        # the privileged publish job just silently bricks. A step that
+        # fails with continue-on-error: true never sets an output it
+        # didn't reach (create-github-app-token calls core.setFailed()
+        # before ever calling core.setOutput("token", ...) on a genuine
+        # auth/permission failure), and GitHub Actions expressions treat a
+        # referenced-but-never-set step output as an empty string, not an
+        # error — so `steps.factory_token.outputs.token` resolves to `''`
+        # exactly as if the step had been skipped, and every downstream
+        # `|| secrets.GITHUB_TOKEN` fallback (and the F2 warning/label)
+        # engages correctly. A failed/absent mint always fails OPEN to the
+        # less-privileged GITHUB_TOKEN path, never bricks publish.
+        continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ vars.FACTORY_PUBLISHER_APP_ID }}

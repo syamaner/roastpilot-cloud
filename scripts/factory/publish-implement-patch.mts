@@ -121,6 +121,7 @@ import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   assertLabelDescriptionWithinLimit,
+  buildFallbackRefreshCommentBody,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
@@ -592,6 +593,73 @@ async function applyNoReviewAutomationLabel(
   });
 }
 
+/**
+ * Applies {@link NO_REVIEW_AUTOMATION_LABEL} to `prNumber`, never
+ * throwing — a failure is logged, not propagated, since by the time this
+ * runs the PR/branch itself is already the load-bearing artifact (its
+ * body warning, on the creation path, or the fallback-refresh comment
+ * `postFallbackRefreshComment` posts alongside this on the refresh path).
+ * Shared by both the PR-creation and existing-PR-refresh publish paths
+ * (Codex round-3 P2, #40 rework) so the label logic — and its "never
+ * fail the publish over a label" tolerance — isn't duplicated between
+ * them.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ * @param context - Human-readable context for the log line if this fails
+ *   — which publish path called it.
+ */
+async function applyNoReviewAutomationLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  context: "opened" | "refreshed",
+): Promise<void> {
+  await applyNoReviewAutomationLabel(token, owner, repo, prNumber).catch((err: unknown) => {
+    console.error(
+      `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
+        `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+}
+
+/**
+ * Posts a fresh comment on `prNumber` noting this refresh went out via the
+ * `GITHUB_TOKEN` fallback (Codex round-3 P2, #40 rework — see
+ * {@link buildFallbackRefreshCommentBody}'s docstring for why this is the
+ * REFRESH path's counterpart to the PR-creation path's body warning, and
+ * why it's a fresh POST rather than an upsert). Never throws — a failure
+ * is logged, not propagated; the label
+ * (`applyNoReviewAutomationLabelBestEffort`) is the persistent signal that
+ * survives even if this specific comment fails to post.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The existing PR being refreshed.
+ * @param runUrl - Link to this implement run, for the comment body.
+ */
+async function postFallbackRefreshComment(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  runUrl: string,
+): Promise<void> {
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+    body: buildFallbackRefreshCommentBody(runUrl),
+  }).catch((err: unknown) => {
+    console.error(
+      `Failed to post the fallback-refresh comment on PR #${prNumber} (the branch was ` +
+        `still refreshed successfully): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+}
+
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -725,6 +793,31 @@ export async function main(): Promise<void> {
         `PR #${existingPr.number} already exists for issue #${issueNumber} ` +
           `(branch ${branchName}); refreshed, not opening a duplicate.`,
       );
+      if (publishedViaFallback) {
+        // Adjudicated fix (Codex round-3 P2, #40 rework): the ORIGINAL F2
+        // fold only ever signaled a fallback publish on PR CREATION — its
+        // own docstring explicitly scoped out this refresh path as "an
+        // accepted, narrow gap". That gap turned out to be a real one: a
+        // re-dispatch that force-pushes a new head onto an already-open
+        // PR was returning right here with NO signal at all, leaving a
+        // genuinely unreviewed new commit indistinguishable from a
+        // normally-reviewed one. Closed: apply the same persistent label
+        // (idempotent — a no-op if already applied from an earlier
+        // publish of this same PR) AND post a fresh comment pointing at
+        // this specific refresh (never an upsert — see
+        // buildFallbackRefreshCommentBody's docstring for why an
+        // edited-in-place comment would be the wrong signal here). Both
+        // are best-effort: this branch still returns normally either way,
+        // since the branch push itself already succeeded.
+        await applyNoReviewAutomationLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          "refreshed",
+        );
+        await postFallbackRefreshComment(token, owner, repo, existingPr.number, runUrl);
+      }
       return;
     }
 
@@ -749,19 +842,10 @@ export async function main(): Promise<void> {
     if (publishedViaFallback) {
       // Adjudicated F2 (#40 rework): the body warning above is easy to
       // miss in a long PR; the label is the always-visible-in-list-view
-      // half of the same signal. Failing to label must never fail the
-      // whole publish — the PR (with its warning body) already exists and
-      // is the load-bearing artifact; a label-application error here is
-      // logged, not thrown.
-      await applyNoReviewAutomationLabel(token, owner, repo, created.number).catch(
-        (err: unknown) => {
-          console.error(
-            `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR ` +
-              `#${created.number} (the PR itself was opened successfully; its ` +
-              `body still carries the fallback warning): ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
+      // half of the same signal. No separate comment needed on THIS path
+      // (unlike the existingPr-refresh path above) — the body warning
+      // just built into this brand-new PR already carries the signal.
+      await applyNoReviewAutomationLabelBestEffort(token, owner, repo, created.number, "opened");
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

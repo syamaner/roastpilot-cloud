@@ -502,6 +502,112 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     );
     expect(applyLabelCall).toBeUndefined();
   });
+
+  it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK=true applies the label AND posts a fallback-refresh comment on the EXISTING PR (Codex round-3 P2 — closes the gap this fold originally scoped out)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+
+    // No NEW PR is opened for an existing PR — the fallback signal must
+    // land on PR #50 (the existing one), not on some freshly-created PR.
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(prCreateCall).toBeUndefined();
+
+    const ensureLabelCall = calls.find(
+      ([url, init]) =>
+        !String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(ensureLabelCall).toBeDefined();
+
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-review-automation"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("GITHUB_TOKEN fallback");
+    expect(commentBody.body).toContain("no-review-automation");
+    expect(commentBody.body).toContain("just refreshed");
+  });
+
+  it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK unset applies NO label and posts NO fallback-refresh comment", async () => {
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const anyLabelCall = calls.find(
+      ([url, init]) => String(url).endsWith("/labels") && init?.method === "POST",
+    );
+    expect(anyLabelCall).toBeUndefined();
+
+    const anyCommentPost = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentPost).toBeUndefined();
+  });
+
+  it("refresh path: a label-application failure and a comment-post failure are each independently logged and never fail the publish", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: { ref: "feature/6-implement-workflow", repo: { full_name: "syamaner/roastpilot-cloud" } },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the fallback-refresh comment"),
+    );
+    errorSpy.mockRestore();
+  });
 });
 
 describe("publish-implement-patch — Codex round 3: binary patches round-trip", () => {

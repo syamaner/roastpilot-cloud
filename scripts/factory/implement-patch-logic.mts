@@ -369,6 +369,44 @@ export function assertLabelDescriptionWithinLimit(
 }
 
 /**
+ * Builds the comment posted on an EXISTING factory PR's issue thread when
+ * a re-dispatch refreshes it via the `GITHUB_TOKEN` fallback (Codex
+ * round-3 P2, #40 rework, closing a gap the original F2 fold's own
+ * docstring had explicitly scoped out).
+ *
+ * The gap this closes: {@link buildImplementPrBody}'s warning banner and
+ * `applyNoReviewAutomationLabel`'s label only ever fired on PR
+ * *creation* — a re-dispatch that force-pushes a new head onto an
+ * ALREADY-OPEN PR returns before either fires. Unlike the failure-comment
+ * upsert elsewhere in this module (which PATCHes its prior comment in
+ * place, because a repeated identical failure genuinely IS the same
+ * event), this is deliberately a fresh POST every time, never an upsert:
+ * each fallback refresh pushes a NEW, not-yet-reviewed commit, so an
+ * upserted/edited-in-place comment could read as "already seen" to a
+ * human who reviewed an earlier version of it. The label
+ * (`no-review-automation`) stays the persistent, always-visible signal;
+ * this comment is the per-event one pointing at what specifically
+ * changed.
+ *
+ * @param runUrl - Link to the implement run, for diagnosis.
+ * @returns The Markdown comment body.
+ */
+export function buildFallbackRefreshCommentBody(runUrl: string): string {
+  return [
+    "> ⚠️ **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
+      "workflows did NOT run against the new commit(s).**",
+    "",
+    "No factory App token was minted for this run (the App wasn't configured, or minting " +
+      "failed), so CodeQL, Codex, and Claude Code Review never triggered on the refreshed " +
+      "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
+      `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
+      `commit(s).** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+    "",
+    `[Run output](${runUrl}).`,
+  ].join("\n");
+}
+
+/**
  * {@link NO_REVIEW_AUTOMATION_LABEL}'s description, applied when the
  * publish job creates the label (idempotently — see
  * `applyNoReviewAutomationLabel` in `publish-implement-patch.mts`).
