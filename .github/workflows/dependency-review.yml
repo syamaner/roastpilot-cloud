@@ -21,6 +21,14 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+          # Codex P2 finding: the action defaults `fail-on-scopes` to
+          # `runtime` only, so a vulnerable/denied-license `devDependency`
+          # (this repo's CI installs and executes ALL dependencies —
+          # `npm ci` then lint/typecheck/test — so a dev-scoped one is a
+          # real CI supply-chain risk, not a theoretical one) would pass
+          # this check silently. Explicit `runtime, development` closes
+          # that gap.
+          fail-on-scopes: runtime, development
           comment-summary-in-pr: on-failure
           # This app has no LICENSE file / no `license` field in
           # package.json — it is proprietary (all rights reserved), not
