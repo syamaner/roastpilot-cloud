@@ -40,6 +40,24 @@ jobs:
       - name: Unit tests
         run: npm run test -- --coverage
 
+      - name: Upload coverage to Codecov
+        # codecov-action v4+ dropped general tokenless uploading (it's
+        # narrowly scoped to fork PRs against an already-connected upstream
+        # OSS repo, which doesn't apply here), so this needs a real
+        # `CODECOV_TOKEN` even though the repo is public — same as the
+        # agent repo's convention. Operator dependency: connect
+        # codecov.io to this repo and add the resulting token as the
+        # `CODECOV_TOKEN` repo secret. `fail_ci_if_error: false` so this
+        # step doesn't red the required `gates` check while that
+        # connection is still pending; the coverage statuses
+        # (`codecov/patch`, `codecov/project`) simply won't post until
+        # then, and only get added to branch protection once they do.
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
