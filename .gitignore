@@ -47,6 +47,9 @@ next-env.d.ts
 /snowflake/.venv
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
+htmlcov/
 
 # factory scratch dirs (F1-S3, round 6 FIX 4): the implement job writes
 # these into the SAME checkout the agent edits, so `git add -A` in the

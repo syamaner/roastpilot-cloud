@@ -22,6 +22,14 @@ pip install -r requirements.txt
 any project venv — either is fine, the version pin in `requirements.txt` is
 what matters.)
 
+For running the tooling's own unit tests (below), install
+`requirements-dev.txt` instead (layers `pytest`/`pytest-cov` on top of
+`requirements.txt`, never merged into it):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ## Connection convention
 
 `schemachange-config.yml` sets **no** account/user/role/warehouse/auth.
@@ -43,10 +51,13 @@ the older flat layout — top-level `[roastpilot]`, not nested
 `[connections.roastpilot]` — and silently returns nothing for our file
 (confirmed by calling it directly against the real config). Env vars are
 schemachange's other fully-supported input layer (P2, above YAML, below
-CLI), so `with_connection_env.py` reads `config.toml` once and exports
-`SNOWFLAKE_ACCOUNT` / `_USER` / `_ROLE` / `_WAREHOUSE` / `_AUTHENTICATOR` /
-`_PRIVATE_KEY_FILE` before exec'ing the real command. Nothing is duplicated
-into the repo — it re-reads `config.toml` on every invocation — and no
+CLI), so `with_connection_env.py` reads `config.toml` **when it exists**
+(see below for what happens when it doesn't) and exports
+`SNOWFLAKE_ACCOUNT` / `_USER` / `_ROLE` / `_WAREHOUSE` / `_DATABASE` /
+`_SCHEMA` / `_AUTHENTICATOR` / `_PRIVATE_KEY_FILE` before exec'ing the real
+command, per field (see the merge behavior below — this isn't an
+all-or-nothing bulk export). Nothing is duplicated into the repo — it
+re-reads `config.toml` on every invocation, never caching it — and no
 secret *value* lives on disk here, only a private key *path*.
 
 The default connection name is `roastpilot` (key-pair auth, role
@@ -64,9 +75,26 @@ python3 with_connection_env.py schemachange deploy ...
 ```
 
 Any `SNOWFLAKE_*` variable already set in the calling shell wins over what
-`with_connection_env.py` resolves — useful for CI, where the DEV-scoped key
-comes from repo secrets rather than a local `config.toml` (F1-S8/C7; out of
-scope here, see below).
+`with_connection_env.py` resolves, **per field** — useful for CI, where the
+DEV-scoped key comes from repo secrets rather than a local `config.toml`
+(F1-S8/C7; out of scope here, see below).
+
+`with_connection_env.py` reads `config.toml` whenever it exists and merges
+it in field by field: each individual `SNOWFLAKE_*` value prefers whatever
+the shell already set, and falls back to the profile for anything the shell
+didn't set. A **missing** `config.toml` is tolerated (not an error) — this
+is exactly CI's shape (issue #18): a job with every `SNOWFLAKE_*` field
+already injected as a secret, no `config.toml` on the runner at all, so the
+profile is never actually needed there. A `config.toml` that **exists but
+doesn't contain the requested connection profile** is still a hard error —
+that's a genuine misconfiguration, not "no local file at all".
+
+`resolve_connection_env` also maps a profile's `database`/`schema` fields
+(to `SNOWFLAKE_DATABASE`/`SNOWFLAKE_SCHEMA`) and accepts either
+`private_key_file` or `private_key_path` in a connection profile — the
+`snow` CLI itself accepts both spellings — normalizing whichever is present
+to the single `SNOWFLAKE_PRIVATE_KEY_FILE` env var schemachange/the
+connector read natively.
 
 ## Target database
 
@@ -125,6 +153,33 @@ live-connecting contract check against `ROASTPILOT_DEV` with a CI-scoped key
 is deferred to the human-gated secret-CI story (F1-S8 / C7), per the factory
 security model (`factory.md` §8: agent jobs hold no Snowflake secrets; a
 post-PR job that does needs a required-reviewer environment gate).
+
+`validate_migrations.py` mirrors schemachange's own deploy-time collector
+exactly (issue #18): it discovers every migration RECURSIVELY, in any
+subdirectory, and recognizes `.sql`, `.sql.jinja` (jinja-templated SQL), and
+`.cli.yml`/`.cli.yml.jinja` (Snowflake CLI action scripts) — not just
+top-level `*.sql`. A file matching one of those extensions but no valid
+`V`/`R`/`A` naming convention is a hard validation FAILURE here, even though
+schemachange's own collector would just silently skip it at deploy time
+(never applying it, never erroring) — this validator exists specifically to
+catch that footgun in CI before it becomes a silently-never-deployed
+migration.
+
+## Testing the tooling itself
+
+`with_connection_env.py` and `validate_migrations.py` have their own unit
+test suite under [`tests/`](./tests/) (pytest, never touches a real
+Snowflake connection or credential):
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov-report=term-missing
+```
+
+This is what CI runs, before the offline migration-validation step above —
+so a regression in either script's own logic (the per-field env/profile
+merge, tolerating a missing `config.toml`, recursive migration discovery)
+is caught independently of whatever migrations currently happen to exist.
 
 ## Migration naming
 

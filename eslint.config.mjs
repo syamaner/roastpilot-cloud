@@ -16,6 +16,14 @@ const eslintConfig = defineConfig([
     "coverage/**",
     "playwright-report/**",
     "test-results/**",
+    // snowflake/ is a Python tool (schemachange + its own pytest suite,
+    // isolated from npm/package.json) -- a local `snowflake/.venv/` (per
+    // its own README setup instructions) bundles third-party JS assets
+    // (e.g. coverage.py's HTML report template) that ESLint would
+    // otherwise scan and warn on. Git-ignored already; excluded here too
+    // so `npm run lint` stays clean for anyone who has that venv set up
+    // locally, not just in CI (which never creates it).
+    "snowflake/.venv/**",
   ]),
 ]);
 

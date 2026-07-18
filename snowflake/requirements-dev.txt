@@ -1,0 +1,7 @@
+# Dev-only tooling for testing the snowflake/ Python scripts (with_connection_env.py,
+# validate_migrations.py). Never needed to run migrations for real — only for
+# `pytest` here. Layered on top of requirements.txt (schemachange itself),
+# never merged into it.
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0

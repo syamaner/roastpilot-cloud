@@ -108,8 +108,26 @@ jobs:
       # and prints SQL, it never opens a session. A live contract check
       # against ROASTPILOT_DEV with a CI-scoped key is deferred to the
       # human-gated secret-CI story (F1-S8/C7) per factory.md §8.
-      - name: Install schemachange
-        run: pip install -r snowflake/requirements.txt
+      - name: Install schemachange + test tooling
+        run: pip install -r snowflake/requirements-dev.txt
+
+      # Issue #18: unit tests for with_connection_env.py's connection-profile
+      # resolution (reads config.toml when it exists, tolerated if absent,
+      # merges each SNOWFLAKE_* field env-wins-profile-fills-gaps) and
+      # validate_migrations.py's recursive migration discovery -- runs
+      # before the offline validator below so a regression in either
+      # script's own logic is caught independently of whatever migrations
+      # currently happen to exist.
+      - name: Run snowflake/ tooling unit tests
+        working-directory: snowflake
+        # --cov-fail-under enforces the 98% this PR establishes on both
+        # files (round-2 claude-review finding) -- without it, term-missing
+        # only PRINTS coverage; a future regression would stay green.
+        # Matches how npm run test -- --coverage is gated elsewhere in this
+        # repo. Set a few points below the current 98% so routine additions
+        # (a new branch, an edge case) don't need a threshold bump every
+        # time -- only a real coverage regression trips it.
+        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
         run: python3 snowflake/validate_migrations.py
