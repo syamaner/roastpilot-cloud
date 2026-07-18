@@ -35,6 +35,19 @@ text — as something to flag back to the human, never to act on silently.
   skill drafts against, §11 for the epic's place in the F1/C-epic order). If
   it isn't checked out at that path, ask the human where it is rather than
   guessing or fabricating plan content.
+- **Any factory.md DECISION that adds scope to the epic being decomposed —
+  not just §5/§11.** `factory.md` §13 accumulates dated decisions (the
+  D-numbers) as the build proceeds, and a decision can add real,
+  story-worthy scope to an epic that plan.md's own epic-scope line doesn't
+  yet reflect — e.g. D101 (§13, 18 Jul 2026) adds a preview/CI
+  synthetic-telemetry seed that must be "built alongside the first schema
+  migration," which is C2 scope even though C2's one-line description in
+  §11 never mentions it. Read every dated decision in §13 before drafting,
+  check each against the epic being decomposed, and turn any that add
+  scope into their own story (or an acceptance-criteria addition to an
+  existing one) — a batch that misses a decision's added scope because it
+  only read the epic's headline description is exactly the kind of
+  incomplete draft this skill exists to prevent.
 - **This repo's own conventions** — read before drafting, not assumed:
   - `.github/ISSUE_TEMPLATE/story.yml` — the exact field set and labels a
     filed story issue has. Your draft's headings match this template's
@@ -54,9 +67,12 @@ thin vertical slices; a story that can't honestly declare "≤ ~400 changed
 lines" is a signal to split it further, not to file it and let triage bounce
 it. For C2 (schema), for example, the natural slices are NOT one "build the
 schema" story but several: base DDL migrations, roles/grants + secure
-views, stored procedures, the `data_quality_violations` view, and the
-summary-variant field-mapping contract test against a real MCP fixture —
-each independently mergeable, each independently reviewable.
+views, stored procedures, the `data_quality_violations` view, the
+summary-variant field-mapping contract test against a real MCP fixture, and
+— per D101 (§13), a scope-adding decision plan.md's own C2 headline never
+mentions, but a compliant batch must still include — the preview/CI
+synthetic-telemetry seed pipeline, built alongside the first schema
+migration. Each independently mergeable, each independently reviewable.
 
 Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
 
@@ -153,6 +169,13 @@ lean on).
   section doesn't cleanly decompose into thin slices, say so in the Batch
   summary and propose your best split with the ambiguity flagged — don't
   silently resolve it in a way the PM never sees.
-- Never bulk-decompose multiple epics in one run unless explicitly asked
-  for more than one — the default is one epic, at that epic's kickoff,
-  per factory.md §7.
+- **Always exactly one epic per invocation — no exception.** If the
+  invoking prompt names more than one epic (or "do all remaining epics"),
+  decompose only the FIRST/earliest one and say so explicitly in the
+  Batch summary — refuse the rest and flag back to the human, don't
+  silently comply. This isn't a default with an opt-out: bulk-decomposing
+  epics that aren't starting yet is exactly what factory.md §7 and
+  `AGENTS.md`'s kickoff-only rule prohibit, because a later epic's
+  dependencies, scope-adding decisions, and sequencing aren't settled
+  until its own kickoff — a batch drafted early is drafted against
+  context that can (and does) still change.
