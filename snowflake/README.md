@@ -154,11 +154,23 @@ see the next section for the live counterpart.
 ## Live contract check against ROASTPILOT_DEV (F1-S8)
 
 `.github/workflows/dev-snowflake-contract.yml` is the live-connecting
-counterpart the offline job above always deferred: it actually deploys
-migrations against `ROASTPILOT_DEV` with a real, DEV-scoped CI key
-(`ROASTPILOT_DEV_CI`, role `ROASTPILOT_DEV_CI_ROLE`), then asserts that
-role's grants never extend beyond `ROASTPILOT_DEV`/`DEV_CI_WH`
-(`assert_dev_ci_grants.py`).
+counterpart the offline job above always deferred: it FIRST asserts a
+real, DEV-scoped CI key (`ROASTPILOT_DEV_CI`, role
+`ROASTPILOT_DEV_CI_ROLE`) stays confined to `ROASTPILOT_DEV`/`DEV_CI_WH`
+(`assert_dev_ci_grants.py`), and only THEN deploys migrations against
+`ROASTPILOT_DEV` with that same key — checking the boundary before
+writing anything, not after.
+
+The grants check covers three independent things, all of which must pass:
+`SHOW GRANTS TO ROLE` (current object grants), `SHOW DATABASES`/`SHOW
+WAREHOUSES` (nothing else is even VISIBLE to the role — closes the gap a
+future grant would leave in `SHOW GRANTS` alone), and secondary roles
+disabled for the session on BOTH the grants-check and deploy connections
+(so no other role granted to the CI user can contribute unaudited
+privileges). Identifier comparisons are case-sensitive throughout, since
+Snowflake preserves the case of a quoted identifier and a naive
+uppercase-both-sides comparison would conflate a quoted, out-of-bounds
+object with the real one.
 
 Per the factory security model (`factory.md` §8: agent jobs hold no
 Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
@@ -166,8 +178,8 @@ job declares `environment: dev-snowflake-ci` — a GitHub Environment with a
 required reviewer, so the credential is never active until a human
 explicitly approves that specific run. It also runs with
 `step-security/harden-runner`'s egress LOCKED to a fixed allowlist (GitHub,
-PyPI/npm, Snowflake) rather than the audit-only mode the rest of this
-factory's jobs use, since a live credential is genuinely at stake here.
+PyPI, Snowflake) rather than the audit-only mode the rest of this factory's
+jobs use, since a live credential is genuinely at stake here.
 
 `validate_migrations.py` mirrors schemachange's own deploy-time collector
 exactly (issue #18): it discovers every migration RECURSIVELY, in any

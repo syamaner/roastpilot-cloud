@@ -83,8 +83,27 @@ class TestIsAllowedGrant:
     def test_allows_a_self_grant_on_the_role_itself(self) -> None:
         assert assert_dev_ci_grants.is_allowed_grant("ROLE", _DEV_ROLE, _DEV_ROLE, _DEV_DB, _DEV_WH)
 
-    def test_is_case_insensitive(self) -> None:
-        assert assert_dev_ci_grants.is_allowed_grant("database", "roastpilot_dev", _DEV_ROLE, _DEV_DB, _DEV_WH)
+    def test_the_granted_on_type_column_is_case_insensitive(self) -> None:
+        # granted_on is Snowflake's own fixed vocabulary (never a quotable
+        # user identifier), so normalizing ITS case is safe and expected.
+        assert assert_dev_ci_grants.is_allowed_grant("database", _DEV_DB, _DEV_ROLE, _DEV_DB, _DEV_WH)
+
+    def test_rejects_a_quoted_lowercase_variant_of_the_allowed_database_codex_p1(self) -> None:
+        # The exact bug this closes (Codex P1, PR #57): Snowflake preserves
+        # the case of a QUOTED identifier, so "roastpilot_dev" (quoted,
+        # lowercase) is a GENUINELY DIFFERENT object from ROASTPILOT_DEV
+        # (unquoted, normalized to uppercase at creation). Uppercasing both
+        # sides before comparing would incorrectly treat them as the same
+        # database -- identifier comparisons must be case-SENSITIVE.
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "DATABASE", "roastpilot_dev", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "WAREHOUSE", "dev_ci_wh", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "ROLE", "roastpilot_dev_ci_role", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
 
     def test_rejects_a_different_database(self) -> None:
         assert not assert_dev_ci_grants.is_allowed_grant(
@@ -172,6 +191,36 @@ class TestFindViolations:
         assert len(violations) == 1
 
 
+class TestFindOutOfBoundsNames:
+    """Codex P1, PR #57: SHOW GRANTS TO ROLE alone can miss a future grant
+    or other visibility path -- these tests cover the SHOW DATABASES/SHOW
+    WAREHOUSES visibility check that closes that gap.
+    """
+
+    def test_empty_when_only_the_allowed_name_is_visible(self) -> None:
+        assert assert_dev_ci_grants.find_out_of_bounds_names([_DEV_DB], _DEV_DB) == []
+
+    def test_flags_any_additional_visible_name(self) -> None:
+        result = assert_dev_ci_grants.find_out_of_bounds_names([_DEV_DB, "ROASTPILOT_PREVIEW"], _DEV_DB)
+        assert result == ["ROASTPILOT_PREVIEW"]
+
+    def test_flags_every_extra_name_independently(self) -> None:
+        result = assert_dev_ci_grants.find_out_of_bounds_names(
+            [_DEV_DB, "ROASTPILOT_PREVIEW", "SNOWFLAKE"], _DEV_DB
+        )
+        assert result == ["ROASTPILOT_PREVIEW", "SNOWFLAKE"]
+
+    def test_is_case_sensitive_a_quoted_lowercase_variant_still_flags(self) -> None:
+        # Same case-sensitivity reasoning as is_allowed_grant -- a quoted
+        # "roastpilot_dev" is a different, out-of-bounds object even though
+        # it looks identical once uppercased.
+        result = assert_dev_ci_grants.find_out_of_bounds_names(["roastpilot_dev"], _DEV_DB)
+        assert result == ["roastpilot_dev"]
+
+    def test_empty_list_of_visible_names_is_never_a_violation(self) -> None:
+        assert assert_dev_ci_grants.find_out_of_bounds_names([], _DEV_DB) == []
+
+
 class TestMain:
     """main()'s own connection/query wiring, with snowflake.connector.connect
     mocked -- there is no real Snowflake credential available to test
@@ -179,6 +228,11 @@ class TestMain:
     RIGHT things with the RIGHT arguments and interprets the result
     correctly, which is what's actually testable without live
     infrastructure access.
+
+    main() now runs THREE sequential queries (SHOW GRANTS, SHOW DATABASES,
+    SHOW WAREHOUSES) against the same cursor -- mock_cursor.fetchall's
+    side_effect is a LIST of three return values, one per call, in that
+    order, rather than a single static return_value.
     """
 
     def _set_required_env(self, monkeypatch, pem: str) -> None:
@@ -189,12 +243,25 @@ class TestMain:
         monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", _DEV_DB)
         monkeypatch.setenv("SNOWFLAKE_DEV_PRIVATE_KEY", pem)
 
+    def _mock_cursor(
+        self,
+        grant_rows: list[dict[str, object]],
+        visible_databases: list[dict[str, object]] | None = None,
+        visible_warehouses: list[dict[str, object]] | None = None,
+    ) -> MagicMock:
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.side_effect = [
+            grant_rows,
+            visible_databases if visible_databases is not None else [{"name": _DEV_DB}],
+            visible_warehouses if visible_warehouses is not None else [{"name": _DEV_WH}],
+        ]
+        return mock_cursor
+
     def test_returns_0_and_prints_confirmation_when_all_grants_are_compliant(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [
-            {"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_DEV"},
-        ]
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 
@@ -211,12 +278,28 @@ class TestMain:
         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
         mock_conn.close.assert_called_once()
 
-    def test_returns_1_when_a_violation_is_found(self, monkeypatch, capsys) -> None:
+    def test_disables_secondary_roles_for_the_session_codex_p1(self, monkeypatch) -> None:
+        # The exact bug this closes (Codex P1, PR #57): without this, other
+        # roles granted to the CI user could contribute privileges this
+        # check never sees.
         self._set_required_env(monkeypatch, _generate_test_pem())
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [
-            {"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"},
-        ]
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn) as mock_connect:
+            assert_dev_ci_grants.main()
+
+        _, connect_kwargs = mock_connect.call_args
+        assert connect_kwargs["session_parameters"] == {"USE_SECONDARY_ROLES": "NONE"}
+
+    def test_returns_1_when_a_grant_violation_is_found(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"}]
+        )
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 
@@ -226,6 +309,41 @@ class TestMain:
         assert exit_code == 1
         assert "ROASTPILOT_PREVIEW" in capsys.readouterr().err
         mock_conn.close.assert_called_once()
+
+    def test_returns_1_when_an_out_of_bounds_database_is_visible_codex_p1(self, monkeypatch, capsys) -> None:
+        # No SHOW GRANTS violation at all -- the boundary breach is only
+        # visible via SHOW DATABASES (e.g. a future grant SHOW GRANTS TO
+        # ROLE can't see). Must still fail.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            visible_databases=[{"name": _DEV_DB}, {"name": "ROASTPILOT_PREVIEW"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ROASTPILOT_PREVIEW" in stderr
+        assert "visible database" in stderr
+
+    def test_returns_1_when_an_out_of_bounds_warehouse_is_visible_codex_p1(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            visible_warehouses=[{"name": _DEV_WH}, {"name": "PREVIEW_WH"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        assert "PREVIEW_WH" in capsys.readouterr().err
 
     def test_checks_against_the_real_snowflake_dev_database_env_var_not_a_hardcoded_literal(
         self, monkeypatch, capsys
@@ -237,10 +355,10 @@ class TestMain:
         # checking a hardcoded "ROASTPILOT_DEV" constant regardless of env.
         self._set_required_env(monkeypatch, _generate_test_pem())
         monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", "SOME_OTHER_DEV_DB")
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [
-            {"privilege": "USAGE", "granted_on": "DATABASE", "name": "SOME_OTHER_DEV_DB"},
-        ]
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "SOME_OTHER_DEV_DB"}],
+            visible_databases=[{"name": "SOME_OTHER_DEV_DB"}],
+        )
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 

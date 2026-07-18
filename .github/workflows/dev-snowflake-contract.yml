@@ -44,6 +44,17 @@ name: DEV Snowflake Contract Check
 #    raw key content (verified against the installed package's source,
 #    #18) — written with `umask 077`, removed via `trap ... EXIT` so it's
 #    gone even if the step fails partway.
+# 6. The grants-assertion step runs BEFORE the deploy step (Codex P1, PR
+#    #57), not after: checking the DEV boundary only AFTER migrations have
+#    already been applied would let a drifted role's damage happen before
+#    this job ever reports it. See that step's own comment for how a
+#    failure there automatically skips the deploy step that follows.
+# 7. Secondary roles are disabled for BOTH Snowflake connections in this
+#    job (Codex P1, PR #57 — `session_parameters`/`SNOWFLAKE_SESSION_
+#    PARAMETERS` on the grants-assertion and deploy steps respectively):
+#    without this, ANY other role granted to the CI user could contribute
+#    unaudited privileges to an effective session, regardless of what the
+#    PRIMARY role's own grants/visibility checks report.
 #
 # NOTE (operator-supervised validation required): the live-connection code
 # paths in with_connection_env.py/assert_dev_ci_grants.py, and this
@@ -104,17 +115,56 @@ jobs:
       - name: Install schemachange + Snowflake connector dependencies
         run: pip install -r snowflake/requirements.txt
 
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH
+        id: grants
+        # Runs BEFORE the deploy step below (Codex P1, PR #57): checking
+        # the boundary AFTER migrations have already been applied would let
+        # a drifted role's damage happen before this script ever reports
+        # it. No `if:` needed — a normal (non-continue-on-error) step
+        # failure here automatically skips the deploy step that follows,
+        # GitHub Actions' own default behavior, so a boundary violation
+        # blocks the deploy without any extra conditional logic to get
+        # wrong.
+        # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
+        # DATABASES, or SHOW WAREHOUSES report anything outside the DEV
+        # database/warehouse this role is provisioned to touch
+        # (assert_dev_ci_grants.py, #11). Connects directly via
+        # snowflake-connector-python with the key held in memory only,
+        # never written to disk (unlike the deploy step below, which needs
+        # schemachange's file-based env layer). Secondary roles are
+        # disabled for this session (session_parameters in the script
+        # itself) — the SAME restriction is applied to the deploy
+        # connection below, since a check on ONE connection would be
+        # meaningless if the connection that actually writes data stayed
+        # exposed to other roles' privileges.
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          # Same var the deploy step below uses for SNOWFLAKE_DATABASE —
+          # assert_dev_ci_grants.py checks grants against THIS value, not a
+          # hardcoded literal (claude-review finding, PR #57), so the two
+          # steps can never silently check a different database boundary
+          # than what's actually deployed to.
+          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: python3 assert_dev_ci_grants.py
+
       - name: Deploy migrations for real against ROASTPILOT_DEV
         id: deploy
-        # Relies on with_connection_env.py's per-field connection merge
-        # (#18, build_launch_env): this runner has no config.toml at all,
-        # which the merge tolerates (never fatal) — and since every
-        # SNOWFLAKE_* field is already set below, there's no profile field
-        # for it to fill in even if a config.toml somehow existed, so it
-        # execs schemachange straight through with this step's own
-        # environment unchanged. The SAME command a local dev would run,
-        # unmodified — no CI-specific fork of the deploy path to drift out
-        # of sync with local usage.
+        # Only reached if the grants-assertion step above succeeded (see
+        # its own comment for why it now runs first). Relies on
+        # with_connection_env.py's per-field connection merge (#18,
+        # build_launch_env): this runner has no config.toml at all, which
+        # the merge tolerates (never fatal) — and since every SNOWFLAKE_*
+        # field is already set below, there's no profile field for it to
+        # fill in even if a config.toml somehow existed, so it execs
+        # schemachange straight through with this step's own environment
+        # unchanged. The SAME command a local dev would run, unmodified —
+        # no CI-specific fork of the deploy path to drift out of sync with
+        # local usage.
         working-directory: snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -123,6 +173,14 @@ jobs:
           SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
           SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+          # Disables secondary roles for this connection too (Codex P1, PR
+          # #57 — same reasoning as the grants-assertion step above): the
+          # ONE connection that actually writes data must never run with
+          # more effective privilege than the primary role the
+          # grants-assertion step just verified. schemachange reads this
+          # env var natively (SNOWFLAKE_SESSION_PARAMETERS, JSON format —
+          # verified against the installed package's source, #18/#57).
+          SNOWFLAKE_SESSION_PARAMETERS: '{"USE_SECONDARY_ROLES": "NONE"}'
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
         run: |
           set -euo pipefail
@@ -132,35 +190,6 @@ jobs:
           printf '%s' "$SNOWFLAKE_DEV_PRIVATE_KEY" > "$KEY_FILE"
           export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
           python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
-
-      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH
-        id: grants
-        if: always() && steps.deploy.outcome != 'skipped'
-        # Runs even if the deploy step above failed (if: always()) so the
-        # operator sees the grants-boundary result independently of a
-        # deploy failure — but not if deploy was itself SKIPPED (e.g. an
-        # earlier setup step failed), since there'd be no meaningful
-        # connection context to check yet.
-        # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE reports
-        # anything outside the DEV database/warehouse this role is
-        # provisioned to touch (assert_dev_ci_grants.py, #11). Connects
-        # directly via snowflake-connector-python with the key held in
-        # memory only, never written to disk (unlike the deploy step
-        # above, which needs schemachange's file-based env layer).
-        working-directory: snowflake
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
-          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
-          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
-          # Same var the deploy step above uses for SNOWFLAKE_DATABASE —
-          # assert_dev_ci_grants.py checks grants against THIS value, not a
-          # hardcoded literal (claude-review finding, PR #57), so the two
-          # steps can never silently check a different database boundary
-          # than what was actually deployed to.
-          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
-          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
-        run: python3 assert_dev_ci_grants.py
 
       - name: Write summary
         # Purely observability — this is a rarely-run, human-approved job
@@ -174,8 +203,8 @@ jobs:
           {
             echo "## DEV Snowflake contract check"
             echo ""
-            echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
             echo "- **Grants stay within DEV:** ${{ steps.grants.outcome }}"
+            echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
             echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
             echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
             echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"
