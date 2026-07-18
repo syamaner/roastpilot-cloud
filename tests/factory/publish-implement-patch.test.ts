@@ -165,3 +165,62 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     );
   });
 });
+
+describe("main — IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN (factory.md §13 publisher-identity switch)", () => {
+  afterEach(() => {
+    delete process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN;
+  });
+
+  it("PATCHes the prior comment when it was authored by the configured login", async () => {
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "roastpilot-factory[bot]";
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 42,
+            body: "prior failure\n\n<!-- roastpilot-factory:implement-failure:do-not-edit -->",
+            user: { type: "Bot", login: "roastpilot-factory[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/42": () => jsonResponse({}, 200),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toContain('implement job result was "failure"');
+  });
+
+  it("does NOT match a prior comment authored by a different login than configured (no cross-identity edit)", async () => {
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "roastpilot-factory[bot]";
+
+    const { fetchMock, calls } = mockFetch({
+      // The prior comment is from the OLD (GITHUB_TOKEN) identity — a
+      // publisher-identity switch must not silently adopt/edit a comment
+      // posted under the previous identity; it posts a fresh one instead.
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 42,
+            body: "prior failure\n\n<!-- roastpilot-factory:implement-failure:do-not-edit -->",
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () => jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect(post).toBeDefined();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+});

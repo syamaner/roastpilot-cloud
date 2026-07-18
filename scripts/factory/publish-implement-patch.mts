@@ -61,8 +61,15 @@
  * `if:` conditions.
  *
  * Required environment variables:
- * - `GH_TOKEN` — the job's `permissions: contents: write, pull-requests:
- *   write, issues: write` token.
+ * - `GH_TOKEN` — the identity that pushes the branch and opens/comments on
+ *   the PR/issue. Defaults to the job's own `permissions: contents: write,
+ *   pull-requests: write, issues: write` `GITHUB_TOKEN`, but the workflow
+ *   may instead pass a `FACTORY_PUBLISHER_TOKEN` (factory.md §13's
+ *   publisher-identity switch) — GitHub suppresses downstream workflow
+ *   triggers (CI, Codex, Claude Code Review) for `GITHUB_TOKEN`-authored
+ *   PR events, so a factory PR needs a real, workflow-triggering identity
+ *   to actually get reviewed. This script itself is identity-agnostic: it
+ *   just uses whatever token the workflow hands it.
  * - `GITHUB_REPOSITORY` — `owner/repo`.
  * - `TRUSTED_ISSUE_NUMBER` — from the `workflow_dispatch` `issue_number`
  *   input. Trusted because dispatch-first means a human explicitly chose
@@ -83,6 +90,17 @@
  *   the implement job ran, for the PR body's minimal provenance section.
  *   Soft-defaulted (not `requireEnv`'d) if unset — provenance metadata
  *   only, never grounds to reject an otherwise-valid publish.
+ * - `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` — the exact login
+ *   {@link findExistingImplementFailureCommentId} treats as "our own prior
+ *   comment" when deciding whether to PATCH or POST a failure comment.
+ *   Soft-defaulted to `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` (the
+ *   built-in `github-actions[bot]` identity) if unset. Must match whatever
+ *   identity `GH_TOKEN` actually authenticates as — if `GH_TOKEN` is a
+ *   `FACTORY_PUBLISHER_TOKEN` and this is left at the GITHUB_TOKEN
+ *   default, a re-dispatch's failure comment won't find its own prior one
+ *   and will post a duplicate rather than editing it (a functional
+ *   annoyance, not a security issue — the spoofing guard this login check
+ *   exists for still holds either way).
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -99,6 +117,7 @@ import {
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   parseNameStatusZ,
   type ExistingComment,
   type PullRequestSummary,
@@ -424,6 +443,7 @@ async function findExistingImplementFailureComment(
   owner: string,
   repo: string,
   issueNumber: number,
+  authorLogin: string,
 ): Promise<number | null> {
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const comments = await githubRequest<GitHubComment[]>(
@@ -437,7 +457,7 @@ async function findExistingImplementFailureComment(
       authorType: c.user?.type ?? null,
       authorLogin: c.user?.login ?? null,
     }));
-    const found = findExistingImplementFailureCommentId(existing);
+    const found = findExistingImplementFailureCommentId(existing, authorLogin);
     if (found !== null) {
       return found;
     }
@@ -472,6 +492,7 @@ async function postFailureComment(
   reasons: readonly string[],
   runUrl: string,
   branchPushed: boolean,
+  failureCommentAuthorLogin: string,
 ): Promise<void> {
   const body = buildImplementFailureCommentBody(reasons, runUrl, branchPushed);
   const existingId = await findExistingImplementFailureComment(
@@ -479,6 +500,7 @@ async function postFailureComment(
     owner,
     repo,
     issueNumber,
+    failureCommentAuthorLogin,
   );
   if (existingId !== null) {
     await githubRequest(
@@ -517,6 +539,16 @@ export async function main(): Promise<void> {
   // "keep these two in sync" note.
   const agentActionRef =
     process.env.IMPLEMENT_AGENT_ACTION_REF ?? "unknown (IMPLEMENT_AGENT_ACTION_REF not set)";
+  // Which login `postFailureComment` treats as "our own prior comment"
+  // (factory.md §13's publisher-identity switch). Soft-defaulted to the
+  // built-in GITHUB_TOKEN identity, same reasoning as agentActionRef above:
+  // a missing/wrong value here degrades to "post a duplicate comment on a
+  // re-dispatch" rather than blocking an otherwise-valid publish. The
+  // workflow sets this from `vars.FACTORY_PUBLISHER_LOGIN` once a
+  // `FACTORY_PUBLISHER_TOKEN` is configured — see that env var's comment
+  // in the workflow for why this can't just be derived automatically.
+  const failureCommentAuthorLogin =
+    process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN ?? IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN;
 
   // Tracked outside the try so the catch block can tell an unpushed
   // rejection apart from a post-push failure (FIX 5) — a branch that WAS
@@ -648,6 +680,7 @@ export async function main(): Promise<void> {
       reasons,
       runUrl,
       branchPushed,
+      failureCommentAuthorLogin,
     );
     console.error(
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +

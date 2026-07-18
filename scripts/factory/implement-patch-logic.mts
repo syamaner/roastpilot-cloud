@@ -376,11 +376,21 @@ export const IMPLEMENT_FAILURE_COMMENT_MARKER =
   "<!-- roastpilot-factory:implement-failure:do-not-edit -->";
 
 /**
- * The exact GitHub identity that posts on behalf of this workflow's
- * `secrets.GITHUB_TOKEN` — the only comment author
- * {@link findExistingImplementFailureCommentId} will ever treat as "our own
- * prior comment". Same value and same reasoning as
- * `apply-triage-verdict-logic.mts`'s `TRIAGE_COMMENT_AUTHOR_LOGIN`.
+ * The default GitHub identity that posts on behalf of this workflow's
+ * `secrets.GITHUB_TOKEN` — the fallback comment author
+ * {@link findExistingImplementFailureCommentId} treats as "our own prior
+ * comment" when no publisher identity is configured. Same value and same
+ * reasoning as `apply-triage-verdict-logic.mts`'s
+ * `TRIAGE_COMMENT_AUTHOR_LOGIN`.
+ *
+ * The publish job's actual identity is configurable (factory.md §13's
+ * publisher-identity switch — see the workflow's
+ * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` env var): once a
+ * `FACTORY_PUBLISHER_TOKEN` is wired in, comments post as THAT identity's
+ * login, not this one, and the workflow must pass the real login through
+ * so a re-dispatch still finds its own prior comment. This constant stays
+ * the correct default for the "no publisher token configured, still on
+ * GITHUB_TOKEN" case.
  */
 export const IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
 
@@ -399,23 +409,35 @@ export interface ExistingComment {
  * earlier run for the same issue, if any, so a re-dispatch edits it
  * instead of posting a duplicate.
  *
- * Scoped to comments authored by exactly
- * {@link IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN} AND carrying the marker —
- * matching on bot-type alone would let a different bot's comment
+ * Scoped to comments authored by exactly `authorLogin` AND carrying the
+ * marker — matching on bot-type alone would let a different bot's comment
  * (containing the marker string coincidentally, or by an untrusted echo)
  * be mistaken for this job's own and silently overwritten. Same reasoning
- * as `findExistingTriageCommentId`.
+ * as `findExistingTriageCommentId`. The expected `authorType` is derived
+ * from `authorLogin`'s own shape (a `[bot]`-suffixed login is always type
+ * `"Bot"` on GitHub; anything else is type `"User"`) rather than assumed —
+ * this keeps the check correct whether the publisher identity is the
+ * built-in Actions bot, a GitHub App's bot identity, or a human-owned PAT.
  *
  * @param comments - Comments currently on the issue.
+ * @param authorLogin - The exact login expected to have posted our own
+ *   prior comment. Defaults to
+ *   {@link IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN} (the built-in
+ *   `GITHUB_TOKEN` identity); pass the actual publisher identity's login
+ *   once `FACTORY_PUBLISHER_TOKEN` is configured, or idempotency breaks
+ *   (every re-dispatch posts a fresh comment instead of editing the prior
+ *   one).
  * @returns The existing comment's id, or `null` if none found.
  */
 export function findExistingImplementFailureCommentId(
   comments: readonly ExistingComment[],
+  authorLogin: string = IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
 ): number | null {
+  const expectedType = authorLogin.endsWith("[bot]") ? "Bot" : "User";
   const match = comments.find(
     (c) =>
-      c.authorType === "Bot" &&
-      c.authorLogin === IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN &&
+      c.authorType === expectedType &&
+      c.authorLogin === authorLogin &&
       c.body.includes(IMPLEMENT_FAILURE_COMMENT_MARKER),
   );
   return match ? match.id : null;

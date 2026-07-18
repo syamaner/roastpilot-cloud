@@ -735,15 +735,57 @@ jobs:
     # overriding this branch check.
     if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # This block scopes the built-in GITHUB_TOKEN — still the FALLBACK
+    # identity (see the checkout/GH_TOKEN steps below) when no
+    # FACTORY_PUBLISHER_TOKEN is configured, so it stays declared even
+    # though a configured publisher identity's own grants (not this block)
+    # govern what that external token can actually do.
     permissions:
       contents: write
       pull-requests: write
       issues: write
     steps:
+      - name: Warn if publishing with GITHUB_TOKEN (review gates will not trigger)
+        # factory.md §13's headline finding, confirmed live on #34: GitHub
+        # suppresses downstream workflow triggers (CI, Codex, Claude Code
+        # Review) for events authored by the built-in GITHUB_TOKEN, so a PR
+        # opened with it sails past the entire review apparatus with
+        # nobody the wiser. Until an operator provisions
+        # `FACTORY_PUBLISHER_TOKEN` (a GitHub App token or PAT — a real,
+        # workflow-triggering identity), this job falls back to
+        # GITHUB_TOKEN below and every publish surfaces this warning
+        # annotation so the gap stays visible rather than silent.
+        #
+        # The emptiness check happens in `run:`, not `if:` — the `secrets`
+        # context is not available in step `if:` conditions (only
+        # `with`/`env`, per GitHub's context-availability rules; confirmed
+        # via actionlint), so the secret has to reach a shell check via
+        # `env:` instead.
+        env:
+          FACTORY_PUBLISHER_TOKEN: ${{ secrets.FACTORY_PUBLISHER_TOKEN }}
+        run: |
+          if [ -z "$FACTORY_PUBLISHER_TOKEN" ]; then
+            echo "::warning::FACTORY_PUBLISHER_TOKEN is not set — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code Review) for GITHUB_TOKEN-authored PR events, so the PR this run opens will NOT be reviewed automatically. See factory.md §13 for the fix."
+          else
+            echo "Confirmed: FACTORY_PUBLISHER_TOKEN is set — publishing with a workflow-triggering identity."
+          fi
+
       - name: Checkout roastpilot-cloud
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        # persist-credentials defaults to true here (deliberately, unlike
-        # every read-only job above) — this job needs to push.
+        with:
+          # factory.md §13's publisher-identity switch: pushing with a real
+          # (non-GITHUB_TOKEN) identity is what makes the PR this job opens
+          # trigger CI/Codex/Claude Code Review at all — see the warning
+          # step above. Falls back to this job's own `permissions:
+          # contents: write` GITHUB_TOKEN when no `FACTORY_PUBLISHER_TOKEN`
+          # secret is configured, so this workflow keeps working (with
+          # degraded review coverage, per the warning above) rather than
+          # failing outright while that operator dependency is pending.
+          # actions/checkout embeds whatever token this resolves to into
+          # `.git/config` (persist-credentials defaults true here,
+          # deliberately, unlike every read-only job above) — this job
+          # needs to push.
+          token: ${{ secrets.FACTORY_PUBLISHER_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Download patch artifact
         # May legitimately not exist (implement failed / produced no
@@ -763,7 +805,14 @@ jobs:
 
       - name: Validate and publish the implement patch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same fallback expression as the checkout step's `token:` above
+          # — KEEP THESE TWO IN SYNC. This is the identity
+          # publish-implement-patch.mts uses for every REST call (PR
+          # create/refresh, issue comments); the checkout step's token is
+          # what `git push` itself authenticates with. Both must be the
+          # SAME identity, or the pushed branch and the PR/comments that
+          # reference it would be attributed to two different actors.
+          GH_TOKEN: ${{ secrets.FACTORY_PUBLISHER_TOKEN || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Trusted issue number, from the workflow's own dispatch input —
           # never from the patch artifact (which has no issue-number field
@@ -791,4 +840,18 @@ jobs:
           # is intentionally just a minimal provenance record — the full
           # trailer (factory.md §13.12) is F1-S10's job.
           IMPLEMENT_AGENT_ACTION_REF: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc" # v1.0.176
+          # The login GH_TOKEN above actually authenticates as, so a
+          # re-dispatch's failure comment finds its own prior one instead
+          # of posting a duplicate (implement-patch-logic.mts's
+          # findExistingImplementFailureCommentId matches by exact login).
+          # Falls back to the GITHUB_TOKEN identity's known login when
+          # unset, matching the GH_TOKEN fallback above. There is no API
+          # to derive this automatically from an arbitrary token (a PAT
+          # authenticates as its owning user; a GitHub App installation
+          # token authenticates as `<app-slug>[bot]`; neither is
+          # discoverable from the token string alone without an extra
+          # call this job doesn't otherwise need to make) — the operator
+          # sets this repository VARIABLE (not a secret; a login isn't
+          # sensitive) alongside creating FACTORY_PUBLISHER_TOKEN.
+          IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN: ${{ vars.FACTORY_PUBLISHER_LOGIN || 'github-actions[bot]' }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts

@@ -486,4 +486,45 @@ describe("findExistingImplementFailureCommentId", () => {
   it("returns null on an empty comment list", () => {
     expect(findExistingImplementFailureCommentId([])).toBeNull();
   });
+
+  it("matches a custom authorLogin (factory.md §13 publisher-identity switch)", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 7,
+        body: `some reason\n\n${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "Bot",
+        authorLogin: "roastpilot-factory[bot]",
+      },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(comments, "roastpilot-factory[bot]"),
+    ).toBe(7);
+    // The default login must NOT match once a different login is passed —
+    // a re-dispatch must never mistake the OLD identity's comment for the
+    // new publisher identity's own.
+    expect(findExistingImplementFailureCommentId(comments)).toBeNull();
+  });
+
+  it("expects User (not Bot) type for a non-bot-suffixed custom authorLogin", () => {
+    const humanPatComments: ExistingComment[] = [
+      {
+        id: 8,
+        body: `some reason\n\n${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "User",
+        authorLogin: "some-operator",
+      },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(humanPatComments, "some-operator"),
+    ).toBe(8);
+
+    // A comment with the right login but the WRONG type (e.g. spoofed
+    // authorType) still doesn't match.
+    const wrongType: ExistingComment[] = [
+      { ...humanPatComments[0]!, authorType: "Bot" },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(wrongType, "some-operator"),
+    ).toBeNull();
+  });
 });
