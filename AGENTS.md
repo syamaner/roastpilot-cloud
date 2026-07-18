@@ -217,3 +217,74 @@ the factory workflows and glue scripts) and any human-directed
 branch-protection or CI change are conventional, human-reviewed work and are
 expected to touch them. The invariant is "a factory implementing agent can't
 grant itself more pipeline power," not "pipeline files are frozen."
+
+## Reviewing a Factory-Authored PR
+
+Applies to every PR the factory's publish job actually opened — the scope
+key is **"did the privileged publisher open this PR"**, never a milestone
+like "C2 onward". C1/F1 story PRs are conventionally authored by a human or
+an interactive agent and reviewed like any interactive-agent PR, so this
+section doesn't apply to them — but factory.md §11's F1-S6 end-to-end dry
+run has the publish job open a real, agent-authored PR on a sacrificial
+issue *before* C2 starts, and that PR is squarely in scope here: the author
+is an agent, so every rule below applies, milestone or not. (Codex P2
+finding on this section's first draft, #38 — a scope keyed on "C2 onward"
+would have let F1-S6's own dry-run PR slip through un-reviewed by the exact
+rules this section exists to enforce.) The author of a factory PR is
+*always* an agent; this section exists because that fact changes what
+"reviewed" has to mean, not because the rubric above stops applying —
+everything in Code Review Rubric still applies in full.
+
+### The roster
+
+The table below describes the roster as it lands once every F1-S4 sibling
+PR merges (#35 Claude Code Review, #36 CodeQL, #37 dependency review, #39
+codecov, #40 the publisher-identity switch — all `Refs #7`). As of any one
+of those PRs landing alone, a row it names may not exist on `main` yet;
+this is a same-batch sequencing artifact, not a claim that the roster is
+already fully wired the moment this file changes.
+
+| Lens | Gate type | What it covers |
+|---|---|---|
+| CI (`Lint, typecheck, unit tests`, `Playwright smoke`, `Snowflake migrations (offline)`) | Required status check | Build/lint/typecheck/unit correctness; branch protection blocks merge on red |
+| `codecov/patch` | Required status check, once wired | No coverage regression on changed lines |
+| CodeQL (`.github/workflows/codeql.yml`) | Not a required status check — surfaces as code-scanning alerts | Security vulnerabilities (taint flows, injection patterns) in the diff |
+| Dependency review (`.github/workflows/dependency-review.yml`) | Blocking job on `pull_request` (fails on high-severity advisory or a denied license) | Supply-chain risk on any `package.json`/`package-lock.json` change |
+| Claude Code Review (`.github/workflows/claude-code-review.yml`) | **NOT** a required status check (fails by design on workflow-edit PRs, per the agent-repo lesson) | Inline findings tagged blocker/medium/low against this file's Code Review Rubric; the real gate is the inline threads + `required_conversation_resolution`, not the check |
+| Codex | Advisory-but-triaged, not a required check | Cross-family second opinion — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses; see the wait-for-verdict rule in PR Merge Policy above (already ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
+| Domain sub-agents (`schema-migration-reviewer`, `privacy-auditor`, `factory-security-reviewer`) | Rubric-routed, human/PM-invoked | The escalation lenses named in Code Review Rubric's routing table above; not auto-run on every factory PR yet (factory.md §13 decision (ii) — rubric-routed to start, automate later is a live option) |
+
+### Codex — operator decision (recorded 18 Jul 2026, updated 18 Jul 2026, F1-S4)
+
+**Codex is installed and active on this repo** — confirmed live: it
+reviewed #38 (this very PR) with a `chatgpt-codex-connector[bot]` reaction
+and posted real findings, several of which this section itself was folded
+from. (Superseded finding, kept for the record: this section originally
+recorded Codex as "not yet installed" with a recommendation to enable it —
+that was accurate at F1-S4's start but went stale within the same story;
+Codex's own review of #38 is what caught the drift, per its P2 "Remove
+stale Codex-not-installed guidance" finding.) The roster above runs WITH
+the Codex row live, not without it. The wait-for-verdict rule in **PR
+Merge Policy** above applies now, unconditionally, on every factory PR — it
+was already copied verbatim from the agent repo's `AGENTS.md` at C1-S4 and
+is the single source of truth for that rule in this repo; do not create a
+second copy here.
+
+### The structural rule (D23) — never self-triaged
+
+**The implement agent's job ends at producing the diff.** It never resolves,
+dismisses, or adjudicates a review finding on its own PR — not even one that
+looks trivially correct or clearly a false positive. A human, or the
+`pr-triage` sub-agent acting on the human's behalf, decides what counts as
+resolved, every single time.
+
+This is stricter than the interactive-agent operating model in the agent
+repo, where an engineer at least drives its own PR under a human's real-time
+oversight and can self-fix a lint nit without derailing anything. In the
+factory, the author is *always* an agent and nobody is watching the
+implement run in real time — so independent triage is the only thing that
+keeps a factory PR's review from being self-graded. It is also the direct
+answer to `factory.md` §13's headline finding: the automation that authors a
+PR must not also be the thing that decides the PR is fine. See `factory.md`
+§13 for the full incident (`#34`'s CI-stall / Codex-skip / CCR-skip failure
+mode) this rule is a structural fix for, not a courtesy.
