@@ -126,10 +126,10 @@ export function findForbiddenPatchPaths(
  * path containing a literal tab or newline can't be misparsed; NUL is the
  * one byte no filesystem allows in a path, making it a safe delimiter.
  *
- * For a rename, `--numstat` reports only the DESTINATION path, not the
- * source — {@link findProtectedPathMentionsInSummaryText} is the
- * complementary check that also catches a rename OUT of a protected path,
- * which this alone would miss.
+ * For a rename or copy, `--numstat` reports only the DESTINATION path, not
+ * the source — {@link extractRenameCopySourcePaths} is the complementary
+ * check that also catches a rename/copy OUT of a protected path, which
+ * this alone would miss.
  *
  * @param numstatZOutput - Raw stdout from `git apply --numstat -z <patch>`.
  * @returns The destination path of every file the patch touches.
@@ -150,41 +150,50 @@ export function parseNumstatZ(numstatZOutput: string): string[] {
   return paths;
 }
 
+const RENAME_COPY_LINE_PREFIXES = [
+  "rename from ",
+  "rename to ",
+  "copy from ",
+  "copy to ",
+] as const;
+
 /**
- * Coarse, defense-in-depth complement to {@link findForbiddenPatchPaths}:
- * scans `git apply --summary`'s raw text output (which, unlike
- * `--numstat`, DOES print both sides of a rename — e.g. `rename
- * .github/workflows/ci.yml => lib/ci.yml (100%)`) for any literal mention
- * of a protected path. This is NOT a structural parse (the rename-summary
- * format itself varies — a shared-prefix `{old => new}` form vs a
- * no-shared-prefix `old => new` form — which is exactly why this checks
- * for a plain substring instead of trying to parse either shape
- * correctly): it exists to catch a rename OUT of a protected path (which
- * moves/effectively deletes protected content — a different attack shape
- * than writing malicious content INTO one, but still pipeline
- * self-modification) that a destination-only path list cannot see, as a
- * second, cruder layer alongside the authoritative numstat-based check —
- * not a replacement for it.
+ * Extracts every path named on a `rename from `/`rename to `/`copy from
+ * `/`copy to ` line, read directly from the RAW patch text — not from
+ * `--numstat` (destination-only for these) or `git apply --summary`
+ * (round-6 finding: --summary brace-COMPACTS a shared path prefix, e.g.
+ * `rename scripts/{factory/x.mts => other/y.mts} (100%)` — the literal
+ * substring `scripts/factory/` is not even present in that string, so a
+ * substring scan on --summary output silently misses exactly the case it
+ * exists to catch; that approach was replaced with this one, not layered
+ * alongside it).
  *
- * @param summaryText - Raw stdout from `git apply --summary <patch>`.
- * @returns Every protected prefix/exact path that appears anywhere in the
- *   text, sorted. Empty if none do.
+ * These lines are safe to parse directly (unlike a `diff --git a/X b/Y`
+ * header, which needs `-p`-stripping interpretation `git apply` itself
+ * must be asked about — see `getAuthoritativeChangedPaths`'s docstring):
+ * empirically confirmed that `git apply` uses `rename from`/`rename to`
+ * paths LITERALLY, regardless of whatever prefix scheme the diff header
+ * on the same file entry uses — a patch with a mismatched/fake
+ * `diff --git zz/X zz/Y` header alongside correct, unprefixed `rename
+ * from X` / `rename to Y` lines still renames exactly `X` to `Y`. There is
+ * no `-p`-interpretation gap for these lines to diverge on.
+ *
+ * @param patchText - The full raw patch text (not `--numstat`/`--summary`
+ *   output — the actual patch file content).
+ * @returns Every path named on a rename/copy from/to line, in patch order
+ *   (both sides of every rename/copy the patch contains).
  */
-export function findProtectedPathMentionsInSummaryText(
-  summaryText: string,
-): string[] {
-  const mentions = new Set<string>();
-  for (const prefix of PROTECTED_PATH_PREFIXES) {
-    if (summaryText.includes(prefix)) {
-      mentions.add(prefix);
+export function extractRenameCopySourcePaths(patchText: string): string[] {
+  const paths: string[] = [];
+  for (const line of patchText.split("\n")) {
+    for (const prefix of RENAME_COPY_LINE_PREFIXES) {
+      if (line.startsWith(prefix)) {
+        paths.push(line.slice(prefix.length));
+        break;
+      }
     }
   }
-  for (const exact of PROTECTED_EXACT_PATHS) {
-    if (summaryText.includes(exact)) {
-      mentions.add(exact);
-    }
-  }
-  return Array.from(mentions).sort();
+  return paths;
 }
 
 /** Upper bound on how long a derived branch slug's title portion may be. */

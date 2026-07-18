@@ -3,9 +3,9 @@ import {
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
+  extractRenameCopySourcePaths,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
-  findProtectedPathMentionsInSummaryText,
   isProtectedPath,
   normalizePatchPath,
   parseNumstatZ,
@@ -203,50 +203,86 @@ describe("parseNumstatZ", () => {
   });
 });
 
-describe("findProtectedPathMentionsInSummaryText", () => {
-  it("finds a .github/ mention (e.g. a rename source) in summary text", () => {
-    const summary = " rename .github/workflows/ci.yml => lib/ci.yml (100%)\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
-      ".github/",
+describe("extractRenameCopySourcePaths", () => {
+  it("extracts both sides of a rename from raw patch text", () => {
+    const patch =
+      "diff --git a/scripts/factory/x.mts b/scripts/other/y.mts\n" +
+      "similarity index 100%\n" +
+      "rename from scripts/factory/x.mts\n" +
+      "rename to scripts/other/y.mts\n";
+    expect(extractRenameCopySourcePaths(patch)).toEqual([
+      "scripts/factory/x.mts",
+      "scripts/other/y.mts",
     ]);
   });
 
-  it("finds a scripts/factory/ mention", () => {
-    const summary =
-      " rename scripts/factory/publish-implement-patch.mts => lib/x.mts (100%)\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
-      "scripts/factory/",
+  it("extracts both sides of a copy from raw patch text", () => {
+    const patch =
+      "diff --git a/.github/workflows/ci.yml b/lib/ci-copy.yml\n" +
+      "similarity index 100%\n" +
+      "copy from .github/workflows/ci.yml\n" +
+      "copy to lib/ci-copy.yml\n";
+    expect(extractRenameCopySourcePaths(patch)).toEqual([
+      ".github/workflows/ci.yml",
+      "lib/ci-copy.yml",
     ]);
   });
 
-  it("finds a bare CODEOWNERS mention", () => {
-    const summary = " rename CODEOWNERS => lib/CODEOWNERS-backup (100%)\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toContain(
-      "CODEOWNERS",
-    );
-  });
-
-  it("finds a docs/CODEOWNERS mention", () => {
-    const summary = " delete mode 100644 docs/CODEOWNERS\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toContain(
-      "docs/CODEOWNERS",
-    );
-  });
-
-  it("returns empty for a summary mentioning only ordinary application paths", () => {
-    const summary = " create mode 100644 lib/new-file.ts\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([]);
-  });
-
-  it("de-duplicates and sorts multiple mentions", () => {
-    const summary =
-      " rename .github/workflows/a.yml => lib/a.yml (100%)\n" +
-      " rename .github/workflows/b.yml => lib/b.yml (100%)\n" +
-      " delete mode 100644 CODEOWNERS\n";
-    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
-      ".github/",
-      "CODEOWNERS",
+  it("catches a rename OUT of a protected path even when --summary would brace-compact it away (round 6, second pass)", () => {
+    // git apply --summary renders this exact patch as
+    // "rename scripts/{factory/x.mts => other/y.mts} (100%)" — the
+    // literal substring "scripts/factory/" never appears. The raw patch
+    // text's rename from/to lines are never compacted like that.
+    const patch =
+      "diff --git a/scripts/factory/x.mts b/scripts/other/y.mts\n" +
+      "similarity index 100%\n" +
+      "rename from scripts/factory/x.mts\n" +
+      "rename to scripts/other/y.mts\n";
+    const allPaths = extractRenameCopySourcePaths(patch);
+    expect(findForbiddenPatchPaths(allPaths)).toEqual([
+      "scripts/factory/x.mts",
     ]);
+  });
+
+  it("returns empty for a patch with no renames or copies", () => {
+    const patch =
+      "diff --git a/lib/new-file.ts b/lib/new-file.ts\n" +
+      "new file mode 100644\n" +
+      "--- /dev/null\n" +
+      "+++ b/lib/new-file.ts\n" +
+      "@@ -0,0 +1 @@\n" +
+      "+export const x = 1;\n";
+    expect(extractRenameCopySourcePaths(patch)).toEqual([]);
+  });
+
+  it("extracts every rename/copy pair from a multi-file patch", () => {
+    const patch =
+      "diff --git a/a.ts b/b.ts\n" +
+      "rename from a.ts\n" +
+      "rename to b.ts\n" +
+      "diff --git a/c.ts b/d.ts\n" +
+      "copy from c.ts\n" +
+      "copy to d.ts\n";
+    expect(extractRenameCopySourcePaths(patch)).toEqual([
+      "a.ts",
+      "b.ts",
+      "c.ts",
+      "d.ts",
+    ]);
+  });
+
+  it("does not false-positive on a hunk content line that happens to start with similar text mid-line", () => {
+    // A "rename from " match requires the line to START with that exact
+    // text — a hunk content line always starts with +/-/space instead,
+    // so this can never collide with real diff content.
+    const patch =
+      "diff --git a/lib/x.ts b/lib/x.ts\n" +
+      "--- a/lib/x.ts\n" +
+      "+++ b/lib/x.ts\n" +
+      "@@ -1 +1 @@\n" +
+      '-const s = "rename from somewhere";\n' +
+      '+const s = "rename to elsewhere";\n';
+    expect(extractRenameCopySourcePaths(patch)).toEqual([]);
   });
 });
 

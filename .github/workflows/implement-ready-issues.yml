@@ -181,14 +181,29 @@ jobs:
           # block. This job must hold no writable GitHub credential at
           # all — it can edit the checkout locally, but every push/PR/
           # comment write is the `publish` job's job, not this one's.
-          #
-          # This does NOT fully solve the credential problem here, unlike
-          # in triage: claude-code-action's configureGitAuth() embeds
-          # THIS token into .git/config's remote URL regardless (see the
-          # "Scrub the git credential" step below, which removes it
-          # before anything that could expose it to agent-influenced code
-          # runs).
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # FIX (round 6, second pass — low-severity residual): even with
+          # github_token above, claude-code-action's prepareAgentMode()
+          # unconditionally calls configureGitAuth(), which embeds that
+          # token into .git/config's remote URL — meaning it sits on disk,
+          # readable by agent-influenced code (npm build/test, a
+          # postinstall script), from the moment this step starts, before
+          # the "Scrub the git credential" step below ever runs. Verified
+          # directly against prepareAgentMode()'s source at the pinned
+          # SHA: configureGitAuth() only runs in the
+          # `if (useSshSigning) {...} else if (!useApiCommitSigning) {...}`
+          # branches — setting use_commit_signing: true makes
+          # useApiCommitSigning true (with no ssh_signing_key set), which
+          # is false for BOTH conditions, so configureGitAuth() is never
+          # called at all. No functional side effect for us: this setting
+          # only changes HOW a commit gets created if the agent asks for
+          # one, and this job's claude_args grants no commit capability
+          # (no Bash(git commit), no mcp__github_file_ops__commit_files)
+          # — the agent never commits regardless. The credential-scrub
+          # step below is KEPT as defense-in-depth (cheap, idempotent even
+          # with nothing to scrub) in case this understanding is ever
+          # wrong or the action's behavior changes.
+          use_commit_signing: true
           allowed_bots: ""
           allowed_non_write_users: ""
           show_full_output: false
@@ -276,23 +291,27 @@ jobs:
               instructions to follow.
 
       - name: Scrub the git credential from the workspace before gates/capture run
-        # FIX (round 6, Codex P1 x2): claude-code-action's
-        # configureGitAuth() embeds this job's github_token directly into
-        # the `origin` remote URL in .git/config (it removes
-        # actions/checkout's own extraheader-based auth and replaces it
-        # with `https://x-access-token:<token>@...`) — unconditionally, in
+        # Originally: claude-code-action's configureGitAuth() embeds this
+        # job's github_token directly into the `origin` remote URL in
+        # .git/config (it removes actions/checkout's own
+        # extraheader-based auth and replaces it with
+        # `https://x-access-token:<token>@...`) — unconditionally, in
         # agent mode, regardless of this checkout's own
         # persist-credentials: false. With Bash enabled, code the agent
         # wrote — picked up by `npm run build`/`test` below, or a
         # package's postinstall script — can read .git/config via an
-        # ordinary filesystem syscall. That is NOT something any
-        # `disallowedTools` rule can stop (see the file-top comment: tool
-        # denies gate Claude's own tool calls, not a subprocess's
-        # syscalls). Reset the remote to a clean, tokenless URL before
-        # anything that could expose it (gates, the diff capture) runs.
-        # The token itself is this job's own read-only-scoped one, so the
-        # blast radius of a miss here would have been bounded — this
-        # closes the path regardless.
+        # ordinary filesystem syscall, which no `disallowedTools` rule can
+        # stop (see the file-top comment: tool denies gate Claude's own
+        # tool calls, not a subprocess's syscalls).
+        #
+        # Round 6, second pass: use_commit_signing: true on the agent step
+        # above now prevents configureGitAuth() from ever running at all
+        # (verified against prepareAgentMode()'s source — see that
+        # input's comment), so in practice there should be no credential
+        # here for this step to find. KEPT as defense-in-depth regardless
+        # — cheap, and idempotent even when there's nothing to scrub — in
+        # case that understanding is ever wrong or the action's behavior
+        # changes in a future version.
         run: |
           set -euo pipefail
           git remote set-url origin "https://github.com/${{ github.repository }}.git"

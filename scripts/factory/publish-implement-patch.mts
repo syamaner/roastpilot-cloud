@@ -11,15 +11,29 @@
  * and only then perform the privileged side effects — here, applying the
  * patch, pushing a branch, and opening a PR, instead of a label/comment.
  *
- * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse: it asks
- * `git apply --numstat` what the patch will actually touch, with the exact
- * same invocation (no `-p` override, on either call) that later applies
- * it — see {@link getAuthoritativeChangedPaths}'s docstring for the exploit
- * this replaced (a `zz/`-style diff-header prefix reads as an unprotected
- * path to a naive `a/`/`b/`-stripping parser, but `git apply`'s own
- * default `-p1` strips whatever the first path segment actually is,
- * landing the write at a *different, protected* path than the one the
- * parser checked).
+ * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse — and this
+ * took TWO passes to get right, both documented here because the same
+ * lesson applies to any future change to this guard:
+ *
+ * 1. It asks `git apply --numstat` what the patch will actually touch,
+ *    with the exact same invocation (no `-p` override, on either call)
+ *    that later applies it — see {@link getAuthoritativeChangedPaths}'s
+ *    docstring for the exploit this replaced (a `zz/`-style diff-header
+ *    prefix reads as an unprotected path to a naive `a/`/`b/`-stripping
+ *    parser, but `git apply`'s own default `-p1` strips whatever the
+ *    first path segment actually is, landing the write at a *different,
+ *    protected* path than the one the parser checked).
+ * 2. `--numstat` only reports a rename/copy's DESTINATION, not its
+ *    source. The first fix for that gap scanned `git apply --summary`'s
+ *    text for a protected-path substring — which is ITSELF exploitable:
+ *    `--summary` brace-compacts a shared prefix (`rename scripts/{factory/
+ *    x.mts => other/y.mts} (100%)`), so a rename OUT of
+ *    `scripts/factory/**` never contains that literal substring. Replaced
+ *    with {@link extractRenameCopySourcePaths}, which reads the raw patch
+ *    text's `rename from`/`rename to`/`copy from`/`copy to` lines directly
+ *    — full, uncompacted paths, empirically confirmed NOT subject to the
+ *    same `-p`-interpretation gap a diff header has (`git apply` uses
+ *    them literally regardless of the diff header's own prefix scheme).
  *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
@@ -47,16 +61,16 @@
  *   comment.
  */
 
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
+  extractRenameCopySourcePaths,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
-  findProtectedPathMentionsInSummaryText,
   parseNumstatZ,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
@@ -130,9 +144,19 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  * later real apply, with the identical invocation (no `-p` override on
  * either call).
  *
- * `--numstat` only reports the DESTINATION path for a rename (not the
- * source) — `getPatchSummaryText` + `findProtectedPathMentionsInSummaryText`
- * is the complementary check for that gap.
+ * `--numstat` only reports the DESTINATION path for a rename/copy (not
+ * the source) — {@link extractRenameCopySourcePaths} (applied to the raw
+ * patch TEXT, not to `--numstat`/`--summary` output) is the complementary
+ * check that also catches a rename/copy OUT of a protected path, which
+ * this alone would miss. An earlier version of that complementary check
+ * scanned `git apply --summary`'s output for a protected-path substring;
+ * that was itself found exploitable (round 6, second pass) — `--summary`
+ * brace-COMPACTS a shared path prefix (`rename scripts/{factory/x.mts =>
+ * other/y.mts} (100%)`), so the literal substring `scripts/factory/` is
+ * not even present in that string for exactly the case the check existed
+ * to catch. See `extractRenameCopySourcePaths`'s docstring for why
+ * parsing the raw `rename from`/`rename to`/`copy from`/`copy to` lines
+ * instead doesn't have the same problem.
  *
  * @param patchPath - Path to the patch file.
  * @returns The destination path of every file the patch touches.
@@ -154,23 +178,14 @@ function getAuthoritativeChangedPaths(patchPath: string): string[] {
   return parseNumstatZ(output);
 }
 
-/** Raw `git apply --summary` text — see `findProtectedPathMentionsInSummaryText`'s docstring for why this is checked too. */
-function getPatchSummaryText(patchPath: string): string {
-  try {
-    return execFileSync("git", ["apply", "--summary", patchPath], {
-      encoding: "utf8",
-    });
-  } catch (err) {
-    // Not independently exercised by a unit test: --summary and --numstat
-    // parse the same underlying patch with the same parser, and --numstat
-    // (called first, above) already rejects anything malformed enough to
-    // fail here — a patch that gets this far genuinely parses. Kept as a
-    // defensive fallback in case that assumption is ever wrong.
-    throw new PublishRejection(
-      `patch could not be summarized by git apply --summary (malformed or ` +
-        `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+/**
+ * Reads the raw patch text — used only for
+ * {@link extractRenameCopySourcePaths}'s scan. Safe to read in full at
+ * this point: `assertPatchArtifactSize` has already bounded the file size
+ * before this is ever called.
+ */
+async function readPatchText(patchPath: string): Promise<string> {
+  return readFile(patchPath, "utf8");
 }
 
 function runGit(args: string[]): void {
@@ -297,24 +312,24 @@ export async function main(): Promise<void> {
       );
     }
 
-    const forbidden = findForbiddenPatchPaths(changedPaths);
+    // Complementary source: --numstat only reports rename/copy
+    // DESTINATIONS, so a rename/copy OUT of a protected path (e.g. moving
+    // scripts/factory/publish-implement-patch.mts elsewhere) wouldn't show
+    // up in changedPaths above. The raw patch text's `rename from`/
+    // `rename to`/`copy from`/`copy to` lines give both sides, safely
+    // (see extractRenameCopySourcePaths's docstring — these lines are not
+    // subject to the same -p-interpretation gap a diff --git header is).
+    const patchText = await readPatchText(patchPath);
+    const renameCopyPaths = extractRenameCopySourcePaths(patchText);
+
+    const forbidden = findForbiddenPatchPaths([
+      ...changedPaths,
+      ...renameCopyPaths,
+    ]);
     if (forbidden.length > 0) {
       throw new PublishRejection(
         `patch touches pipeline-protected path(s), refusing to apply it: ` +
           forbidden.join(", "),
-      );
-    }
-
-    // Complementary check: --numstat only reports rename DESTINATIONS, so
-    // a rename OUT of a protected path (e.g. moving
-    // .github/workflows/ci.yml elsewhere) wouldn't show up in
-    // changedPaths above. --summary's text does include both sides.
-    const summaryText = getPatchSummaryText(patchPath);
-    const summaryMentions = findProtectedPathMentionsInSummaryText(summaryText);
-    if (summaryMentions.length > 0) {
-      throw new PublishRejection(
-        `patch summary mentions pipeline-protected path(s), refusing to ` +
-          `apply it: ${summaryMentions.join(", ")}`,
       );
     }
 

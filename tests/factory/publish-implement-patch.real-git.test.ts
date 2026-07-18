@@ -372,16 +372,31 @@ index abc1234..def5678 100644
     expect(content).toBe("export const marker = 1;\n"); // unchanged
   });
 
-  it("rejects a rename OUT of a protected path (via the --summary complementary check)", async () => {
-    // --numstat alone only reports the DESTINATION path ("lib/ci.yml",
-    // not protected) — this is exactly what findProtectedPathMentionsInSummaryText
-    // exists to catch instead.
-    const diff = `diff --git a/.github/workflows/ci.yml b/lib/ci.yml
-similarity index 100%
-rename from .github/workflows/ci.yml
-rename to lib/ci.yml
-`;
-    process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out.diff", diff);
+  it("REJECTS the reviewer's exact round-6-second-pass exploit: git mv scripts/factory/... to scripts/other/... (the brace-compaction bypass)", async () => {
+    // This is the specific gap FIX A closed: --numstat alone only reports
+    // the destination "scripts/other/x.mts" (not protected), and the OLD
+    // --summary-substring check was defeated by git's own brace
+    // compaction of the shared "scripts/" prefix — "rename scripts/
+    // {factory/publish-implement-patch.mts => other/x.mts} (100%)" never
+    // contains the literal substring "scripts/factory/". Uses a REAL
+    // `git mv` + `git diff --cached`, not a hand-crafted patch, so this
+    // is exactly what the implement job's own capture step would produce.
+    // `git mv` requires the destination directory to already exist on
+    // disk (unlike applying a hand-crafted rename patch, which doesn't
+    // need this) — create it first.
+    await mkdir(join(localCloneDir, "scripts", "other"), { recursive: true });
+    git(localCloneDir, [
+      "mv",
+      "scripts/factory/publish-implement-patch.mts",
+      "scripts/other/x.mts",
+    ]);
+    const exploitDiff = git(localCloneDir, ["diff", "--cached"]);
+    expect(exploitDiff).toContain(
+      "rename from scripts/factory/publish-implement-patch.mts",
+    );
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo the mv on disk before main() runs against the SAME checkout
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "exploit-rename-out.diff", exploitDiff);
 
     const fetchMock = vi.fn(async () => jsonResponse({}, 201));
     vi.stubGlobal("fetch", fetchMock);
@@ -389,12 +404,113 @@ rename to lib/ci.yml
     await main();
 
     expect(process.exitCode).toBe(1);
-    // The original file must still exist, untouched.
+    // Decisive: the file was never moved/deleted.
+    const content = await readFile(
+      join(localCloneDir, "scripts", "factory", "publish-implement-patch.mts"),
+      "utf8",
+    );
+    expect(content).toBe("export const marker = 1;\n");
+    const relocated = await readFile(
+      join(localCloneDir, "scripts", "other", "x.mts"),
+      "utf8",
+    ).catch(() => null);
+    expect(relocated).toBeNull();
+  });
+
+  it("rejects a rename OUT of .github/** (no shared prefix with the destination, so the OLD --summary check would have caught this one too — still covered under the new approach)", async () => {
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    git(localCloneDir, ["mv", ".github/workflows/ci.yml", "lib/ci.yml"]);
+    const diff = git(localCloneDir, ["diff", "--cached"]);
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-github.diff", diff);
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
     const ciContent = await readFile(
       join(localCloneDir, ".github", "workflows", "ci.yml"),
       "utf8",
     );
     expect(ciContent).toBe("on: push\n");
+  });
+
+  it("rejects a rename OUT of root CODEOWNERS", async () => {
+    await fsWriteFile(join(localCloneDir, "CODEOWNERS"), "* @syamaner\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add CODEOWNERS"]);
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    git(localCloneDir, ["mv", "CODEOWNERS", "lib/CODEOWNERS-backup"]);
+    const diff = git(localCloneDir, ["diff", "--cached"]);
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-codeowners.diff", diff);
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const content = await readFile(join(localCloneDir, "CODEOWNERS"), "utf8");
+    expect(content).toBe("* @syamaner\n");
+  });
+
+  it("rejects a rename OUT of docs/CODEOWNERS", async () => {
+    await mkdir(join(localCloneDir, "docs"), { recursive: true });
+    await fsWriteFile(join(localCloneDir, "docs", "CODEOWNERS"), "* @syamaner\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add docs/CODEOWNERS"]);
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    git(localCloneDir, ["mv", "docs/CODEOWNERS", "lib/CODEOWNERS-backup"]);
+    const diff = git(localCloneDir, ["diff", "--cached"]);
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-docs-codeowners.diff", diff);
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const content = await readFile(join(localCloneDir, "docs", "CODEOWNERS"), "utf8");
+    expect(content).toBe("* @syamaner\n");
+  });
+
+  it("rejects a COPY (not just a rename) INTO scripts/factory/** (hand-crafted — our own capture step's git diff --cached never detects copies without -C, so this is defensive coverage)", async () => {
+    const diff = `diff --git a/lib/x.mts b/scripts/factory/evil-copy.mts
+similarity index 100%
+copy from lib/x.mts
+copy to scripts/factory/evil-copy.mts
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "copy-into.diff", diff);
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const exists = await readFile(
+      join(localCloneDir, "scripts", "factory", "evil-copy.mts"),
+      "utf8",
+    ).catch(() => null);
+    expect(exists).toBeNull();
+  });
+
+  it("rejects a COPY OUT of scripts/factory/** (hand-crafted, same reason as above)", async () => {
+    const diff = `diff --git a/scripts/factory/publish-implement-patch.mts b/lib/leaked-copy.mts
+similarity index 100%
+copy from scripts/factory/publish-implement-patch.mts
+copy to lib/leaked-copy.mts
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "copy-out.diff", diff);
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
   });
 
   it("still correctly rejects a protected-path patch when the filename contains a space (Codex's parser miss)", async () => {
