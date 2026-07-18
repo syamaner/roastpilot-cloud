@@ -44,7 +44,13 @@ and each is independently checkable:
 
 1. **Plan link** — points at a real epic/section in the plan repo (verify it
    resolves against the `./plan-repo` checkout; a link to a nonexistent
-   section or a placeholder like "TBD" fails this).
+   section or a placeholder like "TBD" fails this). **Exception (factory.md §5,
+   dry-run/meta-issue exemption):** an internal factory-validation / dry-run
+   issue that self-declares as such (e.g. states it exists to exercise the
+   pipeline itself, not to ship a plan-derived feature) is EXEMPT from the
+   plan-link requirement — it may substitute a reference to F1-S6 (the
+   sacrificial-dry-run story) for the plan link. Do NOT route such an issue to
+   `needs-info` on the missing plan link alone; judge it on the rest of the bar.
 2. **Acceptance criteria** — a checkbox list, each item independently
    verifiable (not vague aspirational language).
 3. **In-scope surface** — concrete files/areas, not "the whole feature."
