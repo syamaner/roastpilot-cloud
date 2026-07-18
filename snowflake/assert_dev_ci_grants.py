@@ -42,12 +42,6 @@ import sys
 import snowflake.connector
 from cryptography.hazmat.primitives import serialization
 
-# The one database and warehouse ROASTPILOT_DEV_CI_ROLE is provisioned to
-# touch (operator-confirmed via `SHOW GRANTS`, per the F1-S8 provisioning
-# note) — anything else is a violation.
-_ALLOWED_DATABASE = "ROASTPILOT_DEV"
-_ALLOWED_WAREHOUSE = "DEV_CI_WH"
-
 # Snowflake object types (SHOW GRANTS' own `granted_on` column values) this
 # check knows how to evaluate against the DEV database. Anything NOT in this
 # set (ACCOUNT, INTEGRATION, USER, or any future object type Snowflake
@@ -105,9 +99,20 @@ def load_private_key_der(pem_text: str, passphrase: str | None) -> bytes:
     )
 
 
-def is_allowed_grant(granted_on: str, name: str, role_name: str) -> bool:
+def is_allowed_grant(
+    granted_on: str, name: str, role_name: str, allowed_database: str, allowed_warehouse: str
+) -> bool:
     """True when a single `SHOW GRANTS TO ROLE` row's target object is
     within the DEV role's intended boundary.
+
+    `allowed_database`/`allowed_warehouse` are passed in by the caller
+    (sourced from `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` in
+    `main()`) rather than hardcoded as module constants (claude-review
+    finding, PR #57): those are the SAME repo variables the deploy step's
+    own connection already uses, so if either is ever repointed (e.g. a
+    future DEV database rename), this check and the deploy step can never
+    silently drift apart into checking a different boundary than what was
+    actually deployed to.
 
     Fails CLOSED for anything not explicitly recognized: an object type
     outside `_DATABASE_SCOPED_OBJECT_TYPES` (and not a warehouse/role
@@ -122,25 +127,28 @@ def is_allowed_grant(granted_on: str, name: str, role_name: str) -> bool:
         possibly fully-qualified (e.g. "ROASTPILOT_DEV.APP.SOME_TABLE").
     @param role_name: The role being checked, for the self-grant case (a
         role's grant ON itself, e.g. an inherited USAGE privilege).
+    @param allowed_database: The one database this role may touch.
+    @param allowed_warehouse: The one warehouse this role may touch.
     @returns: Whether this grant stays within the DEV boundary.
     """
     granted_on_upper = granted_on.strip().upper()
     name_upper = name.strip().upper()
 
     if granted_on_upper == "WAREHOUSE":
-        return name_upper == _ALLOWED_WAREHOUSE
+        return name_upper == allowed_warehouse.strip().upper()
 
     if granted_on_upper == "ROLE":
         return name_upper == role_name.strip().upper()
 
     if granted_on_upper in _DATABASE_SCOPED_OBJECT_TYPES:
-        return name_upper == _ALLOWED_DATABASE or name_upper.startswith(f"{_ALLOWED_DATABASE}.")
+        allowed_database_upper = allowed_database.strip().upper()
+        return name_upper == allowed_database_upper or name_upper.startswith(f"{allowed_database_upper}.")
 
     return False
 
 
 def find_violations(
-    grant_rows: list[dict[str, object]], role_name: str
+    grant_rows: list[dict[str, object]], role_name: str, allowed_database: str, allowed_warehouse: str
 ) -> list[str]:
     """Scans every `SHOW GRANTS TO ROLE` row and returns a human-readable
     description of each one that violates the DEV boundary — empty if none
@@ -149,6 +157,8 @@ def find_violations(
     @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO ROLE <role_name>`.
     @param role_name: The role being checked.
+    @param allowed_database: The one database this role may touch.
+    @param allowed_warehouse: The one warehouse this role may touch.
     @returns: Descriptions of every violating grant, empty if none.
     """
     violations = []
@@ -156,7 +166,7 @@ def find_violations(
         granted_on = str(row.get("granted_on", ""))
         name = str(row.get("name", ""))
         privilege = str(row.get("privilege", ""))
-        if not is_allowed_grant(granted_on, name, role_name):
+        if not is_allowed_grant(granted_on, name, role_name, allowed_database, allowed_warehouse):
             violations.append(f"{privilege} on {granted_on} {name}")
     return violations
 
@@ -166,6 +176,7 @@ def main() -> int:
     user = require_env("SNOWFLAKE_DEV_USER")
     role = require_env("SNOWFLAKE_DEV_ROLE")
     warehouse = require_env("SNOWFLAKE_DEV_WAREHOUSE")
+    database = require_env("SNOWFLAKE_DEV_DATABASE")
     private_key_pem = require_env("SNOWFLAKE_DEV_PRIVATE_KEY")
     passphrase = os.environ.get("SNOWFLAKE_DEV_PRIVATE_KEY_PASSPHRASE") or None
 
@@ -185,18 +196,18 @@ def main() -> int:
     finally:
         conn.close()
 
-    violations = find_violations(rows, role)
+    violations = find_violations(rows, role, database, warehouse)
     if violations:
         print(
             f"error: {role} has {len(violations)} grant(s) reaching outside "
-            f"{_ALLOWED_DATABASE}/{_ALLOWED_WAREHOUSE}:",
+            f"{database}/{warehouse}:",
             file=sys.stderr,
         )
         for violation in violations:
             print(f"  - {violation}", file=sys.stderr)
         return 1
 
-    print(f"confirmed: all {len(rows)} grant(s) on {role} stay within {_ALLOWED_DATABASE}/{_ALLOWED_WAREHOUSE}")
+    print(f"confirmed: all {len(rows)} grant(s) on {role} stay within {database}/{warehouse}")
     return 0
 
 

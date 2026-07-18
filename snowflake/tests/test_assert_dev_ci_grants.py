@@ -60,58 +60,81 @@ class TestLoadPrivateKeyDer:
             pass  # cryptography raises one of these for a bad passphrase -- either is correct.
 
 
+_DEV_DB = "ROASTPILOT_DEV"
+_DEV_WH = "DEV_CI_WH"
+_DEV_ROLE = "ROASTPILOT_DEV_CI_ROLE"
+
+
 class TestIsAllowedGrant:
     def test_allows_the_exact_dev_database(self) -> None:
-        assert assert_dev_ci_grants.is_allowed_grant("DATABASE", "ROASTPILOT_DEV", "ROASTPILOT_DEV_CI_ROLE")
+        assert assert_dev_ci_grants.is_allowed_grant("DATABASE", _DEV_DB, _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_allows_a_qualified_object_inside_the_dev_database(self) -> None:
         assert assert_dev_ci_grants.is_allowed_grant(
-            "TABLE", "ROASTPILOT_DEV.APP.SOME_TABLE", "ROASTPILOT_DEV_CI_ROLE"
+            "TABLE", "ROASTPILOT_DEV.APP.SOME_TABLE", _DEV_ROLE, _DEV_DB, _DEV_WH
         )
         assert assert_dev_ci_grants.is_allowed_grant(
-            "SCHEMA", "ROASTPILOT_DEV.APP", "ROASTPILOT_DEV_CI_ROLE"
+            "SCHEMA", "ROASTPILOT_DEV.APP", _DEV_ROLE, _DEV_DB, _DEV_WH
         )
 
     def test_allows_the_dev_ci_warehouse(self) -> None:
-        assert assert_dev_ci_grants.is_allowed_grant("WAREHOUSE", "DEV_CI_WH", "ROASTPILOT_DEV_CI_ROLE")
+        assert assert_dev_ci_grants.is_allowed_grant("WAREHOUSE", _DEV_WH, _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_allows_a_self_grant_on_the_role_itself(self) -> None:
-        assert assert_dev_ci_grants.is_allowed_grant("ROLE", "ROASTPILOT_DEV_CI_ROLE", "ROASTPILOT_DEV_CI_ROLE")
+        assert assert_dev_ci_grants.is_allowed_grant("ROLE", _DEV_ROLE, _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_is_case_insensitive(self) -> None:
-        assert assert_dev_ci_grants.is_allowed_grant("database", "roastpilot_dev", "ROASTPILOT_DEV_CI_ROLE")
+        assert assert_dev_ci_grants.is_allowed_grant("database", "roastpilot_dev", _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_rejects_a_different_database(self) -> None:
-        assert not assert_dev_ci_grants.is_allowed_grant("DATABASE", "ROASTPILOT_PREVIEW", "ROASTPILOT_DEV_CI_ROLE")
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "DATABASE", "ROASTPILOT_PREVIEW", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
 
     def test_rejects_a_database_whose_name_merely_shares_a_prefix(self) -> None:
         # ROASTPILOT_DEV_EXTRA is NOT ROASTPILOT_DEV and does not start with
         # "ROASTPILOT_DEV." (the dot matters) -- a naive prefix check
         # without the dot would wrongly allow this.
         assert not assert_dev_ci_grants.is_allowed_grant(
-            "DATABASE", "ROASTPILOT_DEV_EXTRA", "ROASTPILOT_DEV_CI_ROLE"
+            "DATABASE", "ROASTPILOT_DEV_EXTRA", _DEV_ROLE, _DEV_DB, _DEV_WH
         )
 
     def test_rejects_a_different_warehouse(self) -> None:
-        assert not assert_dev_ci_grants.is_allowed_grant("WAREHOUSE", "PREVIEW_WH", "ROASTPILOT_DEV_CI_ROLE")
+        assert not assert_dev_ci_grants.is_allowed_grant("WAREHOUSE", "PREVIEW_WH", _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_rejects_a_different_role(self) -> None:
-        assert not assert_dev_ci_grants.is_allowed_grant("ROLE", "ACCOUNTADMIN", "ROASTPILOT_DEV_CI_ROLE")
+        assert not assert_dev_ci_grants.is_allowed_grant("ROLE", "ACCOUNTADMIN", _DEV_ROLE, _DEV_DB, _DEV_WH)
 
     def test_fails_closed_on_an_account_level_object(self) -> None:
-        assert not assert_dev_ci_grants.is_allowed_grant("ACCOUNT", "HVPXLEY-EX88650", "ROASTPILOT_DEV_CI_ROLE")
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "ACCOUNT", "HVPXLEY-EX88650", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
 
     def test_fails_closed_on_an_unrecognized_object_type(self) -> None:
         # A hypothetical future Snowflake object type this allowlist has
         # never seen -- must be rejected, not silently allowed just because
         # it wasn't anticipated.
         assert not assert_dev_ci_grants.is_allowed_grant(
-            "SOME_FUTURE_OBJECT_TYPE", "ROASTPILOT_DEV", "ROASTPILOT_DEV_CI_ROLE"
+            "SOME_FUTURE_OBJECT_TYPE", _DEV_DB, _DEV_ROLE, _DEV_DB, _DEV_WH
         )
 
     def test_fails_closed_on_an_integration_or_user_object(self) -> None:
-        assert not assert_dev_ci_grants.is_allowed_grant("INTEGRATION", "SOME_INTEGRATION", "ROASTPILOT_DEV_CI_ROLE")
-        assert not assert_dev_ci_grants.is_allowed_grant("USER", "ROASTPILOT_DEV_CI", "ROASTPILOT_DEV_CI_ROLE")
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "INTEGRATION", "SOME_INTEGRATION", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant("USER", "ROASTPILOT_DEV_CI", _DEV_ROLE, _DEV_DB, _DEV_WH)
+
+    def test_uses_the_passed_in_database_and_warehouse_not_a_hardcoded_literal(self) -> None:
+        # Regression guard (claude-review finding, PR #57): a caller passing
+        # a DIFFERENT allowed database/warehouse than the "usual" DEV ones
+        # must be honored -- proves this isn't secretly still checking
+        # against a module-level constant.
+        assert assert_dev_ci_grants.is_allowed_grant(
+            "DATABASE", "SOME_OTHER_DB", _DEV_ROLE, "SOME_OTHER_DB", "SOME_OTHER_WH"
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "DATABASE", _DEV_DB, _DEV_ROLE, "SOME_OTHER_DB", "SOME_OTHER_WH"
+        )
 
 
 class TestFindViolations:
@@ -121,14 +144,14 @@ class TestFindViolations:
             {"privilege": "USAGE", "granted_on": "SCHEMA", "name": "ROASTPILOT_DEV.APP"},
             {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": "DEV_CI_WH"},
         ]
-        assert assert_dev_ci_grants.find_violations(rows, "ROASTPILOT_DEV_CI_ROLE") == []
+        assert assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH) == []
 
     def test_flags_a_grant_outside_dev(self) -> None:
         rows = [
             {"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_DEV"},
             {"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"},
         ]
-        violations = assert_dev_ci_grants.find_violations(rows, "ROASTPILOT_DEV_CI_ROLE")
+        violations = assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
         assert len(violations) == 1
         assert "ROASTPILOT_PREVIEW" in violations[0]
 
@@ -138,14 +161,14 @@ class TestFindViolations:
             {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": "PREVIEW_WH"},
             {"privilege": "USAGE", "granted_on": "ACCOUNT", "name": "HVPXLEY-EX88650"},
         ]
-        violations = assert_dev_ci_grants.find_violations(rows, "ROASTPILOT_DEV_CI_ROLE")
+        violations = assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
         assert len(violations) == 3
 
     def test_handles_a_missing_field_gracefully_as_a_violation(self) -> None:
         # A row missing an expected field is treated as a violation (fails
         # closed) rather than crashing or being silently skipped.
         rows = [{"privilege": "USAGE"}]  # no granted_on/name at all
-        violations = assert_dev_ci_grants.find_violations(rows, "ROASTPILOT_DEV_CI_ROLE")
+        violations = assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
         assert len(violations) == 1
 
 
@@ -161,8 +184,9 @@ class TestMain:
     def _set_required_env(self, monkeypatch, pem: str) -> None:
         monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "HVPXLEY-EX88650")
         monkeypatch.setenv("SNOWFLAKE_DEV_USER", "ROASTPILOT_DEV_CI")
-        monkeypatch.setenv("SNOWFLAKE_DEV_ROLE", "ROASTPILOT_DEV_CI_ROLE")
-        monkeypatch.setenv("SNOWFLAKE_DEV_WAREHOUSE", "DEV_CI_WH")
+        monkeypatch.setenv("SNOWFLAKE_DEV_ROLE", _DEV_ROLE)
+        monkeypatch.setenv("SNOWFLAKE_DEV_WAREHOUSE", _DEV_WH)
+        monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", _DEV_DB)
         monkeypatch.setenv("SNOWFLAKE_DEV_PRIVATE_KEY", pem)
 
     def test_returns_0_and_prints_confirmation_when_all_grants_are_compliant(self, monkeypatch, capsys) -> None:
@@ -202,6 +226,29 @@ class TestMain:
         assert exit_code == 1
         assert "ROASTPILOT_PREVIEW" in capsys.readouterr().err
         mock_conn.close.assert_called_once()
+
+    def test_checks_against_the_real_snowflake_dev_database_env_var_not_a_hardcoded_literal(
+        self, monkeypatch, capsys
+    ) -> None:
+        # Regression guard for the single-source-of-truth fix (claude-review
+        # finding, PR #57): SNOWFLAKE_DEV_DATABASE set to something OTHER
+        # than the "usual" ROASTPILOT_DEV must be what main() actually
+        # checks grants against -- proves this isn't secretly still
+        # checking a hardcoded "ROASTPILOT_DEV" constant regardless of env.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", "SOME_OTHER_DEV_DB")
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            {"privilege": "USAGE", "granted_on": "DATABASE", "name": "SOME_OTHER_DEV_DB"},
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 0
+        assert "confirmed" in capsys.readouterr().out
 
     def test_closes_the_connection_even_when_the_query_raises(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())

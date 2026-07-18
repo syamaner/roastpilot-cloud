@@ -29,11 +29,13 @@ name: DEV Snowflake Contract Check
 #    allowed-endpoints list below is ever wrong, this job simply FAILS
 #    (blocked egress -> connection error) rather than silently reaching
 #    somewhere unintended — a safe failure mode either way.
-# 4. `npm ci --ignore-scripts` — this job's own work is Python-only, but a
-#    live Snowflake credential is in scope for later steps in this same
-#    job; no dependency-install step (npm OR pip) in a credential-holding
-#    job should ever run an arbitrary postinstall/build hook that could
-#    exfiltrate it.
+# 4. This job runs no `npm`/Node step at all (it's Python-only, unlike the
+#    Next.js-touching jobs elsewhere in this repo) — deliberately kept that
+#    way (claude-review finding, PR #57): an earlier draft ran
+#    `npm ci --ignore-scripts` here as blanket defense-in-depth, but with no
+#    other npm/Node step in this job to justify it, that was unnecessary
+#    attack surface in the one job that specifically minimizes footprint
+#    around a live credential — removed rather than kept "just in case".
 # 5. The private key never touches disk for the grants-assertion step
 #    (assert_dev_ci_grants.py loads it from memory via
 #    snowflake-connector-python's own `private_key` bytes parameter). The
@@ -67,8 +69,8 @@ jobs:
     steps:
       - name: Harden the runner (block all egress except what this job needs)
         # allowed-endpoints is this job's own best specification (GitHub
-        # checkout, PyPI/npm registries for dependency install, and
-        # Snowflake's account/OCSP/telemetry hosts) — not yet empirically
+        # checkout, PyPI for the Python dependency install, and Snowflake's
+        # account/OCSP/telemetry hosts) — not yet empirically
         # confirmed against a live run, per the NOTE above. Adjust based on
         # what the operator's first real dispatch actually shows in this
         # step's own Harden-Runner Insights, the same "audit, then trust"
@@ -86,17 +88,13 @@ jobs:
             objects.githubusercontent.com:443
             *.actions.githubusercontent.com:443
             pypi.org:443
-            files.pythonhosted.com:443
-            registry.npmjs.org:443
+            files.pythonhosted.org:443
             *.snowflakecomputing.com:443
 
       - name: Checkout roastpilot-cloud
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
-      - name: "Install npm dependencies (--ignore-scripts -- a live Snowflake credential is in scope for later steps in this job; no postinstall hook should ever run with it)"
-        run: npm ci --ignore-scripts
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -108,12 +106,13 @@ jobs:
 
       - name: Deploy migrations for real against ROASTPILOT_DEV
         id: deploy
-        # Relies on with_connection_env.py's env-only bypass (#18,
-        # should_bypass_config_resolution): with SNOWFLAKE_ACCOUNT and
-        # SNOWFLAKE_USER already set below, it skips config.toml resolution
-        # entirely (this runner has no such file) and execs schemachange
-        # straight through with every SNOWFLAKE_* var already in this
-        # step's own environment. The SAME command a local dev would run,
+        # Relies on with_connection_env.py's per-field connection merge
+        # (#18, build_launch_env): this runner has no config.toml at all,
+        # which the merge tolerates (never fatal) — and since every
+        # SNOWFLAKE_* field is already set below, there's no profile field
+        # for it to fill in even if a config.toml somehow existed, so it
+        # execs schemachange straight through with this step's own
+        # environment unchanged. The SAME command a local dev would run,
         # unmodified — no CI-specific fork of the deploy path to drift out
         # of sync with local usage.
         working-directory: snowflake
@@ -154,6 +153,12 @@ jobs:
           SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
           SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
           SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          # Same var the deploy step above uses for SNOWFLAKE_DATABASE —
+          # assert_dev_ci_grants.py checks grants against THIS value, not a
+          # hardcoded literal (claude-review finding, PR #57), so the two
+          # steps can never silently check a different database boundary
+          # than what was actually deployed to.
+          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
         run: python3 assert_dev_ci_grants.py
 
