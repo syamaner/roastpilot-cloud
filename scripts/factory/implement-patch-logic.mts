@@ -693,40 +693,72 @@ export interface PublishStepSummaryContext {
 const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
 
 /**
- * Sanitizes a plain-text field (a login, a fallback reason, a rejection
- * reason) before it reaches `$GITHUB_STEP_SUMMARY`'s rendered Markdown.
- * Fixes a CodeQL alert (#46 reshape): "network data written to file" —
- * `publisherLogin` (from the mint step's `app-slug` API output) and the
- * rejection `reasons` (which can indirectly embed a
- * `deriveBranchName`-derived slug of an issue's title) originate from a
- * GitHub API response or an attacker-writable issue/PR field, not purely
- * this workflow's own literals.
+ * Renders an untrusted plain-text field (a login, a fallback reason, a
+ * rejection reason) as an INERT inline code span before it reaches
+ * `$GITHUB_STEP_SUMMARY`'s rendered Markdown, closing a CodeQL alert
+ * (#46 reshape) — "network data written to file": `publisherLogin` (from
+ * the mint step's `app-slug` API output) and the rejection `reasons`
+ * (which can indirectly embed a `deriveBranchName`-derived slug of an
+ * issue's title, or a forbidden-path guard's report of an
+ * agent-controlled patch path) originate from a GitHub API response or
+ * an attacker-writable issue/PR field, not purely this workflow's own
+ * literals.
  *
- * Deliberately narrower than a blanket "strip every Markdown-special
- * character" pass: an earlier draft of this fix also stripped `[`/`]`/`(`/
- * `)`, which corrupted entirely legitimate content — every bot login is
- * `<slug>[bot]`, and a rejection reason routinely carries a useful
- * parenthetical like `(empty patch)`. Neither is a real Markdown-structure
- * risk in body text (unlike a `[text](url)` LINK slot — see
- * {@link sanitizeStepSummaryUrl} for that case): a stray `[`/`(` sitting in
- * a plain sentence renders as a literal bracket, not a link, unless
- * followed by a matching `](url)`, which none of this module's own
- * template strings ever place immediately after an interpolated field.
- * Only newlines (could smuggle extra summary lines/headings) and
- * backticks (`publisherLogin` specifically is wrapped in a backtick code
- * span in the output; a login containing one would break out of it) are
- * unsafe here.
+ * **This function's history is why it's a code span, not an escaper**
+ * (post-#46-merge fix-forward, 3 rounds against the same class of bug):
+ * round 1 escaped `[`/`]`/`(`/`)`/`<`/`>` — closed the `[text](url)`
+ * link-injection case. Round 2 (CodeQL `js/incomplete-sanitization`)
+ * found that escaping without first escaping a PRE-EXISTING backslash in
+ * the input let an attacker-supplied `\` combine with the sanitizer's own
+ * inserted `\` to form CommonMark's `\\` (literal-backslash) escape,
+ * which consumes itself and un-escapes the next character — fixed by
+ * doubling existing backslashes first. Round 3 (Codex) found that even
+ * fully-correct escaping doesn't stop GFM's **autolinking**: a bare
+ * `www.attacker.example` (no brackets, no parens, nothing to escape) or
+ * even the fully-escaped `\[x\]\(https://attacker.example\)` STILL
+ * renders as a live, clickable link — GFM autolinks a recognized URL
+ * shape regardless of surrounding escape characters. Per-metacharacter
+ * escaping is a losing, indefinitely-extendable game against a renderer
+ * with more Markdown-active constructs than any escaper enumerates.
  *
- * @param value - The field value to sanitize.
- * @returns The sanitized value: newlines collapsed to a space, backticks
- *   stripped, clamped to
- *   {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} characters.
+ * **The categorical fix: don't escape Markdown, remove the field from
+ * Markdown context entirely.** A GitHub-Flavored-Markdown inline CODE
+ * SPAN (`` `text` ``) renders its contents as **literal text** — no
+ * emphasis, no links, no autolinks, no HTML — by construction, not by
+ * enumeration; this is the one Markdown construct whose entire purpose is
+ * "stop parsing Markdown here." The ONLY thing that can break a value out
+ * of the code span it's wrapped in is a literal backtick or a newline
+ * inside it (both would end the span early or add unintended lines), so
+ * those two are still stripped before wrapping — everything else
+ * (brackets, parens, angle brackets, backslashes, bare URLs, anything
+ * else GFM might ever autolink or otherwise interpret) needs no
+ * escaping at all once it's inside the span. This also fixes the
+ * `<slug>[bot]`-login-mangling tension the earlier escaping rounds fought
+ * with "for free": a code span shows `[bot]` exactly as typed.
+ *
+ * **Trusted vs. untrusted, not "escape everything":** this function is
+ * for AGENT/ISSUE-DERIVED fields only. `prUrl` (this workflow's own
+ * constructed `github.com/.../pull/N` link, never attacker-influenced)
+ * deliberately stays a real, clickable `[text](url)` Markdown link via
+ * {@link sanitizeStepSummaryUrl} — code-wrapping the one link the summary
+ * WANTS clickable would be a readability regression for zero security
+ * benefit.
+ *
+ * @param value - The field value to render.
+ * @returns The value with newlines collapsed to a space and backticks
+ *   stripped, clamped to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH}
+ *   characters, then wrapped in a single-backtick inline code span. The
+ *   returned string already includes its own surrounding backticks — a
+ *   caller must NOT additionally wrap it in `` ` ``/`` ` `` (that would
+ *   double-wrap).
  */
 export function sanitizeStepSummaryText(value: string): string {
   const collapsed = value.replace(/[\r\n]+/g, " ").replace(/`/g, "");
-  return collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
-    ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
-    : collapsed;
+  const clamped =
+    collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
+      ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
+      : collapsed;
+  return `\`${clamped}\``;
 }
 
 /**
@@ -752,14 +784,17 @@ export function sanitizeStepSummaryUrl(value: string): string {
 }
 
 function publisherIdentityLine(context: PublishStepSummaryContext): string {
+  // sanitizeStepSummaryText already returns its value wrapped in its own
+  // code span — do NOT add another layer of backticks around `login`
+  // here, that would double-wrap it.
   const login = sanitizeStepSummaryText(context.publisherLogin);
   if (!context.publishedViaFallback) {
-    return `✅ Minted as \`${login}\``;
+    return `✅ Minted as ${login}`;
   }
   const reasonSuffix = context.fallbackReason
     ? ` — ${sanitizeStepSummaryText(context.fallbackReason)}`
     : "";
-  return `⚠️ Fell back to \`GITHUB_TOKEN\` (identity: \`${login}\`)${reasonSuffix}`;
+  return `⚠️ Fell back to \`GITHUB_TOKEN\` (identity: ${login})${reasonSuffix}`;
 }
 
 /**
@@ -800,15 +835,33 @@ export function buildPublishSuccessStepSummary(
   // because CI/CodeQL/etc. triggered. For a GITHUB_TOKEN-fallback PR,
   // Codex does not auto-trigger at all (same GITHUB_TOKEN-authored-event
   // suppression as every other gate).
+  //
+  // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
+  // Review is a THIRD case, not lumped in with "triggered normally" on
+  // the non-fallback path. claude-code-review.yml's `allowed_bots` is
+  // still `claude,claude[bot]` — allowlisting the factory publisher bot
+  // was deliberately dropped from #46 and re-scoped to #47 for its own
+  // security review (allowlisting it while the review job still holds
+  // `Bash(gh pr comment:*)` + an OAuth token is a real credential-exfil
+  // path on agent/issue-derived content). Until #47 lands,
+  // `claude-code-action` REJECTS `roastpilot-factory[bot]` outright, so
+  // Claude Code Review does NOT actually run on an App-minted factory PR
+  // — reporting it as "triggered normally" here would be false on the
+  // one path this summary exists to be honest about.
   const reviewAutomationLine = context.publishedViaFallback
     ? "⚠️ **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
       "a manual review pass is required before merging."
-    : "✅ CI, CodeQL, dependency review, and Claude Code Review triggered normally. " +
-      "Codex auto-reviewed at creation, but the operator must still manually " +
-      "`@codex review` the FINAL commit and wait for its verdict before merging " +
-      "(AGENTS.md's Codex-wait rule) — this is NOT satisfied automatically.";
+    : "✅ CI, CodeQL, and dependency review triggered normally. Codex auto-reviewed " +
+      "at creation, but the operator must still manually `@codex review` the FINAL " +
+      "commit and wait for its verdict before merging (AGENTS.md's Codex-wait rule) " +
+      "— this is NOT satisfied automatically. ⚠️ **Claude Code Review does NOT yet " +
+      // sanitizeStepSummaryText already returns its own code span — no
+      // extra surrounding backticks here.
+      `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
+      "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
+      "PR as if Claude Code Review never ran until that's resolved.";
   return [
     "## Factory publish summary",
     "",

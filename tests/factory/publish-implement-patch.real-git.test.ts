@@ -652,6 +652,79 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
     expect(summary).toContain('implement job result was "failure"');
   });
 
+  it("neutralizes BOTH a [text](url) link-injection AND a bare autolink-shaped URL in the ACTUAL written summary file (Codex P2, categorical fix, round 3 — the team lead's explicit acceptance test)", async () => {
+    // IMPLEMENT_JOB_RESULT flows verbatim into the rejection reason
+    // (`implement job result was "<value>"`), which is the simplest way
+    // to get an attacker-controlled-shaped string into a REAL rejected-
+    // publish run end-to-end, not just through the pure builder function.
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.IMPLEMENT_JOB_RESULT =
+      "[x](https://attacker.example) www.attacker.example";
+    vi.stubGlobal("fetch", rejectionOnlyFetchMock());
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const summary = await readFile(summaryPath, "utf8");
+    // Both vectors must appear on a bullet line that starts and ends with
+    // a backtick (the full rejection reason is one code span) — a code
+    // span is what actually stops GitHub's renderer from turning either
+    // into a live link, not any particular character escaping. Find the
+    // bullet line itself and check its exact boundaries, rather than a
+    // loose substring match, so this genuinely proves "inside one code
+    // span" and not just "somewhere near backticks."
+    const bulletLine = summary
+      .split("\n")
+      .find((line) => line.includes("attacker.example"));
+    expect(bulletLine).toBeDefined();
+    expect(bulletLine).toMatch(/^ {2}- `.*`$/);
+    expect(bulletLine).toContain("[x](https://attacker.example)");
+    expect(bulletLine).toContain("www.attacker.example");
+  });
+
+  it("still writes the rejected-publish summary even when postFailureComment itself throws (Codex P2, post-#46-merge fix-forward)", async () => {
+    // Reproduces the exact gap: on a rejected publish, the ONLY other
+    // signal is the failure comment. If posting that comment throws (rate
+    // limit, outage, permissions), the summary write must not be
+    // contingent on it succeeding — this is precisely the path where the
+    // mint-vs-fallback diagnostic matters most (no PR exists to carry any
+    // other signal).
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        // Simulates the comment-post call itself failing for real.
+        return new Response("rate limited", { status: 429 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // main() itself REJECTS here — postFailureComment's error propagates
+    // out of the catch block (no internal try/catch of its own), and only
+    // the top-level self-invoke wrapper (`if (import.meta.url === ...)`,
+    // not exercised when a test imports `main` directly) would translate
+    // that into `process.exitCode = 1`. The load-bearing assertion is
+    // that the summary is ALREADY on disk by the time this rejection
+    // happens — proving the reorder fix, not that main() somehow
+    // swallows the comment-post failure (it doesn't, and shouldn't).
+    await expect(main()).rejects.toThrow(/429/);
+
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("none — publish rejected");
+    expect(summary).toContain('implement job result was "failure"');
+  });
+
   it("summary says the label FAILED to apply — never claims it landed — when the label call genuinely fails (Codex P2, #46 reshape)", async () => {
     const summaryPath = join(scratchDir, "step-summary.md");
     await fsWriteFile(summaryPath, "");

@@ -963,6 +963,16 @@ export async function main(): Promise<void> {
       );
     }
 
+    // Adjudicated fix (Codex P2, post-#46-merge fix-forward): written
+    // BEFORE postFailureComment, not after. postFailureComment makes its
+    // own GitHub API calls and has no internal try/catch — a genuine
+    // failure there (rate-limit, outage, permissions) throws OUT of this
+    // catch block entirely, so anything placed after it never runs. The
+    // rejected-publish path is exactly the one where the mint-vs-fallback
+    // diagnostic matters most (no PR, no other visible signal), so this
+    // write must not be contingent on the comment call also succeeding.
+    writeStepSummary(buildPublishRejectedStepSummary({ ...summaryContext, reasons }));
+
     await postFailureComment(
       token,
       owner,
@@ -977,7 +987,6 @@ export async function main(): Promise<void> {
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
         reasons.map((r) => `  - ${r}`).join("\n"),
     );
-    writeStepSummary(buildPublishRejectedStepSummary({ ...summaryContext, reasons }));
     process.exitCode = 1;
   }
 }

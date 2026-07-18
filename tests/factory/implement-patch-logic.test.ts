@@ -667,17 +667,25 @@ describe("buildPublishSuccessStepSummary", () => {
     });
     expect(summary).toContain("## Factory publish summary");
     expect(summary).toContain("#6");
+    // publisherLogin is rendered as an inline code span by
+    // sanitizeStepSummaryText (categorical fix, round 3) — verbatim
+    // content, no escaping, since a code span alone neutralizes it.
     expect(summary).toContain("✅ Minted as `roastpilot-factory[bot]`");
     expect(summary).toContain("[#99](https://github.com/o/r/pull/99)");
     expect(summary).not.toContain("(refreshed");
     expect(summary).toContain("triggered normally");
-    expect(summary).not.toContain("Suppressed");
+    expect(summary).not.toContain("**Suppressed**");
     // Adjudicated fix (Codex P2, #46 reshape): must not imply the
     // Codex-wait rule is already satisfied just because it auto-reviewed.
     expect(summary).toContain("Codex auto-reviewed at creation");
     expect(summary).toContain("must still manually");
     expect(summary).toContain("@codex review");
     expect(summary).toContain("NOT satisfied automatically");
+    // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
+    // Review must NOT be reported as part of "triggered normally" — it
+    // does not actually run on a factory-minted PR until #47 lands.
+    expect(summary).toContain("Claude Code Review does NOT yet cover factory-authored PRs");
+    expect(summary).toContain("#47");
   });
 
   it("shows the fallback identity, reason, suppressed review automation, and that Codex does not auto-trigger, when on fallback", () => {
@@ -691,8 +699,8 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: false,
     });
     expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
-    expect(summary).toContain("github-actions[bot]");
-    expect(summary).toContain("FACTORY_PUBLISHER_APP_ID is not configured");
+    expect(summary).toContain("`github-actions[bot]`");
+    expect(summary).toContain("`FACTORY_PUBLISHER_APP_ID is not configured`");
     expect(summary).toContain("⚠️ **Suppressed**");
     expect(summary).toContain("no-review-automation");
     expect(summary).toContain("Codex does NOT auto-trigger either");
@@ -736,8 +744,8 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: false,
     });
     expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
-    // No " — <reason>" suffix when the reason is absent.
-    expect(summary).not.toMatch(/GITHUB_TOKEN`\).*—/);
+    // No " — `<reason>`" suffix when the reason is absent.
+    expect(summary).not.toContain(" — `");
   });
 
   it("marks a refreshed PR distinctly from a newly-opened one", () => {
@@ -764,7 +772,9 @@ describe("buildPublishRejectedStepSummary", () => {
     expect(summary).toContain("## Factory publish summary");
     expect(summary).toContain("#6");
     expect(summary).toContain("none — publish rejected");
-    expect(summary).toContain("the implement run produced no changes (empty patch)");
+    // Rendered as an inline code span (categorical fix, round 3) —
+    // brackets/parens appear verbatim, no escaping needed.
+    expect(summary).toContain("`the implement run produced no changes (empty patch)`");
   });
 
   it("shows the fallback identity even on a rejected publish", () => {
@@ -776,10 +786,10 @@ describe("buildPublishRejectedStepSummary", () => {
       reasons: ["unexpected error: network timeout"],
     });
     expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
-    expect(summary).toContain("the mint step failed (outcome=failure)");
+    expect(summary).toContain("`the mint step failed (outcome=failure)`");
   });
 
-  it("strips a newline and a backtick from a rejection reason (CodeQL fix, #46 reshape) without mangling brackets/parens", () => {
+  it("strips a newline and a backtick from a rejection reason before code-wrapping it, preserving brackets/parens verbatim", () => {
     const summary = buildPublishRejectedStepSummary({
       issueNumber: 6,
       publisherLogin: "roastpilot-factory[bot]",
@@ -790,41 +800,107 @@ describe("buildPublishRejectedStepSummary", () => {
     });
     // The newline-prefixed "## Injected heading" must not survive as its
     // own line/heading, and the backtick-wrapped "code" must not survive
-    // as its own code span — but the parenthetical "(s)" is untouched.
+    // as its own code span — both would break out of the wrapping code
+    // span sanitizeStepSummaryText applies. The parenthetical "(s)" is
+    // preserved verbatim inside that span; a code span itself is what
+    // neutralizes it, not escaping.
     expect(summary).not.toContain("\n## Injected heading");
     expect(summary).not.toContain("`code`");
-    expect(summary).toContain("path(s): scripts/factory/evil.mts");
+    expect(summary).toContain(
+      "`patch touches pipeline-protected path(s): scripts/factory/evil.mts ## Injected heading code`",
+    );
+  });
+
+  it("renders a [text](url) injection attempt in a reason as inert code, not a live link (Codex P2, categorical fix, round 3)", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: [
+        "patch touches pipeline-protected path: .github/workflows/[x](https://attacker.example).yml",
+      ],
+    });
+    // The load-bearing assertion isn't "the raw text is absent" (it's
+    // present, verbatim, inside the code span — that's fine and
+    // intended) but that it's wrapped in backticks, which is what
+    // actually prevents GitHub from rendering it as a live link.
+    expect(summary).toContain(
+      "`patch touches pipeline-protected path: .github/workflows/[x](https://attacker.example).yml`",
+    );
+  });
+
+  it("renders a bare autolink-shaped URL in a reason as inert code, not a live autolink (the vector escaping alone never closed)", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: ["network error contacting www.attacker.example during patch apply"],
+    });
+    expect(summary).toContain(
+      "`network error contacting www.attacker.example during patch apply`",
+    );
   });
 });
 
-describe("sanitizeStepSummaryText", () => {
-  it("collapses newlines to a space", () => {
+describe("sanitizeStepSummaryText (categorical fix, round 3, post-#46-merge fix-forward: render as inert code, don't escape)", () => {
+  it("wraps the value in a single-backtick inline code span", () => {
+    expect(sanitizeStepSummaryText("plain text")).toBe("`plain text`");
+  });
+
+  it("collapses newlines to a space before wrapping", () => {
     expect(sanitizeStepSummaryText("line one\nline two\r\nline three")).toBe(
-      "line one line two line three",
+      "`line one line two line three`",
     );
   });
 
-  it("strips backticks", () => {
-    expect(sanitizeStepSummaryText("a `dangerous` value")).toBe("a dangerous value");
+  it("strips backticks before wrapping (so the value can't break out of its own code span)", () => {
+    expect(sanitizeStepSummaryText("a `dangerous` value")).toBe("`a dangerous value`");
   });
 
-  it("preserves brackets and parens (not a link-structure risk in plain body text)", () => {
-    expect(sanitizeStepSummaryText("roastpilot-factory[bot]")).toBe("roastpilot-factory[bot]");
+  it("preserves brackets/parens/angle-brackets/backslashes VERBATIM — a code span renders them literally, no escaping needed", () => {
+    expect(sanitizeStepSummaryText("roastpilot-factory[bot]")).toBe(
+      "`roastpilot-factory[bot]`",
+    );
     expect(sanitizeStepSummaryText("the mint step failed (outcome=failure)")).toBe(
-      "the mint step failed (outcome=failure)",
+      "`the mint step failed (outcome=failure)`",
+    );
+    expect(sanitizeStepSummaryText("a\\b")).toBe("`a\\b`");
+  });
+
+  it("renders a [text](url) link-injection attempt as inert text, not a live link (round 1's finding, closed categorically)", () => {
+    const malicious = ".github/workflows/[x](https://attacker.example).yml";
+    const sanitized = sanitizeStepSummaryText(malicious);
+    // Inside a code span, GitHub renders NOTHING as Markdown — the raw
+    // [x](url) sequence is shown as literal text, not parsed as a link.
+    // (It's present in the output, unescaped — that's fine and expected;
+    // what matters is it's inside the ` `...` ` span, which the
+    // integration-level test below confirms actually prevents rendering.)
+    expect(sanitized).toBe(`\`${malicious}\``);
+  });
+
+  it("renders a BARE autolink-shaped URL as inert text — round 3's finding: escaping alone never closes this, code spans do", () => {
+    // This is exactly what per-metacharacter escaping (rounds 1-2) could
+    // never close: there is nothing to escape here — no bracket, no
+    // paren, no angle bracket — yet GFM autolinks a bare recognized URL
+    // shape regardless. A code span is the only construct that suppresses
+    // autolinking too.
+    expect(sanitizeStepSummaryText("see www.attacker.example for details")).toBe(
+      "`see www.attacker.example for details`",
     );
   });
 
-  it("clamps to 200 characters with an ellipsis", () => {
+  it("clamps to 200 characters (before wrapping) with an ellipsis", () => {
     const long = "x".repeat(250);
     const result = sanitizeStepSummaryText(long);
-    expect(result.length).toBe(201); // 200 chars + the ellipsis character.
-    expect(result.endsWith("…")).toBe(true);
+    // 200 chars + the ellipsis + the two wrapping backticks.
+    expect(result.length).toBe(203);
+    expect(result.startsWith("`")).toBe(true);
+    expect(result.endsWith("…`")).toBe(true);
   });
 
   it("does not clamp a value at or under the limit", () => {
     const exact = "x".repeat(200);
-    expect(sanitizeStepSummaryText(exact)).toBe(exact);
+    expect(sanitizeStepSummaryText(exact)).toBe(`\`${exact}\``);
   });
 });
 
