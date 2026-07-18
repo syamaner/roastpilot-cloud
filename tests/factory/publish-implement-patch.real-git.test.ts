@@ -652,6 +652,40 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
     expect(summary).toContain('implement job result was "failure"');
   });
 
+  it("summary says the label FAILED to apply — never claims it landed — when the label call genuinely fails (Codex P2, #46 reshape)", async () => {
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("attempted but FAILED to apply");
+    expect(summary).not.toContain("the `no-review-automation` label was applied");
+    errorSpy.mockRestore();
+  });
+
   it("does nothing (and never throws) when GITHUB_STEP_SUMMARY is unset — matches every other test in this file implicitly, asserted explicitly here", async () => {
     expect(process.env.GITHUB_STEP_SUMMARY).toBeUndefined();
     stubHappyPathFetch();

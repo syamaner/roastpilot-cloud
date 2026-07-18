@@ -619,6 +619,13 @@ async function applyNoReviewAutomationLabel(
  * @param prNumber - The PR to label (newly-created or pre-existing).
  * @param context - Human-readable context for the log line if this fails
  *   — which publish path called it.
+ * @returns `true` if the label was actually applied, `false` if it
+ *   failed (logged either way). Adjudicated fix (Codex P2, #46 reshape):
+ *   this is best-effort and CAN fail, so a caller that reports "the label
+ *   was applied" in a PR-visible or human-facing surface (e.g.
+ *   `$GITHUB_STEP_SUMMARY`) must check this rather than assuming success
+ *   — a swallowed failure here must never silently become an overstated
+ *   claim elsewhere.
  */
 async function applyNoReviewAutomationLabelBestEffort(
   token: string,
@@ -626,14 +633,18 @@ async function applyNoReviewAutomationLabelBestEffort(
   repo: string,
   prNumber: number,
   context: "opened" | "refreshed",
-): Promise<void> {
-  await applyNoReviewAutomationLabel(token, owner, repo, prNumber).catch((err: unknown) => {
-    console.error(
-      `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
-        `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
-  });
+): Promise<boolean> {
+  return applyNoReviewAutomationLabel(token, owner, repo, prNumber).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
+          `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
 }
 
 /**
@@ -761,6 +772,13 @@ export async function main(): Promise<void> {
   // reported as "no branch was created".
   let branchName: string | undefined;
   let branchPushed = false;
+  // Adjudicated fix (Codex P2, #46 reshape): the label application is
+  // best-effort (applyNoReviewAutomationLabelBestEffort tolerates
+  // failure) — `undefined` here means "not on the fallback path, this
+  // doesn't apply"; only set to true/false once actually attempted, so
+  // the $GITHUB_STEP_SUMMARY write below can never overstate "the label
+  // was applied" when it might have silently failed.
+  let labelApplied: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -859,7 +877,7 @@ export async function main(): Promise<void> {
         // edited-in-place comment would be the wrong signal here). Both
         // are best-effort: this branch still returns normally either way,
         // since the branch push itself already succeeded.
-        await applyNoReviewAutomationLabelBestEffort(
+        labelApplied = await applyNoReviewAutomationLabelBestEffort(
           token,
           owner,
           repo,
@@ -871,6 +889,7 @@ export async function main(): Promise<void> {
       writeStepSummary(
         buildPublishSuccessStepSummary({
           ...summaryContext,
+          labelApplied,
           prNumber: existingPr.number,
           // findExistingPrForIssue's underlying query doesn't fetch
           // html_url (PullRequestSummary has no such field) — a GitHub PR
@@ -908,11 +927,18 @@ export async function main(): Promise<void> {
       // half of the same signal. No separate comment needed on THIS path
       // (unlike the existingPr-refresh path above) — the body warning
       // just built into this brand-new PR already carries the signal.
-      await applyNoReviewAutomationLabelBestEffort(token, owner, repo, created.number, "opened");
+      labelApplied = await applyNoReviewAutomationLabelBestEffort(
+        token,
+        owner,
+        repo,
+        created.number,
+        "opened",
+      );
     }
     writeStepSummary(
       buildPublishSuccessStepSummary({
         ...summaryContext,
+        labelApplied,
         prNumber: created.number,
         prUrl: created.html_url,
         wasRefresh: false,

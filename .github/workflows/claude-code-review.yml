@@ -24,19 +24,15 @@ jobs:
     # codecov cover them. (claude-review is not a required check, so a
     # Dependabot PR is never blocked; this just avoids a spurious red X.)
     #
-    # Factory-authored PRs (factory.md §13): the publisher-identity switch
-    # (#40) is live — the publish job mints a short-lived GitHub App
-    # installation token and opens PRs as `roastpilot-factory[bot]` (or
-    # falls back to `github-actions[bot]` if minting fails/isn't
-    # configured), so this workflow DOES now fire on factory PRs, the same
-    # as any human-authored one. No `if:` change needed here for that: the
-    # `github.actor` this `if` checks is the PR's OPENER, which is never
-    # `dependabot[bot]` for a factory PR either way — the actual gate that
-    # needed updating for the App identity is `allowed_bots` below (the
-    # actor `claude-code-action` itself checks against for a `synchronize`
-    # push), confirmed live on #45 (the first real factory PR): CI/CodeQL/
-    # dependency-review/codecov all fired correctly, but claude-review
-    # failed outright because `roastpilot-factory[bot]` wasn't allowlisted.
+    # Factory-authored PRs (factory.md §13): as of F1-S4 the publish job
+    # still opens PRs as `github-actions[bot]` via `GITHUB_TOKEN`, and
+    # GitHub suppresses downstream workflow triggers from GITHUB_TOKEN
+    # events — so this workflow does not fire on a factory PR at all yet.
+    # That gap is factory.md §13's linchpin fix (a workflow-triggering
+    # publisher identity), tracked separately; this `if` does not need to
+    # special-case github-actions[bot] until that identity switch lands,
+    # at which point factory PRs will be authored by the App/PAT identity
+    # and reach this job like any other PR.
     #
     # Fork guard (adjudicated P2, #35 rework): a fork PR against this
     # public repo triggers `pull_request` too, but GitHub withholds
@@ -138,16 +134,7 @@ jobs:
           # `claude` explicitly (both suffix forms) — NOT `*`, so an
           # arbitrary third-party bot still can't trigger a review that
           # holds the repo's read-only secret.
-          #
-          # `roastpilot-factory`/`roastpilot-factory[bot]` (fix, confirmed
-          # live on #45 — the first real factory-published PR): the
-          # publish job's minted App token (#40) authors factory PRs as
-          # this identity, and without it here, `claude-code-action`
-          # rejects the PR's own `opened` actor outright — `claude-review`
-          # failed on #45 even though CI/CodeQL/dependency-review/codecov
-          # all fired correctly. Same explicit-allowlist discipline as
-          # `claude` above: named identity, not `*`.
-          allowed_bots: 'claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]'
+          allowed_bots: 'claude,claude[bot]'
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # Always post a visible tracking comment, even when the review

@@ -19,6 +19,8 @@ import {
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
   parseNameStatusZ,
+  sanitizeStepSummaryText,
+  sanitizeStepSummaryUrl,
   type ExistingComment,
 } from "../../scripts/factory/implement-patch-logic.mts";
 
@@ -668,11 +670,17 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("✅ Minted as `roastpilot-factory[bot]`");
     expect(summary).toContain("[#99](https://github.com/o/r/pull/99)");
     expect(summary).not.toContain("(refreshed");
-    expect(summary).toContain("✅ Triggered normally");
+    expect(summary).toContain("triggered normally");
     expect(summary).not.toContain("Suppressed");
+    // Adjudicated fix (Codex P2, #46 reshape): must not imply the
+    // Codex-wait rule is already satisfied just because it auto-reviewed.
+    expect(summary).toContain("Codex auto-reviewed at creation");
+    expect(summary).toContain("must still manually");
+    expect(summary).toContain("@codex review");
+    expect(summary).toContain("NOT satisfied automatically");
   });
 
-  it("shows the fallback identity, reason, and suppressed review automation when on fallback", () => {
+  it("shows the fallback identity, reason, suppressed review automation, and that Codex does not auto-trigger, when on fallback", () => {
     const summary = buildPublishSuccessStepSummary({
       issueNumber: 6,
       publisherLogin: "github-actions[bot]",
@@ -687,6 +695,35 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("FACTORY_PUBLISHER_APP_ID is not configured");
     expect(summary).toContain("⚠️ **Suppressed**");
     expect(summary).toContain("no-review-automation");
+    expect(summary).toContain("Codex does NOT auto-trigger either");
+  });
+
+  it("reports the label as applied when labelApplied is true or omitted (undefined = not attempted, treated as the default success wording)", () => {
+    const applied = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      labelApplied: true,
+    });
+    expect(applied).toContain("the `no-review-automation` label was applied");
+    expect(applied).not.toContain("FAILED to apply");
+  });
+
+  it("reports the label as FAILED (Codex P2, #46 reshape) — never asserts it landed when applyNoReviewAutomationLabelBestEffort actually failed", () => {
+    const failed = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      labelApplied: false,
+    });
+    expect(failed).toContain("attempted but FAILED to apply");
+    expect(failed).not.toContain("the `no-review-automation` label was applied");
   });
 
   it("omits the reason suffix when fallbackReason is not provided", () => {
@@ -740,5 +777,74 @@ describe("buildPublishRejectedStepSummary", () => {
     });
     expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
     expect(summary).toContain("the mint step failed (outcome=failure)");
+  });
+
+  it("strips a newline and a backtick from a rejection reason (CodeQL fix, #46 reshape) without mangling brackets/parens", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: [
+        "patch touches pipeline-protected path(s): scripts/factory/evil.mts\n## Injected heading\n`code`",
+      ],
+    });
+    // The newline-prefixed "## Injected heading" must not survive as its
+    // own line/heading, and the backtick-wrapped "code" must not survive
+    // as its own code span — but the parenthetical "(s)" is untouched.
+    expect(summary).not.toContain("\n## Injected heading");
+    expect(summary).not.toContain("`code`");
+    expect(summary).toContain("path(s): scripts/factory/evil.mts");
+  });
+});
+
+describe("sanitizeStepSummaryText", () => {
+  it("collapses newlines to a space", () => {
+    expect(sanitizeStepSummaryText("line one\nline two\r\nline three")).toBe(
+      "line one line two line three",
+    );
+  });
+
+  it("strips backticks", () => {
+    expect(sanitizeStepSummaryText("a `dangerous` value")).toBe("a dangerous value");
+  });
+
+  it("preserves brackets and parens (not a link-structure risk in plain body text)", () => {
+    expect(sanitizeStepSummaryText("roastpilot-factory[bot]")).toBe("roastpilot-factory[bot]");
+    expect(sanitizeStepSummaryText("the mint step failed (outcome=failure)")).toBe(
+      "the mint step failed (outcome=failure)",
+    );
+  });
+
+  it("clamps to 200 characters with an ellipsis", () => {
+    const long = "x".repeat(250);
+    const result = sanitizeStepSummaryText(long);
+    expect(result.length).toBe(201); // 200 chars + the ellipsis character.
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("does not clamp a value at or under the limit", () => {
+    const exact = "x".repeat(200);
+    expect(sanitizeStepSummaryText(exact)).toBe(exact);
+  });
+});
+
+describe("sanitizeStepSummaryUrl", () => {
+  it("leaves a well-formed GitHub URL untouched", () => {
+    const url = "https://github.com/syamaner/roastpilot-cloud/pull/99";
+    expect(sanitizeStepSummaryUrl(url)).toBe(url);
+  });
+
+  it("strips brackets, parens, backticks, and newlines (link-structure risk, unlike plain body text)", () => {
+    const malicious = "https://evil.example/x\n)[phishing](https://evil.example/y";
+    const sanitized = sanitizeStepSummaryUrl(malicious);
+    expect(sanitized).not.toMatch(/[`[\]()]/);
+    expect(sanitized).not.toContain("\n");
+  });
+
+  it("clamps to 200 characters with an ellipsis", () => {
+    const long = `https://github.com/o/r/pull/${"9".repeat(250)}`;
+    const result = sanitizeStepSummaryUrl(long);
+    expect(result.length).toBe(201);
+    expect(result.endsWith("…")).toBe(true);
   });
 });
