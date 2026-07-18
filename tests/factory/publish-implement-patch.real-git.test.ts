@@ -610,6 +610,108 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
   });
 });
 
+describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {
+  afterEach(() => {
+    delete process.env.GITHUB_STEP_SUMMARY;
+    delete process.env.PUBLISHED_VIA_FALLBACK;
+    delete process.env.FALLBACK_REASON;
+  });
+
+  it("appends a success summary (mint identity, PR link, review-automation status) when GITHUB_STEP_SUMMARY is set", async () => {
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, ""); // GitHub Actions always pre-creates this file.
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    process.env.FALLBACK_REASON = "FACTORY_PUBLISHER_APP_ID is not configured";
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("#6");
+    expect(summary).toContain("Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("FACTORY_PUBLISHER_APP_ID is not configured");
+    expect(summary).toContain("no-review-automation");
+  });
+
+  it("appends a rejected-publish summary (mint identity + reasons) when GITHUB_STEP_SUMMARY is set", async () => {
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    vi.stubGlobal("fetch", rejectionOnlyFetchMock());
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("none — publish rejected");
+    expect(summary).toContain('implement job result was "failure"');
+  });
+
+  it("summary says the label FAILED to apply — never claims it landed — when the label call genuinely fails (Codex P2, #46 reshape)", async () => {
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("attempted but FAILED to apply");
+    expect(summary).not.toContain("the `no-review-automation` label was applied");
+    errorSpy.mockRestore();
+  });
+
+  it("does nothing (and never throws) when GITHUB_STEP_SUMMARY is unset — matches every other test in this file implicitly, asserted explicitly here", async () => {
+    expect(process.env.GITHUB_STEP_SUMMARY).toBeUndefined();
+    stubHappyPathFetch();
+
+    await expect(main()).resolves.toBeUndefined();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("logs (never throws) when the summary path itself is unwritable", async () => {
+    // A path under a directory that doesn't exist — appendFileSync throws
+    // ENOENT, exactly the "disk write fails" case writeStepSummary must
+    // tolerate.
+    process.env.GITHUB_STEP_SUMMARY = join(scratchDir, "no-such-dir", "summary.md");
+    stubHappyPathFetch();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to write $GITHUB_STEP_SUMMARY"),
+    );
+    errorSpy.mockRestore();
+  });
+});
+
 describe("publish-implement-patch — Codex round 3: binary patches round-trip", () => {
   it("applies and pushes a real binary file byte-for-byte when the capture step used --binary (round-trip proof)", async () => {
     // Reproduces exactly what the FIXED capture step

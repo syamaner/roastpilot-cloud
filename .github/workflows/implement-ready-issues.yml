@@ -585,7 +585,14 @@ jobs:
           name: implement-agent-transcript
           path: ${{ steps.implement.outputs.execution_file }}
           if-no-files-found: warn
-          retention-days: 1
+          # Bumped from the default-era 1 day (operator finding, 18 Jul
+          # 2026, live App-identity commissioning): this transcript is the
+          # PRIMARY agent-trace for debugging a factory run — the only
+          # record of what the agent actually did/reasoned, not
+          # reconstructable from the PR diff or logs alone — and a 1-day
+          # expiry meant it was already gone by the time an incident 2
+          # days later needed it.
+          retention-days: 30
 
       - name: Scrub the git credential from the workspace before gates/capture run
         # Originally: claude-code-action's configureGitAuth() embeds this
@@ -711,7 +718,11 @@ jobs:
           name: implement-patch
           path: patch-output/patch.diff
           if-no-files-found: warn
-          retention-days: 1
+          # Same bump and reasoning as implement-agent-transcript above —
+          # for a run the publish job REJECTS (never opens a PR, never
+          # pushes a branch), this patch is the only surviving record of
+          # what the agent produced.
+          retention-days: 30
 
   # --- publish: privileged job. Runs a deterministic script — never agent
   # output as code — that validates the patch artifact (job success,
@@ -808,11 +819,25 @@ jobs:
         # its `token` output is empty, and every step below falls back to
         # GITHUB_TOKEN — every such publish surfaces this warning
         # annotation so the gap stays visible rather than silent.
+        id: fallback_warning
         env:
           FACTORY_APP_TOKEN: ${{ steps.factory_token.outputs.token }}
+          FACTORY_PUBLISHER_APP_ID: ${{ vars.FACTORY_PUBLISHER_APP_ID }}
+          # `steps.<id>.outcome` (unlike `.conclusion`) reflects the mint
+          # step's REAL pass/fail result, ignoring continue-on-error — this
+          # is exactly the distinction the observability fix below needs:
+          # a masked `conclusion=success` on a step that actually FAILED
+          # is the whole problem being fixed.
+          MINT_OUTCOME: ${{ steps.factory_token.outcome }}
         run: |
           if [ -z "$FACTORY_APP_TOKEN" ]; then
-            echo "::warning::No factory App token was minted (FACTORY_PUBLISHER_APP_ID unset, or the mint step failed) — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code Review) for GITHUB_TOKEN-authored PR events, so the PR this run opens will NOT be reviewed automatically. See factory.md §13 for the fix."
+            if [ -z "$FACTORY_PUBLISHER_APP_ID" ]; then
+              REASON="FACTORY_PUBLISHER_APP_ID is not configured"
+            else
+              REASON="the mint step failed (outcome=$MINT_OUTCOME) — check its own step logs for the real error"
+            fi
+            echo "fallback_reason=$REASON" >> "$GITHUB_OUTPUT"
+            echo "::warning::No factory App token was minted ($REASON) — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code Review) for GITHUB_TOKEN-authored PR events, so the PR this run opens will NOT be reviewed automatically. See factory.md §13 for the fix."
           else
             echo "Confirmed: minted a short-lived factory App installation token — publishing with a workflow-triggering identity."
           fi
@@ -921,4 +946,12 @@ jobs:
           # "was a token actually minted" check the warning step above
           # uses.
           PUBLISHED_VIA_FALLBACK: ${{ steps.factory_token.outputs.token == '' }}
+          # Observability fix (18 Jul 2026, live App-identity
+          # commissioning): threads the "Warn if publishing with
+          # GITHUB_TOKEN" step's own best-effort diagnosis of WHY the
+          # fallback happened into publish-implement-patch.mts's
+          # $GITHUB_STEP_SUMMARY write (see that script's writeStepSummary)
+          # — empty string when not on the fallback path, in which case
+          # the script simply omits the reason line.
+          FALLBACK_REASON: ${{ steps.fallback_warning.outputs.fallback_reason }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts

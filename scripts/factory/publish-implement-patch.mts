@@ -111,10 +111,16 @@
  *   label (adjudicated F2, #40 rework) — soft-defaulted to `false` if
  *   unset, which only means the warning is skipped, never that an
  *   otherwise-valid publish is blocked.
+ * - `FALLBACK_REASON` — human-readable, best-effort explanation of WHY
+ *   `PUBLISHED_VIA_FALLBACK` is true (e.g. "FACTORY_PUBLISHER_APP_ID is
+ *   not configured" vs "the mint step failed"), for the
+ *   `$GITHUB_STEP_SUMMARY` block (observability fix, 18 Jul 2026 —
+ *   see {@link writeStepSummary}). Soft-defaulted to `undefined`
+ *   (omitted from the summary) if unset; purely informational.
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { appendFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,6 +130,8 @@ import {
   buildFallbackRefreshCommentBody,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
+  buildPublishRejectedStepSummary,
+  buildPublishSuccessStepSummary,
   deriveBranchName,
   FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
@@ -136,6 +144,7 @@ import {
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
+  type PublishStepSummaryContext,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
 
@@ -610,6 +619,13 @@ async function applyNoReviewAutomationLabel(
  * @param prNumber - The PR to label (newly-created or pre-existing).
  * @param context - Human-readable context for the log line if this fails
  *   — which publish path called it.
+ * @returns `true` if the label was actually applied, `false` if it
+ *   failed (logged either way). Adjudicated fix (Codex P2, #46 reshape):
+ *   this is best-effort and CAN fail, so a caller that reports "the label
+ *   was applied" in a PR-visible or human-facing surface (e.g.
+ *   `$GITHUB_STEP_SUMMARY`) must check this rather than assuming success
+ *   — a swallowed failure here must never silently become an overstated
+ *   claim elsewhere.
  */
 async function applyNoReviewAutomationLabelBestEffort(
   token: string,
@@ -617,14 +633,18 @@ async function applyNoReviewAutomationLabelBestEffort(
   repo: string,
   prNumber: number,
   context: "opened" | "refreshed",
-): Promise<void> {
-  await applyNoReviewAutomationLabel(token, owner, repo, prNumber).catch((err: unknown) => {
-    console.error(
-      `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
-        `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
-  });
+): Promise<boolean> {
+  return applyNoReviewAutomationLabel(token, owner, repo, prNumber).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
+          `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
 }
 
 /**
@@ -658,6 +678,37 @@ async function postFallbackRefreshComment(
         `still refreshed successfully): ${err instanceof Error ? err.message : String(err)}`,
     );
   });
+}
+
+/**
+ * Appends `markdown` to `$GITHUB_STEP_SUMMARY` (observability fix, 18 Jul
+ * 2026, live App-identity commissioning: a mint failure shows
+ * `conclusion=success` in the job view — `continue-on-error` masks it —
+ * so a human had to pull raw job logs to find the real outcome; this puts
+ * mint-vs-fallback, the PR, and whether review automation triggered
+ * directly in the run's own summary instead).
+ *
+ * Never throws: `GITHUB_STEP_SUMMARY` is unset outside a real GitHub
+ * Actions run (every unit/integration test in this repo, and a local
+ * `node publish-implement-patch.mts` invocation), and even inside one, a
+ * write failure here is observability-only — it must never take down an
+ * otherwise-successful (or otherwise-correctly-rejected) publish.
+ *
+ * @param markdown - The summary block to append.
+ */
+function writeStepSummary(markdown: string): void {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) {
+    return;
+  }
+  try {
+    appendFileSync(summaryPath, markdown);
+  } catch (err) {
+    console.error(
+      `Failed to write $GITHUB_STEP_SUMMARY (observability only, publish itself is ` +
+        `unaffected): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 export async function main(): Promise<void> {
@@ -704,6 +755,16 @@ export async function main(): Promise<void> {
   // publish; that fail-open direction matches this whole fallback path's
   // own "publish rather than silently stop shipping" judgement call.
   const publishedViaFallback = process.env.PUBLISHED_VIA_FALLBACK === "true";
+  // Best-effort, purely for $GITHUB_STEP_SUMMARY (see writeStepSummary) —
+  // soft-defaulted to undefined (simply omitted from the summary) when
+  // unset, never blocks anything.
+  const fallbackReason = process.env.FALLBACK_REASON || undefined;
+  const summaryContext: PublishStepSummaryContext = {
+    issueNumber,
+    publisherLogin: failureCommentAuthorLogin,
+    publishedViaFallback,
+    fallbackReason,
+  };
 
   // Tracked outside the try so the catch block can tell an unpushed
   // rejection apart from a post-push failure (FIX 5) — a branch that WAS
@@ -711,6 +772,13 @@ export async function main(): Promise<void> {
   // reported as "no branch was created".
   let branchName: string | undefined;
   let branchPushed = false;
+  // Adjudicated fix (Codex P2, #46 reshape): the label application is
+  // best-effort (applyNoReviewAutomationLabelBestEffort tolerates
+  // failure) — `undefined` here means "not on the fallback path, this
+  // doesn't apply"; only set to true/false once actually attempted, so
+  // the $GITHUB_STEP_SUMMARY write below can never overstate "the label
+  // was applied" when it might have silently failed.
+  let labelApplied: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -809,7 +877,7 @@ export async function main(): Promise<void> {
         // edited-in-place comment would be the wrong signal here). Both
         // are best-effort: this branch still returns normally either way,
         // since the branch push itself already succeeded.
-        await applyNoReviewAutomationLabelBestEffort(
+        labelApplied = await applyNoReviewAutomationLabelBestEffort(
           token,
           owner,
           repo,
@@ -818,6 +886,20 @@ export async function main(): Promise<void> {
         );
         await postFallbackRefreshComment(token, owner, repo, existingPr.number, runUrl);
       }
+      writeStepSummary(
+        buildPublishSuccessStepSummary({
+          ...summaryContext,
+          labelApplied,
+          prNumber: existingPr.number,
+          // findExistingPrForIssue's underlying query doesn't fetch
+          // html_url (PullRequestSummary has no such field) — a GitHub PR
+          // URL has a fixed, well-known shape, so it's constructed here
+          // rather than adding an unused-elsewhere API field just for
+          // this summary line.
+          prUrl: `https://github.com/${owner}/${repo}/pull/${existingPr.number}`,
+          wasRefresh: true,
+        }),
+      );
       return;
     }
 
@@ -845,8 +927,23 @@ export async function main(): Promise<void> {
       // half of the same signal. No separate comment needed on THIS path
       // (unlike the existingPr-refresh path above) — the body warning
       // just built into this brand-new PR already carries the signal.
-      await applyNoReviewAutomationLabelBestEffort(token, owner, repo, created.number, "opened");
+      labelApplied = await applyNoReviewAutomationLabelBestEffort(
+        token,
+        owner,
+        repo,
+        created.number,
+        "opened",
+      );
     }
+    writeStepSummary(
+      buildPublishSuccessStepSummary({
+        ...summaryContext,
+        labelApplied,
+        prNumber: created.number,
+        prUrl: created.html_url,
+        wasRefresh: false,
+      }),
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const reasons =
@@ -880,6 +977,7 @@ export async function main(): Promise<void> {
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
         reasons.map((r) => `  - ${r}`).join("\n"),
     );
+    writeStepSummary(buildPublishRejectedStepSummary({ ...summaryContext, reasons }));
     process.exitCode = 1;
   }
 }

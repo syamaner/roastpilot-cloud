@@ -652,3 +652,195 @@ export function buildImplementFailureCommentBody(
   ];
   return lines.join("\n");
 }
+
+/**
+ * Shared fields for both `$GITHUB_STEP_SUMMARY` builders below (operator
+ * finding, 18 Jul 2026, live App-identity commissioning): a mint failure
+ * shows `conclusion=success` in the job view (masked by `continue-on-error`
+ * on the mint step), so a human had to pull raw job logs to find the real
+ * outcome. Writing mint-vs-fallback into the run's own summary — success
+ * or rejection alike — closes that gap without needing GitHub's own UI to
+ * change.
+ */
+export interface PublishStepSummaryContext {
+  /** The issue this publish run is for. */
+  readonly issueNumber: number;
+  /**
+   * The identity `GH_TOKEN` actually authenticated as — `<app-slug>[bot]`
+   * when a factory App token was minted, or the `GITHUB_TOKEN` fallback's
+   * known login otherwise. Same value the workflow derives for
+   * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN`; passed straight through
+   * rather than re-derived here.
+   */
+  readonly publisherLogin: string;
+  /** Whether this run published via the `GITHUB_TOKEN` fallback. */
+  readonly publishedViaFallback: boolean;
+  /**
+   * Why the fallback happened, if capturable by the workflow (e.g. "App
+   * ID not configured" vs "the mint step failed") — soft, best-effort;
+   * `undefined` when not fallback, or when the workflow couldn't
+   * determine a specific reason.
+   */
+  readonly fallbackReason?: string;
+}
+
+/**
+ * Upper bound applied by both step-summary sanitizers below — generous
+ * enough for any legitimate value (a login, a URL, a short reason phrase)
+ * while still bounding how much of a giant/adversarial string could reach
+ * the summary.
+ */
+const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
+
+/**
+ * Sanitizes a plain-text field (a login, a fallback reason, a rejection
+ * reason) before it reaches `$GITHUB_STEP_SUMMARY`'s rendered Markdown.
+ * Fixes a CodeQL alert (#46 reshape): "network data written to file" —
+ * `publisherLogin` (from the mint step's `app-slug` API output) and the
+ * rejection `reasons` (which can indirectly embed a
+ * `deriveBranchName`-derived slug of an issue's title) originate from a
+ * GitHub API response or an attacker-writable issue/PR field, not purely
+ * this workflow's own literals.
+ *
+ * Deliberately narrower than a blanket "strip every Markdown-special
+ * character" pass: an earlier draft of this fix also stripped `[`/`]`/`(`/
+ * `)`, which corrupted entirely legitimate content — every bot login is
+ * `<slug>[bot]`, and a rejection reason routinely carries a useful
+ * parenthetical like `(empty patch)`. Neither is a real Markdown-structure
+ * risk in body text (unlike a `[text](url)` LINK slot — see
+ * {@link sanitizeStepSummaryUrl} for that case): a stray `[`/`(` sitting in
+ * a plain sentence renders as a literal bracket, not a link, unless
+ * followed by a matching `](url)`, which none of this module's own
+ * template strings ever place immediately after an interpolated field.
+ * Only newlines (could smuggle extra summary lines/headings) and
+ * backticks (`publisherLogin` specifically is wrapped in a backtick code
+ * span in the output; a login containing one would break out of it) are
+ * unsafe here.
+ *
+ * @param value - The field value to sanitize.
+ * @returns The sanitized value: newlines collapsed to a space, backticks
+ *   stripped, clamped to
+ *   {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} characters.
+ */
+export function sanitizeStepSummaryText(value: string): string {
+  const collapsed = value.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  return collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
+    ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
+    : collapsed;
+}
+
+/**
+ * Sanitizes a field placed in a Markdown LINK's URL slot —
+ * `[text](${sanitized})` — before it reaches `$GITHUB_STEP_SUMMARY`.
+ * `prUrl` is network-derived (a PR-create/-list API response); unlike
+ * {@link sanitizeStepSummaryText}'s plain-body-text case, a bracket or
+ * paren HERE genuinely can corrupt the link's structure (close the URL
+ * slot early, or open a second link), so this strips them in addition to
+ * newlines/backticks. A well-formed GitHub URL never legitimately
+ * contains any of these characters, so stripping them is never lossy for
+ * real input.
+ *
+ * @param value - The URL value to sanitize.
+ * @returns The sanitized value, clamped to
+ *   {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} characters.
+ */
+export function sanitizeStepSummaryUrl(value: string): string {
+  const collapsed = value.replace(/[\r\n]+/g, " ").replace(/[`[\]()]/g, "");
+  return collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
+    ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
+    : collapsed;
+}
+
+function publisherIdentityLine(context: PublishStepSummaryContext): string {
+  const login = sanitizeStepSummaryText(context.publisherLogin);
+  if (!context.publishedViaFallback) {
+    return `✅ Minted as \`${login}\``;
+  }
+  const reasonSuffix = context.fallbackReason
+    ? ` — ${sanitizeStepSummaryText(context.fallbackReason)}`
+    : "";
+  return `⚠️ Fell back to \`GITHUB_TOKEN\` (identity: \`${login}\`)${reasonSuffix}`;
+}
+
+/**
+ * Builds the `$GITHUB_STEP_SUMMARY` markdown for a successful publish (a
+ * PR was opened or an existing one refreshed).
+ *
+ * @param context - Shared publisher-identity fields, plus the PR this run
+ *   produced or refreshed, and whether the fallback label was actually
+ *   applied.
+ * @returns The Markdown summary block.
+ */
+export function buildPublishSuccessStepSummary(
+  context: PublishStepSummaryContext & {
+    readonly prNumber: number;
+    readonly prUrl: string;
+    readonly wasRefresh: boolean;
+    /**
+     * Whether `applyNoReviewAutomationLabelBestEffort` actually succeeded
+     * — `undefined` when not on the fallback path (the label is never
+     * attempted). Adjudicated fix (Codex P2, #46 reshape): that function
+     * is best-effort and CAN fail, so this must reflect the REAL outcome
+     * rather than the summary unconditionally claiming "the label was
+     * applied" regardless of what actually happened.
+     */
+    readonly labelApplied?: boolean;
+  },
+): string {
+  const labelLine =
+    context.labelApplied === false
+      ? `⚠️ attempted but FAILED to apply — check the run's logs`
+      : `the \`${NO_REVIEW_AUTOMATION_LABEL}\` label was applied`;
+  // Adjudicated fix (Codex P2, #46 reshape): Codex's real behavior is
+  // narrower than "triggered normally" implied. It auto-reviews at PR
+  // creation for an App-token/human-authored PR, but per AGENTS.md's
+  // merge policy the operator must still MANUALLY `@codex review` the
+  // FINAL commit and wait for that verdict before merging — this summary
+  // must never read as if the Codex-wait is already satisfied just
+  // because CI/CodeQL/etc. triggered. For a GITHUB_TOKEN-fallback PR,
+  // Codex does not auto-trigger at all (same GITHUB_TOKEN-authored-event
+  // suppression as every other gate).
+  const reviewAutomationLine = context.publishedViaFallback
+    ? "⚠️ **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
+      "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
+      `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
+      "a manual review pass is required before merging."
+    : "✅ CI, CodeQL, dependency review, and Claude Code Review triggered normally. " +
+      "Codex auto-reviewed at creation, but the operator must still manually " +
+      "`@codex review` the FINAL commit and wait for its verdict before merging " +
+      "(AGENTS.md's Codex-wait rule) — this is NOT satisfied automatically.";
+  return [
+    "## Factory publish summary",
+    "",
+    `- **Issue:** #${context.issueNumber}`,
+    `- **Publisher identity:** ${publisherIdentityLine(context)}`,
+    `- **PR:** [#${context.prNumber}](${sanitizeStepSummaryUrl(context.prUrl)})${context.wasRefresh ? " (refreshed, not newly opened)" : ""}`,
+    `- **Review automation:** ${reviewAutomationLine}`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Builds the `$GITHUB_STEP_SUMMARY` markdown for a REJECTED publish (no
+ * PR was opened or refreshed) — see
+ * {@link buildPublishSuccessStepSummary}'s docstring for why this exists
+ * even on the failure path.
+ *
+ * @param context - Shared publisher-identity fields, plus the rejection
+ *   reasons already used to build the failure comment
+ *   ({@link buildImplementFailureCommentBody}).
+ * @returns The Markdown summary block.
+ */
+export function buildPublishRejectedStepSummary(
+  context: PublishStepSummaryContext & { readonly reasons: readonly string[] },
+): string {
+  return [
+    "## Factory publish summary",
+    "",
+    `- **Issue:** #${context.issueNumber}`,
+    `- **Publisher identity:** ${publisherIdentityLine(context)}`,
+    "- **PR:** none — publish rejected. Reasons:",
+    ...context.reasons.map((r) => `  - ${sanitizeStepSummaryText(r)}`),
+    "",
+  ].join("\n");
+}
