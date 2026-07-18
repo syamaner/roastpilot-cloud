@@ -321,10 +321,13 @@ export interface ProvenanceContext {
    */
   readonly promptVersion: string;
   /**
-   * The GitHub login of the human who dispatched this run (`github.actor`
-   * on a `workflow_dispatch` event) — the `Signed-off-by` identity, per
-   * factory.md's dispatch-first authorization-seam framing: a human
-   * explicitly chose to run this, so they're the one certifying it.
+   * The GitHub login of the human who authorized THIS attempt
+   * (`github.triggering_actor` — deliberately NOT `github.actor`, which
+   * stays the ORIGINAL `workflow_dispatch` initiator across a `gh run
+   * rerun`; `triggering_actor` is whoever initiated the current attempt,
+   * Codex P2, #55) — the `Signed-off-by` identity, per factory.md's
+   * dispatch-first authorization-seam framing: a human explicitly chose
+   * to run this, so they're the one certifying it.
    */
   readonly dispatchActor: string;
 }
@@ -976,8 +979,21 @@ export function buildPublishRejectedStepSummary(
  * Deliberately conservative: returns `null` (never fabricates a value)
  * for anything other than a clean match — unparseable JSON, a non-array
  * top level, an array with no `system`/`init` message, or an init
- * message whose `model` field is missing, empty, or not a string. A
- * caller must render this as "unavailable", never guess.
+ * message whose `model` field is missing, empty, not a string, or
+ * carries a newline (see below). A caller must render this as
+ * "unavailable", never guess.
+ *
+ * Rejects (rather than sanitizes) a `model` value containing `\n`/`\r`
+ * (Codex P2, #55): this value is interpolated straight into a git commit
+ * trailer ({@link buildCommitTrailer}) with only a nonempty check —
+ * without this, a corrupted or tampered transcript whose `model` field
+ * contained an embedded newline could forge an extra trailer line (e.g.
+ * a fake `Signed-off-by`) into the commit message, the same class of
+ * injection the `$GITHUB_STEP_SUMMARY` sanitizer earlier in this
+ * pipeline's history was built to close. A legitimate model ID never
+ * contains a newline, so REJECTING outright (never truncating/stripping)
+ * is both simplest and correct: there is no valid partial value to
+ * salvage from a model field that fails this shape check.
  *
  * @param rawTranscriptJson - The raw file contents of the transcript
  *   artifact.
@@ -1006,7 +1022,10 @@ export function extractModelIdFromTranscript(
     return null;
   }
   const model = initMessage.model;
-  return typeof model === "string" && model.length > 0 ? model : null;
+  if (typeof model !== "string" || model.length === 0) {
+    return null;
+  }
+  return /[\r\n]/.test(model) ? null : model;
 }
 
 /**

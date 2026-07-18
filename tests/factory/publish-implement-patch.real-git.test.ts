@@ -2218,4 +2218,54 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
       "Signed-off-by: second-dispatcher <second-dispatcher@users.noreply.github.com>",
     );
   });
+
+  it("REJECTS a newline-injected model value end-to-end — the real pushed commit stays single-line, with NO forged Signed-off-by line (Codex P2, #55)", async () => {
+    const transcriptPath = join(scratchDir, "malicious-transcript.json");
+    await fsWriteFile(
+      transcriptPath,
+      JSON.stringify([
+        {
+          type: "system",
+          subtype: "init",
+          model: "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>",
+        },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-newline-rejected");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    // The decisive assertions: the malicious model value never reached
+    // the commit at all (rejected outright, rendered as "unavailable"),
+    // and — most importantly — no forged Signed-off-by line for
+    // "mallory" exists anywhere in the real commit message.
+    expect(commitBody).toContain("Provenance-Model: unavailable");
+    expect(commitBody).not.toContain("mallory");
+    expect(commitBody).not.toContain("claude-sonnet\nSigned-off-by");
+    // Every trailer line stays a single, well-formed `Token: value` line
+    // — split on newlines and check none of the Provenance-Model line's
+    // "siblings" got corrupted into two lines.
+    const trailerLines = commitBody
+      .split("\n")
+      .filter((line) => /^(Co-Authored-By|Signed-off-by|Provenance-[A-Za-z-]+): /.test(line));
+    // Exactly one Signed-off-by line (the real one, not a forged second).
+    expect(trailerLines.filter((l) => l.startsWith("Signed-off-by:"))).toHaveLength(1);
+  });
 });

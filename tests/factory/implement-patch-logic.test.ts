@@ -998,6 +998,23 @@ describe("extractModelIdFromTranscript (F1-S10 slice 3, factory.md §13.12)", ()
   it("returns null for an empty array", () => {
     expect(extractModelIdFromTranscript("[]")).toBeNull();
   });
+
+  it("REJECTS (never truncates/sanitizes) a model value containing a newline — a corrupted/tampered transcript must not forge an extra commit trailer line (Codex P2, #55)", () => {
+    const injected = "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>";
+    expect(
+      extractModelIdFromTranscript(
+        JSON.stringify([{ type: "system", subtype: "init", model: injected }]),
+      ),
+    ).toBeNull();
+  });
+
+  it("REJECTS a model value containing a bare carriage return too, not just \\n", () => {
+    expect(
+      extractModelIdFromTranscript(
+        JSON.stringify([{ type: "system", subtype: "init", model: "claude\rSigned-off-by: x" }]),
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("buildCommitTrailer (F1-S10 slice 3, factory.md §13.12)", () => {

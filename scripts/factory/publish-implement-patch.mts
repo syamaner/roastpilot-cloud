@@ -128,8 +128,10 @@
  *   see {@link ProvenanceContext.promptVersion}'s doc for why this is the
  *   repository commit SHA rather than a named skill version. Soft-
  *   defaulted to a clearly-labeled "unknown" if unset.
- * - `DISPATCH_ACTOR` — the human who dispatched this run (`github.actor`).
- *   Soft-defaulted to a clearly-labeled placeholder if unset.
+ * - `DISPATCH_ACTOR` — the human who authorized THIS attempt
+ *   (`github.triggering_actor`, not `github.actor` — see
+ *   {@link ProvenanceContext.dispatchActor}'s doc). Soft-defaulted to a
+ *   clearly-labeled placeholder if unset.
  */
 
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";

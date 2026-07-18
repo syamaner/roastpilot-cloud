@@ -1002,10 +1002,16 @@ jobs:
           # here rather than invoking a named `.claude/skills/` file, so
           # `github.sha` (the exact commit this run checked out, which
           # that embedded prompt text lives in) is the honest stand-in.
-          # DISPATCH_ACTOR is the human who ran `workflow_dispatch` — the
+          # DISPATCH_ACTOR is the human who authorized THIS attempt — the
           # Signed-off-by identity, per factory.md's dispatch-first
-          # authorization-seam framing.
+          # authorization-seam framing. Deliberately `github.triggering_actor`,
+          # not `github.actor` (Codex P2, #55): `github.actor` stays the
+          # ORIGINAL workflow_dispatch initiator across a `gh run rerun`,
+          # while `github.triggering_actor` is whoever initiated the CURRENT
+          # attempt — the correct one to credit/sign-off, since a rerun can
+          # force-push a fresh implementation commit under a different
+          # human's authorization than the original dispatch.
           IMPLEMENT_TRANSCRIPT_PATH: transcript-output/claude-execution-output.json
           IMPLEMENT_PROMPT_VERSION: ${{ github.sha }}
-          DISPATCH_ACTOR: ${{ github.actor }}
+          DISPATCH_ACTOR: ${{ github.triggering_actor }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts
