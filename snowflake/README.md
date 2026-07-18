@@ -51,10 +51,13 @@ the older flat layout — top-level `[roastpilot]`, not nested
 `[connections.roastpilot]` — and silently returns nothing for our file
 (confirmed by calling it directly against the real config). Env vars are
 schemachange's other fully-supported input layer (P2, above YAML, below
-CLI), so `with_connection_env.py` reads `config.toml` once and exports
-`SNOWFLAKE_ACCOUNT` / `_USER` / `_ROLE` / `_WAREHOUSE` / `_AUTHENTICATOR` /
-`_PRIVATE_KEY_FILE` before exec'ing the real command. Nothing is duplicated
-into the repo — it re-reads `config.toml` on every invocation — and no
+CLI), so `with_connection_env.py` reads `config.toml` **when it exists**
+(see below for what happens when it doesn't) and exports
+`SNOWFLAKE_ACCOUNT` / `_USER` / `_ROLE` / `_WAREHOUSE` / `_DATABASE` /
+`_SCHEMA` / `_AUTHENTICATOR` / `_PRIVATE_KEY_FILE` before exec'ing the real
+command, per field (see the merge behavior below — this isn't an
+all-or-nothing bulk export). Nothing is duplicated into the repo — it
+re-reads `config.toml` on every invocation, never caching it — and no
 secret *value* lives on disk here, only a private key *path*.
 
 The default connection name is `roastpilot` (key-pair auth, role
