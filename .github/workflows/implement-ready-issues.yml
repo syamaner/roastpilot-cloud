@@ -445,6 +445,39 @@ jobs:
               results never make it back into this session, so a run
               structured that way finishes having accomplished nothing.
 
+      - name: Upload the implement agent's execution transcript (diagnostic artifact)
+        # Preferred over show_full_output: true — that flag writes the
+        # full tool-use stream into the PUBLIC Actions log for a public
+        # repo; this uploads the same underlying data as a downloadable
+        # artifact instead, gated behind repo/run access rather than
+        # visible to anyone who can view the log. It also survives after
+        # the run for diagnosis, which the public-log form doesn't offer
+        # any differently.
+        #
+        # claude-code-action always writes this file (unconditionally,
+        # independent of show_full_output — verified against
+        # base-action/src/execution-file.ts at the pinned SHA:
+        # writeExecutionFile() has no show_full_output check at all) to
+        # `${RUNNER_TEMP}/claude-execution-output.json`, and exposes its
+        # resolved path as this step's own `execution_file` output
+        # (src/entrypoints/run.ts calls
+        # `core.setOutput("execution_file", ...)` after a successful run,
+        # falling back to `setExecutionFileOutputIfPresent()` otherwise) —
+        # read from `steps.implement.outputs.execution_file` here rather
+        # than hardcoding the path, so this survives the action ever
+        # changing where RUNNER_TEMP resolves to.
+        #
+        # `if: always()`: the file is written even when the agent step
+        # itself fails or times out (uploading unconditionally only helps
+        # diagnosis, same reasoning as the patch-artifact upload below).
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: implement-agent-transcript
+          path: ${{ steps.implement.outputs.execution_file }}
+          if-no-files-found: warn
+          retention-days: 1
+
       - name: Scrub the git credential from the workspace before gates/capture run
         # Originally: claude-code-action's configureGitAuth() embeds this
         # job's github_token directly into the `origin` remote URL in
