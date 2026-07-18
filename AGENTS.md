@@ -128,6 +128,18 @@ way any Claude Code session would. **Merging is always human** — the factory
 ends at "PR open, CI green, reviews in"; nothing in this repo auto-merges
 (factory.md §2, §9).
 
+**Decomposition (`to-issues`, F1-S5) runs at each epic's kickoff, never
+bulk-up-front.** C2's stories don't exist until someone runs the
+`to-issues` skill (`.claude/skills/to-issues/`) against C2's plan section,
+right before C2 starts — same for C3…C8 in turn. Its output is always a
+**PM-reviewed draft**: the skill writes no file and files no GitHub issue
+itself; a human (the PM) reads the drafted batch, edits it if needed, and
+files each story by hand (or runs it back through `triage` first). Treat a
+`to-issues` draft the same way you'd treat any other unreviewed proposal —
+it is not itself an authorization to build anything, and no story it drafts
+is `ready-to-implement` until a human or the `triage` skill says so against
+the issue as actually filed.
+
 ## PR Merge Policy
 
 Full policy: `factory.md` §9, identical to the agent repo's, no factory
