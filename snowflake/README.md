@@ -76,8 +76,9 @@ python3 with_connection_env.py schemachange deploy ...
 
 Any `SNOWFLAKE_*` variable already set in the calling shell wins over what
 `with_connection_env.py` resolves, **per field** — useful for CI, where the
-DEV-scoped key comes from repo secrets rather than a local `config.toml`
-(F1-S8/C7; out of scope here, see below).
+DEV-scoped key comes from an **environment secret scoped to
+`dev-snowflake-ci`** (NOT a repository secret — see below) rather than a
+local `config.toml` (F1-S8/C7; out of scope here, see below).
 
 `with_connection_env.py` reads `config.toml` whenever it exists and merges
 it in field by field: each individual `SNOWFLAKE_*` value prefers whatever
@@ -151,6 +152,19 @@ description.sql` / `R__description.sql` convention, and every migration
 renders without a Jinja error). CI does **not** connect to Snowflake here —
 see the next section for the live counterpart.
 
+The same offline job also runs `check_forbidden_grants.py` — a cheap,
+best-effort text scan for an obvious `GRANT ... TO PUBLIC` (or `TO ROLE
+PUBLIC`) in the migrations tree, flagging it at PR-review time with no
+Snowflake connection needed. This is **preventive, not authoritative**: it
+splits each migration file on `;` and flags any statement containing both
+a `GRANT` keyword and a `TO PUBLIC` target, case-insensitively — a text
+match, not a SQL parser, so it can miss a Jinja-templated or otherwise
+non-obvious forbidden grant. The live contract check's post-deploy grants
+audit (below) is the authoritative, detective control for that residual
+gap; this scan exists purely to catch the obvious case earlier and
+cheaper. The same script also runs as the first step of the live
+contract-check job, before any Snowflake connection is attempted.
+
 ## Live contract check against ROASTPILOT_DEV (F1-S8)
 
 `.github/workflows/dev-snowflake-contract.yml` is the live-connecting
@@ -165,16 +179,23 @@ forbidden grant — a bad `GRANT ... TO PUBLIC` migration is valid SQL and
 succeeds, so only re-auditing the database AFTER it's applied can catch
 it; a pre-deploy-only check would let that class of bad migration pass).
 
-The grants check covers five independent things, all of which must pass:
+The grants check covers seven independent things, all of which must pass:
 `SHOW GRANTS TO ROLE` (current object grants on the primary role stay
 within `ROASTPILOT_DEV`/`DEV_CI_WH`), `SHOW DATABASES`/`SHOW WAREHOUSES`
-(nothing else is even VISIBLE to the role — closes the gap a future grant
-would leave in `SHOW GRANTS` alone), `SHOW GRANTS TO ROLE PUBLIC` (PUBLIC
-must hold **zero grants, anywhere** — `AGENTS.md`'s Architecture Invariant
-is "No grants to `PUBLIC`, anywhere", not merely "PUBLIC stays inside the
-DEV boundary", so this check does NOT reuse the primary role's
-boundary-aware logic), and `SHOW GRANTS TO USER` (the CI service user
-itself carries no role beyond the primary one, plus PUBLIC).
+(nothing else is even VISIBLE to the role — defense in depth against
+visibility paths other than a grant, e.g. imported privileges), `SHOW
+GRANTS TO ROLE PUBLIC` (PUBLIC must hold **zero grants, anywhere** —
+`AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`, anywhere",
+not merely "PUBLIC stays inside the DEV boundary", so this check does NOT
+reuse the primary role's boundary-aware logic), `SHOW GRANTS TO USER` (the
+CI service user itself carries no role beyond the primary one, plus
+PUBLIC), and `SHOW FUTURE GRANTS TO ROLE` for both the primary role and
+PUBLIC (a future grant — `GRANT ... ON FUTURE TABLES IN SCHEMA ...` —
+produces no row in `SHOW GRANTS` and may target an object that doesn't
+exist yet, so it's invisible to every check above without a dedicated
+query; `SHOW FUTURE GRANTS TO ROLE <role>` is real Snowflake syntax that
+lists every future grant for a role account-wide — an earlier version of
+this README/module wrongly claimed no such account-wide query existed).
 
 Every identifier comparison (database, warehouse, role, object name)
 routes through one function, `identifiers_match` — an EXACT, byte-for-byte
@@ -211,10 +232,14 @@ Per the factory security model (`factory.md` §8: agent jobs hold no
 Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
 job declares `environment: dev-snowflake-ci` — a GitHub Environment with a
 required reviewer, so the credential is never active until a human
-explicitly approves that specific run. It also runs with
-`step-security/harden-runner`'s egress LOCKED to a fixed allowlist (GitHub,
-PyPI, Snowflake) rather than the audit-only mode the rest of this factory's
-jobs use, since a live credential is genuinely at stake here.
+explicitly approves that specific run. `SNOWFLAKE_DEV_PRIVATE_KEY` is
+provisioned as an **environment secret scoped to `dev-snowflake-ci`**, NOT
+a repository secret — no other workflow in this repo can read it, and the
+required-reviewer gate on that environment is a real credential boundary,
+not just a UI speed bump. It also runs with `step-security/harden-runner`'s
+egress LOCKED to a fixed allowlist (GitHub, PyPI, Snowflake) rather than
+the audit-only mode the rest of this factory's jobs use, since a live
+credential is genuinely at stake here.
 
 `validate_migrations.py` mirrors schemachange's own deploy-time collector
 exactly (issue #18): it discovers every migration RECURSIVELY, in any

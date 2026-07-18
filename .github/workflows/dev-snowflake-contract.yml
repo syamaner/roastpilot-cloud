@@ -16,6 +16,13 @@ name: DEV Snowflake Contract Check
 #    environment PAUSES for human approval before a single step runs,
 #    regardless of what triggered the workflow run. Agent-authored code
 #    (or anyone else) cannot make this key active without that approval.
+#    `SNOWFLAKE_DEV_PRIVATE_KEY` is an ENVIRONMENT secret scoped to
+#    `dev-snowflake-ci` specifically, NOT a repository secret (moved there
+#    and the repo-level copy deleted after the round-2 security review) --
+#    no other workflow in this repo can read `secrets.SNOWFLAKE_DEV_
+#    PRIVATE_KEY`, so this environment gate is a real credential boundary,
+#    not just a UI speed bump in front of a secret every job could already
+#    see.
 # 2. `workflow_dispatch` only — deliberately not `pull_request` (even
 #    scoped to snowflake/**) for this first slice. Same dispatch-first,
 #    staged-autonomy pattern as implement-ready-issues.yml: a human
@@ -128,6 +135,18 @@ jobs:
         # (that job just stopped at audit mode; this one starts at block
         # because a live credential is at stake and a wrong list should
         # fail the job, not silently under-restrict it).
+        # `ocsp.snowflakecomputing.com:80` (Codex P2, PR #57, round 4): the
+        # main `*.snowflakecomputing.com:443` entry above covers the actual
+        # Snowflake connection, but snowflake-connector-python's OCSP
+        # certificate-revocation check fetches from a SEPARATE OCSP
+        # response cache server, over plain HTTP (port 80 -- OCSP responses
+        # are individually signed, so the protocol itself doesn't require
+        # TLS). Without this entry, that fetch is blocked by egress-policy:
+        # block, and the connector FAILS OPEN on an OCSP cache miss (skips
+        # the revocation check rather than erroring) -- a silent security
+        # degradation, not a loud failure, which is worse than either
+        # extreme on its own.
+
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
@@ -140,6 +159,7 @@ jobs:
             pypi.org:443
             files.pythonhosted.org:443
             *.snowflakecomputing.com:443
+            ocsp.snowflakecomputing.com:80
 
       - name: Checkout roastpilot-cloud
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -153,6 +173,22 @@ jobs:
 
       - name: Install schemachange + Snowflake connector dependencies
         run: pip install -r snowflake/requirements.txt
+
+      - name: Check migrations for an obvious forbidden PUBLIC grant
+        id: forbidden-grants-scan
+        # A cheap, best-effort PREVENTIVE guard (Codex P1, PR #57, round 4,
+        # :244) -- runs FIRST, before even attempting a live Snowflake
+        # connection, since it needs neither credentials nor network access
+        # to Snowflake. Deliberately NOT the authoritative control: this is
+        # a text scan, not a SQL parser, so it can miss a Jinja-templated or
+        # otherwise non-obvious forbidden grant. The `(post-deploy)` grants
+        # audit below is what actually stays authoritative for that residual
+        # gap -- see check_forbidden_grants.py's own module docstring for
+        # the full reasoning, including why a caught-late bad grant is still
+        # a contained, DEV-only, operator-revocable incident, not a PROD
+        # exposure.
+        working-directory: snowflake
+        run: python3 check_forbidden_grants.py
 
       - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH (pre-deploy)
         id: grants
@@ -168,10 +204,11 @@ jobs:
         # MIGRATION-OUTPUT gate, for why a pre-deploy-only check would miss
         # a migration that itself introduces a forbidden grant.
         # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
-        # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW DATABASES, or
-        # SHOW WAREHOUSES report anything outside the DEV database/
-        # warehouse this role is provisioned to touch, or if PUBLIC holds
-        # ANY grant at all (assert_dev_ci_grants.py, #11). Connects
+        # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW FUTURE GRANTS TO
+        # ROLE (for the role and for PUBLIC), SHOW DATABASES, or SHOW
+        # WAREHOUSES report anything outside the DEV database/warehouse
+        # this role is provisioned to touch, or if PUBLIC holds ANY current
+        # or future grant at all (assert_dev_ci_grants.py, #11). Connects
         # directly via snowflake-connector-python with the key held in
         # memory only, never written to disk (unlike the deploy step below,
         # which needs schemachange's file-based env layer). Secondary
@@ -288,6 +325,7 @@ jobs:
           {
             echo "## DEV Snowflake contract check"
             echo ""
+            echo "- **Migrations pass the preventive PUBLIC-grant scan:** ${{ steps.forbidden-grants-scan.outcome }}"
             echo "- **Grants stay within DEV (pre-deploy):** ${{ steps.grants.outcome }}"
             echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
             echo "- **Grants stay within DEV (post-deploy):** ${{ steps.grants-post.outcome }}"

@@ -291,6 +291,64 @@ class TestFindPublicGrants:
         assert len(assert_dev_ci_grants.find_public_grants(rows)) == 2
 
 
+class TestFindFutureGrantViolations:
+    """Codex P1, PR #57, round 4: `SHOW FUTURE GRANTS TO ROLE` rows use
+    `grant_on` (not `granted_on`) and `name` holds the CONTAINER the future
+    grant is scoped to (the object doesn't exist yet) -- reuses
+    `is_allowed_grant`'s boundary logic regardless.
+    """
+
+    def test_no_violations_for_a_compliant_future_grant(self) -> None:
+        rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"}]
+        assert assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH) == []
+
+    def test_flags_a_future_grant_outside_dev(self) -> None:
+        rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_PREVIEW.APP"}]
+        violations = assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
+        assert len(violations) == 1
+        assert "ROASTPILOT_PREVIEW" in violations[0]
+
+    def test_flags_multiple_future_grant_violations_independently(self) -> None:
+        rows = [
+            {"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_PREVIEW.APP"},
+            {"privilege": "USAGE", "grant_on": "SCHEMA", "name": "SNOWFLAKE.SOME_SCHEMA"},
+        ]
+        violations = assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
+        assert len(violations) == 2
+
+    def test_handles_a_missing_field_gracefully_as_a_violation(self) -> None:
+        rows = [{"privilege": "SELECT"}]  # no grant_on/name at all
+        violations = assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
+        assert len(violations) == 1
+
+    def test_empty_rows_is_never_a_violation(self) -> None:
+        assert assert_dev_ci_grants.find_future_grant_violations([], _DEV_ROLE, _DEV_DB, _DEV_WH) == []
+
+
+class TestFindPublicFutureGrants:
+    """Codex P1, PR #57, round 4: same unconditional zero-tolerance
+    standard as `find_public_grants`, applied to PUBLIC's future grants --
+    AGENTS.md's invariant doesn't carve out an exception for grants that
+    haven't materialized yet.
+    """
+
+    def test_empty_when_public_has_no_future_grants(self) -> None:
+        assert assert_dev_ci_grants.find_public_future_grants([]) == []
+
+    def test_flags_a_future_grant_even_inside_the_dev_boundary(self) -> None:
+        rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"}]
+        violations = assert_dev_ci_grants.find_public_future_grants(rows)
+        assert len(violations) == 1
+        assert "APP" in violations[0]
+
+    def test_flags_multiple_future_grants_independently(self) -> None:
+        rows = [
+            {"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"},
+            {"privilege": "USAGE", "grant_on": "SCHEMA", "name": _DEV_DB},
+        ]
+        assert len(assert_dev_ci_grants.find_public_future_grants(rows)) == 2
+
+
 class TestFindOutOfBoundsNames:
     """Codex P1, PR #57: SHOW GRANTS TO ROLE alone can miss a future grant
     or other visibility path -- these tests cover the SHOW DATABASES/SHOW
@@ -391,12 +449,12 @@ class TestMain:
     correctly, which is what's actually testable without live
     infrastructure access.
 
-    main() now issues SIX sequential statements on the same cursor: `USE
+    main() now issues EIGHT sequential statements on the same cursor: `USE
     SECONDARY ROLES NONE` (no fetchall), then SHOW GRANTS TO ROLE, SHOW
-    DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, and SHOW GRANTS
-    TO USER (each followed by a fetchall) -- mock_cursor.fetchall's
-    side_effect is a LIST of five return values, one per query, in that
-    order.
+    DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, SHOW GRANTS TO
+    USER, SHOW FUTURE GRANTS TO ROLE, and SHOW FUTURE GRANTS TO ROLE PUBLIC
+    (each followed by a fetchall) -- mock_cursor.fetchall's side_effect is
+    a LIST of seven return values, one per query, in that order.
     """
 
     def _set_required_env(self, monkeypatch, pem: str) -> None:
@@ -414,6 +472,8 @@ class TestMain:
         visible_warehouses: list[dict[str, object]] | None = None,
         public_grant_rows: list[dict[str, object]] | None = None,
         user_role_rows: list[dict[str, object]] | None = None,
+        future_grant_rows: list[dict[str, object]] | None = None,
+        public_future_grant_rows: list[dict[str, object]] | None = None,
     ) -> MagicMock:
         mock_cursor = MagicMock()
         mock_cursor.fetchall.side_effect = [
@@ -422,6 +482,8 @@ class TestMain:
             visible_warehouses if visible_warehouses is not None else [{"name": _DEV_WH}],
             public_grant_rows if public_grant_rows is not None else [],
             user_role_rows if user_role_rows is not None else [{"role": _DEV_ROLE}],
+            future_grant_rows if future_grant_rows is not None else [],
+            public_future_grant_rows if public_future_grant_rows is not None else [],
         ]
         return mock_cursor
 
@@ -488,6 +550,66 @@ class TestMain:
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert "SHOW GRANTS TO ROLE PUBLIC" in executed_statements
         assert "SHOW GRANTS TO USER ROASTPILOT_DEV_CI" in executed_statements
+
+    def test_audits_show_future_grants_for_the_role_and_public_codex_p1_round4(
+        self, monkeypatch
+    ) -> None:
+        # Corrects an earlier, WRONG claim that no account-wide
+        # future-grants query existed for a role (Codex P1, PR #57, round
+        # 4) -- SHOW FUTURE GRANTS TO ROLE is real, documented syntax.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            assert_dev_ci_grants.main()
+
+        executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
+        assert f"SHOW FUTURE GRANTS TO ROLE {_DEV_ROLE}" in executed_statements
+        assert "SHOW FUTURE GRANTS TO ROLE PUBLIC" in executed_statements
+
+    def test_returns_1_when_the_role_has_a_future_grant_outside_dev_codex_p1_round4(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            future_grant_rows=[{"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_PREVIEW.APP"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ROASTPILOT_PREVIEW" in stderr
+        assert "future grant" in stderr
+
+    def test_returns_1_when_public_has_a_future_grant_inside_dev_codex_p1_round4(
+        self, monkeypatch, capsys
+    ) -> None:
+        # The future-grant analogue of the round-3 PUBLIC-inside-boundary
+        # regression: PUBLIC must hold zero future grants too, regardless
+        # of boundary.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_future_grant_rows=[{"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "PUBLIC future grant" in stderr
 
     def test_returns_1_when_a_grant_violation_is_found(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())

@@ -3,7 +3,7 @@
 ROASTPILOT_DEV / DEV_CI_WH (F1-S8, issue #11, factory.md §8).
 
 Connects to Snowflake with the SAME identity the live contract-check job
-uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks five
+uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks seven
 independent things, all of which must pass:
 
 1. ``SHOW GRANTS TO ROLE <role>`` — every CURRENT object grant on the
@@ -56,6 +56,25 @@ independent things, all of which must pass:
    extra role granted to the user could still activate in some OTHER
    session (the deploy step's connection, or a future job) unless the
    user-level grant itself is clean (Codex P1, PR #57, round 2).
+6. ``SHOW FUTURE GRANTS TO ROLE <role>`` — every future grant defined for
+   the primary role, across the WHOLE ACCOUNT, stays within the DEV
+   boundary (Codex P1, PR #57, round 4 — corrects an earlier, WRONG claim
+   in this module that no such query existed; `SHOW FUTURE GRANTS TO ROLE`
+   is real, documented Snowflake syntax and does exactly this). A future
+   grant (`GRANT ... ON FUTURE TABLES IN SCHEMA ...`) produces no row in
+   check #1's `SHOW GRANTS TO ROLE` output and may target an object that
+   doesn't exist yet, so without this it would be invisible to every other
+   check here. Reuses `is_allowed_grant`'s boundary logic (`find_
+   future_grant_violations`), since a future grant is fundamentally the
+   same "stays within DEV" question as a current one — only the row shape
+   differs (`grant_on`/`name` instead of `granted_on`/`name`, and `name`
+   here is the CONTAINER the future grant is scoped to, not a specific
+   object, since the object doesn't exist yet).
+7. ``SHOW FUTURE GRANTS TO ROLE PUBLIC`` — same unconditional,
+   zero-tolerance standard as check #4, applied to PUBLIC's future grants
+   (Codex P1, PR #57, round 4): `AGENTS.md`'s "No grants to `PUBLIC`,
+   anywhere" invariant doesn't carve out an exception for grants that
+   haven't materialized yet.
 
 This is the F1-S8 acceptance bar: a compromised or misbehaving agent
 holding this role must never be able to touch PROD, PREVIEW, or any other
@@ -131,27 +150,32 @@ key CONTENT held in memory — never written to disk, unlike the schemachange
 deploy step in the same job, which needs a temp file because schemachange's
 own env-var layer only accepts a file path (see with_connection_env.py).
 
-KNOWN RESIDUAL GAP (documented, not silently ignored): Snowflake's
-`SHOW FUTURE GRANTS` command is scoped `IN DATABASE <db>` / `IN SCHEMA
-<schema>` — there is no account-wide "every future grant this role has,
-anywhere" query. The `SHOW DATABASES`/`SHOW WAREHOUSES` visibility checks
-above are this script's actual defense against the future-grants class of
-drift: a future grant can only ever matter if it makes some OTHER
-database/warehouse visible or usable, and both are checked directly. A
-future grant scoped entirely WITHIN the already-allowed
-ROASTPILOT_DEV/DEV_CI_WH boundary is, definitionally, not a boundary
-violation. If Snowflake ever exposes an account-wide future-grants
-listing, tighten this further — tracked as a residual item, not built
-speculatively against undocumented/unverified syntax.
+CORRECTED CLAIM (Codex P1, PR #57, round 4): an earlier version of this
+module claimed, wrongly, that "there is no account-wide 'every future
+grant this role has, anywhere' query" and treated the `SHOW DATABASES`/
+`SHOW WAREHOUSES` visibility checks as the sole defense against the
+future-grants class of drift. That claim was WRONG — `SHOW FUTURE GRANTS
+TO ROLE <role>` is real, documented Snowflake syntax and IS exactly that
+account-wide, role-filtered query; checks #6 and #7 above now use it
+directly rather than relying on visibility as an indirect proxy. The
+`SHOW DATABASES`/`SHOW WAREHOUSES` checks (#2) remain, as defense in
+depth against OTHER visibility paths a future grant isn't the only
+possible cause of (e.g. imported privileges, replication) — but they are
+no longer this script's primary defense against future grants
+specifically, checks #6/#7 are.
 
 NOTE (operator-supervised validation required): the connection/query
 mechanics below follow Snowflake's documented key-pair (JWT) auth flow and
-`SHOW GRANTS TO ROLE`/`SHOW GRANTS TO USER`/`SHOW DATABASES`/
-`SHOW WAREHOUSES`'s documented output columns, and `USE SECONDARY ROLES
-NONE`'s documented statement syntax, but this script has never run against
-a real Snowflake session (no credentials available to the agent that
-wrote it, per factory.md's own "agent jobs hold no Snowflake secrets"
-invariant). The FIRST real dispatch of the gated job is this script's
+`SHOW GRANTS TO ROLE`/`SHOW FUTURE GRANTS TO ROLE`/`SHOW GRANTS TO USER`/
+`SHOW DATABASES`/`SHOW WAREHOUSES`'s documented output columns, and `USE
+SECONDARY ROLES NONE`'s documented statement syntax, but this script has
+never run against a real Snowflake session (no credentials available to
+the agent that wrote it, per factory.md's own "agent jobs hold no
+Snowflake secrets" invariant) — including the `SHOW FUTURE GRANTS`
+column shapes (`grant_on`/`name`/`grantee_name` rather than `SHOW GRANTS
+TO ROLE`'s `granted_on`/`name`/`granted_to`), which are taken from
+Snowflake's own SQL command reference, not verified against a live
+response. The FIRST real dispatch of the gated job is this script's
 actual validation — same "the operator's live dispatch doubles as the
 audit" pattern already used elsewhere in this repo for code that can't be
 verified without live infrastructure access. The operator is also
@@ -404,6 +428,65 @@ def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
     ]
 
 
+def find_future_grant_violations(
+    future_grant_rows: list[dict[str, object]],
+    role_name: str,
+    allowed_database: str,
+    allowed_warehouse: str,
+) -> list[str]:
+    """Scans every `SHOW FUTURE GRANTS TO ROLE` row and returns a
+    human-readable description of each one that violates the DEV boundary
+    — empty if none do (Codex P1, PR #57, round 4).
+
+    `SHOW FUTURE GRANTS` rows use a DIFFERENT column name for the object
+    type than `SHOW GRANTS` does -- `grant_on`, not `granted_on` -- and
+    `name` holds the CONTAINER (a database or schema) the future grant is
+    scoped to, not a specific object name, since the object doesn't exist
+    yet. Reuses `is_allowed_grant` regardless: a future grant's `grant_on`
+    value is one of the same `_DATABASE_SCOPED_OBJECT_TYPES` (TABLE, VIEW,
+    SCHEMA, ...) `is_allowed_grant` already knows how to evaluate, and its
+    container `name` is checked with the exact same first-dot-component
+    boundary logic as a current grant's fully-qualified object name.
+
+    @param future_grant_rows: Rows as returned by a `DictCursor` running
+        `SHOW FUTURE GRANTS TO ROLE <role_name>`.
+    @param role_name: The role being checked.
+    @param allowed_database: The one database this role may touch.
+    @param allowed_warehouse: The one warehouse this role may touch.
+    @returns: Descriptions of every violating future grant, empty if none.
+    """
+    violations = []
+    for row in future_grant_rows:
+        grant_on = str(row.get("grant_on", ""))
+        name = str(row.get("name", ""))
+        privilege = str(row.get("privilege", ""))
+        if not is_allowed_grant(grant_on, name, role_name, allowed_database, allowed_warehouse):
+            violations.append(f"{privilege} on future {grant_on} in {name}")
+    return violations
+
+
+def find_public_future_grants(future_grant_rows: list[dict[str, object]]) -> list[str]:
+    """Returns a human-readable description of EVERY future grant PUBLIC
+    holds — empty only if PUBLIC has none at all (Codex P1, PR #57, round
+    4).
+
+    Same unconditional standard as `find_public_grants`, applied to `SHOW
+    FUTURE GRANTS TO ROLE PUBLIC` rows (which use `grant_on`, not
+    `granted_on` -- see `find_future_grant_violations`): `AGENTS.md`'s "No
+    grants to PUBLIC, anywhere" invariant doesn't carve out an exception
+    for grants that haven't materialized yet.
+
+    @param future_grant_rows: Rows as returned by a `DictCursor` running
+        `SHOW FUTURE GRANTS TO ROLE PUBLIC`.
+    @returns: Descriptions of every future grant PUBLIC holds, empty if
+        none.
+    """
+    return [
+        f"{row.get('privilege', '')} on future {row.get('grant_on', '')} in {row.get('name', '')}"
+        for row in future_grant_rows
+    ]
+
+
 def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> list[str]:
     """Filters a list of visible object names (from `SHOW DATABASES` or
     `SHOW WAREHOUSES`) down to whichever ones are NOT the one allowed name
@@ -516,6 +599,15 @@ def main() -> int:
         # Codex P1, PR #57, round 2 -- see the module docstring's point 5.
         cursor.execute(f"SHOW GRANTS TO USER {user}")
         user_role_rows = cursor.fetchall()
+
+        # Codex P1, PR #57, round 4 -- see the module docstring's points 6
+        # and 7. Corrects an earlier, WRONG claim that no account-wide
+        # future-grants query existed for a role.
+        cursor.execute(f"SHOW FUTURE GRANTS TO ROLE {role}")
+        future_grant_rows = cursor.fetchall()
+
+        cursor.execute("SHOW FUTURE GRANTS TO ROLE PUBLIC")
+        public_future_grant_rows = cursor.fetchall()
     finally:
         conn.close()
 
@@ -528,6 +620,8 @@ def main() -> int:
     out_of_bounds_databases = find_out_of_bounds_names(visible_databases, database)
     out_of_bounds_warehouses = find_out_of_bounds_names(visible_warehouses, warehouse)
     unexpected_user_roles = find_unexpected_user_role_grants(user_role_rows, role)
+    future_violations = find_future_grant_violations(future_grant_rows, role, database, warehouse)
+    public_future_violations = find_public_future_grants(public_future_grant_rows)
 
     if (
         violations
@@ -535,6 +629,8 @@ def main() -> int:
         or out_of_bounds_databases
         or out_of_bounds_warehouses
         or unexpected_user_roles
+        or future_violations
+        or public_future_violations
     ):
         print(
             f"error: {role}/PUBLIC/{user} fail the DEV boundary or PUBLIC-grants audit:",
@@ -550,12 +646,16 @@ def main() -> int:
             print(f"  - visible warehouse beyond the DEV boundary: {extra_warehouse}", file=sys.stderr)
         for extra_role in unexpected_user_roles:
             print(f"  - unexpected role granted to {user}: {extra_role}", file=sys.stderr)
+        for violation in future_violations:
+            print(f"  - future grant on {role} outside {database}/{warehouse}: {violation}", file=sys.stderr)
+        for violation in public_future_violations:
+            print(f"  - PUBLIC future grant (PUBLIC must have none, anywhere): {violation}", file=sys.stderr)
         return 1
 
     print(
-        f"confirmed: all {len(grant_rows)} grant(s) on {role} stay within {database}/{warehouse}, "
-        f"PUBLIC holds zero grants, no other database/warehouse is visible, and {user} has no "
-        "unexpected role grants"
+        f"confirmed: all {len(grant_rows)} grant(s) (+ {len(future_grant_rows)} future grant(s)) on "
+        f"{role} stay within {database}/{warehouse}, PUBLIC holds zero current or future grants, "
+        f"no other database/warehouse is visible, and {user} has no unexpected role grants"
     )
     return 0
 

@@ -123,16 +123,31 @@ jobs:
       # session in CI; this is the security-critical grant-boundary logic
       # for the one workflow holding a real writable Snowflake credential,
       # so its own coverage stays gated the same as the other two files.
+      # check_forbidden_grants.py (#11, F1-S8, round 4) joins the same gate
+      # -- its own text-scan logic is fully unit-testable with no
+      # Snowflake connection at all.
       - name: Run snowflake/ tooling unit tests
         working-directory: snowflake
         # --cov-fail-under enforces the 98% this PR establishes on all
-        # three files (round-2 claude-review finding) -- without it,
+        # four files (round-2 claude-review finding) -- without it,
         # term-missing only PRINTS coverage; a future regression would stay
         # green. Matches how npm run test -- --coverage is gated elsewhere
         # in this repo. Set a few points below the current 98% so routine
         # additions (a new branch, an edge case) don't need a threshold
         # bump every time -- only a real coverage regression trips it.
-        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov-report=term-missing --cov-fail-under=90
+        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
         run: python3 snowflake/validate_migrations.py
+
+      # Codex P1, PR #57, round 4, :244: a PREVENTIVE, best-effort static
+      # scan for an obvious GRANT ... TO PUBLIC -- catches the class of bug
+      # here, at PR-review time, with no Snowflake connection needed, well
+      # before the gated live dispatch would otherwise be the first place
+      # it's caught. NOT a replacement for the post-deploy grants audit in
+      # dev-snowflake-contract.yml, which stays the authoritative detective
+      # control (see check_forbidden_grants.py's own module docstring for
+      # why a purely textual scan can never be authoritative).
+      - name: Check migrations for an obvious forbidden PUBLIC grant
+        working-directory: snowflake
+        run: python3 check_forbidden_grants.py
