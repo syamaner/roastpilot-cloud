@@ -3,7 +3,7 @@
 ROASTPILOT_DEV / DEV_CI_WH (F1-S8, issue #11, factory.md §8).
 
 Connects to Snowflake with the SAME identity the live contract-check job
-uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks seven
+uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks eight
 independent things, all of which must pass:
 
 1. ``SHOW GRANTS TO ROLE <role>`` — every CURRENT object grant on the
@@ -37,18 +37,33 @@ independent things, all of which must pass:
    ``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()``,
    which stops secondary roles activating by default on ANY connection
    this user makes, this script's included.
-4. ``SHOW GRANTS TO ROLE PUBLIC`` — EVERY grant PUBLIC holds, anywhere, is
-   a violation, not merely one that reaches outside the DEV boundary
-   (Codex P1, PR #57, round 3). `AGENTS.md`'s own Architecture Invariant
-   is "No grants to `PUBLIC`, anywhere" — a PUBLIC grant scoped entirely
-   inside `ROASTPILOT_DEV`/`DEV_CI_WH` is still a violation of that
-   invariant, so this check (`find_public_grants`) does NOT reuse the
-   boundary-aware `is_allowed_grant`/`find_violations` logic checks #1 and
-   #5 use — PUBLIC is held to a stricter, unconditional standard: zero
-   grants, full stop. PUBLIC is also active for every Snowflake session
-   regardless of secondary-roles settings, and its own grants never appear
-   in `SHOW GRANTS TO ROLE <primary role>`'s output, so this audit is the
-   only thing that catches a PUBLIC grant at all.
+4. ``SHOW GRANTS TO ROLE PUBLIC`` — EVERY grant PUBLIC holds that's
+   VISIBLE TO THIS DEV-SCOPED ROLE is a violation, not merely one that
+   reaches outside the DEV boundary (Codex P1, PR #57, round 3). `AGENTS
+   .md`'s own Architecture Invariant is "No grants to `PUBLIC`, anywhere"
+   — a PUBLIC grant scoped entirely inside `ROASTPILOT_DEV`/`DEV_CI_WH` is
+   still a violation of that invariant, so this check (`find_public_
+   grants`) does NOT reuse the boundary-aware `is_allowed_grant`/`find_
+   violations` logic checks #1 and #5 use — PUBLIC is held to a stricter,
+   unconditional standard: zero grants, full stop, for whatever this role
+   can see.
+   COMPLETENESS LIMIT (Codex P1, PR #57, round 5, :596 — tracked #59,
+   don't over-fix here): `SHOW GRANTS TO ROLE PUBLIC`, run BY this
+   DEV-scoped role, is only guaranteed to show grants within this role's
+   OWN visibility -- true account-wide completeness would need `MANAGE
+   GRANTS`, a broad, account-level privilege this role deliberately does
+   NOT hold (granting it would contradict the whole minimal-role premise
+   this audit exists to enforce). So this check is a DEV-visibility-scoped,
+   best-effort DETECTIVE control, not an account-wide guarantee that
+   PUBLIC truly has zero grants everywhere. The actual account-wide "no
+   grants to PUBLIC" enforcement is layered elsewhere, not in this one
+   query: `check_forbidden_grants.py`'s pre-deploy migration scan
+   (preventive), the `AGENTS.md` invariant itself (policy), and account
+   provisioning discipline (nothing should ever grant to PUBLIC in the
+   first place). A residual PUBLIC grant this check can't see is still
+   contained to whatever this role can't see either -- not a PROD
+   exposure, since F1-S8's blast-radius guarantee doesn't depend on this
+   specific check being complete.
 5. ``SHOW GRANTS TO USER <user>`` — confirms the CI service user itself
    has no role granted to it beyond the primary role (+ PUBLIC, which
    Snowflake grants to every user implicitly). Disabling secondary roles
@@ -74,7 +89,21 @@ independent things, all of which must pass:
    zero-tolerance standard as check #4, applied to PUBLIC's future grants
    (Codex P1, PR #57, round 4): `AGENTS.md`'s "No grants to `PUBLIC`,
    anywhere" invariant doesn't carve out an exception for grants that
-   haven't materialized yet.
+   haven't materialized yet. Same COMPLETENESS LIMIT as check #4 applies
+   here too — DEV-visibility-scoped, not an account-wide guarantee; see
+   check #4's note.
+8. ``SHOW USERS LIKE '<user>'`` — verifies the CI service user's
+   `DEFAULT_SECONDARY_ROLES` property is actually empty (Codex P1, PR #57,
+   round 5, :270). The operator-run `ALTER USER ROASTPILOT_DEV_CI SET
+   DEFAULT_SECONDARY_ROLES = ()` (see point 3) is what's SUPPOSED to keep
+   secondary roles off the deploy connection, but it's a manual,
+   account-level action this script has no way to enforce or re-run —
+   only to VERIFY. If that command is ever missed (e.g. the user gets
+   re-created without it), the deploy connection's secondary-roles
+   protection silently disappears with no code-visible signal. This check
+   turns that silent operator dependency into a verified precondition,
+   checked on every dispatch, in both the pre- and post-deploy audits
+   (`find_default_secondary_roles_violation`).
 
 This is the F1-S8 acceptance bar: a compromised or misbehaving agent
 holding this role must never be able to touch PROD, PREVIEW, or any other
@@ -167,22 +196,29 @@ specifically, checks #6/#7 are.
 NOTE (operator-supervised validation required): the connection/query
 mechanics below follow Snowflake's documented key-pair (JWT) auth flow and
 `SHOW GRANTS TO ROLE`/`SHOW FUTURE GRANTS TO ROLE`/`SHOW GRANTS TO USER`/
-`SHOW DATABASES`/`SHOW WAREHOUSES`'s documented output columns, and `USE
-SECONDARY ROLES NONE`'s documented statement syntax, but this script has
-never run against a real Snowflake session (no credentials available to
-the agent that wrote it, per factory.md's own "agent jobs hold no
-Snowflake secrets" invariant) — including the `SHOW FUTURE GRANTS`
-column shapes (`grant_on`/`name`/`grantee_name` rather than `SHOW GRANTS
-TO ROLE`'s `granted_on`/`name`/`granted_to`), which are taken from
-Snowflake's own SQL command reference, not verified against a live
-response. The FIRST real dispatch of the gated job is this script's
-actual validation — same "the operator's live dispatch doubles as the
-audit" pattern already used elsewhere in this repo for code that can't be
-verified without live infrastructure access. The operator is also
+`SHOW USERS`/`SHOW DATABASES`/`SHOW WAREHOUSES`'s documented output
+columns, and `USE SECONDARY ROLES NONE`'s documented statement syntax, but
+this script has never run against a real Snowflake session (no
+credentials available to the agent that wrote it, per factory.md's own
+"agent jobs hold no Snowflake secrets" invariant) — including the `SHOW
+FUTURE GRANTS` column shapes (`grant_on`/`name`/`grantee_name` rather than
+`SHOW GRANTS TO ROLE`'s `granted_on`/`name`/`granted_to`), which are taken
+from Snowflake's own SQL command reference, not verified against a live
+response. The `SHOW USERS`/`default_secondary_roles` column's EXACT
+returned representation for an empty set is the least certain of these —
+`find_default_secondary_roles_violation` deliberately recognizes only the
+specific empty-set forms documented/expected (`"[]"` or an already-parsed
+empty list) and fails CLOSED on anything else, including a representation
+this check doesn't recognize, rather than guessing at an unfamiliar shape
+and risking a false pass. The FIRST real dispatch of the gated job is this
+script's actual validation — same "the operator's live dispatch doubles as
+the audit" pattern already used elsewhere in this repo for code that can't
+be verified without live infrastructure access. The operator is also
 responsible for running
 ``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`` (an
 account-level, elevated-privilege action) before that first dispatch — see
-point 3 above.
+point 3 above; check #8 verifies that action actually took effect, rather
+than trusting it happened.
 """
 
 from __future__ import annotations
@@ -407,8 +443,9 @@ def find_violations(
 
 
 def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
-    """Returns a human-readable description of EVERY grant PUBLIC holds —
-    empty only if PUBLIC has none at all (Codex P1, PR #57, round 3).
+    """Returns a human-readable description of EVERY grant PUBLIC holds
+    that's VISIBLE TO THIS DEV-SCOPED ROLE — empty only if none are visible
+    (Codex P1, PR #57, round 3).
 
     Deliberately does NOT reuse `find_violations`'s boundary-aware logic:
     `AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`,
@@ -417,6 +454,15 @@ def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
     checking PUBLIC against the DEV boundary (as an earlier version of
     this audit did) would wrongly ALLOW it. PUBLIC should have zero
     grants, full stop -- every row here is unconditionally a violation.
+
+    COMPLETENESS LIMIT (Codex P1, PR #57, round 5, :596 -- tracked #59):
+    the caller's `SHOW GRANTS TO ROLE PUBLIC` rows are only what's visible
+    to THIS role's own session -- true account-wide completeness would
+    need `MANAGE GRANTS`, which this minimal role deliberately doesn't
+    hold. This function (and the audit built on it) is a DEV-visibility-
+    scoped, best-effort detective control, not an account-wide guarantee.
+    See the module docstring's point 4 for the full reasoning and what
+    provides the actual account-wide enforcement instead.
 
     @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO ROLE PUBLIC`.
@@ -467,14 +513,16 @@ def find_future_grant_violations(
 
 def find_public_future_grants(future_grant_rows: list[dict[str, object]]) -> list[str]:
     """Returns a human-readable description of EVERY future grant PUBLIC
-    holds — empty only if PUBLIC has none at all (Codex P1, PR #57, round
-    4).
+    holds that's VISIBLE TO THIS DEV-SCOPED ROLE — empty only if none are
+    visible (Codex P1, PR #57, round 4).
 
     Same unconditional standard as `find_public_grants`, applied to `SHOW
     FUTURE GRANTS TO ROLE PUBLIC` rows (which use `grant_on`, not
     `granted_on` -- see `find_future_grant_violations`): `AGENTS.md`'s "No
     grants to PUBLIC, anywhere" invariant doesn't carve out an exception
-    for grants that haven't materialized yet.
+    for grants that haven't materialized yet. Same COMPLETENESS LIMIT as
+    `find_public_grants` (tracked #59) -- DEV-visibility-scoped, not an
+    account-wide guarantee.
 
     @param future_grant_rows: Rows as returned by a `DictCursor` running
         `SHOW FUTURE GRANTS TO ROLE PUBLIC`.
@@ -554,6 +602,51 @@ def find_unexpected_user_role_grants(
     return unexpected
 
 
+def find_default_secondary_roles_violation(user_rows: list[dict[str, object]], user: str) -> str | None:
+    """Returns a violation description if the CI user's
+    `DEFAULT_SECONDARY_ROLES` property isn't verifiably empty, else `None`
+    (Codex P1, PR #57, round 5, :270).
+
+    The operator-run `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_
+    ROLES = ()` (module docstring point 3) is what's SUPPOSED to keep
+    secondary roles off the schemachange deploy connection -- a manual,
+    account-level action this script has no way to run or enforce, only
+    to verify. This turns that silent operator dependency into a checked
+    precondition: if the property is ever missing (e.g. the user gets
+    re-created without it, or was never set), the deploy connection's
+    secondary-roles protection would silently disappear with no other
+    signal anywhere in this job.
+
+    Accepts ONLY the specific empty-set representations expected for
+    `DEFAULT_SECONDARY_ROLES = ()` -- the JSON array string `"[]"`, or an
+    already-parsed empty Python list (in case the connector parses this
+    particular column) -- and fails CLOSED on anything else, including a
+    missing column, `None`, or an unrecognized representation (e.g. an
+    `["ALL"]`-shaped value, which is exactly the misconfiguration this
+    check exists to catch). This column's exact returned format has not
+    been verified against a live session -- see the module NOTE -- so
+    recognizing only the specific forms expected, and treating everything
+    else as a failure, is the fail-closed choice consistent with the rest
+    of this module rather than guessing at an unfamiliar shape.
+
+    @param user_rows: Rows as returned by a `DictCursor` running `SHOW
+        USERS LIKE '<user>'`.
+    @param user: The CI service user being checked.
+    @returns: A violation description, or `None` if verifiably empty.
+    """
+    if not user_rows:
+        return f"SHOW USERS LIKE '{user}' returned no rows -- cannot verify DEFAULT_SECONDARY_ROLES"
+    value = user_rows[0].get("default_secondary_roles", "<column missing>")
+    if value == "[]" or value == []:
+        return None
+    return (
+        f"{user}'s DEFAULT_SECONDARY_ROLES is {value!r}, expected an empty set ([]) -- the "
+        "operator-run ALTER USER ... SET DEFAULT_SECONDARY_ROLES = () may be missing or have "
+        "been reset (e.g. after a user re-creation), leaving the deploy connection's "
+        "secondary-roles protection unverified"
+    )
+
+
 def main() -> int:
     account = require_env("SNOWFLAKE_ACCOUNT")
     user = require_env("SNOWFLAKE_DEV_USER")
@@ -608,6 +701,13 @@ def main() -> int:
 
         cursor.execute("SHOW FUTURE GRANTS TO ROLE PUBLIC")
         public_future_grant_rows = cursor.fetchall()
+
+        # Codex P1, PR #57, round 5 -- see the module docstring's point 8.
+        # Turns the operator's manual ALTER USER ... DEFAULT_SECONDARY_
+        # ROLES = () dependency into a verified precondition instead of a
+        # silent assumption.
+        cursor.execute(f"SHOW USERS LIKE '{user}'")
+        show_user_rows = cursor.fetchall()
     finally:
         conn.close()
 
@@ -615,13 +715,16 @@ def main() -> int:
     # Codex P1, PR #57, round 3: PUBLIC is held to an unconditional
     # zero-grants standard (AGENTS.md's "No grants to PUBLIC, anywhere"),
     # not the boundary-aware check the primary role gets -- see
-    # find_public_grants's own docstring.
+    # find_public_grants's own docstring, including its COMPLETENESS LIMIT
+    # (round 5, :596, tracked #59): this is DEV-visibility-scoped, not an
+    # account-wide guarantee.
     public_violations = find_public_grants(public_grant_rows)
     out_of_bounds_databases = find_out_of_bounds_names(visible_databases, database)
     out_of_bounds_warehouses = find_out_of_bounds_names(visible_warehouses, warehouse)
     unexpected_user_roles = find_unexpected_user_role_grants(user_role_rows, role)
     future_violations = find_future_grant_violations(future_grant_rows, role, database, warehouse)
     public_future_violations = find_public_future_grants(public_future_grant_rows)
+    default_secondary_roles_violation = find_default_secondary_roles_violation(show_user_rows, user)
 
     if (
         violations
@@ -631,6 +734,7 @@ def main() -> int:
         or unexpected_user_roles
         or future_violations
         or public_future_violations
+        or default_secondary_roles_violation
     ):
         print(
             f"error: {role}/PUBLIC/{user} fail the DEV boundary or PUBLIC-grants audit:",
@@ -639,7 +743,7 @@ def main() -> int:
         for violation in violations:
             print(f"  - grant on {role} outside {database}/{warehouse}: {violation}", file=sys.stderr)
         for violation in public_violations:
-            print(f"  - PUBLIC grant (PUBLIC must have none, anywhere): {violation}", file=sys.stderr)
+            print(f"  - PUBLIC grant visible to {role} (PUBLIC must have none visible): {violation}", file=sys.stderr)
         for extra_database in out_of_bounds_databases:
             print(f"  - visible database beyond the DEV boundary: {extra_database}", file=sys.stderr)
         for extra_warehouse in out_of_bounds_warehouses:
@@ -649,13 +753,19 @@ def main() -> int:
         for violation in future_violations:
             print(f"  - future grant on {role} outside {database}/{warehouse}: {violation}", file=sys.stderr)
         for violation in public_future_violations:
-            print(f"  - PUBLIC future grant (PUBLIC must have none, anywhere): {violation}", file=sys.stderr)
+            print(
+                f"  - PUBLIC future grant visible to {role} (PUBLIC must have none visible): {violation}",
+                file=sys.stderr,
+            )
+        if default_secondary_roles_violation:
+            print(f"  - {default_secondary_roles_violation}", file=sys.stderr)
         return 1
 
     print(
         f"confirmed: all {len(grant_rows)} grant(s) (+ {len(future_grant_rows)} future grant(s)) on "
-        f"{role} stay within {database}/{warehouse}, PUBLIC holds zero current or future grants, "
-        f"no other database/warehouse is visible, and {user} has no unexpected role grants"
+        f"{role} stay within {database}/{warehouse}, PUBLIC holds zero current or future grants "
+        f"visible to this role, no other database/warehouse is visible, {user} has no unexpected "
+        f"role grants, and {user}'s DEFAULT_SECONDARY_ROLES is verified empty"
     )
     return 0
 

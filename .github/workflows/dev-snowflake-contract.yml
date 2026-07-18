@@ -120,6 +120,10 @@ jobs:
     # terminates it -- without this, a stalled/locked migration would keep
     # both alive until Actions' own default (hours), not this job's actual
     # expected runtime (a schema migration against a tiny XSMALL warehouse).
+    # Deliberately LONGER than the deploy step's own 10-minute timeout
+    # below (Codex P1, PR #57, round 5, :123) -- the gap is budget for the
+    # post-deploy audit to run and report even after a stalled deploy is
+    # killed, not slack to raise casually.
     timeout-minutes: 15
     permissions:
       contents: read
@@ -207,18 +211,27 @@ jobs:
         # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW FUTURE GRANTS TO
         # ROLE (for the role and for PUBLIC), SHOW DATABASES, or SHOW
         # WAREHOUSES report anything outside the DEV database/warehouse
-        # this role is provisioned to touch, or if PUBLIC holds ANY current
-        # or future grant at all (assert_dev_ci_grants.py, #11). Connects
-        # directly via snowflake-connector-python with the key held in
-        # memory only, never written to disk (unlike the deploy step below,
-        # which needs schemachange's file-based env layer). Secondary
-        # roles are disabled for this session via a real `USE SECONDARY
-        # ROLES NONE` statement the script issues right after connecting
-        # (Codex P1, PR #57, round 2 -- an earlier `session_parameters`
-        # attempt here was invalid and never actually worked). The deploy
-        # connection below has no equivalent mid-session hook, so it's
-        # covered instead by an operator-run `ALTER USER ROASTPILOT_DEV_CI
-        # SET DEFAULT_SECONDARY_ROLES = ()` -- see that step's own comment.
+        # this role is provisioned to touch, or if PUBLIC holds any current
+        # or future grant VISIBLE TO THIS ROLE (assert_dev_ci_grants.py,
+        # #11 -- the PUBLIC checks are a DEV-visibility-scoped, best-effort
+        # detective control, not an account-wide completeness guarantee;
+        # true completeness would need MANAGE GRANTS, which this minimal
+        # role deliberately doesn't hold -- tracked #59, see the script's
+        # own docstring), or if the CI user's DEFAULT_SECONDARY_ROLES isn't
+        # verifiably empty (SHOW USERS LIKE, Codex P1, PR #57, round 5).
+        # Connects directly via snowflake-connector-python with the key
+        # held in memory only, never written to disk (unlike the deploy
+        # step below, which needs schemachange's file-based env layer).
+        # Secondary roles are disabled for this session via a real `USE
+        # SECONDARY ROLES NONE` statement the script issues right after
+        # connecting (Codex P1, PR #57, round 2 -- an earlier
+        # `session_parameters` attempt here was invalid and never actually
+        # worked). The deploy connection below has no equivalent
+        # mid-session hook, so it's covered instead by an operator-run
+        # `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
+        # -- see that step's own comment. This step's SHOW USERS check
+        # verifies that operator action actually took effect, rather than
+        # silently trusting it happened.
         working-directory: snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -249,6 +262,17 @@ jobs:
         # unchanged. The SAME command a local dev would run, unmodified —
         # no CI-specific fork of the deploy path to drift out of sync with
         # local usage.
+        # `timeout-minutes` here, SHORTER than the job's own 15 (Codex P1,
+        # PR #57, round 5, :123): the job-level timeout alone kills the
+        # RUNNER mid-stall, which would also kill the `if: always()`
+        # post-deploy audit below before it ever runs -- and DDL already
+        # auto-commits, so a stall here doesn't undo whatever the migration
+        # already applied. A step-level timeout shorter than the job's
+        # leaves enough job budget for the post-deploy audit to actually
+        # run and report on whatever state the stalled deploy left behind,
+        # rather than the whole job just vanishing mid-migration with no
+        # final audit at all.
+        timeout-minutes: 10
         working-directory: snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}

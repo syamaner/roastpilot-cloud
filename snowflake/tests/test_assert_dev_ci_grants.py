@@ -441,6 +441,52 @@ class TestFindUnexpectedUserRoleGrants:
         assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
 
 
+_CI_USER = "ROASTPILOT_DEV_CI"
+
+
+class TestFindDefaultSecondaryRolesViolation:
+    """Codex P1, PR #57, round 5, :270: turns the operator-run `ALTER USER
+    ... SET DEFAULT_SECONDARY_ROLES = ()` dependency into a VERIFIED
+    precondition instead of a silently-trusted one.
+    """
+
+    def test_none_when_the_json_array_string_is_empty(self) -> None:
+        rows = [{"default_secondary_roles": "[]"}]
+        assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
+
+    def test_none_when_the_connector_already_parsed_an_empty_list(self) -> None:
+        # In case the connector parses this particular column into a
+        # Python object rather than leaving it as a raw JSON string.
+        rows = [{"default_secondary_roles": []}]
+        assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
+
+    def test_flags_all_as_a_violation(self) -> None:
+        # The exact misconfiguration this check exists to catch: the
+        # operator-run ALTER USER ... DEFAULT_SECONDARY_ROLES = () was
+        # never run, or was reset, leaving ALL secondary roles active.
+        rows = [{"default_secondary_roles": '["ALL"]'}]
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
+        assert "DEFAULT_SECONDARY_ROLES" in violation
+
+    def test_flags_a_missing_column_as_a_violation_fails_closed(self) -> None:
+        # Fails CLOSED on a shape this check doesn't recognize, rather than
+        # silently treating "column absent" as "safe".
+        rows = [{"name": _CI_USER}]  # no default_secondary_roles key at all
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
+
+    def test_flags_none_value_as_a_violation_fails_closed(self) -> None:
+        rows = [{"default_secondary_roles": None}]
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
+
+    def test_flags_no_rows_at_all_as_a_violation(self) -> None:
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation([], _CI_USER)
+        assert violation is not None
+        assert "no rows" in violation
+
+
 class TestMain:
     """main()'s own connection/query wiring, with snowflake.connector.connect
     mocked -- there is no real Snowflake credential available to test
@@ -449,12 +495,13 @@ class TestMain:
     correctly, which is what's actually testable without live
     infrastructure access.
 
-    main() now issues EIGHT sequential statements on the same cursor: `USE
+    main() now issues NINE sequential statements on the same cursor: `USE
     SECONDARY ROLES NONE` (no fetchall), then SHOW GRANTS TO ROLE, SHOW
     DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, SHOW GRANTS TO
-    USER, SHOW FUTURE GRANTS TO ROLE, and SHOW FUTURE GRANTS TO ROLE PUBLIC
-    (each followed by a fetchall) -- mock_cursor.fetchall's side_effect is
-    a LIST of seven return values, one per query, in that order.
+    USER, SHOW FUTURE GRANTS TO ROLE, SHOW FUTURE GRANTS TO ROLE PUBLIC, and
+    SHOW USERS LIKE (each followed by a fetchall) -- mock_cursor.fetchall's
+    side_effect is a LIST of eight return values, one per query, in that
+    order.
     """
 
     def _set_required_env(self, monkeypatch, pem: str) -> None:
@@ -474,6 +521,7 @@ class TestMain:
         user_role_rows: list[dict[str, object]] | None = None,
         future_grant_rows: list[dict[str, object]] | None = None,
         public_future_grant_rows: list[dict[str, object]] | None = None,
+        show_user_rows: list[dict[str, object]] | None = None,
     ) -> MagicMock:
         mock_cursor = MagicMock()
         mock_cursor.fetchall.side_effect = [
@@ -484,6 +532,7 @@ class TestMain:
             user_role_rows if user_role_rows is not None else [{"role": _DEV_ROLE}],
             future_grant_rows if future_grant_rows is not None else [],
             public_future_grant_rows if public_future_grant_rows is not None else [],
+            show_user_rows if show_user_rows is not None else [{"default_secondary_roles": "[]"}],
         ]
         return mock_cursor
 
@@ -570,6 +619,45 @@ class TestMain:
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert f"SHOW FUTURE GRANTS TO ROLE {_DEV_ROLE}" in executed_statements
         assert "SHOW FUTURE GRANTS TO ROLE PUBLIC" in executed_statements
+
+    def test_audits_show_users_like_the_ci_user_codex_p1_round5(self, monkeypatch) -> None:
+        # Codex P1, PR #57, round 5, :270 -- turns the operator's manual
+        # ALTER USER ... DEFAULT_SECONDARY_ROLES = () dependency into a
+        # verified precondition.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 0
+        executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
+        assert "SHOW USERS LIKE 'ROASTPILOT_DEV_CI'" in executed_statements
+
+    def test_returns_1_when_default_secondary_roles_is_not_verifiably_empty_codex_p1_round5(
+        self, monkeypatch, capsys
+    ) -> None:
+        # The exact misconfiguration this check exists to catch: the
+        # operator-run ALTER USER ... DEFAULT_SECONDARY_ROLES = () was
+        # missing or reset (e.g. after a user re-creation).
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            show_user_rows=[{"default_secondary_roles": '["ALL"]'}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "DEFAULT_SECONDARY_ROLES" in stderr
 
     def test_returns_1_when_the_role_has_a_future_grant_outside_dev_codex_p1_round4(
         self, monkeypatch, capsys

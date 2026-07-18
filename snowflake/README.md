@@ -179,23 +179,44 @@ forbidden grant — a bad `GRANT ... TO PUBLIC` migration is valid SQL and
 succeeds, so only re-auditing the database AFTER it's applied can catch
 it; a pre-deploy-only check would let that class of bad migration pass).
 
-The grants check covers seven independent things, all of which must pass:
+The grants check covers eight independent things, all of which must pass:
 `SHOW GRANTS TO ROLE` (current object grants on the primary role stay
 within `ROASTPILOT_DEV`/`DEV_CI_WH`), `SHOW DATABASES`/`SHOW WAREHOUSES`
 (nothing else is even VISIBLE to the role — defense in depth against
 visibility paths other than a grant, e.g. imported privileges), `SHOW
-GRANTS TO ROLE PUBLIC` (PUBLIC must hold **zero grants, anywhere** —
-`AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`, anywhere",
-not merely "PUBLIC stays inside the DEV boundary", so this check does NOT
-reuse the primary role's boundary-aware logic), `SHOW GRANTS TO USER` (the
-CI service user itself carries no role beyond the primary one, plus
-PUBLIC), and `SHOW FUTURE GRANTS TO ROLE` for both the primary role and
-PUBLIC (a future grant — `GRANT ... ON FUTURE TABLES IN SCHEMA ...` —
-produces no row in `SHOW GRANTS` and may target an object that doesn't
-exist yet, so it's invisible to every check above without a dedicated
-query; `SHOW FUTURE GRANTS TO ROLE <role>` is real Snowflake syntax that
-lists every future grant for a role account-wide — an earlier version of
-this README/module wrongly claimed no such account-wide query existed).
+GRANTS TO ROLE PUBLIC` (PUBLIC must hold **zero grants visible to this
+role** — `AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`,
+anywhere", not merely "PUBLIC stays inside the DEV boundary", so this
+check does NOT reuse the primary role's boundary-aware logic), `SHOW
+GRANTS TO USER` (the CI service user itself carries no role beyond the
+primary one, plus PUBLIC), `SHOW FUTURE GRANTS TO ROLE` for both the
+primary role and PUBLIC (a future grant — `GRANT ... ON FUTURE TABLES IN
+SCHEMA ...` — produces no row in `SHOW GRANTS` and may target an object
+that doesn't exist yet, so it's invisible to every check above without a
+dedicated query; `SHOW FUTURE GRANTS TO ROLE <role>` is real Snowflake
+syntax that lists every future grant for a role account-wide — an earlier
+version of this README/module wrongly claimed no such account-wide query
+existed), and `SHOW USERS LIKE '<user>'` (verifies the CI user's
+`DEFAULT_SECONDARY_ROLES` is actually empty — see "Secondary roles" below).
+
+**PUBLIC-audit completeness limit (tracked [#59]):** `SHOW GRANTS TO ROLE
+PUBLIC`/`SHOW FUTURE GRANTS TO ROLE PUBLIC`, run by this DEV-scoped role,
+are only guaranteed to show grants **visible to this role's own session**
+— true account-wide completeness would need `MANAGE GRANTS`, a broad,
+account-level privilege this role deliberately does NOT hold (granting it
+would contradict the whole minimal-role premise this audit exists to
+enforce). So the PUBLIC checks are a DEV-visibility-scoped, best-effort
+**detective** control, not an account-wide guarantee that PUBLIC truly has
+zero grants everywhere. The actual account-wide "no grants to PUBLIC"
+enforcement is layered across three things, none of which is this one
+query: `check_forbidden_grants.py`'s pre-deploy migration scan
+(**preventive**), the `AGENTS.md` invariant itself (**policy**), and
+account provisioning discipline (nothing should ever grant to PUBLIC in
+the first place). A residual PUBLIC grant this check can't see is still
+contained to `ROASTPILOT_DEV` — not a PROD exposure, since F1-S8's
+blast-radius guarantee doesn't depend on this one check being complete.
+
+[#59]: https://github.com/syamaner/roastpilot-cloud/issues/59
 
 Every identifier comparison (database, warehouse, role, object name)
 routes through one function, `identifiers_match` — an EXACT, byte-for-byte
@@ -228,6 +249,14 @@ mechanism can't cover both:
   DEFAULT_SECONDARY_ROLES = ()`, which stops secondary roles activating by
   default on any connection this user makes.
 
+That operator action is manual and unenforceable by code — if it's ever
+missed (e.g. the user gets re-created without it), the deploy connection's
+protection would silently disappear. The grants check **verifies** it took
+effect, rather than trusting it happened: it runs `SHOW USERS LIKE
+'ROASTPILOT_DEV_CI'` and fails if `DEFAULT_SECONDARY_ROLES` isn't
+verifiably empty (`[]`), fail-closed on any representation it doesn't
+recognize.
+
 Per the factory security model (`factory.md` §8: agent jobs hold no
 Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
 job declares `environment: dev-snowflake-ci` — a GitHub Environment with a
@@ -240,6 +269,14 @@ not just a UI speed bump. It also runs with `step-security/harden-runner`'s
 egress LOCKED to a fixed allowlist (GitHub, PyPI, Snowflake) rather than
 the audit-only mode the rest of this factory's jobs use, since a live
 credential is genuinely at stake here.
+
+The job has a 15-minute `timeout-minutes`; the deploy step inside it has
+its OWN, shorter 10-minute timeout. That gap is deliberate: a job-level
+timeout alone kills the runner mid-stall and takes the post-deploy grants
+audit down with it — the deploy step's own shorter timeout means a stalled
+deploy gets killed first, leaving the job enough budget left to still run
+that audit and report on whatever the stalled deploy left behind (DDL
+auto-commits, so a stall doesn't undo it).
 
 `validate_migrations.py` mirrors schemachange's own deploy-time collector
 exactly (issue #18): it discovers every migration RECURSIVELY, in any
