@@ -76,18 +76,24 @@ cancellation step too.
 first, while the workflow is still enabled and its runs are trivially
 listable, avoids that entirely.
 
-**List active/queued runs on both factory workflows.** `--status` only
-keeps the LAST value passed if you repeat the flag (a known `gh` CLI
+**List active/queued/pending runs on both factory workflows.** `--status`
+only keeps the LAST value passed if you repeat the flag (a known `gh` CLI
 limitation, cli/cli#7949) — `--status in_progress --status queued` would
-silently only match `queued`. Filter both statuses in one call via
+silently only match `queued`. Filter all three statuses in one call via
 `--json`/`--jq` instead (verified: `gh run list --help` lists `status`
-and `databaseId` as valid `--json` fields):
+and `databaseId` as valid `--json` fields, and lists `pending` as a
+distinct status value from `queued`/`in_progress` — a run waiting behind
+`implement-ready-issues.yml`'s `publish` job's `cancel-in-progress: false`
+concurrency group sits as `pending`, not `queued`, so it's missed if you
+only filter the other two). `--limit`/`-L` defaults to 20 (verified
+against `gh run list --help`), which silently truncates a runaway with
+more than 20 in-flight runs — pass a higher explicit limit:
 
 ```bash
-gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml \
-  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-gh run list -R syamaner/roastpilot-cloud --workflow implement-ready-issues.yml \
-  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml --limit 200 \
+  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .databaseId'
+gh run list -R syamaner/roastpilot-cloud --workflow implement-ready-issues.yml --limit 200 \
+  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .databaseId'
 ```
 
 **Cancel each one found:**
@@ -195,13 +201,30 @@ run side has no such trap, since every `Triage Issues` run inside the
 exact pause window is, by definition, one that hit `pause-notice` instead
 of the real chain.
 
+**This rerun-based backfill only covers the PAUSED window — it does NOT
+cover a DISABLED workflow.** A disabled workflow doesn't fire at all, for
+any trigger — no run is created, so there's nothing to rerun, and (as
+above) there's no `labeled`/`workflow_dispatch` trigger to fall back on
+either. Concretely: any issue opened while `triage-issues.yml` was
+disabled (§3) is **not auto-backfillable today** — it must be triaged
+manually until the workflow is re-enabled and a real event fires for it.
+Don't paper over this: check the disable/enable timestamps
+(`gh api repos/syamaner/roastpilot-cloud/actions/workflows --jq
+'.workflows[] | {name, updated_at, state}'`) against issue-creation times
+and handle anything in that window by hand. **#51 tracks the actual fix**
+— adding a `workflow_dispatch` (or `reopened`) trigger to
+`triage-issues.yml` so both the paused-window and disabled-window cases
+become deterministically re-runnable; that's a code change, out of scope
+for this docs slice.
+
 **Step 1 — find every triage run that fired during the pause window**
 (replace `<PAUSE_START>`/`<PAUSE_END>` with the actual timestamps you
 paused/resumed at — `--created` accepts a GitHub search-style date range,
-verified against `gh run list --help`):
+verified against `gh run list --help`; `--limit`/`-L` defaults to 20, so
+pass a higher explicit limit for a long pause window with many issues):
 
 ```bash
-gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml \
+gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml --limit 200 \
   --created "<PAUSE_START>..<PAUSE_END>" --json databaseId,createdAt,event
 ```
 
