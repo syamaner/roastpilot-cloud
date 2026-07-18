@@ -117,9 +117,22 @@
  *   `$GITHUB_STEP_SUMMARY` block (observability fix, 18 Jul 2026 —
  *   see {@link writeStepSummary}). Soft-defaulted to `undefined`
  *   (omitted from the summary) if unset; purely informational.
+ * - `IMPLEMENT_TRANSCRIPT_PATH` — path to the downloaded implement-agent
+ *   transcript artifact (F1-S10 slice 3, factory.md §13.12's provenance
+ *   trailer). May legitimately not exist (best-effort artifact download,
+ *   same as `PATCH_PATH`) — a missing/unreadable/unparseable transcript
+ *   degrades the trailer's model-ID field to "unavailable", never blocks
+ *   an otherwise-valid publish. Soft-defaulted to
+ *   `transcript-output/claude-execution-output.json` if unset.
+ * - `IMPLEMENT_PROMPT_VERSION` — stands in for a prompt/skill version;
+ *   see {@link ProvenanceContext.promptVersion}'s doc for why this is the
+ *   repository commit SHA rather than a named skill version. Soft-
+ *   defaulted to a clearly-labeled "unknown" if unset.
+ * - `DISPATCH_ACTOR` — the human who dispatched this run (`github.actor`).
+ *   Soft-defaulted to a clearly-labeled placeholder if unset.
  */
 
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { appendFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -127,12 +140,14 @@ import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   assertLabelDescriptionWithinLimit,
+  buildCommitTrailer,
   buildFallbackRefreshCommentBody,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
   buildPublishSuccessStepSummary,
   deriveBranchName,
+  extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
@@ -144,6 +159,7 @@ import {
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
+  type ProvenanceContext,
   type PublishStepSummaryContext,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
@@ -345,12 +361,19 @@ function runGit(args: string[]): void {
  * with). The patch file's own content is never passed as an argv value —
  * `git apply` reads it directly from disk, with the SAME invocation (no
  * `-p` override) as `getAuthoritativeChangedPaths` used to check it.
+ *
+ * The commit message carries the F1-S10 slice-3 provenance trailer (see
+ * {@link buildCommitTrailer}) on EVERY commit this function makes —
+ * including a re-dispatch's force-pushed refresh, unlike the PR body's
+ * own Provenance section (creation-time only).
  */
 function applyPatchAndPush(
   branchName: string,
   patchPath: string,
   issueNumber: number,
   issueTitle: string,
+  agentActionRef: string,
+  provenance: ProvenanceContext,
 ): void {
   runGit(["config", "user.name", "github-actions[bot]"]);
   runGit([
@@ -387,12 +410,31 @@ function applyPatchAndPush(
   // before.
   rmSync("patch-output", { recursive: true, force: true });
   rmSync("issue-context", { recursive: true, force: true });
+  // Same reasoning as patch-output/issue-context above: the "Download
+  // implement agent transcript artifact" step (best-effort, for the
+  // provenance trailer's model-ID field) writes into this job's checkout
+  // too, before this ever runs, and nothing stops a patch from touching
+  // .gitignore to un-ignore it.
+  rmSync("transcript-output", { recursive: true, force: true });
   runGit(["add", "-A"]);
   const commitTitle = `Implement #${issueNumber}: ${issueTitle}`.slice(
     0,
     120,
   );
-  runGit(["commit", "-m", commitTitle, "-m", `Closes #${issueNumber}`]);
+  const trailer = buildCommitTrailer({
+    issueNumber,
+    agentActionRef,
+    ...provenance,
+  });
+  runGit([
+    "commit",
+    "-m",
+    commitTitle,
+    "-m",
+    `Closes #${issueNumber}`,
+    "-m",
+    trailer,
+  ]);
   runGit(["push", "--force", "origin", branchName]);
 }
 
@@ -711,6 +753,36 @@ function writeStepSummary(markdown: string): void {
   }
 }
 
+/**
+ * Reads and parses the implement job's execution-transcript artifact for
+ * its model ID (F1-S10 slice 3, factory.md §13.12), via
+ * {@link extractModelIdFromTranscript}. Best-effort, same shape as the
+ * patch artifact's own "may legitimately not exist" handling: the
+ * transcript is uploaded with `if: always()` but its download step is
+ * `continue-on-error: true` (a missing/failed implement run may never
+ * have produced one at all), so a read failure here degrades the
+ * provenance trailer's model-ID field to "unavailable" — logged, never
+ * thrown, and never a reason to reject an otherwise-valid publish.
+ *
+ * @param transcriptPath - Path to the downloaded transcript artifact.
+ * @returns The model ID, or `null` if the file is missing, unreadable, or
+ *   {@link extractModelIdFromTranscript} couldn't find the field.
+ */
+async function readModelIdFromTranscript(transcriptPath: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(transcriptPath, "utf8");
+  } catch (err) {
+    console.warn(
+      `Could not read the implement transcript artifact at ${transcriptPath} ` +
+        `(provenance trailer's model ID will read "unavailable"): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  return extractModelIdFromTranscript(raw);
+}
+
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -731,6 +803,17 @@ export async function main(): Promise<void> {
   // "keep these two in sync" note.
   const agentActionRef =
     process.env.IMPLEMENT_AGENT_ACTION_REF ?? "unknown (IMPLEMENT_AGENT_ACTION_REF not set)";
+  // F1-S10 slice 3 (factory.md §13.12) — the fuller provenance trailer.
+  // Every field here is soft-defaulted, same reasoning as agentActionRef
+  // above: a missing/degraded value here can only ever weaken the
+  // PROVENANCE RECORD, never block an otherwise-valid publish.
+  const promptVersion =
+    process.env.IMPLEMENT_PROMPT_VERSION ?? "unknown (IMPLEMENT_PROMPT_VERSION not set)";
+  const dispatchActor = process.env.DISPATCH_ACTOR ?? "unknown-dispatcher";
+  const transcriptPath =
+    process.env.IMPLEMENT_TRANSCRIPT_PATH ?? "transcript-output/claude-execution-output.json";
+  const modelId = await readModelIdFromTranscript(transcriptPath);
+  const provenance: ProvenanceContext = { modelId, promptVersion, dispatchActor };
   // Which login `postFailureComment` treats as "our own prior comment"
   // (factory.md §13's publisher-identity switch). Soft-defaulted to the
   // built-in GITHUB_TOKEN identity, same reasoning as agentActionRef above:
@@ -853,7 +936,14 @@ export async function main(): Promise<void> {
       ? existingPr.headRef
       : deriveBranchName(issueNumber, issue.title);
 
-    applyPatchAndPush(branchName, patchPath, issueNumber, issue.title);
+    applyPatchAndPush(
+      branchName,
+      patchPath,
+      issueNumber,
+      issue.title,
+      agentActionRef,
+      provenance,
+    );
     branchPushed = true;
 
     if (existingPr) {
@@ -916,6 +1006,7 @@ export async function main(): Promise<void> {
           runUrl,
           agentActionRef,
           publishedViaFallback,
+          ...provenance,
         }),
       },
     );

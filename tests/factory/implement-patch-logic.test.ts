@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
+  buildCommitTrailer,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
   buildPublishSuccessStepSummary,
   deriveBranchName,
+  extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
@@ -376,11 +378,18 @@ describe("deriveBranchName", () => {
 });
 
 describe("buildImplementPrBody", () => {
+  const baseContext = {
+    issueNumber: 6,
+    runUrl: "https://github.com/o/r/actions/runs/123",
+    agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+    modelId: "claude-opus-4-1-20250805",
+    promptVersion: "1b781ecabc1234567890abcdef1234567890abcd",
+    dispatchActor: "syamaner",
+  };
+
   it("includes Closes #N and the run link", () => {
     const body = buildImplementPrBody({
-      issueNumber: 6,
-      runUrl: "https://github.com/o/r/actions/runs/123",
-      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      ...baseContext,
       publishedViaFallback: false,
     });
     expect(body).toContain("Closes #6");
@@ -391,26 +400,37 @@ describe("buildImplementPrBody", () => {
     expect(body).toContain("## Review routing");
   });
 
-  it("includes a Provenance section with the issue ref and the pinned agent action SHA (Codex round-3 finding)", () => {
+  it("includes the FULL provenance trailer — model, prompt/skill version, pinned agent action SHA, issue ref, and the dispatching human (F1-S10 slice 3, factory.md §13.12)", () => {
     const body = buildImplementPrBody({
-      issueNumber: 6,
-      runUrl: "https://github.com/o/r/actions/runs/123",
-      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      ...baseContext,
       publishedViaFallback: false,
     });
     expect(body).toContain("## Provenance");
+    expect(body).toContain("claude-opus-4-1-20250805");
     expect(body).toContain(
       "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
     );
-    expect(body).toContain("issue #6");
-    expect(body).toContain("F1-S10");
+    expect(body).toContain("1b781ecabc1234567890abcdef1234567890abcd");
+    expect(body).toContain("#6");
+    expect(body).toContain("@syamaner");
+    expect(body).toContain("Co-Authored-By");
+    expect(body).toContain("Signed-off-by");
+    expect(body).toContain("Provenance-*");
+  });
+
+  it("renders the model as 'unavailable' (never fabricated) when modelId is null", () => {
+    const body = buildImplementPrBody({
+      ...baseContext,
+      modelId: null,
+      publishedViaFallback: false,
+    });
+    expect(body).toContain("unavailable");
+    expect(body).not.toContain("claude-opus-4-1-20250805");
   });
 
   it("omits the fallback warning when publishedViaFallback is false", () => {
     const body = buildImplementPrBody({
-      issueNumber: 6,
-      runUrl: "https://github.com/o/r/actions/runs/123",
-      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      ...baseContext,
       publishedViaFallback: false,
     });
     expect(body).not.toContain("GITHUB_TOKEN fallback");
@@ -419,9 +439,7 @@ describe("buildImplementPrBody", () => {
 
   it("prepends a bold fallback warning when publishedViaFallback is true (adjudicated F2, #40 rework)", () => {
     const body = buildImplementPrBody({
-      issueNumber: 6,
-      runUrl: "https://github.com/o/r/actions/runs/123",
-      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      ...baseContext,
       publishedViaFallback: true,
     });
     expect(body).toContain("⚠️");
@@ -922,5 +940,103 @@ describe("sanitizeStepSummaryUrl", () => {
     const result = sanitizeStepSummaryUrl(long);
     expect(result.length).toBe(201);
     expect(result.endsWith("…")).toBe(true);
+  });
+});
+
+describe("extractModelIdFromTranscript (F1-S10 slice 3, factory.md §13.12)", () => {
+  it("extracts the model from the system/init message (the real claude-code-action transcript shape)", () => {
+    const transcript = JSON.stringify([
+      {
+        type: "system",
+        subtype: "init",
+        model: "claude-opus-4-1-20250805",
+        session_id: "abc-123",
+      },
+      { type: "assistant", message: { content: [] } },
+      { type: "result", subtype: "success", is_error: false },
+    ]);
+    expect(extractModelIdFromTranscript(transcript)).toBe("claude-opus-4-1-20250805");
+  });
+
+  it("finds the init message even when it isn't first (defensive — real transcripts always lead with it, but this must not assume position)", () => {
+    const transcript = JSON.stringify([
+      { type: "assistant", message: { content: [] } },
+      { type: "system", subtype: "init", model: "claude-sonnet-5" },
+    ]);
+    expect(extractModelIdFromTranscript(transcript)).toBe("claude-sonnet-5");
+  });
+
+  it("returns null for unparseable JSON", () => {
+    expect(extractModelIdFromTranscript("{not valid json")).toBeNull();
+  });
+
+  it("returns null for a non-array top level", () => {
+    expect(extractModelIdFromTranscript(JSON.stringify({ type: "system" }))).toBeNull();
+  });
+
+  it("returns null when no system/init message exists", () => {
+    const transcript = JSON.stringify([{ type: "assistant", message: {} }]);
+    expect(extractModelIdFromTranscript(transcript)).toBeNull();
+  });
+
+  it("returns null when the init message's model field is missing, empty, or not a string", () => {
+    expect(
+      extractModelIdFromTranscript(JSON.stringify([{ type: "system", subtype: "init" }])),
+    ).toBeNull();
+    expect(
+      extractModelIdFromTranscript(
+        JSON.stringify([{ type: "system", subtype: "init", model: "" }]),
+      ),
+    ).toBeNull();
+    expect(
+      extractModelIdFromTranscript(
+        JSON.stringify([{ type: "system", subtype: "init", model: 42 }]),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for an empty array", () => {
+    expect(extractModelIdFromTranscript("[]")).toBeNull();
+  });
+});
+
+describe("buildCommitTrailer (F1-S10 slice 3, factory.md §13.12)", () => {
+  const baseContext = {
+    issueNumber: 6,
+    agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+    modelId: "claude-opus-4-1-20250805",
+    promptVersion: "1b781ecabc1234567890abcdef1234567890abcd",
+    dispatchActor: "syamaner",
+  };
+
+  it("includes every required trailer line as a valid `Token: value` git trailer", () => {
+    const trailer = buildCommitTrailer(baseContext);
+    const lines = trailer.split("\n");
+    expect(lines).toContain("Co-Authored-By: Claude <noreply@anthropic.com>");
+    expect(lines).toContain("Signed-off-by: syamaner <syamaner@users.noreply.github.com>");
+    expect(lines).toContain("Provenance-Model: claude-opus-4-1-20250805");
+    expect(lines).toContain(
+      "Provenance-Prompt-Version: 1b781ecabc1234567890abcdef1234567890abcd",
+    );
+    expect(lines).toContain(
+      "Provenance-Agent-Action: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+    );
+    expect(lines).toContain("Provenance-Issue: #6");
+    // Every line must itself be a single-line, colon-delimited trailer —
+    // no embedded newlines that would break `git interpret-trailers`.
+    for (const line of lines) {
+      expect(line).toMatch(/^[A-Za-z0-9-]+: .+$/);
+    }
+  });
+
+  it("renders 'unavailable' (never fabricated) for Provenance-Model when modelId is null", () => {
+    const trailer = buildCommitTrailer({ ...baseContext, modelId: null });
+    expect(trailer).toContain("Provenance-Model: unavailable");
+    expect(trailer).not.toContain("claude-opus-4-1-20250805");
+  });
+
+  it("strips [ and ] from the dispatch actor's login when constructing the Signed-off-by email (defensive — this workflow is human-dispatch-only today, but a bot login would otherwise produce an invalid email local-part)", () => {
+    const trailer = buildCommitTrailer({ ...baseContext, dispatchActor: "some-app[bot]" });
+    expect(trailer).toContain("Signed-off-by: some-app[bot] <some-appbot@users.noreply.github.com>");
   });
 });
