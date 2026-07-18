@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertLabelDescriptionWithinLimit,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
@@ -7,10 +8,13 @@ import {
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
+  isLabelAlreadyExistsError,
   isProtectedPath,
   NO_REVIEW_AUTOMATION_LABEL,
+  NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
   parseNameStatusZ,
   type ExistingComment,
@@ -558,5 +562,91 @@ describe("findExistingImplementFailureCommentId", () => {
     expect(
       findExistingImplementFailureCommentId(wrongType, "some-operator"),
     ).toBeNull();
+  });
+});
+
+describe("NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION", () => {
+  it("stays within GitHub's label-description limit (regression guard, Codex round-3 P2)", () => {
+    // An earlier draft was 119 chars, over GitHub's 100-char cap, which
+    // made the label-create call 422 and get misread as "already
+    // exists" by the (since-fixed) old catch — this guard fails loudly
+    // if a future edit reintroduces that.
+    expect(NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION.length).toBeLessThanOrEqual(
+      GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+    );
+  });
+});
+
+describe("assertLabelDescriptionWithinLimit", () => {
+  it("does not throw when the description is within the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("short description", 100)).not.toThrow();
+  });
+
+  it("does not throw when the description is exactly at the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("x".repeat(100), 100)).not.toThrow();
+  });
+
+  it("throws a clear error when the description exceeds the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("x".repeat(101), 100)).toThrow(
+      /label description is 101 chars, exceeds GitHub's 100-char limit/,
+    );
+  });
+
+  it("defaults maxLength to GITHUB_LABEL_DESCRIPTION_MAX_LENGTH when unspecified", () => {
+    expect(() =>
+      assertLabelDescriptionWithinLimit("x".repeat(GITHUB_LABEL_DESCRIPTION_MAX_LENGTH + 1)),
+    ).toThrow();
+    expect(() =>
+      assertLabelDescriptionWithinLimit("x".repeat(GITHUB_LABEL_DESCRIPTION_MAX_LENGTH)),
+    ).not.toThrow();
+  });
+});
+
+describe("isLabelAlreadyExistsError", () => {
+  function githubApiError(status: number, body: unknown): Error {
+    return new Error(
+      `GitHub API POST /repos/o/r/labels failed: ${status} ${JSON.stringify(body)}`,
+    );
+  }
+
+  it("returns true for GitHub's genuine 'already exists' 422", () => {
+    const err = githubApiError(422, {
+      message: "Validation Failed",
+      errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(true);
+  });
+
+  it("returns false for a DIFFERENT 422 validation error (e.g. an over-length description) — the Codex round-3 P2 fix", () => {
+    const err = githubApiError(422, {
+      message: "Validation Failed",
+      errors: [
+        { resource: "Label", code: "invalid", field: "description" },
+      ],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a non-422 status even with an already_exists-shaped body", () => {
+    const err = githubApiError(500, {
+      message: "Validation Failed",
+      errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for an unparsable response body (never assumes the benign case)", () => {
+    const err = new Error("GitHub API POST /repos/o/r/labels failed: 422 not json");
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a 422 with no errors array at all", () => {
+    const err = githubApiError(422, { message: "Validation Failed" });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a non-Error value", () => {
+    expect(isLabelAlreadyExistsError("not an error")).toBe(false);
+    expect(isLabelAlreadyExistsError(undefined)).toBe(false);
   });
 });

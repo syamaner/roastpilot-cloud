@@ -318,6 +318,15 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
         init?.method === "POST",
     );
     expect(ensureLabelCall).toBeDefined();
+    // Regression guard (Codex round-3 P2): the actual request payload's
+    // description must stay within GitHub's 100-char label-description
+    // limit, or the create call 422s and (pre-fix) got misread as
+    // "already exists" — asserted against the REAL request body sent on
+    // the wire, not just the source constant in isolation.
+    const ensureLabelBody = JSON.parse((ensureLabelCall?.[1]?.body as string) ?? "{}") as {
+      description: string;
+    };
+    expect(ensureLabelBody.description.length).toBeLessThanOrEqual(100);
 
     const applyLabelCall = calls.find(
       ([url, init]) =>
@@ -382,6 +391,116 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     expect(process.exitCode).toBeUndefined();
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
     errorSpy.mockRestore();
+  });
+
+  it("tolerates GitHub's genuine 'already exists' 422 on label-create and still applies the label (Codex round-3 P2)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.includes("/issues/") && url.endsWith("/labels")) {
+        return jsonResponse([{ name: "no-review-automation" }], 200);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        // The label already exists on the repo — GitHub's REAL response
+        // shape for this case, not a hand-waved generic 422.
+        return jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+          },
+          422,
+        );
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    // The already-exists 422 must NOT have stopped the follow-up "apply
+    // the label to the PR" call from happening.
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("does NOT swallow a genuine validation 422 on label-create (Codex round-3 P2: the original bug)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.includes("/issues/") && url.endsWith("/labels")) {
+        // Reachable ONLY if the bug reappears (the create failure below
+        // gets misread as "already exists"). Returns success rather than
+        // throwing, so a regression here shows up as a clean, readable
+        // assertion failure below instead of the mock's own guard-throw
+        // muddying the "Failed to apply the" log message the (correct)
+        // behavior also produces via a different path.
+        return jsonResponse([{ name: "no-review-automation" }], 200);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        // A DIFFERENT validation failure — e.g. what an over-length
+        // description would trigger — not the "already exists" case.
+        return jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ resource: "Label", code: "invalid", field: "description" }],
+          },
+          422,
+        );
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    // The genuine validation error must surface through the outer
+    // "don't fail the publish over a label" tolerance (so the PR itself
+    // still opened successfully — the body warning is the load-bearing
+    // signal), while still being logged rather than silently discarded.
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
+    errorSpy.mockRestore();
+
+    // The load-bearing assertion for this test: the apply-label call
+    // must NEVER have been reached — a genuine validation error must
+    // stop the flow before that second call, not get misread as
+    // "already exists" and let it through.
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeUndefined();
   });
 });
 

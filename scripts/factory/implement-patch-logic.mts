@@ -330,6 +330,97 @@ export interface ImplementPrContext {
 export const NO_REVIEW_AUTOMATION_LABEL = "no-review-automation";
 
 /**
+ * GitHub caps a label's `description` at 100 characters (REST: "Create a
+ * label") and returns 422 if it's exceeded — the same status code as the
+ * "label already exists" case {@link isLabelAlreadyExistsError} tolerates,
+ * which is exactly why that function checks the error's `code`, not just
+ * the status. Kept under a named constant, with a unit test asserting
+ * {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} stays within it, so a
+ * future edit that lengthens the text can't silently regress into the
+ * same 422-swallowed-as-success bug (Codex round-3 P2, #40 rework) this
+ * module's `isLabelAlreadyExistsError` fix closes.
+ */
+export const GITHUB_LABEL_DESCRIPTION_MAX_LENGTH = 100;
+
+/**
+ * Throws if `description` exceeds `maxLength`. A pure, directly-testable
+ * guard so `applyNoReviewAutomationLabel` (in `publish-implement-patch.mts`)
+ * fails with a clear message here rather than a cryptic 422 from GitHub —
+ * extracted as its own function specifically so BOTH branches (within
+ * limit / over limit) are exercisable by a unit test without needing to
+ * mutate the fixed {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} export at
+ * runtime.
+ *
+ * @param description - The label description to check.
+ * @param maxLength - The limit, in characters. Defaults to
+ *   {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}.
+ * @throws If `description.length` exceeds `maxLength`.
+ */
+export function assertLabelDescriptionWithinLimit(
+  description: string,
+  maxLength: number = GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+): void {
+  if (description.length > maxLength) {
+    throw new Error(
+      `label description is ${description.length} chars, exceeds GitHub's ` +
+        `${maxLength}-char limit`,
+    );
+  }
+}
+
+/**
+ * {@link NO_REVIEW_AUTOMATION_LABEL}'s description, applied when the
+ * publish job creates the label (idempotently — see
+ * `applyNoReviewAutomationLabel` in `publish-implement-patch.mts`).
+ * Deliberately short: an earlier draft's 119-character description
+ * exceeded {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH} and triggered the
+ * exact bug `isLabelAlreadyExistsError` now guards against (a genuine
+ * validation 422 misread as "label already exists").
+ */
+export const NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION =
+  "Opened via GITHUB_TOKEN fallback — no review automation ran; needs a manual review before merging.";
+
+/**
+ * True only when `err` represents GitHub's specific "label already
+ * exists" validation error (422, with an `errors[]` entry whose `code` is
+ * `"already_exists"`) — NOT any 422 from a label-create call.
+ *
+ * Adjudicated fix (Codex round-3 P2, #40 rework): an earlier version of
+ * this check treated EVERY 422 from `POST .../labels` as "already
+ * exists" and silently swallowed it. That also swallowed a genuine
+ * validation error — e.g. an over-length `description` (see
+ * {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}) returns 422 too — so the
+ * label was never actually created, the follow-up "add label to PR" call
+ * then failed for real, and the label silently never applied (the PR
+ * body warning still fired, so this was a degradation, not a total loss
+ * of signal, but a real one). Parsing the response body's `errors[].code`
+ * distinguishes the two: only the genuine duplicate case is tolerated, so
+ * a future validation error (e.g. this description growing past 100
+ * chars again) surfaces loudly instead of no-op'ing.
+ *
+ * @param err - The error a `githubRequest` `POST .../labels` call threw
+ *   (its message has the shape `GitHub API <method> <path> failed:
+ *   <status> <raw response body>` — see `github-api.mts`).
+ * @returns Whether this is specifically GitHub's "already exists" case.
+ */
+export function isLabelAlreadyExistsError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const match = err.message.match(/^GitHub API \S+ \S+ failed: (\d+) ([\s\S]*)$/);
+  if (!match || match[1] !== "422") {
+    return false;
+  }
+  let body: { errors?: Array<{ code?: string }> };
+  try {
+    body = JSON.parse(match[2]) as { errors?: Array<{ code?: string }> };
+  } catch {
+    return false; // Unparsable body: never assume it's the benign case.
+  }
+  return Boolean(body.errors?.some((e) => e.code === "already_exists"));
+}
+
+/**
  * Builds the PR body for a successful implement run, following
  * `.github/PULL_REQUEST_TEMPLATE.md`'s structure so the factory's PRs read
  * the same as a human's.

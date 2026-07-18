@@ -120,6 +120,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
+  assertLabelDescriptionWithinLimit,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
@@ -127,8 +128,11 @@ import {
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+  isLabelAlreadyExistsError,
   NO_REVIEW_AUTOMATION_LABEL,
+  NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
   type PullRequestSummary,
@@ -539,8 +543,9 @@ async function postFailureComment(
  * The GitHub REST API's "Add labels to an issue" endpoint requires the
  * label to already exist on the repo (unlike some label-taxonomy tools,
  * it does NOT auto-create an unknown label name) — so this first
- * idempotently ensures the label exists (`POST .../labels`, tolerating a
- * 422 "already exists" as success), then applies it to the PR.
+ * idempotently ensures the label exists (`POST .../labels`, tolerating
+ * ONLY the specific "already exists" 422 as success — see
+ * {@link isLabelAlreadyExistsError}), then applies it to the PR.
  *
  * Scope note: only ever called on the PR-CREATION path, not on a
  * re-dispatch that refreshes an existing PR — matching
@@ -563,17 +568,23 @@ async function applyNoReviewAutomationLabel(
   repo: string,
   prNumber: number,
 ): Promise<void> {
+  // Defensive, not expected to ever fire in practice against the fixed
+  // NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION literal — but if a future edit
+  // ever lengthened it past GitHub's limit, this fails here with a clear
+  // message instead of a cryptic 422 from GitHub two lines down.
+  assertLabelDescriptionWithinLimit(
+    NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
+    GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+  );
   try {
     await githubRequest(token, "POST", `/repos/${owner}/${repo}/labels`, {
       name: NO_REVIEW_AUTOMATION_LABEL,
       color: "b60205",
-      description:
-        "Opened via the GITHUB_TOKEN fallback — no review-automation workflow ran; requires a manual review pass before merging.",
+      description: NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!message.includes(" 422 ")) {
-      throw err; // Anything other than "label already exists" is unexpected.
+    if (!isLabelAlreadyExistsError(err)) {
+      throw err; // A real validation error must surface, not be swallowed.
     }
   }
   await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/labels`, {
