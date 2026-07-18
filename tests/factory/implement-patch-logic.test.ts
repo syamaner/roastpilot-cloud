@@ -4,11 +4,15 @@ import {
   buildImplementPrBody,
   deriveBranchName,
   extractRenameCopySourcePaths,
+  findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+  IMPLEMENT_FAILURE_COMMENT_MARKER,
   isProtectedPath,
   normalizePatchPath,
   parseNumstatZ,
+  type ExistingComment,
 } from "../../scripts/factory/implement-patch-logic.mts";
 
 describe("normalizePatchPath", () => {
@@ -391,6 +395,7 @@ describe("buildImplementPrBody", () => {
     const body = buildImplementPrBody({
       issueNumber: 6,
       runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
     });
     expect(body).toContain("Closes #6");
     expect(body).toContain("https://github.com/o/r/actions/runs/123");
@@ -398,6 +403,20 @@ describe("buildImplementPrBody", () => {
     expect(body).toContain("## What changed");
     expect(body).toContain("## How it was verified");
     expect(body).toContain("## Review routing");
+  });
+
+  it("includes a Provenance section with the issue ref and the pinned agent action SHA (Codex round-3 finding)", () => {
+    const body = buildImplementPrBody({
+      issueNumber: 6,
+      runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+    });
+    expect(body).toContain("## Provenance");
+    expect(body).toContain(
+      "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+    );
+    expect(body).toContain("issue #6");
+    expect(body).toContain("F1-S10");
   });
 });
 
@@ -430,5 +449,65 @@ describe("buildImplementFailureCommentBody", () => {
     expect(body).not.toContain("No branch was created and nothing was pushed");
     expect(body).toContain("even though a");
     expect(body).toContain("branch was pushed");
+  });
+
+  it("Codex round 3: ends with the idempotency marker so a re-dispatch can find and edit it", () => {
+    const body = buildImplementFailureCommentBody(
+      ["some reason"],
+      "https://github.com/o/r/actions/runs/456",
+    );
+    expect(body).toContain(IMPLEMENT_FAILURE_COMMENT_MARKER);
+  });
+});
+
+describe("findExistingImplementFailureCommentId", () => {
+  const ours = (id: number, body: string): ExistingComment => ({
+    id,
+    body,
+    authorType: "Bot",
+    authorLogin: IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+  });
+
+  it("finds our own prior marked comment", () => {
+    const comments: ExistingComment[] = [
+      { id: 1, body: "unrelated human comment", authorType: "User", authorLogin: "someone" },
+      ours(2, `some reason\n\n${IMPLEMENT_FAILURE_COMMENT_MARKER}`),
+    ];
+    expect(findExistingImplementFailureCommentId(comments)).toBe(2);
+  });
+
+  it("returns null when no comment carries the marker", () => {
+    const comments: ExistingComment[] = [
+      ours(1, "a bot comment, but not one of ours"),
+    ];
+    expect(findExistingImplementFailureCommentId(comments)).toBeNull();
+  });
+
+  it("does NOT match a marker-containing comment from a different bot login (spoofing guard)", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 1,
+        body: `looks like ours ${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "Bot",
+        authorLogin: "some-other-bot[bot]",
+      },
+    ];
+    expect(findExistingImplementFailureCommentId(comments)).toBeNull();
+  });
+
+  it("does NOT match a marker-containing comment whose authorType isn't Bot", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 1,
+        body: `a human quoting the marker: ${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "User",
+        authorLogin: IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+      },
+    ];
+    expect(findExistingImplementFailureCommentId(comments)).toBeNull();
+  });
+
+  it("returns null on an empty comment list", () => {
+    expect(findExistingImplementFailureCommentId([])).toBeNull();
   });
 });

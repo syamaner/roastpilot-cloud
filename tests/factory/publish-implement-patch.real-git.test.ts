@@ -106,6 +106,31 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * A fetch mock for tests that expect `main()` to reject BEFORE ever
+ * reaching the issue-fetch/PR-lookup/PR-create calls (every forbidden-path
+ * guard-rejection test below) — the only calls it needs to answer are
+ * `postFailureComment`'s own upsert lookup (GET comments — answered empty,
+ * "no prior comment") and its resulting POST. Replaces a bare
+ * `vi.fn(async () => jsonResponse({}, 201))`, which broke once
+ * `postFailureComment` started GETting comments first (Codex round 3): an
+ * unconditional `{}` response isn't the array `findExistingImplementFailureComment`
+ * expects to `.map()` over.
+ */
+function rejectionOnlyFetchMock(): ReturnType<typeof vi.fn> {
+  return vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (method === "GET" && url.includes("/comments")) {
+      return jsonResponse([]);
+    }
+    if (method === "POST" && url.includes("/comments")) {
+      return jsonResponse({}, 201);
+    }
+    throw new Error(`unexpected fetch: ${method} ${url}`);
+  });
+}
+
 /** A fetch mock covering the issue-fetch + PR-list + PR-create calls a successful run makes. */
 function stubHappyPathFetch(options?: {
   existingPrs?: Array<{
@@ -114,6 +139,14 @@ function stubHappyPathFetch(options?: {
   }>;
   createResponse?: { number: number; html_url: string };
   issueTitle?: string;
+  /**
+   * Simulates a prior implement-failure comment already on the issue
+   * (Codex round-3 upsert idempotency) — when set, the mocked
+   * `GET .../comments` returns exactly this one comment (marked, from our
+   * bot login), so `postFailureComment` should PATCH it rather than POST
+   * a new one.
+   */
+  existingFailureComment?: { id: number; body: string };
 }) {
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -149,6 +182,22 @@ function stubHappyPathFetch(options?: {
         },
         201,
       );
+    }
+    if (method === "GET" && url.includes("/comments")) {
+      // postFailureComment's upsert now looks this up BEFORE ever
+      // POSTing/PATCHing — reached on every failure path, not just the
+      // ones a test is specifically targeting, so this must always
+      // answer (empty by default: "no prior comment, POST a fresh one").
+      return jsonResponse(options?.existingFailureComment ? [
+        {
+          id: options.existingFailureComment.id,
+          body: options.existingFailureComment.body,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        },
+      ] : []);
+    }
+    if (method === "PATCH" && url.includes("/issues/comments/")) {
+      return jsonResponse({}, 200);
     }
     if (method === "POST" && url.includes("/comments")) {
       // Reached only on a post-guard failure (e.g. a real git-apply
@@ -225,6 +274,264 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       { cwd: bareRemoteDir, encoding: "utf8" },
     );
     expect(branches).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — Codex round 3: binary patches round-trip", () => {
+  it("applies and pushes a real binary file byte-for-byte when the capture step used --binary (round-trip proof)", async () => {
+    // Reproduces exactly what the FIXED capture step
+    // (`git diff --cached --binary`) produces for a real binary file —
+    // not a hand-crafted patch, for the same reason the rename-exploit
+    // tests use real `git mv`: don't trust an assumption about what git's
+    // output looks like when you can just ask git. A few arbitrary
+    // non-UTF8 bytes stand in for e.g. a small image/font a story might
+    // add.
+    const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
+    await fsWriteFile(join(localCloneDir, "asset.bin"), binaryBytes);
+    git(localCloneDir, ["add", "-A"]);
+    const binaryDiff = execFileSync("git", ["diff", "--cached", "--binary"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    expect(binaryDiff).toContain("GIT binary patch");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "binary.diff", binaryDiff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-binary");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const roundTripped = await readFile(join(verifyDir, "asset.bin"));
+    expect(roundTripped.equals(binaryBytes)).toBe(true);
+  });
+
+  it("REJECTS (git apply fails) the OLD non---binary form as a sanity check that this test would have caught the bug", async () => {
+    // Not testing our own code here — proving the counterfactual: the
+    // PRE-fix `git diff --cached` (no --binary) form really does fail to
+    // apply, so the fix above is provably necessary, not just cosmetic.
+    const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
+    await fsWriteFile(join(localCloneDir, "asset.bin"), binaryBytes);
+    git(localCloneDir, ["add", "-A"]);
+    const placeholderDiff = execFileSync("git", ["diff", "--cached"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    expect(placeholderDiff).toContain("Binary files");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "binary-placeholder.diff", placeholderDiff);
+    const fetchMock = rejectionOnlyFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const assetExists = await readFile(join(localCloneDir, "asset.bin")).catch(() => null);
+    expect(assetExists).toBeNull();
+  });
+});
+
+describe("publish-implement-patch — Codex round 3: publisher-side scratch-dir exclude survives an edited .gitignore", () => {
+  it("does NOT commit patch-output/patch.diff into the factory PR, even when the patch itself edits .gitignore to un-ignore it", async () => {
+    // Seed a .gitignore matching the real repo's (issue-context/ and
+    // patch-output/ both ignored) — the baseline this test's patch will
+    // attempt to defeat.
+    await fsWriteFile(join(localCloneDir, ".gitignore"), "/issue-context\n/patch-output\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add .gitignore"]);
+
+    // Simulate the "Download patch artifact" step: patch-output/patch.diff
+    // already sits on disk in the publish job's OWN checkout by the time
+    // applyPatchAndPush's `git add -A` runs — this is what makes the
+    // vulnerability live for THIS job specifically (unlike issue-context/,
+    // which never exists here at all).
+    await mkdir(join(localCloneDir, "patch-output"), { recursive: true });
+    await fsWriteFile(join(localCloneDir, "patch-output", "patch.diff"), "leftover artifact\n");
+
+    // A patch that (a) makes an ordinary, allowed change AND (b) edits
+    // .gitignore to un-ignore /patch-output — nothing stops a patch from
+    // touching .gitignore; it isn't a pipeline-protected path.
+    const diff = `diff --git a/.gitignore b/.gitignore
+index abc1234..def5678 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1,1 @@
+ /issue-context
+-/patch-output
+diff --git a/lib/new-file.ts b/lib/new-file.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/lib/new-file.ts
+@@ -0,0 +1,1 @@
++export const x = 1;
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "gitignore-tamper.diff", diff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    // Verify against the pushed branch on the bare remote: the ordinary
+    // change landed, but the scratch artifact never did — even though
+    // .gitignore no longer protects it. A pre-fix `git add -A` (no
+    // pathspec exclude) would have staged and committed it.
+    const verifyDir = join(scratchDir, "verify-pathspec");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const newFile = await readFile(join(verifyDir, "lib", "new-file.ts"), "utf8");
+    expect(newFile).toBe("export const x = 1;\n");
+    const scratchArtifact = await readFile(
+      join(verifyDir, "patch-output", "patch.diff"),
+    ).catch(() => null);
+    expect(scratchArtifact).toBeNull();
+  });
+});
+
+describe("publish-implement-patch — Codex round 3: implement-failure comment idempotency (upsert)", () => {
+  it("PATCHes the existing marked comment on a re-dispatch instead of posting a duplicate", async () => {
+    const diff = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
+    const fetchMock = stubHappyPathFetch({
+      existingFailureComment: {
+        id: 777,
+        body: `some earlier failure\n\n<!-- roastpilot-factory:implement-failure:do-not-edit -->`,
+      },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === "PATCH",
+    );
+    expect(patchCall).toBeDefined();
+    const [patchUrl, patchInit] = patchCall!;
+    expect(String(patchUrl)).toContain("/issues/comments/777");
+    const patchBody = JSON.parse((patchInit as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(patchBody.body).toContain(".github/workflows/evil.yml");
+
+    // Decisively: no fresh POST comment was made — this was an edit, not
+    // a duplicate.
+    const postCommentCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).includes("/comments") &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCommentCall).toBeUndefined();
+  });
+
+  it("POSTs a fresh comment (no prior marked comment exists — first failure for this issue)", async () => {
+    const diff = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const postCommentCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).includes("/comments") &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCommentCall).toBeDefined();
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === "PATCH",
+    );
+    expect(patchCall).toBeUndefined();
+  });
+
+  it("stops after MAX_COMMENT_PAGES (50) full pages without finding a marked comment, warns, and POSTs a fresh one", async () => {
+    // Every page returns exactly 100 unrelated (unmarked) comments — a
+    // full page every time, so pagination never naturally terminates via
+    // the "short page" signal and must instead hit the MAX_COMMENT_PAGES
+    // bound, mirroring the PR-listing exhaustion test above.
+    const unrelatedFullPage = Array.from({ length: 100 }, (_, i) => ({
+      id: 3000 + i,
+      body: `unrelated comment ${i}`,
+      user: { type: "User", login: "someone" },
+    }));
+    const diff = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse(unrelatedFullPage);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const commentCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/comments"),
+    );
+    // 50 GET pages + 1 POST.
+    expect(commentCalls).toHaveLength(51);
+    expect(
+      commentCalls.some(([input]) => String(input).includes("page=50")),
+    ).toBe(true);
+    expect(
+      commentCalls.some(([input]) => String(input).includes("page=51")),
+    ).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Scanned 50 pages of comments"),
+    );
+    const postCommentCall = commentCalls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCommentCall).toBeDefined();
+
+    warnSpy.mockRestore();
   });
 });
 
@@ -531,6 +838,9 @@ index abc1234..def5678 100644
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
       if (method === "POST" && url.includes("/comments")) {
         return jsonResponse({}, 201);
       }
@@ -542,9 +852,15 @@ index abc1234..def5678 100644
 
     expect(process.exitCode).toBe(1);
     // Never even reached the point of fetching the issue title / checking
-    // for an existing PR — rejected before any of that.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0]!;
+    // for an existing PR — rejected before any of that. Two calls total:
+    // postFailureComment's own upsert lookup (GET comments, Codex round 3)
+    // plus the resulting POST — no issue-fetch, no PR-list, no PR-create.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const postCall = fetchMock.mock.calls.find(
+      ([, callInit]) => (callInit as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCall).toBeDefined();
+    const [, init] = postCall!;
     const body = JSON.parse((init as RequestInit).body as string) as {
       body: string;
     };
@@ -570,7 +886,7 @@ index 0000000..abc1234
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
 
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -594,7 +910,7 @@ index abc1234..def5678 100644
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "glue.diff", diff);
 
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -633,7 +949,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "exploit-rename-out.diff", exploitDiff);
 
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -659,7 +975,7 @@ index abc1234..def5678 100644
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-github.diff", diff);
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -682,7 +998,7 @@ index abc1234..def5678 100644
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-codeowners.diff", diff);
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -703,7 +1019,7 @@ index abc1234..def5678 100644
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-docs-codeowners.diff", diff);
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -720,7 +1036,7 @@ copy from lib/x.mts
 copy to scripts/factory/evil-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-into.diff", diff);
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -740,7 +1056,7 @@ copy from scripts/factory/publish-implement-patch.mts
 copy to lib/leaked-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-out.diff", diff);
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -759,7 +1075,7 @@ index 0000000..abc1234
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "space.diff", diff);
 
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -793,7 +1109,7 @@ index 0000000..abc1234
   it("rejects an empty patch (no diff --git headers at all)", async () => {
     process.env.PATCH_PATH = await writePatch(scratchDir, "empty.diff", "");
 
-    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    const fetchMock = rejectionOnlyFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
@@ -836,6 +1152,9 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
       if (method === "POST" && url.endsWith("/pulls")) {
         return new Response("service unavailable", { status: 503 });
       }
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
       if (method === "POST" && url.includes("/comments")) {
         return jsonResponse({}, 201);
       }
@@ -856,8 +1175,13 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
     expect(branches).toContain("feature/6-implement-workflow");
 
     // ...and the comment says so accurately, not "no branch was created".
-    const commentCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).includes("/comments"),
+    // Filtered to the POST specifically — postFailureComment's own upsert
+    // lookup (Codex round 3) makes a GET .../comments call first, which
+    // also matches a bare "/comments" substring but carries no JSON body.
+    const commentCall = fetchMock.mock.calls.find(
+      ([input, callInit]) =>
+        String(input).includes("/comments") &&
+        (callInit as RequestInit | undefined)?.method === "POST",
     );
     expect(commentCall).toBeDefined();
     const [, init] = commentCall!;

@@ -59,6 +59,12 @@
  * - `PATCH_PATH` — path to the downloaded patch artifact (may not exist).
  * - `RUN_URL` — link to the implement run, for the PR body / failure
  *   comment.
+ *
+ * Optional environment variables:
+ * - `IMPLEMENT_AGENT_ACTION_REF` — the pinned `claude-code-action@<sha>`
+ *   the implement job ran, for the PR body's minimal provenance section.
+ *   Soft-defaulted (not `requireEnv`'d) if unset — provenance metadata
+ *   only, never grounds to reject an otherwise-valid publish.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -69,9 +75,11 @@ import {
   buildImplementPrBody,
   deriveBranchName,
   extractRenameCopySourcePaths,
+  findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
   parseNumstatZ,
+  type ExistingComment,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
 
@@ -97,6 +105,12 @@ class PublishRejection extends Error {}
 
 interface GitHubIssue {
   readonly title: string;
+}
+
+interface GitHubComment {
+  readonly id: number;
+  readonly body: string;
+  readonly user: { readonly type: string; readonly login: string } | null;
 }
 
 interface GitHubPullRequestApi {
@@ -232,7 +246,19 @@ function applyPatchAndPush(
   ]);
   runGit(["checkout", "-B", branchName]);
   runGit(["apply", patchPath]);
-  runGit(["add", "-A"]);
+  // FIX (Codex round 3, P2): the SAME pathspec-exclude fix as the
+  // implement job's own capture step, applied here too. This job's own
+  // checkout has `patch-output/patch.diff` sitting on disk right now (the
+  // "Download patch artifact" step wrote it there before this ever runs)
+  // — an ordinary `git add -A` with no exclude would stage it if a patch
+  // ALSO edited .gitignore to un-ignore /patch-output (nothing stops a
+  // patch from touching .gitignore; it isn't a protected path), which
+  // would commit the raw patch-diff artifact itself into the factory PR.
+  // `:!issue-context` is included for symmetry with the implement side
+  // (that directory never actually exists in THIS job's checkout — the
+  // implement and publish jobs run in separate workspaces — so it's
+  // harmless defense-in-depth here, not the applicable half of this fix).
+  runGit(["add", "-A", "--", ":!issue-context", ":!patch-output"]);
   const commitTitle = `Implement #${issueNumber}: ${issueTitle}`.slice(
     0,
     120,
@@ -291,6 +317,67 @@ async function findExistingPrForIssue(
   return findPrForIssueNumber(summaries, issueNumber, expectedHeadRepoFullName);
 }
 
+/** Page size for listing issue comments — GitHub's own per-page maximum. */
+const COMMENT_PAGE_SIZE = 100;
+/**
+ * Upper bound on how many comment pages to scan looking for a prior
+ * implement-failure comment (~5,000 comments) — pathologically high for a
+ * factory issue, but a sane cap against an unbounded loop rather than
+ * trusting the API to always terminate cleanly. Same shape as
+ * `apply-triage-verdict.mts`'s `MAX_COMMENT_PAGES`.
+ */
+const MAX_COMMENT_PAGES = 50;
+
+/**
+ * Finds this job's own prior implement-failure comment on this issue, if
+ * any, paginating through every page of comments rather than only the
+ * first.
+ */
+async function findExistingImplementFailureComment(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<number | null> {
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const comments = await githubRequest<GitHubComment[]>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
+    );
+    const existing: ExistingComment[] = comments.map((c) => ({
+      id: c.id,
+      body: c.body,
+      authorType: c.user?.type ?? null,
+      authorLogin: c.user?.login ?? null,
+    }));
+    const found = findExistingImplementFailureCommentId(existing);
+    if (found !== null) {
+      return found;
+    }
+    if (comments.length < COMMENT_PAGE_SIZE) {
+      return null; // Last page: no more comments to check.
+    }
+  }
+  console.warn(
+    `Scanned ${MAX_COMMENT_PAGES} pages of comments on #${issueNumber} ` +
+      `without finding a prior implement-failure comment; posting a new ` +
+      `one rather than risking missing a marker beyond this page limit.`,
+  );
+  return null;
+}
+
+/**
+ * Posts (or, on a re-dispatch, edits) the implement-failure comment.
+ *
+ * FIX (Codex round 3, P2, factory.md §13.8): previously always POSTed a
+ * fresh comment, so a re-dispatch that fails again for the same issue
+ * stacked a new duplicate comment every time instead of updating the
+ * existing one — exactly the idempotency gap `apply-triage-verdict.mts`'s
+ * `upsertComment` already closed for the triage pipeline's own comment.
+ * Same upsert shape here: find by marker (paginated), PATCH if found,
+ * POST otherwise.
+ */
 async function postFailureComment(
   token: string,
   owner: string,
@@ -300,12 +387,28 @@ async function postFailureComment(
   runUrl: string,
   branchPushed: boolean,
 ): Promise<void> {
-  await githubRequest(
+  const body = buildImplementFailureCommentBody(reasons, runUrl, branchPushed);
+  const existingId = await findExistingImplementFailureComment(
     token,
-    "POST",
-    `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-    { body: buildImplementFailureCommentBody(reasons, runUrl, branchPushed) },
+    owner,
+    repo,
+    issueNumber,
   );
+  if (existingId !== null) {
+    await githubRequest(
+      token,
+      "PATCH",
+      `/repos/${owner}/${repo}/issues/comments/${existingId}`,
+      { body },
+    );
+  } else {
+    await githubRequest(
+      token,
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
+      { body },
+    );
+  }
 }
 
 export async function main(): Promise<void> {
@@ -320,6 +423,14 @@ export async function main(): Promise<void> {
   const implementJobResult = requireEnv("IMPLEMENT_JOB_RESULT");
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
+  // Provenance metadata only (Codex round-3 finding) — soft-defaulted,
+  // not `requireEnv`'d, since a missing value here should degrade the PR
+  // body's "Provenance" section, never block an otherwise-valid publish.
+  // The workflow sets this to a literal copy of the implement job's
+  // `claude-code-action@<sha>` pin; see that step's env var for the
+  // "keep these two in sync" note.
+  const agentActionRef =
+    process.env.IMPLEMENT_AGENT_ACTION_REF ?? "unknown (IMPLEMENT_AGENT_ACTION_REF not set)";
 
   // Tracked outside the try so the catch block can tell an unpushed
   // rejection apart from a post-push failure (FIX 5) — a branch that WAS
@@ -374,6 +485,23 @@ export async function main(): Promise<void> {
       );
     }
 
+    // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
+    // (gitleaks/trufflehog-style) of the patch content belongs right
+    // here, alongside the forbidden-path check above, but is explicitly
+    // OUT of this story's scope: it's F1-S7's (issue #10) coherent,
+    // dedicated deliverable, not a fragment bolted on here. Interim
+    // rationale for why that gap is acceptable until F1-S7 lands:
+    // dispatch-first means every run is human-triggered AND every
+    // resulting PR is human-merged (no auto-merge), on a public repo
+    // where a leaked secret in a PR is visible immediately, not silently
+    // shipped; and this job's own token has nothing left TO leak in
+    // practice — FIX B eliminates the git credential at the source,
+    // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB strips the implement job's
+    // subprocess environment, and the "assert no Snowflake/Vercel
+    // secrets" step confirms no other secret was ever injected into that
+    // job to begin with. Secret-scanning is still a HARD gate before any
+    // stage-2 (auto-merge/no-human-review) autonomy — F1-S7 owns it.
+
     const issue = await githubRequest<GitHubIssue>(
       token,
       "GET",
@@ -411,7 +539,7 @@ export async function main(): Promise<void> {
         title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
         head: branchName,
         base: "main",
-        body: buildImplementPrBody({ issueNumber, runUrl }),
+        body: buildImplementPrBody({ issueNumber, runUrl, agentActionRef }),
       },
     );
     console.log(`Opened PR #${created.number}: ${created.html_url}`);

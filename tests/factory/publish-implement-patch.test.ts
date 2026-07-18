@@ -104,6 +104,8 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     process.env.PATCH_PATH = patchPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
         jsonResponse({}, 201),
     });
@@ -123,6 +125,8 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     process.env.PATCH_PATH = join(workdir, "does-not-exist.diff");
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
         jsonResponse({}, 201),
     });
@@ -144,6 +148,8 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     process.env.PATCH_PATH = patchPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
         jsonResponse({}, 201),
     });

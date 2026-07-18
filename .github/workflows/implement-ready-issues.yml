@@ -396,13 +396,34 @@ jobs:
           echo "Confirmed: origin remote URL no longer carries a credential."
 
       - name: Run local gates (independent of the agent's own self-report)
+        # FIX (Codex round 3, P1): `npm run <script>` resolves through
+        # package.json's own "scripts" block — a file the agent CAN edit
+        # (it isn't in the disallowedTools protected-path list). An agent
+        # that quietly rewrote e.g. "test": "echo ok" into package.json
+        # would make this step "pass" trivially, while claiming to be
+        # "independent of the agent's own self-report" — a claim that
+        # wasn't actually true. Invoking each tool directly via `npx`
+        # bypasses package.json's scripts indirection entirely; verified
+        # empirically that each npx form here produces the identical
+        # result to its `npm run` equivalent for this repo's actual
+        # config (eslint's flat config, tsconfig.json, vitest's own config
+        # file, next.config.*) — none of which route through package.json
+        # scripts.
+        #
+        # HONEST SCOPE: this closes "the gate COMMAND can't be silently
+        # no-op'd via package.json" — it does NOT close "the gate CONTENT
+        # (the tests themselves) can be weakened" (an agent editing a test
+        # to assert something trivially true, or deleting an assertion
+        # outright). Test-content mutation testing is F1-S9's job
+        # (factory.md §13.5/§13.6); the dispatch-first human review/merge
+        # gate is the interim catch for that until F1-S9 lands.
         run: |
           set -euo pipefail
           npm ci
-          npm run lint
-          npm run typecheck
-          npm run test -- --coverage
-          npm run build
+          npx eslint .
+          npx tsc --noEmit
+          npx vitest run --coverage
+          npx next build
 
       - name: Capture the implement agent's changes as a patch
         # FIX (Codex round 7): `git add -A` staging everything and relying
@@ -421,12 +442,25 @@ jobs:
         # entries are kept as defense-in-depth (cheap, and they also keep
         # these paths out of a plain `git status`/`git diff` a human runs
         # locally).
+        #
+        # FIX (Codex round 3, P2): `git diff --cached` (no `--binary`)
+        # emits a "Binary files a/X and b/Y differ" PLACEHOLDER for a
+        # binary file, not its actual content — `git apply --numstat`
+        # still parses that placeholder fine (reporting `-\t-\t<path>`,
+        # since line-added/removed counts are meaningless for binary), so
+        # the patch-path guard passes, but the REAL `git apply` on the
+        # publish side then fails ("cannot apply binary patch ... without
+        # full index line") — silently discarding a story that adds e.g.
+        # an image or font. `--binary` embeds the actual base85-encoded
+        # content instead; empirically verified (scratch repo) that only
+        # the `--binary` form round-trips a real binary file byte-for-byte
+        # through `git apply` on the far end.
         if: always()
         run: |
           set -euo pipefail
           mkdir -p patch-output
           git add -A -- ':!issue-context' ':!patch-output'
-          git diff --cached > patch-output/patch.diff
+          git diff --cached --binary > patch-output/patch.diff
           echo "Patch: $(wc -c < patch-output/patch.diff) bytes, $(git diff --cached --name-only | wc -l) file(s) changed"
 
       - name: Upload patch artifact
@@ -509,4 +543,15 @@ jobs:
           IMPLEMENT_JOB_RESULT: ${{ needs.implement.result }}
           PATCH_PATH: patch-output/patch.diff
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Minimal PR-body provenance (Codex round 3, partial factory.md
+          # §13.12) — a literal copy of the implement job's
+          # claude-code-action `uses:` pin above. KEEP THESE TWO IN SYNC:
+          # bumping that pin without updating this string leaves the PR
+          # body's provenance line naming a stale SHA. There's no dynamic
+          # way to derive this (the two jobs are separate workspaces with
+          # no shared step output for "which ref actually ran"), so this
+          # duplication is accepted rather than engineered away for what
+          # is intentionally just a minimal provenance record — the full
+          # trailer (factory.md §13.12) is F1-S10's job.
+          IMPLEMENT_AGENT_ACTION_REF: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc" # v1.0.176
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts
