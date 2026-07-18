@@ -343,31 +343,77 @@ jobs:
           # namespaces" step above). Diagnosis is done; full output is
           # otherwise unnecessary log surface on a public repo.
           show_full_output: false
-          # --permission-mode acceptEdits: auto-allows Edit/Write/
-          # MultiEdit inside $GITHUB_WORKSPACE (denied outside it) — this
-          # is claude-code-action's own tag-mode default, set explicitly
-          # here since agent mode (src/modes/agent/index.ts,
-          # prepareAgentMode()) sets no permission-mode of its own (the
-          # same fact that made triage's Write/Edit grant necessary).
-          # Broader than triage's single-file grant on purpose: this job
-          # implements a whole story, not one JSON file.
+          # FIX (issue #26 live dispatch, definitive via the #31 transcript
+          # artifact): the comment that used to sit here claimed
+          # `--permission-mode acceptEdits` "auto-allows Edit/Write/
+          # MultiEdit inside $GITHUB_WORKSPACE" — that was wrong, and the
+          # first two live implement runs (after the bwrap/userns fix made
+          # Bash itself work) proved it: the transcript showed the agent
+          # try EVERY means of creating app/api/health/route.ts and get
+          # denied every time — `Write` to that path (~9 denials), a Bash
+          # `mkdir -p app/api/health && cat > route.ts <<EOF` (denied), a
+          # bare `mkdir app/api` (denied), and — tellingly — a Bash
+          # `mkdir /tmp/claude/testdir123` the agent used purely to test
+          # whether `mkdir` worked AT ALL (also denied). 24 denial records
+          # total across the session. This is the exact F1-S2 lesson (that
+          # story's own probe is why triage's workflow grants
+          # `Edit(triage-output/verdict.json)` explicitly) that never got
+          # carried over here: `--allowedTools` is a STRICT allowlist, and
+          # a permission MODE can never grant a tool that isn't in it —
+          # `acceptEdits` changes how an ALREADY-allowed edit is confirmed
+          # (auto vs. prompt), it does not add Edit/Write/MultiEdit to the
+          # allowlist by itself. This job's allowedTools never listed them
+          # at all, so there was no path to a write, mode setting
+          # notwithstanding.
           #
-          # Bash is allowlisted to exactly the repo's known local gates
-          # (AGENTS.md's Quick Commands) plus read-only git — NOT
-          # `git commit`/`git push`/`gh` (this job holds no write token,
-          # so those would fail anyway, but they're not even offered) and
-          # NOT a blanket Bash grant.
+          # Fixed by adding Edit/Write/MultiEdit UNSCOPED (the whole
+          # checked-out workspace, not one file — this job implements a
+          # whole story, unlike triage's single-file grant) to
+          # allowedTools below. disallowedTools (further down) is
+          # UNCHANGED and still carves out .github/**, scripts/factory/**,
+          # CODEOWNERS, and .git/** for all three edit-tool names — the
+          # net grant is "write anywhere in the workspace EXCEPT the
+          # pipeline-protected paths", which was always the intended
+          # design (see disallowedTools's own comment below); the missing
+          # piece was simply never adding the baseline unscoped allow this
+          # relies on. Also added `Read` and `ToolSearch` explicitly —
+          # the transcript shows the agent using both successfully even
+          # without them listed (some read-only/introspection tools have
+          # their own baseline availability separate from this allowlist),
+          # but making the allowlist state that outright rather than
+          # leaning on an implicit default keeps this file the single
+          # source of truth for what the agent can do.
           #
-          # FIX (Codex round 4, P2): `Bash(npm run test:*)` alone never
-          # matches the bare `npm run test` (no trailing args) the
-          # prompt below and AGENTS.md's own Quick Commands both tell the
-          # agent to run for self-verification — only `npm run test`
-          # WITH extra args (e.g. `npm run test -- --coverage`) matched
-          # the `:*` wildcard. Added `Bash(npm run test)` alongside it so
-          # the agent's own self-check allowlist actually covers what it's
-          # told to run. This is the AGENT's self-check tool grant only —
-          # separate from the deterministic gate re-run below, which
-          # correctly uses `npx vitest run --coverage` regardless.
+          # F1-S2 ALSO found (its own probe) that the SDK matches
+          # `Edit(path)` rules but NOT `Write(path)` rules the same way —
+          # i.e. Edit and Write are not interchangeable for permission-
+          # matching purposes. The transcript shows this run's agent
+          # reaching for `Write` first, so granting all three
+          # (Edit/Write/MultiEdit) here is deliberate, not redundant —
+          # each needed its own grant. Whether all three actually behave
+          # identically once unscoped-granted (vs. F1-S2's SCOPED-grant
+          # finding) is the next empirical unknown; the operator's live
+          # dispatch + the #31 transcript artifact is how it gets
+          # confirmed, the same discipline every other claim in this file
+          # has been held to.
+          #
+          # Bash stays scoped to exactly the repo's known local gates
+          # (AGENTS.md's Quick Commands) plus read-only git — the agent
+          # should create files via Edit/Write, not Bash `mkdir`/`cat`;
+          # that scoping is correct and unchanged. NOT `git commit`/
+          # `git push`/`gh` (this job holds no write token, so those would
+          # fail anyway, but they're not even offered) and NOT a blanket
+          # Bash grant.
+          #
+          # `Bash(npm run test:*)` alone never matches the bare
+          # `npm run test` (no trailing args) the prompt below and
+          # AGENTS.md's own Quick Commands both tell the agent to run for
+          # self-verification — only `npm run test` WITH extra args (e.g.
+          # `npm run test -- --coverage`) matched the `:*` wildcard.
+          # `Bash(npm run test)` alongside it covers the bare form too.
+          # This is the AGENT's self-check tool grant only — separate from
+          # the deterministic gate re-run below, which correctly uses
+          # `npx vitest run --coverage` regardless.
           #
           # disallowedTools denies the pipeline-self-modification paths
           # (AGENTS.md "Pipeline self-modification") — .github/**,
@@ -385,15 +431,9 @@ jobs:
           # boundary once Bash is enabled — it's defense-in-depth on top
           # of the publish job's applier-authoritative guard, which is
           # the real control.
-          #
-          # This whole claude_args value — acceptEdits + Bash + ENV_SCRUB
-          # + bubblewrap all combined — is the empirical unknown the
-          # operator's probe/dry-run settles; static reading confirms the
-          # mechanism, not that this exact combination behaves as
-          # expected end-to-end.
           claude_args: >-
             --permission-mode acceptEdits
-            --allowedTools "Bash(npm ci),Bash(npm install),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
+            --allowedTools "Read,ToolSearch,Edit,Write,MultiEdit,Bash(npm ci),Bash(npm install),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*),Read(.git/**),Grep(.git/**),Edit(.git/**),Write(.git/**),MultiEdit(.git/**),Edit(.github/**),Write(.github/**),MultiEdit(.github/**),Edit(scripts/factory/**),Write(scripts/factory/**),MultiEdit(scripts/factory/**),Edit(CODEOWNERS),Write(CODEOWNERS),MultiEdit(CODEOWNERS),Edit(docs/CODEOWNERS),Write(docs/CODEOWNERS),MultiEdit(docs/CODEOWNERS)"
             --max-turns ${{ inputs.max_turns }}
           prompt: |
