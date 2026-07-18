@@ -1,0 +1,13 @@
+coverage:
+  status:
+    patch:
+      default:
+        # Current project coverage is ~96.8% (npm run test -- --coverage,
+        # 18 Jul 2026). A small margin so a genuinely environment-dependent
+        # sliver (a real-git/real-fs shim path, an unreachable defensive
+        # branch) doesn't red-flag an otherwise fully-tested diff — same
+        # convention as the agent repo's codecov.yml.
+        threshold: 2%
+    project:
+      default:
+        threshold: 1%
