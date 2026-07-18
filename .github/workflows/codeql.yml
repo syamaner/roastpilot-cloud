@@ -1,0 +1,69 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, catches new query-pack findings on unchanged code (a new CVE
+    # pattern published against an existing dependency/idiom). Tuesday
+    # 03:17 UTC — off-peak, off the hour to avoid the scheduler stampede.
+    - cron: "17 3 * * 2"
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `actions` (Codex P2 finding, round 1): this repo's crown-jewel
+        # attack surface is `.github/workflows/**` (the factory's
+        # read-only-agent/privileged-publisher split, the
+        # publisher-identity token, the pipeline-self-modification guard),
+        # and it was entirely outside CodeQL's coverage with only
+        # javascript-typescript initialized — a script-injection or
+        # missing-permissions defect in `implement-ready-issues.yml` could
+        # get a green CodeQL run with the Actions-specific queries never
+        # having run at all.
+        #
+        # `python` (Codex P2 finding, round 2): the repo also has tracked
+        # Python (`snowflake/validate_migrations.py`,
+        # `snowflake/with_connection_env.py`) that the js-ts+actions matrix
+        # left unscanned.
+        #
+        # Each language gets its own init/analyze pair (and its own
+        # `category` below) so results don't collide.
+        language: [javascript-typescript, actions, python]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          languages: ${{ matrix.language }}
+          # security-extended adds lower-confidence-but-real query packs
+          # (e.g. broader taint tracking) on top of the default suite;
+          # cheap here (neither language has a compile step) so there's no
+          # runtime-budget reason to hold it back. Applies uniformly across
+          # the matrix — each language just uses whatever security-extended
+          # queries exist for it.
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          category: "/language:${{ matrix.language }}"
