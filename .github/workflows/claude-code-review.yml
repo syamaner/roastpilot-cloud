@@ -1,0 +1,156 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+# Adjudicated fold (round-2 Finding 3, #35 rework): without this, a rapid
+# sequence of pushes to the same PR can leave an OLDER review run still
+# posting inline threads after a newer push has already changed the diff
+# those threads referenced — stale findings against code that no longer
+# exists. Scoped per-PR (not per-ref/per-SHA) specifically so a new push
+# cancels the prior push's still-running review, not just a literal
+# re-run of the identical commit.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    # Skip Dependabot PRs: GitHub withholds repository secrets from
+    # Dependabot `pull_request` runs (read-only token), so
+    # CLAUDE_CODE_OAUTH_TOKEN is empty and the action would fail. Dependency
+    # bumps don't need a Claude code review — CI + dependency-review +
+    # codecov cover them. (claude-review is not a required check, so a
+    # Dependabot PR is never blocked; this just avoids a spurious red X.)
+    #
+    # Factory-authored PRs (factory.md §13): as of F1-S4 the publish job
+    # still opens PRs as `github-actions[bot]` via `GITHUB_TOKEN`, and
+    # GitHub suppresses downstream workflow triggers from GITHUB_TOKEN
+    # events — so this workflow does not fire on a factory PR at all yet.
+    # That gap is factory.md §13's linchpin fix (a workflow-triggering
+    # publisher identity), tracked separately; this `if` does not need to
+    # special-case github-actions[bot] until that identity switch lands,
+    # at which point factory PRs will be authored by the App/PAT identity
+    # and reach this job like any other PR.
+    #
+    # Fork guard (adjudicated P2, #35 rework): a fork PR against this
+    # public repo triggers `pull_request` too, but GitHub withholds
+    # repository secrets from a fork's workflow run — same empty-token
+    # failure mode as the Dependabot case above, just for a different
+    # reason. Without this, a fork PR gets a permanent red X instead of
+    # simply not running. `head.repo.full_name == repository` is false for
+    # any fork (true only when the PR's source branch lives in this same
+    # repo), so this skips exactly the cases with no secret to work with.
+    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Adjudicated P1-b (#35 rework): without this, claude-code-action's
+          # prepareAgentMode() calls configureGitAuth(), which embeds this
+          # job's OAuth-derived credential directly into .git/config's
+          # remote URL — readable on disk by anything this job's tool
+          # policy allows to read files, i.e. a real exfiltration path for
+          # a token this job should never need to write with at all (it
+          # only reviews and posts inline comments, never pushes). Setting
+          # `use_commit_signing: true` makes claude-code-action skip
+          # configureGitAuth() entirely (same fix already applied in the
+          # agent repo's own claude-code-review.yml and in this repo's
+          # implement-ready-issues.yml — see that workflow's identical
+          # comment on its own `use_commit_signing` for the verified
+          # code-path reasoning). Posting inline findings is unaffected:
+          # that goes through the separate `mcp__github_inline_comment`
+          # server, authenticated from the job's own token via the
+          # environment, not through git or .git/config at all.
+          use_commit_signing: true
+          # Adjudicated P1-a (#35 rework): `--comment` runs the review
+          # under the plugin's own tag-mode permission profile, which
+          # defaults to `acceptEdits` — auto-confirming any edit/write/
+          # commit tool call rather than requiring interactive approval.
+          # This job only ever needs to READ the diff and POST inline
+          # review comments; it has no legitimate reason to touch the
+          # working tree, the git history, or delete anything, so deny
+          # every edit/write/commit-adjacent tool explicitly rather than
+          # relying on the plugin's default profile to stay conservative
+          # forever. Deny rules win over acceptEdits and the tag mode's own
+          # allow list (verified against the pinned action's source), so
+          # this closes the write blast radius.
+          #
+          # CRITICAL (round-2 Finding 1, #35 rework): the `--disallowedTools`
+          # deny-only form above (this rework's original shape) silently
+          # broke true inline-comment posting. claude-code-action's own
+          # `install-mcp-server.ts::prepareMcpConfig` only installs the
+          # `github_inline_comment` MCP server when `claude_args` contains
+          # an `--allowedTools` entry starting with
+          # `mcp__github_inline_comment__` (verified against that source,
+          # and matches the action's own canonical
+          # `examples/pr-review-comprehensive.yml`) — without that
+          # allowlist entry, findings silently degrade to a `gh pr comment`
+          # summary instead of the resolvable inline threads
+          # `required_conversation_resolution` actually gates merge on.
+          # `--allowedTools` and `--disallowedTools` coexist safely here:
+          # deny still wins over allow (and over acceptEdits) for every
+          # write/commit-adjacent tool, so granting the inline-comment
+          # server and a few read-only `gh pr` Bash forms doesn't reopen
+          # the write blast radius the deny list closes.
+          #
+          # Accepted residual (round-2 Finding 4, REAL but low-severity,
+          # not folded — operator decision): `Bash(gh pr comment:*)` is
+          # itself a real, if narrow, exfiltration surface under prompt
+          # injection from a malicious diff — a compromised review session
+          # could shell out with the job's OAuth-derived credential
+          # reachable in its environment. Accepted as-is because this
+          # workflow only ever runs same-repo (the fork guard above), the
+          # blast radius is a same-repo actor already trusted with this
+          # token's scope, and closing it properly would mean a tighter
+          # subprocess-env scrub that entangles with a looser actor model
+          # elsewhere in this file — net-negative for this rework. Revisit
+          # sandboxing here if this job is ever extended to run on fork
+          # PRs, where the trust assumption above no longer holds.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
+          # A `synchronize` push made by the Claude GitHub App itself (e.g.
+          # a human re-running Claude Code locally against this PR) has
+          # actor `claude[bot]`; the action rejects non-human actors unless
+          # allowlisted, which would leave a permanent red X. Allowlist
+          # `claude` explicitly (both suffix forms) — NOT `*`, so an
+          # arbitrary third-party bot still can't trigger a review that
+          # holds the repo's read-only secret.
+          allowed_bots: 'claude,claude[bot]'
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          # Always post a visible tracking comment, even when the review
+          # has no findings — a clean review must be distinguishable from a
+          # silently failed one.
+          track_progress: true
+          # --comment posts each finding as an INLINE PR review comment (a
+          # resolvable thread), not a single summary issue comment.
+          # Combined with `required_conversation_resolution` on main, every
+          # finding then BLOCKS merge until its thread is explicitly
+          # resolved — the same discipline as the agent repo's
+          # claude-code-review.yml, ported here per AGENTS.md's Code Review
+          # Rubric (roastpilot-cloud's must-block list: PUBLIC grants,
+          # PUBLIC_WEB surface, secure-view visibility filter, Zod/Pydantic
+          # range-enum mismatches, deletion cascade gaps, raw/unpurged IP,
+          # Fahrenheit, and login/session on the public taster surface).
+          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
