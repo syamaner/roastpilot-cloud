@@ -37,11 +37,18 @@ independent things, all of which must pass:
    ``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()``,
    which stops secondary roles activating by default on ANY connection
    this user makes, this script's included.
-4. ``SHOW GRANTS TO ROLE PUBLIC`` — PUBLIC is active for every Snowflake
-   session regardless of secondary-roles settings, and its own grants
-   never appear in `SHOW GRANTS TO ROLE <primary role>`'s output (Codex
-   P1, PR #57, round 2). A PUBLIC grant reaching outside the DEV boundary
-   would otherwise go completely unaudited by checks #1–#2 above.
+4. ``SHOW GRANTS TO ROLE PUBLIC`` — EVERY grant PUBLIC holds, anywhere, is
+   a violation, not merely one that reaches outside the DEV boundary
+   (Codex P1, PR #57, round 3). `AGENTS.md`'s own Architecture Invariant
+   is "No grants to `PUBLIC`, anywhere" — a PUBLIC grant scoped entirely
+   inside `ROASTPILOT_DEV`/`DEV_CI_WH` is still a violation of that
+   invariant, so this check (`find_public_grants`) does NOT reuse the
+   boundary-aware `is_allowed_grant`/`find_violations` logic checks #1 and
+   #5 use — PUBLIC is held to a stricter, unconditional standard: zero
+   grants, full stop. PUBLIC is also active for every Snowflake session
+   regardless of secondary-roles settings, and its own grants never appear
+   in `SHOW GRANTS TO ROLE <primary role>`'s output, so this audit is the
+   only thing that catches a PUBLIC grant at all.
 5. ``SHOW GRANTS TO USER <user>`` — confirms the CI service user itself
    has no role granted to it beyond the primary role (+ PUBLIC, which
    Snowflake grants to every user implicitly). Disabling secondary roles
@@ -55,12 +62,20 @@ holding this role must never be able to touch PROD, PREVIEW, or any other
 account-level object, and this check runs on every dispatch of the gated
 job — not just at provisioning time — so a grant drift (an operator
 accidentally widening the role later) is caught automatically, not just
-verified once by hand via `SHOW GRANTS` at setup time. It also runs
-BEFORE the schemachange deploy step in the same job (Codex P1, PR #57):
-checking the boundary AFTER migrations have already been applied would
-let a drifted role's damage happen before this script ever reports it —
-the whole point is to catch drift before it can be used, not just narrate
-it afterward.
+verified once by hand via `SHOW GRANTS` at setup time.
+
+`dev-snowflake-contract.yml` invokes this script TWICE, not once (Codex
+P1, PR #57, round 3): once BEFORE the schemachange deploy step (the drift
+gate — catches a grant that was already wrong going in, before writing
+anything), and once AFTER it (the migration-output gate — catches a
+migration that ITSELF introduces a forbidden grant, e.g. a bad `GRANT ...
+TO PUBLIC` migration, which the pre-deploy run can never see since it
+hasn't been applied yet). Checking only before deploy would let exactly
+that class of bad migration pass, since deploy's own job is running the
+migration's SQL, not judging whether that SQL was safe. This script itself
+has no notion of "which invocation" it is — both runs are the identical,
+stateless, full five-check audit; see the workflow file for the two call
+sites and how a post-deploy failure fails the job.
 
 Before connecting at all, `main()` also asserts the
 `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` env vars still equal
@@ -75,19 +90,40 @@ Deliberately fails CLOSED: an unrecognized object type (a Snowflake
 privilege/object kind this allowlist doesn't know about) is treated as a
 VIOLATION, never silently permitted — see `is_allowed_grant`.
 
-Identifier comparisons are CASE-SENSITIVE, not normalized to uppercase
-(Codex P1, PR #57): Snowflake preserves the exact case of a QUOTED
-identifier (`"roastpilot_dev"` is a genuinely different object from
-`ROASTPILOT_DEV`), so uppercasing both sides before comparing would
-conflate the two — a quoted, lowercase, out-of-bounds object would
-incorrectly pass. Every identifier this repo's own tooling creates is
-unquoted (Snowflake normalizes those to uppercase at creation time), so
-comparing case-sensitively against the canonical uppercase name is both
-correct and never a false rejection for anything this repo's own
-migrations create. Only `granted_on` (Snowflake's own fixed, non-user-
-influenceable vocabulary — "DATABASE", "TABLE", etc.) is still normalized
-for robustness, since that field has no quoting/case ambiguity to begin
-with.
+Every identifier comparison (database, warehouse, role, and object name)
+routes through ONE function, `identifiers_match` — a categorical fix
+(Codex P1, PR #57, round 3), replacing three independently-patched bugs
+that all stemmed from the same root cause: Snowflake quoted identifiers
+preserve EXACT case and EXACT whitespace (a quoted `"roastpilot_dev"`, or
+a quoted `"ROASTPILOT_DEV "` with a trailing space, is a genuinely
+DIFFERENT object from unquoted `ROASTPILOT_DEV`), while unquoted
+identifiers fold to uppercase at creation time.
+- Case-folding a comparison (e.g. `.upper()` on a user-supplied
+  identifier) would conflate a quoted, differently-cased lookalike with
+  the real object.
+- Stripping whitespace would conflate a quoted, whitespace-padded
+  lookalike with the real object.
+- Case-folding the system-PUBLIC-role check specifically
+  (`role_name.upper() == "PUBLIC"`) would mistake a quoted, genuinely
+  different role literally named `"public"` for the real system PUBLIC
+  role and wrongly skip auditing it.
+`identifiers_match` does none of that: it compares two strings BYTE FOR
+BYTE, no `.strip()`, no `.upper()`/`.lower()`. Every identifier this
+repo's own tooling creates is unquoted (normalized to uppercase at
+creation time), so an exact match against the canonical uppercase name is
+both correct and never a false rejection for anything this repo's own
+migrations create — while a quoted, differently-cased OR
+whitespace-padded lookalike, or the real Snowflake system `PUBLIC` role
+being confused with a same-named-but-different quoted role, is now
+correctly treated as NOT a match. A qualified object name (e.g.
+`"ROASTPILOT_DEV.APP.SOME_TABLE"`) is compared by splitting on the first
+`.` and matching that first component exactly, not `str.startswith`,
+which is the same exact-match discipline applied to the qualifying
+prefix rather than the whole string. Only `granted_on` (Snowflake's own
+fixed, non-user-influenceable vocabulary — "DATABASE", "TABLE", etc.) is
+still normalized (stripped + uppercased) for robustness, since that field
+has no quoting/case ambiguity to begin with and isn't a comparison this
+fix is scoped to.
 
 This connects DIRECTLY via snowflake-connector-python (not through
 schemachange, which has no equivalent of `SHOW GRANTS`), using the private
@@ -193,18 +229,42 @@ def assert_boundary_vars_not_drifted(database: str, warehouse: str) -> None:
     @param warehouse: The `SNOWFLAKE_DEV_WAREHOUSE` value to verify.
     @raises SystemExit: If either value doesn't match the expected literal.
     """
-    if database != _EXPECTED_DATABASE:
+    if not identifiers_match(database, _EXPECTED_DATABASE):
         raise SystemExit(
             f"error: SNOWFLAKE_DEV_DATABASE is {database!r}, expected "
             f"{_EXPECTED_DATABASE!r} -- refusing to audit a boundary that "
             "may have silently drifted from the known-correct DEV database"
         )
-    if warehouse != _EXPECTED_WAREHOUSE:
+    if not identifiers_match(warehouse, _EXPECTED_WAREHOUSE):
         raise SystemExit(
             f"error: SNOWFLAKE_DEV_WAREHOUSE is {warehouse!r}, expected "
             f"{_EXPECTED_WAREHOUSE!r} -- refusing to audit a boundary that "
             "may have silently drifted from the known-correct DEV warehouse"
         )
+
+
+def identifiers_match(candidate: str, expected: str) -> bool:
+    """True when two Snowflake identifiers are the EXACT same string
+    (Codex P1, PR #57, round 3 — the categorical fix for :276/:376 and
+    #58's L1, replacing three independently-patched symptoms of the same
+    root cause).
+
+    Snowflake quoted identifiers preserve exact case AND exact whitespace;
+    unquoted identifiers fold to uppercase at creation time. This repo's
+    own tooling only ever creates unquoted (canonical uppercase)
+    identifiers, so comparing candidate/expected byte-for-byte -- no
+    `.strip()`, no `.upper()`/`.lower()` -- is both correct for everything
+    this repo creates and safe against a quoted, differently-cased or
+    whitespace-padded lookalike slipping through as a false match. Every
+    name/role/database/warehouse comparison in this module routes through
+    this one function rather than each doing its own ad hoc normalization.
+
+    @param candidate: The identifier as Snowflake actually returned it (or
+        as an env var actually holds it).
+    @param expected: The identifier this repo expects/allows.
+    @returns: Whether they are exactly the same string.
+    """
+    return candidate == expected
 
 
 def load_private_key_der(pem_text: str, passphrase: str | None) -> bytes:
@@ -248,12 +308,11 @@ def is_allowed_grant(
     actually deployed to. `main()` separately anchors those vars against
     silent drift -- see `assert_boundary_vars_not_drifted`.
 
-    Comparisons are CASE-SENSITIVE for every user-influenceable identifier
-    (`name`, `role_name`, `allowed_database`, `allowed_warehouse`) — see
-    the module docstring for why uppercasing both sides would let a
-    quoted, differently-cased object slip through. `granted_on` is still
-    normalized to uppercase: it's Snowflake's own fixed vocabulary, not a
-    quotable identifier.
+    Comparisons for every user-influenceable identifier (`name`,
+    `role_name`, `allowed_database`, `allowed_warehouse`) route through
+    `identifiers_match` — an EXACT, byte-for-byte comparison; see the
+    module docstring for why. `granted_on` is still stripped/uppercased:
+    it's Snowflake's own fixed vocabulary, not a quotable identifier.
 
     Fails CLOSED for anything not explicitly recognized: an object type
     outside `_DATABASE_SCOPED_OBJECT_TYPES` (and not a warehouse/role
@@ -273,19 +332,21 @@ def is_allowed_grant(
     @returns: Whether this grant stays within the DEV boundary.
     """
     granted_on_upper = granted_on.strip().upper()
-    name_stripped = name.strip()
 
     if granted_on_upper == "WAREHOUSE":
-        return name_stripped == allowed_warehouse.strip()
+        return identifiers_match(name, allowed_warehouse)
 
     if granted_on_upper == "ROLE":
-        return name_stripped == role_name.strip()
+        return identifiers_match(name, role_name)
 
     if granted_on_upper in _DATABASE_SCOPED_OBJECT_TYPES:
-        allowed_database_stripped = allowed_database.strip()
-        return name_stripped == allowed_database_stripped or name_stripped.startswith(
-            f"{allowed_database_stripped}."
-        )
+        # Compare the first dot-delimited component EXACTLY (Codex P1, PR
+        # #57, round 3), not `str.startswith(f"{allowed_database}.")` --
+        # splitting first and matching the resulting component with the
+        # same exact-match discipline as every other identifier here,
+        # rather than a substring-prefix check, is what closes #58's L1.
+        first_component = name.split(".", 1)[0]
+        return identifiers_match(first_component, allowed_database)
 
     return False
 
@@ -297,10 +358,12 @@ def find_violations(
     description of each one that violates the DEV boundary — empty if none
     do.
 
-    Also used to audit PUBLIC's own grants (Codex P1, PR #57, round 2): the
-    caller passes `role_name="PUBLIC"` and PUBLIC's own `SHOW GRANTS TO
-    ROLE PUBLIC` rows, reusing the exact same boundary logic rather than
-    duplicating it for a second role.
+    Boundary-aware: a grant is fine as long as it stays within
+    `allowed_database`/`allowed_warehouse`. Used for the primary role (#1)
+    and the CI user's own role grants (#5, indirectly via
+    `find_unexpected_user_role_grants`) — NOT for PUBLIC, which is held to
+    an unconditional zero-grants standard regardless of boundary; see
+    `find_public_grants`.
 
     @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO ROLE <role_name>`.
@@ -319,6 +382,28 @@ def find_violations(
     return violations
 
 
+def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
+    """Returns a human-readable description of EVERY grant PUBLIC holds —
+    empty only if PUBLIC has none at all (Codex P1, PR #57, round 3).
+
+    Deliberately does NOT reuse `find_violations`'s boundary-aware logic:
+    `AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`,
+    anywhere" -- a PUBLIC grant scoped entirely inside
+    `ROASTPILOT_DEV`/`DEV_CI_WH` is still a violation of that invariant, so
+    checking PUBLIC against the DEV boundary (as an earlier version of
+    this audit did) would wrongly ALLOW it. PUBLIC should have zero
+    grants, full stop -- every row here is unconditionally a violation.
+
+    @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
+        GRANTS TO ROLE PUBLIC`.
+    @returns: Descriptions of every grant PUBLIC holds, empty if none.
+    """
+    return [
+        f"{row.get('privilege', '')} on {row.get('granted_on', '')} {row.get('name', '')}"
+        for row in grant_rows
+    ]
+
+
 def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> list[str]:
     """Filters a list of visible object names (from `SHOW DATABASES` or
     `SHOW WAREHOUSES`) down to whichever ones are NOT the one allowed name
@@ -327,16 +412,16 @@ def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> lis
     Catches what `SHOW GRANTS TO ROLE` alone can miss (Codex P1, PR #57):
     a future grant, an account-level visibility path, or any other
     mechanism that makes an object visible/usable to this role without a
-    corresponding row in `SHOW GRANTS`'s own output. Comparison is
-    case-sensitive, same reasoning as `is_allowed_grant`.
+    corresponding row in `SHOW GRANTS`'s own output. Comparison is an
+    EXACT match via `identifiers_match`, same reasoning as
+    `is_allowed_grant`.
 
     @param visible_names: Object names as returned by `SHOW DATABASES`/
         `SHOW WAREHOUSES` (the `name` column).
     @param allowed_name: The one name this role should see.
     @returns: Every visible name that isn't the allowed one.
     """
-    allowed_stripped = allowed_name.strip()
-    return [name for name in visible_names if name.strip() != allowed_stripped]
+    return [name for name in visible_names if not identifiers_match(name, allowed_name)]
 
 
 def find_unexpected_user_role_grants(
@@ -348,13 +433,22 @@ def find_unexpected_user_role_grants(
 
     PUBLIC is implicitly granted to every Snowflake user and can't be
     revoked, so it's excluded here deliberately -- it's audited separately
-    via `find_violations(..., role_name="PUBLIC", ...)` against PUBLIC's
-    own `SHOW GRANTS TO ROLE PUBLIC` rows, not flagged as an unexpected
-    user-role grant. Any OTHER role reaching this far means the CI service
-    user itself carries a role beyond the one this whole audit was scoped
-    to -- a role that could activate as a secondary role in some OTHER
-    session (not just this script's own, which disables secondary roles
-    for itself) unless the user-level grant is clean.
+    via `find_public_grants` against PUBLIC's own `SHOW GRANTS TO ROLE
+    PUBLIC` rows, not flagged as an unexpected user-role grant. Any OTHER
+    role reaching this far means the CI service user itself carries a role
+    beyond the one this whole audit was scoped to -- a role that could
+    activate as a secondary role in some OTHER session (not just this
+    script's own, which disables secondary roles for itself) unless the
+    user-level grant is clean.
+
+    The system PUBLIC role is matched via `identifiers_match(role_name,
+    "PUBLIC")` -- an EXACT comparison, not `role_name.upper() == "PUBLIC"`
+    (Codex P1, PR #57, round 3): the real system PUBLIC role is always the
+    literal, unquoted, uppercase string `PUBLIC`, so case-folding the
+    comparison would incorrectly treat a QUOTED, genuinely different role
+    literally named `"public"` as if it were the real system role and
+    wrongly skip auditing it -- exactly the kind of role that could later
+    activate as a secondary role and contribute unaudited privileges.
 
     @param user_role_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO USER <user>` -- each row's `role` column names a granted
@@ -364,15 +458,14 @@ def find_unexpected_user_role_grants(
     @returns: Names of every unexpected role granted to the user, empty if
         none.
     """
-    expected_role_stripped = expected_role.strip()
     unexpected = []
     for row in user_role_rows:
-        role_name = str(row.get("role", "")).strip()
+        role_name = str(row.get("role", ""))
         if not role_name:
             continue
-        if role_name == expected_role_stripped:
+        if identifiers_match(role_name, expected_role):
             continue
-        if role_name.upper() == "PUBLIC":
+        if identifiers_match(role_name, "PUBLIC"):
             continue
         unexpected.append(role_name)
     return unexpected
@@ -427,7 +520,11 @@ def main() -> int:
         conn.close()
 
     violations = find_violations(grant_rows, role, database, warehouse)
-    public_violations = find_violations(public_grant_rows, "PUBLIC", database, warehouse)
+    # Codex P1, PR #57, round 3: PUBLIC is held to an unconditional
+    # zero-grants standard (AGENTS.md's "No grants to PUBLIC, anywhere"),
+    # not the boundary-aware check the primary role gets -- see
+    # find_public_grants's own docstring.
+    public_violations = find_public_grants(public_grant_rows)
     out_of_bounds_databases = find_out_of_bounds_names(visible_databases, database)
     out_of_bounds_warehouses = find_out_of_bounds_names(visible_warehouses, warehouse)
     unexpected_user_roles = find_unexpected_user_role_grants(user_role_rows, role)
@@ -440,13 +537,13 @@ def main() -> int:
         or unexpected_user_roles
     ):
         print(
-            f"error: {role} reaches outside {database}/{warehouse}:",
+            f"error: {role}/PUBLIC/{user} fail the DEV boundary or PUBLIC-grants audit:",
             file=sys.stderr,
         )
         for violation in violations:
-            print(f"  - grant: {violation}", file=sys.stderr)
+            print(f"  - grant on {role} outside {database}/{warehouse}: {violation}", file=sys.stderr)
         for violation in public_violations:
-            print(f"  - PUBLIC grant: {violation}", file=sys.stderr)
+            print(f"  - PUBLIC grant (PUBLIC must have none, anywhere): {violation}", file=sys.stderr)
         for extra_database in out_of_bounds_databases:
             print(f"  - visible database beyond the DEV boundary: {extra_database}", file=sys.stderr)
         for extra_warehouse in out_of_bounds_warehouses:
@@ -456,9 +553,9 @@ def main() -> int:
         return 1
 
     print(
-        f"confirmed: all {len(grant_rows)} grant(s) on {role} and {len(public_grant_rows)} on PUBLIC "
-        f"stay within {database}/{warehouse}, no other database/warehouse is visible, and {user} "
-        "has no unexpected role grants"
+        f"confirmed: all {len(grant_rows)} grant(s) on {role} stay within {database}/{warehouse}, "
+        f"PUBLIC holds zero grants, no other database/warehouse is visible, and {user} has no "
+        "unexpected role grants"
     )
     return 0
 

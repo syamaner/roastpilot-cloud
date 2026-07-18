@@ -44,11 +44,17 @@ name: DEV Snowflake Contract Check
 #    raw key content (verified against the installed package's source,
 #    #18) — written with `umask 077`, removed via `trap ... EXIT` so it's
 #    gone even if the step fails partway.
-# 6. The grants-assertion step runs BEFORE the deploy step (Codex P1, PR
-#    #57), not after: checking the DEV boundary only AFTER migrations have
-#    already been applied would let a drifted role's damage happen before
-#    this job ever reports it. See that step's own comment for how a
-#    failure there automatically skips the deploy step that follows.
+# 6. The grants-assertion runs TWICE, not once (Codex P1, PR #57, round
+#    3): once BEFORE the deploy step (Codex P1, PR #57, round 1 — the
+#    drift gate: checking the boundary only AFTER migrations have already
+#    been applied would let a drifted role's damage happen before this job
+#    ever reports it), and once AFTER it (the migration-output gate: a
+#    migration that ITSELF grants something forbidden -- e.g. a bad
+#    `GRANT ... TO PUBLIC` -- succeeds as valid SQL and would sail through
+#    a pre-deploy-only check, since that check ran before the migration
+#    existed in the database at all). Both runs are the exact same script;
+#    see the two steps' own comments for why the second one also runs even
+#    if the deploy step itself failed partway.
 # 7. Secondary roles are kept off for BOTH Snowflake connections in this
 #    job, by two DIFFERENT mechanisms (Codex P1, PR #57, round 2 — an
 #    earlier attempt tried a single `session_parameters`/
@@ -148,31 +154,34 @@ jobs:
       - name: Install schemachange + Snowflake connector dependencies
         run: pip install -r snowflake/requirements.txt
 
-      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH (pre-deploy)
         id: grants
-        # Runs BEFORE the deploy step below (Codex P1, PR #57): checking
-        # the boundary AFTER migrations have already been applied would let
-        # a drifted role's damage happen before this script ever reports
-        # it. No `if:` needed — a normal (non-continue-on-error) step
-        # failure here automatically skips the deploy step that follows,
-        # GitHub Actions' own default behavior, so a boundary violation
-        # blocks the deploy without any extra conditional logic to get
-        # wrong.
+        # The DRIFT gate -- runs BEFORE the deploy step below (Codex P1, PR
+        # #57): checking the boundary only AFTER migrations have already
+        # been applied would let a drifted role's damage happen before this
+        # script ever reports it. No `if:` needed — a normal
+        # (non-continue-on-error) step failure here automatically skips the
+        # deploy step that follows, GitHub Actions' own default behavior,
+        # so a boundary violation blocks the deploy without any extra
+        # conditional logic to get wrong. This is NOT the only run of this
+        # script in this job -- see the "(post-deploy)" step below, the
+        # MIGRATION-OUTPUT gate, for why a pre-deploy-only check would miss
+        # a migration that itself introduces a forbidden grant.
         # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
         # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW DATABASES, or
         # SHOW WAREHOUSES report anything outside the DEV database/
-        # warehouse this role is provisioned to touch (assert_dev_ci_
-        # grants.py, #11). Connects directly via snowflake-connector-python
-        # with the key held in memory only, never written to disk (unlike
-        # the deploy step below, which needs schemachange's file-based env
-        # layer). Secondary roles are disabled for this session via a real
-        # `USE SECONDARY ROLES NONE` statement the script issues right
-        # after connecting (Codex P1, PR #57, round 2 -- an earlier
-        # `session_parameters` attempt here was invalid and never actually
-        # worked). The deploy connection below has no equivalent mid-
-        # session hook, so it's covered instead by an operator-run
-        # `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
-        # -- see that step's own comment.
+        # warehouse this role is provisioned to touch, or if PUBLIC holds
+        # ANY grant at all (assert_dev_ci_grants.py, #11). Connects
+        # directly via snowflake-connector-python with the key held in
+        # memory only, never written to disk (unlike the deploy step below,
+        # which needs schemachange's file-based env layer). Secondary
+        # roles are disabled for this session via a real `USE SECONDARY
+        # ROLES NONE` statement the script issues right after connecting
+        # (Codex P1, PR #57, round 2 -- an earlier `session_parameters`
+        # attempt here was invalid and never actually worked). The deploy
+        # connection below has no equivalent mid-session hook, so it's
+        # covered instead by an operator-run `ALTER USER ROASTPILOT_DEV_CI
+        # SET DEFAULT_SECONDARY_ROLES = ()` -- see that step's own comment.
         working-directory: snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -234,6 +243,39 @@ jobs:
           export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
           python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
 
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH (post-deploy)
+        id: grants-post
+        # The MIGRATION-OUTPUT gate (Codex P1, PR #57, round 3): the
+        # pre-deploy step above can only ever catch a boundary problem that
+        # ALREADY existed before this run's migrations were applied -- a
+        # migration that itself contains a forbidden grant (e.g. `GRANT
+        # SELECT ON ... TO PUBLIC`) is valid SQL, so schemachange applies it
+        # successfully, and the pre-deploy audit has no way to have seen it
+        # since it hadn't been applied yet. Re-running the exact same audit
+        # here, against the now-migrated database, is what actually catches
+        # that class of bad migration -- a failure here means the migration
+        # under test introduced a forbidden grant, and fails the job.
+        # `if: always()` + explicitly checking the pre-deploy step's own
+        # outcome (rather than relying on the default "skip after a
+        # failure" behavior) so this still runs even if the deploy step
+        # itself exited non-zero -- schemachange applies migrations one at
+        # a time, so a batch that fails partway through may still have
+        # already applied an earlier, bad grant; skipping this check in
+        # that case would let that grant go unaudited. It does NOT run if
+        # the pre-deploy step itself failed (no deploy was attempted, so
+        # there's nothing new to audit, and the state is identical to what
+        # pre-deploy already reported).
+        if: always() && steps.grants.outcome == 'success'
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: python3 assert_dev_ci_grants.py
+
       - name: Write summary
         # Purely observability — this is a rarely-run, human-approved job
         # holding a real credential, so the operator reviewing a run should
@@ -246,8 +288,9 @@ jobs:
           {
             echo "## DEV Snowflake contract check"
             echo ""
-            echo "- **Grants stay within DEV:** ${{ steps.grants.outcome }}"
+            echo "- **Grants stay within DEV (pre-deploy):** ${{ steps.grants.outcome }}"
             echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
+            echo "- **Grants stay within DEV (post-deploy):** ${{ steps.grants-post.outcome }}"
             echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
             echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
             echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"

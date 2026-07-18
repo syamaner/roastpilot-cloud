@@ -154,25 +154,39 @@ see the next section for the live counterpart.
 ## Live contract check against ROASTPILOT_DEV (F1-S8)
 
 `.github/workflows/dev-snowflake-contract.yml` is the live-connecting
-counterpart the offline job above always deferred: it FIRST asserts a
-real, DEV-scoped CI key (`ROASTPILOT_DEV_CI`, role
-`ROASTPILOT_DEV_CI_ROLE`) stays confined to `ROASTPILOT_DEV`/`DEV_CI_WH`
-(`assert_dev_ci_grants.py`), and only THEN deploys migrations against
-`ROASTPILOT_DEV` with that same key — checking the boundary before
-writing anything, not after.
+counterpart the offline job above always deferred: it runs the grants
+audit (`assert_dev_ci_grants.py`) **twice** — once BEFORE deploying
+migrations against `ROASTPILOT_DEV` with the DEV-scoped CI key
+(`ROASTPILOT_DEV_CI`, role `ROASTPILOT_DEV_CI_ROLE`), and once AFTER. The
+pre-deploy run is the drift gate (catches a grant that was already wrong
+going in, before writing anything); the post-deploy run is the
+migration-output gate (catches a migration that ITSELF introduces a
+forbidden grant — a bad `GRANT ... TO PUBLIC` migration is valid SQL and
+succeeds, so only re-auditing the database AFTER it's applied can catch
+it; a pre-deploy-only check would let that class of bad migration pass).
 
 The grants check covers five independent things, all of which must pass:
-`SHOW GRANTS TO ROLE` (current object grants on the primary role),
-`SHOW DATABASES`/`SHOW WAREHOUSES` (nothing else is even VISIBLE to the
-role — closes the gap a future grant would leave in `SHOW GRANTS` alone),
-`SHOW GRANTS TO ROLE PUBLIC` (PUBLIC is active for every session regardless
-of secondary-roles settings and its grants never show up under the primary
-role's own `SHOW GRANTS`, so it's audited separately against the same
-boundary), and `SHOW GRANTS TO USER` (the CI service user itself carries no
-role beyond the primary one, plus PUBLIC). Identifier comparisons are
-case-sensitive throughout, since Snowflake preserves the case of a quoted
-identifier and a naive uppercase-both-sides comparison would conflate a
-quoted, out-of-bounds object with the real one.
+`SHOW GRANTS TO ROLE` (current object grants on the primary role stay
+within `ROASTPILOT_DEV`/`DEV_CI_WH`), `SHOW DATABASES`/`SHOW WAREHOUSES`
+(nothing else is even VISIBLE to the role — closes the gap a future grant
+would leave in `SHOW GRANTS` alone), `SHOW GRANTS TO ROLE PUBLIC` (PUBLIC
+must hold **zero grants, anywhere** — `AGENTS.md`'s Architecture Invariant
+is "No grants to `PUBLIC`, anywhere", not merely "PUBLIC stays inside the
+DEV boundary", so this check does NOT reuse the primary role's
+boundary-aware logic), and `SHOW GRANTS TO USER` (the CI service user
+itself carries no role beyond the primary one, plus PUBLIC).
+
+Every identifier comparison (database, warehouse, role, object name)
+routes through one function, `identifiers_match` — an EXACT, byte-for-byte
+match: no case-folding, no whitespace-stripping. Snowflake quoted
+identifiers preserve exact case AND exact whitespace, so a quoted
+`"roastpilot_dev"` or a quoted `"ROASTPILOT_DEV "` (trailing space) is a
+genuinely different object from unquoted `ROASTPILOT_DEV` — and the real
+system `PUBLIC` role is always the literal uppercase, unquoted string
+`PUBLIC`, so a quoted `"public"` is a different, disallowed role, not a
+case variant of the real one. A qualified object name is matched by
+splitting on the first `.` and comparing that component exactly, not
+`str.startswith`.
 
 Before connecting, the script also asserts
 `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` still equal the known-

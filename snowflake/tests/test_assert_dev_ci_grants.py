@@ -93,6 +93,32 @@ class TestAssertBoundaryVarsNotDrifted:
             assert "SOME_OTHER_WH" in str(exc)
 
 
+class TestIdentifiersMatch:
+    """Codex P1, PR #57, round 3: the ONE categorical exact-match function
+    every name/role/db/warehouse comparison in this module routes through
+    -- replaces three independently-patched symptoms of the same root
+    cause (case-folding, whitespace-stripping, and the system-PUBLIC
+    special case).
+    """
+
+    def test_matches_the_identical_string(self) -> None:
+        assert assert_dev_ci_grants.identifiers_match(_DEV_DB, _DEV_DB)
+
+    def test_rejects_a_differently_cased_variant(self) -> None:
+        assert not assert_dev_ci_grants.identifiers_match("roastpilot_dev", _DEV_DB)
+
+    def test_rejects_a_whitespace_padded_variant_codex_p1_276(self) -> None:
+        # The exact bug this closes (Codex P1, PR #57, round 3, :276): a
+        # QUOTED identifier with trailing whitespace ("ROASTPILOT_DEV ") is
+        # a genuinely different object from ROASTPILOT_DEV -- stripping
+        # before comparing would incorrectly treat them as the same.
+        assert not assert_dev_ci_grants.identifiers_match(f"{_DEV_DB} ", _DEV_DB)
+        assert not assert_dev_ci_grants.identifiers_match(f" {_DEV_DB}", _DEV_DB)
+
+    def test_rejects_an_empty_string_against_a_real_name(self) -> None:
+        assert not assert_dev_ci_grants.identifiers_match("", _DEV_DB)
+
+
 class TestIsAllowedGrant:
     def test_allows_the_exact_dev_database(self) -> None:
         assert assert_dev_ci_grants.is_allowed_grant("DATABASE", _DEV_DB, _DEV_ROLE, _DEV_DB, _DEV_WH)
@@ -131,6 +157,17 @@ class TestIsAllowedGrant:
         )
         assert not assert_dev_ci_grants.is_allowed_grant(
             "ROLE", "roastpilot_dev_ci_role", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+
+    def test_rejects_a_whitespace_padded_variant_of_the_allowed_database_codex_p1_276(self) -> None:
+        # Codex P1, PR #57, round 3, :276: a quoted "ROASTPILOT_DEV " (with
+        # a trailing space) is a genuinely different object -- a naive
+        # .strip() before comparing would incorrectly allow it.
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "DATABASE", f"{_DEV_DB} ", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "WAREHOUSE", f"{_DEV_WH} ", _DEV_ROLE, _DEV_DB, _DEV_WH
         )
 
     def test_rejects_a_different_database(self) -> None:
@@ -218,17 +255,40 @@ class TestFindViolations:
         violations = assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
         assert len(violations) == 1
 
-    def test_reused_against_public_with_its_own_role_name_codex_p1(self) -> None:
-        # Codex P1, PR #57, round 2: PUBLIC's own grants are audited by
-        # reusing this SAME function with role_name="PUBLIC", against
-        # PUBLIC's own SHOW GRANTS TO ROLE PUBLIC rows.
+
+class TestFindPublicGrants:
+    """Codex P1, PR #57, round 3: PUBLIC is held to an UNCONDITIONAL
+    zero-grants standard (AGENTS.md's "No grants to PUBLIC, anywhere"),
+    not the boundary-aware check `find_violations`/`is_allowed_grant` give
+    the primary role -- deliberately NOT reused for PUBLIC's own audit.
+    """
+
+    def test_empty_when_public_has_no_grants(self) -> None:
+        assert assert_dev_ci_grants.find_public_grants([]) == []
+
+    def test_flags_a_grant_outside_the_dev_boundary(self) -> None:
         rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"}]
-        violations = assert_dev_ci_grants.find_violations(rows, "PUBLIC", _DEV_DB, _DEV_WH)
+        violations = assert_dev_ci_grants.find_public_grants(rows)
         assert len(violations) == 1
         assert "ROASTPILOT_PREVIEW" in violations[0]
 
-        compliant_rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
-        assert assert_dev_ci_grants.find_violations(compliant_rows, "PUBLIC", _DEV_DB, _DEV_WH) == []
+    def test_flags_a_grant_even_INSIDE_the_dev_boundary_codex_p1_round3(self) -> None:
+        # The exact regression this round closes: reusing the
+        # boundary-aware find_violations here would wrongly ALLOW a PUBLIC
+        # grant that happens to sit inside ROASTPILOT_DEV/DEV_CI_WH --
+        # AGENTS.md's invariant is "no grants to PUBLIC, anywhere", full
+        # stop, regardless of what's granted or where.
+        rows = [{"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.SOME_TABLE"}]
+        violations = assert_dev_ci_grants.find_public_grants(rows)
+        assert len(violations) == 1
+        assert "SOME_TABLE" in violations[0]
+
+    def test_flags_multiple_grants_independently(self) -> None:
+        rows = [
+            {"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB},
+            {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": _DEV_WH},
+        ]
+        assert len(assert_dev_ci_grants.find_public_grants(rows)) == 2
 
 
 class TestFindOutOfBoundsNames:
@@ -257,6 +317,12 @@ class TestFindOutOfBoundsNames:
         result = assert_dev_ci_grants.find_out_of_bounds_names(["roastpilot_dev"], _DEV_DB)
         assert result == ["roastpilot_dev"]
 
+    def test_is_whitespace_sensitive_a_padded_variant_still_flags_codex_p1_276(self) -> None:
+        # Codex P1, PR #57, round 3, :276: a quoted "ROASTPILOT_DEV " (with
+        # a trailing space) is a genuinely different, out-of-bounds object.
+        result = assert_dev_ci_grants.find_out_of_bounds_names([f"{_DEV_DB} "], _DEV_DB)
+        assert result == [f"{_DEV_DB} "]
+
     def test_empty_list_of_visible_names_is_never_a_violation(self) -> None:
         assert assert_dev_ci_grants.find_out_of_bounds_names([], _DEV_DB) == []
 
@@ -272,15 +338,22 @@ class TestFindUnexpectedUserRoleGrants:
         assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
 
     def test_public_is_never_flagged(self) -> None:
+        # The real system PUBLIC role is always the literal, unquoted,
+        # uppercase string "PUBLIC".
         rows = [{"role": _DEV_ROLE}, {"role": "PUBLIC"}]
         assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
 
-    def test_public_is_never_flagged_case_insensitively(self) -> None:
-        # PUBLIC is Snowflake's own fixed vocabulary here, not a quotable
-        # user identifier -- unlike is_allowed_grant's user-supplied
-        # identifiers, normalizing this one specific case is correct.
+    def test_a_quoted_lowercase_public_role_IS_flagged_as_unexpected_codex_p1_376(self) -> None:
+        # The exact bug this closes (Codex P1, PR #57, round 3, :376): an
+        # earlier version case-folded this comparison
+        # (role_name.upper() == "PUBLIC"), which would mistake a QUOTED,
+        # genuinely DIFFERENT role literally named "public" for the real
+        # system PUBLIC role and wrongly skip auditing it. The real system
+        # PUBLIC role is always uppercase and unquoted -- a lowercase
+        # "public" is a different, disallowed role and must be flagged.
         rows = [{"role": _DEV_ROLE}, {"role": "public"}]
-        assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == ["public"]
 
     def test_flags_an_unexpected_extra_role(self) -> None:
         rows = [{"role": _DEV_ROLE}, {"role": "ACCOUNTADMIN"}]
@@ -294,6 +367,16 @@ class TestFindUnexpectedUserRoleGrants:
 
     def test_empty_rows_is_never_a_violation(self) -> None:
         assert assert_dev_ci_grants.find_unexpected_user_role_grants([], _DEV_ROLE) == []
+
+    def test_a_whitespace_padded_variant_of_the_expected_role_is_flagged_codex_p1_276(self) -> None:
+        # Codex P1, PR #57, round 3, :276: a quoted role with a trailing
+        # space is a genuinely different role from the expected one --
+        # stripping before comparing would incorrectly treat them as the
+        # same and skip auditing the (different) role that was actually
+        # granted.
+        rows = [{"role": f"{_DEV_ROLE} "}]
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == [f"{_DEV_ROLE} "]
 
     def test_ignores_a_row_with_a_missing_role_field(self) -> None:
         rows = [{"role": _DEV_ROLE}, {}]
@@ -473,6 +556,31 @@ class TestMain:
         assert exit_code == 1
         stderr = capsys.readouterr().err
         assert "ROASTPILOT_PREVIEW" in stderr
+        assert "PUBLIC grant" in stderr
+
+    def test_returns_1_when_public_has_a_grant_INSIDE_dev_codex_p1_round3(self, monkeypatch, capsys) -> None:
+        # The exact regression Codex P1, PR #57, round 3 closes: a PUBLIC
+        # grant on a table INSIDE ROASTPILOT_DEV must still FAIL --
+        # AGENTS.md's invariant is "no grants to PUBLIC, anywhere", not
+        # merely "PUBLIC stays inside the DEV boundary". An earlier version
+        # of this audit reused the boundary-aware find_violations for
+        # PUBLIC and would have wrongly ALLOWED this.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_grant_rows=[
+                {"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.SOME_TABLE"}
+            ],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "SOME_TABLE" in stderr
         assert "PUBLIC grant" in stderr
 
     def test_returns_1_when_the_user_has_an_unexpected_role_codex_p1_round2(self, monkeypatch, capsys) -> None:
