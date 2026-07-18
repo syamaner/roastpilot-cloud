@@ -296,6 +296,43 @@ export function findPrForIssueNumber(
 }
 
 /**
+ * Inputs the F1-S10 slice-3 provenance trailer needs (factory.md §13.12)
+ * — gathered once by `main()` and shared by both
+ * {@link buildImplementPrBody} (PR-body rendering) and
+ * {@link buildCommitTrailer} (the git commit trailer), rather than
+ * threading the same three fields through two separate parameter lists.
+ */
+export interface ProvenanceContext {
+  /**
+   * The model Claude Code actually ran with, extracted from the implement
+   * job's own execution-transcript artifact (see
+   * {@link extractModelIdFromTranscript}) — `null` when that artifact was
+   * missing, unparseable, or lacked the field. NEVER fabricated: a caller
+   * rendering this must show "unavailable" for `null`, not guess a value.
+   */
+  readonly modelId: string | null;
+  /**
+   * Stands in for a prompt/skill version. This workflow embeds the
+   * implement prompt directly in `implement-ready-issues.yml` rather than
+   * invoking a named `.claude/skills/` file, so there is no separate
+   * skill version to report — the repository commit this run checked out
+   * (the exact commit the embedded prompt text lived in, unchanged, for
+   * this run) is the honest, always-available stand-in.
+   */
+  readonly promptVersion: string;
+  /**
+   * The GitHub login of the human who authorized THIS attempt
+   * (`github.triggering_actor` — deliberately NOT `github.actor`, which
+   * stays the ORIGINAL `workflow_dispatch` initiator across a `gh run
+   * rerun`; `triggering_actor` is whoever initiated the current attempt,
+   * Codex P2, #55) — the `Signed-off-by` identity, per factory.md's
+   * dispatch-first authorization-seam framing: a human explicitly chose
+   * to run this, so they're the one certifying it.
+   */
+  readonly dispatchActor: string;
+}
+
+/**
  * A validated set of inputs for building the implement PR's body.
  * `agentActionRef` is the pinned `owner/repo@sha` the implement job's
  * `claude-code-action` step actually ran (see `main()`'s
@@ -313,7 +350,7 @@ export function findPrForIssueNumber(
  * human merging the PR doesn't read. This field makes
  * {@link buildImplementPrBody} put that same signal ON the PR itself.
  */
-export interface ImplementPrContext {
+export interface ImplementPrContext extends ProvenanceContext {
   readonly issueNumber: number;
   readonly runUrl: string;
   readonly agentActionRef: string;
@@ -463,13 +500,23 @@ export function isLabelAlreadyExistsError(err: unknown): boolean {
  * `.github/PULL_REQUEST_TEMPLATE.md`'s structure so the factory's PRs read
  * the same as a human's.
  *
- * Includes a minimal "Provenance" section (Codex round-3, partial
- * factory.md §13.12): the issue reference and the pinned
- * `claude-code-action` SHA that generated this PR — the two facts already
- * available right here at PR-body-build time. The FULL provenance trailer
- * §13.12 actually calls for (model ID, prompt/skill version, and similar)
- * is F1-S10's deliverable, not this story's; said so explicitly in the
- * body so this partial version is never mistaken for that one.
+ * Includes the FULL "Provenance" section (F1-S10 slice 3, factory.md
+ * §13.12) — model ID, prompt/skill version, pinned `claude-code-action`
+ * SHA, issue ref, and the dispatching human, extending the minimal
+ * issue-ref + action-SHA record #34/Codex-round-3 originally shipped
+ * (that version explicitly deferred the fuller trailer to this story —
+ * see this function's own git history for that earlier docstring).
+ *
+ * This section is rendered ONLY at PR-creation time, not re-rendered on a
+ * later re-dispatch refresh (an accepted, narrow scope matching the
+ * fallback-warning banner below, which has the identical limitation for
+ * the identical reason — the PR body isn't re-PATCHed on refresh at all).
+ * The git commit itself does not share this limitation: {@link
+ * buildCommitTrailer} runs on EVERY commit `applyPatchAndPush` makes,
+ * including a refresh's force-pushed commit, so the commit trailer always
+ * reflects the run that actually produced the code currently on the
+ * branch even when this PR-body section still shows the original
+ * creation's values.
  *
  * When {@link ImplementPrContext.publishedViaFallback} is true, prepends a
  * bold warning line (adjudicated F2, #40 rework) so the human merging this
@@ -478,8 +525,9 @@ export function isLabelAlreadyExistsError(err: unknown): boolean {
  * Actions log, which isn't part of a normal merge review.
  *
  * @param context - The issue number, a link to the implement run's gate
- *   output, the pinned agent action ref that ran, and whether this PR was
- *   opened via the `GITHUB_TOKEN` fallback.
+ *   output, the pinned agent action ref that ran, whether this PR was
+ *   opened via the `GITHUB_TOKEN` fallback, and the gathered
+ *   {@link ProvenanceContext} fields.
  * @returns The Markdown PR body.
  */
 export function buildImplementPrBody(context: ImplementPrContext): string {
@@ -495,6 +543,9 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
         "",
       ]
     : [];
+  const modelLine =
+    context.modelId ??
+    "unavailable (the implement job's transcript artifact was missing or unparseable)";
   return [
     ...fallbackWarning,
     "## Story",
@@ -514,13 +565,22 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
     "",
     "## Provenance",
     "",
-    `Generated by the F1-S3 implement agent (\`${context.agentActionRef}\`), from ` +
-      `issue #${context.issueNumber}, on a manually-dispatched run — ` +
-      `[run output](${context.runUrl}).`,
+    `- **Model:** ${modelLine}`,
+    `- **Prompt/skill version:** \`${context.promptVersion}\` — this workflow embeds ` +
+      "the implement prompt directly in `.github/workflows/implement-ready-issues.yml` " +
+      "rather than invoking a named skill file, so this is the repository commit that " +
+      "prompt text lived in, unchanged, for this run.",
+    `- **Agent action:** \`${context.agentActionRef}\``,
+    `- **Issue:** #${context.issueNumber}`,
+    `- **Dispatched by:** @${context.dispatchActor}`,
     "",
-    "_This is a minimal provenance record (issue ref + pinned agent action SHA). " +
-      "The full provenance trailer (model ID, prompt/skill version, and similar — " +
-      "factory.md §13.12) is F1-S10's deliverable, not this one's._",
+    `On a manually-dispatched run — [run output](${context.runUrl}).`,
+    "",
+    "_The commit(s) on this branch carry the same facts as git trailers " +
+      "(`Co-Authored-By`, `Signed-off-by`, `Provenance-*`) — refreshed on every " +
+      "commit `applyPatchAndPush` makes, unlike this section, which is only " +
+      "rendered at PR-creation time (same accepted scope as the fallback-warning " +
+      "banner above)._",
     "",
     "## Review routing",
     "",
@@ -895,5 +955,126 @@ export function buildPublishRejectedStepSummary(
     "- **PR:** none — publish rejected. Reasons:",
     ...context.reasons.map((r) => `  - ${sanitizeStepSummaryText(r)}`),
     "",
+  ].join("\n");
+}
+
+/**
+ * Extracts the model ID Claude Code actually ran with, from the implement
+ * job's own execution-transcript artifact (F1-S10 slice 3, factory.md
+ * §13.12's provenance trailer — the model-ID field).
+ *
+ * The transcript (`claude-execution-output.json`, uploaded by the
+ * implement job as the `implement-agent-transcript` artifact — see
+ * `implement-ready-issues.yml`) is the raw Claude Agent SDK message
+ * stream: a JSON array whose first message is always `{type: "system",
+ * subtype: "init", model: "<id>", ...}` (verified against
+ * `anthropics/claude-code-action`'s own
+ * `base-action/src/run-claude-sdk.ts` at the pinned SHA — that file reads
+ * this exact field the same way, for its own sanitized log line). No
+ * other source reports the model actually used: this workflow's
+ * `claude-code-action` step declares no `model:` input at all (the action
+ * defers to whatever the auth method resolves to), so this transcript
+ * field is the ONLY place the real value is ever recorded.
+ *
+ * Deliberately conservative: returns `null` (never fabricates a value)
+ * for anything other than a clean match — unparseable JSON, a non-array
+ * top level, an array with no `system`/`init` message, or an init
+ * message whose `model` field is missing, empty, not a string, or
+ * carries a newline (see below). A caller must render this as
+ * "unavailable", never guess.
+ *
+ * Rejects (rather than sanitizes) a `model` value containing `\n`/`\r`
+ * (Codex P2, #55): this value is interpolated straight into a git commit
+ * trailer ({@link buildCommitTrailer}) with only a nonempty check —
+ * without this, a corrupted or tampered transcript whose `model` field
+ * contained an embedded newline could forge an extra trailer line (e.g.
+ * a fake `Signed-off-by`) into the commit message, the same class of
+ * injection the `$GITHUB_STEP_SUMMARY` sanitizer earlier in this
+ * pipeline's history was built to close. A legitimate model ID never
+ * contains a newline, so REJECTING outright (never truncating/stripping)
+ * is both simplest and correct: there is no valid partial value to
+ * salvage from a model field that fails this shape check.
+ *
+ * @param rawTranscriptJson - The raw file contents of the transcript
+ *   artifact.
+ * @returns The model ID string, or `null` if it could not be determined.
+ */
+export function extractModelIdFromTranscript(
+  rawTranscriptJson: string,
+): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawTranscriptJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+  const initMessage = (parsed as unknown[]).find(
+    (m): m is Record<string, unknown> =>
+      typeof m === "object" &&
+      m !== null &&
+      (m as Record<string, unknown>).type === "system" &&
+      (m as Record<string, unknown>).subtype === "init",
+  );
+  if (!initMessage) {
+    return null;
+  }
+  const model = initMessage.model;
+  if (typeof model !== "string" || model.length === 0) {
+    return null;
+  }
+  return /[\r\n]/.test(model) ? null : model;
+}
+
+/**
+ * Builds the git commit trailer (F1-S10 slice 3, factory.md §13.12): the
+ * fuller provenance record #34's PR body explicitly deferred — that
+ * earlier version put a minimal issue-ref + action-SHA note IN THE PR
+ * BODY only; the commit itself carried no trailer at all before this.
+ *
+ * Every line is a valid git trailer (`Token: value`, recognized by `git
+ * interpret-trailers`): `Co-Authored-By` credits the agent identity
+ * (matching Claude Code's own convention elsewhere), `Signed-off-by`
+ * credits the human who authorized this run via dispatch, and the
+ * `Provenance-*` lines carry the model / prompt-version / agent-action /
+ * issue facts a systemic-bad-PR investigation needs to trace a change
+ * back to a specific model version and prompt revision.
+ *
+ * Applied on EVERY commit `applyPatchAndPush` makes — including a
+ * re-dispatch's force-pushed refresh — unlike {@link buildImplementPrBody}'s
+ * Provenance section (rendered only at PR-creation time, an existing
+ * accepted gap), so the commit itself always reflects the run that
+ * actually produced it even when the PR body still shows the original
+ * creation's values.
+ *
+ * The dispatching actor's login is stripped of `[`/`]` before use in the
+ * constructed noreply email's local-part — defensive-only: this
+ * workflow is exclusively `workflow_dispatch`-triggered by a human (never
+ * a bot), so `dispatchActor` is a real GitHub username today (which
+ * cannot itself contain those characters), but a future automated
+ * trigger could pass a `[bot]`-suffixed login, and those characters are
+ * not valid in an unquoted email local-part.
+ *
+ * @param context - Issue number, agent action ref, and the gathered
+ *   {@link ProvenanceContext} fields.
+ * @returns The trailer block, ready to pass as a `git commit -m` message
+ *   part.
+ */
+export function buildCommitTrailer(
+  context: ProvenanceContext & {
+    readonly issueNumber: number;
+    readonly agentActionRef: string;
+  },
+): string {
+  const emailSafeActor = context.dispatchActor.replace(/[[\]]/g, "");
+  return [
+    "Co-Authored-By: Claude <noreply@anthropic.com>",
+    `Signed-off-by: ${context.dispatchActor} <${emailSafeActor}@users.noreply.github.com>`,
+    `Provenance-Model: ${context.modelId ?? "unavailable (implement transcript missing or unparseable)"}`,
+    `Provenance-Prompt-Version: ${context.promptVersion}`,
+    `Provenance-Agent-Action: ${context.agentActionRef}`,
+    `Provenance-Issue: #${context.issueNumber}`,
   ].join("\n");
 }

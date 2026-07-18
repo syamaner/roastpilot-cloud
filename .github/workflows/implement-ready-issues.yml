@@ -891,6 +891,21 @@ jobs:
           name: implement-patch
           path: patch-output
 
+      - name: Download implement agent transcript artifact
+        # F1-S10 slice 3 (factory.md §13.12): the provenance trailer's
+        # model-ID field is read from this transcript (the implement
+        # job's raw Claude Agent SDK message stream — see
+        # extractModelIdFromTranscript's docstring). Same "may
+        # legitimately not exist" handling as the patch artifact above —
+        # a failed/timed-out implement run may never have produced one,
+        # and this must degrade the trailer's model field to
+        # "unavailable", never fail the publish.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: implement-agent-transcript
+          path: transcript-output
+
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -976,4 +991,27 @@ jobs:
           # — empty string when not on the fallback path, in which case
           # the script simply omits the reason line.
           FALLBACK_REASON: ${{ steps.fallback_warning.outputs.fallback_reason }}
+          # F1-S10 slice 3 (factory.md §13.12) — the fuller provenance
+          # trailer. IMPLEMENT_TRANSCRIPT_PATH matches the "Download
+          # implement agent transcript artifact" step's own `path:` above
+          # plus the fixed filename claude-code-action's base-action
+          # always writes (`claude-execution-output.json` — see
+          # extractModelIdFromTranscript's docstring for the verified
+          # source). IMPLEMENT_PROMPT_VERSION stands in for a prompt/skill
+          # version: this workflow embeds the implement prompt directly
+          # here rather than invoking a named `.claude/skills/` file, so
+          # `github.sha` (the exact commit this run checked out, which
+          # that embedded prompt text lives in) is the honest stand-in.
+          # DISPATCH_ACTOR is the human who authorized THIS attempt — the
+          # Signed-off-by identity, per factory.md's dispatch-first
+          # authorization-seam framing. Deliberately `github.triggering_actor`,
+          # not `github.actor` (Codex P2, #55): `github.actor` stays the
+          # ORIGINAL workflow_dispatch initiator across a `gh run rerun`,
+          # while `github.triggering_actor` is whoever initiated the CURRENT
+          # attempt — the correct one to credit/sign-off, since a rerun can
+          # force-push a fresh implementation commit under a different
+          # human's authorization than the original dispatch.
+          IMPLEMENT_TRANSCRIPT_PATH: transcript-output/claude-execution-output.json
+          IMPLEMENT_PROMPT_VERSION: ${{ github.sha }}
+          DISPATCH_ACTOR: ${{ github.triggering_actor }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts

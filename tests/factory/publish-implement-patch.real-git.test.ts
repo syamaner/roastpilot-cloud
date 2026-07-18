@@ -84,6 +84,9 @@ afterEach(async () => {
   delete process.env.IMPLEMENT_JOB_RESULT;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
+  delete process.env.IMPLEMENT_PROMPT_VERSION;
+  delete process.env.DISPATCH_ACTOR;
+  delete process.env.IMPLEMENT_TRANSCRIPT_PATH;
   process.exitCode = undefined;
 });
 
@@ -2066,5 +2069,203 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
     expect(commentPostAttempts).toBe(2);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rate-limited"));
     warnSpy.mockRestore();
+  });
+});
+
+describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): provenance trailer, end-to-end", () => {
+  afterEach(() => {
+    delete process.env.PUBLISHED_VIA_FALLBACK;
+  });
+
+  it("the pushed commit carries the full trailer (Co-Authored-By, Signed-off-by, Provenance-*) with real values, including the model ID read from the transcript artifact", async () => {
+    process.env.IMPLEMENT_PROMPT_VERSION = "1b781ecabc1234567890abcdef1234567890abcd";
+    process.env.DISPATCH_ACTOR = "syamaner";
+    const transcriptPath = join(scratchDir, "transcript.json");
+    await fsWriteFile(
+      transcriptPath,
+      JSON.stringify([
+        { type: "system", subtype: "init", model: "claude-opus-4-1-20250805" },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-trailer");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    expect(commitBody).toContain("Co-Authored-By: Claude <noreply@anthropic.com>");
+    expect(commitBody).toContain("Signed-off-by: syamaner <syamaner@users.noreply.github.com>");
+    expect(commitBody).toContain("Provenance-Model: claude-opus-4-1-20250805");
+    expect(commitBody).toContain(
+      "Provenance-Prompt-Version: 1b781ecabc1234567890abcdef1234567890abcd",
+    );
+    expect(commitBody).toContain("Provenance-Agent-Action:");
+    expect(commitBody).toContain("Provenance-Issue: #6");
+  });
+
+  it("degrades honestly to 'unavailable' — never fabricates a model ID — when the transcript artifact is missing (best-effort download step never ran/failed)", async () => {
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = join(scratchDir, "does-not-exist.json");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Could not read the implement transcript artifact"),
+    );
+
+    const verifyDir = join(scratchDir, "verify-no-transcript");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    expect(commitBody).toContain("Provenance-Model: unavailable");
+
+    // Also check the PR body shows the same honest "unavailable" — not
+    // silently omitted or fabricated.
+    const fetchMock = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock;
+    const prCreateCall = fetchMock.calls.find(
+      (call) =>
+        String(call[0]).endsWith("/pulls") &&
+        (call[1] as RequestInit | undefined)?.method === "POST",
+    );
+    expect(prCreateCall).toBeDefined();
+    const prBody = JSON.parse((prCreateCall?.[1] as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(prBody.body).toContain("unavailable");
+    warnSpy.mockRestore();
+  });
+
+  it("does NOT commit the downloaded transcript-output/ scratch directory into the factory branch", async () => {
+    // Simulate the "Download implement agent transcript artifact" step:
+    // the file already sits on disk in THIS job's checkout before
+    // applyPatchAndPush's git add -A runs.
+    await mkdir(join(localCloneDir, "transcript-output"), { recursive: true });
+    await fsWriteFile(
+      join(localCloneDir, "transcript-output", "claude-execution-output.json"),
+      "leftover transcript artifact\n",
+    );
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-transcript-scratch");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const scratchArtifact = await readFile(
+      join(verifyDir, "transcript-output", "claude-execution-output.json"),
+    ).catch(() => null);
+    expect(scratchArtifact).toBeNull();
+  });
+
+  it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation (unlike the PR body's Provenance section, which stays creation-time-only)", async () => {
+    process.env.DISPATCH_ACTOR = "second-dispatcher";
+    stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-refresh-trailer");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    expect(commitBody).toContain(
+      "Signed-off-by: second-dispatcher <second-dispatcher@users.noreply.github.com>",
+    );
+  });
+
+  it("REJECTS a newline-injected model value end-to-end — the real pushed commit stays single-line, with NO forged Signed-off-by line (Codex P2, #55)", async () => {
+    const transcriptPath = join(scratchDir, "malicious-transcript.json");
+    await fsWriteFile(
+      transcriptPath,
+      JSON.stringify([
+        {
+          type: "system",
+          subtype: "init",
+          model: "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>",
+        },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-newline-rejected");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    // The decisive assertions: the malicious model value never reached
+    // the commit at all (rejected outright, rendered as "unavailable"),
+    // and — most importantly — no forged Signed-off-by line for
+    // "mallory" exists anywhere in the real commit message.
+    expect(commitBody).toContain("Provenance-Model: unavailable");
+    expect(commitBody).not.toContain("mallory");
+    expect(commitBody).not.toContain("claude-sonnet\nSigned-off-by");
+    // Every trailer line stays a single, well-formed `Token: value` line
+    // — split on newlines and check none of the Provenance-Model line's
+    // "siblings" got corrupted into two lines.
+    const trailerLines = commitBody
+      .split("\n")
+      .filter((line) => /^(Co-Authored-By|Signed-off-by|Provenance-[A-Za-z-]+): /.test(line));
+    // Exactly one Signed-off-by line (the real one, not a forged second).
+    expect(trailerLines.filter((l) => l.startsWith("Signed-off-by:"))).toHaveLength(1);
   });
 });

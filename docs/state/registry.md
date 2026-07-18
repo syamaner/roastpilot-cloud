@@ -27,10 +27,11 @@ factory pipeline/security model/label taxonomy: `factory.md`.
 |---|---|---|
 | F1-S1 Labels, issue templates, milestones, story issues for C1/F1 | — (no issue; done at prep, 16 Jul 2026) | Done |
 | F1-S2 `triage-issues.yml` + triage skill (seed/triage/apply, JSON contract, concurrency) | [#5](https://github.com/syamaner/roastpilot-cloud/issues/5) | Done — merged via #19 (5 review rounds + a `workflow_dispatch` probe, #20, that empirically settled the verdict-write permission rule — `Edit(path)`, not `Write(path)`, no pre-touch needed). A live dry-run against a real issue is the operator's next step. |
-| F1-S3 `implement-ready-issues.yml` (read-only agent + privileged publisher, dispatch-first) | [#6](https://github.com/syamaner/roastpilot-cloud/issues/6) | In progress — PR open, [#24](https://github.com/syamaner/roastpilot-cloud/pull/24). `--permission-mode acceptEdits` + a curated Bash allowlist (needed for self-verification, unlike triage) + bubblewrap-for-ENV_SCRUB is the new empirical unknown; a live probe/dry-run is expected before merge, same as F1-S2. |
-| F1-S4 Review workflow port + repo `AGENTS.md` review rubric section | — | Not started |
-| F1-S5 `to-issues` skill + dry-run decomposition of C2 (PM-reviewed) | — | Not started |
+| F1-S3 `implement-ready-issues.yml` (read-only agent + privileged publisher, dispatch-first) | [#6](https://github.com/syamaner/roastpilot-cloud/issues/6) | Done — merged via #24. Since extended by F1-S4 (publisher-identity switch), F1-S9/#40 fix-forwards, and F1-S10 (#50/#53/#55). |
+| F1-S4 Review workflow port + repo `AGENTS.md` review rubric section | [#7](https://github.com/syamaner/roastpilot-cloud/issues/7) | Done — merged via #35–#40, #46/#49 fix-forward |
+| F1-S5 `to-issues` skill + dry-run decomposition of C2 (PM-reviewed) | [#8](https://github.com/syamaner/roastpilot-cloud/issues/8) | Done — merged via #48 |
 | F1-S6 End-to-end dry run + factory runbook | — | Not started |
+| F1-S10 Factory operational safety (kill-switch, idempotency guards, provenance trailer) | [#13](https://github.com/syamaner/roastpilot-cloud/issues/13) | Done — 3 slices: kill-switch + runbook merged via #50; 429/Retry-After idempotency backoff merged via #53; full provenance trailer (model ID, prompt/skill version, `Co-Authored-By`/`Signed-off-by`) merged via [#55](https://github.com/syamaner/roastpilot-cloud/pull/55). Aggregate cost caps (factory.md §13 point 7) are an operator-console dependency, tracked in `docs/factory-runbook.md`, not this story's code. |
 
 Check `gh issue view <n>` for current state before relying on this table —
 it is a pointer, not a live sync.

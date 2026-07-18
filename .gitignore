@@ -54,3 +54,7 @@ __pycache__/
 # there into a real product-branch commit. Never product content.
 /issue-context
 /patch-output
+# F1-S10 slice 3: the publish job's own checkout, where the downloaded
+# implement-agent-transcript artifact lands before applyPatchAndPush's
+# `git add -A` — same reasoning as the two above.
+/transcript-output
