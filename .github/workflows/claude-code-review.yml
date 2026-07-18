@@ -22,7 +22,16 @@ jobs:
     # special-case github-actions[bot] until that identity switch lands,
     # at which point factory PRs will be authored by the App/PAT identity
     # and reach this job like any other PR.
-    if: ${{ github.actor != 'dependabot[bot]' }}
+    #
+    # Fork guard (adjudicated P2, #35 rework): a fork PR against this
+    # public repo triggers `pull_request` too, but GitHub withholds
+    # repository secrets from a fork's workflow run — same empty-token
+    # failure mode as the Dependabot case above, just for a different
+    # reason. Without this, a fork PR gets a permanent red X instead of
+    # simply not running. `head.repo.full_name == repository` is false for
+    # any fork (true only when the PR's source branch lives in this same
+    # repo), so this skips exactly the cases with no secret to work with.
+    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
 
     runs-on: ubuntu-latest
     permissions:
@@ -43,6 +52,42 @@ jobs:
         uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Adjudicated P1-b (#35 rework): without this, claude-code-action's
+          # prepareAgentMode() calls configureGitAuth(), which embeds this
+          # job's OAuth-derived credential directly into .git/config's
+          # remote URL — readable on disk by anything this job's tool
+          # policy allows to read files, i.e. a real exfiltration path for
+          # a token this job should never need to write with at all (it
+          # only reviews and posts inline comments, never pushes). Setting
+          # `use_commit_signing: true` makes claude-code-action skip
+          # configureGitAuth() entirely (same fix already applied in the
+          # agent repo's own claude-code-review.yml and in this repo's
+          # implement-ready-issues.yml — see that workflow's identical
+          # comment on its own `use_commit_signing` for the verified
+          # code-path reasoning). Posting inline findings is unaffected:
+          # that goes through the separate `mcp__github_inline_comment`
+          # server, authenticated from the job's own token via the
+          # environment, not through git or .git/config at all.
+          use_commit_signing: true
+          # Adjudicated P1-a (#35 rework): `--comment` runs the review
+          # under the plugin's own tag-mode permission profile, which
+          # defaults to `acceptEdits` — auto-confirming any edit/write/
+          # commit tool call rather than requiring interactive approval.
+          # This job only ever needs to READ the diff and POST inline
+          # review comments; it has no legitimate reason to touch the
+          # working tree, the git history, or delete anything, so deny
+          # every edit/write/commit-adjacent tool explicitly rather than
+          # relying on the plugin's default profile to stay conservative
+          # forever. Deny rules win over acceptEdits and the tag mode's own
+          # allow list (verified against the pinned action's source), so
+          # this closes the write blast radius without needing an
+          # allow-list of its own. `mcp__github_inline_comment__*` is
+          # deliberately NOT in this deny list — findings must still be
+          # able to post, and that MCP server is separate from the
+          # `mcp__github_file_ops__*` write tools denied below (same
+          # separation `use_commit_signing` above relies on).
+          claude_args: >-
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
           # actor `claude[bot]`; the action rejects non-human actors unless
