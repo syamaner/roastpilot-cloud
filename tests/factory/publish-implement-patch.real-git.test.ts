@@ -345,7 +345,55 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
   });
 });
 
-describe("publish-implement-patch — Codex round 3: publisher-side scratch-dir exclude survives an edited .gitignore", () => {
+describe("publish-implement-patch — Codex round 3 (mechanism corrected by a live-dispatch-test finding): publisher-side scratch-dir removal survives an edited .gitignore, and doesn't collide with an INTACT one", () => {
+  it("REPRODUCES the live-dispatch-test bug: with .gitignore's entries left INTACT (the ordinary, non-adversarial case), the run still succeeds and never commits patch-output/", async () => {
+    // The exact gap the pathspec-exclude form of this fix had, found only
+    // on the real runner: `git add -A -- ':!issue-context'
+    // ':!patch-output'` refuses (exit 1, "paths are ignored ... use -f")
+    // when .gitignore ALREADY ignores those paths and they're ALSO named
+    // in the pathspec — which is the ORDINARY case (no attack, no
+    // .gitignore tampering at all), not the adversarial one the test
+    // below exercises. Every prior test in this file used execFileSync
+    // directly against a real git binary too, but none of them had BOTH
+    // a pre-existing .gitignore ignoring these exact paths AND
+    // patch-output/ physically present on disk AND an intact (untouched)
+    // .gitignore at git-add time — the precise three-way interaction
+    // this bug needed. This test has all three.
+    await fsWriteFile(join(localCloneDir, ".gitignore"), "/issue-context\n/patch-output\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add .gitignore"]);
+
+    // Simulate the "Download patch artifact" step, same as the
+    // adversarial test below.
+    await mkdir(join(localCloneDir, "patch-output"), { recursive: true });
+    await fsWriteFile(join(localCloneDir, "patch-output", "patch.diff"), "leftover artifact\n");
+
+    // An ORDINARY patch — no .gitignore edit, nothing adversarial at all.
+    process.env.PATCH_PATH = await writePatch(scratchDir, "ordinary.diff", VALID_DIFF);
+    stubHappyPathFetch();
+
+    await main();
+
+    // The decisive assertion: this must SUCCEED, not fail with exit 1.
+    expect(process.exitCode).toBeUndefined();
+
+    const verifyDir = join(scratchDir, "verify-ordinary");
+    execFileSync("git", [
+      "clone",
+      "-q",
+      "--branch",
+      "feature/6-implement-workflow",
+      bareRemoteDir,
+      verifyDir,
+    ]);
+    const newFile = await readFile(join(verifyDir, "lib", "new-file.ts"), "utf8");
+    expect(newFile).toBe("export const x = 1;\n");
+    const scratchArtifact = await readFile(
+      join(verifyDir, "patch-output", "patch.diff"),
+    ).catch(() => null);
+    expect(scratchArtifact).toBeNull();
+  });
+
   it("does NOT commit patch-output/patch.diff into the factory PR, even when the patch itself edits .gitignore to un-ignore it", async () => {
     // Seed a .gitignore matching the real repo's (issue-context/ and
     // patch-output/ both ignored) — the baseline this test's patch will

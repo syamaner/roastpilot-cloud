@@ -86,6 +86,7 @@
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -315,19 +316,34 @@ function applyPatchAndPush(
   ]);
   runGit(["checkout", "-B", branchName]);
   runGit(["apply", patchPath]);
-  // FIX (Codex round 3, P2): the SAME pathspec-exclude fix as the
-  // implement job's own capture step, applied here too. This job's own
-  // checkout has `patch-output/patch.diff` sitting on disk right now (the
-  // "Download patch artifact" step wrote it there before this ever runs)
-  // — an ordinary `git add -A` with no exclude would stage it if a patch
-  // ALSO edited .gitignore to un-ignore /patch-output (nothing stops a
-  // patch from touching .gitignore; it isn't a protected path), which
-  // would commit the raw patch-diff artifact itself into the factory PR.
-  // `:!issue-context` is included for symmetry with the implement side
-  // (that directory never actually exists in THIS job's checkout — the
-  // implement and publish jobs run in separate workspaces — so it's
-  // harmless defense-in-depth here, not the applicable half of this fix).
-  runGit(["add", "-A", "--", ":!issue-context", ":!patch-output"]);
+  // FIX (Codex round 3, P2, corrected by a live-dispatch-test finding —
+  // fix-forward off main): this job's own checkout has
+  // `patch-output/patch.diff` sitting on disk right now (the "Download
+  // patch artifact" step wrote it there before this ever runs) — an
+  // ordinary `git add -A` with nothing done about it would stage that
+  // raw patch-diff artifact if a patch ALSO edited .gitignore to
+  // un-ignore /patch-output (nothing stops a patch from touching
+  // .gitignore; it isn't a protected path), committing it into the
+  // factory PR.
+  //
+  // The original fix here used the SAME pathspec-exclude form as the
+  // implement job's capture step (`git add -A -- ':!issue-context'
+  // ':!patch-output'`) — that form FAILED on the real runner for the
+  // identical reason documented at the capture step in
+  // implement-ready-issues.yml: `git add` refuses (exit 1) when a
+  // pathspec NAMES a path this repo's own committed `.gitignore` already
+  // ignores, even as an EXCLUDE. Fixed the same way: physically remove
+  // the scratch directories from disk before staging, rather than
+  // naming them in a pathspec. `patch-output/` is removed AFTER `apply`
+  // above (nothing past this point needs the on-disk patch file
+  // anymore) and BEFORE the `git add -A` below. `issue-context/` never
+  // actually exists in THIS job's checkout (the implement and publish
+  // jobs run in separate workspaces) — removing it here is harmless
+  // defense-in-depth, not the applicable half of this fix, exactly as
+  // before.
+  rmSync("patch-output", { recursive: true, force: true });
+  rmSync("issue-context", { recursive: true, force: true });
+  runGit(["add", "-A"]);
   const commitTitle = `Implement #${issueNumber}: ${issueTitle}`.slice(
     0,
     120,
