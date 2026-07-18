@@ -220,13 +220,29 @@ grant itself more pipeline power," not "pipeline files are frozen."
 
 ## Reviewing a Factory-Authored PR
 
-Applies to every PR the factory's publish job opens (C2 onward — C1/F1 are
-conventionally authored and reviewed like any interactive-agent PR). The
-author of a factory PR is *always* an agent; this section exists because
-that fact changes what "reviewed" has to mean, not because the rubric above
-stops applying — everything in Code Review Rubric still applies in full.
+Applies to every PR the factory's publish job actually opened — the scope
+key is **"did the privileged publisher open this PR"**, never a milestone
+like "C2 onward". C1/F1 story PRs are conventionally authored by a human or
+an interactive agent and reviewed like any interactive-agent PR, so this
+section doesn't apply to them — but factory.md §11's F1-S6 end-to-end dry
+run has the publish job open a real, agent-authored PR on a sacrificial
+issue *before* C2 starts, and that PR is squarely in scope here: the author
+is an agent, so every rule below applies, milestone or not. (Codex P2
+finding on this section's first draft, #38 — a scope keyed on "C2 onward"
+would have let F1-S6's own dry-run PR slip through un-reviewed by the exact
+rules this section exists to enforce.) The author of a factory PR is
+*always* an agent; this section exists because that fact changes what
+"reviewed" has to mean, not because the rubric above stops applying —
+everything in Code Review Rubric still applies in full.
 
 ### The roster
+
+The table below describes the roster as it lands once every F1-S4 sibling
+PR merges (#35 Claude Code Review, #36 CodeQL, #37 dependency review, #39
+codecov, #40 the publisher-identity switch — all `Refs #7`). As of any one
+of those PRs landing alone, a row it names may not exist on `main` yet;
+this is a same-batch sequencing artifact, not a claim that the roster is
+already fully wired the moment this file changes.
 
 | Lens | Gate type | What it covers |
 |---|---|---|
@@ -238,17 +254,18 @@ stops applying — everything in Code Review Rubric still applies in full.
 | Codex | Advisory-but-triaged, not a required check | Cross-family second opinion — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses; see the wait-for-verdict rule in PR Merge Policy above (already ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
 | Domain sub-agents (`schema-migration-reviewer`, `privacy-auditor`, `factory-security-reviewer`) | Rubric-routed, human/PM-invoked | The escalation lenses named in Code Review Rubric's routing table above; not auto-run on every factory PR yet (factory.md §13 decision (ii) — rubric-routed to start, automate later is a live option) |
 
-### Codex — operator decision (recorded 18 Jul 2026, F1-S4)
+### Codex — operator decision (recorded 18 Jul 2026, updated 18 Jul 2026, F1-S4)
 
-Codex is **not yet installed** on this repo (no GitHub App connector). No
-installation-status API is available to an agent — this is an operator
-action. **Recommendation: enable now, before the first C2 story PR lands**,
-rather than retrofitting it once a habit of merging factory PRs without it
-has formed — this mirrors the agent repo, where Codex has repeatedly caught
-real bugs (a roast-breaking config regression, a credential-redirection
-hole) that an Opus-family reviewer passed twice. Until an operator installs
-it, the roster above runs without that row. Once installed, the
-wait-for-verdict rule in **PR Merge Policy** above applies unchanged — it
+**Codex is installed and active on this repo** — confirmed live: it
+reviewed #38 (this very PR) with a `chatgpt-codex-connector[bot]` reaction
+and posted real findings, several of which this section itself was folded
+from. (Superseded finding, kept for the record: this section originally
+recorded Codex as "not yet installed" with a recommendation to enable it —
+that was accurate at F1-S4's start but went stale within the same story;
+Codex's own review of #38 is what caught the drift, per its P2 "Remove
+stale Codex-not-installed guidance" finding.) The roster above runs WITH
+the Codex row live, not without it. The wait-for-verdict rule in **PR
+Merge Policy** above applies now, unconditionally, on every factory PR — it
 was already copied verbatim from the agent repo's `AGENTS.md` at C1-S4 and
 is the single source of truth for that rule in this repo; do not create a
 second copy here.
