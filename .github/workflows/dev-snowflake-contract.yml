@@ -1,0 +1,177 @@
+name: DEV Snowflake Contract Check
+
+# F1-S8 (#11, factory.md §8) -- the live-key counterpart ci.yml's
+# "Snowflake migrations (offline)" job has always deferred: that job's own
+# comment says "A live contract check against ROASTPILOT_DEV with a
+# CI-scoped key is deferred to the human-gated secret-CI story (F1-S8/C7)".
+# This is that story.
+#
+# SECURITY MODEL: this is the ONLY workflow in this repo that holds a real,
+# writable Snowflake credential (SNOWFLAKE_DEV_PRIVATE_KEY). Every control
+# below exists specifically because of that, not as generic hardening:
+#
+# 1. `environment: dev-snowflake-ci` (below) is the REAL gate — a GitHub
+#    Environment with a required reviewer (the operator), provisioned
+#    directly in repo settings, not in this file. A job declaring this
+#    environment PAUSES for human approval before a single step runs,
+#    regardless of what triggered the workflow run. Agent-authored code
+#    (or anyone else) cannot make this key active without that approval.
+# 2. `workflow_dispatch` only — deliberately not `pull_request` (even
+#    scoped to snowflake/**) for this first slice. Same dispatch-first,
+#    staged-autonomy pattern as implement-ready-issues.yml: a human
+#    explicitly chooses to run this, rather than it firing automatically
+#    on every commit that touches migrations. Broadening the trigger is a
+#    conscious later decision, not a default.
+# 3. `egress-policy: block` (not `audit`) — unlike implement-ready-
+#    issues.yml's deliberately cautious audit-mode rollout (that job
+#    doesn't hold a real credential; this one does), a job with a live
+#    Snowflake key defaults to fail-closed from the start. If the
+#    allowed-endpoints list below is ever wrong, this job simply FAILS
+#    (blocked egress -> connection error) rather than silently reaching
+#    somewhere unintended — a safe failure mode either way.
+# 4. `npm ci --ignore-scripts` — this job's own work is Python-only, but a
+#    live Snowflake credential is in scope for later steps in this same
+#    job; no dependency-install step (npm OR pip) in a credential-holding
+#    job should ever run an arbitrary postinstall/build hook that could
+#    exfiltrate it.
+# 5. The private key never touches disk for the grants-assertion step
+#    (assert_dev_ci_grants.py loads it from memory via
+#    snowflake-connector-python's own `private_key` bytes parameter). The
+#    schemachange deploy step DOES need a temp file — schemachange's own
+#    env-var layer only accepts SNOWFLAKE_PRIVATE_KEY_FILE, a path, never
+#    raw key content (verified against the installed package's source,
+#    #18) — written with `umask 077`, removed via `trap ... EXIT` so it's
+#    gone even if the step fails partway.
+#
+# NOTE (operator-supervised validation required): the live-connection code
+# paths in with_connection_env.py/assert_dev_ci_grants.py, and this
+# workflow's own step sequencing, have never run against a real Snowflake
+# session — no credentials are available to the agent that wrote them, per
+# factory.md's own "agent jobs hold no Snowflake secrets" invariant. The
+# FIRST real dispatch of this job, by the operator, is this workflow's
+# actual validation.
+
+on:
+  workflow_dispatch: {}
+
+# Default-deny; the job below declares exactly the scope it needs.
+permissions: {}
+
+jobs:
+  contract-check:
+    name: Live contract check + grants assertion (ROASTPILOT_DEV)
+    runs-on: ubuntu-latest
+    environment: dev-snowflake-ci
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (block all egress except what this job needs)
+        # allowed-endpoints is this job's own best specification (GitHub
+        # checkout, PyPI/npm registries for dependency install, and
+        # Snowflake's account/OCSP/telemetry hosts) — not yet empirically
+        # confirmed against a live run, per the NOTE above. Adjust based on
+        # what the operator's first real dispatch actually shows in this
+        # step's own Harden-Runner Insights, the same "audit, then trust"
+        # discipline implement-ready-issues.yml's own egress step describes
+        # (that job just stopped at audit mode; this one starts at block
+        # because a live credential is at stake and a wrong list should
+        # fail the job, not silently under-restrict it).
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.com:443
+            registry.npmjs.org:443
+            *.snowflakecomputing.com:443
+
+      - name: Checkout roastpilot-cloud
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: "Install npm dependencies (--ignore-scripts -- a live Snowflake credential is in scope for later steps in this job; no postinstall hook should ever run with it)"
+        run: npm ci --ignore-scripts
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install schemachange + Snowflake connector dependencies
+        run: pip install -r snowflake/requirements.txt
+
+      - name: Deploy migrations for real against ROASTPILOT_DEV
+        id: deploy
+        # Relies on with_connection_env.py's env-only bypass (#18,
+        # should_bypass_config_resolution): with SNOWFLAKE_ACCOUNT and
+        # SNOWFLAKE_USER already set below, it skips config.toml resolution
+        # entirely (this runner has no such file) and execs schemachange
+        # straight through with every SNOWFLAKE_* var already in this
+        # step's own environment. The SAME command a local dev would run,
+        # unmodified — no CI-specific fork of the deploy path to drift out
+        # of sync with local usage.
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          umask 077
+          printf '%s' "$SNOWFLAKE_DEV_PRIVATE_KEY" > "$KEY_FILE"
+          export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
+          python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
+
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH
+        id: grants
+        if: always() && steps.deploy.outcome != 'skipped'
+        # Runs even if the deploy step above failed (if: always()) so the
+        # operator sees the grants-boundary result independently of a
+        # deploy failure — but not if deploy was itself SKIPPED (e.g. an
+        # earlier setup step failed), since there'd be no meaningful
+        # connection context to check yet.
+        # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE reports
+        # anything outside the DEV database/warehouse this role is
+        # provisioned to touch (assert_dev_ci_grants.py, #11). Connects
+        # directly via snowflake-connector-python with the key held in
+        # memory only, never written to disk (unlike the deploy step
+        # above, which needs schemachange's file-based env layer).
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: python3 assert_dev_ci_grants.py
+
+      - name: Write summary
+        # Purely observability — this is a rarely-run, human-approved job
+        # holding a real credential, so the operator reviewing a run should
+        # see a clear pass/fail signal for both halves without opening the
+        # raw step logs. steps.<id>.outcome (not .conclusion) reflects each
+        # step's REAL pass/fail result. Never a reason to fail the job on
+        # its own — if: always() runs this regardless of what came before.
+        if: always()
+        run: |
+          {
+            echo "## DEV Snowflake contract check"
+            echo ""
+            echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
+            echo "- **Grants stay within DEV:** ${{ steps.grants.outcome }}"
+            echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
+            echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
+            echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

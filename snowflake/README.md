@@ -148,11 +148,26 @@ schemachange render migrations/V1.0.0__bootstrap.sql
 
 This is what the CI job runs (offline lint: filenames match the `V<version>__
 description.sql` / `R__description.sql` convention, and every migration
-renders without a Jinja error). CI does **not** connect to Snowflake — a
-live-connecting contract check against `ROASTPILOT_DEV` with a CI-scoped key
-is deferred to the human-gated secret-CI story (F1-S8 / C7), per the factory
-security model (`factory.md` §8: agent jobs hold no Snowflake secrets; a
-post-PR job that does needs a required-reviewer environment gate).
+renders without a Jinja error). CI does **not** connect to Snowflake here —
+see the next section for the live counterpart.
+
+## Live contract check against ROASTPILOT_DEV (F1-S8)
+
+`.github/workflows/dev-snowflake-contract.yml` is the live-connecting
+counterpart the offline job above always deferred: it actually deploys
+migrations against `ROASTPILOT_DEV` with a real, DEV-scoped CI key
+(`ROASTPILOT_DEV_CI`, role `ROASTPILOT_DEV_CI_ROLE`), then asserts that
+role's grants never extend beyond `ROASTPILOT_DEV`/`DEV_CI_WH`
+(`assert_dev_ci_grants.py`).
+
+Per the factory security model (`factory.md` §8: agent jobs hold no
+Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
+job declares `environment: dev-snowflake-ci` — a GitHub Environment with a
+required reviewer, so the credential is never active until a human
+explicitly approves that specific run. It also runs with
+`step-security/harden-runner`'s egress LOCKED to a fixed allowlist (GitHub,
+PyPI/npm, Snowflake) rather than the audit-only mode the rest of this
+factory's jobs use, since a live credential is genuinely at stake here.
 
 `validate_migrations.py` mirrors schemachange's own deploy-time collector
 exactly (issue #18): it discovers every migration RECURSIVELY, in any
