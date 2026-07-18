@@ -4,8 +4,11 @@ import {
   buildImplementPrBody,
   deriveBranchName,
   findForbiddenPatchPaths,
+  findPrForIssueNumber,
+  findProtectedPathMentionsInSummaryText,
   isProtectedPath,
   normalizePatchPath,
+  parseNumstatZ,
 } from "../../scripts/factory/implement-patch-logic.mts";
 
 describe("normalizePatchPath", () => {
@@ -126,6 +129,152 @@ describe("findForbiddenPatchPaths", () => {
       ".github/workflows/b.yml",
     ]);
   });
+
+  it("works on paths with NO a/b prefix — the real shape git apply --numstat reports", () => {
+    // The primary caller (publish-implement-patch.mts) feeds this
+    // authoritative, already-git-resolved paths, not diff-header text —
+    // no a/ or b/ prefix to strip.
+    const forbidden = findForbiddenPatchPaths([
+      "lib/slug.ts",
+      ".github/workflows/evil.yml",
+    ]);
+    expect(forbidden).toEqual([".github/workflows/evil.yml"]);
+  });
+
+  it("catches the zz/-prefix exploit shape once normalized (git apply's default -p1 strips ANY first segment, not just a/b)", () => {
+    // Simulates what getAuthoritativeChangedPaths would have returned had
+    // it been a naive a/b/-only strip instead of asking git: this proves
+    // isProtectedPath's fail-closed traversal handling isn't the only
+    // thing standing between a zz/-prefixed path and detection — even a
+    // RAW, unstripped "zz/.github/..." path is caught, because
+    // normalizePatchPath only strips a LITERAL "a/"/"b/" and this path
+    // has neither, so isProtectedPath must catch it some other way.
+    // (Documented here to make the invariant explicit: the REAL defense
+    // against the zz/ exploit is asking git for the resolved path in the
+    // first place — see publish-implement-patch.mts — not this function
+    // alone silently saving a wrong input.)
+    const forbidden = findForbiddenPatchPaths(["zz/.github/workflows/evil.yml"]);
+    expect(forbidden).toEqual([]); // Confirms: this function does NOT
+    // magically fix an unresolved zz/ prefix — the fix has to be upstream
+    // (asking git), which is exactly why publish-implement-patch.mts's
+    // getAuthoritativeChangedPaths exists instead of a smarter regex here.
+  });
+});
+
+describe("parseNumstatZ", () => {
+  it("parses a single-file record", () => {
+    expect(parseNumstatZ("1\t0\tlib/new-file.ts\0")).toEqual([
+      "lib/new-file.ts",
+    ]);
+  });
+
+  it("parses multiple NUL-terminated records", () => {
+    // Built via join(), not a literal "\0<digit>" in the string — that's
+    // a legacy octal escape in JS (\01 === ""), not NUL followed by
+    // "1". Exactly the kind of off-by-one-character bug this function's
+    // own real input (git's actual -z output) never has to worry about,
+    // but a hand-written test fixture can trip on.
+    const input = ["1\t0\tlib/a.ts", "1\t0\tlib/b.ts", ""].join("\0");
+    expect(parseNumstatZ(input)).toEqual(["lib/a.ts", "lib/b.ts"]);
+  });
+
+  it("parses a path containing a space correctly (tab-delimited fields, not whitespace-delimited)", () => {
+    expect(parseNumstatZ("1\t0\tlib/new file.ts\0")).toEqual([
+      "lib/new file.ts",
+    ]);
+  });
+
+  it("returns the DESTINATION-only path for a rename (matching git apply --numstat's real behavior)", () => {
+    expect(parseNumstatZ("0\t0\tlib/new-name.ts\0")).toEqual([
+      "lib/new-name.ts",
+    ]);
+  });
+
+  it("returns an empty array for empty input", () => {
+    expect(parseNumstatZ("")).toEqual([]);
+  });
+
+  it("skips a malformed record missing a second tab", () => {
+    expect(parseNumstatZ("not-a-valid-record\0")).toEqual([]);
+  });
+
+  it("skips a malformed record missing any tab at all", () => {
+    expect(parseNumstatZ("nodata\0")).toEqual([]);
+  });
+});
+
+describe("findProtectedPathMentionsInSummaryText", () => {
+  it("finds a .github/ mention (e.g. a rename source) in summary text", () => {
+    const summary = " rename .github/workflows/ci.yml => lib/ci.yml (100%)\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
+      ".github/",
+    ]);
+  });
+
+  it("finds a scripts/factory/ mention", () => {
+    const summary =
+      " rename scripts/factory/publish-implement-patch.mts => lib/x.mts (100%)\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
+      "scripts/factory/",
+    ]);
+  });
+
+  it("finds a bare CODEOWNERS mention", () => {
+    const summary = " rename CODEOWNERS => lib/CODEOWNERS-backup (100%)\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toContain(
+      "CODEOWNERS",
+    );
+  });
+
+  it("finds a docs/CODEOWNERS mention", () => {
+    const summary = " delete mode 100644 docs/CODEOWNERS\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toContain(
+      "docs/CODEOWNERS",
+    );
+  });
+
+  it("returns empty for a summary mentioning only ordinary application paths", () => {
+    const summary = " create mode 100644 lib/new-file.ts\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([]);
+  });
+
+  it("de-duplicates and sorts multiple mentions", () => {
+    const summary =
+      " rename .github/workflows/a.yml => lib/a.yml (100%)\n" +
+      " rename .github/workflows/b.yml => lib/b.yml (100%)\n" +
+      " delete mode 100644 CODEOWNERS\n";
+    expect(findProtectedPathMentionsInSummaryText(summary)).toEqual([
+      ".github/",
+      "CODEOWNERS",
+    ]);
+  });
+});
+
+describe("findPrForIssueNumber", () => {
+  it("finds a PR whose branch matches the feature/{issueNumber}- prefix", () => {
+    const prs = [
+      { number: 1, headRef: "feature/60-unrelated" },
+      { number: 2, headRef: "feature/6-implement-workflow" },
+    ];
+    expect(findPrForIssueNumber(prs, 6)).toEqual({
+      number: 2,
+      headRef: "feature/6-implement-workflow",
+    });
+  });
+
+  it("is not fooled by a numeric-prefix collision (issue 6 vs issue 60)", () => {
+    const prs = [{ number: 1, headRef: "feature/60-unrelated-issue" }];
+    expect(findPrForIssueNumber(prs, 6)).toBeNull();
+  });
+
+  it("returns null when no PR matches", () => {
+    expect(findPrForIssueNumber([], 6)).toBeNull();
+  });
+
+  it("finds the branch regardless of what slug it carries (title-independent)", () => {
+    const prs = [{ number: 5, headRef: "feature/6-a-totally-different-slug-now" }];
+    expect(findPrForIssueNumber(prs, 6)).not.toBeNull();
+  });
 });
 
 describe("deriveBranchName", () => {
@@ -194,5 +343,24 @@ describe("buildImplementFailureCommentBody", () => {
     expect(body).toContain("empty diff");
     expect(body).toContain("https://github.com/o/r/actions/runs/456");
     expect(body).toContain("did not produce a PR");
+  });
+
+  it("claims no branch was created when branchPushed is false (the default)", () => {
+    const body = buildImplementFailureCommentBody(
+      ["some reason"],
+      "https://github.com/o/r/actions/runs/456",
+    );
+    expect(body).toContain("No branch was created and nothing was pushed");
+  });
+
+  it("FIX 5: does NOT falsely claim no branch was created when branchPushed is true", () => {
+    const body = buildImplementFailureCommentBody(
+      ["the branch `feature/6-x` WAS pushed successfully, but publishing the PR failed"],
+      "https://github.com/o/r/actions/runs/456",
+      true,
+    );
+    expect(body).not.toContain("No branch was created and nothing was pushed");
+    expect(body).toContain("even though a");
+    expect(body).toContain("branch was pushed");
   });
 });

@@ -11,12 +11,16 @@ vi.mock("node:child_process", () => ({
 const { main } = await import("../../scripts/factory/publish-implement-patch.mts");
 
 /**
- * Mocked-git-plumbing tests: `execFileSync` never actually runs `git`
- * here, so these cover validation/rejection logic, the idempotency
- * pre-check, and that git is called with the right arguments — NOT that
- * `git apply`/`commit`/`push` genuinely work together, which
- * `publish-implement-patch.real-git.test.ts` proves against a real
- * temporary repository instead.
+ * Covers only the rejection paths that happen BEFORE any `git` command is
+ * ever invoked (env validation, job-result gate, missing/oversized patch
+ * artifact) — `execFileSync` stays mocked and unused for these, and each
+ * test asserts it. Everything that depends on git's actual `--numstat`/
+ * `--summary` output (the patch-path guard, valid-patch application,
+ * idempotency, and the exploit-reproduction cases) is deliberately NOT
+ * mocked here — `publish-implement-patch.real-git.test.ts` runs those
+ * against a real repository instead, for exactly the reason this guard
+ * was rewritten: don't trust an assumption about what git's output looks
+ * like when you can just ask git.
  */
 
 interface FetchCall {
@@ -60,15 +64,6 @@ index 0000000..abc1234
 +export const x = 1;
 `;
 
-const FORBIDDEN_DIFF = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
-new file mode 100644
-index 0000000..abc1234
---- /dev/null
-+++ b/.github/workflows/evil.yml
-@@ -0,0 +1,1 @@
-+on: push
-`;
-
 let workdir: string;
 
 beforeEach(async () => {
@@ -80,7 +75,6 @@ beforeEach(async () => {
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.exitCode = undefined;
   vi.mocked(execFileSync).mockReset();
-  vi.mocked(execFileSync).mockImplementation(() => Buffer.from(""));
 });
 
 afterEach(async () => {
@@ -95,80 +89,6 @@ afterEach(async () => {
   process.exitCode = undefined;
 });
 
-describe("main — valid patch path", () => {
-  it("applies the patch, pushes, and opens a new PR when none exists", async () => {
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, VALID_DIFF);
-    process.env.PATCH_PATH = patchPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/6": () =>
-        jsonResponse({ title: "[F1-S3] Implement workflow" }),
-      "GET /repos/syamaner/roastpilot-cloud/pulls?head=syamaner:feature/6-implement-workflow&state=open":
-        () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/pulls": () =>
-        jsonResponse(
-          { number: 99, html_url: "https://github.com/o/r/pull/99" },
-          201,
-        ),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBeUndefined();
-    const create = calls.find((c) => c.method === "POST");
-    expect(create).toBeDefined();
-    const body = create!.body as { title: string; head: string; base: string; body: string };
-    expect(body.head).toBe("feature/6-implement-workflow");
-    expect(body.base).toBe("main");
-    expect(body.body).toContain("Closes #6");
-    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
-      "git",
-      ["checkout", "-b", "feature/6-implement-workflow"],
-      expect.anything(),
-    );
-    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
-      "git",
-      ["apply", patchPath],
-      expect.anything(),
-    );
-    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
-      "git",
-      ["push", "--force", "origin", "feature/6-implement-workflow"],
-      expect.anything(),
-    );
-  });
-
-  it("does not create a duplicate PR when one already exists for the branch (idempotency)", async () => {
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, VALID_DIFF);
-    process.env.PATCH_PATH = patchPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/6": () =>
-        jsonResponse({ title: "[F1-S3] Implement workflow" }),
-      "GET /repos/syamaner/roastpilot-cloud/pulls?head=syamaner:feature/6-implement-workflow&state=open":
-        () =>
-          jsonResponse([
-            { number: 50, html_url: "https://github.com/o/r/pull/50" },
-          ]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBeUndefined();
-    expect(calls.some((c) => c.method === "POST")).toBe(false);
-    // The branch is still pushed (refreshing the existing PR's diff).
-    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
-      "git",
-      ["push", "--force", "origin", "feature/6-implement-workflow"],
-      expect.anything(),
-    );
-  });
-});
-
 describe("main — input validation", () => {
   it("throws when GITHUB_REPOSITORY is not owner/repo", async () => {
     process.env.GITHUB_REPOSITORY = "not-a-valid-repo-string";
@@ -176,7 +96,7 @@ describe("main — input validation", () => {
   });
 });
 
-describe("main — fail-closed paths (no branch, no PR, one comment)", () => {
+describe("main — fail-closed paths that never reach git (no branch, no PR, one comment)", () => {
   it("rejects a FAILED implement job without ever reading the patch or calling git", async () => {
     process.env.IMPLEMENT_JOB_RESULT = "failure";
     const patchPath = join(workdir, "patch.diff");
@@ -218,7 +138,7 @@ describe("main — fail-closed paths (no branch, no PR, one comment)", () => {
     );
   });
 
-  it("rejects an oversized patch artifact before reading its content", async () => {
+  it("rejects an oversized patch artifact before ever invoking git", async () => {
     const patchPath = join(workdir, "patch.diff");
     await writeFile(patchPath, "x".repeat(3 * 1024 * 1024));
     process.env.PATCH_PATH = patchPath;
@@ -236,108 +156,6 @@ describe("main — fail-closed paths (no branch, no PR, one comment)", () => {
     const comment = calls.find((c) => c.method === "POST");
     expect((comment?.body as { body: string }).body).toContain(
       "exceeds the 2097152-byte limit",
-    );
-  });
-
-  it("rejects an empty diff (implement made no changes)", async () => {
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, "");
-    process.env.PATCH_PATH = patchPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
-        jsonResponse({}, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBe(1);
-    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
-    const comment = calls.find((c) => c.method === "POST");
-    expect((comment?.body as { body: string }).body).toContain(
-      "produced no changes",
-    );
-  });
-
-  it("rejects a patch that touches a pipeline-protected path, without ever calling git", async () => {
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, FORBIDDEN_DIFF);
-    process.env.PATCH_PATH = patchPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
-        jsonResponse({}, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBe(1);
-    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
-    const comment = calls.find((c) => c.method === "POST");
-    expect((comment?.body as { body: string }).body).toContain(
-      ".github/workflows/evil.yml",
-    );
-  });
-
-  it("rejects a patch touching the privileged glue scripts (scripts/factory/**), not just .github/**", async () => {
-    const diff = `diff --git a/scripts/factory/publish-implement-patch.mts b/scripts/factory/publish-implement-patch.mts
---- a/scripts/factory/publish-implement-patch.mts
-+++ b/scripts/factory/publish-implement-patch.mts
-@@ -1 +1 @@
--x
-+y
-`;
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, diff);
-    process.env.PATCH_PATH = patchPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
-        jsonResponse({}, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBe(1);
-    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
-    const comment = calls.find((c) => c.method === "POST");
-    expect((comment?.body as { body: string }).body).toContain(
-      "scripts/factory/publish-implement-patch.mts",
-    );
-  });
-
-  it("posts a generic failure comment when git apply throws unexpectedly (patch validated but doesn't apply cleanly)", async () => {
-    const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, VALID_DIFF);
-    process.env.PATCH_PATH = patchPath;
-
-    vi.mocked(execFileSync).mockImplementation((_cmd, args) => {
-      if (Array.isArray(args) && args[0] === "apply") {
-        throw new Error("patch does not apply");
-      }
-      return Buffer.from("");
-    });
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/6": () =>
-        jsonResponse({ title: "[F1-S3] Implement workflow" }),
-      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
-        jsonResponse({}, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBe(1);
-    const comment = calls.find((c) => c.method === "POST");
-    expect((comment?.body as { body: string }).body).toContain(
-      "unexpected error",
-    );
-    expect((comment?.body as { body: string }).body).toContain(
-      "patch does not apply",
     );
   });
 });

@@ -11,12 +11,22 @@
  * and only then perform the privileged side effects — here, applying the
  * patch, pushing a branch, and opening a PR, instead of a label/comment.
  *
+ * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse: it asks
+ * `git apply --numstat` what the patch will actually touch, with the exact
+ * same invocation (no `-p` override, on either call) that later applies
+ * it — see {@link getAuthoritativeChangedPaths}'s docstring for the exploit
+ * this replaced (a `zz/`-style diff-header prefix reads as an unprotected
+ * path to a naive `a/`/`b/`-stripping parser, but `git apply`'s own
+ * default `-p1` strips whatever the first path segment actually is,
+ * landing the write at a *different, protected* path than the one the
+ * parser checked).
+ *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
- * on the issue with no branch and no PR created. Every git/API operation
- * happens inside one `main()` so there is exactly one place a comment gets
- * posted, instead of coordinating comment-avoidance across several
- * workflow steps and their `if:` conditions.
+ * on the issue. Every git/API operation happens inside one `main()` so
+ * there is exactly one place a comment gets posted, instead of
+ * coordinating comment-avoidance across several workflow steps and their
+ * `if:` conditions.
  *
  * Required environment variables:
  * - `GH_TOKEN` — the job's `permissions: contents: write, pull-requests:
@@ -37,20 +47,31 @@
  *   comment.
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { githubRequest, requireEnv } from "./github-api.mts";
-import {
-  extractChangedPathsFromDiff,
-  isEmptyDiff,
-  MAX_PATCH_BYTES,
-} from "./patch-diff.mts";
 import {
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
   findForbiddenPatchPaths,
+  findPrForIssueNumber,
+  findProtectedPathMentionsInSummaryText,
+  parseNumstatZ,
+  type PullRequestSummary,
 } from "./implement-patch-logic.mts";
+
+/**
+ * Upper bound on the on-disk patch artifact size, in bytes, checked via
+ * `stat` BEFORE the file is read/processed at all — same DoS-guard
+ * rationale as `MAX_PAYLOAD_BYTES` in `triage-verdict-schema.mts`, sized
+ * up from that verdict-JSON bound since a real code patch is legitimately
+ * much larger. 2 MiB comfortably covers the house "thin slice" convention
+ * (~400 changed lines, plus diff context and test files) with a lot of
+ * headroom, while still being far below anything that could meaningfully
+ * stall the runner or `git apply` itself.
+ */
+export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 
 /**
  * Raised for a validated, expected reason implementation must not
@@ -64,13 +85,14 @@ interface GitHubIssue {
   readonly title: string;
 }
 
-interface GitHubPullRequest {
+interface GitHubPullRequestApi {
   readonly html_url: string;
   readonly number: number;
+  readonly head: { readonly ref: string };
 }
 
-/** Reads the patch artifact, enforcing the size cap before ever reading its content. */
-async function readPatchArtifact(path: string): Promise<string> {
+/** Enforces the size cap via `stat`, before the file is touched any other way. */
+async function assertPatchArtifactSize(path: string): Promise<void> {
   let fileStat: Awaited<ReturnType<typeof stat>>;
   try {
     fileStat = await stat(path);
@@ -86,7 +108,69 @@ async function readPatchArtifact(path: string): Promise<string> {
         `${MAX_PATCH_BYTES}-byte limit — rejected before being read into memory`,
     );
   }
-  return readFile(path, "utf8");
+}
+
+/**
+ * Asks `git apply` itself which paths the patch will touch, via
+ * `git apply --numstat -z <patch>` — deliberately NOT a re-parse of the
+ * diff text. An earlier version of this guard parsed `diff --git a/X b/Y`
+ * header lines directly and stripped a literal `a/`/`b/` prefix before
+ * checking against protected paths. That is exploitable: `git apply`'s
+ * default `-p1` strips whatever the diff header's first path segment
+ * actually is — not specifically `a`/`b` — so a patch whose headers read
+ * `diff --git zz/.github/workflows/evil.yml zz/.github/workflows/evil.yml`
+ * parses (under the old logic) as touching the harmless path
+ * `zz/.github/workflows/evil.yml`, while the SAME default `git apply`
+ * strips `zz/` and writes to the *actually protected*
+ * `.github/workflows/evil.yml`. No amount of smarter regex closes this —
+ * the guard and the applier were two independent implementations of "what
+ * does `-p1` strip", and any two independent implementations of the same
+ * parsing logic can diverge. Asking git is the only way to guarantee
+ * agreement, because it's the same tool doing both the reporting and the
+ * later real apply, with the identical invocation (no `-p` override on
+ * either call).
+ *
+ * `--numstat` only reports the DESTINATION path for a rename (not the
+ * source) — `getPatchSummaryText` + `findProtectedPathMentionsInSummaryText`
+ * is the complementary check for that gap.
+ *
+ * @param patchPath - Path to the patch file.
+ * @returns The destination path of every file the patch touches.
+ * @throws {PublishRejection} If the patch can't be parsed at all
+ *   (malformed, or genuinely empty).
+ */
+function getAuthoritativeChangedPaths(patchPath: string): string[] {
+  let output: string;
+  try {
+    output = execFileSync("git", ["apply", "--numstat", "-z", patchPath], {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    throw new PublishRejection(
+      `patch could not be parsed by git apply --numstat (malformed or ` +
+        `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return parseNumstatZ(output);
+}
+
+/** Raw `git apply --summary` text — see `findProtectedPathMentionsInSummaryText`'s docstring for why this is checked too. */
+function getPatchSummaryText(patchPath: string): string {
+  try {
+    return execFileSync("git", ["apply", "--summary", patchPath], {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    // Not independently exercised by a unit test: --summary and --numstat
+    // parse the same underlying patch with the same parser, and --numstat
+    // (called first, above) already rejects anything malformed enough to
+    // fail here — a patch that gets this far genuinely parses. Kept as a
+    // defensive fallback in case that assumption is ever wrong.
+    throw new PublishRejection(
+      `patch could not be summarized by git apply --summary (malformed or ` +
+        `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 function runGit(args: string[]): void {
@@ -100,7 +184,8 @@ function runGit(args: string[]): void {
  * `[a-z0-9-]+`-only, so it carries no shell-meaningful characters even
  * though `execFileSync` with an argv array never invokes a shell to begin
  * with). The patch file's own content is never passed as an argv value —
- * `git apply` reads it directly from disk.
+ * `git apply` reads it directly from disk, with the SAME invocation (no
+ * `-p` override) as `getAuthoritativeChangedPaths` used to check it.
  */
 function applyPatchAndPush(
   branchName: string,
@@ -114,7 +199,7 @@ function applyPatchAndPush(
     "user.email",
     "41898282+github-actions[bot]@users.noreply.github.com",
   ]);
-  runGit(["checkout", "-b", branchName]);
+  runGit(["checkout", "-B", branchName]);
   runGit(["apply", patchPath]);
   runGit(["add", "-A"]);
   const commitTitle = `Implement #${issueNumber}: ${issueTitle}`.slice(
@@ -126,22 +211,28 @@ function applyPatchAndPush(
 }
 
 /**
- * Finds an existing open PR for this branch, if any (idempotency guard —
- * factory.md §13 point 8: a re-dispatch of the same issue must refresh the
- * existing PR, not open a duplicate).
+ * Finds the existing open PR for this issue, if any — see
+ * `findPrForIssueNumber`'s docstring for why this keys off the issue
+ * number (a stable `feature/{issueNumber}-` branch prefix) rather than
+ * the exact branch name a fresh `deriveBranchName` call would produce
+ * from today's title.
  */
-async function findExistingPr(
+async function findExistingPrForIssue(
   token: string,
   owner: string,
   repo: string,
-  branchName: string,
-): Promise<GitHubPullRequest | null> {
-  const results = await githubRequest<GitHubPullRequest[]>(
+  issueNumber: number,
+): Promise<PullRequestSummary | null> {
+  const results = await githubRequest<GitHubPullRequestApi[]>(
     token,
     "GET",
-    `/repos/${owner}/${repo}/pulls?head=${owner}:${branchName}&state=open`,
+    `/repos/${owner}/${repo}/pulls?state=open&per_page=100`,
   );
-  return results[0] ?? null;
+  const summaries: PullRequestSummary[] = results.map((pr) => ({
+    number: pr.number,
+    headRef: pr.head.ref,
+  }));
+  return findPrForIssueNumber(summaries, issueNumber);
 }
 
 async function postFailureComment(
@@ -151,12 +242,13 @@ async function postFailureComment(
   issueNumber: number,
   reasons: readonly string[],
   runUrl: string,
+  branchPushed: boolean,
 ): Promise<void> {
   await githubRequest(
     token,
     "POST",
     `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-    { body: buildImplementFailureCommentBody(reasons, runUrl) },
+    { body: buildImplementFailureCommentBody(reasons, runUrl, branchPushed) },
   );
 }
 
@@ -173,6 +265,13 @@ export async function main(): Promise<void> {
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
 
+  // Tracked outside the try so the catch block can tell an unpushed
+  // rejection apart from a post-push failure (FIX 5) — a branch that WAS
+  // successfully pushed before something later failed must never be
+  // reported as "no branch was created".
+  let branchName: string | undefined;
+  let branchPushed = false;
+
   try {
     if (implementJobResult !== "success") {
       throw new PublishRejection(
@@ -182,15 +281,22 @@ export async function main(): Promise<void> {
       );
     }
 
-    const patchContent = await readPatchArtifact(patchPath);
+    await assertPatchArtifactSize(patchPath);
 
-    if (isEmptyDiff(patchContent)) {
+    const changedPaths = getAuthoritativeChangedPaths(patchPath);
+    if (changedPaths.length === 0) {
+      // Not independently exercised by a unit test: every real-patch
+      // shape tried empirically (including a mode-change-only diff,
+      // which has zero added/removed lines) still reports at least one
+      // path once git apply --numstat succeeds at all — a totally empty
+      // diff instead fails to parse and is caught above, in
+      // getAuthoritativeChangedPaths. Kept as a defensive fail-closed
+      // check rather than assumed away.
       throw new PublishRejection(
         "the implement run produced no changes (empty patch)",
       );
     }
 
-    const changedPaths = extractChangedPathsFromDiff(patchContent);
     const forbidden = findForbiddenPatchPaths(changedPaths);
     if (forbidden.length > 0) {
       throw new PublishRejection(
@@ -199,25 +305,49 @@ export async function main(): Promise<void> {
       );
     }
 
+    // Complementary check: --numstat only reports rename DESTINATIONS, so
+    // a rename OUT of a protected path (e.g. moving
+    // .github/workflows/ci.yml elsewhere) wouldn't show up in
+    // changedPaths above. --summary's text does include both sides.
+    const summaryText = getPatchSummaryText(patchPath);
+    const summaryMentions = findProtectedPathMentionsInSummaryText(summaryText);
+    if (summaryMentions.length > 0) {
+      throw new PublishRejection(
+        `patch summary mentions pipeline-protected path(s), refusing to ` +
+          `apply it: ${summaryMentions.join(", ")}`,
+      );
+    }
+
     const issue = await githubRequest<GitHubIssue>(
       token,
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}`,
     );
-    const branchName = deriveBranchName(issueNumber, issue.title);
+
+    // Idempotency keys off the issue number (stable), never a freshly
+    // re-derived title slug — see findPrForIssueNumber's docstring.
+    const existingPr = await findExistingPrForIssue(
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
+    branchName = existingPr
+      ? existingPr.headRef
+      : deriveBranchName(issueNumber, issue.title);
 
     applyPatchAndPush(branchName, patchPath, issueNumber, issue.title);
+    branchPushed = true;
 
-    const existingPr = await findExistingPr(token, owner, repo, branchName);
     if (existingPr) {
       console.log(
-        `PR #${existingPr.number} already exists for ${branchName}; branch ` +
-          `refreshed, not opening a duplicate.`,
+        `PR #${existingPr.number} already exists for issue #${issueNumber} ` +
+          `(branch ${branchName}); refreshed, not opening a duplicate.`,
       );
       return;
     }
 
-    const created = await githubRequest<GitHubPullRequest>(
+    const created = await githubRequest<GitHubPullRequestApi>(
       token,
       "POST",
       `/repos/${owner}/${repo}/pulls`,
@@ -230,11 +360,33 @@ export async function main(): Promise<void> {
     );
     console.log(`Opened PR #${created.number}: ${created.html_url}`);
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     const reasons =
-      err instanceof PublishRejection
-        ? [err.message]
-        : [`unexpected error: ${err instanceof Error ? err.message : String(err)}`];
-    await postFailureComment(token, owner, repo, issueNumber, reasons, runUrl);
+      err instanceof PublishRejection ? [detail] : [`unexpected error: ${detail}`];
+
+    if (branchPushed && branchName) {
+      // FIX 5: the branch write DID succeed — say so accurately, rather
+      // than the generic "no branch was created" message, which would be
+      // false here and could leave an orphaned branch undiscovered.
+      // Deliberately not auto-deleted: it's evidence for whatever failed
+      // after the push, and a human can still open a PR from it by hand.
+      reasons.unshift(
+        `the branch \`${branchName}\` WAS pushed successfully, but ` +
+          `publishing the PR failed after that — this needs manual ` +
+          `follow-up (open a PR from that branch by hand, or inspect/` +
+          `delete it)`,
+      );
+    }
+
+    await postFailureComment(
+      token,
+      owner,
+      repo,
+      issueNumber,
+      reasons,
+      runUrl,
+      branchPushed,
+    );
     console.error(
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
         reasons.map((r) => `  - ${r}`).join("\n"),

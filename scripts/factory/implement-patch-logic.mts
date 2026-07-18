@@ -92,11 +92,17 @@ export function isProtectedPath(normalizedPath: string): boolean {
 }
 
 /**
- * Scans a list of raw (diff-header-format) paths and returns every one
- * that resolves to a pipeline-protected location.
+ * Scans a list of paths and returns every one that resolves to a
+ * pipeline-protected location.
  *
- * @param rawPaths - Paths as extracted from a unified diff (see
- *   `extractChangedPathsFromDiff` in `patch-diff.mts`).
+ * @param rawPaths - Paths git itself reports the patch will touch (see
+ *   `getAuthoritativeChangedPaths` in `publish-implement-patch.mts`, which
+ *   asks `git apply --numstat` rather than re-parsing the diff — the
+ *   caller MUST be the applier's own report, not an independent parse of
+ *   the diff text; see that function's docstring for why this replaced an
+ *   earlier, exploitable diff-header regex parser). Still run through
+ *   {@link normalizePatchPath} here regardless of source, since a
+ *   `..`-segment or similar can appear in an authoritative path too.
  * @returns The subset that are protected, normalized. Empty if the patch
  *   is clean.
  */
@@ -111,6 +117,74 @@ export function findForbiddenPatchPaths(
     }
   }
   return Array.from(forbidden).sort();
+}
+
+/**
+ * Parses `git apply --numstat -z`'s output into the list of destination
+ * paths it reports. NUL-separated records, each `<added>\t<deleted>\t
+ * <path>` — `-z` (rather than plain `--numstat`) is used specifically so a
+ * path containing a literal tab or newline can't be misparsed; NUL is the
+ * one byte no filesystem allows in a path, making it a safe delimiter.
+ *
+ * For a rename, `--numstat` reports only the DESTINATION path, not the
+ * source — {@link findProtectedPathMentionsInSummaryText} is the
+ * complementary check that also catches a rename OUT of a protected path,
+ * which this alone would miss.
+ *
+ * @param numstatZOutput - Raw stdout from `git apply --numstat -z <patch>`.
+ * @returns The destination path of every file the patch touches.
+ */
+export function parseNumstatZ(numstatZOutput: string): string[] {
+  const paths: string[] = [];
+  for (const record of numstatZOutput.split("\0")) {
+    if (record.length === 0) {
+      continue;
+    }
+    const firstTab = record.indexOf("\t");
+    const secondTab = firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
+    if (firstTab === -1 || secondTab === -1) {
+      continue; // Malformed record — shouldn't happen from a real git invocation.
+    }
+    paths.push(record.slice(secondTab + 1));
+  }
+  return paths;
+}
+
+/**
+ * Coarse, defense-in-depth complement to {@link findForbiddenPatchPaths}:
+ * scans `git apply --summary`'s raw text output (which, unlike
+ * `--numstat`, DOES print both sides of a rename — e.g. `rename
+ * .github/workflows/ci.yml => lib/ci.yml (100%)`) for any literal mention
+ * of a protected path. This is NOT a structural parse (the rename-summary
+ * format itself varies — a shared-prefix `{old => new}` form vs a
+ * no-shared-prefix `old => new` form — which is exactly why this checks
+ * for a plain substring instead of trying to parse either shape
+ * correctly): it exists to catch a rename OUT of a protected path (which
+ * moves/effectively deletes protected content — a different attack shape
+ * than writing malicious content INTO one, but still pipeline
+ * self-modification) that a destination-only path list cannot see, as a
+ * second, cruder layer alongside the authoritative numstat-based check —
+ * not a replacement for it.
+ *
+ * @param summaryText - Raw stdout from `git apply --summary <patch>`.
+ * @returns Every protected prefix/exact path that appears anywhere in the
+ *   text, sorted. Empty if none do.
+ */
+export function findProtectedPathMentionsInSummaryText(
+  summaryText: string,
+): string[] {
+  const mentions = new Set<string>();
+  for (const prefix of PROTECTED_PATH_PREFIXES) {
+    if (summaryText.includes(prefix)) {
+      mentions.add(prefix);
+    }
+  }
+  for (const exact of PROTECTED_EXACT_PATHS) {
+    if (summaryText.includes(exact)) {
+      mentions.add(exact);
+    }
+  }
+  return Array.from(mentions).sort();
 }
 
 /** Upper bound on how long a derived branch slug's title portion may be. */
@@ -140,6 +214,37 @@ export function deriveBranchName(
     .replace(/-+$/g, "");
   const safeSlug = slug || "issue";
   return `feature/${issueNumber}-${safeSlug}`;
+}
+
+/** The subset of a GitHub pull request's fields the idempotency check needs. */
+export interface PullRequestSummary {
+  readonly number: number;
+  readonly headRef: string;
+}
+
+/**
+ * Finds, among a list of open PRs, the one that was opened for this
+ * issue — matched by the STABLE `feature/{issueNumber}-` branch prefix,
+ * never by re-deriving the current title's slug. Idempotency must key off
+ * the issue number, not the branch name `deriveBranchName` would produce
+ * from today's title: if the issue's title is edited between dispatches,
+ * re-deriving the branch name from the (now different) title would miss
+ * the existing PR entirely and open a duplicate targeting a
+ * never-before-seen branch. Once a branch exists for an issue, every
+ * later run must reuse its actual name — found here — rather than
+ * deriving a fresh one.
+ *
+ * @param openPrs - Open pull requests on the repo.
+ * @param issueNumber - The issue number to match.
+ * @returns The matching PR, or `null` if none exists yet (first dispatch
+ *   for this issue).
+ */
+export function findPrForIssueNumber(
+  openPrs: readonly PullRequestSummary[],
+  issueNumber: number,
+): PullRequestSummary | null {
+  const prefix = `feature/${issueNumber}-`;
+  return openPrs.find((pr) => pr.headRef.startsWith(prefix)) ?? null;
 }
 
 /** A validated set of inputs for building the implement PR's body. */
@@ -196,10 +301,21 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
 export function buildImplementFailureCommentBody(
   reasons: readonly string[],
   runUrl: string,
+  branchPushed = false,
 ): string {
+  // FIX 5: the preamble must not claim "no branch was created" when one
+  // actually was — that's exactly the false statement a post-push,
+  // pre-PR-create failure would otherwise produce, and a false "nothing
+  // happened" claim is worse than no claim at all: it hides that a branch
+  // needs manual follow-up.
+  const preamble = branchPushed
+    ? "**Automated implementation did not produce a PR**, even though a " +
+      "branch was pushed — see the reasons below for what needs manual " +
+      "follow-up."
+    : "**Automated implementation did not produce a PR.** No branch was " +
+      "created and nothing was pushed.";
   const lines = [
-    "**Automated implementation did not produce a PR.** No branch was created " +
-      "and nothing was pushed.",
+    preamble,
     "",
     "Reasons:",
     ...reasons.map((r) => `- ${r}`),

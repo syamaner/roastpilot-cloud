@@ -1,18 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile as fsWriteFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../../scripts/factory/publish-implement-patch.mts";
 
 /**
- * Proves the actual git plumbing (`applyPatchAndPush`, private to
- * `publish-implement-patch.mts`) genuinely works — apply, commit, push —
- * against a real temporary repository and a real bare "remote", not a
- * mock. `publish-implement-patch.test.ts` covers validation/rejection
- * logic with `execFileSync` mocked out; this file is the complement: only
- * `fetch` is mocked here, `git` runs for real. No network access needed —
- * the "remote" is a bare repo on local disk.
+ * Proves the actual git plumbing AND the patch-path guard genuinely work
+ * — against a real temporary repository and a real bare "remote", not a
+ * mock. This is deliberate: the guard this file exercises was rewritten
+ * specifically because an earlier version re-parsed diff text instead of
+ * asking `git apply` what it would actually do, and diverged from it
+ * (the `zz/`-prefix exploit below). Mocking `execFileSync`'s numstat/
+ * summary output would just reintroduce the same class of risk one layer
+ * up — trusting an assumption about git's output instead of git itself.
+ * `publish-implement-patch.test.ts` covers the rejection paths that never
+ * reach git at all (job-result gate, missing/oversized artifact); this
+ * file is everything downstream of "a `git apply --numstat`-parseable
+ * patch exists".
  */
 
 const VALID_DIFF = `diff --git a/lib/new-file.ts b/lib/new-file.ts
@@ -26,6 +31,12 @@ index 0000000..abc1234
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+async function writePatch(scratchDir: string, name: string, content: string): Promise<string> {
+  const path = join(scratchDir, name);
+  await fsWriteFile(path, content);
+  return path;
 }
 
 let scratchDir: string;
@@ -49,10 +60,7 @@ beforeEach(async () => {
   git(localCloneDir, ["branch", "-M", "main"]);
   git(localCloneDir, ["push", "-u", "origin", "main"]);
 
-  patchPath = join(scratchDir, "patch.diff");
-  await import("node:fs/promises").then((fs) =>
-    fs.writeFile(patchPath, VALID_DIFF),
-  );
+  patchPath = await writePatch(scratchDir, "patch.diff", VALID_DIFF);
 
   originalCwd = process.cwd();
   process.chdir(localCloneDir);
@@ -80,8 +88,13 @@ afterEach(async () => {
 });
 
 async function writeInitialCommit(dir: string): Promise<void> {
-  const { writeFile } = await import("node:fs/promises");
-  await writeFile(join(dir, "README.md"), "# scratch repo\n");
+  await fsWriteFile(join(dir, "README.md"), "# scratch repo\n");
+  const ciPath = join(dir, ".github", "workflows", "ci.yml");
+  await mkdir(dirname(ciPath), { recursive: true });
+  await fsWriteFile(ciPath, "on: push\n");
+  const glueScriptPath = join(dir, "scripts", "factory", "publish-implement-patch.mts");
+  await mkdir(dirname(glueScriptPath), { recursive: true });
+  await fsWriteFile(glueScriptPath, "export const marker = 1;\n");
   git(dir, ["add", "-A"]);
   git(dir, ["commit", "-q", "-m", "initial commit"]);
 }
@@ -93,26 +106,48 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe("publish-implement-patch — real git plumbing", () => {
+/** A fetch mock covering the issue-fetch + PR-list + PR-create calls a successful run makes. */
+function stubHappyPathFetch(options?: {
+  existingPrs?: Array<{ number: number; head: { ref: string } }>;
+  createResponse?: { number: number; html_url: string };
+  issueTitle?: string;
+}) {
+  const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+      return jsonResponse({
+        title: options?.issueTitle ?? "[F1-S3] Implement workflow",
+      });
+    }
+    if (method === "GET" && url.includes("/pulls?state=open")) {
+      return jsonResponse(options?.existingPrs ?? []);
+    }
+    if (method === "POST" && url.endsWith("/pulls")) {
+      return jsonResponse(
+        options?.createResponse ?? {
+          number: 99,
+          html_url: "https://github.com/o/r/pull/99",
+        },
+        201,
+      );
+    }
+    if (method === "POST" && url.includes("/comments")) {
+      // Reached only on a post-guard failure (e.g. a real git-apply
+      // error) — not part of the "happy" path per se, but harmless to
+      // handle here so callers testing that specific failure mode don't
+      // need their own bespoke fetch mock.
+      return jsonResponse({}, 201);
+    }
+    throw new Error(`unexpected fetch: ${method} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+describe("publish-implement-patch — real git plumbing (happy path)", () => {
   it("applies the patch, commits, and pushes a real branch to the bare remote", async () => {
-    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-      if (method === "GET" && url.endsWith("/issues/6")) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
-      }
-      if (method === "GET" && url.includes("/pulls?head=")) {
-        return jsonResponse([]);
-      }
-      if (method === "POST" && url.endsWith("/pulls")) {
-        return jsonResponse(
-          { number: 99, html_url: "https://github.com/o/r/pull/99" },
-          201,
-        );
-      }
-      throw new Error(`unexpected fetch: ${method} ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    stubHappyPathFetch();
 
     await main();
 
@@ -127,8 +162,6 @@ describe("publish-implement-patch — real git plumbing", () => {
     );
     expect(branches).toContain("feature/6-implement-workflow");
 
-    // Clone the remote fresh into a separate dir to inspect the pushed
-    // content, independent of the working copy `main()` operated on.
     const verifyDir = join(scratchDir, "verify");
     execFileSync("git", [
       "clone",
@@ -138,10 +171,7 @@ describe("publish-implement-patch — real git plumbing", () => {
       bareRemoteDir,
       verifyDir,
     ]);
-    const content = await readFile(
-      join(verifyDir, "lib", "new-file.ts"),
-      "utf8",
-    );
+    const content = await readFile(join(verifyDir, "lib", "new-file.ts"), "utf8");
     expect(content).toBe("export const x = 1;\n");
 
     const log = execFileSync("git", ["log", "-1", "--format=%s%n%b"], {
@@ -153,28 +183,13 @@ describe("publish-implement-patch — real git plumbing", () => {
   });
 
   it("force-pushes cleanly on a re-run against an already-existing remote branch (idempotent re-dispatch)", async () => {
-    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-      if (method === "GET" && url.endsWith("/issues/6")) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
-      }
-      if (method === "GET" && url.includes("/pulls?head=")) {
-        return jsonResponse([
-          { number: 50, html_url: "https://github.com/o/r/pull/50" },
-        ]);
-      }
-      throw new Error(`unexpected fetch: ${method} ${url}`);
+    stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
     });
-    vi.stubGlobal("fetch", fetchMock);
 
-    // First run.
     await main();
     expect(process.exitCode).toBeUndefined();
 
-    // Reset the local clone back to a clean main-only state, as a fresh
-    // actions/checkout would give the publish job on a re-dispatch, then
-    // run again.
     process.chdir(originalCwd);
     const secondCloneDir = join(scratchDir, "local2");
     execFileSync("git", ["clone", "-q", bareRemoteDir, secondCloneDir]);
@@ -192,5 +207,313 @@ describe("publish-implement-patch — real git plumbing", () => {
       { cwd: bareRemoteDir, encoding: "utf8" },
     );
     expect(branches).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — FIX 7: idempotency keys off issue number, not title", () => {
+  it("reuses the EXISTING branch (found by issue-number prefix) rather than deriving a new one when the title changed since the first dispatch", async () => {
+    // The existing PR's branch reflects an OLD title's slug
+    // ("feature/6-old-title-slug"), while the issue's CURRENT title (as
+    // fetched this run) would derive a totally different slug. A naive
+    // "derive branch name from today's title, then look for a PR with
+    // that exact name" would miss this PR and open a duplicate.
+    stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-old-title-slug" } }],
+      issueTitle: "[F1-S3] A completely different, edited title now",
+    });
+
+    // Create the branch the "existing PR" claims to point at, so the
+    // force-push has something real to land on.
+    git(localCloneDir, ["checkout", "-b", "feature/6-old-title-slug"]);
+    await fsWriteFile(join(localCloneDir, "placeholder.txt"), "old\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "old dispatch"]);
+    git(localCloneDir, ["push", "-u", "origin", "feature/6-old-title-slug"]);
+    git(localCloneDir, ["checkout", "main"]);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // Pushed to the OLD branch name, not a fresh title-derived one.
+    const oldBranch = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-old-title-slug"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(oldBranch).toContain("feature/6-old-title-slug");
+    const newTitleBranch = execFileSync(
+      "git",
+      [
+        "branch",
+        "--list",
+        "feature/6-a-completely-different-edited-title-now",
+      ],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(newTitleBranch.trim()).toBe("");
+  });
+
+  it("is NOT fooled by a different issue's branch that merely shares a numeric prefix (e.g. issue 6 vs issue 60)", async () => {
+    stubHappyPathFetch({
+      existingPrs: [{ number: 12, head: { ref: "feature/60-unrelated-issue" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // Should NOT have reused issue 60's branch — must have derived and
+    // pushed a fresh one for issue 6.
+    const branch6 = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-implement-workflow"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(branch6).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — FIX 1: the applier-authoritative patch-path guard", () => {
+  it("REJECTS the reviewer's exact exploit: a zz/-prefixed diff header targeting .github/workflows/ci.yml", async () => {
+    // This is the exact bypass class the guard was rewritten for: a diff
+    // header using a made-up "zz/" prefix instead of the usual "a/"/"b/".
+    // git apply's default -p1 strips whatever the first path segment
+    // actually is — not specifically "a"/"b" — so it still lands the
+    // write at .github/workflows/ci.yml. An old parser that only strips a
+    // literal "a/"/"b/" would see the harmless-looking path
+    // "zz/.github/workflows/ci.yml" and let this through.
+    const exploitDiff = `diff --git zz/.github/workflows/ci.yml zz/.github/workflows/ci.yml
+index abc1234..def5678 100644
+--- zz/.github/workflows/ci.yml
++++ zz/.github/workflows/ci.yml
+@@ -1 +1 @@
+-on: push
++on: pull_request_target
+`;
+    const exploitPath = await writePatch(scratchDir, "exploit-zz.diff", exploitDiff);
+    process.env.PATCH_PATH = exploitPath;
+
+    const { calls } = { calls: [] as unknown[] };
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    // Never even reached the point of fetching the issue title / checking
+    // for an existing PR — rejected before any of that.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(body.body).toContain(".github/workflows/ci.yml");
+
+    // And, decisively: the file on disk was never touched.
+    const ciContent = await readFile(
+      join(localCloneDir, ".github", "workflows", "ci.yml"),
+      "utf8",
+    );
+    expect(ciContent).toBe("on: push\n");
+    void calls;
+  });
+
+  it("rejects a straightforward (non-exploit) patch touching .github/**", async () => {
+    const diff = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
+
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const evilExists = await readFile(
+      join(localCloneDir, ".github", "workflows", "evil.yml"),
+      "utf8",
+    ).catch(() => null);
+    expect(evilExists).toBeNull();
+  });
+
+  it("rejects a patch touching the privileged glue scripts (scripts/factory/**), not just .github/**", async () => {
+    const diff = `diff --git a/scripts/factory/publish-implement-patch.mts b/scripts/factory/publish-implement-patch.mts
+index abc1234..def5678 100644
+--- a/scripts/factory/publish-implement-patch.mts
++++ b/scripts/factory/publish-implement-patch.mts
+@@ -1 +1 @@
+-export const marker = 1;
++export const marker = 999;
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "glue.diff", diff);
+
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const content = await readFile(
+      join(localCloneDir, "scripts", "factory", "publish-implement-patch.mts"),
+      "utf8",
+    );
+    expect(content).toBe("export const marker = 1;\n"); // unchanged
+  });
+
+  it("rejects a rename OUT of a protected path (via the --summary complementary check)", async () => {
+    // --numstat alone only reports the DESTINATION path ("lib/ci.yml",
+    // not protected) — this is exactly what findProtectedPathMentionsInSummaryText
+    // exists to catch instead.
+    const diff = `diff --git a/.github/workflows/ci.yml b/lib/ci.yml
+similarity index 100%
+rename from .github/workflows/ci.yml
+rename to lib/ci.yml
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out.diff", diff);
+
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    // The original file must still exist, untouched.
+    const ciContent = await readFile(
+      join(localCloneDir, ".github", "workflows", "ci.yml"),
+      "utf8",
+    );
+    expect(ciContent).toBe("on: push\n");
+  });
+
+  it("still correctly rejects a protected-path patch when the filename contains a space (Codex's parser miss)", async () => {
+    const diff = `diff --git a/.github/workflows/evil workflow.yml b/.github/workflows/evil workflow.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil workflow.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "space.diff", diff);
+
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("still allows a legitimate patch to a filename containing a space, outside any protected path", async () => {
+    const diff = `diff --git a/lib/new file.ts b/lib/new file.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/lib/new file.ts
+@@ -0,0 +1,1 @@
++export const x = 1;
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "space-ok.diff", diff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const branches = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-implement-workflow"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(branches).toContain("feature/6-implement-workflow");
+  });
+
+  it("rejects an empty patch (no diff --git headers at all)", async () => {
+    process.env.PATCH_PATH = await writePatch(scratchDir, "empty.diff", "");
+
+    const fetchMock = vi.fn(async () => jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("posts a generic failure comment when a well-formed, unprotected patch doesn't actually apply cleanly", async () => {
+    // Passes the guard (touches only lib/**), but the context lines don't
+    // match the base file — a genuine git-apply failure distinct from a
+    // guard rejection.
+    const diff = `diff --git a/README.md b/README.md
+index abc1234..def5678 100644
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
+-this context line does not match the real file
++replacement
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "bad-context.diff", diff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("publish-implement-patch — FIX 5: accurate reporting when publish partially succeeds", () => {
+  it("reports that the branch WAS pushed when PR-create fails after a successful push", async () => {
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return new Response("service unavailable", { status: 503 });
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+
+    // The branch really did land on the remote...
+    const branches = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-implement-workflow"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(branches).toContain("feature/6-implement-workflow");
+
+    // ...and the comment says so accurately, not "no branch was created".
+    const commentCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).includes("/comments"),
+    );
+    expect(commentCall).toBeDefined();
+    const [, init] = commentCall!;
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(body.body).toContain("WAS pushed successfully");
+    expect(body.body).not.toContain("No branch was created and nothing was pushed");
   });
 });
