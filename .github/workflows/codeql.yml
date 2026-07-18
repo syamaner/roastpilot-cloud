@@ -1,0 +1,45 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, catches new query-pack findings on unchanged code (a new CVE
+    # pattern published against an existing dependency/idiom). Tuesday
+    # 03:17 UTC — off-peak, off the hour to avoid the scheduler stampede.
+    - cron: "17 3 * * 2"
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          languages: javascript-typescript
+          # security-extended adds lower-confidence-but-real query packs
+          # (e.g. broader taint tracking) on top of the default suite;
+          # cheap for a JS/TS analysis (no compile step) so there's no
+          # runtime-budget reason to hold it back.
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          category: "/language:javascript-typescript"
