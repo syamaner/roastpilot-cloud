@@ -17,11 +17,26 @@ concurrency:
 
 jobs:
   analyze:
-    name: Analyze (javascript-typescript)
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `actions` (Codex P2 finding on this workflow's original PR):
+        # this repo's crown-jewel attack surface is `.github/workflows/**`
+        # (the factory's read-only-agent/privileged-publisher split, the
+        # publisher-identity token, the pipeline-self-modification guard),
+        # and it was entirely outside CodeQL's coverage with only
+        # javascript-typescript initialized — a script-injection or
+        # missing-permissions defect in `implement-ready-issues.yml` could
+        # get a green CodeQL run with the Actions-specific queries never
+        # having run at all. Each language gets its own init/analyze pair
+        # (and its own `category` below) so results don't collide.
+        language: [javascript-typescript, actions]
 
     steps:
       - name: Checkout
@@ -32,14 +47,16 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
-          languages: javascript-typescript
+          languages: ${{ matrix.language }}
           # security-extended adds lower-confidence-but-real query packs
           # (e.g. broader taint tracking) on top of the default suite;
-          # cheap for a JS/TS analysis (no compile step) so there's no
-          # runtime-budget reason to hold it back.
+          # cheap here (neither language has a compile step) so there's no
+          # runtime-budget reason to hold it back. Applies uniformly across
+          # the matrix — each language just uses whatever security-extended
+          # queries exist for it.
           queries: security-extended
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
-          category: "/language:javascript-typescript"
+          category: "/language:${{ matrix.language }}"
