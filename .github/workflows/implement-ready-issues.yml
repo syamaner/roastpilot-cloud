@@ -57,6 +57,28 @@ concurrency:
 permissions: {}
 
 jobs:
+  # --- pause-notice: F1-S10's observability half of the kill-switch
+  # (factory.md §13 point 9) — see triage-issues.yml's identical job for
+  # the full reasoning. Both real jobs below already hard-gate on
+  # `vars.FACTORY_PAUSED != 'true'`, unconditionally and outside the
+  # agent's own code; this job is the opposite-gated one that runs
+  # precisely when they don't, so a dispatch against a paused factory gets
+  # an explicit, readable reason instead of two silent "skipped" jobs. ---
+  pause-notice:
+    name: Factory pause notice
+    if: vars.FACTORY_PAUSED == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Announce that the factory is paused
+        run: |
+          echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — this dispatch will NOT implement or publish anything. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
+          {
+            echo "## ⏸️ Factory paused"
+            echo "\`FACTORY_PAUSED\` is \`true\` — this dispatch did not implement or publish anything."
+            echo "See [docs/factory-runbook.md](https://github.com/${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # --- implement: read-only agent job. Broad edit access WITHIN the
   # checked-out workspace (needed to touch multiple files across the repo,
   # unlike triage's single-file grant), Bash scoped to the repo's known

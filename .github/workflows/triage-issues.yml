@@ -17,15 +17,40 @@ concurrency:
 permissions: {}
 
 jobs:
+  # --- pause-notice: F1-S10's observability half of the kill-switch
+  # (factory.md §13 point 9). Every real job below already hard-gates on
+  # `vars.FACTORY_PAUSED != 'true'` — that gate is the actual enforcement,
+  # unconditional, outside the agent's own code, and unchanged by this job.
+  # But a job skipped by its own `if:` produces no custom log line at
+  # all — this is the OPPOSITE-gated job that runs precisely when the
+  # others don't, so a human looking at the run has an explicit, readable
+  # "why nothing happened" instead of five silent "skipped" rows. ---
+  pause-notice:
+    name: Factory pause notice
+    if: vars.FACTORY_PAUSED == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Announce that the factory is paused
+        run: |
+          echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — seed/triage/apply will NOT run for this event. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
+          {
+            echo "## ⏸️ Factory paused"
+            echo "\`FACTORY_PAUSED\` is \`true\` — no triage jobs ran for this event."
+            echo "See [docs/factory-runbook.md](https://github.com/${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # --- seed: dumb, deterministic, no agent involved. Applies `needs-triage`
   # if the issue has no readiness label yet, so the inbox is in a known
   # state even if `triage` or `apply` fails outright. ---
   seed:
     name: Seed inbox label
-    # §13 point 9's manual kill-switch, cheap version: a repo variable the
-    # whole factory reuses (F1-S10 formalises the pattern further). Set
-    # `FACTORY_PAUSED` to the literal string 'true' to halt every job below
-    # without disabling the workflow file itself.
+    # §13 point 9's manual kill-switch (F1-S10): a repo variable the whole
+    # factory reuses. Set `FACTORY_PAUSED` to the literal string 'true' to
+    # halt every job below without disabling the workflow file itself —
+    # this `if:` is the actual enforcement (a GitHub Actions job-level
+    # condition, evaluated before any step runs, so the agent never even
+    # starts — see `pause-notice` above for the paired observability half).
     if: vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
