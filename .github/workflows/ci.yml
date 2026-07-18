@@ -108,8 +108,17 @@ jobs:
       # and prints SQL, it never opens a session. A live contract check
       # against ROASTPILOT_DEV with a CI-scoped key is deferred to the
       # human-gated secret-CI story (F1-S8/C7) per factory.md §8.
-      - name: Install schemachange
-        run: pip install -r snowflake/requirements.txt
+      - name: Install schemachange + test tooling
+        run: pip install -r snowflake/requirements-dev.txt
+
+      # Issue #18: unit tests for with_connection_env.py's connection-profile
+      # resolution/env-only-bypass logic and validate_migrations.py's
+      # recursive migration discovery -- runs before the offline validator
+      # below so a regression in either script's own logic is caught
+      # independently of whatever migrations currently happen to exist.
+      - name: Run snowflake/ tooling unit tests
+        working-directory: snowflake
+        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov-report=term-missing
 
       - name: Validate migration filenames + render
         run: python3 snowflake/validate_migrations.py

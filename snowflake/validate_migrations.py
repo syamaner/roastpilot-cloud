@@ -6,20 +6,55 @@ convention (reusing schemachange's real classifier, not a hand-rolled
 regex) and renders cleanly via ``schemachange render``. Never opens a
 Snowflake connection or reads any credential — safe to run in CI with no
 secrets, and this is exactly what the CI job runs.
+
+Recursive + jinja/CLI coverage (issue #18, Codex finding 3, fast-followed
+from #17's review): the ORIGINAL version of this validator only scanned
+``migrations/*.sql`` — top-level, SQL-only. schemachange's own deploy-time
+collector (``schemachange.session.Script.get_all_scripts_recursively``)
+walks the ENTIRE migrations tree recursively and additionally recognizes
+``.sql.jinja`` (jinja-templated SQL) and ``.cli.yml``/``.cli.yml.jinja``
+(Snowflake CLI action scripts) — a migration in a subdirectory, or using
+either of those formats, would deploy completely unvalidated by CI. Fixed
+by mirroring schemachange 4.3.3's own recursive walk and file-extension
+regexes exactly (``_candidate_migration_files`` below — verified against
+the installed ``schemachange.session.Script`` module's source, not
+guessed), so this validator sees every file schemachange itself would ever
+try to classify at deploy time.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from schemachange.session.Script import AlwaysScript, RepeatableScript, VersionedScript
+from schemachange.session.Script import (
+    AlwaysCLIScript,
+    AlwaysScript,
+    RepeatableCLIScript,
+    RepeatableScript,
+    VersionedCLIScript,
+    VersionedScript,
+    get_all_scripts_recursively,
+)
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent
 MIGRATIONS_DIR = SNOWFLAKE_DIR / "migrations"
 SCRIPT_CLASSES = (VersionedScript, RepeatableScript, AlwaysScript)
+CLI_SCRIPT_CLASSES = (VersionedCLIScript, RepeatableCLIScript, AlwaysCLIScript)
+
+# Mirrors schemachange 4.3.3's own get_all_scripts_recursively (installed
+# package, snowflake/.venv/lib/*/site-packages/schemachange/session/Script.py)
+# EXACTLY — same two extension regexes, same case-insensitivity. Duplicated
+# here (not importable as module constants; they're locals inside that
+# function) rather than re-derived from first principles, so this validator
+# sees precisely what schemachange's deploy-time collector would. A future
+# schemachange version bump should re-diff these two lines against the new
+# installed source before trusting them again.
+_SQL_EXTENSION_PATTERN = re.compile(r"\.sql(\.jinja)?$", re.IGNORECASE)
+_CLI_EXTENSION_PATTERN = re.compile(r"\.cli\.yml(\.jinja)?$", re.IGNORECASE)
 
 
 def _schemachange_executable() -> str:
@@ -37,11 +72,39 @@ def _schemachange_executable() -> str:
     raise SystemExit("error: schemachange executable not found on PATH or next to the interpreter")
 
 
+def find_candidate_migration_files(migrations_dir: Path) -> list[Path]:
+    """Every file schemachange's own deploy-time collector would consider a
+    migration CANDIDATE — matches its ``.sql``/``.sql.jinja``/``.cli.yml``/
+    ``.cli.yml.jinja`` extension pattern, recursively, at any depth (see the
+    module docstring for why this replaced a top-level-only ``*.sql`` glob).
+
+    A file matching neither extension pattern is not a migration candidate
+    at all (README.md, requirements.txt, a stray ``.venv/`` if one somehow
+    existed under ``migrations/``) and is silently excluded, same as
+    schemachange's own collector would exclude it.
+
+    @param migrations_dir: The migrations root directory to walk.
+    @returns: Every matching file path, sorted for deterministic output.
+    """
+    return sorted(
+        path
+        for path in migrations_dir.glob("**/*")
+        if path.is_file()
+        and (_SQL_EXTENSION_PATTERN.search(path.name) or _CLI_EXTENSION_PATTERN.search(path.name))
+    )
+
+
 def classify(path: Path) -> str | None:
     """Return the schemachange script kind for a migration file, or None if
-    its filename doesn't match any recognized convention.
+    its filename doesn't match any recognized V/R/A (or CLI-equivalent)
+    naming convention — schemachange's own collector would silently SKIP
+    such a file at deploy time (never validated, never deployed); this
+    function's caller treats that as a hard validation failure instead, so
+    a naming mistake is caught here rather than becoming a silently-never-
+    applied migration.
     """
-    for script_cls in SCRIPT_CLASSES:
+    classes = CLI_SCRIPT_CLASSES if _CLI_EXTENSION_PATTERN.search(path.name) else SCRIPT_CLASSES
+    for script_cls in classes:
         if script_cls.pattern.search(path.name):
             try:
                 script_cls.from_path(file_path=path)
@@ -53,29 +116,42 @@ def classify(path: Path) -> str | None:
 
 
 def main() -> int:
-    sql_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
-    if not sql_files:
+    candidates = find_candidate_migration_files(MIGRATIONS_DIR)
+    if not candidates:
         print("no migrations found under migrations/ -- nothing to validate")
         return 0
+
+    # Catches what schemachange's own get_all_scripts_recursively raises
+    # for (never silently skips): a filename that DOES match a V/R/A prefix
+    # but violates a real formatting rule (e.g. one underscore instead of
+    # two), or two scripts sharing the same name/version. Run BEFORE the
+    # per-file render loop below so a hard structural violation is reported
+    # even if it would otherwise be masked by a later per-file failure.
+    try:
+        get_all_scripts_recursively(MIGRATIONS_DIR)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
 
     schemachange_bin = _schemachange_executable()
 
     failed = False
-    for path in sql_files:
+    for path in candidates:
+        rel_path = path.relative_to(SNOWFLAKE_DIR)
         kind = classify(path)
         if kind is None:
             print(
-                f"error: {path.name} does not match schemachange's "
-                "V<version>__description.sql / R__description.sql / "
-                "A__description.sql naming convention",
+                f"error: {rel_path} does not match schemachange's "
+                "V<version>__description / R__description / A__description "
+                "naming convention (would be silently ignored at deploy time)",
                 file=sys.stderr,
             )
             failed = True
             continue
 
-        print(f"{path.name}: {kind}, rendering...")
+        print(f"{rel_path}: {kind}, rendering...")
         result = subprocess.run(
-            [schemachange_bin, "render", str(path.relative_to(SNOWFLAKE_DIR))],
+            [schemachange_bin, "render", str(rel_path)],
             cwd=SNOWFLAKE_DIR,
             capture_output=True,
             text=True,
@@ -89,7 +165,7 @@ def main() -> int:
     if failed:
         return 1
 
-    print(f"validated {len(sql_files)} migration(s) offline (no Snowflake connection)")
+    print(f"validated {len(candidates)} migration(s) offline (no Snowflake connection)")
     return 0
 
 
