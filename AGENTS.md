@@ -190,6 +190,12 @@ inline.
   Zod/Pydantic validation rules → **`schema-migration-reviewer`**.
 - Any diff touching routes, components, stored procs, or anything handling
   reviewer data, IP addresses, visibility, or deletion → **`privacy-auditor`**.
+- Any diff touching the factory's own pipeline — `.github/workflows/**`,
+  `scripts/factory/**`, CODEOWNERS, or branch-protection → **`factory-security-reviewer`**.
+  This is an adversarial red-team: its job is to produce a working exploit, not
+  to assess. The F1-S3 implement workflow shipped an EXPLOITABLE pipeline-guard
+  that only this lens caught, so a factory-pipeline diff without this pass is not
+  ready to merge.
 
 **Also verify**: tests assert real behavior, not a smoke check; new code is
 covered or carries a documented reason for an uncovered line.
