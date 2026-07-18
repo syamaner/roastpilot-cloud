@@ -7,6 +7,7 @@ import {
   MAX_RETRY_AFTER_SECONDS,
   parseRetryAfterMs,
   requireEnv,
+  shouldGiveUpOnRateLimit,
 } from "../../scripts/factory/github-api.mts";
 
 describe("requireEnv", () => {
@@ -127,10 +128,9 @@ describe("parseRetryAfterMs", () => {
     expect(parseRetryAfterMs("0")).toBe(0);
   });
 
-  it("clamps a value above MAX_RETRY_AFTER_SECONDS", () => {
-    expect(parseRetryAfterMs(String(MAX_RETRY_AFTER_SECONDS + 1000))).toBe(
-      MAX_RETRY_AFTER_SECONDS * 1000,
-    );
+  it("does NOT clamp a value above MAX_RETRY_AFTER_SECONDS — returns the exact server-requested wait (Codex P2, #53: clamping here caused premature retries against a still-rate-limited server)", () => {
+    const seconds = MAX_RETRY_AFTER_SECONDS + 1000;
+    expect(parseRetryAfterMs(String(seconds))).toBe(seconds * 1000);
   });
 
   it("returns null for a missing, non-numeric, or negative value", () => {
@@ -159,6 +159,25 @@ describe("computeBackoffMs", () => {
 
   it("caps exponential backoff at MAX_RETRY_AFTER_SECONDS even for a large attempt number", () => {
     expect(computeBackoffMs(null, 20)).toBe(MAX_RETRY_AFTER_SECONDS * 1000);
+  });
+});
+
+describe("shouldGiveUpOnRateLimit (Codex P2, #53)", () => {
+  it("is false for a wait within MAX_RETRY_AFTER_SECONDS", () => {
+    expect(shouldGiveUpOnRateLimit(String(MAX_RETRY_AFTER_SECONDS))).toBe(false);
+    expect(shouldGiveUpOnRateLimit("5")).toBe(false);
+    expect(shouldGiveUpOnRateLimit("0")).toBe(false);
+  });
+
+  it("is true for a wait exceeding MAX_RETRY_AFTER_SECONDS — the caller must give up, not clamp-and-retry-early", () => {
+    expect(shouldGiveUpOnRateLimit(String(MAX_RETRY_AFTER_SECONDS + 1))).toBe(true);
+    expect(shouldGiveUpOnRateLimit("120")).toBe(true);
+  });
+
+  it("is false for a missing or unparseable header (that case falls to computeBackoffMs's own exponential fallback instead, never a reason to give up)", () => {
+    expect(shouldGiveUpOnRateLimit(null)).toBe(false);
+    expect(shouldGiveUpOnRateLimit("garbage")).toBe(false);
+    expect(shouldGiveUpOnRateLimit("-5")).toBe(false);
   });
 });
 
@@ -234,6 +253,31 @@ describe("githubRequest — 429/Retry-After backoff (F1-S10, factory.md §13 poi
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(sleepFn).not.toHaveBeenCalled();
+  });
+
+  it("gives up immediately — no sleep, no retry — when Retry-After exceeds MAX_RETRY_AFTER_SECONDS (Codex P2, #53: must not retry EARLY against a longer server-requested wait)", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "120" }, // Exceeds the 60s cap.
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      githubRequest("tok", "POST", "/pulls", undefined, { sleepFn }),
+    ).rejects.toThrow(/429/);
+
+    // Decisive: exactly ONE fetch attempt, and NEVER slept — retrying
+    // after waiting only the capped 60s would fire before the server's
+    // actual 120s request elapsed, which is exactly the bug this guards.
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sleepFn).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("giving up"));
+    warnSpy.mockRestore();
   });
 
   it("gives up after exhausting the retry budget and throws with the final status", async () => {

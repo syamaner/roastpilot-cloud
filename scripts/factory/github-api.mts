@@ -72,11 +72,22 @@ export function isRateLimitedResponse(
  * sends it here and a caller falling back to its own backoff for an
  * unparseable value is the safe default either way.
  *
+ * Deliberately NOT clamped to {@link MAX_RETRY_AFTER_SECONDS} (Codex P2,
+ * #53's first review round): an earlier version of this function clamped
+ * an oversized value down to the cap and returned it as a wait, which
+ * made the retry loop wait the CAPPED amount and then retry anyway —
+ * firing the retry attempt BEFORE the server's own requested delay had
+ * actually elapsed, burning part of the retry budget against a request
+ * that was still guaranteed to be rejected. This function's job is only
+ * to report what the server actually asked for; {@link
+ * shouldGiveUpOnRateLimit} is the caller's signal for "this wait is
+ * longer than we're willing to retry for at all — stop, don't retry
+ * early instead."
+ *
  * @param headerValue - The raw header value, or `null` if the response
  *   had none.
- * @returns The wait, in milliseconds, clamped to
- *   {@link MAX_RETRY_AFTER_SECONDS}; `null` if the value is missing,
- *   non-numeric, or negative.
+ * @returns The wait, in milliseconds, exactly as the server requested;
+ *   `null` if the value is missing, non-numeric, or negative.
  */
 export function parseRetryAfterMs(headerValue: string | null): number | null {
   if (headerValue === null) {
@@ -86,7 +97,34 @@ export function parseRetryAfterMs(headerValue: string | null): number | null {
   if (!Number.isFinite(seconds) || seconds < 0) {
     return null;
   }
-  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+  return seconds * 1000;
+}
+
+/**
+ * True when a rate-limited response's `Retry-After` header requests a
+ * wait LONGER than {@link MAX_RETRY_AFTER_SECONDS} — the caller must
+ * give up (let the failure surface) rather than retry at all.
+ *
+ * The cap bounds how long this client is willing to sit idle waiting on
+ * GitHub; it does not license retrying EARLY against a genuine,
+ * longer-than-usual wait GitHub explicitly asked for. Clamping the wait
+ * down to the cap and retrying anyway (the bug this replaces, Codex P2,
+ * #53) would hit the server again before its own requested delay
+ * elapsed — a wasted attempt against a request still guaranteed to be
+ * rejected. Giving up cleanly is the safe choice once the legitimately-
+ * requested wait exceeds what this client will wait for.
+ *
+ * A missing or unparseable header returns `false` — that's a genuinely
+ * different situation (no real guidance from the server at all), handled
+ * instead by {@link computeBackoffMs}'s own capped exponential fallback.
+ *
+ * @param headerValue - The rate-limited response's `Retry-After` header
+ *   value, or `null`.
+ * @returns Whether the caller should give up rather than retry.
+ */
+export function shouldGiveUpOnRateLimit(headerValue: string | null): boolean {
+  const ms = parseRetryAfterMs(headerValue);
+  return ms !== null && ms > MAX_RETRY_AFTER_SECONDS * 1000;
 }
 
 /**
@@ -99,6 +137,12 @@ export function parseRetryAfterMs(headerValue: string | null): number | null {
  * when the header is absent or unparseable, so a retry still makes
  * bounded forward progress even when GitHub's response is silent on
  * timing.
+ *
+ * Callers MUST check {@link shouldGiveUpOnRateLimit} first and never call
+ * this when it returns `true` — this function does not re-check the cap
+ * against a header-provided value, since by the time it's called that
+ * value is already guaranteed (by the caller's own prior check) to be
+ * within {@link MAX_RETRY_AFTER_SECONDS}.
  *
  * @param retryAfterHeader - The rate-limited response's `Retry-After`
  *   header value, or `null`.
@@ -178,7 +222,9 @@ export function requireEnv(name: string): string {
  *   {@link GithubRequestOptions}.
  * @returns The parsed JSON response, or `undefined` for a 204.
  * @throws If the response status is not ok (2xx) and either isn't rate
- *   limiting or the retry budget is exhausted.
+ *   limiting, the server's requested wait exceeds
+ *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
+ *   or the retry budget is exhausted.
  */
 export async function githubRequest<T>(
   token: string,
@@ -205,7 +251,8 @@ export async function githubRequest<T>(
     const retryAfterHeader = response.headers.get("retry-after");
     if (
       isRateLimitedResponse(response.status, retryAfterHeader) &&
-      attempt < maxRetries
+      attempt < maxRetries &&
+      !shouldGiveUpOnRateLimit(retryAfterHeader)
     ) {
       const waitMs = computeBackoffMs(retryAfterHeader, attempt);
       console.warn(
@@ -214,6 +261,17 @@ export async function githubRequest<T>(
       );
       await sleepFn(waitMs);
       continue;
+    }
+
+    if (
+      isRateLimitedResponse(response.status, retryAfterHeader) &&
+      shouldGiveUpOnRateLimit(retryAfterHeader)
+    ) {
+      console.warn(
+        `GitHub API ${method} ${path} rate-limited (status ${response.status}) with a ` +
+          `Retry-After of ${retryAfterHeader}s, exceeding the ${MAX_RETRY_AFTER_SECONDS}s ` +
+          `cap — giving up rather than retrying before that wait elapses.`,
+      );
     }
 
     if (!response.ok) {
