@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertLabelDescriptionWithinLimit,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
@@ -7,9 +8,13 @@ import {
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
+  isLabelAlreadyExistsError,
   isProtectedPath,
+  NO_REVIEW_AUTOMATION_LABEL,
+  NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
   parseNameStatusZ,
   type ExistingComment,
@@ -372,6 +377,7 @@ describe("buildImplementPrBody", () => {
       issueNumber: 6,
       runUrl: "https://github.com/o/r/actions/runs/123",
       agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
     });
     expect(body).toContain("Closes #6");
     expect(body).toContain("https://github.com/o/r/actions/runs/123");
@@ -386,6 +392,7 @@ describe("buildImplementPrBody", () => {
       issueNumber: 6,
       runUrl: "https://github.com/o/r/actions/runs/123",
       agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
     });
     expect(body).toContain("## Provenance");
     expect(body).toContain(
@@ -393,6 +400,35 @@ describe("buildImplementPrBody", () => {
     );
     expect(body).toContain("issue #6");
     expect(body).toContain("F1-S10");
+  });
+
+  it("omits the fallback warning when publishedViaFallback is false", () => {
+    const body = buildImplementPrBody({
+      issueNumber: 6,
+      runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
+    });
+    expect(body).not.toContain("GITHUB_TOKEN fallback");
+    expect(body).not.toContain("no-review-automation");
+  });
+
+  it("prepends a bold fallback warning when publishedViaFallback is true (adjudicated F2, #40 rework)", () => {
+    const body = buildImplementPrBody({
+      issueNumber: 6,
+      runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: true,
+    });
+    expect(body).toContain("⚠️");
+    expect(body).toContain("GITHUB_TOKEN fallback");
+    expect(body).toContain("Do not merge without a manual review pass");
+    expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
+    // The warning must lead the body, not be buried below the fold —
+    // asserted structurally (its position precedes "## Story"), not just
+    // "somewhere in the string".
+    expect(body.indexOf("⚠️")).toBeLessThan(body.indexOf("## Story"));
+    expect(body.indexOf("## Story")).toBeGreaterThan(-1);
   });
 });
 
@@ -485,5 +521,132 @@ describe("findExistingImplementFailureCommentId", () => {
 
   it("returns null on an empty comment list", () => {
     expect(findExistingImplementFailureCommentId([])).toBeNull();
+  });
+
+  it("matches a custom authorLogin (factory.md §13 publisher-identity switch)", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 7,
+        body: `some reason\n\n${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "Bot",
+        authorLogin: "roastpilot-factory[bot]",
+      },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(comments, "roastpilot-factory[bot]"),
+    ).toBe(7);
+    // The default login must NOT match once a different login is passed —
+    // a re-dispatch must never mistake the OLD identity's comment for the
+    // new publisher identity's own.
+    expect(findExistingImplementFailureCommentId(comments)).toBeNull();
+  });
+
+  it("expects User (not Bot) type for a non-bot-suffixed custom authorLogin", () => {
+    const humanPatComments: ExistingComment[] = [
+      {
+        id: 8,
+        body: `some reason\n\n${IMPLEMENT_FAILURE_COMMENT_MARKER}`,
+        authorType: "User",
+        authorLogin: "some-operator",
+      },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(humanPatComments, "some-operator"),
+    ).toBe(8);
+
+    // A comment with the right login but the WRONG type (e.g. spoofed
+    // authorType) still doesn't match.
+    const wrongType: ExistingComment[] = [
+      { ...humanPatComments[0]!, authorType: "Bot" },
+    ];
+    expect(
+      findExistingImplementFailureCommentId(wrongType, "some-operator"),
+    ).toBeNull();
+  });
+});
+
+describe("NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION", () => {
+  it("stays within GitHub's label-description limit (regression guard, Codex round-3 P2)", () => {
+    // An earlier draft was 119 chars, over GitHub's 100-char cap, which
+    // made the label-create call 422 and get misread as "already
+    // exists" by the (since-fixed) old catch — this guard fails loudly
+    // if a future edit reintroduces that.
+    expect(NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION.length).toBeLessThanOrEqual(
+      GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+    );
+  });
+});
+
+describe("assertLabelDescriptionWithinLimit", () => {
+  it("does not throw when the description is within the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("short description", 100)).not.toThrow();
+  });
+
+  it("does not throw when the description is exactly at the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("x".repeat(100), 100)).not.toThrow();
+  });
+
+  it("throws a clear error when the description exceeds the limit", () => {
+    expect(() => assertLabelDescriptionWithinLimit("x".repeat(101), 100)).toThrow(
+      /label description is 101 chars, exceeds GitHub's 100-char limit/,
+    );
+  });
+
+  it("defaults maxLength to GITHUB_LABEL_DESCRIPTION_MAX_LENGTH when unspecified", () => {
+    expect(() =>
+      assertLabelDescriptionWithinLimit("x".repeat(GITHUB_LABEL_DESCRIPTION_MAX_LENGTH + 1)),
+    ).toThrow();
+    expect(() =>
+      assertLabelDescriptionWithinLimit("x".repeat(GITHUB_LABEL_DESCRIPTION_MAX_LENGTH)),
+    ).not.toThrow();
+  });
+});
+
+describe("isLabelAlreadyExistsError", () => {
+  function githubApiError(status: number, body: unknown): Error {
+    return new Error(
+      `GitHub API POST /repos/o/r/labels failed: ${status} ${JSON.stringify(body)}`,
+    );
+  }
+
+  it("returns true for GitHub's genuine 'already exists' 422", () => {
+    const err = githubApiError(422, {
+      message: "Validation Failed",
+      errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(true);
+  });
+
+  it("returns false for a DIFFERENT 422 validation error (e.g. an over-length description) — the Codex round-3 P2 fix", () => {
+    const err = githubApiError(422, {
+      message: "Validation Failed",
+      errors: [
+        { resource: "Label", code: "invalid", field: "description" },
+      ],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a non-422 status even with an already_exists-shaped body", () => {
+    const err = githubApiError(500, {
+      message: "Validation Failed",
+      errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+    });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for an unparsable response body (never assumes the benign case)", () => {
+    const err = new Error("GitHub API POST /repos/o/r/labels failed: 422 not json");
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a 422 with no errors array at all", () => {
+    const err = githubApiError(422, { message: "Validation Failed" });
+    expect(isLabelAlreadyExistsError(err)).toBe(false);
+  });
+
+  it("returns false for a non-Error value", () => {
+    expect(isLabelAlreadyExistsError("not an error")).toBe(false);
+    expect(isLabelAlreadyExistsError(undefined)).toBe(false);
   });
 });

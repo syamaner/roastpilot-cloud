@@ -302,11 +302,160 @@ export function findPrForIssueNumber(
  * `IMPLEMENT_AGENT_ACTION_REF` read) — passed through from the workflow
  * rather than hardcoded here, so this module has no literal SHA of its own
  * to drift out of sync with the `uses:` pin.
+ *
+ * `publishedViaFallback` — true when this PR was opened using the built-in
+ * `GITHUB_TOKEN` because no factory App token was minted (factory.md
+ * §13's publisher-identity switch). GitHub suppresses downstream workflow
+ * triggers for `GITHUB_TOKEN`-authored PR events, so a PR opened this way
+ * got NO review-automation coverage at all (CodeQL, Codex, Claude Code
+ * Review never ran) — a fact the workflow's own `::warning::` annotation
+ * (adjudicated F2, #40 rework) only surfaced in the Actions log, which the
+ * human merging the PR doesn't read. This field makes
+ * {@link buildImplementPrBody} put that same signal ON the PR itself.
  */
 export interface ImplementPrContext {
   readonly issueNumber: number;
   readonly runUrl: string;
   readonly agentActionRef: string;
+  readonly publishedViaFallback: boolean;
+}
+
+/**
+ * The label {@link buildImplementPrBody}'s caller applies to a PR opened
+ * via the `GITHUB_TOKEN` fallback (adjudicated F2, #40 rework) — a second,
+ * always-visible (PR list / board view, not just the PR body) signal that
+ * this PR got no review-automation coverage and needs a manual pass before
+ * merging.
+ */
+export const NO_REVIEW_AUTOMATION_LABEL = "no-review-automation";
+
+/**
+ * GitHub caps a label's `description` at 100 characters (REST: "Create a
+ * label") and returns 422 if it's exceeded — the same status code as the
+ * "label already exists" case {@link isLabelAlreadyExistsError} tolerates,
+ * which is exactly why that function checks the error's `code`, not just
+ * the status. Kept under a named constant, with a unit test asserting
+ * {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} stays within it, so a
+ * future edit that lengthens the text can't silently regress into the
+ * same 422-swallowed-as-success bug (Codex round-3 P2, #40 rework) this
+ * module's `isLabelAlreadyExistsError` fix closes.
+ */
+export const GITHUB_LABEL_DESCRIPTION_MAX_LENGTH = 100;
+
+/**
+ * Throws if `description` exceeds `maxLength`. A pure, directly-testable
+ * guard so `applyNoReviewAutomationLabel` (in `publish-implement-patch.mts`)
+ * fails with a clear message here rather than a cryptic 422 from GitHub —
+ * extracted as its own function specifically so BOTH branches (within
+ * limit / over limit) are exercisable by a unit test without needing to
+ * mutate the fixed {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} export at
+ * runtime.
+ *
+ * @param description - The label description to check.
+ * @param maxLength - The limit, in characters. Defaults to
+ *   {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}.
+ * @throws If `description.length` exceeds `maxLength`.
+ */
+export function assertLabelDescriptionWithinLimit(
+  description: string,
+  maxLength: number = GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+): void {
+  if (description.length > maxLength) {
+    throw new Error(
+      `label description is ${description.length} chars, exceeds GitHub's ` +
+        `${maxLength}-char limit`,
+    );
+  }
+}
+
+/**
+ * Builds the comment posted on an EXISTING factory PR's issue thread when
+ * a re-dispatch refreshes it via the `GITHUB_TOKEN` fallback (Codex
+ * round-3 P2, #40 rework, closing a gap the original F2 fold's own
+ * docstring had explicitly scoped out).
+ *
+ * The gap this closes: {@link buildImplementPrBody}'s warning banner and
+ * `applyNoReviewAutomationLabel`'s label only ever fired on PR
+ * *creation* — a re-dispatch that force-pushes a new head onto an
+ * ALREADY-OPEN PR returns before either fires. Unlike the failure-comment
+ * upsert elsewhere in this module (which PATCHes its prior comment in
+ * place, because a repeated identical failure genuinely IS the same
+ * event), this is deliberately a fresh POST every time, never an upsert:
+ * each fallback refresh pushes a NEW, not-yet-reviewed commit, so an
+ * upserted/edited-in-place comment could read as "already seen" to a
+ * human who reviewed an earlier version of it. The label
+ * (`no-review-automation`) stays the persistent, always-visible signal;
+ * this comment is the per-event one pointing at what specifically
+ * changed.
+ *
+ * @param runUrl - Link to the implement run, for diagnosis.
+ * @returns The Markdown comment body.
+ */
+export function buildFallbackRefreshCommentBody(runUrl: string): string {
+  return [
+    "> ⚠️ **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
+      "workflows did NOT run against the new commit(s).**",
+    "",
+    "No factory App token was minted for this run (the App wasn't configured, or minting " +
+      "failed), so CodeQL, Codex, and Claude Code Review never triggered on the refreshed " +
+      "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
+      `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
+      `commit(s).** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+    "",
+    `[Run output](${runUrl}).`,
+  ].join("\n");
+}
+
+/**
+ * {@link NO_REVIEW_AUTOMATION_LABEL}'s description, applied when the
+ * publish job creates the label (idempotently — see
+ * `applyNoReviewAutomationLabel` in `publish-implement-patch.mts`).
+ * Deliberately short: an earlier draft's 119-character description
+ * exceeded {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH} and triggered the
+ * exact bug `isLabelAlreadyExistsError` now guards against (a genuine
+ * validation 422 misread as "label already exists").
+ */
+export const NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION =
+  "Opened via GITHUB_TOKEN fallback — no review automation ran; needs a manual review before merging.";
+
+/**
+ * True only when `err` represents GitHub's specific "label already
+ * exists" validation error (422, with an `errors[]` entry whose `code` is
+ * `"already_exists"`) — NOT any 422 from a label-create call.
+ *
+ * Adjudicated fix (Codex round-3 P2, #40 rework): an earlier version of
+ * this check treated EVERY 422 from `POST .../labels` as "already
+ * exists" and silently swallowed it. That also swallowed a genuine
+ * validation error — e.g. an over-length `description` (see
+ * {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}) returns 422 too — so the
+ * label was never actually created, the follow-up "add label to PR" call
+ * then failed for real, and the label silently never applied (the PR
+ * body warning still fired, so this was a degradation, not a total loss
+ * of signal, but a real one). Parsing the response body's `errors[].code`
+ * distinguishes the two: only the genuine duplicate case is tolerated, so
+ * a future validation error (e.g. this description growing past 100
+ * chars again) surfaces loudly instead of no-op'ing.
+ *
+ * @param err - The error a `githubRequest` `POST .../labels` call threw
+ *   (its message has the shape `GitHub API <method> <path> failed:
+ *   <status> <raw response body>` — see `github-api.mts`).
+ * @returns Whether this is specifically GitHub's "already exists" case.
+ */
+export function isLabelAlreadyExistsError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const match = err.message.match(/^GitHub API \S+ \S+ failed: (\d+) ([\s\S]*)$/);
+  if (!match || match[1] !== "422") {
+    return false;
+  }
+  let body: { errors?: Array<{ code?: string }> };
+  try {
+    body = JSON.parse(match[2]) as { errors?: Array<{ code?: string }> };
+  } catch {
+    return false; // Unparsable body: never assume it's the benign case.
+  }
+  return Boolean(body.errors?.some((e) => e.code === "already_exists"));
 }
 
 /**
@@ -322,12 +471,32 @@ export interface ImplementPrContext {
  * is F1-S10's deliverable, not this story's; said so explicitly in the
  * body so this partial version is never mistaken for that one.
  *
+ * When {@link ImplementPrContext.publishedViaFallback} is true, prepends a
+ * bold warning line (adjudicated F2, #40 rework) so the human merging this
+ * PR sees, on the PR itself, that no review-automation workflow ran on it
+ * — the `::warning::` annotation this mirrors only ever landed in the
+ * Actions log, which isn't part of a normal merge review.
+ *
  * @param context - The issue number, a link to the implement run's gate
- *   output, and the pinned agent action ref that ran.
+ *   output, the pinned agent action ref that ran, and whether this PR was
+ *   opened via the `GITHUB_TOKEN` fallback.
  * @returns The Markdown PR body.
  */
 export function buildImplementPrBody(context: ImplementPrContext): string {
+  const fallbackWarning = context.publishedViaFallback
+    ? [
+        "> ⚠️ **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
+          "NOT run on this PR.** No factory App token was minted when this PR was " +
+          "published (the App wasn't configured, or minting failed), so CodeQL, " +
+          "Codex, and Claude Code Review never triggered (GitHub suppresses " +
+          "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
+          "factory.md §13). **Do not merge without a manual review pass.** " +
+          `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+        "",
+      ]
+    : [];
   return [
+    ...fallbackWarning,
     "## Story",
     "",
     `Closes #${context.issueNumber}`,
@@ -376,11 +545,21 @@ export const IMPLEMENT_FAILURE_COMMENT_MARKER =
   "<!-- roastpilot-factory:implement-failure:do-not-edit -->";
 
 /**
- * The exact GitHub identity that posts on behalf of this workflow's
- * `secrets.GITHUB_TOKEN` — the only comment author
- * {@link findExistingImplementFailureCommentId} will ever treat as "our own
- * prior comment". Same value and same reasoning as
- * `apply-triage-verdict-logic.mts`'s `TRIAGE_COMMENT_AUTHOR_LOGIN`.
+ * The default GitHub identity that posts on behalf of this workflow's
+ * `secrets.GITHUB_TOKEN` — the fallback comment author
+ * {@link findExistingImplementFailureCommentId} treats as "our own prior
+ * comment" when no publisher identity is configured. Same value and same
+ * reasoning as `apply-triage-verdict-logic.mts`'s
+ * `TRIAGE_COMMENT_AUTHOR_LOGIN`.
+ *
+ * The publish job's actual identity is configurable (factory.md §13's
+ * publisher-identity switch — see the workflow's
+ * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` env var): once a factory App
+ * token is minted, comments post as THAT identity's `<app-slug>[bot]`
+ * login, not this one, and the workflow must pass the real login through
+ * so a re-dispatch still finds its own prior comment. This constant stays
+ * the correct default for the "no App token minted, still on
+ * GITHUB_TOKEN" case.
  */
 export const IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
 
@@ -399,23 +578,34 @@ export interface ExistingComment {
  * earlier run for the same issue, if any, so a re-dispatch edits it
  * instead of posting a duplicate.
  *
- * Scoped to comments authored by exactly
- * {@link IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN} AND carrying the marker —
- * matching on bot-type alone would let a different bot's comment
+ * Scoped to comments authored by exactly `authorLogin` AND carrying the
+ * marker — matching on bot-type alone would let a different bot's comment
  * (containing the marker string coincidentally, or by an untrusted echo)
  * be mistaken for this job's own and silently overwritten. Same reasoning
- * as `findExistingTriageCommentId`.
+ * as `findExistingTriageCommentId`. The expected `authorType` is derived
+ * from `authorLogin`'s own shape (a `[bot]`-suffixed login is always type
+ * `"Bot"` on GitHub; anything else is type `"User"`) rather than assumed —
+ * this keeps the check correct whether the publisher identity is the
+ * built-in Actions bot, a GitHub App's bot identity, or a human-owned PAT.
  *
  * @param comments - Comments currently on the issue.
+ * @param authorLogin - The exact login expected to have posted our own
+ *   prior comment. Defaults to
+ *   {@link IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN} (the built-in
+ *   `GITHUB_TOKEN` identity); pass the actual publisher identity's login
+ *   once a factory App token is minted, or idempotency breaks (every
+ *   re-dispatch posts a fresh comment instead of editing the prior one).
  * @returns The existing comment's id, or `null` if none found.
  */
 export function findExistingImplementFailureCommentId(
   comments: readonly ExistingComment[],
+  authorLogin: string = IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
 ): number | null {
+  const expectedType = authorLogin.endsWith("[bot]") ? "Bot" : "User";
   const match = comments.find(
     (c) =>
-      c.authorType === "Bot" &&
-      c.authorLogin === IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN &&
+      c.authorType === expectedType &&
+      c.authorLogin === authorLogin &&
       c.body.includes(IMPLEMENT_FAILURE_COMMENT_MARKER),
   );
   return match ? match.id : null;

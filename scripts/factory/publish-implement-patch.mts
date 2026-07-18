@@ -61,8 +61,17 @@
  * `if:` conditions.
  *
  * Required environment variables:
- * - `GH_TOKEN` — the job's `permissions: contents: write, pull-requests:
- *   write, issues: write` token.
+ * - `GH_TOKEN` — the identity that pushes the branch and opens/comments on
+ *   the PR/issue. Defaults to the job's own `permissions: contents: write,
+ *   pull-requests: write, issues: write` `GITHUB_TOKEN`, but the workflow
+ *   may instead pass a short-lived token minted for a dedicated GitHub App
+ *   (factory.md §13's publisher-identity switch, operator decision 18 Jul
+ *   2026 — a minted App installation token, not a standing PAT) —
+ *   GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code
+ *   Review) for `GITHUB_TOKEN`-authored PR events, so a factory PR needs a
+ *   real, workflow-triggering identity to actually get reviewed. This
+ *   script itself is identity-agnostic: it just uses whatever token the
+ *   workflow hands it.
  * - `GITHUB_REPOSITORY` — `owner/repo`.
  * - `TRUSTED_ISSUE_NUMBER` — from the `workflow_dispatch` `issue_number`
  *   input. Trusted because dispatch-first means a human explicitly chose
@@ -83,6 +92,25 @@
  *   the implement job ran, for the PR body's minimal provenance section.
  *   Soft-defaulted (not `requireEnv`'d) if unset — provenance metadata
  *   only, never grounds to reject an otherwise-valid publish.
+ * - `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` — the exact login
+ *   {@link findExistingImplementFailureCommentId} treats as "our own prior
+ *   comment" when deciding whether to PATCH or POST a failure comment.
+ *   Soft-defaulted to `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` (the
+ *   built-in `github-actions[bot]` identity) if unset. Must match whatever
+ *   identity `GH_TOKEN` actually authenticates as — if `GH_TOKEN` is a
+ *   minted App token and this is left at the GITHUB_TOKEN default, a
+ *   re-dispatch's failure comment won't find its own prior one and will
+ *   post a duplicate rather than editing it (a functional annoyance, not
+ *   a security issue — the spoofing guard this login check exists for
+ *   still holds either way). The workflow derives this automatically from
+ *   the App token mint step's own `app-slug` output when a token was
+ *   minted, so this rarely needs manual attention in practice.
+ * - `PUBLISHED_VIA_FALLBACK` — `"true"` when `GH_TOKEN` above is the
+ *   `GITHUB_TOKEN` fallback rather than a minted factory App token. Drives
+ *   the PR body's bold fallback warning and the `no-review-automation`
+ *   label (adjudicated F2, #40 rework) — soft-defaulted to `false` if
+ *   unset, which only means the warning is skipped, never that an
+ *   otherwise-valid publish is blocked.
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -92,6 +120,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
+  assertLabelDescriptionWithinLimit,
+  buildFallbackRefreshCommentBody,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
@@ -99,6 +129,11 @@ import {
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+  IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+  isLabelAlreadyExistsError,
+  NO_REVIEW_AUTOMATION_LABEL,
+  NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
   type PullRequestSummary,
@@ -424,6 +459,7 @@ async function findExistingImplementFailureComment(
   owner: string,
   repo: string,
   issueNumber: number,
+  authorLogin: string,
 ): Promise<number | null> {
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const comments = await githubRequest<GitHubComment[]>(
@@ -437,7 +473,7 @@ async function findExistingImplementFailureComment(
       authorType: c.user?.type ?? null,
       authorLogin: c.user?.login ?? null,
     }));
-    const found = findExistingImplementFailureCommentId(existing);
+    const found = findExistingImplementFailureCommentId(existing, authorLogin);
     if (found !== null) {
       return found;
     }
@@ -472,6 +508,7 @@ async function postFailureComment(
   reasons: readonly string[],
   runUrl: string,
   branchPushed: boolean,
+  failureCommentAuthorLogin: string,
 ): Promise<void> {
   const body = buildImplementFailureCommentBody(reasons, runUrl, branchPushed);
   const existingId = await findExistingImplementFailureComment(
@@ -479,6 +516,7 @@ async function postFailureComment(
     owner,
     repo,
     issueNumber,
+    failureCommentAuthorLogin,
   );
   if (existingId !== null) {
     await githubRequest(
@@ -495,6 +533,131 @@ async function postFailureComment(
       { body },
     );
   }
+}
+
+/**
+ * Applies {@link NO_REVIEW_AUTOMATION_LABEL} to a newly-opened PR
+ * (adjudicated F2, #40 rework) — the second, always-visible-in-list-view
+ * half of the fallback signal `buildImplementPrBody`'s warning banner
+ * provides in the PR body.
+ *
+ * The GitHub REST API's "Add labels to an issue" endpoint requires the
+ * label to already exist on the repo (unlike some label-taxonomy tools,
+ * it does NOT auto-create an unknown label name) — so this first
+ * idempotently ensures the label exists (`POST .../labels`, tolerating
+ * ONLY the specific "already exists" 422 as success — see
+ * {@link isLabelAlreadyExistsError}), then applies it to the PR.
+ *
+ * Scope note: only ever called on the PR-CREATION path, not on a
+ * re-dispatch that refreshes an existing PR — matching
+ * `buildImplementPrBody`'s own scope (the body is likewise only built at
+ * creation time, never re-PATCHed on refresh). A PR whose fallback status
+ * *changes* between the create and a later refresh (e.g. the operator
+ * finishes provisioning the factory App mid-flight) can end up with a
+ * stale label/body — an accepted, narrow gap for this thin fold, not a
+ * claim that refresh keeps this in sync.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The newly-created PR's number (PRs share the Issues
+ *   API's label endpoints).
+ */
+async function applyNoReviewAutomationLabel(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<void> {
+  // Defensive, not expected to ever fire in practice against the fixed
+  // NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION literal — but if a future edit
+  // ever lengthened it past GitHub's limit, this fails here with a clear
+  // message instead of a cryptic 422 from GitHub two lines down.
+  assertLabelDescriptionWithinLimit(
+    NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
+    GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+  );
+  try {
+    await githubRequest(token, "POST", `/repos/${owner}/${repo}/labels`, {
+      name: NO_REVIEW_AUTOMATION_LABEL,
+      color: "b60205",
+      description: NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
+    });
+  } catch (err) {
+    if (!isLabelAlreadyExistsError(err)) {
+      throw err; // A real validation error must surface, not be swallowed.
+    }
+  }
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/labels`, {
+    labels: [NO_REVIEW_AUTOMATION_LABEL],
+  });
+}
+
+/**
+ * Applies {@link NO_REVIEW_AUTOMATION_LABEL} to `prNumber`, never
+ * throwing — a failure is logged, not propagated, since by the time this
+ * runs the PR/branch itself is already the load-bearing artifact (its
+ * body warning, on the creation path, or the fallback-refresh comment
+ * `postFallbackRefreshComment` posts alongside this on the refresh path).
+ * Shared by both the PR-creation and existing-PR-refresh publish paths
+ * (Codex round-3 P2, #40 rework) so the label logic — and its "never
+ * fail the publish over a label" tolerance — isn't duplicated between
+ * them.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ * @param context - Human-readable context for the log line if this fails
+ *   — which publish path called it.
+ */
+async function applyNoReviewAutomationLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  context: "opened" | "refreshed",
+): Promise<void> {
+  await applyNoReviewAutomationLabel(token, owner, repo, prNumber).catch((err: unknown) => {
+    console.error(
+      `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR #${prNumber} ` +
+        `(${context} via the GITHUB_TOKEN fallback; the PR/branch itself is unaffected): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+}
+
+/**
+ * Posts a fresh comment on `prNumber` noting this refresh went out via the
+ * `GITHUB_TOKEN` fallback (Codex round-3 P2, #40 rework — see
+ * {@link buildFallbackRefreshCommentBody}'s docstring for why this is the
+ * REFRESH path's counterpart to the PR-creation path's body warning, and
+ * why it's a fresh POST rather than an upsert). Never throws — a failure
+ * is logged, not propagated; the label
+ * (`applyNoReviewAutomationLabelBestEffort`) is the persistent signal that
+ * survives even if this specific comment fails to post.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The existing PR being refreshed.
+ * @param runUrl - Link to this implement run, for the comment body.
+ */
+async function postFallbackRefreshComment(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  runUrl: string,
+): Promise<void> {
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+    body: buildFallbackRefreshCommentBody(runUrl),
+  }).catch((err: unknown) => {
+    console.error(
+      `Failed to post the fallback-refresh comment on PR #${prNumber} (the branch was ` +
+        `still refreshed successfully): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
 }
 
 export async function main(): Promise<void> {
@@ -517,6 +680,30 @@ export async function main(): Promise<void> {
   // "keep these two in sync" note.
   const agentActionRef =
     process.env.IMPLEMENT_AGENT_ACTION_REF ?? "unknown (IMPLEMENT_AGENT_ACTION_REF not set)";
+  // Which login `postFailureComment` treats as "our own prior comment"
+  // (factory.md §13's publisher-identity switch). Soft-defaulted to the
+  // built-in GITHUB_TOKEN identity, same reasoning as agentActionRef above:
+  // a missing/wrong value here degrades to "post a duplicate comment on a
+  // re-dispatch" rather than blocking an otherwise-valid publish. The
+  // workflow derives this automatically from the App-token mint step's
+  // `app-slug` output once a factory App token is minted — see that env
+  // var's comment in the workflow for the fallback chain.
+  const failureCommentAuthorLogin =
+    process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN ?? IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN;
+  // Adjudicated F2 (#40 rework): whether GH_TOKEN above is the
+  // GITHUB_TOKEN fallback (no factory App token minted), computed by the
+  // workflow from a step output this job never sees directly — this
+  // script only ever receives a bearer token string, which carries no
+  // self-describing "which identity am I" signal, so the caller has to
+  // tell it. Drives both the PR body's fallback warning and the
+  // `no-review-automation` label, so the human merging a fallback-opened
+  // PR sees the gap ON THE PR, not just in the Actions log the
+  // `::warning::` annotation (implement-ready-issues.yml) only reaches.
+  // Soft-defaulted to `false` (not `requireEnv`'d) — a missing value here
+  // degrades to "no warning shown", never blocks an otherwise-valid
+  // publish; that fail-open direction matches this whole fallback path's
+  // own "publish rather than silently stop shipping" judgement call.
+  const publishedViaFallback = process.env.PUBLISHED_VIA_FALLBACK === "true";
 
   // Tracked outside the try so the catch block can tell an unpushed
   // rejection apart from a post-push failure (FIX 5) — a branch that WAS
@@ -606,6 +793,31 @@ export async function main(): Promise<void> {
         `PR #${existingPr.number} already exists for issue #${issueNumber} ` +
           `(branch ${branchName}); refreshed, not opening a duplicate.`,
       );
+      if (publishedViaFallback) {
+        // Adjudicated fix (Codex round-3 P2, #40 rework): the ORIGINAL F2
+        // fold only ever signaled a fallback publish on PR CREATION — its
+        // own docstring explicitly scoped out this refresh path as "an
+        // accepted, narrow gap". That gap turned out to be a real one: a
+        // re-dispatch that force-pushes a new head onto an already-open
+        // PR was returning right here with NO signal at all, leaving a
+        // genuinely unreviewed new commit indistinguishable from a
+        // normally-reviewed one. Closed: apply the same persistent label
+        // (idempotent — a no-op if already applied from an earlier
+        // publish of this same PR) AND post a fresh comment pointing at
+        // this specific refresh (never an upsert — see
+        // buildFallbackRefreshCommentBody's docstring for why an
+        // edited-in-place comment would be the wrong signal here). Both
+        // are best-effort: this branch still returns normally either way,
+        // since the branch push itself already succeeded.
+        await applyNoReviewAutomationLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          "refreshed",
+        );
+        await postFallbackRefreshComment(token, owner, repo, existingPr.number, runUrl);
+      }
       return;
     }
 
@@ -617,10 +829,24 @@ export async function main(): Promise<void> {
         title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
-        body: buildImplementPrBody({ issueNumber, runUrl, agentActionRef }),
+        body: buildImplementPrBody({
+          issueNumber,
+          runUrl,
+          agentActionRef,
+          publishedViaFallback,
+        }),
       },
     );
     console.log(`Opened PR #${created.number}: ${created.html_url}`);
+
+    if (publishedViaFallback) {
+      // Adjudicated F2 (#40 rework): the body warning above is easy to
+      // miss in a long PR; the label is the always-visible-in-list-view
+      // half of the same signal. No separate comment needed on THIS path
+      // (unlike the existingPr-refresh path above) — the body warning
+      // just built into this brand-new PR already carries the signal.
+      await applyNoReviewAutomationLabelBestEffort(token, owner, repo, created.number, "opened");
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const reasons =
@@ -648,6 +874,7 @@ export async function main(): Promise<void> {
       reasons,
       runUrl,
       branchPushed,
+      failureCommentAuthorLogin,
     );
     console.error(
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +

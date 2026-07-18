@@ -735,15 +735,103 @@ jobs:
     # overriding this branch check.
     if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # This block scopes the built-in GITHUB_TOKEN — still the FALLBACK
+    # identity (see the checkout/GH_TOKEN steps below) when no factory App
+    # token was minted, so it stays declared even though a minted App
+    # token's own `permission-*`-requested grants (not this block) govern
+    # what that external token can actually do.
     permissions:
       contents: write
       pull-requests: write
       issues: write
     steps:
+      # factory.md §13's headline finding, confirmed live on #34: GitHub
+      # suppresses downstream workflow triggers (CI, Codex, Claude Code
+      # Review) for events authored by the built-in GITHUB_TOKEN, so a PR
+      # opened with it sails past the entire review apparatus with nobody
+      # the wiser. The fix (operator decision, 18 Jul 2026): mint a
+      # short-lived installation token for a dedicated GitHub App —
+      # NOT a long-lived PAT (an earlier design used
+      # `FACTORY_PUBLISHER_TOKEN`, a fine-grained PAT on the owner's
+      # account; superseded here, since the whole point is getting the
+      # factory off the owner's admin identity, and an App token expires
+      # at job end rather than sitting around as a standing credential).
+      # `permission-*` inputs request a token scoped to exactly what this
+      # job does (push, open/refresh a PR, comment) — narrower than
+      # whatever the App's installation was granted overall, so a minted
+      # token can't do more than this job needs even if the App itself is
+      # over-permissioned for some other reason.
+      #
+      # Gated on `vars.FACTORY_PUBLISHER_APP_ID` (a plain repository
+      # VARIABLE, not a secret — a GitHub App ID is not sensitive) rather
+      # than a `secrets.*` check: `secrets` is not available in step `if:`
+      # conditions at all (confirmed via actionlint on an earlier PAT-era
+      # draft of this same gate), so the presence check has to be on
+      # something `if:` CAN read. When this var is unset, the step is
+      # skipped entirely (not run-and-fail on missing required inputs) and
+      # every step below falls back to `secrets.GITHUB_TOKEN`.
+      - name: Mint factory App token
+        id: factory_token
+        if: ${{ vars.FACTORY_PUBLISHER_APP_ID != '' }}
+        # Adjudicated fix (Codex round-3 P2, #40 rework): minting is
+        # best-effort. Without continue-on-error, a half-configured
+        # rollout — FACTORY_PUBLISHER_APP_ID set but
+        # FACTORY_PUBLISHER_PRIVATE_KEY missing/invalid, or the App
+        # lacking a requested permission — would fail THIS step, and
+        # because a failed non-continue-on-error step halts the job, the
+        # entire publish job would die before the `steps.factory_token.
+        # outputs.token || secrets.GITHUB_TOKEN` fallback three steps down
+        # ever runs: no warning, no label, no failure comment, nothing —
+        # the privileged publish job just silently bricks. A step that
+        # fails with continue-on-error: true never sets an output it
+        # didn't reach (create-github-app-token calls core.setFailed()
+        # before ever calling core.setOutput("token", ...) on a genuine
+        # auth/permission failure), and GitHub Actions expressions treat a
+        # referenced-but-never-set step output as an empty string, not an
+        # error — so `steps.factory_token.outputs.token` resolves to `''`
+        # exactly as if the step had been skipped, and every downstream
+        # `|| secrets.GITHUB_TOKEN` fallback (and the F2 warning/label)
+        # engages correctly. A failed/absent mint always fails OPEN to the
+        # less-privileged GITHUB_TOKEN path, never bricks publish.
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.FACTORY_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.FACTORY_PUBLISHER_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Warn if publishing with GITHUB_TOKEN (review gates will not trigger)
+        # Until the operator provisions `FACTORY_PUBLISHER_APP_ID` +
+        # `FACTORY_PUBLISHER_PRIVATE_KEY`, the mint step above is skipped,
+        # its `token` output is empty, and every step below falls back to
+        # GITHUB_TOKEN — every such publish surfaces this warning
+        # annotation so the gap stays visible rather than silent.
+        env:
+          FACTORY_APP_TOKEN: ${{ steps.factory_token.outputs.token }}
+        run: |
+          if [ -z "$FACTORY_APP_TOKEN" ]; then
+            echo "::warning::No factory App token was minted (FACTORY_PUBLISHER_APP_ID unset, or the mint step failed) — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code Review) for GITHUB_TOKEN-authored PR events, so the PR this run opens will NOT be reviewed automatically. See factory.md §13 for the fix."
+          else
+            echo "Confirmed: minted a short-lived factory App installation token — publishing with a workflow-triggering identity."
+          fi
+
       - name: Checkout roastpilot-cloud
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        # persist-credentials defaults to true here (deliberately, unlike
-        # every read-only job above) — this job needs to push.
+        with:
+          # factory.md §13's publisher-identity switch: pushing with a real
+          # (non-GITHUB_TOKEN) identity is what makes the PR this job opens
+          # trigger CI/Codex/Claude Code Review at all — see the warning
+          # step above. Falls back to this job's own `permissions:
+          # contents: write` GITHUB_TOKEN when no App token was minted, so
+          # this workflow keeps working (with degraded review coverage,
+          # per the warning above) rather than failing outright while that
+          # operator dependency is pending. actions/checkout embeds
+          # whatever token this resolves to into `.git/config`
+          # (persist-credentials defaults true here, deliberately, unlike
+          # every read-only job above) — this job needs to push.
+          token: ${{ steps.factory_token.outputs.token || secrets.GITHUB_TOKEN }}
 
       - name: Download patch artifact
         # May legitimately not exist (implement failed / produced no
@@ -763,7 +851,14 @@ jobs:
 
       - name: Validate and publish the implement patch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same fallback expression as the checkout step's `token:` above
+          # — KEEP THESE TWO IN SYNC. This is the identity
+          # publish-implement-patch.mts uses for every REST call (PR
+          # create/refresh, issue comments); the checkout step's token is
+          # what `git push` itself authenticates with. Both must be the
+          # SAME identity, or the pushed branch and the PR/comments that
+          # reference it would be attributed to two different actors.
+          GH_TOKEN: ${{ steps.factory_token.outputs.token || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Trusted issue number, from the workflow's own dispatch input —
           # never from the patch artifact (which has no issue-number field
@@ -791,4 +886,39 @@ jobs:
           # is intentionally just a minimal provenance record — the full
           # trailer (factory.md §13.12) is F1-S10's job.
           IMPLEMENT_AGENT_ACTION_REF: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc" # v1.0.176
+          # The login GH_TOKEN above actually authenticates as, so a
+          # re-dispatch's failure comment finds its own prior one instead
+          # of posting a duplicate (implement-patch-logic.mts's
+          # findExistingImplementFailureCommentId matches by exact login).
+          # Derived automatically when an App token was minted — the mint
+          # step's own `app-slug` output IS the App's bot login's slug
+          # (GitHub always authenticates an App installation token as
+          # `<app-slug>[bot]`, and the action sets both outputs together on
+          # a successful mint), so there's no need for the operator to
+          # separately report and hand-set this.
+          #
+          # Deliberately does NOT fall back to `vars.FACTORY_PUBLISHER_LOGIN`
+          # here (an earlier draft of this expression did, and that was a
+          # live bug caught before merge, not just a style choice): that
+          # variable is currently still set to `syamaner`, left over from
+          # the superseded PAT-era design (§FACTORY_PUBLISHER_TOKEN note
+          # above), and won't be cleared until the operator finishes
+          # provisioning the App. Falling through to a stale value whenever
+          # `app-slug` is empty — which today means EVERY run, since no App
+          # token is minted yet — would reintroduce the exact
+          # mismatched-login idempotency bug this whole mechanism exists to
+          # prevent: GH_TOKEN authenticates as `github-actions[bot]` right
+          # now, not `syamaner`, so this must resolve to
+          # `github-actions[bot]` whenever no token was minted, full stop.
+          IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN: ${{ steps.factory_token.outputs.app-slug != '' && format('{0}[bot]', steps.factory_token.outputs.app-slug) || 'github-actions[bot]' }}
+          # Adjudicated F2 (#40 rework): the "Warn if publishing with
+          # GITHUB_TOKEN" step above only puts its signal in the Actions
+          # log (a `::warning::` annotation), which the human merging a
+          # factory PR doesn't read as part of a normal review. This env
+          # var lets publish-implement-patch.mts put the SAME signal ON
+          # the PR itself — a bold warning line in the body plus a
+          # `no-review-automation` label — computed from the identical
+          # "was a token actually minted" check the warning step above
+          # uses.
+          PUBLISHED_VIA_FALLBACK: ${{ steps.factory_token.outputs.token == '' }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts

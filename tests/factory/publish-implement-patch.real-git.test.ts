@@ -209,6 +209,15 @@ function stubHappyPathFetch(options?: {
       // need their own bespoke fetch mock.
       return jsonResponse({}, 201);
     }
+    // Adjudicated F2 (#40 rework): applyNoReviewAutomationLabel's two
+    // calls. The more specific /issues/{n}/labels check must come first —
+    // both URLs end with "/labels".
+    if (method === "POST" && url.includes("/issues/") && url.endsWith("/labels")) {
+      return jsonResponse([{ name: "no-review-automation" }], 200);
+    }
+    if (method === "POST" && url.endsWith("/labels")) {
+      return jsonResponse({ name: "no-review-automation" }, 201);
+    }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -277,6 +286,327 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       { cwd: bareRemoteDir, encoding: "utf8" },
     );
     expect(branches).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN fallback surfaced on the PR", () => {
+  afterEach(() => {
+    delete process.env.PUBLISHED_VIA_FALLBACK;
+  });
+
+  it("PUBLISHED_VIA_FALLBACK=true: PR body carries the warning and both label calls happen", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(prCreateCall).toBeDefined();
+    const prBody = JSON.parse((prCreateCall?.[1]?.body as string) ?? "{}") as { body: string };
+    expect(prBody.body).toContain("GITHUB_TOKEN fallback");
+    expect(prBody.body).toContain("no-review-automation");
+
+    const ensureLabelCall = calls.find(
+      ([url, init]) =>
+        !String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(ensureLabelCall).toBeDefined();
+    // Regression guard (Codex round-3 P2): the actual request payload's
+    // description must stay within GitHub's 100-char label-description
+    // limit, or the create call 422s and (pre-fix) got misread as
+    // "already exists" — asserted against the REAL request body sent on
+    // the wire, not just the source constant in isolation.
+    const ensureLabelBody = JSON.parse((ensureLabelCall?.[1]?.body as string) ?? "{}") as {
+      description: string;
+    };
+    expect(ensureLabelBody.description.length).toBeLessThanOrEqual(100);
+
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-review-automation"]);
+  });
+
+  it("PUBLISHED_VIA_FALLBACK unset: PR body has no warning and no label calls happen", async () => {
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    const prBody = JSON.parse((prCreateCall?.[1]?.body as string) ?? "{}") as { body: string };
+    expect(prBody.body).not.toContain("GITHUB_TOKEN fallback");
+
+    const anyLabelCall = calls.find(
+      ([url, init]) => String(url).endsWith("/labels") && init?.method === "POST",
+    );
+    expect(anyLabelCall).toBeUndefined();
+  });
+
+  it("a label-application failure does not fail the whole publish (the PR is the load-bearing artifact)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        // Simulates the label-endpoint failing for any reason other than
+        // "already exists" — must not take down an otherwise-successful
+        // publish.
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
+    errorSpy.mockRestore();
+  });
+
+  it("tolerates GitHub's genuine 'already exists' 422 on label-create and still applies the label (Codex round-3 P2)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.includes("/issues/") && url.endsWith("/labels")) {
+        return jsonResponse([{ name: "no-review-automation" }], 200);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        // The label already exists on the repo — GitHub's REAL response
+        // shape for this case, not a hand-waved generic 422.
+        return jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+          },
+          422,
+        );
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    // The already-exists 422 must NOT have stopped the follow-up "apply
+    // the label to the PR" call from happening.
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("does NOT swallow a genuine validation 422 on label-create (Codex round-3 P2: the original bug)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && url.includes("/issues/") && url.endsWith("/labels")) {
+        // Reachable ONLY if the bug reappears (the create failure below
+        // gets misread as "already exists"). Returns success rather than
+        // throwing, so a regression here shows up as a clean, readable
+        // assertion failure below instead of the mock's own guard-throw
+        // muddying the "Failed to apply the" log message the (correct)
+        // behavior also produces via a different path.
+        return jsonResponse([{ name: "no-review-automation" }], 200);
+      }
+      if (method === "POST" && url.endsWith("/labels")) {
+        // A DIFFERENT validation failure — e.g. what an over-length
+        // description would trigger — not the "already exists" case.
+        return jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ resource: "Label", code: "invalid", field: "description" }],
+          },
+          422,
+        );
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    // The genuine validation error must surface through the outer
+    // "don't fail the publish over a label" tolerance (so the PR itself
+    // still opened successfully — the body warning is the load-bearing
+    // signal), while still being logged rather than silently discarded.
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
+    errorSpy.mockRestore();
+
+    // The load-bearing assertion for this test: the apply-label call
+    // must NEVER have been reached — a genuine validation error must
+    // stop the flow before that second call, not get misread as
+    // "already exists" and let it through.
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeUndefined();
+  });
+
+  it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK=true applies the label AND posts a fallback-refresh comment on the EXISTING PR (Codex round-3 P2 — closes the gap this fold originally scoped out)", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+
+    // No NEW PR is opened for an existing PR — the fallback signal must
+    // land on PR #50 (the existing one), not on some freshly-created PR.
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(prCreateCall).toBeUndefined();
+
+    const ensureLabelCall = calls.find(
+      ([url, init]) =>
+        !String(url).includes("/issues/") &&
+        String(url).endsWith("/labels") &&
+        init?.method === "POST",
+    );
+    expect(ensureLabelCall).toBeDefined();
+
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-review-automation"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("GITHUB_TOKEN fallback");
+    expect(commentBody.body).toContain("no-review-automation");
+    expect(commentBody.body).toContain("just refreshed");
+  });
+
+  it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK unset applies NO label and posts NO fallback-refresh comment", async () => {
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const anyLabelCall = calls.find(
+      ([url, init]) => String(url).endsWith("/labels") && init?.method === "POST",
+    );
+    expect(anyLabelCall).toBeUndefined();
+
+    const anyCommentPost = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentPost).toBeUndefined();
+  });
+
+  it("refresh path: a label-application failure and a comment-post failure are each independently logged and never fail the publish", async () => {
+    process.env.PUBLISHED_VIA_FALLBACK = "true";
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: { ref: "feature/6-implement-workflow", repo: { full_name: "syamaner/roastpilot-cloud" } },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to apply the"));
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the fallback-refresh comment"),
+    );
+    errorSpy.mockRestore();
   });
 });
 
