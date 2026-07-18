@@ -136,6 +136,7 @@ function stubHappyPathFetch(options?: {
   existingPrs?: Array<{
     number: number;
     head: { ref: string; repo?: { full_name: string } | null };
+    base?: { ref: string };
   }>;
   createResponse?: { number: number; html_url: string };
   issueTitle?: string;
@@ -157,11 +158,12 @@ function stubHappyPathFetch(options?: {
       });
     }
     if (method === "GET" && url.includes("/pulls?state=open")) {
-      // Defaults every existingPrs entry's head.repo to THIS repo unless a
-      // test explicitly overrides it (to a fork's full_name, or null) —
-      // preserves every pre-Codex-round-7 test's implicit assumption that
-      // an "existing PR" fixture means our own PR, while letting the new
-      // fork-scoping tests below opt into a different repo.
+      // Defaults every existingPrs entry's head.repo to THIS repo, and its
+      // base.ref to "main", unless a test explicitly overrides them —
+      // preserves every pre-Codex-round-7/round-4 test's implicit
+      // assumption that an "existing PR" fixture means a real factory PR
+      // (this repo, targeting main), while letting the fork-scoping and
+      // base-ref tests opt into something else.
       const prs = (options?.existingPrs ?? []).map((pr) => ({
         number: pr.number,
         head: {
@@ -171,6 +173,7 @@ function stubHappyPathFetch(options?: {
               ? { full_name: "syamaner/roastpilot-cloud" }
               : pr.head.repo,
         },
+        base: pr.base ?? { ref: "main" },
       }));
       return jsonResponse(prs);
     }
@@ -694,11 +697,13 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
     const page1 = Array.from({ length: 100 }, (_, i) => ({
       number: 1000 + i,
       head: { ref: `feature/999${i}-unrelated`, repo: { full_name: "syamaner/roastpilot-cloud" } },
+      base: { ref: "main" },
     }));
     const page2 = [
       {
         number: 50,
         head: { ref: "feature/6-implement-workflow", repo: { full_name: "syamaner/roastpilot-cloud" } },
+        base: { ref: "main" },
       },
     ];
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -756,6 +761,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
     const unrelatedFullPage = Array.from({ length: 100 }, (_, i) => ({
       number: 2000 + i,
       head: { ref: `feature/999${i}-unrelated`, repo: { full_name: "syamaner/roastpilot-cloud" } },
+      base: { ref: "main" },
     }));
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1062,6 +1068,120 @@ copy to lib/leaked-copy.mts
     await main();
 
     expect(process.exitCode).toBe(1);
+  });
+
+  it("REJECTS Codex round-4's exact exploit: a COPY OUT of scripts/factory/** whose source path is C-QUOTED", async () => {
+    // The finding that motivated the categorical rewrite: the OLD
+    // extractRenameCopySourcePaths did `line.slice("copy from ".length)`
+    // on the raw text, which for a C-quoted line keeps the leading `"` —
+    // "\"scripts/factory/publish-implement-patch.mts\"" never matched the
+    // "scripts/factory/" prefix check. This guard no longer parses that
+    // line (or ANY diff-text line) at all — getAuthoritativeChangedPaths
+    // asks git's own tree comparison, which has no quoting to get wrong
+    // in the first place. Empirically confirmed this exact patch text
+    // applies cleanly via `git apply --cached` and is reported as a
+    // C100 record with both paths already unquoted.
+    const diff = `diff --git a/lib/copy-dest.mts "b/scripts/factory/publish-implement-patch.mts"
+similarity index 100%
+copy from "scripts/factory/publish-implement-patch.mts"
+copy to lib/copy-dest.mts
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-from.diff", diff);
+    const fetchMock = rejectionOnlyFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const leaked = await readFile(join(localCloneDir, "lib", "copy-dest.mts")).catch(
+      () => null,
+    );
+    expect(leaked).toBeNull();
+  });
+
+  it("REJECTS a COPY INTO scripts/factory/** whose DESTINATION path is C-QUOTED (the symmetric variant)", async () => {
+    const diff = `diff --git "a/README.md" "b/scripts/factory/evil-copy.mts"
+similarity index 100%
+copy from README.md
+copy to "scripts/factory/evil-copy.mts"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-to.diff", diff);
+    const fetchMock = rejectionOnlyFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const evilExists = await readFile(
+      join(localCloneDir, "scripts", "factory", "evil-copy.mts"),
+    ).catch(() => null);
+    expect(evilExists).toBeNull();
+  });
+
+  it("REJECTS a RENAME OUT of scripts/factory/** with BOTH sides C-QUOTED (adversarial variant beyond Codex's own report)", async () => {
+    // Codex's finding was specifically about a quoted "copy from" line;
+    // the same slice-based parsing bug would equally have affected a
+    // quoted "rename from"/"rename to" line, which nothing had reported
+    // yet. Proving it here anyway, since the categorical fix closes this
+    // whole CLASS regardless of which specific line a report named.
+    const diff = `diff --git "a/scripts/factory/publish-implement-patch.mts" "b/scripts/other/x.mts"
+similarity index 100%
+rename from "scripts/factory/publish-implement-patch.mts"
+rename to "scripts/other/x.mts"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-rename.diff", diff);
+    const fetchMock = rejectionOnlyFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const content = await readFile(
+      join(localCloneDir, "scripts", "factory", "publish-implement-patch.mts"),
+      "utf8",
+    );
+    expect(content).toBe("export const marker = 1;\n");
+    const relocated = await readFile(
+      join(localCloneDir, "scripts", "other", "x.mts"),
+    ).catch(() => null);
+    expect(relocated).toBeNull();
+  });
+
+  it("REJECTS a RENAME OUT via a non-ASCII destination filename, octal-escaped by git's DIFFERENT core.quotepath mechanism (adversarial variant hunting a fourth encoding)", async () => {
+    // A genuinely different quoting mechanism from Codex's C-style
+    // special-char quoting: git's human-readable diff header
+    // octal-escapes non-ASCII BYTES regardless of any special characters
+    // being present — "scripts/other/café.mts" renders as
+    // "scripts/other/caf\303\251.mts" in the diff header text. Uses a
+    // REAL `git mv` + `git diff --cached` (not hand-crafted), so this is
+    // exactly what a real rename to a non-ASCII filename produces.
+    // Empirically confirmed this same escaping happens on the diff
+    // HEADER but never on the `-z` oracle's output, which reports the
+    // raw UTF-8 bytes unescaped either way — proving the categorical fix
+    // holds against a quoting mechanism neither Codex's report nor any
+    // prior round of this guard ever named.
+    await mkdir(join(localCloneDir, "scripts", "other"), { recursive: true });
+    git(localCloneDir, [
+      "mv",
+      "scripts/factory/publish-implement-patch.mts",
+      "scripts/other/café.mts",
+    ]);
+    const exploitDiff = git(localCloneDir, ["diff", "--cached"]);
+    expect(exploitDiff).toContain('caf\\303\\251.mts"'); // Confirms the header really is octal-escaped.
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "nonascii-rename.diff", exploitDiff);
+    const fetchMock = rejectionOnlyFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const content = await readFile(
+      join(localCloneDir, "scripts", "factory", "publish-implement-patch.mts"),
+      "utf8",
+    );
+    expect(content).toBe("export const marker = 1;\n");
   });
 
   it("still correctly rejects a protected-path patch when the filename contains a space (Codex's parser miss)", async () => {

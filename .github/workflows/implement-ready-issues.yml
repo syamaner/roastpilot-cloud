@@ -299,6 +299,17 @@ jobs:
           # so those would fail anyway, but they're not even offered) and
           # NOT a blanket Bash grant.
           #
+          # FIX (Codex round 4, P2): `Bash(npm run test:*)` alone never
+          # matches the bare `npm run test` (no trailing args) the
+          # prompt below and AGENTS.md's own Quick Commands both tell the
+          # agent to run for self-verification — only `npm run test`
+          # WITH extra args (e.g. `npm run test -- --coverage`) matched
+          # the `:*` wildcard. Added `Bash(npm run test)` alongside it so
+          # the agent's own self-check allowlist actually covers what it's
+          # told to run. This is the AGENT's self-check tool grant only —
+          # separate from the deterministic gate re-run below, which
+          # correctly uses `npx vitest run --coverage` regardless.
+          #
           # disallowedTools denies the pipeline-self-modification paths
           # (AGENTS.md "Pipeline self-modification") — .github/**,
           # scripts/factory/** (the privileged glue scripts, which live
@@ -323,7 +334,7 @@ jobs:
           # expected end-to-end.
           claude_args: >-
             --permission-mode acceptEdits
-            --allowedTools "Bash(npm ci),Bash(npm install),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
+            --allowedTools "Bash(npm ci),Bash(npm install),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*),Read(.git/**),Grep(.git/**),Edit(.git/**),Write(.git/**),MultiEdit(.git/**),Edit(.github/**),Write(.github/**),MultiEdit(.github/**),Edit(scripts/factory/**),Write(scripts/factory/**),MultiEdit(scripts/factory/**),Edit(CODEOWNERS),Write(CODEOWNERS),MultiEdit(CODEOWNERS),Edit(docs/CODEOWNERS),Write(docs/CODEOWNERS),MultiEdit(docs/CODEOWNERS)"
             --max-turns ${{ inputs.max_turns }}
           prompt: |

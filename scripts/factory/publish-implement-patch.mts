@@ -11,29 +11,47 @@
  * and only then perform the privileged side effects — here, applying the
  * patch, pushing a branch, and opening a PR, instead of a label/comment.
  *
- * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse — and this
- * took TWO passes to get right, both documented here because the same
- * lesson applies to any future change to this guard:
+ * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse — and it
+ * took THREE rounds of finding a new diff-text-encoding variant to reach
+ * the current, CATEGORICALLY complete design, all documented here because
+ * the lesson (don't re-derive what git will do; ask it) applies to any
+ * future change to this guard:
  *
- * 1. It asks `git apply --numstat` what the patch will actually touch,
- *    with the exact same invocation (no `-p` override, on either call)
- *    that later applies it — see {@link getAuthoritativeChangedPaths}'s
- *    docstring for the exploit this replaced (a `zz/`-style diff-header
- *    prefix reads as an unprotected path to a naive `a/`/`b/`-stripping
- *    parser, but `git apply`'s own default `-p1` strips whatever the
- *    first path segment actually is, landing the write at a *different,
- *    protected* path than the one the parser checked).
+ * 1. Parsing a `diff --git a/X b/Y` header directly and stripping a
+ *    literal `a/`/`b/` prefix is exploitable: `git apply`'s default `-p1`
+ *    strips whatever the header's first path segment actually IS, not
+ *    specifically `a`/`b` — so `diff --git zz/.github/workflows/evil.yml
+ *    zz/.github/workflows/evil.yml` parses as the harmless
+ *    `zz/.github/workflows/evil.yml` under that logic, while the SAME
+ *    `git apply` strips `zz/` and writes to the *actually protected*
+ *    `.github/workflows/evil.yml`. Fixed by asking `git apply --numstat`
+ *    what it would actually touch, with the identical invocation used to
+ *    apply it for real.
  * 2. `--numstat` only reports a rename/copy's DESTINATION, not its
- *    source. The first fix for that gap scanned `git apply --summary`'s
- *    text for a protected-path substring — which is ITSELF exploitable:
- *    `--summary` brace-compacts a shared prefix (`rename scripts/{factory/
- *    x.mts => other/y.mts} (100%)`), so a rename OUT of
- *    `scripts/factory/**` never contains that literal substring. Replaced
- *    with {@link extractRenameCopySourcePaths}, which reads the raw patch
- *    text's `rename from`/`rename to`/`copy from`/`copy to` lines directly
- *    — full, uncompacted paths, empirically confirmed NOT subject to the
- *    same `-p`-interpretation gap a diff header has (`git apply` uses
- *    them literally regardless of the diff header's own prefix scheme).
+ *    source, so a rename/copy OUT of a protected path was invisible to
+ *    it. The first fix for THAT scanned `git apply --summary`'s text for
+ *    a protected-path substring — itself exploitable, since `--summary`
+ *    brace-compacts a shared prefix (`rename scripts/{factory/x.mts =>
+ *    other/y.mts} (100%)`) so the literal substring `scripts/factory/`
+ *    is never present for exactly the case being checked. Fixed by
+ *    reading the raw patch text's `rename from`/`rename to`/`copy from`/
+ *    `copy to` lines directly instead.
+ * 3. Those lines are themselves C-style-quotable (Codex round-4 finding):
+ *    a `copy from "scripts/factory/publish-implement-patch.mts"` line's
+ *    naive `.slice(prefix.length)` keeps the leading `"`, so the
+ *    resulting string never matches a protected-path prefix — the
+ *    checker was reading the raw byte sequence git WROTE into the diff,
+ *    not the PATH git meant, and every one of these three fixes was
+ *    trying to re-implement a piece of git's own diff-serialization
+ *    format from the outside.
+ *
+ * The categorical fix (this version): rather than parse diff TEXT in any
+ * form, apply the patch to a THROWAWAY scratch git index and ask git
+ * `diff-index` what actually changed — see
+ * {@link getAuthoritativeChangedPaths}'s docstring. This is definitionally
+ * complete: it's git's own tree comparison, not a re-implementation of
+ * git's diff-serialization or quoting rules, so there is no fourth
+ * text-encoding variant to eventually find.
  *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
@@ -67,18 +85,20 @@
  *   only, never grounds to reject an otherwise-valid publish.
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
-  extractRenameCopySourcePaths,
+  FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
-  parseNumstatZ,
+  parseNameStatusZ,
   type ExistingComment,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
@@ -122,6 +142,7 @@ interface GitHubPullRequestApi {
     // the GitHub API's own documented shape for that case.
     readonly repo: { readonly full_name: string } | null;
   };
+  readonly base: { readonly ref: string };
 }
 
 /** Page size for listing open PRs — GitHub's own per-page maximum. */
@@ -155,67 +176,115 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
 }
 
 /**
- * Asks `git apply` itself which paths the patch will touch, via
- * `git apply --numstat -z <patch>` — deliberately NOT a re-parse of the
- * diff text. An earlier version of this guard parsed `diff --git a/X b/Y`
- * header lines directly and stripped a literal `a/`/`b/` prefix before
- * checking against protected paths. That is exploitable: `git apply`'s
- * default `-p1` strips whatever the diff header's first path segment
- * actually is — not specifically `a`/`b` — so a patch whose headers read
- * `diff --git zz/.github/workflows/evil.yml zz/.github/workflows/evil.yml`
- * parses (under the old logic) as touching the harmless path
- * `zz/.github/workflows/evil.yml`, while the SAME default `git apply`
- * strips `zz/` and writes to the *actually protected*
- * `.github/workflows/evil.yml`. No amount of smarter regex closes this —
- * the guard and the applier were two independent implementations of "what
- * does `-p1` strip", and any two independent implementations of the same
- * parsing logic can diverge. Asking git is the only way to guarantee
- * agreement, because it's the same tool doing both the reporting and the
- * later real apply, with the identical invocation (no `-p` override on
- * either call).
+ * Asks git itself which paths a patch touches, via a THROWAWAY scratch
+ * git index — never the repo's real index or working tree, and never a
+ * re-parse of the diff TEXT in any form (see the file-top comment for the
+ * three rounds of diff-text-parsing exploits this categorically replaces).
  *
- * `--numstat` only reports the DESTINATION path for a rename/copy (not
- * the source) — {@link extractRenameCopySourcePaths} (applied to the raw
- * patch TEXT, not to `--numstat`/`--summary` output) is the complementary
- * check that also catches a rename/copy OUT of a protected path, which
- * this alone would miss. An earlier version of that complementary check
- * scanned `git apply --summary`'s output for a protected-path substring;
- * that was itself found exploitable (round 6, second pass) — `--summary`
- * brace-COMPACTS a shared path prefix (`rename scripts/{factory/x.mts =>
- * other/y.mts} (100%)`), so the literal substring `scripts/factory/` is
- * not even present in that string for exactly the case the check existed
- * to catch. See `extractRenameCopySourcePaths`'s docstring for why
- * parsing the raw `rename from`/`rename to`/`copy from`/`copy to` lines
- * instead doesn't have the same problem.
+ * Mechanism, each step run with `GIT_INDEX_FILE` pointed at a fresh
+ * temp-file index (never the real `.git/index`, so none of this touches
+ * the repo's actual staged state):
+ * 1. `git read-tree HEAD` — seeds the scratch index with the CURRENT
+ *    HEAD's tree, so a patch that MODIFIES an existing tracked file has
+ *    a base to apply against (an empty index can only accept brand-new
+ *    files).
+ * 2. `git apply --cached <patch>` — applies the patch to that scratch
+ *    index only. `--cached` never touches the working tree. If this
+ *    fails, the patch is malformed/inapplicable — same fail-closed
+ *    outcome the old `--numstat` failure produced.
+ * 3. `git diff-index --cached --name-status -z -M -C --find-copies-harder
+ *    HEAD` — asks git which paths differ between HEAD and the
+ *    now-patched scratch index. This is git's own TREE comparison, not a
+ *    diff-format re-serialization the patch's own text could ever
+ *    influence the wording of — there is no quoting, no prefix-stripping
+ *    interpretation, and no brace-compaction to get right or wrong,
+ *    because nothing here is parsing text git wrote for human/patch
+ *    consumption; it's git comparing two trees it already holds and
+ *    reporting the result in its own `-z` (NUL-delimited, unquoted)
+ *    machine format. {@link parseNameStatusZ} parses that format.
+ *
+ * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
+ * including against files the patch left otherwise UNTOUCHED — the exact
+ * shape of Codex's round-4 quoted-`copy from` exploit, where the copy's
+ * SOURCE file has zero other changes in the patch) together guarantee
+ * BOTH sides of every rename/copy are reported. Empirically verified
+ * (scratch repo): `-C` alone, without `--find-copies-harder`, misses a
+ * copy whose source is otherwise unmodified — `--find-copies-harder`
+ * closes that. Verified negligible cost at this repo's current size
+ * (~49 tracked files, ~10ms) — `--find-copies-harder`'s cost scales with
+ * repo size, not patch size, so revisit if the repo grows enormously.
+ *
+ * Even WITHOUT rename/copy detection at all, a rename's two sides would
+ * still both be reported here (as a plain delete + add, rather than an
+ * `R<score>` pair) — `-M`/`-C` change the STATUS LABEL, not whether both
+ * paths appear, since `diff-index` is comparing trees regardless.
  *
  * @param patchPath - Path to the patch file.
- * @returns The destination path of every file the patch touches.
- * @throws {PublishRejection} If the patch can't be parsed at all
- *   (malformed, or genuinely empty).
+ * @returns Every path git itself reports as touched, both sides of every
+ *   rename/copy.
+ * @throws {PublishRejection} If the patch can't be applied to the scratch
+ *   index at all (malformed, unreadable, or genuinely empty).
  */
-function getAuthoritativeChangedPaths(patchPath: string): string[] {
-  let output: string;
+async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]> {
+  const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
-    output = execFileSync("git", ["apply", "--numstat", "-z", patchPath], {
-      encoding: "utf8",
-    });
-  } catch (err) {
-    throw new PublishRejection(
-      `patch could not be parsed by git apply --numstat (malformed or ` +
-        `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
-    );
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
+    try {
+      execFileSync("git", ["read-tree", "HEAD"], { env, stdio: "pipe" });
+    } catch (err) {
+      // Not independently exercised by a unit test: every test fixture in
+      // this repo's suite runs against a checkout with a real commit
+      // (`writeInitialCommit`), matching the publish job's real
+      // precondition — its own checkout always has HEAD resolvable. Kept
+      // as a defensive fail-closed branch (an unexpected, broken
+      // repository state must never proceed to apply a patch) rather
+      // than assumed unreachable.
+      throw new PublishRejection(
+        `could not seed a scratch index from HEAD (unexpected repository ` +
+          `state): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      execFileSync("git", ["apply", "--cached", patchPath], {
+        env,
+        stdio: "pipe",
+      });
+    } catch (err) {
+      throw new PublishRejection(
+        `patch could not be applied to a scratch index (malformed or ` +
+          `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let output: string;
+    try {
+      output = execFileSync(
+        "git",
+        [
+          "diff-index",
+          "--cached",
+          "--name-status",
+          "-z",
+          "-M",
+          "-C",
+          "--find-copies-harder",
+          "HEAD",
+        ],
+        { env, encoding: "utf8" },
+      );
+    } catch (err) {
+      // Not independently exercised by a unit test: if the preceding
+      // read-tree and apply steps both succeeded, HEAD and the scratch
+      // index are both in a state where this diff-index call has never
+      // been observed to fail. Kept defensively regardless — same
+      // reasoning as the read-tree catch above.
+      throw new PublishRejection(
+        `could not read the scratch index's changed paths: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return parseNameStatusZ(output);
+  } finally {
+    await rm(scratchDir, { recursive: true, force: true });
   }
-  return parseNumstatZ(output);
-}
-
-/**
- * Reads the raw patch text — used only for
- * {@link extractRenameCopySourcePaths}'s scan. Safe to read in full at
- * this point: `assertPatchArtifactSize` has already bounded the file size
- * before this is ever called.
- */
-async function readPatchText(patchPath: string): Promise<string> {
-  return readFile(patchPath, "utf8");
 }
 
 function runGit(args: string[]): void {
@@ -301,6 +370,7 @@ async function findExistingPrForIssue(
         number: pr.number,
         headRef: pr.head.ref,
         headRepoFullName: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref,
       });
     }
     if (results.length < PR_PAGE_SIZE) {
@@ -450,13 +520,13 @@ export async function main(): Promise<void> {
 
     await assertPatchArtifactSize(patchPath);
 
-    const changedPaths = getAuthoritativeChangedPaths(patchPath);
+    const changedPaths = await getAuthoritativeChangedPaths(patchPath);
     if (changedPaths.length === 0) {
       // Not independently exercised by a unit test: every real-patch
       // shape tried empirically (including a mode-change-only diff,
       // which has zero added/removed lines) still reports at least one
-      // path once git apply --numstat succeeds at all — a totally empty
-      // diff instead fails to parse and is caught above, in
+      // path once the scratch-index apply succeeds at all — a totally
+      // empty diff instead fails to apply at all and is caught above, in
       // getAuthoritativeChangedPaths. Kept as a defensive fail-closed
       // check rather than assumed away.
       throw new PublishRejection(
@@ -464,20 +534,12 @@ export async function main(): Promise<void> {
       );
     }
 
-    // Complementary source: --numstat only reports rename/copy
-    // DESTINATIONS, so a rename/copy OUT of a protected path (e.g. moving
-    // scripts/factory/publish-implement-patch.mts elsewhere) wouldn't show
-    // up in changedPaths above. The raw patch text's `rename from`/
-    // `rename to`/`copy from`/`copy to` lines give both sides, safely
-    // (see extractRenameCopySourcePaths's docstring — these lines are not
-    // subject to the same -p-interpretation gap a diff --git header is).
-    const patchText = await readPatchText(patchPath);
-    const renameCopyPaths = extractRenameCopySourcePaths(patchText);
-
-    const forbidden = findForbiddenPatchPaths([
-      ...changedPaths,
-      ...renameCopyPaths,
-    ]);
+    // No complementary rename/copy-source check needed here (unlike
+    // earlier rounds of this guard) — getAuthoritativeChangedPaths
+    // already returns BOTH sides of every rename/copy, since it's asking
+    // git for a tree comparison, not a diff-text parse that only ever
+    // saw one side. See that function's docstring.
+    const forbidden = findForbiddenPatchPaths(changedPaths);
     if (forbidden.length > 0) {
       throw new PublishRejection(
         `patch touches pipeline-protected path(s), refusing to apply it: ` +
@@ -538,7 +600,7 @@ export async function main(): Promise<void> {
       {
         title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
         head: branchName,
-        base: "main",
+        base: FACTORY_PR_BASE_REF,
         body: buildImplementPrBody({ issueNumber, runUrl, agentActionRef }),
       },
     );

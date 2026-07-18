@@ -3,7 +3,7 @@ import {
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   deriveBranchName,
-  extractRenameCopySourcePaths,
+  FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -11,7 +11,7 @@ import {
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isProtectedPath,
   normalizePatchPath,
-  parseNumstatZ,
+  parseNameStatusZ,
   type ExistingComment,
 } from "../../scripts/factory/implement-patch-logic.mts";
 
@@ -165,128 +165,84 @@ describe("findForbiddenPatchPaths", () => {
   });
 });
 
-describe("parseNumstatZ", () => {
-  it("parses a single-file record", () => {
-    expect(parseNumstatZ("1\t0\tlib/new-file.ts\0")).toEqual([
+describe("parseNameStatusZ", () => {
+  it("parses a single-file, single-path record (add)", () => {
+    expect(parseNameStatusZ("A\0lib/new-file.ts\0")).toEqual([
       "lib/new-file.ts",
     ]);
   });
 
-  it("parses multiple NUL-terminated records", () => {
-    // Built via join(), not a literal "\0<digit>" in the string — that's
-    // a legacy octal escape in JS (\01 === ""), not NUL followed by
-    // "1". Exactly the kind of off-by-one-character bug this function's
-    // own real input (git's actual -z output) never has to worry about,
-    // but a hand-written test fixture can trip on.
-    const input = ["1\t0\tlib/a.ts", "1\t0\tlib/b.ts", ""].join("\0");
-    expect(parseNumstatZ(input)).toEqual(["lib/a.ts", "lib/b.ts"]);
+  it("parses a modify and a delete record", () => {
+    expect(parseNameStatusZ("M\0lib/a.ts\0")).toEqual(["lib/a.ts"]);
+    expect(parseNameStatusZ("D\0lib/a.ts\0")).toEqual(["lib/a.ts"]);
   });
 
-  it("parses a path containing a space correctly (tab-delimited fields, not whitespace-delimited)", () => {
-    expect(parseNumstatZ("1\t0\tlib/new file.ts\0")).toEqual([
+  it("parses multiple NUL-terminated single-path records", () => {
+    // Built via join(), not a literal NUL-followed-by-digit in the
+    // string -- a hand-written fixture gotcha, not something real git
+    // output has to worry about.
+    const input = ["A", "lib/a.ts", "M", "lib/b.ts", ""].join("\0");
+    expect(parseNameStatusZ(input)).toEqual(["lib/a.ts", "lib/b.ts"]);
+  });
+
+  it("parses a path containing a space correctly (NUL-delimited fields, not whitespace-delimited)", () => {
+    expect(parseNameStatusZ("A\0lib/new file.ts\0")).toEqual([
       "lib/new file.ts",
     ]);
   });
 
-  it("returns the DESTINATION-only path for a rename (matching git apply --numstat's real behavior)", () => {
-    expect(parseNumstatZ("0\t0\tlib/new-name.ts\0")).toEqual([
-      "lib/new-name.ts",
+  it("returns BOTH sides of a rename record (R-score), unlike the old destination-only numstat oracle", () => {
+    expect(
+      parseNameStatusZ("R100\0scripts/factory/x.mts\0scripts/other/y.mts\0"),
+    ).toEqual(["scripts/factory/x.mts", "scripts/other/y.mts"]);
+  });
+
+  it("returns BOTH sides of a copy record (C-score), unquoted -- the Codex round-4 quoted-copy-from case's oracle output", () => {
+    expect(
+      parseNameStatusZ(
+        "C100\0scripts/factory/publish-implement-patch.mts\0lib/copy-dest.mts\0",
+      ),
+    ).toEqual([
+      "scripts/factory/publish-implement-patch.mts",
+      "lib/copy-dest.mts",
+    ]);
+  });
+
+  it("parses a mixed add + rename record set in one call, preserving record boundaries", () => {
+    // Exactly the shape empirically verified against real git output for
+    // a two-file patch (one plain add, one rename).
+    const input =
+      "A\0lib/new-file.ts\0R100\0scripts/factory/publish-implement-patch.mts\0scripts/other/x.mts\0";
+    expect(parseNameStatusZ(input)).toEqual([
+      "lib/new-file.ts",
+      "scripts/factory/publish-implement-patch.mts",
+      "scripts/other/x.mts",
     ]);
   });
 
   it("returns an empty array for empty input", () => {
-    expect(parseNumstatZ("")).toEqual([]);
+    expect(parseNameStatusZ("")).toEqual([]);
   });
 
-  it("skips a malformed record missing a second tab", () => {
-    expect(parseNumstatZ("not-a-valid-record\0")).toEqual([]);
+  it("stops at a malformed record with an empty status field, returning whatever was parsed before it", () => {
+    // A leading empty field (before any real status) — shouldn't happen
+    // from a real git invocation, but the parser fails closed by
+    // stopping rather than misinterpreting later fields as a status.
+    expect(parseNameStatusZ("\0lib/x.ts\0")).toEqual([]);
   });
 
-  it("skips a malformed record missing any tab at all", () => {
-    expect(parseNumstatZ("nodata\0")).toEqual([]);
-  });
-});
-
-describe("extractRenameCopySourcePaths", () => {
-  it("extracts both sides of a rename from raw patch text", () => {
-    const patch =
-      "diff --git a/scripts/factory/x.mts b/scripts/other/y.mts\n" +
-      "similarity index 100%\n" +
-      "rename from scripts/factory/x.mts\n" +
-      "rename to scripts/other/y.mts\n";
-    expect(extractRenameCopySourcePaths(patch)).toEqual([
-      "scripts/factory/x.mts",
-      "scripts/other/y.mts",
-    ]);
+  it("does not push a path for a truncated single-path record (a status with nothing following it)", () => {
+    expect(parseNameStatusZ("A")).toEqual([]);
   });
 
-  it("extracts both sides of a copy from raw patch text", () => {
-    const patch =
-      "diff --git a/.github/workflows/ci.yml b/lib/ci-copy.yml\n" +
-      "similarity index 100%\n" +
-      "copy from .github/workflows/ci.yml\n" +
-      "copy to lib/ci-copy.yml\n";
-    expect(extractRenameCopySourcePaths(patch)).toEqual([
-      ".github/workflows/ci.yml",
-      "lib/ci-copy.yml",
-    ]);
+  it("does not push a path for a truncated rename/copy record (a status with no paths following it)", () => {
+    expect(parseNameStatusZ("R100")).toEqual([]);
   });
 
-  it("catches a rename OUT of a protected path even when --summary would brace-compact it away (round 6, second pass)", () => {
-    // git apply --summary renders this exact patch as
-    // "rename scripts/{factory/x.mts => other/y.mts} (100%)" — the
-    // literal substring "scripts/factory/" never appears. The raw patch
-    // text's rename from/to lines are never compacted like that.
-    const patch =
-      "diff --git a/scripts/factory/x.mts b/scripts/other/y.mts\n" +
-      "similarity index 100%\n" +
-      "rename from scripts/factory/x.mts\n" +
-      "rename to scripts/other/y.mts\n";
-    const allPaths = extractRenameCopySourcePaths(patch);
-    expect(findForbiddenPatchPaths(allPaths)).toEqual([
+  it("pushes only the old path for a rename/copy record truncated after just the first path", () => {
+    expect(parseNameStatusZ("R100\0scripts/factory/x.mts")).toEqual([
       "scripts/factory/x.mts",
     ]);
-  });
-
-  it("returns empty for a patch with no renames or copies", () => {
-    const patch =
-      "diff --git a/lib/new-file.ts b/lib/new-file.ts\n" +
-      "new file mode 100644\n" +
-      "--- /dev/null\n" +
-      "+++ b/lib/new-file.ts\n" +
-      "@@ -0,0 +1 @@\n" +
-      "+export const x = 1;\n";
-    expect(extractRenameCopySourcePaths(patch)).toEqual([]);
-  });
-
-  it("extracts every rename/copy pair from a multi-file patch", () => {
-    const patch =
-      "diff --git a/a.ts b/b.ts\n" +
-      "rename from a.ts\n" +
-      "rename to b.ts\n" +
-      "diff --git a/c.ts b/d.ts\n" +
-      "copy from c.ts\n" +
-      "copy to d.ts\n";
-    expect(extractRenameCopySourcePaths(patch)).toEqual([
-      "a.ts",
-      "b.ts",
-      "c.ts",
-      "d.ts",
-    ]);
-  });
-
-  it("does not false-positive on a hunk content line that happens to start with similar text mid-line", () => {
-    // A "rename from " match requires the line to START with that exact
-    // text — a hunk content line always starts with +/-/space instead,
-    // so this can never collide with real diff content.
-    const patch =
-      "diff --git a/lib/x.ts b/lib/x.ts\n" +
-      "--- a/lib/x.ts\n" +
-      "+++ b/lib/x.ts\n" +
-      "@@ -1 +1 @@\n" +
-      '-const s = "rename from somewhere";\n' +
-      '+const s = "rename to elsewhere";\n';
-    expect(extractRenameCopySourcePaths(patch)).toEqual([]);
   });
 });
 
@@ -295,18 +251,19 @@ const HOME_REPO = "syamaner/roastpilot-cloud";
 describe("findPrForIssueNumber", () => {
   it("finds a PR whose branch matches the feature/{issueNumber}- prefix and lives in this repo", () => {
     const prs = [
-      { number: 1, headRef: "feature/60-unrelated", headRepoFullName: HOME_REPO },
-      { number: 2, headRef: "feature/6-implement-workflow", headRepoFullName: HOME_REPO },
+      { number: 1, headRef: "feature/60-unrelated", headRepoFullName: HOME_REPO, baseRef: "main" },
+      { number: 2, headRef: "feature/6-implement-workflow", headRepoFullName: HOME_REPO, baseRef: "main" },
     ];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toEqual({
       number: 2,
       headRef: "feature/6-implement-workflow",
       headRepoFullName: HOME_REPO,
+      baseRef: "main",
     });
   });
 
   it("is not fooled by a numeric-prefix collision (issue 6 vs issue 60)", () => {
-    const prs = [{ number: 1, headRef: "feature/60-unrelated-issue", headRepoFullName: HOME_REPO }];
+    const prs = [{ number: 1, headRef: "feature/60-unrelated-issue", headRepoFullName: HOME_REPO, baseRef: "main" }];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
   });
 
@@ -316,7 +273,7 @@ describe("findPrForIssueNumber", () => {
 
   it("finds the branch regardless of what slug it carries (title-independent)", () => {
     const prs = [
-      { number: 5, headRef: "feature/6-a-totally-different-slug-now", headRepoFullName: HOME_REPO },
+      { number: 5, headRef: "feature/6-a-totally-different-slug-now", headRepoFullName: HOME_REPO, baseRef: "main" },
     ];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).not.toBeNull();
   });
@@ -326,26 +283,45 @@ describe("findPrForIssueNumber", () => {
     // happens to be named feature/{issueNumber}-anything — this must
     // never be mistaken for the factory's own PR for that issue.
     const prs = [
-      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud" },
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud", baseRef: "main" },
     ];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
   });
 
   it("prefers a same-repo match over an earlier fork match with the same branch prefix", () => {
     const prs = [
-      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud" },
-      { number: 10, headRef: "feature/6-implement-workflow-real", headRepoFullName: HOME_REPO },
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud", baseRef: "main" },
+      { number: 10, headRef: "feature/6-implement-workflow-real", headRepoFullName: HOME_REPO, baseRef: "main" },
     ];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toEqual({
       number: 10,
       headRef: "feature/6-implement-workflow-real",
       headRepoFullName: HOME_REPO,
+      baseRef: "main",
     });
   });
 
   it("rejects a branch-name match whose source repo has since been deleted (headRepoFullName: null)", () => {
-    const prs = [{ number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: null }];
+    const prs = [{ number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: null, baseRef: "main" }];
     expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
+  });
+
+  it("rejects a same-repo, correctly-prefixed match whose base is NOT main (Codex round-4 finding)", () => {
+    // A same-repo PR named feature/6-* that targets some OTHER branch
+    // isn't a real factory PR for this issue — reusing it would
+    // force-push onto it while no PR into main for this issue exists.
+    const prs = [
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: HOME_REPO, baseRef: "some-other-branch" },
+    ];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
+  });
+
+  it("uses FACTORY_PR_BASE_REF as the required base, not a hardcoded literal, so the two stay in sync", () => {
+    const prs = [
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: HOME_REPO, baseRef: FACTORY_PR_BASE_REF },
+    ];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).not.toBeNull();
+    expect(FACTORY_PR_BASE_REF).toBe("main");
   });
 });
 

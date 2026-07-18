@@ -120,77 +120,57 @@ export function findForbiddenPatchPaths(
 }
 
 /**
- * Parses `git apply --numstat -z`'s output into the list of destination
- * paths it reports. NUL-separated records, each `<added>\t<deleted>\t
- * <path>` — `-z` (rather than plain `--numstat`) is used specifically so a
- * path containing a literal tab or newline can't be misparsed; NUL is the
- * one byte no filesystem allows in a path, making it a safe delimiter.
+ * Parses `git diff-index --cached --name-status -z -M -C --find-copies-harder
+ * HEAD`'s output (run against a throwaway scratch index — see
+ * `getAuthoritativeChangedPaths` in `publish-implement-patch.mts` for the
+ * full oracle this feeds and WHY it replaced three successive rounds of
+ * diff-text parsing).
  *
- * For a rename or copy, `--numstat` reports only the DESTINATION path, not
- * the source — {@link extractRenameCopySourcePaths} is the complementary
- * check that also catches a rename/copy OUT of a protected path, which
- * this alone would miss.
+ * `-z` NUL-terminates every record (not merely separates them), so a
+ * trailing empty string after the final record is expected and dropped.
+ * Each record is either:
+ * - a single-path status (`A`, `M`, `D`, ...): `<status>\0<path>\0`, or
+ * - a rename/copy status (`R<score>`, `C<score>`): `<status>\0<oldpath>
+ *   \0<newpath>\0` — BOTH paths are pushed for these, since either side
+ *   touching a protected path matters to {@link findForbiddenPatchPaths}.
  *
- * @param numstatZOutput - Raw stdout from `git apply --numstat -z <patch>`.
- * @returns The destination path of every file the patch touches.
+ * @param nameStatusZOutput - Raw stdout from the `git diff-index` oracle
+ *   invocation above.
+ * @returns Every path git itself reports as touched — both sides of every
+ *   rename/copy, already unquoted (git's `-z` output form never uses
+ *   C-style quoting, unlike its human-readable default).
  */
-export function parseNumstatZ(numstatZOutput: string): string[] {
-  const paths: string[] = [];
-  for (const record of numstatZOutput.split("\0")) {
-    if (record.length === 0) {
-      continue;
-    }
-    const firstTab = record.indexOf("\t");
-    const secondTab = firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
-    if (firstTab === -1 || secondTab === -1) {
-      continue; // Malformed record — shouldn't happen from a real git invocation.
-    }
-    paths.push(record.slice(secondTab + 1));
+export function parseNameStatusZ(nameStatusZOutput: string): string[] {
+  const fields = nameStatusZOutput.split("\0");
+  // `String.split()` always returns at least one element (even for "" —
+  // `"".split("\0")` is `[""]`), so `fields` is never empty here; no
+  // length check needed before this trailing-empty-record pop.
+  if (fields[fields.length - 1] === "") {
+    fields.pop(); // Trailing empty string from the final record's NUL terminator.
   }
-  return paths;
-}
-
-const RENAME_COPY_LINE_PREFIXES = [
-  "rename from ",
-  "rename to ",
-  "copy from ",
-  "copy to ",
-] as const;
-
-/**
- * Extracts every path named on a `rename from `/`rename to `/`copy from
- * `/`copy to ` line, read directly from the RAW patch text — not from
- * `--numstat` (destination-only for these) or `git apply --summary`
- * (round-6 finding: --summary brace-COMPACTS a shared path prefix, e.g.
- * `rename scripts/{factory/x.mts => other/y.mts} (100%)` — the literal
- * substring `scripts/factory/` is not even present in that string, so a
- * substring scan on --summary output silently misses exactly the case it
- * exists to catch; that approach was replaced with this one, not layered
- * alongside it).
- *
- * These lines are safe to parse directly (unlike a `diff --git a/X b/Y`
- * header, which needs `-p`-stripping interpretation `git apply` itself
- * must be asked about — see `getAuthoritativeChangedPaths`'s docstring):
- * empirically confirmed that `git apply` uses `rename from`/`rename to`
- * paths LITERALLY, regardless of whatever prefix scheme the diff header
- * on the same file entry uses — a patch with a mismatched/fake
- * `diff --git zz/X zz/Y` header alongside correct, unprefixed `rename
- * from X` / `rename to Y` lines still renames exactly `X` to `Y`. There is
- * no `-p`-interpretation gap for these lines to diverge on.
- *
- * @param patchText - The full raw patch text (not `--numstat`/`--summary`
- *   output — the actual patch file content).
- * @returns Every path named on a rename/copy from/to line, in patch order
- *   (both sides of every rename/copy the patch contains).
- */
-export function extractRenameCopySourcePaths(patchText: string): string[] {
   const paths: string[] = [];
-  for (const line of patchText.split("\n")) {
-    for (const prefix of RENAME_COPY_LINE_PREFIXES) {
-      if (line.startsWith(prefix)) {
-        paths.push(line.slice(prefix.length));
-        break;
+  let i = 0;
+  while (i < fields.length) {
+    const status = fields[i];
+    if (status === undefined || status.length === 0) {
+      break; // Malformed — shouldn't happen from a real git invocation.
+    }
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const oldPath = fields[i + 1];
+      const newPath = fields[i + 2];
+      if (oldPath !== undefined) {
+        paths.push(oldPath);
       }
+      if (newPath !== undefined) {
+        paths.push(newPath);
+      }
+      i += 3;
+    } else {
+      const path = fields[i + 1];
+      if (path !== undefined) {
+        paths.push(path);
+      }
+      i += 2;
     }
   }
   return paths;
@@ -226,23 +206,47 @@ export function deriveBranchName(
 }
 
 /**
+ * The base branch every factory-opened PR targets — matches the
+ * PR-creation call's own `base: "main"` (`publish-implement-patch.mts`)
+ * and the Codex round-7 dispatch-ref guard (`github.ref ==
+ * 'refs/heads/main'` in the workflow) that already restricts this whole
+ * pipeline to main-only runs. A single named constant rather than a
+ * parameter: there is exactly one correct value, never a caller-supplied
+ * one, so a typo'd literal at a call site can't silently widen it.
+ */
+export const FACTORY_PR_BASE_REF = "main";
+
+/**
  * The subset of a GitHub pull request's fields the idempotency check
  * needs. `headRepoFullName` is the head branch's OWNING repo (GitHub API's
  * `pull.head.repo.full_name`), `null` when that repo has since been
  * deleted (e.g. a fork removed after opening a PR from it) — never treated
- * as a match in that case; see {@link findPrForIssueNumber}.
+ * as a match in that case; see {@link findPrForIssueNumber}. `baseRef` is
+ * the PR's target branch (GitHub API's `pull.base.ref`).
  */
 export interface PullRequestSummary {
   readonly number: number;
   readonly headRef: string;
   readonly headRepoFullName: string | null;
+  readonly baseRef: string;
 }
 
 /**
  * Finds, among a list of open PRs, the one that was opened for this
  * issue — matched by the STABLE `feature/{issueNumber}-` branch prefix,
- * never by re-deriving the current title's slug, AND scoped to PRs whose
- * head branch lives in THIS repo (`headRepoFullName === expectedHeadRepoFullName`).
+ * never by re-deriving the current title's slug; scoped to PRs whose head
+ * branch lives in THIS repo (`headRepoFullName === expectedHeadRepoFullName`);
+ * and scoped to PRs whose BASE is {@link FACTORY_PR_BASE_REF} (Codex
+ * round-4 finding).
+ *
+ * The base-ref scope closes a second idempotency-matching gap: a
+ * same-repo, correctly-prefixed PR whose base is something OTHER than
+ * `main` (e.g. a human opened `feature/6-foo` against a long-lived
+ * feature branch for unrelated reasons, or a stale PR from before a base
+ * was ever enforced) is not a real factory PR for this issue and must
+ * never be "reused" — `applyPatchAndPush` would force-push onto its
+ * branch and this job would report success while no PR into `main` for
+ * this issue's changes actually exists.
  *
  * The repo scope closes a fork-PR confusion (Codex round-7 finding): this
  * is a public repo, so anyone can open a PR from a fork whose branch
@@ -272,7 +276,8 @@ export interface PullRequestSummary {
  *   this exactly (a fork, or a since-deleted source repo) is never
  *   returned, even if its branch name matches.
  * @returns The matching PR, or `null` if none exists yet (first dispatch
- *   for this issue, or every branch-name match was a fork/foreign PR).
+ *   for this issue, or every branch-name match was a fork/foreign PR or a
+ *   non-main-base PR).
  */
 export function findPrForIssueNumber(
   openPrs: readonly PullRequestSummary[],
@@ -284,7 +289,8 @@ export function findPrForIssueNumber(
     openPrs.find(
       (pr) =>
         pr.headRef.startsWith(prefix) &&
-        pr.headRepoFullName === expectedHeadRepoFullName,
+        pr.headRepoFullName === expectedHeadRepoFullName &&
+        pr.baseRef === FACTORY_PR_BASE_REF,
     ) ?? null
   );
 }
