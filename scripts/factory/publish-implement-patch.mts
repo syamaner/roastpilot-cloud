@@ -101,6 +101,12 @@
  *   and will post a duplicate rather than editing it (a functional
  *   annoyance, not a security issue — the spoofing guard this login check
  *   exists for still holds either way).
+ * - `PUBLISHED_VIA_FALLBACK` — `"true"` when `GH_TOKEN` above is the
+ *   `GITHUB_TOKEN` fallback rather than a configured
+ *   `FACTORY_PUBLISHER_TOKEN`. Drives the PR body's bold fallback warning
+ *   and the `no-review-automation` label (adjudicated F2, #40 rework) —
+ *   soft-defaulted to `false` if unset, which only means the warning is
+ *   skipped, never that an otherwise-valid publish is blocked.
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -118,6 +124,7 @@ import {
   findForbiddenPatchPaths,
   findPrForIssueNumber,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
+  NO_REVIEW_AUTOMATION_LABEL,
   parseNameStatusZ,
   type ExistingComment,
   type PullRequestSummary,
@@ -519,6 +526,57 @@ async function postFailureComment(
   }
 }
 
+/**
+ * Applies {@link NO_REVIEW_AUTOMATION_LABEL} to a newly-opened PR
+ * (adjudicated F2, #40 rework) — the second, always-visible-in-list-view
+ * half of the fallback signal `buildImplementPrBody`'s warning banner
+ * provides in the PR body.
+ *
+ * The GitHub REST API's "Add labels to an issue" endpoint requires the
+ * label to already exist on the repo (unlike some label-taxonomy tools,
+ * it does NOT auto-create an unknown label name) — so this first
+ * idempotently ensures the label exists (`POST .../labels`, tolerating a
+ * 422 "already exists" as success), then applies it to the PR.
+ *
+ * Scope note: only ever called on the PR-CREATION path, not on a
+ * re-dispatch that refreshes an existing PR — matching
+ * `buildImplementPrBody`'s own scope (the body is likewise only built at
+ * creation time, never re-PATCHed on refresh). A PR whose fallback status
+ * *changes* between the create and a later refresh (e.g. the operator
+ * fixes `FACTORY_PUBLISHER_TOKEN` mid-flight) can end up with a stale
+ * label/body — an accepted, narrow gap for this thin fold, not a claim
+ * that refresh keeps this in sync.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The newly-created PR's number (PRs share the Issues
+ *   API's label endpoints).
+ */
+async function applyNoReviewAutomationLabel(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<void> {
+  try {
+    await githubRequest(token, "POST", `/repos/${owner}/${repo}/labels`, {
+      name: NO_REVIEW_AUTOMATION_LABEL,
+      color: "b60205",
+      description:
+        "Opened via the GITHUB_TOKEN fallback — no review-automation workflow ran; requires a manual review pass before merging.",
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes(" 422 ")) {
+      throw err; // Anything other than "label already exists" is unexpected.
+    }
+  }
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/labels`, {
+    labels: [NO_REVIEW_AUTOMATION_LABEL],
+  });
+}
+
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -549,6 +607,20 @@ export async function main(): Promise<void> {
   // in the workflow for why this can't just be derived automatically.
   const failureCommentAuthorLogin =
     process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN ?? IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN;
+  // Adjudicated F2 (#40 rework): whether GH_TOKEN above is the
+  // GITHUB_TOKEN fallback (FACTORY_PUBLISHER_TOKEN absent), computed by
+  // the workflow from the same secret this job never sees directly —
+  // this script only ever receives a bearer token string, which carries
+  // no self-describing "which identity am I" signal, so the caller has to
+  // tell it. Drives both the PR body's fallback warning and the
+  // `no-review-automation` label, so the human merging a fallback-opened
+  // PR sees the gap ON THE PR, not just in the Actions log the
+  // `::warning::` annotation (implement-ready-issues.yml) only reaches.
+  // Soft-defaulted to `false` (not `requireEnv`'d) — a missing value here
+  // degrades to "no warning shown", never blocks an otherwise-valid
+  // publish; that fail-open direction matches this whole fallback path's
+  // own "publish rather than silently stop shipping" judgement call.
+  const publishedViaFallback = process.env.PUBLISHED_VIA_FALLBACK === "true";
 
   // Tracked outside the try so the catch block can tell an unpushed
   // rejection apart from a post-push failure (FIX 5) — a branch that WAS
@@ -649,10 +721,33 @@ export async function main(): Promise<void> {
         title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
-        body: buildImplementPrBody({ issueNumber, runUrl, agentActionRef }),
+        body: buildImplementPrBody({
+          issueNumber,
+          runUrl,
+          agentActionRef,
+          publishedViaFallback,
+        }),
       },
     );
     console.log(`Opened PR #${created.number}: ${created.html_url}`);
+
+    if (publishedViaFallback) {
+      // Adjudicated F2 (#40 rework): the body warning above is easy to
+      // miss in a long PR; the label is the always-visible-in-list-view
+      // half of the same signal. Failing to label must never fail the
+      // whole publish — the PR (with its warning body) already exists and
+      // is the load-bearing artifact; a label-application error here is
+      // logged, not thrown.
+      await applyNoReviewAutomationLabel(token, owner, repo, created.number).catch(
+        (err: unknown) => {
+          console.error(
+            `Failed to apply the ${NO_REVIEW_AUTOMATION_LABEL} label to PR ` +
+              `#${created.number} (the PR itself was opened successfully; its ` +
+              `body still carries the fallback warning): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        },
+      );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const reasons =

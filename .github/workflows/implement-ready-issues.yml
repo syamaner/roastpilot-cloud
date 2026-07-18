@@ -854,4 +854,15 @@ jobs:
           # sets this repository VARIABLE (not a secret; a login isn't
           # sensitive) alongside creating FACTORY_PUBLISHER_TOKEN.
           IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN: ${{ vars.FACTORY_PUBLISHER_LOGIN || 'github-actions[bot]' }}
+          # Adjudicated F2 (#40 rework): the "Warn if publishing with
+          # GITHUB_TOKEN" step above only puts its signal in the Actions
+          # log (a `::warning::` annotation), which the human merging a
+          # factory PR doesn't read as part of a normal review. This env
+          # var lets publish-implement-patch.mts put the SAME signal ON
+          # the PR itself — a bold warning line in the body plus a
+          # `no-review-automation` label — computed from the identical
+          # `secrets.FACTORY_PUBLISHER_TOKEN == ''` check that step uses
+          # (allowed here in `env:`, unlike in a step `if:` — see that
+          # step's own comment on why the check moved out of `if:`).
+          PUBLISHED_VIA_FALLBACK: ${{ secrets.FACTORY_PUBLISHER_TOKEN == '' }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts

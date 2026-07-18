@@ -10,6 +10,7 @@ import {
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isProtectedPath,
+  NO_REVIEW_AUTOMATION_LABEL,
   normalizePatchPath,
   parseNameStatusZ,
   type ExistingComment,
@@ -372,6 +373,7 @@ describe("buildImplementPrBody", () => {
       issueNumber: 6,
       runUrl: "https://github.com/o/r/actions/runs/123",
       agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
     });
     expect(body).toContain("Closes #6");
     expect(body).toContain("https://github.com/o/r/actions/runs/123");
@@ -386,6 +388,7 @@ describe("buildImplementPrBody", () => {
       issueNumber: 6,
       runUrl: "https://github.com/o/r/actions/runs/123",
       agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
     });
     expect(body).toContain("## Provenance");
     expect(body).toContain(
@@ -393,6 +396,35 @@ describe("buildImplementPrBody", () => {
     );
     expect(body).toContain("issue #6");
     expect(body).toContain("F1-S10");
+  });
+
+  it("omits the fallback warning when publishedViaFallback is false", () => {
+    const body = buildImplementPrBody({
+      issueNumber: 6,
+      runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: false,
+    });
+    expect(body).not.toContain("GITHUB_TOKEN fallback");
+    expect(body).not.toContain("no-review-automation");
+  });
+
+  it("prepends a bold fallback warning when publishedViaFallback is true (adjudicated F2, #40 rework)", () => {
+    const body = buildImplementPrBody({
+      issueNumber: 6,
+      runUrl: "https://github.com/o/r/actions/runs/123",
+      agentActionRef: "anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc",
+      publishedViaFallback: true,
+    });
+    expect(body).toContain("⚠️");
+    expect(body).toContain("GITHUB_TOKEN fallback");
+    expect(body).toContain("Do not merge without a manual review pass");
+    expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
+    // The warning must lead the body, not be buried below the fold —
+    // asserted structurally (its position precedes "## Story"), not just
+    // "somewhere in the string".
+    expect(body.indexOf("⚠️")).toBeLessThan(body.indexOf("## Story"));
+    expect(body.indexOf("## Story")).toBeGreaterThan(-1);
   });
 });
 

@@ -302,12 +302,32 @@ export function findPrForIssueNumber(
  * `IMPLEMENT_AGENT_ACTION_REF` read) — passed through from the workflow
  * rather than hardcoded here, so this module has no literal SHA of its own
  * to drift out of sync with the `uses:` pin.
+ *
+ * `publishedViaFallback` — true when this PR was opened using the built-in
+ * `GITHUB_TOKEN` because `FACTORY_PUBLISHER_TOKEN` was absent (factory.md
+ * §13's publisher-identity switch). GitHub suppresses downstream workflow
+ * triggers for `GITHUB_TOKEN`-authored PR events, so a PR opened this way
+ * got NO review-automation coverage at all (CodeQL, Codex, Claude Code
+ * Review never ran) — a fact the workflow's own `::warning::` annotation
+ * (adjudicated F2, #40 rework) only surfaced in the Actions log, which the
+ * human merging the PR doesn't read. This field makes
+ * {@link buildImplementPrBody} put that same signal ON the PR itself.
  */
 export interface ImplementPrContext {
   readonly issueNumber: number;
   readonly runUrl: string;
   readonly agentActionRef: string;
+  readonly publishedViaFallback: boolean;
 }
+
+/**
+ * The label {@link buildImplementPrBody}'s caller applies to a PR opened
+ * via the `GITHUB_TOKEN` fallback (adjudicated F2, #40 rework) — a second,
+ * always-visible (PR list / board view, not just the PR body) signal that
+ * this PR got no review-automation coverage and needs a manual pass before
+ * merging.
+ */
+export const NO_REVIEW_AUTOMATION_LABEL = "no-review-automation";
 
 /**
  * Builds the PR body for a successful implement run, following
@@ -322,12 +342,31 @@ export interface ImplementPrContext {
  * is F1-S10's deliverable, not this story's; said so explicitly in the
  * body so this partial version is never mistaken for that one.
  *
+ * When {@link ImplementPrContext.publishedViaFallback} is true, prepends a
+ * bold warning line (adjudicated F2, #40 rework) so the human merging this
+ * PR sees, on the PR itself, that no review-automation workflow ran on it
+ * — the `::warning::` annotation this mirrors only ever landed in the
+ * Actions log, which isn't part of a normal merge review.
+ *
  * @param context - The issue number, a link to the implement run's gate
- *   output, and the pinned agent action ref that ran.
+ *   output, the pinned agent action ref that ran, and whether this PR was
+ *   opened via the `GITHUB_TOKEN` fallback.
  * @returns The Markdown PR body.
  */
 export function buildImplementPrBody(context: ImplementPrContext): string {
+  const fallbackWarning = context.publishedViaFallback
+    ? [
+        "> ⚠️ **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
+          "NOT run on this PR.** `FACTORY_PUBLISHER_TOKEN` was not configured when " +
+          "this PR was published, so CodeQL, Codex, and Claude Code Review never " +
+          "triggered (GitHub suppresses downstream workflow triggers for " +
+          "GITHUB_TOKEN-authored PR events — factory.md §13). **Do not merge without " +
+          `a manual review pass.** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+        "",
+      ]
+    : [];
   return [
+    ...fallbackWarning,
     "## Story",
     "",
     `Closes #${context.issueNumber}`,
