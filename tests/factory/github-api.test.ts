@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { githubRequest, requireEnv } from "../../scripts/factory/github-api.mts";
+import {
+  computeBackoffMs,
+  githubRequest,
+  isRateLimitedResponse,
+  MAX_RATE_LIMIT_RETRIES,
+  MAX_RETRY_AFTER_SECONDS,
+  parseRetryAfterMs,
+  requireEnv,
+} from "../../scripts/factory/github-api.mts";
 
 describe("requireEnv", () => {
   afterEach(() => {
@@ -90,5 +98,227 @@ describe("githubRequest", () => {
       Authorization: "Bearer secret-token",
     });
     expect(init?.body).toBe(JSON.stringify({ a: 1 }));
+  });
+});
+
+describe("isRateLimitedResponse (F1-S10, factory.md §13 point 8)", () => {
+  it("treats a bare 429 as rate limited regardless of headers", () => {
+    expect(isRateLimitedResponse(429, null)).toBe(true);
+    expect(isRateLimitedResponse(429, "5")).toBe(true);
+  });
+
+  it("treats a 403 WITH a Retry-After header as rate limited (GitHub's documented secondary-limit shape)", () => {
+    expect(isRateLimitedResponse(403, "10")).toBe(true);
+  });
+
+  it("does NOT treat a 403 WITHOUT a Retry-After header as rate limited (an ordinary permissions/auth 403 must fail immediately, not be retried into a slow timeout)", () => {
+    expect(isRateLimitedResponse(403, null)).toBe(false);
+  });
+
+  it("does not treat other statuses as rate limited even with a Retry-After header", () => {
+    expect(isRateLimitedResponse(500, "5")).toBe(false);
+    expect(isRateLimitedResponse(200, "5")).toBe(false);
+  });
+});
+
+describe("parseRetryAfterMs", () => {
+  it("parses a plain integer-seconds value into milliseconds", () => {
+    expect(parseRetryAfterMs("5")).toBe(5000);
+    expect(parseRetryAfterMs("0")).toBe(0);
+  });
+
+  it("clamps a value above MAX_RETRY_AFTER_SECONDS", () => {
+    expect(parseRetryAfterMs(String(MAX_RETRY_AFTER_SECONDS + 1000))).toBe(
+      MAX_RETRY_AFTER_SECONDS * 1000,
+    );
+  });
+
+  it("returns null for a missing, non-numeric, or negative value", () => {
+    expect(parseRetryAfterMs(null)).toBeNull();
+    expect(parseRetryAfterMs("not-a-number")).toBeNull();
+    expect(parseRetryAfterMs("-5")).toBeNull();
+    // The HTTP-date form is valid per RFC 9110 but GitHub never sends it —
+    // Number() on a date string is NaN, so this correctly falls through to
+    // null (the caller's own backoff), not a nonsensical wait.
+    expect(parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).toBeNull();
+  });
+});
+
+describe("computeBackoffMs", () => {
+  it("prefers a parseable Retry-After header over exponential backoff", () => {
+    expect(computeBackoffMs("7", 0)).toBe(7000);
+    expect(computeBackoffMs("7", 3)).toBe(7000); // Header wins regardless of attempt number.
+  });
+
+  it("falls back to capped exponential backoff when the header is absent or unparseable", () => {
+    expect(computeBackoffMs(null, 0)).toBe(500);
+    expect(computeBackoffMs(null, 1)).toBe(1000);
+    expect(computeBackoffMs(null, 2)).toBe(2000);
+    expect(computeBackoffMs("garbage", 0)).toBe(500);
+  });
+
+  it("caps exponential backoff at MAX_RETRY_AFTER_SECONDS even for a large attempt number", () => {
+    expect(computeBackoffMs(null, 20)).toBe(MAX_RETRY_AFTER_SECONDS * 1000);
+  });
+});
+
+describe("githubRequest — 429/Retry-After backoff (F1-S10, factory.md §13 point 8)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retries a 429 with a Retry-After header, waiting the header's exact value, then succeeds", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "3" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await githubRequest("tok", "POST", "/pulls", undefined, {
+      sleepFn,
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(attempts).toBe(2);
+    expect(sleepFn).toHaveBeenCalledExactlyOnceWith(3000);
+    warnSpy.mockRestore();
+  });
+
+  it("retries a 403 WITH Retry-After (secondary rate limit's documented alternate status)", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("secondary rate limited", {
+          status: 403,
+          headers: { "retry-after": "2" },
+        });
+      }
+      return new Response(JSON.stringify({ id: 1 }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await githubRequest("tok", "POST", "/issues/1/comments", undefined, {
+      sleepFn,
+    });
+
+    expect(result).toEqual({ id: 1 });
+    expect(attempts).toBe(2);
+  });
+
+  it("does NOT retry an ordinary 403 with no Retry-After header (unauthorized/expired token must fail immediately)", async () => {
+    const fetchMock = vi.fn(async () => new Response("nope", { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+
+    await expect(
+      githubRequest("tok", "GET", "/error", undefined, { sleepFn }),
+    ).rejects.toThrow(/403/);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sleepFn).not.toHaveBeenCalled();
+  });
+
+  it("gives up after exhausting the retry budget and throws with the final status", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response("still limited", {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      githubRequest("tok", "POST", "/pulls", undefined, {
+        sleepFn,
+        maxRateLimitRetries: 2,
+      }),
+    ).rejects.toThrow(/429/);
+
+    // The initial attempt plus exactly 2 retries — never a 3rd retry once
+    // the budget (maxRateLimitRetries: 2) is exhausted.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleepFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("defaults to MAX_RATE_LIMIT_RETRIES when no override is given", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("limited", { status: 429, headers: { "retry-after": "0" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      githubRequest("tok", "POST", "/pulls", undefined, { sleepFn }),
+    ).rejects.toThrow(/429/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RATE_LIMIT_RETRIES + 1);
+  });
+
+  it("never retries a genuinely successful request (no unnecessary sleep/extra fetch on the happy path)", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+
+    await githubRequest("tok", "GET", "/ok", undefined, { sleepFn });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sleepFn).not.toHaveBeenCalled();
+  });
+
+  it("uses the REAL default sleep (no sleepFn override) when retrying — proves production callers (which never pass one) actually wait, not just the test-only override path", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        // A zero-second wait keeps this real-timer path fast in CI while
+        // still exercising the actual `setTimeout`-based sleep() every
+        // production call site relies on (none of them pass `sleepFn` —
+        // that override exists purely for this test file).
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await githubRequest("tok", "POST", "/pulls");
+
+    expect(result).toEqual({ ok: true });
+    expect(attempts).toBe(2);
+    warnSpy.mockRestore();
   });
 });

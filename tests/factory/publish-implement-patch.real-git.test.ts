@@ -702,8 +702,15 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
         return jsonResponse([]);
       }
       if (method === "POST" && url.includes("/comments")) {
-        // Simulates the comment-post call itself failing for real.
-        return new Response("rate limited", { status: 429 });
+        // Simulates the comment-post call itself failing for real — a
+        // genuine, non-rate-limited failure (outage/permissions), not
+        // 429: F1-S10's githubRequest retry logic now retries a 429 with
+        // real backoff, which would make this specific test either slow
+        // (waiting out the retries for real) or, worse, leave a dangling
+        // retry that outlives this test's own timeout and pollutes a
+        // LATER test's fetch mock — a 500 fails immediately, exactly as
+        // this test's own comment ("failing for real") always intended.
+        return new Response("server error", { status: 500 });
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
@@ -717,7 +724,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
     // that the summary is ALREADY on disk by the time this rejection
     // happens — proving the reorder fix, not that main() somehow
     // swallows the comment-post failure (it doesn't, and shouldn't).
-    await expect(main()).rejects.toThrow(/429/);
+    await expect(main()).rejects.toThrow(/500/);
 
     const summary = await readFile(summaryPath, "utf8");
     expect(summary).toContain("## Factory publish summary");
@@ -1863,5 +1870,201 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
     };
     expect(body.body).toContain("WAS pushed successfully");
     expect(body.body).not.toContain("No branch was created and nothing was pushed");
+  });
+});
+
+describe("publish-implement-patch — F1-S10 slice 2 (#13, factory.md §13 point 8): duplicate-dispatch idempotency acceptance test", () => {
+  // The concrete acceptance criterion from the story brief: "a duplicated
+  // dispatch of the same issue produces NO second PR and NO duplicate
+  // comment." Both halves are exercised end-to-end here — via TWO full
+  // main() invocations against the SAME remote, from separate clones, the
+  // same way a real re-dispatch would run in a fresh job checkout. The
+  // individual mechanisms (findPrForIssueNumber's issue-scoped lookup,
+  // postFailureComment's marker-based upsert) already have their own
+  // dedicated tests elsewhere in this file; this describe block is the
+  // crisp, combined proof that traces directly to this story's acceptance
+  // bar, counting the actual PR-create/comment-post calls rather than
+  // just the resulting git/PR state.
+  //
+  // Concurrent (not just sequential) duplicate dispatches for the SAME
+  // issue are additionally prevented at the infrastructure layer —
+  // implement-ready-issues.yml's workflow-level `concurrency: group:
+  // implement-issue-${{ inputs.issue_number }}` (cancel-in-progress:
+  // false) serializes the whole workflow run per issue number, so two
+  // dispatches for the same issue can never race past this script's own
+  // existing-PR/existing-comment lookups concurrently — that guarantee
+  // is GitHub Actions', not this script's, and isn't re-provable in a
+  // single-process unit test; these tests cover the sequential case this
+  // script itself is responsible for (a completed prior run, or a naive
+  // whole-job retry of an already-completed run).
+  it("PR path: re-running main() against an issue that already has an open PR opens NO second PR (exactly one POST /pulls total across both runs)", async () => {
+    const firstFetchMock = stubHappyPathFetch();
+
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const firstRunCreateCalls = firstFetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(firstRunCreateCalls).toHaveLength(1);
+
+    // Simulate the second dispatch running in a FRESH checkout (a real
+    // job never reuses the first run's working tree), against the SAME
+    // remote — the existing PR (#99, from stubHappyPathFetch's default
+    // createResponse) is what the second run's PR-lookup must find.
+    process.chdir(originalCwd);
+    const secondCloneDir = join(scratchDir, "local-duplicate-pr");
+    execFileSync("git", ["clone", "-q", bareRemoteDir, secondCloneDir]);
+    git(secondCloneDir, ["checkout", "main"]);
+    git(secondCloneDir, ["config", "user.name", "Test"]);
+    git(secondCloneDir, ["config", "user.email", "test@example.com"]);
+    process.chdir(secondCloneDir);
+
+    const secondFetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 99, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const secondRunCreateCalls = secondFetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    // The decisive assertion: the SECOND (duplicate) dispatch made ZERO
+    // PR-create calls — it found and refreshed #99 instead.
+    expect(secondRunCreateCalls).toHaveLength(0);
+  });
+
+  it("comment path: re-running main() against an issue with an already-failed prior run posts NO duplicate comment (exactly one POST total, second run PATCHes)", async () => {
+    const diff = `diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/.github/workflows/evil.yml
+@@ -0,0 +1,1 @@
++on: pull_request_target
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "evil-dup.diff", diff);
+
+    const firstFetchMock = stubHappyPathFetch();
+    await main();
+    expect(process.exitCode).toBe(1);
+    const firstRunPosts = firstFetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).includes("/comments") && (init?.method ?? "GET") === "POST",
+    );
+    expect(firstRunPosts).toHaveLength(1);
+
+    // The "second dispatch" reuses the SAME patch and issue — the marker
+    // this job posted on the first run is now what the second run's own
+    // upsert lookup must find (a real re-dispatch always re-fetches
+    // comments fresh from the API; no in-memory state carries over
+    // between job runs, which is exactly why this must be tested via two
+    // independent main() calls, not asserted from code inspection alone).
+    const secondFetchMock = stubHappyPathFetch({
+      existingFailureComment: {
+        id: 555,
+        body: "some earlier failure\n\n<!-- roastpilot-factory:implement-failure:do-not-edit -->",
+      },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const secondRunPosts = secondFetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).includes("/comments") && (init?.method ?? "GET") === "POST",
+    );
+    const secondRunPatches = secondFetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).includes("/issues/comments/555") &&
+        (init?.method ?? "GET") === "PATCH",
+    );
+    // The decisive assertions: the SECOND (duplicate) run posted ZERO new
+    // comments — it found the marked comment and PATCHed it instead.
+    expect(secondRunPosts).toHaveLength(0);
+    expect(secondRunPatches).toHaveLength(1);
+  });
+});
+
+describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After backoff, end-to-end through the real script", () => {
+  // github-api.test.ts already unit-tests computeBackoffMs/
+  // isRateLimitedResponse/githubRequest's retry loop in isolation. These
+  // two tests prove the SAME behavior actually engages when driven
+  // through the real publish script — the PR-create and comment-post
+  // call sites the story brief specifically named ("honor 429/Retry-After
+  // with backoff on BOTH the PR and comment GitHub APIs") — not just the
+  // shared helper considered alone.
+  it("PR-create: a single 429-with-Retry-After on POST /pulls is retried and the PR still opens", async () => {
+    let createAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        createAttempts += 1;
+        if (createAttempts === 1) {
+          return new Response("rate limited", {
+            status: 429,
+            headers: { "retry-after": "0" }, // Zero-second wait keeps this test fast without needing to fake timers.
+          });
+        }
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(createAttempts).toBe(2);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rate-limited"));
+    const branches = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-implement-workflow"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(branches).toContain("feature/6-implement-workflow");
+    warnSpy.mockRestore();
+  });
+
+  it("comment-post (failure path): a single 429-with-Retry-After on POST .../comments is retried and the comment still lands", async () => {
+    process.env.IMPLEMENT_JOB_RESULT = "failure";
+    let commentPostAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        commentPostAttempts += 1;
+        if (commentPostAttempts === 1) {
+          return new Response("rate limited", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await main();
+
+    expect(process.exitCode).toBe(1); // Still a rejected publish (bad IMPLEMENT_JOB_RESULT) — the retry is about the COMMENT landing, not the publish succeeding.
+    expect(commentPostAttempts).toBe(2);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rate-limited"));
+    warnSpy.mockRestore();
   });
 });
