@@ -48,9 +48,17 @@ push to an unintended ref, or escape the read-only boundary.
    (`zz/.github/...`), spaces / C-quoted paths in diff headers, `+++`-line vs
    `diff --git` disagreement, trailing traditional hunks with no `diff --git`,
    rename INTO or OUT of a protected path, mode-only changes, symlink creation.
-   The correct pattern is to ASK the applier (`git apply --numstat`/`--summary`)
-   which paths it will touch and gate on that, with the SAME `-p` the real apply
-   uses — flag any guard that doesn't.
+   The correct pattern is to ASK the applier which paths it will touch and gate
+   on the COMPLETE set, with the SAME `-p` the real apply uses. Precisely:
+   `git apply --numstat -z` is the path oracle for edits/adds/deletes and the
+   DESTINATION side of a rename/copy — but it does NOT report the rename/copy
+   SOURCE, and `--summary` is not a reliable path oracle either (it returns no
+   path for an ordinary content-only edit, and brace-compacts a shared prefix,
+   `scripts/{factory/... => other/...}`, which defeats substring matching). So the
+   source side must come from the RAW patch's `rename from`/`copy from` lines
+   (always full, uncompacted); gate on `numstat` paths ∪ those source lines. A
+   guard that trusts `--summary` substrings, or that sees only `numstat`
+   destinations, has a live rename-OUT bypass — flag it.
 
 4. **Credentials in the workspace.** The action writes the token into
    `.git/config` even with `persist-credentials: false`. With a shell, `npm` or
