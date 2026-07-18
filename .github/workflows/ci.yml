@@ -112,10 +112,12 @@ jobs:
         run: pip install -r snowflake/requirements-dev.txt
 
       # Issue #18: unit tests for with_connection_env.py's connection-profile
-      # resolution/env-only-bypass logic and validate_migrations.py's
-      # recursive migration discovery -- runs before the offline validator
-      # below so a regression in either script's own logic is caught
-      # independently of whatever migrations currently happen to exist.
+      # resolution (reads config.toml when it exists, tolerated if absent,
+      # merges each SNOWFLAKE_* field env-wins-profile-fills-gaps) and
+      # validate_migrations.py's recursive migration discovery -- runs
+      # before the offline validator below so a regression in either
+      # script's own logic is caught independently of whatever migrations
+      # currently happen to exist.
       - name: Run snowflake/ tooling unit tests
         working-directory: snowflake
         # --cov-fail-under enforces the 98% this PR establishes on both
