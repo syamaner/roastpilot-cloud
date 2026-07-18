@@ -95,50 +95,48 @@ jobs:
       # combination is untested until the operator's probe/dry-run.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     steps:
-      - name: Harden the runner (egress-lock this code-exec job)
-        # Codex round-7 finding, elevating FIX B from "assessed" to
-        # "fixed" at the network layer too: even with use_commit_signing:
-        # true (below) removing the GitHub token from .git/config
-        # entirely, this is still the one job in the pipeline that runs
+      - name: Harden the runner (audit egress on this code-exec job)
+        # Codex round-7 finding: even with use_commit_signing: true
+        # (below) removing the GitHub token from .git/config entirely,
+        # this is still the one job in the pipeline that runs
         # agent-influenced code (npm build/test, a package's postinstall
         # script) — so it's exactly the code-exec surface factory.md §13
         # names for this control, pulled forward here rather than waiting
-        # for a repo-wide rollout. egress-policy: block means only the
-        # hosts below are reachable for the rest of this job; anything
-        # else — including an attempt to exfiltrate this job's
-        # contents:read,issues:read token, any repo content, or anything
-        # else on disk — is refused at the network layer, not merely
-        # denied by a tool-level rule an agent-launched subprocess was
-        # never subject to in the first place (see the file-top comment).
-        # disable-telemetry: true also means harden-runner itself makes no
-        # outbound call beyond installing its own agent (which runs in the
-        # action's `pre:` phase, before this block takes effect) — one
-        # fewer host to reason about.
+        # for a repo-wide rollout.
+        #
+        # egress-policy: audit (NOT block) is a deliberate, operator-
+        # decided choice for THIS merge: the allowed-endpoints list below
+        # is static research (GitHub checkout/API/artifact-upload, the
+        # npm registry, the Anthropic API, and the apt mirrors + Ubuntu
+        # Pro/motd hosts a GitHub-hosted Ubuntu runner's `apt-get` is
+        # known to reach), never confirmed against a live run — and
+        # FIX B (use_commit_signing: true) already eliminates the actual
+        # credential-in-.git/config finding at the source, so this step
+        # is general egress-defense-in-depth, not itself the fix for a
+        # live vulnerability. StepSecurity's own recommended workflow for
+        # a first deploy is audit mode: non-blocking (nothing here can
+        # break the job on a wrong or incomplete list), while still
+        # recording exactly which hosts the job actually contacts, in
+        # this run's Harden-Runner Insights. That's precisely the
+        # empirical data currently missing. The operator's upcoming live
+        # dispatch test doubles as this audit — allowed-endpoints below
+        # becomes the verified block-list afterward (trimmed or
+        # extended per what's actually observed), and flipping
+        # egress-policy to block with that confirmed list is F1-S7's
+        # egress-lock rollout (which owns the block-mode rollout across
+        # all factory jobs), not this story.
+        #
+        # disable-telemetry is deliberately left at its default (false)
+        # for this same reason: the action's own input docs say it "can
+        # only be set to true when egress-policy is set to block" — true
+        # here (still block's semantics, not audit's) would be an invalid
+        # combination for the policy this step is actually running under.
         #
         # disable-sudo / disable-sudo-and-containers are deliberately left
         # at their default (false): "Install bubblewrap" below needs sudo.
-        #
-        # allowed-endpoints below is a best-effort list assembled from
-        # what each subsequent step is documented to need (GitHub
-        # checkout/API/artifact-upload, the npm registry, the Anthropic
-        # API, and the apt mirrors + Ubuntu Pro/motd hosts a GitHub-hosted
-        # Ubuntu runner's `apt-get` is known to reach even without a Pro
-        # subscription) — NOT verified against a live run yet, unlike
-        # every other mechanism in this file. StepSecurity's own
-        # documented workflow for getting this list right is to run in
-        # audit mode and read back the observed hosts from the run's
-        # Insights; we don't have that turnaround here, so this list is
-        # the best static approximation. A missing host here fails LOUDLY
-        # (the step that needed it errors, and harden-runner's own run
-        # summary names exactly which egress attempt was blocked) — never
-        # silently, so the failure mode of getting this list wrong is "the
-        # operator's live dispatch test fails with a clear signal", not "a
-        # security gap slips through". Flagged explicitly for the operator
-        # to confirm on that live test.
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
-          egress-policy: block
-          disable-telemetry: true
+          egress-policy: audit
           allowed-endpoints: >
             github.com:443
             api.github.com:443
