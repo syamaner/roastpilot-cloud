@@ -102,8 +102,24 @@ interface GitHubIssue {
 interface GitHubPullRequestApi {
   readonly html_url: string;
   readonly number: number;
-  readonly head: { readonly ref: string };
+  readonly head: {
+    readonly ref: string;
+    // `null` when the source repo (e.g. a fork) has since been deleted —
+    // the GitHub API's own documented shape for that case.
+    readonly repo: { readonly full_name: string } | null;
+  };
 }
+
+/** Page size for listing open PRs — GitHub's own per-page maximum. */
+const PR_PAGE_SIZE = 100;
+/**
+ * Upper bound on how many pages of open PRs to scan looking for this
+ * issue's existing PR (~5,000 open PRs) — pathologically high for this
+ * repo, but a sane cap against an unbounded loop rather than trusting the
+ * API to always terminate cleanly. Same shape as
+ * `apply-triage-verdict.mts`'s `MAX_COMMENT_PAGES`.
+ */
+const MAX_PR_PAGES = 50;
 
 /** Enforces the size cap via `stat`, before the file is touched any other way. */
 async function assertPatchArtifactSize(path: string): Promise<void> {
@@ -230,7 +246,15 @@ function applyPatchAndPush(
  * `findPrForIssueNumber`'s docstring for why this keys off the issue
  * number (a stable `feature/{issueNumber}-` branch prefix) rather than
  * the exact branch name a fresh `deriveBranchName` call would produce
- * from today's title.
+ * from today's title, AND why it's additionally scoped to PRs whose head
+ * branch lives in this repo (never a fork's, which `headRepoFullName`
+ * lets it reject even when the branch name coincidentally matches).
+ *
+ * Paginates through every page of open PRs (Codex round-7 finding) rather
+ * than only the first 100 — a repo with more open PRs than that could
+ * otherwise have this issue's existing PR missed on a later page, causing
+ * a duplicate PR (or a force-push to a freshly-derived branch name that
+ * collides with nothing, orphaning the real existing PR).
  */
 async function findExistingPrForIssue(
   token: string,
@@ -238,16 +262,33 @@ async function findExistingPrForIssue(
   repo: string,
   issueNumber: number,
 ): Promise<PullRequestSummary | null> {
-  const results = await githubRequest<GitHubPullRequestApi[]>(
-    token,
-    "GET",
-    `/repos/${owner}/${repo}/pulls?state=open&per_page=100`,
-  );
-  const summaries: PullRequestSummary[] = results.map((pr) => ({
-    number: pr.number,
-    headRef: pr.head.ref,
-  }));
-  return findPrForIssueNumber(summaries, issueNumber);
+  const expectedHeadRepoFullName = `${owner}/${repo}`;
+  const summaries: PullRequestSummary[] = [];
+  for (let page = 1; page <= MAX_PR_PAGES; page++) {
+    const results = await githubRequest<GitHubPullRequestApi[]>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/pulls?state=open&per_page=${PR_PAGE_SIZE}&page=${page}`,
+    );
+    for (const pr of results) {
+      summaries.push({
+        number: pr.number,
+        headRef: pr.head.ref,
+        headRepoFullName: pr.head.repo?.full_name ?? null,
+      });
+    }
+    if (results.length < PR_PAGE_SIZE) {
+      break; // Last page.
+    }
+    if (page === MAX_PR_PAGES) {
+      console.warn(
+        `Scanned ${MAX_PR_PAGES} pages of open PRs without exhausting the ` +
+          `list; searching only what was fetched rather than looping ` +
+          `unboundedly.`,
+      );
+    }
+  }
+  return findPrForIssueNumber(summaries, issueNumber, expectedHeadRepoFullName);
 }
 
 async function postFailureComment(

@@ -108,7 +108,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 /** A fetch mock covering the issue-fetch + PR-list + PR-create calls a successful run makes. */
 function stubHappyPathFetch(options?: {
-  existingPrs?: Array<{ number: number; head: { ref: string } }>;
+  existingPrs?: Array<{
+    number: number;
+    head: { ref: string; repo?: { full_name: string } | null };
+  }>;
   createResponse?: { number: number; html_url: string };
   issueTitle?: string;
 }) {
@@ -121,7 +124,22 @@ function stubHappyPathFetch(options?: {
       });
     }
     if (method === "GET" && url.includes("/pulls?state=open")) {
-      return jsonResponse(options?.existingPrs ?? []);
+      // Defaults every existingPrs entry's head.repo to THIS repo unless a
+      // test explicitly overrides it (to a fork's full_name, or null) —
+      // preserves every pre-Codex-round-7 test's implicit assumption that
+      // an "existing PR" fixture means our own PR, while letting the new
+      // fork-scoping tests below opt into a different repo.
+      const prs = (options?.existingPrs ?? []).map((pr) => ({
+        number: pr.number,
+        head: {
+          ref: pr.head.ref,
+          repo:
+            pr.head.repo === undefined
+              ? { full_name: "syamaner/roastpilot-cloud" }
+              : pr.head.repo,
+        },
+      }));
+      return jsonResponse(prs);
     }
     if (method === "POST" && url.endsWith("/pulls")) {
       return jsonResponse(
@@ -269,6 +287,223 @@ describe("publish-implement-patch — FIX 7: idempotency keys off issue number, 
       { cwd: bareRemoteDir, encoding: "utf8" },
     );
     expect(branch6).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — Codex round 7: fork-PR confusion (findExistingPrForIssue repo scoping)", () => {
+  it("does NOT reuse a fork's PR whose branch coincidentally matches feature/{issueNumber}-, and opens a fresh same-repo PR instead", async () => {
+    // A public-repo attack shape: a fork opens a PR from a branch named
+    // exactly like this factory would name its own branch for issue 6.
+    // Matching on head.ref alone would have this run force-push OUR
+    // patch onto what it believes is PR #77's branch (i.e. treat #77 as
+    // "already exists, just refresh it") — wrong, because #77's branch
+    // isn't in this repo at all.
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [
+        {
+          number: 77,
+          head: {
+            ref: "feature/6-implement-workflow",
+            repo: { full_name: "some-attacker/roastpilot-cloud" },
+          },
+        },
+      ],
+      createResponse: { number: 101, html_url: "https://github.com/o/r/pull/101" },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // A fresh PR was opened (POST /pulls called) rather than treating #77
+    // as the existing PR to refresh.
+    const postPullsCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(postPullsCall).toBeDefined();
+
+    // The push landed on the freshly-derived branch for issue 6 (still
+    // named feature/6-implement-workflow here, since that's what
+    // deriveBranchName also produces for this fixture's issue title) —
+    // in THIS repo's bare remote, proving the push targeted our repo
+    // regardless of the fork PR's existence.
+    const branches = execFileSync(
+      "git",
+      ["branch", "--list", "feature/6-implement-workflow"],
+      { cwd: bareRemoteDir, encoding: "utf8" },
+    );
+    expect(branches).toContain("feature/6-implement-workflow");
+  });
+
+  it("does NOT reuse a PR whose source repo has been deleted (head.repo: null)", async () => {
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [
+        { number: 77, head: { ref: "feature/6-implement-workflow", repo: null } },
+      ],
+      createResponse: { number: 102, html_url: "https://github.com/o/r/pull/102" },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const postPullsCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(postPullsCall).toBeDefined();
+  });
+
+  it("DOES reuse a same-repo PR (the ordinary idempotent-refresh case still works)", async () => {
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [
+        {
+          number: 50,
+          head: {
+            ref: "feature/6-implement-workflow",
+            repo: { full_name: "syamaner/roastpilot-cloud" },
+          },
+        },
+      ],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const postPullsCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(postPullsCall).toBeUndefined(); // Reused PR #50, no new PR opened.
+  });
+});
+
+describe("publish-implement-patch — Codex round 7: open-PR listing is paginated", () => {
+  it("finds this issue's existing PR when it's on the SECOND page of open PRs", async () => {
+    // Page 1: exactly 100 (PR_PAGE_SIZE) unrelated PRs — a full page
+    // signals "there may be more" and must trigger a page-2 fetch.
+    // Page 2: fewer than 100, containing the real match — signals "last
+    // page" once found. A pre-pagination implementation (page 1 only)
+    // would report no existing PR here and incorrectly open a duplicate.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      number: 1000 + i,
+      head: { ref: `feature/999${i}-unrelated`, repo: { full_name: "syamaner/roastpilot-cloud" } },
+    }));
+    const page2 = [
+      {
+        number: 50,
+        head: { ref: "feature/6-implement-workflow", repo: { full_name: "syamaner/roastpilot-cloud" } },
+      },
+    ];
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        if (url.includes("page=2")) {
+          return jsonResponse(page2);
+        }
+        // Every other page number (including the un-paginated legacy
+        // shape, if this URL ever omitted `page=`) returns page 1 —
+        // asserts page=1 is requested explicitly below instead.
+        return jsonResponse(page1);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The existing PR's branch must already exist on the remote for the
+    // force-push to a REUSED branch to succeed.
+    git(localCloneDir, ["checkout", "-b", "feature/6-implement-workflow"]);
+    await fsWriteFile(join(localCloneDir, "placeholder.txt"), "old\n");
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "old dispatch"]);
+    git(localCloneDir, ["push", "-u", "origin", "feature/6-implement-workflow"]);
+    git(localCloneDir, ["checkout", "main"]);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // Confirms page=1 was actually requested (not just page=2 by luck).
+    const requestedPage1 = fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/pulls?state=open") && String(input).includes("page=1"),
+    );
+    expect(requestedPage1).toBe(true);
+    const requestedPage2 = fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/pulls?state=open") && String(input).includes("page=2"),
+    );
+    expect(requestedPage2).toBe(true);
+    // No duplicate PR opened — the page-2 match was found and reused.
+    const postPullsCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(postPullsCall).toBeUndefined();
+  });
+
+  it("stops after MAX_PR_PAGES (50) full pages without finding a match, warns, and proceeds as if no existing PR was found", async () => {
+    // Every page returns exactly 100 unrelated PRs — a full page every
+    // time, so pagination never naturally terminates via the "short page"
+    // signal and must instead hit the MAX_PR_PAGES bound.
+    const unrelatedFullPage = Array.from({ length: 100 }, (_, i) => ({
+      number: 2000 + i,
+      head: { ref: `feature/999${i}-unrelated`, repo: { full_name: "syamaner/roastpilot-cloud" } },
+    }));
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse(unrelatedFullPage);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 200, html_url: "https://github.com/o/r/pull/200" }, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // Fetched exactly 50 pages (1..50), never a 51st.
+    const pullsCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/pulls?state=open"),
+    );
+    expect(pullsCalls).toHaveLength(50);
+    expect(
+      pullsCalls.some(([input]) => String(input).includes("page=50")),
+    ).toBe(true);
+    expect(
+      pullsCalls.some(([input]) => String(input).includes("page=51")),
+    ).toBe(false);
+    // Warned about the exhausted scan.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Scanned 50 pages of open PRs"));
+    // No match found across all 50 pages, so it proceeded to open a fresh
+    // PR rather than treating anything as "already exists".
+    const postPullsCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/pulls") && (init?.method ?? "GET") === "POST",
+    );
+    expect(postPullsCall).toBeDefined();
+
+    warnSpy.mockRestore();
+  });
+
+  it("stops paginating once a page comes back short of PR_PAGE_SIZE (single-page repos don't fetch page 2)", async () => {
+    const fetchMock = stubHappyPathFetch({ existingPrs: [] });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const page2Requested = fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/pulls?state=open") && String(input).includes("page=2"),
+    );
+    expect(page2Requested).toBe(false);
   });
 });
 

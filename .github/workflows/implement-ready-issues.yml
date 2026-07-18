@@ -59,7 +59,18 @@ jobs:
   # ---
   implement:
     name: Implement (read-only)
-    if: vars.FACTORY_PAUSED != 'true'
+    # Codex round-7 finding: workflow_dispatch can be manually run from any
+    # branch (the Actions UI/API `ref` parameter), but the publish job
+    # hardcodes `base: "main"` when opening the PR. A non-main dispatch
+    # would check out that other branch's tree, let the agent implement on
+    # top of it, and push a branch that forks from it — not from main — so
+    # the resulting PR's diff against main would include everything that
+    # branch had already diverged by, not just the issue's change. Fail
+    # closed by simply never running (both jobs skip; no side effect at
+    # all) unless dispatched from main. `github.ref` for a
+    # workflow_dispatch-triggered run is exactly the ref the dispatch
+    # selected.
+    if: vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,6 +95,65 @@ jobs:
       # combination is untested until the operator's probe/dry-run.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     steps:
+      - name: Harden the runner (egress-lock this code-exec job)
+        # Codex round-7 finding, elevating FIX B from "assessed" to
+        # "fixed" at the network layer too: even with use_commit_signing:
+        # true (below) removing the GitHub token from .git/config
+        # entirely, this is still the one job in the pipeline that runs
+        # agent-influenced code (npm build/test, a package's postinstall
+        # script) — so it's exactly the code-exec surface factory.md §13
+        # names for this control, pulled forward here rather than waiting
+        # for a repo-wide rollout. egress-policy: block means only the
+        # hosts below are reachable for the rest of this job; anything
+        # else — including an attempt to exfiltrate this job's
+        # contents:read,issues:read token, any repo content, or anything
+        # else on disk — is refused at the network layer, not merely
+        # denied by a tool-level rule an agent-launched subprocess was
+        # never subject to in the first place (see the file-top comment).
+        # disable-telemetry: true also means harden-runner itself makes no
+        # outbound call beyond installing its own agent (which runs in the
+        # action's `pre:` phase, before this block takes effect) — one
+        # fewer host to reason about.
+        #
+        # disable-sudo / disable-sudo-and-containers are deliberately left
+        # at their default (false): "Install bubblewrap" below needs sudo.
+        #
+        # allowed-endpoints below is a best-effort list assembled from
+        # what each subsequent step is documented to need (GitHub
+        # checkout/API/artifact-upload, the npm registry, the Anthropic
+        # API, and the apt mirrors + Ubuntu Pro/motd hosts a GitHub-hosted
+        # Ubuntu runner's `apt-get` is known to reach even without a Pro
+        # subscription) — NOT verified against a live run yet, unlike
+        # every other mechanism in this file. StepSecurity's own
+        # documented workflow for getting this list right is to run in
+        # audit mode and read back the observed hosts from the run's
+        # Insights; we don't have that turnaround here, so this list is
+        # the best static approximation. A missing host here fails LOUDLY
+        # (the step that needed it errors, and harden-runner's own run
+        # summary names exactly which egress attempt was blocked) — never
+        # silently, so the failure mode of getting this list wrong is "the
+        # operator's live dispatch test fails with a clear signal", not "a
+        # security gap slips through". Flagged explicitly for the operator
+        # to confirm on that live test.
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            registry.npmjs.org:443
+            api.anthropic.com:443
+            azure.archive.ubuntu.com:80
+            security.ubuntu.com:80
+            archive.ubuntu.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+
       - name: Validate max_turns input
         # FIX (round 6, Codex P1): max_turns is a free-form
         # workflow_dispatch string input that gets appended VERBATIM into
@@ -147,10 +217,19 @@ jobs:
         # SNOWFLAKE_*/VERCEL_* secret — but assert it anyway so a future
         # edit to this job that accidentally adds such a reference fails
         # loudly here instead of silently widening this job's blast radius.
+        # FIX (Codex round 7): the original `env | grep -iE '...'` form
+        # printed the full `NAME=value` line to the job log before
+        # `exit 1` ever ran — so a guard meant to CATCH secret exposure
+        # would itself have LOGGED the secret first. `compgen -e` (a bash
+        # builtin) lists only exported variable NAMES, never values, so
+        # nothing sensitive reaches the log even if this ever fires for
+        # real.
         run: |
           set -euo pipefail
-          if env | grep -iE '^(SNOWFLAKE|VERCEL)_'; then
-            echo "Snowflake/Vercel secret(s) found in this job's environment — must never happen here."
+          matched_names=$(compgen -e | grep -iE '^(SNOWFLAKE|VERCEL)_' || true)
+          if [ -n "$matched_names" ]; then
+            echo "Snowflake/Vercel secret name(s) found in this job's environment (names only, values withheld): $matched_names"
+            echo "This must never happen here."
             exit 1
           fi
           echo "Confirmed: no Snowflake/Vercel secrets present."
@@ -328,11 +407,27 @@ jobs:
           npm run build
 
       - name: Capture the implement agent's changes as a patch
+        # FIX (Codex round 7): `git add -A` staging everything and relying
+        # on a `.gitignore` entry to keep issue-context/ and
+        # patch-output/ (the scratch dirs holding the raw issue body and,
+        # transiently, this very patch file) out of the captured diff is
+        # bypassable — nothing stops the agent from editing .gitignore
+        # itself to un-ignore them (`.gitignore` isn't in the
+        # disallowedTools protected-path list; it's an ordinary file), at
+        # which point `git add -A` would stage them. Pathspec excludes
+        # (`:!path`) are evaluated by `git add` directly against the
+        # literal paths given here, independent of .gitignore's content —
+        # empirically verified (scratch repo test) that they still
+        # exclude issue-context/ and patch-output/ even after `.gitignore`
+        # is tampered with to un-ignore them. `.gitignore`'s existing
+        # entries are kept as defense-in-depth (cheap, and they also keep
+        # these paths out of a plain `git status`/`git diff` a human runs
+        # locally).
         if: always()
         run: |
           set -euo pipefail
           mkdir -p patch-output
-          git add -A
+          git add -A -- ':!issue-context' ':!patch-output'
           git diff --cached > patch-output/patch.diff
           echo "Patch: $(wc -c < patch-output/patch.diff) bytes, $(git diff --cached --name-only | wc -l) file(s) changed"
 
@@ -364,7 +459,12 @@ jobs:
   publish:
     name: Publish patch (privileged)
     needs: implement
-    if: always() && vars.FACTORY_PAUSED != 'true'
+    # Same Codex round-7 guard as the implement job above, same reason:
+    # this job hardcodes `base: "main"` when opening the PR, so it must
+    # never run for a non-main dispatch either — `always()` here is about
+    # not being skipped by the implement job's own status, not about
+    # overriding this branch check.
+    if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

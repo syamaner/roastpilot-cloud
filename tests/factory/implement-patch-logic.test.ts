@@ -286,30 +286,62 @@ describe("extractRenameCopySourcePaths", () => {
   });
 });
 
+const HOME_REPO = "syamaner/roastpilot-cloud";
+
 describe("findPrForIssueNumber", () => {
-  it("finds a PR whose branch matches the feature/{issueNumber}- prefix", () => {
+  it("finds a PR whose branch matches the feature/{issueNumber}- prefix and lives in this repo", () => {
     const prs = [
-      { number: 1, headRef: "feature/60-unrelated" },
-      { number: 2, headRef: "feature/6-implement-workflow" },
+      { number: 1, headRef: "feature/60-unrelated", headRepoFullName: HOME_REPO },
+      { number: 2, headRef: "feature/6-implement-workflow", headRepoFullName: HOME_REPO },
     ];
-    expect(findPrForIssueNumber(prs, 6)).toEqual({
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toEqual({
       number: 2,
       headRef: "feature/6-implement-workflow",
+      headRepoFullName: HOME_REPO,
     });
   });
 
   it("is not fooled by a numeric-prefix collision (issue 6 vs issue 60)", () => {
-    const prs = [{ number: 1, headRef: "feature/60-unrelated-issue" }];
-    expect(findPrForIssueNumber(prs, 6)).toBeNull();
+    const prs = [{ number: 1, headRef: "feature/60-unrelated-issue", headRepoFullName: HOME_REPO }];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
   });
 
   it("returns null when no PR matches", () => {
-    expect(findPrForIssueNumber([], 6)).toBeNull();
+    expect(findPrForIssueNumber([], 6, HOME_REPO)).toBeNull();
   });
 
   it("finds the branch regardless of what slug it carries (title-independent)", () => {
-    const prs = [{ number: 5, headRef: "feature/6-a-totally-different-slug-now" }];
-    expect(findPrForIssueNumber(prs, 6)).not.toBeNull();
+    const prs = [
+      { number: 5, headRef: "feature/6-a-totally-different-slug-now", headRepoFullName: HOME_REPO },
+    ];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).not.toBeNull();
+  });
+
+  it("rejects a branch-name match whose head repo is a fork, not this repo (Codex round-7 finding)", () => {
+    // On a public repo, anyone can open a PR from a fork whose branch
+    // happens to be named feature/{issueNumber}-anything — this must
+    // never be mistaken for the factory's own PR for that issue.
+    const prs = [
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud" },
+    ];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
+  });
+
+  it("prefers a same-repo match over an earlier fork match with the same branch prefix", () => {
+    const prs = [
+      { number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: "some-attacker/roastpilot-cloud" },
+      { number: 10, headRef: "feature/6-implement-workflow-real", headRepoFullName: HOME_REPO },
+    ];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toEqual({
+      number: 10,
+      headRef: "feature/6-implement-workflow-real",
+      headRepoFullName: HOME_REPO,
+    });
+  });
+
+  it("rejects a branch-name match whose source repo has since been deleted (headRepoFullName: null)", () => {
+    const prs = [{ number: 9, headRef: "feature/6-implement-workflow", headRepoFullName: null }];
+    expect(findPrForIssueNumber(prs, 6, HOME_REPO)).toBeNull();
   });
 });
 

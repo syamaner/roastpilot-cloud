@@ -225,35 +225,68 @@ export function deriveBranchName(
   return `feature/${issueNumber}-${safeSlug}`;
 }
 
-/** The subset of a GitHub pull request's fields the idempotency check needs. */
+/**
+ * The subset of a GitHub pull request's fields the idempotency check
+ * needs. `headRepoFullName` is the head branch's OWNING repo (GitHub API's
+ * `pull.head.repo.full_name`), `null` when that repo has since been
+ * deleted (e.g. a fork removed after opening a PR from it) — never treated
+ * as a match in that case; see {@link findPrForIssueNumber}.
+ */
 export interface PullRequestSummary {
   readonly number: number;
   readonly headRef: string;
+  readonly headRepoFullName: string | null;
 }
 
 /**
  * Finds, among a list of open PRs, the one that was opened for this
  * issue — matched by the STABLE `feature/{issueNumber}-` branch prefix,
- * never by re-deriving the current title's slug. Idempotency must key off
- * the issue number, not the branch name `deriveBranchName` would produce
- * from today's title: if the issue's title is edited between dispatches,
- * re-deriving the branch name from the (now different) title would miss
- * the existing PR entirely and open a duplicate targeting a
- * never-before-seen branch. Once a branch exists for an issue, every
- * later run must reuse its actual name — found here — rather than
- * deriving a fresh one.
+ * never by re-deriving the current title's slug, AND scoped to PRs whose
+ * head branch lives in THIS repo (`headRepoFullName === expectedHeadRepoFullName`).
+ *
+ * The repo scope closes a fork-PR confusion (Codex round-7 finding): this
+ * is a public repo, so anyone can open a PR from a fork whose branch
+ * happens to be named `feature/{issueNumber}-anything` — matching on
+ * `headRef` alone would let an attacker-controlled fork PR be mistaken for
+ * this factory's own PR for that issue. `applyPatchAndPush` would then
+ * force-push OUR patch onto what it believes is that existing PR's
+ * branch, but `git push` targets `origin` (this repo) regardless of what
+ * PR the caller THOUGHT it was refreshing — so the practical failure mode
+ * of the bug is pushing to a branch name that collides with a fork's PR,
+ * silently reusing/misattributing that PR's number, rather than writing
+ * into the fork itself. Either way, matching is wrong, so it must not be
+ * used as "the existing PR for this issue".
+ *
+ * Idempotency must key off the issue number, not the branch name
+ * `deriveBranchName` would produce from today's title: if the issue's
+ * title is edited between dispatches, re-deriving the branch name from
+ * the (now different) title would miss the existing PR entirely and open
+ * a duplicate targeting a never-before-seen branch. Once a branch exists
+ * for an issue, every later run must reuse its actual name — found here —
+ * rather than deriving a fresh one.
  *
  * @param openPrs - Open pull requests on the repo.
  * @param issueNumber - The issue number to match.
+ * @param expectedHeadRepoFullName - This repo's `owner/repo`, e.g.
+ *   `"syamaner/roastpilot-cloud"` — a PR whose head repo doesn't match
+ *   this exactly (a fork, or a since-deleted source repo) is never
+ *   returned, even if its branch name matches.
  * @returns The matching PR, or `null` if none exists yet (first dispatch
- *   for this issue).
+ *   for this issue, or every branch-name match was a fork/foreign PR).
  */
 export function findPrForIssueNumber(
   openPrs: readonly PullRequestSummary[],
   issueNumber: number,
+  expectedHeadRepoFullName: string,
 ): PullRequestSummary | null {
   const prefix = `feature/${issueNumber}-`;
-  return openPrs.find((pr) => pr.headRef.startsWith(prefix)) ?? null;
+  return (
+    openPrs.find(
+      (pr) =>
+        pr.headRef.startsWith(prefix) &&
+        pr.headRepoFullName === expectedHeadRepoFullName,
+    ) ?? null
+  );
 }
 
 /** A validated set of inputs for building the implement PR's body. */
