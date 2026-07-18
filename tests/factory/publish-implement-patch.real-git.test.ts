@@ -652,6 +652,38 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
     expect(summary).toContain('implement job result was "failure"');
   });
 
+  it("neutralizes BOTH a [text](url) link-injection AND a bare autolink-shaped URL in the ACTUAL written summary file (Codex P2, categorical fix, round 3 — the team lead's explicit acceptance test)", async () => {
+    // IMPLEMENT_JOB_RESULT flows verbatim into the rejection reason
+    // (`implement job result was "<value>"`), which is the simplest way
+    // to get an attacker-controlled-shaped string into a REAL rejected-
+    // publish run end-to-end, not just through the pure builder function.
+    const summaryPath = join(scratchDir, "step-summary.md");
+    await fsWriteFile(summaryPath, "");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    process.env.IMPLEMENT_JOB_RESULT =
+      "[x](https://attacker.example) www.attacker.example";
+    vi.stubGlobal("fetch", rejectionOnlyFetchMock());
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const summary = await readFile(summaryPath, "utf8");
+    // Both vectors must appear on a bullet line that starts and ends with
+    // a backtick (the full rejection reason is one code span) — a code
+    // span is what actually stops GitHub's renderer from turning either
+    // into a live link, not any particular character escaping. Find the
+    // bullet line itself and check its exact boundaries, rather than a
+    // loose substring match, so this genuinely proves "inside one code
+    // span" and not just "somewhere near backticks."
+    const bulletLine = summary
+      .split("\n")
+      .find((line) => line.includes("attacker.example"));
+    expect(bulletLine).toBeDefined();
+    expect(bulletLine).toMatch(/^ {2}- `.*`$/);
+    expect(bulletLine).toContain("[x](https://attacker.example)");
+    expect(bulletLine).toContain("www.attacker.example");
+  });
+
   it("still writes the rejected-publish summary even when postFailureComment itself throws (Codex P2, post-#46-merge fix-forward)", async () => {
     // Reproduces the exact gap: on a rejected publish, the ONLY other
     // signal is the failure comment. If posting that comment throws (rate
