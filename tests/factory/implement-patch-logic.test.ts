@@ -868,6 +868,19 @@ describe("sanitizeStepSummaryText", () => {
     );
   });
 
+  it("doubles a pre-existing backslash BEFORE escaping brackets/parens (CodeQL js/incomplete-sanitization, caught in CI before merge)", () => {
+    // Without escaping the pre-existing backslash first, this exact input
+    // would sanitize to `\\](url)` — which CommonMark parses as a literal
+    // `\` (from the doubled backslash) followed by an UNESCAPED `]`,
+    // reopening the exact link-injection this function exists to close.
+    const sanitized = sanitizeStepSummaryText("\\](url)");
+    expect(sanitized).toBe("\\\\\\]\\(url\\)");
+    // Every backslash in the output is paired with the character
+    // immediately after it (CommonMark escape pairs) — no bare,
+    // unescaped `]`, `(`, or `)` survives.
+    expect(sanitized).not.toMatch(/(?<!\\)[[\]()]/);
+  });
+
   it("clamps to 200 characters with an ellipsis", () => {
     const long = "x".repeat(250);
     const result = sanitizeStepSummaryText(long);

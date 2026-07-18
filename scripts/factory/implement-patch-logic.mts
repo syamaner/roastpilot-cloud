@@ -726,16 +726,33 @@ const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
  * literally, unlike brackets/parens which routinely appear in real
  * content.
  *
+ * CodeQL finding (`js/incomplete-sanitization`, caught in CI on this exact
+ * PR before merge — not a nit, a real bypass): the FIRST version of this
+ * escaping fix escaped `[`/`]`/`(`/`)` without first escaping any
+ * backslash ALREADY present in the input. Backslash-escaping schemes must
+ * always escape the escape character itself first, or an attacker-
+ * supplied backslash immediately before one of these characters combines
+ * with the sanitizer's own inserted backslash to form `\\` (CommonMark's
+ * literal-backslash escape), which consumes itself and leaves the
+ * character after it unescaped again — e.g. input `\](url)` naively
+ * escaped to `\\](url)` still parses with a live, unescaped `]`. Fixed by
+ * escaping every existing `\` to `\\` FIRST, before escaping
+ * brackets/parens — see the ordering below; reordering these two
+ * `.replace()` calls reintroduces the bypass.
+ *
  * @param value - The field value to sanitize.
  * @returns The sanitized value: newlines collapsed to a space, backticks
- *   stripped, `[`/`]`/`(`/`)` backslash-escaped, `<`/`>` HTML-entity
- *   escaped, clamped to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH}
- *   characters.
+ *   stripped, existing backslashes doubled, `[`/`]`/`(`/`)`
+ *   backslash-escaped, `<`/`>` HTML-entity escaped, clamped to
+ *   {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} characters.
  */
 export function sanitizeStepSummaryText(value: string): string {
   const collapsed = value
     .replace(/[\r\n]+/g, " ")
     .replace(/`/g, "")
+    // MUST run before the brackets/parens escape below — see the
+    // docstring's CodeQL-finding note.
+    .replace(/\\/g, "\\\\")
     .replace(/[[\]()]/g, "\\$&")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
