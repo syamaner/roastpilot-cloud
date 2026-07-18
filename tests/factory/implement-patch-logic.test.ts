@@ -3,6 +3,8 @@ import {
   assertLabelDescriptionWithinLimit,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
+  buildPublishRejectedStepSummary,
+  buildPublishSuccessStepSummary,
   deriveBranchName,
   FACTORY_PR_BASE_REF,
   findExistingImplementFailureCommentId,
@@ -648,5 +650,95 @@ describe("isLabelAlreadyExistsError", () => {
   it("returns false for a non-Error value", () => {
     expect(isLabelAlreadyExistsError("not an error")).toBe(false);
     expect(isLabelAlreadyExistsError(undefined)).toBe(false);
+  });
+});
+
+describe("buildPublishSuccessStepSummary", () => {
+  it("shows a minted identity and normal review-automation triggering when not on fallback", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("#6");
+    expect(summary).toContain("✅ Minted as `roastpilot-factory[bot]`");
+    expect(summary).toContain("[#99](https://github.com/o/r/pull/99)");
+    expect(summary).not.toContain("(refreshed");
+    expect(summary).toContain("✅ Triggered normally");
+    expect(summary).not.toContain("Suppressed");
+  });
+
+  it("shows the fallback identity, reason, and suppressed review automation when on fallback", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      fallbackReason: "FACTORY_PUBLISHER_APP_ID is not configured",
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("github-actions[bot]");
+    expect(summary).toContain("FACTORY_PUBLISHER_APP_ID is not configured");
+    expect(summary).toContain("⚠️ **Suppressed**");
+    expect(summary).toContain("no-review-automation");
+  });
+
+  it("omits the reason suffix when fallbackReason is not provided", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    // No " — <reason>" suffix when the reason is absent.
+    expect(summary).not.toMatch(/GITHUB_TOKEN`\).*—/);
+  });
+
+  it("marks a refreshed PR distinctly from a newly-opened one", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+    });
+    expect(summary).toContain("(refreshed, not newly opened)");
+  });
+});
+
+describe("buildPublishRejectedStepSummary", () => {
+  it("lists every rejection reason and no PR", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: ["the implement run produced no changes (empty patch)"],
+    });
+    expect(summary).toContain("## Factory publish summary");
+    expect(summary).toContain("#6");
+    expect(summary).toContain("none — publish rejected");
+    expect(summary).toContain("the implement run produced no changes (empty patch)");
+  });
+
+  it("shows the fallback identity even on a rejected publish", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      fallbackReason: "the mint step failed (outcome=failure)",
+      reasons: ["unexpected error: network timeout"],
+    });
+    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("the mint step failed (outcome=failure)");
   });
 });

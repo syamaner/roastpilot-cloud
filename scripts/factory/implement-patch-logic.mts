@@ -652,3 +652,99 @@ export function buildImplementFailureCommentBody(
   ];
   return lines.join("\n");
 }
+
+/**
+ * Shared fields for both `$GITHUB_STEP_SUMMARY` builders below (operator
+ * finding, 18 Jul 2026, live App-identity commissioning): a mint failure
+ * shows `conclusion=success` in the job view (masked by `continue-on-error`
+ * on the mint step), so a human had to pull raw job logs to find the real
+ * outcome. Writing mint-vs-fallback into the run's own summary — success
+ * or rejection alike — closes that gap without needing GitHub's own UI to
+ * change.
+ */
+export interface PublishStepSummaryContext {
+  /** The issue this publish run is for. */
+  readonly issueNumber: number;
+  /**
+   * The identity `GH_TOKEN` actually authenticated as — `<app-slug>[bot]`
+   * when a factory App token was minted, or the `GITHUB_TOKEN` fallback's
+   * known login otherwise. Same value the workflow derives for
+   * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN`; passed straight through
+   * rather than re-derived here.
+   */
+  readonly publisherLogin: string;
+  /** Whether this run published via the `GITHUB_TOKEN` fallback. */
+  readonly publishedViaFallback: boolean;
+  /**
+   * Why the fallback happened, if capturable by the workflow (e.g. "App
+   * ID not configured" vs "the mint step failed") — soft, best-effort;
+   * `undefined` when not fallback, or when the workflow couldn't
+   * determine a specific reason.
+   */
+  readonly fallbackReason?: string;
+}
+
+function publisherIdentityLine(context: PublishStepSummaryContext): string {
+  if (!context.publishedViaFallback) {
+    return `✅ Minted as \`${context.publisherLogin}\``;
+  }
+  const reasonSuffix = context.fallbackReason ? ` — ${context.fallbackReason}` : "";
+  return `⚠️ Fell back to \`GITHUB_TOKEN\` (identity: \`${context.publisherLogin}\`)${reasonSuffix}`;
+}
+
+/**
+ * Builds the `$GITHUB_STEP_SUMMARY` markdown for a successful publish (a
+ * PR was opened or an existing one refreshed).
+ *
+ * @param context - Shared publisher-identity fields, plus the PR this run
+ *   produced or refreshed.
+ * @returns The Markdown summary block.
+ */
+export function buildPublishSuccessStepSummary(
+  context: PublishStepSummaryContext & {
+    readonly prNumber: number;
+    readonly prUrl: string;
+    readonly wasRefresh: boolean;
+  },
+): string {
+  const reviewAutomationLine = context.publishedViaFallback
+    ? "⚠️ **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
+      "dependency review, Codex, Claude Code Review) for `GITHUB_TOKEN`-authored PR " +
+      `events (factory.md §13). The \`${NO_REVIEW_AUTOMATION_LABEL}\` label was applied; ` +
+      "a manual review pass is required before merging."
+    : "✅ Triggered normally (CI, CodeQL, dependency review, Codex, Claude Code Review).";
+  return [
+    "## Factory publish summary",
+    "",
+    `- **Issue:** #${context.issueNumber}`,
+    `- **Publisher identity:** ${publisherIdentityLine(context)}`,
+    `- **PR:** [#${context.prNumber}](${context.prUrl})${context.wasRefresh ? " (refreshed, not newly opened)" : ""}`,
+    `- **Review automation:** ${reviewAutomationLine}`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Builds the `$GITHUB_STEP_SUMMARY` markdown for a REJECTED publish (no
+ * PR was opened or refreshed) — see
+ * {@link buildPublishSuccessStepSummary}'s docstring for why this exists
+ * even on the failure path.
+ *
+ * @param context - Shared publisher-identity fields, plus the rejection
+ *   reasons already used to build the failure comment
+ *   ({@link buildImplementFailureCommentBody}).
+ * @returns The Markdown summary block.
+ */
+export function buildPublishRejectedStepSummary(
+  context: PublishStepSummaryContext & { readonly reasons: readonly string[] },
+): string {
+  return [
+    "## Factory publish summary",
+    "",
+    `- **Issue:** #${context.issueNumber}`,
+    `- **Publisher identity:** ${publisherIdentityLine(context)}`,
+    "- **PR:** none — publish rejected. Reasons:",
+    ...context.reasons.map((r) => `  - ${r}`),
+    "",
+  ].join("\n");
+}
