@@ -304,7 +304,7 @@ export function findPrForIssueNumber(
  * to drift out of sync with the `uses:` pin.
  *
  * `publishedViaFallback` — true when this PR was opened using the built-in
- * `GITHUB_TOKEN` because `FACTORY_PUBLISHER_TOKEN` was absent (factory.md
+ * `GITHUB_TOKEN` because no factory App token was minted (factory.md
  * §13's publisher-identity switch). GitHub suppresses downstream workflow
  * triggers for `GITHUB_TOKEN`-authored PR events, so a PR opened this way
  * got NO review-automation coverage at all (CodeQL, Codex, Claude Code
@@ -357,11 +357,12 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
   const fallbackWarning = context.publishedViaFallback
     ? [
         "> ⚠️ **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
-          "NOT run on this PR.** `FACTORY_PUBLISHER_TOKEN` was not configured when " +
-          "this PR was published, so CodeQL, Codex, and Claude Code Review never " +
-          "triggered (GitHub suppresses downstream workflow triggers for " +
-          "GITHUB_TOKEN-authored PR events — factory.md §13). **Do not merge without " +
-          `a manual review pass.** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+          "NOT run on this PR.** No factory App token was minted when this PR was " +
+          "published (the App wasn't configured, or minting failed), so CodeQL, " +
+          "Codex, and Claude Code Review never triggered (GitHub suppresses " +
+          "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
+          "factory.md §13). **Do not merge without a manual review pass.** " +
+          `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
     : [];
@@ -424,11 +425,11 @@ export const IMPLEMENT_FAILURE_COMMENT_MARKER =
  *
  * The publish job's actual identity is configurable (factory.md §13's
  * publisher-identity switch — see the workflow's
- * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` env var): once a
- * `FACTORY_PUBLISHER_TOKEN` is wired in, comments post as THAT identity's
+ * `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` env var): once a factory App
+ * token is minted, comments post as THAT identity's `<app-slug>[bot]`
  * login, not this one, and the workflow must pass the real login through
  * so a re-dispatch still finds its own prior comment. This constant stays
- * the correct default for the "no publisher token configured, still on
+ * the correct default for the "no App token minted, still on
  * GITHUB_TOKEN" case.
  */
 export const IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
@@ -463,9 +464,8 @@ export interface ExistingComment {
  *   prior comment. Defaults to
  *   {@link IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN} (the built-in
  *   `GITHUB_TOKEN` identity); pass the actual publisher identity's login
- *   once `FACTORY_PUBLISHER_TOKEN` is configured, or idempotency breaks
- *   (every re-dispatch posts a fresh comment instead of editing the prior
- *   one).
+ *   once a factory App token is minted, or idempotency breaks (every
+ *   re-dispatch posts a fresh comment instead of editing the prior one).
  * @returns The existing comment's id, or `null` if none found.
  */
 export function findExistingImplementFailureCommentId(

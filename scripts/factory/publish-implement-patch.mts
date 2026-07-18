@@ -64,12 +64,14 @@
  * - `GH_TOKEN` — the identity that pushes the branch and opens/comments on
  *   the PR/issue. Defaults to the job's own `permissions: contents: write,
  *   pull-requests: write, issues: write` `GITHUB_TOKEN`, but the workflow
- *   may instead pass a `FACTORY_PUBLISHER_TOKEN` (factory.md §13's
- *   publisher-identity switch) — GitHub suppresses downstream workflow
- *   triggers (CI, Codex, Claude Code Review) for `GITHUB_TOKEN`-authored
- *   PR events, so a factory PR needs a real, workflow-triggering identity
- *   to actually get reviewed. This script itself is identity-agnostic: it
- *   just uses whatever token the workflow hands it.
+ *   may instead pass a short-lived token minted for a dedicated GitHub App
+ *   (factory.md §13's publisher-identity switch, operator decision 18 Jul
+ *   2026 — a minted App installation token, not a standing PAT) —
+ *   GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code
+ *   Review) for `GITHUB_TOKEN`-authored PR events, so a factory PR needs a
+ *   real, workflow-triggering identity to actually get reviewed. This
+ *   script itself is identity-agnostic: it just uses whatever token the
+ *   workflow hands it.
  * - `GITHUB_REPOSITORY` — `owner/repo`.
  * - `TRUSTED_ISSUE_NUMBER` — from the `workflow_dispatch` `issue_number`
  *   input. Trusted because dispatch-first means a human explicitly chose
@@ -96,17 +98,19 @@
  *   Soft-defaulted to `IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN` (the
  *   built-in `github-actions[bot]` identity) if unset. Must match whatever
  *   identity `GH_TOKEN` actually authenticates as — if `GH_TOKEN` is a
- *   `FACTORY_PUBLISHER_TOKEN` and this is left at the GITHUB_TOKEN
- *   default, a re-dispatch's failure comment won't find its own prior one
- *   and will post a duplicate rather than editing it (a functional
- *   annoyance, not a security issue — the spoofing guard this login check
- *   exists for still holds either way).
+ *   minted App token and this is left at the GITHUB_TOKEN default, a
+ *   re-dispatch's failure comment won't find its own prior one and will
+ *   post a duplicate rather than editing it (a functional annoyance, not
+ *   a security issue — the spoofing guard this login check exists for
+ *   still holds either way). The workflow derives this automatically from
+ *   the App token mint step's own `app-slug` output when a token was
+ *   minted, so this rarely needs manual attention in practice.
  * - `PUBLISHED_VIA_FALLBACK` — `"true"` when `GH_TOKEN` above is the
- *   `GITHUB_TOKEN` fallback rather than a configured
- *   `FACTORY_PUBLISHER_TOKEN`. Drives the PR body's bold fallback warning
- *   and the `no-review-automation` label (adjudicated F2, #40 rework) —
- *   soft-defaulted to `false` if unset, which only means the warning is
- *   skipped, never that an otherwise-valid publish is blocked.
+ *   `GITHUB_TOKEN` fallback rather than a minted factory App token. Drives
+ *   the PR body's bold fallback warning and the `no-review-automation`
+ *   label (adjudicated F2, #40 rework) — soft-defaulted to `false` if
+ *   unset, which only means the warning is skipped, never that an
+ *   otherwise-valid publish is blocked.
  */
 
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -543,9 +547,9 @@ async function postFailureComment(
  * `buildImplementPrBody`'s own scope (the body is likewise only built at
  * creation time, never re-PATCHed on refresh). A PR whose fallback status
  * *changes* between the create and a later refresh (e.g. the operator
- * fixes `FACTORY_PUBLISHER_TOKEN` mid-flight) can end up with a stale
- * label/body — an accepted, narrow gap for this thin fold, not a claim
- * that refresh keeps this in sync.
+ * finishes provisioning the factory App mid-flight) can end up with a
+ * stale label/body — an accepted, narrow gap for this thin fold, not a
+ * claim that refresh keeps this in sync.
  *
  * @param token - The publish job's own bearer token.
  * @param owner - The repo owner.
@@ -602,16 +606,16 @@ export async function main(): Promise<void> {
   // built-in GITHUB_TOKEN identity, same reasoning as agentActionRef above:
   // a missing/wrong value here degrades to "post a duplicate comment on a
   // re-dispatch" rather than blocking an otherwise-valid publish. The
-  // workflow sets this from `vars.FACTORY_PUBLISHER_LOGIN` once a
-  // `FACTORY_PUBLISHER_TOKEN` is configured — see that env var's comment
-  // in the workflow for why this can't just be derived automatically.
+  // workflow derives this automatically from the App-token mint step's
+  // `app-slug` output once a factory App token is minted — see that env
+  // var's comment in the workflow for the fallback chain.
   const failureCommentAuthorLogin =
     process.env.IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN ?? IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN;
   // Adjudicated F2 (#40 rework): whether GH_TOKEN above is the
-  // GITHUB_TOKEN fallback (FACTORY_PUBLISHER_TOKEN absent), computed by
-  // the workflow from the same secret this job never sees directly —
-  // this script only ever receives a bearer token string, which carries
-  // no self-describing "which identity am I" signal, so the caller has to
+  // GITHUB_TOKEN fallback (no factory App token minted), computed by the
+  // workflow from a step output this job never sees directly — this
+  // script only ever receives a bearer token string, which carries no
+  // self-describing "which identity am I" signal, so the caller has to
   // tell it. Drives both the PR body's fallback warning and the
   // `no-review-automation` label, so the human merging a fallback-opened
   // PR sees the gap ON THE PR, not just in the Actions log the
