@@ -26,17 +26,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `actions` (Codex P2 finding on this workflow's original PR):
-        # this repo's crown-jewel attack surface is `.github/workflows/**`
-        # (the factory's read-only-agent/privileged-publisher split, the
+        # `actions` (Codex P2 finding, round 1): this repo's crown-jewel
+        # attack surface is `.github/workflows/**` (the factory's
+        # read-only-agent/privileged-publisher split, the
         # publisher-identity token, the pipeline-self-modification guard),
         # and it was entirely outside CodeQL's coverage with only
         # javascript-typescript initialized — a script-injection or
         # missing-permissions defect in `implement-ready-issues.yml` could
         # get a green CodeQL run with the Actions-specific queries never
-        # having run at all. Each language gets its own init/analyze pair
-        # (and its own `category` below) so results don't collide.
-        language: [javascript-typescript, actions]
+        # having run at all.
+        #
+        # `python` (Codex P2 finding, round 2): the repo also has tracked
+        # Python (`snowflake/validate_migrations.py`,
+        # `snowflake/with_connection_env.py`) that the js-ts+actions matrix
+        # left unscanned.
+        #
+        # Each language gets its own init/analyze pair (and its own
+        # `category` below) so results don't collide.
+        language: [javascript-typescript, actions, python]
 
     steps:
       - name: Checkout
