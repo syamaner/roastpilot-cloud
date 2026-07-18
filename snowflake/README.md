@@ -72,16 +72,19 @@ python3 with_connection_env.py schemachange deploy ...
 ```
 
 Any `SNOWFLAKE_*` variable already set in the calling shell wins over what
-`with_connection_env.py` resolves — useful for CI, where the DEV-scoped key
-comes from repo secrets rather than a local `config.toml` (F1-S8/C7; out of
-scope here, see below).
+`with_connection_env.py` resolves, **per field** — useful for CI, where the
+DEV-scoped key comes from repo secrets rather than a local `config.toml`
+(F1-S8/C7; out of scope here, see below).
 
-When `SNOWFLAKE_ACCOUNT` and `SNOWFLAKE_USER` are BOTH already set in the
-calling environment, `with_connection_env.py` skips `config.toml` resolution
-entirely — it never even checks whether the file exists — rather than
-attempting resolution and failing on a missing file. This is exactly CI's
-shape (issue #18): a job with `SNOWFLAKE_*` injected as secrets, no
-`config.toml` on the runner at all.
+`with_connection_env.py` reads `config.toml` whenever it exists and merges
+it in field by field: each individual `SNOWFLAKE_*` value prefers whatever
+the shell already set, and falls back to the profile for anything the shell
+didn't set. A **missing** `config.toml` is tolerated (not an error) — this
+is exactly CI's shape (issue #18): a job with every `SNOWFLAKE_*` field
+already injected as a secret, no `config.toml` on the runner at all, so the
+profile is never actually needed there. A `config.toml` that **exists but
+doesn't contain the requested connection profile** is still a hard error —
+that's a genuine misconfiguration, not "no local file at all".
 
 `resolve_connection_env` also maps a profile's `database`/`schema` fields
 (to `SNOWFLAKE_DATABASE`/`SNOWFLAKE_SCHEMA`) and accepts either
@@ -171,9 +174,9 @@ pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov-report=t
 ```
 
 This is what CI runs, before the offline migration-validation step above —
-so a regression in either script's own logic (connection-profile resolution,
-the env-only CI bypass, recursive migration discovery) is caught
-independently of whatever migrations currently happen to exist.
+so a regression in either script's own logic (the per-field env/profile
+merge, tolerating a missing `config.toml`, recursive migration discovery)
+is caught independently of whatever migrations currently happen to exist.
 
 ## Migration naming
 
