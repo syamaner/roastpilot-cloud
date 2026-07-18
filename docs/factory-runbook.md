@@ -7,19 +7,24 @@ runbook land; this is not meant to be "finished" before it's useful.
 
 ## Kill-switch: stopping the factory
 
-**The pause flag is the primary halt mechanism, and it's race-free.**
-Every factory job (`triage-issues.yml`'s `seed`, `triage`, `apply`;
+**The pause flag is the primary halt mechanism for anything not yet
+started, but it is not reliably race-free against a run that is already
+queued or in progress at the moment you set it.** Every factory job
+(`triage-issues.yml`'s `seed`, `triage`, `apply`;
 `implement-ready-issues.yml`'s `implement`, `publish`) has
-`if: vars.FACTORY_PAUSED != 'true'` as its own job-level condition,
-evaluated by GitHub Actions fresh, before that job's first step runs —
-so a paused job never runs a single step, let alone any agent code. This
-check happens for *every* job attempt, including one whose run was
-*triggered after* the moment you set the flag: there is no window where
-a newly-started run can slip through. That's what makes it race-free,
-and it's why the two mechanisms below are follow-ups for what the flag
-*can't* reach (a run already mid-execution), not prerequisites to it —
-there's no cancel-vs-disable ordering to get right when the flag alone
-already neutralizes the factory.
+`if: vars.FACTORY_PAUSED != 'true'` as its own job-level condition. This
+reliably neutralizes any run *created after* you set the flag — that
+job's `if:` check reads the new value and no-ops, with no exceptions.
+**It does not reliably neutralize a run that was already queued or
+in-progress at flag-set time**: GitHub Actions is understood to snapshot
+repo variables at run-queue time, so such a run's `if:` check may still
+see the OLD value and proceed regardless of what you just set the flag
+to (the exact snapshot-timing behavior needs live verification — tracked
+in #52 — but treat it as unreliable until proven otherwise, since
+assuming otherwise is the unsafe direction). **Because of this, cancelling
+(§2) is a REQUIRED step, not optional, whenever any factory run already
+exists — queued or in-progress — at the moment you set the flag.** Only
+skip §2 if you're certain no factory run was live when you paused.
 
 This is scoped to the **factory** workflows only — `CI`, `CodeQL`,
 `Dependency Review`, and `Claude Code Review` are unaffected, so ordinary
@@ -46,25 +51,26 @@ gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 gh variable list --repo syamaner/roastpilot-cloud
 ```
 
-Takes effect on the **next** job-level `if:` evaluation — which, per the
-race-free property above, means it also covers a run that starts *after*
-you set it, not just runs already queued. It does not touch a job that
-is already past its gate and running (see §2). **A paused factory
-silently drops issues opened during the pause window out of triage — see
-"Resuming after a pause" below before you assume flipping the flag back
-is the whole story.**
+Reliably covers any run whose job-level `if:` is evaluated *after* this
+point — new issues opened, new `workflow_dispatch` calls. **Do not assume
+it also stops a run that was already queued or in-progress when you ran
+this command — check for and cancel those explicitly (§2, required, not
+optional).** **A paused factory silently drops issues opened during the
+pause window out of triage — see "Resuming after a pause" below before
+you assume flipping the flag back is the whole story.**
 
-### 2. Cancel a run that's already mid-execution (only if one exists)
+### 2. Cancel any run already queued or in-progress (REQUIRED whenever one exists)
 
-The flag stops a job from *starting*; it cannot stop a job that's
-already running past its gate — most concretely, `implement-ready-issues.yml`'s
-`publish` job, which deliberately runs with `cancel-in-progress: false`
-(an in-flight publish must finish, never be cut off mid-push — see that
-workflow's own comment) and holds `contents`/`pull-requests`/`issues`
-write. If one was already pushing a branch, opening a PR, or posting a
-comment at the moment you set the flag, it will finish doing so. Check
-for this and cancel it explicitly; don't assume the flag alone caught
-everything.
+**Treat this as a required step, not an optional follow-up**, whenever
+any factory run is queued or in-progress at the moment you set the flag
+— per the caveat above, the flag alone may not stop it. This is
+especially true for `implement-ready-issues.yml`'s `publish` job, which
+deliberately runs with `cancel-in-progress: false` (an in-flight publish
+must finish, never be cut off mid-push — see that workflow's own
+comment) and holds `contents`/`pull-requests`/`issues` write: if one was
+already pushing a branch, opening a PR, or posting a comment, it can keep
+doing so even after you've paused. Check for this and cancel it
+explicitly; never assume the flag alone caught everything.
 
 Because you have not disabled the workflows at this point, their runs
 are trivially listable with a plain `gh run list --workflow <name>` —
@@ -114,11 +120,13 @@ gh api -X POST repos/syamaner/roastpilot-cloud/actions/runs/<run-id>/force-cance
 disabled workflow does not run at all — no jobs, no `pause-notice`, no
 "skipped" rows, nothing — for ANY trigger, until explicitly re-enabled.
 
-**This step is optional**, because the pause flag (§1) already
-neutralizes the factory on its own — a disabled workflow's jobs would
-have no-op'd via the flag anyway. Reach for this only if you want a
-second, independent lever that doesn't depend on the flag/YAML being
-read correctly at all, or to stop *new* runs from starting so they stop
+**This step is optional for NEW runs** — the pause flag (§1) already
+reliably stops any run created from here on, so a disabled workflow's
+jobs would have no-op'd via the flag anyway. It does **not** substitute
+for cancelling (§2) — disabling stops future triggers, not something
+already queued or in-progress. Reach for it if you want a second,
+independent lever that doesn't depend on the flag/YAML being read
+correctly at all, or to stop *new* runs from starting so they stop
 adding `pause-notice` noise during a busy incident. **If you do disable,
 do it after cancelling (§2)** — or pass `-a/--all` to `gh run list` if
 you need to look at a workflow's runs after it's already disabled (a
@@ -143,22 +151,26 @@ migration or a workflow file being deleted and recreated.
 
 ### Emergency halt — full procedure
 
-1. **Set the pause flag** (§1) first, always — it's instant and
-   race-free, and by itself neutralizes every future job attempt.
-2. **Cancel anything already mid-execution** (§2) — only needed if a job
-   was already past its gate and running at the moment you set the flag.
+1. **Set the pause flag** (§1) first, always — instant, and reliably
+   stops the inflow of any run created from this point on.
+2. **Check for and cancel any run already queued or in-progress** (§2) —
+   **required**, not optional, whenever any factory run exists at the
+   moment you set the flag: the flag alone is not proven to stop a run
+   that started before it was set (see §1's caveat; #52 tracks getting a
+   definitive answer on GitHub's exact vars-snapshot timing). Skip this
+   only if you're certain nothing was live.
 3. **Disable the workflows** (§3), optionally — for extra insurance or to
-   stop new-run noise; not required for the halt to be effective, since
-   step 1 already covers it.
+   stop new-run noise; not required for the halt to be effective once
+   steps 1 and 2 are both done.
 
 ### Which to use
 
 | Situation | Use |
 |---|---|
-| Something looks wrong with a specific factory run; want the *next* one to not start while you look | Pause flag (§1) alone |
-| A live incident, runaway loop, or genuine doubt anything is still running | Pause flag (§1), then check for and cancel (§2) anything mid-execution |
+| Nothing is currently running; want the *next* trigger to not start while you look | Pause flag (§1) alone |
+| A live incident, runaway loop, or ANY factory run already queued/in-progress | Pause flag (§1) **+ required cancel** (§2) of anything already live |
 | Extra insurance, or you want new triggers to stop adding noise | Add disable (§3) on top |
-| Routine "we're not touching the factory this week" | Pause flag (§1) alone (cheaper to reverse than re-enabling workflows by ID) |
+| Routine "we're not touching the factory this week" with nothing in flight | Pause flag (§1) alone (cheaper to reverse than re-enabling workflows by ID) |
 
 ## Resuming after a pause — clear the flag, then don't skip the backfill
 
