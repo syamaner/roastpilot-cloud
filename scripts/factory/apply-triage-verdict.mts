@@ -38,6 +38,7 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
+import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   MAX_PAYLOAD_BYTES,
   validateTriageVerdict,
@@ -51,16 +52,6 @@ import {
   type ExistingComment,
 } from "./apply-triage-verdict-logic.mts";
 
-const GITHUB_API = "https://api.github.com";
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
 interface GitHubIssueLabel {
   readonly name: string;
 }
@@ -69,35 +60,6 @@ interface GitHubComment {
   readonly id: number;
   readonly body: string;
   readonly user: { readonly type: string; readonly login: string } | null;
-}
-
-/** Thin wrapper: authenticated JSON request against the GitHub REST API. */
-async function githubRequest<T>(
-  token: string,
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const response = await fetch(`${GITHUB_API}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "<unreadable body>");
-    throw new Error(
-      `GitHub API ${method} ${path} failed: ${response.status} ${text}`,
-    );
-  }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  return (await response.json()) as T;
 }
 
 /**
