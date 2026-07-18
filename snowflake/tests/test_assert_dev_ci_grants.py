@@ -65,6 +65,34 @@ _DEV_WH = "DEV_CI_WH"
 _DEV_ROLE = "ROASTPILOT_DEV_CI_ROLE"
 
 
+class TestAssertBoundaryVarsNotDrifted:
+    """Codex P2, PR #57, round 2: every check in this script trusts
+    SNOWFLAKE_DEV_DATABASE/SNOWFLAKE_DEV_WAREHOUSE AS the allowed boundary
+    -- these tests cover the anchor that catches those vars drifting from
+    their known-correct literal values.
+    """
+
+    def test_passes_for_the_expected_literals(self) -> None:
+        # Must not raise.
+        assert_dev_ci_grants.assert_boundary_vars_not_drifted(_DEV_DB, _DEV_WH)
+
+    def test_raises_systemexit_for_a_drifted_database(self) -> None:
+        try:
+            assert_dev_ci_grants.assert_boundary_vars_not_drifted("SOME_OTHER_DB", _DEV_WH)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert "SNOWFLAKE_DEV_DATABASE" in str(exc)
+            assert "SOME_OTHER_DB" in str(exc)
+
+    def test_raises_systemexit_for_a_drifted_warehouse(self) -> None:
+        try:
+            assert_dev_ci_grants.assert_boundary_vars_not_drifted(_DEV_DB, "SOME_OTHER_WH")
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert "SNOWFLAKE_DEV_WAREHOUSE" in str(exc)
+            assert "SOME_OTHER_WH" in str(exc)
+
+
 class TestIsAllowedGrant:
     def test_allows_the_exact_dev_database(self) -> None:
         assert assert_dev_ci_grants.is_allowed_grant("DATABASE", _DEV_DB, _DEV_ROLE, _DEV_DB, _DEV_WH)
@@ -190,6 +218,18 @@ class TestFindViolations:
         violations = assert_dev_ci_grants.find_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
         assert len(violations) == 1
 
+    def test_reused_against_public_with_its_own_role_name_codex_p1(self) -> None:
+        # Codex P1, PR #57, round 2: PUBLIC's own grants are audited by
+        # reusing this SAME function with role_name="PUBLIC", against
+        # PUBLIC's own SHOW GRANTS TO ROLE PUBLIC rows.
+        rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"}]
+        violations = assert_dev_ci_grants.find_violations(rows, "PUBLIC", _DEV_DB, _DEV_WH)
+        assert len(violations) == 1
+        assert "ROASTPILOT_PREVIEW" in violations[0]
+
+        compliant_rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        assert assert_dev_ci_grants.find_violations(compliant_rows, "PUBLIC", _DEV_DB, _DEV_WH) == []
+
 
 class TestFindOutOfBoundsNames:
     """Codex P1, PR #57: SHOW GRANTS TO ROLE alone can miss a future grant
@@ -221,6 +261,45 @@ class TestFindOutOfBoundsNames:
         assert assert_dev_ci_grants.find_out_of_bounds_names([], _DEV_DB) == []
 
 
+class TestFindUnexpectedUserRoleGrants:
+    """Codex P1, PR #57, round 2: SHOW GRANTS TO USER audit -- the CI
+    service user itself must carry no role beyond the primary role (and
+    PUBLIC, which every Snowflake user has implicitly and can't shed).
+    """
+
+    def test_empty_when_the_user_has_only_the_expected_role(self) -> None:
+        rows = [{"role": _DEV_ROLE}]
+        assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
+
+    def test_public_is_never_flagged(self) -> None:
+        rows = [{"role": _DEV_ROLE}, {"role": "PUBLIC"}]
+        assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
+
+    def test_public_is_never_flagged_case_insensitively(self) -> None:
+        # PUBLIC is Snowflake's own fixed vocabulary here, not a quotable
+        # user identifier -- unlike is_allowed_grant's user-supplied
+        # identifiers, normalizing this one specific case is correct.
+        rows = [{"role": _DEV_ROLE}, {"role": "public"}]
+        assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
+
+    def test_flags_an_unexpected_extra_role(self) -> None:
+        rows = [{"role": _DEV_ROLE}, {"role": "ACCOUNTADMIN"}]
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == ["ACCOUNTADMIN"]
+
+    def test_flags_multiple_unexpected_roles_independently(self) -> None:
+        rows = [{"role": _DEV_ROLE}, {"role": "ACCOUNTADMIN"}, {"role": "SYSADMIN"}]
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == ["ACCOUNTADMIN", "SYSADMIN"]
+
+    def test_empty_rows_is_never_a_violation(self) -> None:
+        assert assert_dev_ci_grants.find_unexpected_user_role_grants([], _DEV_ROLE) == []
+
+    def test_ignores_a_row_with_a_missing_role_field(self) -> None:
+        rows = [{"role": _DEV_ROLE}, {}]
+        assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
+
+
 class TestMain:
     """main()'s own connection/query wiring, with snowflake.connector.connect
     mocked -- there is no real Snowflake credential available to test
@@ -229,10 +308,12 @@ class TestMain:
     correctly, which is what's actually testable without live
     infrastructure access.
 
-    main() now runs THREE sequential queries (SHOW GRANTS, SHOW DATABASES,
-    SHOW WAREHOUSES) against the same cursor -- mock_cursor.fetchall's
-    side_effect is a LIST of three return values, one per call, in that
-    order, rather than a single static return_value.
+    main() now issues SIX sequential statements on the same cursor: `USE
+    SECONDARY ROLES NONE` (no fetchall), then SHOW GRANTS TO ROLE, SHOW
+    DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, and SHOW GRANTS
+    TO USER (each followed by a fetchall) -- mock_cursor.fetchall's
+    side_effect is a LIST of five return values, one per query, in that
+    order.
     """
 
     def _set_required_env(self, monkeypatch, pem: str) -> None:
@@ -248,12 +329,16 @@ class TestMain:
         grant_rows: list[dict[str, object]],
         visible_databases: list[dict[str, object]] | None = None,
         visible_warehouses: list[dict[str, object]] | None = None,
+        public_grant_rows: list[dict[str, object]] | None = None,
+        user_role_rows: list[dict[str, object]] | None = None,
     ) -> MagicMock:
         mock_cursor = MagicMock()
         mock_cursor.fetchall.side_effect = [
             grant_rows,
             visible_databases if visible_databases is not None else [{"name": _DEV_DB}],
             visible_warehouses if visible_warehouses is not None else [{"name": _DEV_WH}],
+            public_grant_rows if public_grant_rows is not None else [],
+            user_role_rows if user_role_rows is not None else [{"role": _DEV_ROLE}],
         ]
         return mock_cursor
 
@@ -278,10 +363,13 @@ class TestMain:
         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
         mock_conn.close.assert_called_once()
 
-    def test_disables_secondary_roles_for_the_session_codex_p1(self, monkeypatch) -> None:
-        # The exact bug this closes (Codex P1, PR #57): without this, other
-        # roles granted to the CI user could contribute privileges this
-        # check never sees.
+    def test_disables_secondary_roles_via_a_real_sql_statement_codex_p1_round2(self, monkeypatch) -> None:
+        # The exact bug this closes (Codex P1, PR #57, round 2): an earlier
+        # fix passed session_parameters={"USE_SECONDARY_ROLES": "NONE"} to
+        # connect() -- invalid, since USE SECONDARY ROLES is a SQL
+        # statement, not a settable session parameter, so that kwarg never
+        # actually disabled anything. The correct fix issues the real
+        # statement via cursor.execute, before any audit query.
         self._set_required_env(monkeypatch, _generate_test_pem())
         mock_cursor = self._mock_cursor(
             [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
@@ -292,8 +380,31 @@ class TestMain:
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn) as mock_connect:
             assert_dev_ci_grants.main()
 
+        # No such kwarg exists anymore -- it never worked.
         _, connect_kwargs = mock_connect.call_args
-        assert connect_kwargs["session_parameters"] == {"USE_SECONDARY_ROLES": "NONE"}
+        assert "session_parameters" not in connect_kwargs
+
+        executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
+        assert executed_statements[0] == "USE SECONDARY ROLES NONE"
+        # Issued before every audit query, not after.
+        assert executed_statements[1] == f"SHOW GRANTS TO ROLE {_DEV_ROLE}"
+
+    def test_audits_show_grants_to_role_public_and_show_grants_to_user_codex_p1_round2(
+        self, monkeypatch
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            assert_dev_ci_grants.main()
+
+        executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
+        assert "SHOW GRANTS TO ROLE PUBLIC" in executed_statements
+        assert "SHOW GRANTS TO USER ROASTPILOT_DEV_CI" in executed_statements
 
     def test_returns_1_when_a_grant_violation_is_found(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
@@ -345,19 +456,53 @@ class TestMain:
         assert exit_code == 1
         assert "PREVIEW_WH" in capsys.readouterr().err
 
-    def test_checks_against_the_real_snowflake_dev_database_env_var_not_a_hardcoded_literal(
-        self, monkeypatch, capsys
-    ) -> None:
-        # Regression guard for the single-source-of-truth fix (claude-review
-        # finding, PR #57): SNOWFLAKE_DEV_DATABASE set to something OTHER
-        # than the "usual" ROASTPILOT_DEV must be what main() actually
-        # checks grants against -- proves this isn't secretly still
-        # checking a hardcoded "ROASTPILOT_DEV" constant regardless of env.
+    def test_returns_1_when_public_has_a_grant_outside_dev_codex_p1_round2(self, monkeypatch, capsys) -> None:
+        # PUBLIC's own grants never show up in SHOW GRANTS TO ROLE
+        # <primary role> -- this is the audit that closes that gap.
         self._set_required_env(monkeypatch, _generate_test_pem())
-        monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", "SOME_OTHER_DEV_DB")
         mock_cursor = self._mock_cursor(
-            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "SOME_OTHER_DEV_DB"}],
-            visible_databases=[{"name": "SOME_OTHER_DEV_DB"}],
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_grant_rows=[{"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ROASTPILOT_PREVIEW" in stderr
+        assert "PUBLIC grant" in stderr
+
+    def test_returns_1_when_the_user_has_an_unexpected_role_codex_p1_round2(self, monkeypatch, capsys) -> None:
+        # Even with secondary roles disabled for THIS session, an extra
+        # role granted to the user could activate in some OTHER session
+        # (e.g. the deploy step's) unless the user-level grant is clean.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            user_role_rows=[{"role": _DEV_ROLE}, {"role": "ACCOUNTADMIN"}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ACCOUNTADMIN" in stderr
+        assert "unexpected role" in stderr
+
+    def test_a_public_role_grant_on_the_user_is_never_flagged_as_unexpected(self, monkeypatch, capsys) -> None:
+        # PUBLIC is implicitly granted to every user and can't be revoked --
+        # SHOW GRANTS TO USER legitimately lists it alongside the primary
+        # role, and that must not be treated as a violation.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            user_role_rows=[{"role": _DEV_ROLE}, {"role": "PUBLIC"}],
         )
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
@@ -367,6 +512,40 @@ class TestMain:
 
         assert exit_code == 0
         assert "confirmed" in capsys.readouterr().out
+
+    def test_raises_systemexit_before_connecting_when_the_database_var_has_drifted_codex_p2_round2(
+        self, monkeypatch
+    ) -> None:
+        # Codex P2, PR #57, round 2: SNOWFLAKE_DEV_DATABASE drifting away
+        # from the known-correct literal must fail LOUDLY and BEFORE any
+        # connection attempt -- not silently audit whatever the drifted
+        # value happens to point at.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setenv("SNOWFLAKE_DEV_DATABASE", "SOME_OTHER_DEV_DB")
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
+            try:
+                assert_dev_ci_grants.main()
+                raise AssertionError("expected SystemExit")
+            except SystemExit as exc:
+                assert "SNOWFLAKE_DEV_DATABASE" in str(exc)
+
+        mock_connect.assert_not_called()
+
+    def test_raises_systemexit_before_connecting_when_the_warehouse_var_has_drifted_codex_p2_round2(
+        self, monkeypatch
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setenv("SNOWFLAKE_DEV_WAREHOUSE", "SOME_OTHER_WH")
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
+            try:
+                assert_dev_ci_grants.main()
+                raise AssertionError("expected SystemExit")
+            except SystemExit as exc:
+                assert "SNOWFLAKE_DEV_WAREHOUSE" in str(exc)
+
+        mock_connect.assert_not_called()
 
     def test_closes_the_connection_even_when_the_query_raises(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())

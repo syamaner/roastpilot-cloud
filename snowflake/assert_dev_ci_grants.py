@@ -3,7 +3,7 @@
 ROASTPILOT_DEV / DEV_CI_WH (F1-S8, issue #11, factory.md §8).
 
 Connects to Snowflake with the SAME identity the live contract-check job
-uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks three
+uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks five
 independent things, all of which must pass:
 
 1. ``SHOW GRANTS TO ROLE <role>`` — every CURRENT object grant on the
@@ -15,15 +15,40 @@ independent things, all of which must pass:
    visibility is the thing that's actually exploitable, so it's checked
    directly rather than trying to enumerate every possible grant
    mechanism that could produce it).
-3. Secondary roles are disabled for this session
-   (``session_parameters={"USE_SECONDARY_ROLES": "NONE"}``, Codex P1,
-   PR #57) — without this, the CI user having ANY other role granted to
-   it (even one never intended for this job) could contribute additional,
-   unaudited privileges to an effective session, independent of what the
-   PRIMARY role's own grants say. The SAME session parameter is set for
-   the deploy step's connection (see `dev-snowflake-contract.yml`) — this
-   check would be meaningless if only ITS OWN connection were restricted
-   while the connection that actually WRITES data stayed exposed.
+3. Secondary roles are disabled for this session via
+   ``USE SECONDARY ROLES NONE`` — a real SQL STATEMENT, executed right
+   after connecting and before any audit query (Codex P1, PR #57, round
+   2). An earlier version of this fix tried
+   ``session_parameters={"USE_SECONDARY_ROLES": "NONE"}`` on `connect()`;
+   that is invalid — `USE SECONDARY ROLES` is not a settable Snowflake
+   session parameter, it's a standalone command, and
+   snowflake-connector-python's `session_parameters` kwarg only applies
+   genuine parameter name/value pairs (verified against the installed
+   connector's own source: zero references to `SECONDARY_ROLES` anywhere,
+   and `session_parameters` is threaded straight into the connection
+   bootstrap as parameter assignments, never as SQL). That version quietly
+   left secondary roles ON. Without disabling them, the CI user having ANY
+   other role granted to it (even one never intended for this job) could
+   contribute additional, unaudited privileges to an effective session,
+   independent of what the PRIMARY role's own grants say. This only
+   protects THIS script's own connection — the schemachange deploy step's
+   connection (see `dev-snowflake-contract.yml`) has no equivalent
+   mid-session hook, so it's covered instead by an operator-run
+   ``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()``,
+   which stops secondary roles activating by default on ANY connection
+   this user makes, this script's included.
+4. ``SHOW GRANTS TO ROLE PUBLIC`` — PUBLIC is active for every Snowflake
+   session regardless of secondary-roles settings, and its own grants
+   never appear in `SHOW GRANTS TO ROLE <primary role>`'s output (Codex
+   P1, PR #57, round 2). A PUBLIC grant reaching outside the DEV boundary
+   would otherwise go completely unaudited by checks #1–#2 above.
+5. ``SHOW GRANTS TO USER <user>`` — confirms the CI service user itself
+   has no role granted to it beyond the primary role (+ PUBLIC, which
+   Snowflake grants to every user implicitly). Disabling secondary roles
+   for THIS session (#3) only protects this audit's own connection; an
+   extra role granted to the user could still activate in some OTHER
+   session (the deploy step's connection, or a future job) unless the
+   user-level grant itself is clean (Codex P1, PR #57, round 2).
 
 This is the F1-S8 acceptance bar: a compromised or misbehaving agent
 holding this role must never be able to touch PROD, PREVIEW, or any other
@@ -36,6 +61,15 @@ checking the boundary AFTER migrations have already been applied would
 let a drifted role's damage happen before this script ever reports it —
 the whole point is to catch drift before it can be used, not just narrate
 it afterward.
+
+Before connecting at all, `main()` also asserts the
+`SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` env vars still equal
+the known-correct literals `ROASTPILOT_DEV`/`DEV_CI_WH` (Codex P2, PR #57,
+round 2) — every check above trusts those vars AS the allowed boundary, so
+if they were ever accidentally (or maliciously) repointed, the whole
+script would silently "bless" the wrong object instead of catching the
+drift. This assertion anchors the boundary to a value that can't move
+just because an env var did.
 
 Deliberately fails CLOSED: an unrecognized object type (a Snowflake
 privilege/object kind this allowlist doesn't know about) is treated as a
@@ -76,14 +110,19 @@ speculatively against undocumented/unverified syntax.
 
 NOTE (operator-supervised validation required): the connection/query
 mechanics below follow Snowflake's documented key-pair (JWT) auth flow and
-`SHOW GRANTS TO ROLE`/`SHOW DATABASES`/`SHOW WAREHOUSES`'s documented
-output columns, but this script has never run against a real Snowflake
-session (no credentials available to the agent that wrote it, per
-factory.md's own "agent jobs hold no Snowflake secrets" invariant). The
-FIRST real dispatch of the gated job is this script's actual validation —
-same "the operator's live dispatch doubles as the audit" pattern already
-used elsewhere in this repo for code that can't be verified without live
-infrastructure access.
+`SHOW GRANTS TO ROLE`/`SHOW GRANTS TO USER`/`SHOW DATABASES`/
+`SHOW WAREHOUSES`'s documented output columns, and `USE SECONDARY ROLES
+NONE`'s documented statement syntax, but this script has never run against
+a real Snowflake session (no credentials available to the agent that
+wrote it, per factory.md's own "agent jobs hold no Snowflake secrets"
+invariant). The FIRST real dispatch of the gated job is this script's
+actual validation — same "the operator's live dispatch doubles as the
+audit" pattern already used elsewhere in this repo for code that can't be
+verified without live infrastructure access. The operator is also
+responsible for running
+``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`` (an
+account-level, elevated-privilege action) before that first dispatch — see
+point 3 above.
 """
 
 from __future__ import annotations
@@ -117,13 +156,14 @@ _DATABASE_SCOPED_OBJECT_TYPES = frozenset(
     }
 )
 
-# Disables secondary roles for the session (Codex P1, PR #57): without
-# this, the CI user having ANY other role granted to it could contribute
-# additional, unaudited privileges to an effective session regardless of
-# what the primary role's own SHOW GRANTS reports. Confining the session
-# to ONLY the primary role's privileges is what makes checking that
-# primary role's grants (and visibility) actually mean something.
-_SECONDARY_ROLES_DISABLED_SESSION_PARAMETERS = {"USE_SECONDARY_ROLES": "NONE"}
+# The known-correct DEV boundary (Codex P2, PR #57, round 2). Every check in
+# this script trusts SNOWFLAKE_DEV_DATABASE/SNOWFLAKE_DEV_WAREHOUSE (env
+# vars, sourced the same way the deploy step's connection is) AS the allowed
+# boundary -- these literals exist purely to catch that trust being misplaced
+# if either var ever drifts from the value it's actually supposed to have.
+# See assert_boundary_vars_not_drifted.
+_EXPECTED_DATABASE = "ROASTPILOT_DEV"
+_EXPECTED_WAREHOUSE = "DEV_CI_WH"
 
 
 def require_env(name: str) -> str:
@@ -132,6 +172,39 @@ def require_env(name: str) -> str:
     if not value:
         raise SystemExit(f"error: missing required environment variable: {name}")
     return value
+
+
+def assert_boundary_vars_not_drifted(database: str, warehouse: str) -> None:
+    """Fails loudly if the DEV boundary env vars have drifted from their
+    known-correct literal values (Codex P2, PR #57, round 2).
+
+    Every check in this script treats `database`/`warehouse` (sourced from
+    `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE`) AS the allowed
+    boundary. That's deliberate -- it's the same source the deploy step's
+    own connection uses, so the check and the deploy can never silently
+    audit a different object than what was actually deployed to (see
+    `is_allowed_grant`'s docstring). But it also means an accidental (or
+    malicious) repoint of either var would make this whole script "bless"
+    the wrong database/warehouse instead of catching the drift. This
+    assertion anchors the boundary to a value that can't move just because
+    an env var did.
+
+    @param database: The `SNOWFLAKE_DEV_DATABASE` value to verify.
+    @param warehouse: The `SNOWFLAKE_DEV_WAREHOUSE` value to verify.
+    @raises SystemExit: If either value doesn't match the expected literal.
+    """
+    if database != _EXPECTED_DATABASE:
+        raise SystemExit(
+            f"error: SNOWFLAKE_DEV_DATABASE is {database!r}, expected "
+            f"{_EXPECTED_DATABASE!r} -- refusing to audit a boundary that "
+            "may have silently drifted from the known-correct DEV database"
+        )
+    if warehouse != _EXPECTED_WAREHOUSE:
+        raise SystemExit(
+            f"error: SNOWFLAKE_DEV_WAREHOUSE is {warehouse!r}, expected "
+            f"{_EXPECTED_WAREHOUSE!r} -- refusing to audit a boundary that "
+            "may have silently drifted from the known-correct DEV warehouse"
+        )
 
 
 def load_private_key_der(pem_text: str, passphrase: str | None) -> bytes:
@@ -172,7 +245,8 @@ def is_allowed_grant(
     own connection already uses, so if either is ever repointed (e.g. a
     future DEV database rename), this check and the deploy step can never
     silently drift apart into checking a different boundary than what was
-    actually deployed to.
+    actually deployed to. `main()` separately anchors those vars against
+    silent drift -- see `assert_boundary_vars_not_drifted`.
 
     Comparisons are CASE-SENSITIVE for every user-influenceable identifier
     (`name`, `role_name`, `allowed_database`, `allowed_warehouse`) — see
@@ -223,6 +297,11 @@ def find_violations(
     description of each one that violates the DEV boundary — empty if none
     do.
 
+    Also used to audit PUBLIC's own grants (Codex P1, PR #57, round 2): the
+    caller passes `role_name="PUBLIC"` and PUBLIC's own `SHOW GRANTS TO
+    ROLE PUBLIC` rows, reusing the exact same boundary logic rather than
+    duplicating it for a second role.
+
     @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO ROLE <role_name>`.
     @param role_name: The role being checked.
@@ -260,6 +339,45 @@ def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> lis
     return [name for name in visible_names if name.strip() != allowed_stripped]
 
 
+def find_unexpected_user_role_grants(
+    user_role_rows: list[dict[str, object]], expected_role: str
+) -> list[str]:
+    """Scans `SHOW GRANTS TO USER` rows and returns every granted role name
+    other than the expected primary role and PUBLIC (Codex P1, PR #57,
+    round 2).
+
+    PUBLIC is implicitly granted to every Snowflake user and can't be
+    revoked, so it's excluded here deliberately -- it's audited separately
+    via `find_violations(..., role_name="PUBLIC", ...)` against PUBLIC's
+    own `SHOW GRANTS TO ROLE PUBLIC` rows, not flagged as an unexpected
+    user-role grant. Any OTHER role reaching this far means the CI service
+    user itself carries a role beyond the one this whole audit was scoped
+    to -- a role that could activate as a secondary role in some OTHER
+    session (not just this script's own, which disables secondary roles
+    for itself) unless the user-level grant is clean.
+
+    @param user_role_rows: Rows as returned by a `DictCursor` running `SHOW
+        GRANTS TO USER <user>` -- each row's `role` column names a granted
+        role.
+    @param expected_role: The one role this user should have, beyond
+        PUBLIC.
+    @returns: Names of every unexpected role granted to the user, empty if
+        none.
+    """
+    expected_role_stripped = expected_role.strip()
+    unexpected = []
+    for row in user_role_rows:
+        role_name = str(row.get("role", "")).strip()
+        if not role_name:
+            continue
+        if role_name == expected_role_stripped:
+            continue
+        if role_name.upper() == "PUBLIC":
+            continue
+        unexpected.append(role_name)
+    return unexpected
+
+
 def main() -> int:
     account = require_env("SNOWFLAKE_ACCOUNT")
     user = require_env("SNOWFLAKE_DEV_USER")
@@ -269,6 +387,8 @@ def main() -> int:
     private_key_pem = require_env("SNOWFLAKE_DEV_PRIVATE_KEY")
     passphrase = os.environ.get("SNOWFLAKE_DEV_PRIVATE_KEY_PASSPHRASE") or None
 
+    assert_boundary_vars_not_drifted(database, warehouse)
+
     private_key_der = load_private_key_der(private_key_pem, passphrase)
 
     conn = snowflake.connector.connect(
@@ -277,13 +397,15 @@ def main() -> int:
         role=role,
         warehouse=warehouse,
         private_key=private_key_der,
-        # Codex P1, PR #57 -- see the module docstring's point 3. Without
-        # this, other roles granted to the CI user could contribute
-        # privileges this check never sees.
-        session_parameters=_SECONDARY_ROLES_DISABLED_SESSION_PARAMETERS,
     )
     try:
         cursor = conn.cursor(snowflake.connector.DictCursor)
+
+        # Codex P1, PR #57, round 2 -- see the module docstring's point 3.
+        # USE SECONDARY ROLES is a SQL STATEMENT, not a settable session
+        # parameter; issuing it here, before any audit query below, is what
+        # actually confines this session to the primary role alone.
+        cursor.execute("USE SECONDARY ROLES NONE")
 
         cursor.execute(f"SHOW GRANTS TO ROLE {role}")
         grant_rows = cursor.fetchall()
@@ -293,29 +415,50 @@ def main() -> int:
 
         cursor.execute("SHOW WAREHOUSES")
         visible_warehouses = [str(row["name"]) for row in cursor.fetchall()]
+
+        # Codex P1, PR #57, round 2 -- see the module docstring's point 4.
+        cursor.execute("SHOW GRANTS TO ROLE PUBLIC")
+        public_grant_rows = cursor.fetchall()
+
+        # Codex P1, PR #57, round 2 -- see the module docstring's point 5.
+        cursor.execute(f"SHOW GRANTS TO USER {user}")
+        user_role_rows = cursor.fetchall()
     finally:
         conn.close()
 
     violations = find_violations(grant_rows, role, database, warehouse)
+    public_violations = find_violations(public_grant_rows, "PUBLIC", database, warehouse)
     out_of_bounds_databases = find_out_of_bounds_names(visible_databases, database)
     out_of_bounds_warehouses = find_out_of_bounds_names(visible_warehouses, warehouse)
+    unexpected_user_roles = find_unexpected_user_role_grants(user_role_rows, role)
 
-    if violations or out_of_bounds_databases or out_of_bounds_warehouses:
+    if (
+        violations
+        or public_violations
+        or out_of_bounds_databases
+        or out_of_bounds_warehouses
+        or unexpected_user_roles
+    ):
         print(
             f"error: {role} reaches outside {database}/{warehouse}:",
             file=sys.stderr,
         )
         for violation in violations:
             print(f"  - grant: {violation}", file=sys.stderr)
+        for violation in public_violations:
+            print(f"  - PUBLIC grant: {violation}", file=sys.stderr)
         for extra_database in out_of_bounds_databases:
             print(f"  - visible database beyond the DEV boundary: {extra_database}", file=sys.stderr)
         for extra_warehouse in out_of_bounds_warehouses:
             print(f"  - visible warehouse beyond the DEV boundary: {extra_warehouse}", file=sys.stderr)
+        for extra_role in unexpected_user_roles:
+            print(f"  - unexpected role granted to {user}: {extra_role}", file=sys.stderr)
         return 1
 
     print(
-        f"confirmed: all {len(grant_rows)} grant(s) on {role} stay within {database}/{warehouse}, "
-        f"and no other database/warehouse is visible to this role"
+        f"confirmed: all {len(grant_rows)} grant(s) on {role} and {len(public_grant_rows)} on PUBLIC "
+        f"stay within {database}/{warehouse}, no other database/warehouse is visible, and {user} "
+        "has no unexpected role grants"
     )
     return 0
 

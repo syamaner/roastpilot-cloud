@@ -49,12 +49,30 @@ name: DEV Snowflake Contract Check
 #    already been applied would let a drifted role's damage happen before
 #    this job ever reports it. See that step's own comment for how a
 #    failure there automatically skips the deploy step that follows.
-# 7. Secondary roles are disabled for BOTH Snowflake connections in this
-#    job (Codex P1, PR #57 — `session_parameters`/`SNOWFLAKE_SESSION_
-#    PARAMETERS` on the grants-assertion and deploy steps respectively):
-#    without this, ANY other role granted to the CI user could contribute
-#    unaudited privileges to an effective session, regardless of what the
-#    PRIMARY role's own grants/visibility checks report.
+# 7. Secondary roles are kept off for BOTH Snowflake connections in this
+#    job, by two DIFFERENT mechanisms (Codex P1, PR #57, round 2 — an
+#    earlier attempt tried a single `session_parameters`/
+#    `SNOWFLAKE_SESSION_PARAMETERS` mechanism for both, which turned out to
+#    be invalid; `USE SECONDARY ROLES` is a SQL statement, not a settable
+#    session parameter):
+#      - the grants-assertion step issues `USE SECONDARY ROLES NONE` as a
+#        real statement on its own connection (assert_dev_ci_grants.py);
+#      - the deploy step has no equivalent mid-session hook (schemachange
+#        owns that connection), so the OPERATOR runs
+#        `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
+#        once, account-side, which stops secondary roles activating by
+#        default on ANY connection this user makes — the deploy step's
+#        included. See the deploy step's own comment.
+#    Without one of these covering each connection, ANY other role granted
+#    to the CI user could contribute unaudited privileges to an effective
+#    session, regardless of what the PRIMARY role's own grants/visibility
+#    checks report.
+# 8. `concurrency` (below) serializes dispatches of this job so two
+#    concurrent runs can never execute `schemachange deploy` against the
+#    same change-history table at once — `cancel-in-progress: false`
+#    because a mid-migration run must never be orphaned by a newer
+#    dispatch, the same reasoning implement-ready-issues.yml uses for its
+#    own concurrency group.
 #
 # NOTE (operator-supervised validation required): the live-connection code
 # paths in with_connection_env.py/assert_dev_ci_grants.py, and this
@@ -70,11 +88,26 @@ on:
 # Default-deny; the job below declares exactly the scope it needs.
 permissions: {}
 
+# Serializes dispatches (Codex P2, PR #57, round 2): two concurrent runs
+# executing `schemachange deploy` against the same change-history table at
+# once is a migration race. cancel-in-progress stays false -- never cancel
+# a run that may be mid-migration, same reasoning implement-ready-issues.yml
+# uses for its own concurrency group.
+concurrency:
+  group: dev-snowflake-contract
+  cancel-in-progress: false
+
 jobs:
   contract-check:
     name: Live contract check + grants assertion (ROASTPILOT_DEV)
     runs-on: ubuntu-latest
     environment: dev-snowflake-ci
+    # Codex P2, PR #57, round 2: bounds how long this job can hold the
+    # writable key + the DEV warehouse resource before GitHub force-
+    # terminates it -- without this, a stalled/locked migration would keep
+    # both alive until Actions' own default (hours), not this job's actual
+    # expected runtime (a schema migration against a tiny XSMALL warehouse).
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -126,17 +159,20 @@ jobs:
         # blocks the deploy without any extra conditional logic to get
         # wrong.
         # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
-        # DATABASES, or SHOW WAREHOUSES report anything outside the DEV
-        # database/warehouse this role is provisioned to touch
-        # (assert_dev_ci_grants.py, #11). Connects directly via
-        # snowflake-connector-python with the key held in memory only,
-        # never written to disk (unlike the deploy step below, which needs
-        # schemachange's file-based env layer). Secondary roles are
-        # disabled for this session (session_parameters in the script
-        # itself) — the SAME restriction is applied to the deploy
-        # connection below, since a check on ONE connection would be
-        # meaningless if the connection that actually writes data stayed
-        # exposed to other roles' privileges.
+        # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW DATABASES, or
+        # SHOW WAREHOUSES report anything outside the DEV database/
+        # warehouse this role is provisioned to touch (assert_dev_ci_
+        # grants.py, #11). Connects directly via snowflake-connector-python
+        # with the key held in memory only, never written to disk (unlike
+        # the deploy step below, which needs schemachange's file-based env
+        # layer). Secondary roles are disabled for this session via a real
+        # `USE SECONDARY ROLES NONE` statement the script issues right
+        # after connecting (Codex P1, PR #57, round 2 -- an earlier
+        # `session_parameters` attempt here was invalid and never actually
+        # worked). The deploy connection below has no equivalent mid-
+        # session hook, so it's covered instead by an operator-run
+        # `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
+        # -- see that step's own comment.
         working-directory: snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -147,7 +183,9 @@ jobs:
           # assert_dev_ci_grants.py checks grants against THIS value, not a
           # hardcoded literal (claude-review finding, PR #57), so the two
           # steps can never silently check a different database boundary
-          # than what's actually deployed to.
+          # than what's actually deployed to. The script itself separately
+          # asserts this var (and the warehouse one) hasn't drifted from
+          # its known-correct literal (Codex P2, PR #57, round 2).
           SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
         run: python3 assert_dev_ci_grants.py
@@ -173,14 +211,19 @@ jobs:
           SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
           SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
-          # Disables secondary roles for this connection too (Codex P1, PR
-          # #57 — same reasoning as the grants-assertion step above): the
-          # ONE connection that actually writes data must never run with
-          # more effective privilege than the primary role the
-          # grants-assertion step just verified. schemachange reads this
-          # env var natively (SNOWFLAKE_SESSION_PARAMETERS, JSON format —
-          # verified against the installed package's source, #18/#57).
-          SNOWFLAKE_SESSION_PARAMETERS: '{"USE_SECONDARY_ROLES": "NONE"}'
+          # OPERATOR DEPENDENCY (Codex P1, PR #57, round 2): this
+          # connection has no mid-session hook to disable secondary roles
+          # the way the grants-assertion step's own `USE SECONDARY ROLES
+          # NONE` statement does -- schemachange owns the connection and
+          # runs its own migration SQL, not ours. An earlier attempt set
+          # `SNOWFLAKE_SESSION_PARAMETERS: '{"USE_SECONDARY_ROLES":
+          # "NONE"}'` here; that was invalid (USE SECONDARY ROLES is a SQL
+          # statement, not a settable session parameter) and never actually
+          # worked. Instead, the operator runs, once, account-side:
+          #   ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()
+          # which stops secondary roles activating by default on ANY
+          # connection this user makes -- this one included -- without
+          # needing a per-connection mechanism at all.
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
         run: |
           set -euo pipefail

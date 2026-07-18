@@ -161,16 +161,37 @@ real, DEV-scoped CI key (`ROASTPILOT_DEV_CI`, role
 `ROASTPILOT_DEV` with that same key — checking the boundary before
 writing anything, not after.
 
-The grants check covers three independent things, all of which must pass:
-`SHOW GRANTS TO ROLE` (current object grants), `SHOW DATABASES`/`SHOW
-WAREHOUSES` (nothing else is even VISIBLE to the role — closes the gap a
-future grant would leave in `SHOW GRANTS` alone), and secondary roles
-disabled for the session on BOTH the grants-check and deploy connections
-(so no other role granted to the CI user can contribute unaudited
-privileges). Identifier comparisons are case-sensitive throughout, since
-Snowflake preserves the case of a quoted identifier and a naive
-uppercase-both-sides comparison would conflate a quoted, out-of-bounds
-object with the real one.
+The grants check covers five independent things, all of which must pass:
+`SHOW GRANTS TO ROLE` (current object grants on the primary role),
+`SHOW DATABASES`/`SHOW WAREHOUSES` (nothing else is even VISIBLE to the
+role — closes the gap a future grant would leave in `SHOW GRANTS` alone),
+`SHOW GRANTS TO ROLE PUBLIC` (PUBLIC is active for every session regardless
+of secondary-roles settings and its grants never show up under the primary
+role's own `SHOW GRANTS`, so it's audited separately against the same
+boundary), and `SHOW GRANTS TO USER` (the CI service user itself carries no
+role beyond the primary one, plus PUBLIC). Identifier comparisons are
+case-sensitive throughout, since Snowflake preserves the case of a quoted
+identifier and a naive uppercase-both-sides comparison would conflate a
+quoted, out-of-bounds object with the real one.
+
+Before connecting, the script also asserts
+`SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` still equal the known-
+correct literals `ROASTPILOT_DEV`/`DEV_CI_WH` — every check above trusts
+those vars AS the boundary, so this anchors them against silently drifting
+to point at the wrong object.
+
+**Secondary roles** are kept off for both connections in this job, by two
+different mechanisms — `USE SECONDARY ROLES` is a SQL statement, not a
+settable session parameter, so a single `session_parameters`-style
+mechanism can't cover both:
+
+- The grants-check connection issues a real `USE SECONDARY ROLES NONE`
+  statement right after connecting, before any audit query.
+- The deploy connection has no equivalent mid-session hook (schemachange
+  owns it), so it's covered instead by an **operator-run, one-time,
+  account-level action**: `ALTER USER ROASTPILOT_DEV_CI SET
+  DEFAULT_SECONDARY_ROLES = ()`, which stops secondary roles activating by
+  default on any connection this user makes.
 
 Per the factory security model (`factory.md` §8: agent jobs hold no
 Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
