@@ -36,7 +36,15 @@ on:
       max_turns:
         description: "Hard cap on the implement agent's conversation turns (factory.md §12 open item 2's token-budget guardrail). Plain integer, 1-200."
         required: false
-        default: "40"
+        # Raised 40 -> 80 (issue #26 live dispatch): the first run with a
+        # working sandbox + edit-tools grant correctly implemented the
+        # story but hit error_max_turns at 41 (over the old default of 40)
+        # — implement + self-verify + real-world friction needs more
+        # headroom than 40 turns provides. The pre-install-dependencies fix
+        # alongside this change should mean far fewer turns get burned on
+        # dead-end diagnosis going forward, but a bigger budget is cheap
+        # insurance regardless.
+        default: "80"
 
 concurrency:
   group: implement-issue-${{ inputs.issue_number }}
@@ -231,6 +239,65 @@ jobs:
             exit 1
           fi
           echo "Confirmed: no Snowflake/Vercel secrets present."
+
+      - name: Install dependencies (before the agent runs, so it never has to)
+        # FIX (issue #26 live dispatch, third finding via the #31 transcript
+        # artifact — run 29638727808): the edit-tools grant (previous PR)
+        # worked — the agent wrote app/api/health/route.ts and its test
+        # correctly (Write 3 calls, Edit 1, an 801-byte 2-file patch) — but
+        # the job still failed: `error_max_turns` at 41 turns (default cap
+        # 40). The transcript's exact Bash-call sequence shows why, and it
+        # is NOT a missing-exploration-tool problem (the transcript shows
+        # zero Glob/Grep/LS attempts of any kind — the agent explored fine
+        # via targeted Read/find/cat calls and wrote correct code without
+        # ever needing them):
+        #
+        #   1. `npm run typecheck` (allowlisted, ran) FAILED for real:
+        #      "Cannot find module 'next/server'" — because node_modules/
+        #      was completely empty (`ls node_modules | wc -l` => 0).
+        #      Nothing installs dependencies anywhere in THIS job before
+        #      the agent starts — the only npm ci was in "Run local gates",
+        #      which runs AFTER the agent, as an independent re-check.
+        #   2. The agent correctly diagnosed this and tried `npm install`
+        #      itself (bare, exactly the allowlisted form) — it ran, but
+        #      npm itself failed: `npm error code EROFS / syscall symlink /
+        #      path ../@babel/parser/bin/babel-parser.js` — a genuine,
+        #      deterministically-repeated (3 separate attempts, identical
+        #      failure each time) filesystem-level read-only error trying
+        #      to create a symlink under node_modules/.bin/, not a Claude
+        #      tool-permission denial. (Separately, and NOT the same
+        #      mechanism: bare `touch`/`mkdir` under node_modules/ WERE
+        #      denied by Claude's own Bash-tool policy, independent of this
+        #      job's allowedTools — the exact interaction between
+        #      bubblewrap's sandbox and node_modules writes is not fully
+        #      characterized, and doesn't need to be: the fix below removes
+        #      the agent's need to ever write there at all.)
+        #   3. With node_modules never actually populated, `npm run test`/
+        #      `npm run lint`/`npm run build` (all allowlisted, all ran)
+        #      each failed with "Exit code 127" / "command not found" —
+        #      vitest/eslint/next were never installed, so there was
+        #      nothing for those commands to invoke. The agent spent a
+        #      large share of its 41 turns on diagnostic dead ends (mount
+        #      checks, write-permission probes, Claude settings-file
+        #      checks, retrying npm install with different flags) trying to
+        #      recover from a condition no amount of retrying could fix
+        #      from inside its own session.
+        #
+        # Fix: install dependencies HERE — a plain, unsandboxed workflow
+        # step (this is the SAME trusted `npm ci` operation the "Run local
+        # gates" step already runs later, against the SAME pristine,
+        # not-yet-agent-touched checkout of main; running it twice is
+        # cheap and safe, not a new exposure), so node_modules/ is fully
+        # populated BEFORE the agent's own bwrap-sandboxed Bash subprocess
+        # ever runs. The agent's gate self-checks can then just find
+        # vitest/eslint/tsc/next already present and READ/EXECUTE them
+        # (unlike the WRITE that failed above) — and if it re-runs
+        # `npm install`/`npm ci` out of habit, there is nothing new left to
+        # write, so nothing left to hit EROFS on either.
+        run: |
+          set -euo pipefail
+          npm ci
+          echo "Confirmed: dependencies installed before the agent runs."
 
       - name: Install bubblewrap
         # Required by CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 above — the
@@ -450,8 +517,10 @@ jobs:
             hygiene, and the Architecture Invariants section. Implement
             the issue's acceptance criteria as a thin, focused change.
 
-            Run the repo's local gates yourself before you finish (lint,
-            typecheck, unit tests, build) and fix anything they catch — a
+            Dependencies are already installed (npm ci ran before you
+            started) — you do not need to run `npm install` or `npm ci`
+            yourself. Run the repo's local gates directly (lint, typecheck,
+            unit tests, build) and fix anything they catch — a
             deterministic step outside your control re-runs them
             independently afterward and treats a failure as grounds to
             discard your work entirely, so do not skip this.
