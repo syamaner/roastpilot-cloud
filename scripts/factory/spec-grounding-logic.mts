@@ -485,21 +485,35 @@ function buildStructuralView(text: string): string {
       }
       continue;
     }
-    let masked = joined;
+    // LINEAR masking, not quadratic (Codex finding, PR #70 review round
+    // 10 — a real resource-exhaustion DoS, category (a), verified
+    // empirically before fixing: a synthetic body with thousands of
+    // identical inline-code spans took measurably super-linear time with
+    // the earlier approach). The earlier version re-searched the
+    // progressively-MUTATED `masked` string from the SAME fixed
+    // `contentOffset` on every child — for k identical spans, the kth
+    // search had to scan past the (k-1) already-masked occurrences
+    // before it, an O(k) search repeated k times, and each match also
+    // rebuilt the WHOLE string via `.slice`/`+` concatenation (another
+    // O(n) cost per match) — O(n²) total for a pathological body. Fixed
+    // by (a) searching the ORIGINAL, never-mutated `joined` string with
+    // a MONOTONICALLY ADVANCING cursor — each child's search starts
+    // exactly where the PREVIOUS child's match ended, so no character is
+    // ever re-scanned across the whole token, and (b) building the
+    // result as an array of segments joined ONCE at the end, instead of
+    // repeated whole-string reconstruction. Children are already in
+    // document order (markdown-it's own guarantee), so a monotonic
+    // cursor is correct, not just fast: each child's span genuinely
+    // appears strictly after the previous child's in the source.
+    let searchCursor = contentOffset;
+    let copiedThroughIndex = 0;
+    const maskedSegments: string[] = [];
     for (const child of token.children) {
       if (child.type !== "code_inline") {
         continue;
       }
       const originalSpan = `${child.markup}${child.content}${child.markup}`;
-      // Search starting from contentOffset: the span can only legitimately
-      // sit within the inline content itself, never inside a container
-      // prefix that happens to look similar. Searching the FULL (already
-      // partially-masked, on a later iteration) `masked` string from this
-      // fixed start point also correctly handles duplicate spans on the
-      // same line — once the first occurrence is masked to whitespace, it
-      // no longer literally matches `originalSpan`, so the next search
-      // naturally lands on the next real occurrence instead.
-      const index = masked.indexOf(originalSpan, contentOffset);
+      const index = joined.indexOf(originalSpan, searchCursor);
       if (index === -1) {
         // Genuinely reachable, not just defensive (verified empirically:
         // `` `` `text` `` `` triggers this) -- CommonMark strips exactly
@@ -513,16 +527,21 @@ function buildStructuralView(text: string): string {
         // (Codex finding, PR #70 review round 8): this token's line
         // range is recorded so a literal `<!--` inside the unmasked
         // span can't be mistaken for a real comment opener downstream.
+        // Deliberately does NOT advance searchCursor -- a later child's
+        // span could still legitimately sit between here and the next
+        // match.
         for (let i = start; i < end; i++) {
           fallbackProtectedLines.add(i);
         }
         continue;
       }
-      masked =
-        masked.slice(0, index) +
-        neuterPreservingNewlines(originalSpan) +
-        masked.slice(index + originalSpan.length);
+      maskedSegments.push(joined.slice(copiedThroughIndex, index));
+      maskedSegments.push(neuterPreservingNewlines(originalSpan));
+      copiedThroughIndex = index + originalSpan.length;
+      searchCursor = copiedThroughIndex;
     }
+    maskedSegments.push(joined.slice(copiedThroughIndex));
+    const masked = maskedSegments.join("");
     const maskedSplit = masked.split("\n");
     for (let i = start; i < end && i < maskedLines.length; i++) {
       maskedLines[i] = maskedSplit[i - start] ?? maskedLines[i] ?? "";

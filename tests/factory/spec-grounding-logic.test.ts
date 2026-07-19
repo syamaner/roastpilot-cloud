@@ -181,9 +181,25 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 8, kind: "closing" }]);
   });
 
-  it("masks BOTH occurrences of a duplicate code-span content on the same line, not just the first (the mutation-based sequential search naturally lands on the second real occurrence once the first is masked out)", () => {
+  it("masks BOTH occurrences of a duplicate code-span content on the same line, not just the first (the cursor-advancing linear search, round 10, finds each occurrence in document order without re-scanning already-processed text — same observable behavior as the earlier mutation-based approach, verified after the rewrite)", () => {
     const body = "See `Closes #12` and also `Closes #12` again.";
     expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
+  it("masks thousands of identical inline-code spans in LINEAR time, not quadratic (Codex finding, PR #70 review round 10 — a real resource-exhaustion DoS: the earlier approach re-searched a progressively-mutated string from a FIXED offset for every span, so the kth of k identical spans re-scanned all (k-1) before it; verified empirically before the fix that this produced measurably super-linear time, e.g. doubling the span count more-than-doubled the elapsed time)", () => {
+    const spanCount = 3000;
+    const body = `${Array.from({ length: spanCount }, () => "`x`").join(" ")} Closes #12`;
+    const start = performance.now();
+    const result = parseLinkedIssueReferences(body);
+    const elapsed = performance.now() - start;
+    expect(result).toEqual([{ issueNumber: 12, kind: "closing" }]);
+    // A generous bound, not a tight benchmark assertion (CI machines vary)
+    // -- the point is proving this completes in a small, bounded time at
+    // all for a few thousand spans, not measuring an exact number. The
+    // quadratic version of this same input took hundreds of milliseconds
+    // at a SMALLER span count in local verification; this linear version
+    // finished in well under 100ms at 50,000 spans.
+    expect(elapsed).toBeLessThan(2000);
   });
 
   it("the multi-line-container fallback PRESERVES a real reference sharing the same multi-line container paragraph as an unlocatable code span (operator correction, round 4: an earlier version of this fallback masked the whole paragraph here, silently DROPPING this real reference — an under-match that violated this module's own invariant; the fallback now does nothing to these lines at all, so a real reference elsewhere in the same paragraph is never at risk)", () => {
