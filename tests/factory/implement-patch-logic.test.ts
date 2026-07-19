@@ -12,6 +12,7 @@ import {
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
+  findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -240,9 +241,12 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
 
   it("flags snowflake/pytest.toml specifically (Codex finding, F1-S9 slice 1, issue #12, ready round 2 — the pinned pytest 9.x reads pytest.toml as implicit config, same as pyproject.toml)", () => {
     expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
-    // Not the root-level file — same "not what this repo's pytest would
-    // ever read" reasoning as the other pytest config exact-matches.
-    expect(isTestFilePath("pytest.toml")).toBe(false);
+  });
+
+  it("ALSO flags a root-level pytest.ini/pytest.toml/tox.ini (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — corrects a round-3 error: pytest's CONFIG-FILE discovery ASCENDS parent directories from snowflake/ looking for the first recognized file, unlike conftest.py collection, which never walks above rootdir — a repo-root pytest.ini/pytest.toml/tox.ini WOULD genuinely be honored)", () => {
+    expect(isTestFilePath("pytest.ini")).toBe(true);
+    expect(isTestFilePath("pytest.toml")).toBe(true);
+    expect(isTestFilePath("tox.ini")).toBe(true);
   });
 
   it("flags snowflake/conftest.py (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — pytest loads conftest.py automatically and it can hook collection/reporting itself, the same class as the config files above)", () => {
@@ -250,19 +254,24 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     // A repo-root conftest.py is DELIBERATELY not flagged: this repo's
     // pytest invocation (working-directory: snowflake, no ini file
     // anywhere) resolves rootdir to snowflake/ itself, and pytest's own
-    // conftest.py collection never walks ABOVE rootdir — same "not what
-    // this invocation would ever read" reasoning as the root-level
-    // pyproject.toml/setup.cfg exclusion.
+    // conftest.py COLLECTION never walks ABOVE rootdir — this is a
+    // DIFFERENT algorithm from config-FILE discovery above (which does
+    // ascend), so this exclusion is still correct even after round 4's
+    // pytest.ini/pytest.toml/tox.ini correction.
     expect(isTestFilePath("conftest.py")).toBe(false);
   });
 
-  it("does NOT flag a root-level pyproject.toml/setup.cfg — not what this repo's pytest invocation would ever read", () => {
-    // Deliberately narrow, per the finding: over-flagging is the safe
-    // direction for a REAL discovery-config path, but a root pyproject.toml
-    // in THIS repo would almost certainly be unrelated Next.js/npm
-    // tooling — pytest's own config search starts from the invocation
-    // directory (snowflake/, per ci.yml's working-directory), not the
-    // repo root, so a root file isn't what it would ever read here.
+  it("does NOT flag a root-level pyproject.toml/setup.cfg BY PATH ALONE — not a blanket exclusion, just not this classifier's mechanism for these two files", () => {
+    // Deliberately narrow (round 3), STILL correct after round 4 — but
+    // for a different reason than originally claimed: pyproject.toml and
+    // setup.cfg ARE reachable by the same ascending config-file search
+    // pytest.ini/pytest.toml/tox.ini are (round 4 corrected that part of
+    // the claim). They're excluded from the PATH-only check specifically
+    // because they're high-frequency, legitimately-edited files for
+    // reasons unrelated to pytest — an unconditional path flag would
+    // over-trigger constantly. See findAddedRootPytestConfigSections's
+    // own tests for the TARGETED, content-based mechanism that actually
+    // covers these two files.
     expect(isTestFilePath("pyproject.toml")).toBe(false);
     expect(isTestFilePath("setup.cfg")).toBe(false);
   });
@@ -670,12 +679,140 @@ describe("findAddedPackageJsonTestScriptEdits (Codex finding, F1-S9 slice 1, iss
     ].join("\n");
     expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
   });
+
+  it("flags a MULTILINE key-split (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — valid JSON allows the key and its colon on separate lines; an earlier version required them on the SAME line and missed this entirely)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,3 @@",
+      '   "scripts": {',
+      '+    "test"',
+      '+    : "echo ok",',
+      "   },",
+    ].join("\n");
+    // Both added lines are reported: the key-only line matches the
+    // quote-anchored key token (no trailing colon required anymore); the
+    // colon-only line matches nothing, which is fine — the KEY line alone
+    // is what proves this evasion is closed.
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toContain('"test"');
+  });
+
+  it("flags an added preinstall/install/postinstall lifecycle hook (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — npm ci runs these BEFORE this workflow's own gates)", () => {
+    for (const key of ["preinstall", "install", "postinstall"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
+
+  it("flags an added prepare or prepublishOnly hook", () => {
+    for (const key of ["prepare", "prepublishOnly"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
+
+  it("still does NOT flag prepublish (bare, without Only) — round 4's install/prepare/prepublishOnly additions don't widen the existing prepublish exclusion", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "prepublish": "npm run build",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+});
+
+describe("findAddedRootPytestConfigSections (Codex finding, F1-S9 slice 1, issue #12, ready round 4)", () => {
+  it("flags an added [tool.pytest.ini_options] section in a root pyproject.toml", () => {
+    const patch = [
+      "diff --git a/pyproject.toml b/pyproject.toml",
+      "--- a/pyproject.toml",
+      "+++ b/pyproject.toml",
+      "@@ -1,1 +1,3 @@",
+      ' name = "x"',
+      "+[tool.pytest.ini_options]",
+      '+addopts = "-k not slow"',
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual(["[tool.pytest.ini_options]"]);
+  });
+
+  it("flags an added [tool:pytest] section in a root setup.cfg", () => {
+    const patch = [
+      "diff --git a/setup.cfg b/setup.cfg",
+      "--- a/setup.cfg",
+      "+++ b/setup.cfg",
+      "@@ -1,1 +1,2 @@",
+      " [metadata]",
+      "+[tool:pytest]",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual(["[tool:pytest]"]);
+  });
+
+  it("does NOT flag an ordinary root pyproject.toml edit with no pytest section (the targeted-fix requirement)", () => {
+    const patch = [
+      "diff --git a/pyproject.toml b/pyproject.toml",
+      "--- a/pyproject.toml",
+      "+++ b/pyproject.toml",
+      "@@ -1,1 +1,2 @@",
+      ' name = "x"',
+      '+version = "1.0.1"',
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a pytest-section-shaped line in a file OTHER than pyproject.toml/setup.cfg", () => {
+    const patch = [
+      "diff --git a/notes.md b/notes.md",
+      "--- a/notes.md",
+      "+++ b/notes.md",
+      "@@ -1,1 +1,2 @@",
+      " # Notes",
+      "+[tool.pytest.ini_options]",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
+
+  it("returns empty for a clean patch that never touches either root file", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
 });
 
 describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("names the exact test file(s) edited", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
       true,
     );
     expect(body).toContain(NO_AUTO_CHAIN_LABEL);
@@ -688,6 +825,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         testFileEdits: [],
         suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
         packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
       },
       true,
     );
@@ -701,6 +839,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         testFileEdits: ["tests/slug.test.ts"],
         suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
         packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
       },
       true,
     );
@@ -714,6 +853,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         testFileEdits: [],
         suppressions: [],
         packageJsonTestScriptEdits: ['"test": "echo ok",'],
+        rootPytestConfigSections: [],
       },
       true,
     );
@@ -721,9 +861,23 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     expect(body).toContain('"test": "echo ok",');
   });
 
+  it("names the exact root pytest config section added (F1-S9 slice 1, issue #12, ready round 4)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: ["[tool.pytest.ini_options]"],
+      },
+      true,
+    );
+    expect(body).toContain("pyproject.toml/setup.cfg");
+    expect(body).toContain("[tool.pytest.ini_options]");
+  });
+
   it("says the label was applied when labelApplied is true", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
       true,
     );
     expect(body).toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
@@ -732,7 +886,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
 
   it("says the label FAILED to apply — never claims it landed — when labelApplied is false (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3)", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
       false,
     );
     expect(body).toContain(`the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply`);
@@ -753,7 +907,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     const payload =
       "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [] },
+      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
       true,
     );
     // The exact, deterministic expected rendering: the payload's own
@@ -775,7 +929,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
     const payload = "tests/`[click](https://attacker.example)`.test.ts";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [] },
+      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
       true,
     );
     const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));

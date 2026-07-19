@@ -158,13 +158,8 @@ const TEST_FILENAME_PATTERNS = [
  * `pyproject.toml` is) — scoped to `snowflake/` specifically, where this
  * repo's pytest is actually invoked FROM (`ci.yml`'s `working-directory:
  * snowflake`) and where pytest's own rootdir/inifile search starts.
- * Deliberately NOT a root-level `pyproject.toml`/`setup.cfg`: verified
- * neither exists in this repo today, and if one appeared it would almost
- * certainly be unrelated Next.js/npm tooling — pytest's config search
- * starts from the invocation directory, not the repo root, so a root
- * file isn't what it would ever read here. Exact-match, not a prefix or
- * suffix pattern: these are specific, known filenames, not a whole class
- * of paths.
+ * Exact-match, not a prefix or suffix pattern: these are specific, known
+ * filenames, not a whole class of paths.
  *
  * `snowflake/conftest.py` (Codex finding, F1-S9 slice 1, issue #12, ready
  * round 3): pytest loads any `conftest.py` it finds automatically (no
@@ -178,13 +173,40 @@ const TEST_FILENAME_PATTERNS = [
  * conftest.py files from the ROOTDIR down to the test directory, and this
  * repo's invocation (`ci.yml`'s `working-directory: snowflake`, `pytest
  * tests/`, no ini file anywhere) resolves rootdir to `snowflake/` itself
- * — so `snowflake/conftest.py` is genuinely loaded. Deliberately NOT a
- * repo-root `conftest.py`: verified none exists today, and even if one
- * appeared, pytest's conftest collection walks from the test path UP to
- * rootdir (inclusive) but never ABOVE rootdir — with rootdir resolving to
- * `snowflake/` here, a repo-root conftest.py sits outside the directory
- * range this invocation would ever load, the same reasoning as the
- * root-level `pyproject.toml`/`setup.cfg` exclusion above.
+ * — so `snowflake/conftest.py` is genuinely loaded.
+ *
+ * CONFTEST COLLECTION vs. CONFIG-FILE DISCOVERY — two DIFFERENT
+ * algorithms with opposite directions (Codex finding, F1-S9 slice 1,
+ * issue #12, ready round 4 — an earlier round's docstring conflated
+ * these and drew the wrong conclusion for the config-file case):
+ * - `conftest.py` COLLECTION walks from the test path UP TO rootdir
+ *   (inclusive) but never ABOVE rootdir. With rootdir resolving to
+ *   `snowflake/` here, a repo-root `conftest.py` genuinely sits outside
+ *   the range this invocation would ever load — correctly NOT flagged
+ *   (verified none exists today either).
+ * - pytest's own CONFIG-FILE discovery (`pytest.ini`/`pyproject.toml`
+ *   with `[tool.pytest.ini_options]`/`tox.ini` with `[pytest]`/`setup.cfg`
+ *   with `[tool:pytest]`) is what DETERMINES rootdir in the first place,
+ *   by ASCENDING from the common-ancestor directory (here, `snowflake/`)
+ *   through EVERY parent directory — including the repo root, one level
+ *   above `snowflake/` — looking for the first recognized file. A
+ *   repo-root `pytest.ini`/`pytest.toml`/`tox.ini`-with-`[pytest]` WOULD
+ *   therefore be discovered and honored, changing pytest's effective
+ *   config even though CWD is `snowflake/`. These three root-level,
+ *   pytest-DEDICATED filenames are exact-matched below for exactly that
+ *   reason — unlike conftest.py, over-flagging here has essentially no
+ *   false-positive cost, since nothing else in this repo would
+ *   legitimately create a root `pytest.ini`/`pytest.toml`/`tox.ini`.
+ * - Root-level `pyproject.toml`/`setup.cfg` are DELIBERATELY NOT
+ *   exact-matched, even though they're equally reachable by the same
+ *   ascending config-file search: both are HIGH-frequency, legitimately-
+ *   edited files for reasons that have nothing to do with pytest (Python
+ *   packaging metadata, build-system config, other tools' own sections),
+ *   so an unconditional flag here would over-trigger constantly. See
+ *   {@link findAddedRootPytestConfigSections} for the targeted,
+ *   content-based check that covers these two instead — flag only an
+ *   ADDED line that introduces the actual pytest section header, not
+ *   every edit to the file.
  */
 const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
   "vitest.config.ts",
@@ -194,6 +216,9 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
   "vitest.config.cjs",
   "playwright.config.ts",
   "playwright.config.js",
+  "pytest.ini",
+  "pytest.toml",
+  "tox.ini",
   "snowflake/pytest.ini",
   "snowflake/pytest.toml",
   "snowflake/pyproject.toml",
@@ -414,9 +439,9 @@ export function findAddedCoverageSuppressions(
  * PR that touches the file. Narrowing to the script-KEY line specifically
  * (not just any line containing the word "test") also avoids flagging an
  * unrelated added dependency whose NAME happens to contain "test" (e.g.
- * `"jest-test-utils": "^1.0.0"` is a dependency line, not a script-key
- * line, and correctly does not match this pattern's `:`-after-the-key
- * shape requirement).
+ * `"jest-test-utils": "^1.0.0"` is a dependency line — the surrounding
+ * quotes wrap the WHOLE dependency name, not just `test`, so this
+ * pattern's quote-anchored key token never matches it).
  *
  * Optional `(?:pre|post)?` prefix (Codex finding, F1-S9 slice 1, issue
  * #12, ready round 3): npm auto-runs a `pretest`/`posttest` lifecycle
@@ -429,9 +454,37 @@ export function findAddedCoverageSuppressions(
  * an unrelated key like `"prepublish"` does not match: stripping the
  * optional `pre`/`post` still leaves `publish`, which is neither `test`,
  * a `test:`-prefixed variant, nor `coverage`.
+ *
+ * `(?:pre|post)?install` / `prepare` / `prepublishOnly` (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 4): npm runs `preinstall` /
+ * `install` / `postinstall` / `prepare` automatically on `npm ci` —
+ * BEFORE this workflow's own lint/typecheck/test gates ever run — and
+ * `prepublishOnly` runs on `npm publish`. Any of these can tamper with
+ * the checkout (rewrite a test file, drop a suppression comment) before
+ * the gates even see it, the same install-time-hook class as the
+ * test-lifecycle hooks above, just reachable via a different npm
+ * lifecycle event. The durable root fix for install-time scripts
+ * specifically is `--ignore-scripts` on the factory's own `npm ci`
+ * (tracked as part of F1-S7, issue #10's secret-scanning-adjacent
+ * hardening — flagging it here is defence-in-depth, not a substitute for
+ * that fix landing).
+ *
+ * Colon requirement DROPPED (Codex finding, F1-S9 slice 1, issue #12,
+ * ready round 4 — closes a multiline key-split evasion): JSON permits a
+ * key and its value's colon to be split across separate lines (e.g.
+ * `"test"` on one line, `: "echo ok"` on the next) — valid JSON, and
+ * `walkAddedLines` yields these as two SEPARATE added lines. Requiring
+ * `"test":` together on one line, as an earlier version of this pattern
+ * did, missed exactly this split: the key-only line has no colon to
+ * match, and the colon-only line has no quoted key. Matching the quoted
+ * key TOKEN ALONE, with no trailing colon requirement, closes this at
+ * the cost of a narrow, accepted over-flag: a package.json STRING VALUE
+ * that happens to read exactly `"test"` (not as a key) would also match.
+ * Over-flagging is the accepted trade-off throughout this classifier;
+ * this is a small instance of the same trade, not a new one.
  */
 const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN =
-  /"(?:pre|post)?(?:test|test:[\w:-]*|coverage)"\s*:/;
+  /"(?:(?:pre|post)?(?:test|test:[\w:-]*|coverage)|(?:pre|post)?install|prepare|prepublishOnly)"/;
 
 /**
  * Matches a JSON `\uXXXX` unicode escape sequence appearing literally in
@@ -456,20 +509,23 @@ const PACKAGE_JSON_UNICODE_ESCAPE_PATTERN = /\\u[0-9a-fA-F]{4}/;
 
 /**
  * Scans raw unified-diff text for `package.json` script-key edits/adds
- * that redefine a CI-invoked test/coverage script, OR add an npm
- * lifecycle hook (`pretest`/`posttest`) around one, OR add a line
- * containing a JSON unicode escape (Codex finding, F1-S9 slice 1, issue
- * #12, ready rounds 2-3) — narrowing or replacing what `npm test` / `npm
- * run coverage` actually runs (e.g. rewriting `"test": "vitest run"` to
- * `"test": "echo ok"`, or adding a `"pretest"` hook that rewrites the
- * suite first, or hiding either behind a `\uXXXX`-escaped key) is the
- * same gaming class as editing a test file directly, but a blanket
- * "package.json changed" flag would also trip on every routine
- * dependency bump, so this targets exactly the script-KEY lines CI
- * depends on (plus the unicode-escape over-flag, which is intentionally
- * broader — see {@link PACKAGE_JSON_UNICODE_ESCAPE_PATTERN}). Consumes
- * {@link walkAddedLines} for the same hunk-tracking traversal {@link
- * findAddedCoverageSuppressions} uses.
+ * that redefine a CI-invoked test/coverage script, add an npm test- or
+ * install-time lifecycle hook (`pretest`/`posttest`/`preinstall`/
+ * `install`/`postinstall`/`prepare`/`prepublishOnly`) around one, or add
+ * a line containing a JSON unicode escape (Codex finding, F1-S9 slice 1,
+ * issue #12, ready rounds 2-4) — narrowing or replacing what `npm test` /
+ * `npm run coverage` actually runs (e.g. rewriting `"test": "vitest run"`
+ * to `"test": "echo ok"`, adding a `"pretest"` hook that rewrites the
+ * suite first, adding a `"postinstall"` hook that tampers with the
+ * checkout before the gates even see it, or hiding any of these behind a
+ * `\uXXXX`-escaped or line-split key) is the same gaming class as editing
+ * a test file directly, but a blanket "package.json changed" flag would
+ * also trip on every routine dependency bump, so this targets exactly the
+ * script-KEY tokens CI/npm actually act on (plus the unicode-escape
+ * over-flag, which is intentionally broader — see {@link
+ * PACKAGE_JSON_UNICODE_ESCAPE_PATTERN}). Consumes {@link walkAddedLines}
+ * for the same hunk-tracking traversal {@link findAddedCoverageSuppressions}
+ * uses.
  *
  * @param patchText - The raw contents of a unified diff.
  * @returns Every matching added line's trimmed content, in file order.
@@ -494,14 +550,77 @@ export function findAddedPackageJsonTestScriptEdits(
 }
 
 /**
+ * Root-level (repo-root, not `snowflake/`-scoped) filenames this
+ * classifier inspects for an ADDED pytest config-section header, rather
+ * than exact-matching the path unconditionally (Codex finding, F1-S9
+ * slice 1, issue #12, ready round 4) — see
+ * {@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}'s own docstring for why
+ * `pyproject.toml`/`setup.cfg` specifically need a content check instead
+ * of an exact-path flag: both are common, legitimately-edited files for
+ * reasons unrelated to pytest, so an unconditional flag here would
+ * over-trigger constantly; the actual gaming vector is introducing a NEW
+ * pytest section where none existed, which {@link
+ * findAddedRootPytestConfigSections} targets directly.
+ */
+const ROOT_PYTEST_CONFIG_CONTENT_PATHS = new Set(["pyproject.toml", "setup.cfg"]);
+
+/**
+ * Matches the pytest-recognized ini-section header for `pyproject.toml`
+ * (`[tool.pytest.ini_options]`), `pytest.ini`/`tox.ini` (`[pytest]`), or
+ * `setup.cfg` (`[tool:pytest]`) — introducing ANY of these into a
+ * root-level `pyproject.toml` or `setup.cfg` makes pytest honor that
+ * file as part of ITS OWN config once discovery ascends from
+ * `snowflake/` up to the repo root (see
+ * {@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}'s docstring for the
+ * config-file-discovery-ascends-parents mechanism this closes). All
+ * three header spellings are matched regardless of which of the two
+ * files is being scanned — matching `[tool:pytest]` inside a
+ * `pyproject.toml`, for instance, would never be pytest's own real
+ * syntax there, but over-matching costs nothing and keeps this one
+ * pattern simple rather than keying it per-file.
+ */
+const PYTEST_CONFIG_SECTION_HEADER_PATTERN =
+  /\[(?:tool\.pytest\.ini_options|pytest|tool:pytest)\]/;
+
+/**
+ * Scans raw unified-diff text for an ADDED pytest ini-section header
+ * introduced into a root-level `pyproject.toml` or `setup.cfg` (Codex
+ * finding, F1-S9 slice 1, issue #12, ready round 4) — see
+ * {@link ROOT_PYTEST_CONFIG_CONTENT_PATHS} and
+ * {@link PYTEST_CONFIG_SECTION_HEADER_PATTERN} for the mechanism and why
+ * a targeted content check, not a blanket exact-path flag, is the right
+ * shape for these two specific files. Consumes {@link walkAddedLines}
+ * for the same hunk-tracking traversal every other added-line classifier
+ * here uses.
+ *
+ * @param patchText - The raw contents of a unified diff.
+ * @returns Every matching added line's trimmed content, in file order.
+ *   Empty if none (including when neither root file is touched at all).
+ */
+export function findAddedRootPytestConfigSections(patchText: string): string[] {
+  const matches: string[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (
+      ROOT_PYTEST_CONFIG_CONTENT_PATHS.has(path) &&
+      PYTEST_CONFIG_SECTION_HEADER_PATTERN.test(line)
+    ) {
+      matches.push(line.trim());
+    }
+  }
+  return matches;
+}
+
+/**
  * Applied to a PR whose diff trips the deterministic anti-gaming
  * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions} /
- * {@link findAddedPackageJsonTestScriptEdits}, F1-S9 slice 1, issue #12):
- * any edit to a test file, any ADDED coverage-suppression comment, or any
- * ADDED `package.json` test/coverage script-key redefinition. All three
- * are treated as a SINGLE, conservative class — "assertion weakening"
- * itself is semantic and can't be reliably detected (no LLM is used here;
- * this whole classifier is deterministic string/path matching), so the
+ * {@link findAddedPackageJsonTestScriptEdits} / {@link findAddedRootPytestConfigSections},
+ * F1-S9 slice 1, issue #12): any edit to a test file, any ADDED
+ * coverage-suppression comment, any ADDED `package.json` test/coverage/
+ * lifecycle script-key redefinition, or any ADDED pytest config section
+ * in a root-level `pyproject.toml`/`setup.cfg`. All four are treated as
+ * a SINGLE, conservative class — "assertion weakening" itself is
+ * semantic and can't be reliably detected (no LLM is used here; this
+ * whole classifier is deterministic string/path matching), so the
  * entire vector is flagged rather than attempting to distinguish a
  * legitimate test-file edit (e.g. a genuine strengthening) from a gamed
  * one. A human confirms which it is — see {@link buildGamingFlagAnnotation}
@@ -587,11 +706,17 @@ export interface GamingFlag {
   /** Coverage-suppression comments the diff adds. */
   readonly suppressions: readonly CoverageSuppressionMatch[];
   /**
-   * `package.json` test/coverage script-key redefinitions the diff adds
-   * (F1-S9 slice 1, issue #12, ready round 2) — see
+   * `package.json` test/coverage/lifecycle script-key redefinitions the
+   * diff adds (F1-S9 slice 1, issue #12, ready rounds 2-4) — see
    * {@link findAddedPackageJsonTestScriptEdits}.
    */
   readonly packageJsonTestScriptEdits: readonly string[];
+  /**
+   * Pytest config-section headers the diff adds to a root-level
+   * `pyproject.toml`/`setup.cfg` (F1-S9 slice 1, issue #12, ready round
+   * 4) — see {@link findAddedRootPytestConfigSections}.
+   */
+  readonly rootPytestConfigSections: readonly string[];
 }
 
 /**
@@ -655,8 +780,15 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
     lines.push("");
   }
   if (flag.packageJsonTestScriptEdits.length > 0) {
-    lines.push("**`package.json` test/coverage script(s) redefined:**");
+    lines.push("**`package.json` test/coverage/lifecycle script(s) redefined:**");
     for (const line of flag.packageJsonTestScriptEdits) {
+      lines.push(`- ${sanitizeStepSummaryText(line)}`);
+    }
+    lines.push("");
+  }
+  if (flag.rootPytestConfigSections.length > 0) {
+    lines.push("**Pytest config section added to a root-level pyproject.toml/setup.cfg:**");
+    for (const line of flag.rootPytestConfigSections) {
       lines.push(`- ${sanitizeStepSummaryText(line)}`);
     }
     lines.push("");

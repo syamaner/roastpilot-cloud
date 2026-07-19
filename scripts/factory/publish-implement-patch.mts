@@ -187,6 +187,7 @@ import {
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
+  findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -539,6 +540,20 @@ function runGit(args: string[]): void {
 }
 
 /**
+ * Same shape as {@link runGit}, but returns the command's trimmed stdout
+ * instead of discarding it — used by {@link applyPatchAndPush} to read
+ * back the sha of the commit it just made (F1-S9 slice 1, issue #12,
+ * ready round 4: `postGamingBothLostFailureStatus` needs the pushed
+ * HEAD's sha to attach a commit status to it).
+ */
+function runGitCapture(args: string[]): string {
+  return execFileSync("git", args, {
+    encoding: "utf8",
+    maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+  }).trim();
+}
+
+/**
  * Applies the patch, commits, and pushes the branch. All arguments that
  * reach `execFileSync` here are either paths we control or the
  * already-sanitized `branchName` (see `deriveBranchName` —
@@ -552,6 +567,10 @@ function runGit(args: string[]): void {
  * {@link buildCommitTrailer}) on EVERY commit this function makes —
  * including a re-dispatch's force-pushed refresh, unlike the PR body's
  * own Provenance section (creation-time only).
+ *
+ * @returns The pushed commit's sha (F1-S9 slice 1, issue #12, ready round
+ *   4 — `postGamingBothLostFailureStatus` needs it to attach a commit
+ *   status to the PR's actual head).
  */
 function applyPatchAndPush(
   branchName: string,
@@ -560,7 +579,7 @@ function applyPatchAndPush(
   issueTitle: string,
   agentActionRef: string,
   provenance: ProvenanceContext,
-): void {
+): string {
   runGit(["config", "user.name", "github-actions[bot]"]);
   runGit([
     "config",
@@ -621,7 +640,12 @@ function applyPatchAndPush(
     "-m",
     trailer,
   ]);
+  // Read back BEFORE the push (the sha is fixed at commit time; a
+  // force-push never changes it) so a push failure still throws before
+  // this returns a sha nothing actually pushed.
+  const commitSha = runGitCapture(["rev-parse", "HEAD"]);
   runGit(["push", "--force", "origin", branchName]);
+  return commitSha;
 }
 
 /**
@@ -1099,19 +1123,22 @@ async function postGamingFlagAnnotation(
  * itself) sees NOTHING distinguishing a flagged diff from a clean one —
  * the classifier ran, found something, and every signal it tried to
  * surface silently failed. That specific combination gets its own,
- * stronger response: this never becomes a {@link PublishRejection} (an
- * API flake mid-publish must not undo an otherwise-successful branch
- * push + PR — the PR is still the load-bearing artifact), but the
- * publish JOB exiting non-zero afterwards is a THIRD, durable signal a
- * human merging from the PR's own Checks tab cannot miss, unlike a label
- * or comment that silently never landed.
+ * stronger response, which this predicate GATES but does not itself
+ * deliver — the caller both sets `process.exitCode = 1` (an
+ * operator-side signal, visible on the Actions run) AND posts a failure
+ * commit status via {@link postGamingBothLostFailureStatus} (the
+ * actual PR-VISIBLE signal — see that function's docstring for why the
+ * exit code alone doesn't reach the PR at all). Neither ever becomes a
+ * {@link PublishRejection}: an API flake mid-publish must not undo an
+ * otherwise-successful branch push + PR — the PR is still the
+ * load-bearing artifact.
  *
  * @param gamingFlagged - Whether the classifier flagged this diff at all.
  * @param labelApplied - Whether the `no-auto-chain` label call succeeded
  *   (`undefined` when never attempted, i.e. `gamingFlagged` is falsy).
  * @param annotationPosted - Whether the annotation comment call succeeded
  *   (`undefined` when never attempted, same condition).
- * @returns Whether the publish job must exit non-zero.
+ * @returns Whether both signal channels were lost.
  */
 function gamingSignalsBothLost(
   gamingFlagged: boolean,
@@ -1119,6 +1146,61 @@ function gamingSignalsBothLost(
   annotationPosted: boolean | undefined,
 ): boolean {
   return gamingFlagged && labelApplied === false && annotationPosted === false;
+}
+
+/**
+ * Posts a failure commit status on `sha` — the actual PR-VISIBLE signal
+ * the `process.exitCode = 1` fix (see {@link gamingSignalsBothLost})
+ * promised but, on its own, doesn't deliver (Codex finding, F1-S9 slice
+ * 1, issue #12, ready round 4): `implement-ready-issues.yml` runs on
+ * `workflow_dispatch`, so the publish JOB's own conclusion appears on
+ * the Actions run list, NOT on the PR itself — a human merging from the
+ * PR page never sees a `workflow_dispatch` run's exit code at all,
+ * unlike a PR opened by a `pull_request`-triggered workflow whose own
+ * check run naturally renders on that PR. A commit STATUS on the head
+ * sha, by contrast, genuinely renders in the PR's own Checks/status
+ * list regardless of what triggered it — this is the actual mechanism
+ * that matches the "durable signal a human can't miss" promise.
+ *
+ * Best-effort, like every other gaming-flag signal here: if this ALSO
+ * fails, three independent channels (label, comment, status) have now
+ * all failed — logged loudly, but this still never becomes a
+ * {@link PublishRejection} (the PR itself remains the load-bearing
+ * artifact; `process.exitCode = 1` stays set regardless, as the
+ * operator-side fallback).
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param sha - The commit sha to attach the status to (the branch's
+ *   pushed HEAD — {@link applyPatchAndPush}'s return value).
+ * @returns `true` if the status was actually posted, `false` if it
+ *   failed (logged either way).
+ */
+async function postGamingBothLostFailureStatus(
+  token: string,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<boolean> {
+  return githubRequest(token, "POST", `/repos/${owner}/${repo}/statuses/${sha}`, {
+    state: "failure",
+    context: "factory/anti-gaming",
+    description:
+      "Anti-gaming classifier flagged this diff; the label and annotation comment both " +
+      "failed to post — review manually before merging.",
+  }).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to post the anti-gaming failure commit status on ${sha} (the ` +
+          `${NO_AUTO_CHAIN_LABEL} label AND the annotation comment ALSO failed — three ` +
+          `independent signal channels lost; the PR still exists and this never fails the ` +
+          `publish): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
 }
 
 /**
@@ -1331,11 +1413,13 @@ export async function main(): Promise<void> {
       testFileEdits: findTestFileEdits(changedPaths),
       suppressions: findAddedCoverageSuppressions(diffText),
       packageJsonTestScriptEdits: findAddedPackageJsonTestScriptEdits(diffText),
+      rootPytestConfigSections: findAddedRootPytestConfigSections(diffText),
     };
     const gamingFlagged =
       gamingFlag.testFileEdits.length > 0 ||
       gamingFlag.suppressions.length > 0 ||
-      gamingFlag.packageJsonTestScriptEdits.length > 0;
+      gamingFlag.packageJsonTestScriptEdits.length > 0 ||
+      gamingFlag.rootPytestConfigSections.length > 0;
 
     // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
     // (gitleaks/trufflehog-style) of the patch content belongs right
@@ -1372,7 +1456,7 @@ export async function main(): Promise<void> {
       ? existingPr.headRef
       : deriveBranchName(issueNumber, issue.title);
 
-    applyPatchAndPush(
+    const pushedSha = applyPatchAndPush(
       branchName,
       patchPath,
       issueNumber,
@@ -1468,9 +1552,11 @@ export async function main(): Promise<void> {
         console.error(
           `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
             `failed to post on PR #${existingPr.number} — a flagged diff would otherwise ` +
-            `have NO visible signal on the PR itself. Failing this publish job (non-zero ` +
-            `exit) so its own run status is the durable signal a human merging can't miss.`,
+            `have NO visible signal on the PR itself. Posting a failure commit status on ` +
+            `the pushed sha (the actual PR-visible signal) and failing this publish job ` +
+            `(non-zero exit, operator-side fallback).`,
         );
+        await postGamingBothLostFailureStatus(token, owner, repo, pushedSha);
         process.exitCode = 1;
       }
       return;
@@ -1550,9 +1636,11 @@ export async function main(): Promise<void> {
       console.error(
         `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
           `failed to post on PR #${created.number} — a flagged diff would otherwise have ` +
-          `NO visible signal on the PR itself. Failing this publish job (non-zero exit) so ` +
-          `its own run status is the durable signal a human merging can't miss.`,
+          `NO visible signal on the PR itself. Posting a failure commit status on the ` +
+          `pushed sha (the actual PR-visible signal) and failing this publish job ` +
+          `(non-zero exit, operator-side fallback).`,
       );
+      await postGamingBothLostFailureStatus(token, owner, repo, pushedSha);
       process.exitCode = 1;
     }
   } catch (err) {

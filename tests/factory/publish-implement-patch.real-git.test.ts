@@ -840,6 +840,9 @@ index 0000000..abc1234
       if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
         return new Response("server error", { status: 500 });
       }
+      if (method === "POST" && url.includes("/statuses/")) {
+        return jsonResponse({ state: "failure" }, 201);
+      }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -849,12 +852,22 @@ index 0000000..abc1234
 
     expect(process.exitCode).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Failing this publish job"),
+      expect.stringContaining("Posting a failure commit status"),
     );
+    const statusCall = (
+      fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>
+    ).find(([url, init]) => init?.method === "POST" && String(url).includes("/statuses/"));
+    expect(statusCall).toBeDefined();
+    const statusBody = JSON.parse((statusCall?.[1]?.body as string) ?? "{}") as {
+      state: string;
+      context: string;
+    };
+    expect(statusBody.state).toBe("failure");
+    expect(statusBody.context).toBe("factory/anti-gaming");
     errorSpy.mockRestore();
   });
 
-  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent)", async () => {
+  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent) — AND a failure commit status is posted on the pushed sha, the mechanism that ACTUALLY renders on the PR (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — a workflow_dispatch job's own exit code never reaches the PR)", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -871,6 +884,9 @@ index 0000000..abc1234
       }
       if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
         return new Response("server error", { status: 500 });
+      }
+      if (method === "POST" && url.includes("/statuses/")) {
+        return jsonResponse({ state: "failure" }, 201);
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
@@ -894,7 +910,54 @@ index 0000000..abc1234
       expect.stringContaining("Failed to post the anti-gaming annotation comment"),
     );
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Failing this publish job"),
+      expect.stringContaining("Posting a failure commit status"),
+    );
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const statusCall = calls.find(
+      ([url, init]) => init?.method === "POST" && String(url).includes("/statuses/"),
+    );
+    expect(statusCall).toBeDefined();
+    const statusBody = JSON.parse((statusCall?.[1]?.body as string) ?? "{}") as {
+      state: string;
+      context: string;
+      description: string;
+    };
+    expect(statusBody.state).toBe("failure");
+    expect(statusBody.context).toBe("factory/anti-gaming");
+    errorSpy.mockRestore();
+  });
+
+  it("when the failure commit status ALSO fails to post (three of three signal channels lost), it's logged, never thrown, and the publish job still exits non-zero", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (
+        method === "POST" &&
+        (url.endsWith("/labels") || url.includes("/comments") || url.includes("/statuses/"))
+      ) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the anti-gaming failure commit status"),
     );
     errorSpy.mockRestore();
   });
@@ -1252,6 +1315,94 @@ index 0000000..abc1234
       ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
     );
     expect(anyCommentCall).toBeUndefined();
+  });
+
+  it("creation path: a root-level pytest.ini is labelled no-auto-chain (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — pytest's config-file discovery ascends from snowflake/ up to the repo root and would honor this file)", async () => {
+    const pytestIniDiff = `diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++addopts = -k "not slow"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "root-pytest-ini.diff", pytestIniDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("creation path: a root pyproject.toml edit adding [tool.pytest.ini_options] is flagged (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — the targeted content check for the two high-frequency root files)", async () => {
+    const pyprojectDiff = `diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,2 @@
++[tool.pytest.ini_options]
++addopts = "-k not slow"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "root-pyproject.diff", pyprojectDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("[tool.pytest.ini_options]");
+  });
+
+  it("creation path: an ORDINARY root pyproject.toml edit (no pytest section) is NOT flagged", async () => {
+    const pyprojectDiff = `diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,2 @@
++[project]
++name = "x"
+`;
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "root-pyproject-ordinary.diff",
+      pyprojectDiff,
+    );
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
   });
 });
 
