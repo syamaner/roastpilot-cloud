@@ -632,6 +632,74 @@ index 0000000..abc1234
 +export const x = 1; /* v8 ignore next */
 `;
 
+  const VITEST_CONFIG_DIFF = `diff --git a/vitest.config.ts b/vitest.config.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/vitest.config.ts
+@@ -0,0 +1,1 @@
++export default {};
+`;
+
+  const PLAYWRIGHT_CONFIG_DIFF = `diff --git a/playwright.config.ts b/playwright.config.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/playwright.config.ts
+@@ -0,0 +1,1 @@
++export default {};
+`;
+
+  it("creation path: a vitest.config.ts edit is labelled no-auto-chain (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round — test-discovery config is the same gaming class as a test-file edit)", async () => {
+    const path = await writePatch(scratchDir, "vitest-config.diff", VITEST_CONFIG_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("vitest.config.ts");
+  });
+
+  it("creation path: a playwright.config.ts edit is labelled no-auto-chain", async () => {
+    const path = await writePatch(scratchDir, "playwright-config.diff", PLAYWRIGHT_CONFIG_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("playwright.config.ts");
+  });
+
   it("creation path: a test-file-edit diff is labelled no-auto-chain and annotated naming the exact file", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
@@ -834,6 +902,105 @@ index 0000000..abc1234
       body: string;
     };
     expect(commentBody.body).toContain("lib/sneaky.ts");
+  });
+
+  it("does not ENOBUFS-reject a legitimate large patch on the re-diff (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round — execFileSync's default 1 MiB maxBuffer is smaller than MAX_PATCH_BYTES itself)", async () => {
+    // ~1.2 MiB of content: comfortably over Node's default 1 MiB
+    // execFileSync maxBuffer, comfortably under the 2 MiB MAX_PATCH_BYTES
+    // cap on the INPUT patch — exactly the gap the fix closes. The
+    // git-REGENERATED diff this classifier now scans can be even larger
+    // than the input due to diff formatting overhead, so this also
+    // exercises that path, not just the input-size boundary.
+    const bigContent = "x".repeat(1_200_000);
+    await fsWriteFile(join(localCloneDir, "big-file.txt"), `${bigContent}\n`);
+    git(localCloneDir, ["add", "-A"]);
+    const bigDiff = execFileSync("git", ["diff", "--cached"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024, // this test's OWN generation call, unrelated to the fix under test
+    });
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "big.diff", bigDiff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("refresh path: a clean re-dispatch REMOVES a stale no-auto-chain label from an earlier, flagged push (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", async () => {
+    const path = await writePatch(scratchDir, "clean-refresh.diff", VALID_DIFF);
+    process.env.PATCH_PATH = path;
+    let deleteCalled = false;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "DELETE" && url.includes("/issues/50/labels/no-auto-chain")) {
+        deleteCalled = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(deleteCalled).toBe(true);
+  });
+
+  it("refresh path: a clean re-dispatch with NO prior stale label tolerates the 404 (no-op, not a failure) and stays unlabelled", async () => {
+    const path = await writePatch(scratchDir, "clean-refresh.diff", VALID_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "DELETE" && url.includes("/issues/50/labels/no-auto-chain")) {
+        return new Response(JSON.stringify({ message: "Label does not exist" }), {
+          status: 404,
+        });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
 

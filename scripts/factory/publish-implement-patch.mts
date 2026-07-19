@@ -176,6 +176,7 @@ import {
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   isLabelAlreadyExistsError,
+  isLabelNotFoundOnIssueError,
   NO_AUTO_CHAIN_LABEL,
   NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
@@ -199,6 +200,19 @@ import {
  * stall the runner or `git apply` itself.
  */
 export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
+
+/**
+ * `maxBuffer` for the `git diff --cached --text ...` call in
+ * {@link getAuthoritativePatchAnalysis} (Codex + claude-review finding,
+ * F1-S9 slice 1, issue #12, ready round) — `execFileSync`'s own default
+ * (1 MiB) is smaller than {@link MAX_PATCH_BYTES} itself, and the
+ * git-REGENERATED diff this call produces can legitimately exceed the
+ * input patch's own size (unified-diff context lines, rename/copy
+ * detection expanding what's reported). 16 MiB gives real headroom over
+ * the 2 MiB input cap rather than risk an ENOBUFS false-rejection —
+ * treating a legitimate, sizeable patch as if git itself had failed.
+ */
+export const MAX_DIFF_TEXT_BUFFER_BYTES = 16 * 1024 * 1024;
 
 /**
  * Raised for a validated, expected reason implementation must not
@@ -409,7 +423,22 @@ async function getAuthoritativePatchAnalysis(
           "--find-copies-harder",
           "HEAD",
         ],
-        { env, encoding: "utf8" },
+        {
+          env,
+          encoding: "utf8",
+          // Codex + claude-review finding, F1-S9 slice 1, issue #12,
+          // ready round: execFileSync's default maxBuffer is 1 MiB, but
+          // MAX_PATCH_BYTES caps the INPUT patch at 2 MiB — a legitimate
+          // patch anywhere near that size would already exceed the
+          // default before this call even runs. Worse, the REGENERATED
+          // diff this call produces can legitimately be LARGER than the
+          // input patch (unified-diff context lines, rename/copy-detection
+          // expansion), so bounding it to the input size isn't enough
+          // either. MAX_DIFF_TEXT_BUFFER_BYTES gives real headroom rather
+          // than risk an ENOBUFS false-rejection on an otherwise-valid,
+          // sizeable patch.
+          maxBuffer: MAX_DIFF_TEXT_BUFFER_BYTES,
+        },
       );
     } catch (err) {
       // Not independently exercised by a unit test: same reasoning as the
@@ -876,6 +905,59 @@ async function applyNoAutoChainLabelBestEffort(
 }
 
 /**
+ * Best-effort REMOVES {@link NO_AUTO_CHAIN_LABEL} from `prNumber` if it's
+ * currently applied — for the REFRESH path when a re-dispatch's new
+ * commit(s) are classifier-CLEAN (Codex + claude-review finding, F1-S9
+ * slice 1, issue #12, ready round): an earlier version never removed a
+ * label an EARLIER, flagged push had applied, so a PR that was fixed
+ * stayed permanently labelled `no-auto-chain` even after the offending
+ * content was gone — a stale, contradictory signal (the step summary
+ * says "clean" while the PR's own label list still says "flagged").
+ * Only ever called on the refresh path — a brand-new PR can't have a
+ * stale label from a "previous" state that never existed.
+ *
+ * GitHub's "Remove a label from an issue" endpoint 404s when the label
+ * isn't currently applied ({@link isLabelNotFoundOnIssueError}) —
+ * tolerated as a no-op (nothing needed doing), not a failure. Never
+ * throws otherwise: a real removal failure is logged, not propagated —
+ * the PR/branch itself is already the load-bearing artifact by the time
+ * this runs.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The existing PR being refreshed.
+ * @returns `true` if the label was removed, `false` if removal was
+ *   attempted and failed for a real reason (logged either way),
+ *   `undefined` if the label wasn't present to begin with.
+ */
+async function removeNoAutoChainLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<boolean | undefined> {
+  return githubRequest(
+    token,
+    "DELETE",
+    `/repos/${owner}/${repo}/issues/${prNumber}/labels/${NO_AUTO_CHAIN_LABEL}`,
+  ).then(
+    () => true,
+    (err: unknown) => {
+      if (isLabelNotFoundOnIssueError(err)) {
+        return undefined; // Wasn't applied -- nothing to do, not a failure.
+      }
+      console.error(
+        `Failed to remove the ${NO_AUTO_CHAIN_LABEL} label from PR #${prNumber} ` +
+          `(this refresh's commit(s) are classifier-clean, so it should no longer ` +
+          `carry it): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
  * Posts the deterministic, templated annotation naming exactly what
  * tripped the anti-gaming classifier (F1-S9 slice 1, issue #12) — see
  * {@link buildGamingFlagAnnotation}'s docstring for why this is always a
@@ -1071,6 +1153,13 @@ export async function main(): Promise<void> {
   // are two independent best-effort calls, so the step summary must
   // reflect each of their REAL outcomes, not assume one implies the other.
   let gamingAnnotationPosted: boolean | undefined;
+  // Ready-round finding: only ever set on the REFRESH path, when this
+  // run's own commit(s) are classifier-clean but the label may have
+  // survived from an earlier, flagged push. `undefined` covers BOTH
+  // "not attempted" (creation path, or a still-flagged refresh) and
+  // "attempted, but the label wasn't there to remove" — see
+  // `removeNoAutoChainLabelBestEffort`'s own three-way return.
+  let gamingLabelRemoved: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -1225,6 +1314,18 @@ export async function main(): Promise<void> {
           gamingFlag,
           gamingLabelApplied,
         );
+      } else {
+        // F1-S9 slice 1 (issue #12), ready round: this refresh's own
+        // commit(s) are classifier-clean, but an EARLIER, flagged push
+        // to this same PR may have left the label on it — best-effort
+        // remove it so a fixed PR doesn't stay permanently flagged. A
+        // no-op (undefined) if the label was never applied to begin with.
+        gamingLabelRemoved = await removeNoAutoChainLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+        );
       }
       writeStepSummary(
         buildPublishSuccessStepSummary({
@@ -1233,6 +1334,7 @@ export async function main(): Promise<void> {
           gamingFlagged,
           gamingLabelApplied,
           gamingAnnotationPosted,
+          gamingLabelRemoved,
           prNumber: existingPr.number,
           // findExistingPrForIssue's underlying query doesn't fetch
           // html_url (PullRequestSummary has no such field) — a GitHub PR

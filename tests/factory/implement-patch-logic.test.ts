@@ -19,6 +19,7 @@ import {
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isLabelAlreadyExistsError,
+  isLabelNotFoundOnIssueError,
   isProtectedPath,
   isTestFilePath,
   NO_AUTO_CHAIN_LABEL,
@@ -210,6 +211,40 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     expect(isTestFilePath("lib/slug.ts")).toBe(false);
     expect(isTestFilePath("scripts/factory/implement-patch-logic.mts")).toBe(false);
     expect(isTestFilePath("snowflake/assert_dev_ci_grants.py")).toBe(false);
+  });
+
+  it("flags an edit to vitest's own test-discovery config (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", () => {
+    // Narrowing vitest.config.ts's `include` glob can make a failing test
+    // silently stop being discovered/run without touching a single test
+    // file — the same gaming class as editing a test file directly.
+    expect(isTestFilePath("vitest.config.ts")).toBe(true);
+    expect(isTestFilePath("vitest.config.mts")).toBe(true);
+    expect(isTestFilePath("vitest.config.js")).toBe(true);
+    expect(isTestFilePath("vitest.config.mjs")).toBe(true);
+    expect(isTestFilePath("vitest.config.cjs")).toBe(true);
+  });
+
+  it("flags an edit to playwright's own test-discovery config", () => {
+    expect(isTestFilePath("playwright.config.ts")).toBe(true);
+    expect(isTestFilePath("playwright.config.js")).toBe(true);
+  });
+
+  it("flags an edit to pytest's own discovery config under snowflake/, where this repo's pytest is actually invoked from", () => {
+    expect(isTestFilePath("snowflake/pytest.ini")).toBe(true);
+    expect(isTestFilePath("snowflake/pyproject.toml")).toBe(true);
+    expect(isTestFilePath("snowflake/setup.cfg")).toBe(true);
+    expect(isTestFilePath("snowflake/tox.ini")).toBe(true);
+  });
+
+  it("does NOT flag a root-level pyproject.toml/setup.cfg — not what this repo's pytest invocation would ever read", () => {
+    // Deliberately narrow, per the finding: over-flagging is the safe
+    // direction for a REAL discovery-config path, but a root pyproject.toml
+    // in THIS repo would almost certainly be unrelated Next.js/npm
+    // tooling — pytest's own config search starts from the invocation
+    // directory (snowflake/, per ci.yml's working-directory), not the
+    // repo root, so a root file isn't what it would ever read here.
+    expect(isTestFilePath("pyproject.toml")).toBe(false);
+    expect(isTestFilePath("setup.cfg")).toBe(false);
   });
 
   it("findTestFileEdits normalizes, de-duplicates, and sorts the result", () => {
@@ -1058,6 +1093,29 @@ describe("isLabelAlreadyExistsError", () => {
   });
 });
 
+describe("isLabelNotFoundOnIssueError (F1-S9 slice 1, issue #12, ready round)", () => {
+  function githubDeleteError(status: number, body: unknown): Error {
+    return new Error(
+      `GitHub API DELETE /repos/o/r/issues/50/labels/no-auto-chain failed: ${status} ${JSON.stringify(body)}`,
+    );
+  }
+
+  it("returns true for a 404 (label not currently applied — the benign no-op case)", () => {
+    const err = githubDeleteError(404, { message: "Label does not exist" });
+    expect(isLabelNotFoundOnIssueError(err)).toBe(true);
+  });
+
+  it("returns false for a non-404 status — a real failure must not be misread as the benign case", () => {
+    const err = githubDeleteError(500, { message: "Internal Server Error" });
+    expect(isLabelNotFoundOnIssueError(err)).toBe(false);
+  });
+
+  it("returns false for a non-Error value", () => {
+    expect(isLabelNotFoundOnIssueError("not an error")).toBe(false);
+    expect(isLabelNotFoundOnIssueError(undefined)).toBe(false);
+  });
+});
+
 describe("buildPublishSuccessStepSummary", () => {
   it("shows a minted identity and normal review-automation triggering when not on fallback", () => {
     const summary = buildPublishSuccessStepSummary({
@@ -1205,6 +1263,52 @@ describe("buildPublishSuccessStepSummary", () => {
     });
     expect(summary).toContain("FAILED to apply the `no-auto-chain` label");
     expect(summary).not.toContain("labelled `no-auto-chain`");
+  });
+
+  it("says a stale label was removed on a clean refresh (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+      gamingFlagged: false,
+      gamingLabelRemoved: true,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).toContain("was removed");
+    expect(summary).not.toContain("FLAGGED");
+  });
+
+  it("says removal of a stale label FAILED — never silently drops that signal — when removal was attempted and failed", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+      gamingFlagged: false,
+      gamingLabelRemoved: false,
+    });
+    expect(summary).toContain("FAILED to remove a stale");
+    expect(summary).toContain("may still read as flagged");
+  });
+
+  it("says plain clean with no removal mention when gamingLabelRemoved is undefined (nothing to remove, or never attempted)", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: false,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).not.toContain("was removed");
+    expect(summary).not.toContain("FAILED to remove");
   });
 });
 

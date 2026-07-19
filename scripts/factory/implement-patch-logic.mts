@@ -144,9 +144,45 @@ const TEST_FILENAME_PATTERNS = [
 ] as const;
 
 /**
- * True when a normalized path is a test file by this repo's own
- * conventions (directory OR filename-suffix match — see
- * {@link TEST_PATH_PREFIXES}/{@link TEST_FILENAME_PATTERNS}).
+ * Exact test-DISCOVERY config paths (Codex + claude-review finding, F1-S9
+ * slice 1, issue #12, ready round): editing WHICH tests get discovered
+ * is the SAME gaming class as editing a test file directly — narrowing
+ * `vitest.config.ts`'s `include` glob (or `playwright.config.ts`'s
+ * `testDir`) can make a failing test silently stop being collected
+ * without touching a single test file, invisible to path/suffix matching
+ * alone. Also covers pytest's own recognized config-file names
+ * (`pytest.ini`/`pyproject.toml`/`setup.cfg`/`tox.ini`, any of which can
+ * carry a `[pytest]`/`[tool.pytest.ini_options]` section narrowing
+ * collection) — scoped to `snowflake/` specifically, where this repo's
+ * pytest is actually invoked FROM (`ci.yml`'s `working-directory:
+ * snowflake`) and where pytest's own rootdir/inifile search starts.
+ * Deliberately NOT a root-level `pyproject.toml`/`setup.cfg`: verified
+ * neither exists in this repo today, and if one appeared it would almost
+ * certainly be unrelated Next.js/npm tooling — pytest's config search
+ * starts from the invocation directory, not the repo root, so a root
+ * file isn't what it would ever read here. Exact-match, not a prefix or
+ * suffix pattern: these are specific, known filenames, not a whole class
+ * of paths.
+ */
+const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
+  "vitest.config.ts",
+  "vitest.config.mts",
+  "vitest.config.js",
+  "vitest.config.mjs",
+  "vitest.config.cjs",
+  "playwright.config.ts",
+  "playwright.config.js",
+  "snowflake/pytest.ini",
+  "snowflake/pyproject.toml",
+  "snowflake/setup.cfg",
+  "snowflake/tox.ini",
+]);
+
+/**
+ * True when a normalized path is a test file (or its discovery config) by
+ * this repo's own conventions — directory prefix, filename suffix, or
+ * exact discovery-config match; see {@link TEST_PATH_PREFIXES}/
+ * {@link TEST_FILENAME_PATTERNS}/{@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}.
  *
  * Deliberately conservative in one direction only: this is used to FLAG a
  * diff for human review, never to silently permit anything, so a false
@@ -159,9 +195,12 @@ const TEST_FILENAME_PATTERNS = [
  *
  * @param normalizedPath - A path already run through
  *   {@link normalizePatchPath}.
- * @returns Whether this path is a test file.
+ * @returns Whether this path is a test file or its discovery config.
  */
 export function isTestFilePath(normalizedPath: string): boolean {
+  if (TEST_DISCOVERY_CONFIG_EXACT_PATHS.has(normalizedPath)) {
+    return true;
+  }
   if (TEST_PATH_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
     return true;
   }
@@ -813,6 +852,27 @@ export function isLabelAlreadyExistsError(err: unknown): boolean {
 }
 
 /**
+ * True when `err` represents GitHub's "Remove a label from an issue"
+ * 404 — the label simply isn't currently applied, a benign no-op case
+ * (F1-S9 slice 1, issue #12, ready round — see
+ * `removeNoAutoChainLabelBestEffort` in `publish-implement-patch.mts`).
+ * Unlike {@link isLabelAlreadyExistsError}, GitHub reliably reports this
+ * case as a plain 404 regardless of response body shape, so no body
+ * parsing is needed to distinguish it from a genuine failure.
+ *
+ * @param err - The error a `githubRequest` `DELETE .../labels/{name}`
+ *   call threw.
+ * @returns Whether this is specifically "the label wasn't applied".
+ */
+export function isLabelNotFoundOnIssueError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const match = err.message.match(/^GitHub API \S+ \S+ failed: (\d+) /);
+  return match?.[1] === "404";
+}
+
+/**
  * Builds the PR body for a successful implement run, following
  * `.github/PULL_REQUEST_TEMPLATE.md`'s structure so the factory's PRs read
  * the same as a human's.
@@ -1221,6 +1281,17 @@ export function buildPublishSuccessStepSummary(
      * comment call itself failed and no such comment exists.
      */
     readonly gamingAnnotationPosted?: boolean;
+    /**
+     * Whether `removeNoAutoChainLabelBestEffort` removed a STALE label
+     * from an earlier, flagged push on this same PR — `true` if removed,
+     * `false` if removal was attempted and failed, `undefined` if there
+     * was nothing to remove (never attempted, or the label wasn't
+     * present). Ready-round finding: only ever set on the REFRESH path
+     * when this run's own commit(s) are classifier-clean; a brand-new PR
+     * can't have a stale label from a "previous" state that never
+     * existed.
+     */
+    readonly gamingLabelRemoved?: boolean;
   },
 ): string {
   const labelLine =
@@ -1276,8 +1347,20 @@ export function buildPublishSuccessStepSummary(
     context.gamingAnnotationPosted === false
       ? "the annotation comment FAILED to post — check the run's logs for exactly what tripped it"
       : "see the PR's annotation comment for exactly what tripped it";
+  // Ready-round finding: a clean refresh must say whether a STALE label
+  // from an earlier, flagged push on this same PR was cleared, rather
+  // than leaving the PR's own label list contradicting this "clean"
+  // line.
+  const gamingCleanLine =
+    context.gamingLabelRemoved === true
+      ? `✅ clean — no test-file edits, no added coverage-suppression comments (the ` +
+        `\`${NO_AUTO_CHAIN_LABEL}\` label from an earlier, flagged push on this PR was removed)`
+      : context.gamingLabelRemoved === false
+        ? `✅ clean, but FAILED to remove a stale \`${NO_AUTO_CHAIN_LABEL}\` label from an ` +
+          "earlier push — check the run's logs; the PR may still read as flagged"
+        : "✅ clean — no test-file edits, no added coverage-suppression comments";
   const gamingLine = !context.gamingFlagged
-    ? "✅ clean — no test-file edits, no added coverage-suppression comments"
+    ? gamingCleanLine
     : `🚩 **FLAGGED** — ${gamingLabelClause}; ${gamingAnnotationClause} — human review required before this advances`;
   return [
     "## Factory publish summary",
