@@ -153,9 +153,18 @@ exception. The load-bearing points:
 - **Codex is advisory-but-triaged, not a required check.** Trigger it once
   on the final commit (`@codex review`). A 👀 reaction means the review is
   **in progress — keep waiting** (bounded ~30 min from the 👀); it does
-  **not** clear the merge by itself. Only a **posted review** (findings) or
-  a **👍** (nothing found), postdating the final commit, satisfies the wait.
-  Do not arm auto-merge on green CI alone.
+  **not** clear the merge by itself. A CLEAN verdict is **either a 👍 reaction
+  (after the 👀) OR a top-level "Codex Review: Didn't find any major issues"
+  comment carrying a `Reviewed commit: <sha>` line** whose sha matches the PR
+  head (the more common channel — a watcher polling only reviews + reactions is
+  blind to it); a **posted `pull_request_review` with inline threads** = findings.
+  The signal must postdate the final-commit trigger. Do not arm auto-merge on
+  green CI alone. **Carve-out (D103 draft-first, interactive PRs):** while a PR
+  is a **draft**, re-triggering `@codex review` on each new post-fold head to
+  converge the diverse lens is allowed — that's the shift-left mechanism, not the
+  cross-push re-litigation the once-on-final rule targets; once-on-final governs
+  the **ready** PR and resumes when it's marked ready. (Factory-authored PRs open
+  non-draft and are reviewed post-open — #62.)
 - **`pr-triage` adjudicates independently of the author.** Under the factory,
   the author is always an agent; it never self-triages its own PR's review
   comments (D23). The lead (or the `pr-triage` sub-agent) decides what counts

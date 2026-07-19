@@ -42,7 +42,11 @@ jobs:
     # simply not running. `head.repo.full_name == repository` is false for
     # any fork (true only when the PR's source branch lives in this same
     # repo), so this skips exactly the cases with no secret to work with.
-    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    # Skip DRAFT PRs (D103 draft-first): the diverse-lens loop opens a PR as a
+    # draft to converge Codex before "ready". Running claude-review on the draft
+    # too would double its runs and land findings pre-ready; it fires on
+    # ready_for_review once the PR is out of draft. (Factory PRs open non-draft.)
+    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
 
     runs-on: ubuntu-latest
     permissions:
