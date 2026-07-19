@@ -169,6 +169,31 @@ class TestEvaluate:
         baseline = {"killed": 353, "survived": 131, "suspicious": 2, "timeout": 1}
         assert check_mutation_score.evaluate(current, baseline) == []
 
+    def test_flags_a_dropped_total_even_when_the_ratio_improves(self) -> None:
+        # Codex finding (F1-S9 slice 2, issue #12, ready round): the exact
+        # evasion this check exists to close -- fewer, easier-to-kill
+        # mutants can raise killed/(killed+survived) while genuinely
+        # shrinking the testable surface (e.g. a suppressed mutant that
+        # disappears from every other count entirely).
+        current = {"killed": 300, "survived": 20, "total": 320}
+        baseline = {"killed": 353, "survived": 131, "total": 484}
+        reasons = check_mutation_score.evaluate(current, baseline)
+        assert len(reasons) == 1
+        assert "total mutant count dropped" in reasons[0]
+
+    def test_does_not_flag_an_equal_or_grown_total(self) -> None:
+        current = {"killed": 353, "survived": 131, "total": 484}
+        baseline = {"killed": 353, "survived": 131, "total": 484}
+        assert check_mutation_score.evaluate(current, baseline) == []
+
+        current_grown = {"killed": 380, "survived": 140, "total": 520}
+        assert check_mutation_score.evaluate(current_grown, baseline) == []
+
+    def test_missing_total_key_defaults_to_zero_on_both_sides(self) -> None:
+        current = {"killed": 353, "survived": 131}
+        baseline = {"killed": 353, "survived": 131}
+        assert check_mutation_score.evaluate(current, baseline) == []
+
 
 class TestMain:
     def _write_stats_and_baseline(

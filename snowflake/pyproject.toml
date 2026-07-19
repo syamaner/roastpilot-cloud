@@ -36,11 +36,28 @@ source_paths = ["."]
 # views... grants/roles" — the Snowflake-side half of that list; the
 # TypeScript half, the Zod-validated app/api routes + lib/ schemas, is C2
 # surface that doesn't exist in this repo yet and needs a SEPARATE tool —
-# see the "C2 PRE-WIRING" note below). `with_connection_env.py` (connection-
-# profile plumbing) and `validate_migrations.py` (filename/render validation)
-# are deliberately EXCLUDED: real, tested code, but not the grant-boundary
-# security logic this criterion is scoped to — mutating them would dilute
-# the baseline with noise unrelated to what this job exists to protect.
+# see the "C2 PRE-WIRING" note below).
+#
+# `validate_migrations.py` is INCLUDED (Codex finding, F1-S9 slice 2, issue
+# #12, ready round — corrects an earlier version of this comment that
+# excluded it as "not grant-boundary security logic"): that claim was WRONG
+# for `find_candidate_migration_files` specifically -- `check_forbidden_
+# grants.py` imports and calls it directly to decide which migration files
+# get scanned for a forbidden `GRANT ... TO PUBLIC` at all. A weakened
+# recursive-glob or extension predicate there could silently exclude a
+# migration containing exactly the forbidden grant this whole job exists to
+# catch, with NOTHING in the previous (narrower) mutation scope able to
+# detect that regression. Included at file granularity (mutmut's
+# `only_mutate` matches whole files, not individual functions), which also
+# sweeps in `classify`/`main`/`_schemachange_executable` -- over-inclusion
+# in the safe direction, consistent with this whole classifier's philosophy
+# elsewhere in the build.
+#
+# `with_connection_env.py` (connection-profile env-var resolution) stays
+# EXCLUDED: real, tested code, but genuinely not in the call graph of
+# either grant-boundary script -- `assert_dev_ci_grants.py` reads its OWN
+# `SNOWFLAKE_DEV_*` env vars directly (see its own `main()`), and
+# `check_forbidden_grants.py`/`validate_migrations.py` never import it.
 #
 # C2 PRE-WIRING: when C2 lands a Snowflake-side Python surface (Snowflake
 # supports `LANGUAGE PYTHON` stored procedures — factory.md's "stored
@@ -59,6 +76,7 @@ source_paths = ["."]
 only_mutate = [
     "assert_dev_ci_grants.py",
     "check_forbidden_grants.py",
+    "validate_migrations.py",
 ]
 
 # Matches ci.yml's own `pytest tests/` invocation (relative to snowflake/).

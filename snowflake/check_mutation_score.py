@@ -8,7 +8,7 @@ config error, e.g. a missing/malformed `pyproject.toml`, DOES exit non-zero;
 only the mutant-survival outcome itself is silent). This script is the actual
 gate: it reads `mutmut export-cicd-stats`'s JSON output, compares the current
 run's mutation score against the committed baseline
-(`mutation-baseline.json`), and fails closed on either of two conditions:
+(`mutation-baseline.json`), and fails closed on any of THREE conditions:
 
 1. The mutation score (`killed / (killed + survived)`) dropped below the
    baseline's score — the acceptance criterion's literal ask ("a dropped
@@ -32,8 +32,21 @@ run's mutation score against the committed baseline
    category explicitly rather than deriving them by exclusion, so a future
    mutmut release adding a new outcome category is a visible one-line
    addition here, not a silent gap.
+3. `total` (the number of mutants mutmut GENERATED) dropped below the
+   baseline's total (Codex finding, F1-S9 slice 2, issue #12, ready round):
+   a mutant that stops being generated at all disappears from every other
+   count entirely -- it never becomes `survived`, `no_tests`, or anything
+   else checks 1-2 would see. A diff that suppresses mutants outright (e.g.
+   mutmut's own `# pragma: no mutate`, or otherwise shrinking the covered
+   files' testable surface) can hold the `killed/(killed+survived)` ratio
+   steady or even IMPROVE it -- fewer, easier-to-kill mutants raise the
+   ratio -- while genuinely removing mutation coverage. A legitimate
+   refactor that shrinks these files is still possible; the honest path for
+   that is a CONSCIOUS `mutation-baseline.json` update in the same PR
+   (reviewed, auditable), not a silent pass against a stale, now-inflated
+   baseline.
 
-Both checks are necessary; neither alone catches everything the other does.
+All three checks are necessary; none alone catches everything the others do.
 """
 
 from __future__ import annotations
@@ -152,9 +165,11 @@ def evaluate(current: dict[str, object], baseline: dict[str, object]) -> list[st
     """
     current_killed = int(current.get("killed", 0))
     current_survived = int(current.get("survived", 0))
+    current_total = int(current.get("total", 0))
 
     baseline_killed = int(baseline.get("killed", 0))
     baseline_survived = int(baseline.get("survived", 0))
+    baseline_total = int(baseline.get("total", 0))
 
     reasons: list[str] = []
 
@@ -166,6 +181,16 @@ def evaluate(current: dict[str, object], baseline: dict[str, object]) -> list[st
             f"({current_killed} killed / {current_killed + current_survived} total) "
             f"is below the baseline {baseline_score:.4f} "
             f"({baseline_killed} killed / {baseline_killed + baseline_survived} total)"
+        )
+
+    if current_total < baseline_total:
+        reasons.append(
+            f"total mutant count dropped: {current_total} generated this run, below the "
+            f"baseline's {baseline_total} -- mutants that stop being generated at all "
+            "disappear from every other count, so a shrinking testable surface can hold "
+            "or even improve the killed/survived ratio while removing real mutation "
+            "coverage; if this is a legitimate refactor, update mutation-baseline.json "
+            "in this same PR rather than let it pass against a stale baseline"
         )
 
     for category in UNRESOLVED_MUTANT_CATEGORIES:
@@ -201,8 +226,9 @@ def main() -> int:
         for reason in reasons:
             print(f"  - {reason}", file=sys.stderr)
         print(
-            "  See mutants/mutmut-cicd-stats.json and `mutmut results` (or the uploaded "
-            "artifact) for exactly which mutants survived.",
+            "  See the uploaded `mutation-testing-stats` artifact's mutmut-survivors.txt "
+            "for the exact surviving mutant IDs (or run `mutmut results` locally), then "
+            "`mutmut show <mutant-name>` for the full diff of any one of them.",
             file=sys.stderr,
         )
         return 1

@@ -224,17 +224,34 @@ jobs:
       # how many mutants survived (verified empirically -- only a genuine
       # config/setup error exits non-zero from that step). This script
       # compares mutants/mutmut-cicd-stats.json against the committed
-      # mutation-baseline.json and fails on a dropped score OR a risen
-      # no_tests count -- see check_mutation_score.py's own module
-      # docstring for why both checks are needed.
+      # mutation-baseline.json and fails on a dropped score, a risen
+      # unresolved-mutant count, or a dropped total -- see
+      # check_mutation_score.py's own module docstring for why all three
+      # checks are needed.
       - name: Check mutation score against the committed baseline
         working-directory: snowflake
         run: python3 check_mutation_score.py
+
+      # Codex finding (F1-S9 slice 2, issue #12, ready round): the uploaded
+      # artifact previously carried only the aggregate stats JSON, which
+      # can't identify which mutants actually survived -- a maintainer
+      # investigating a failure had to reproduce the whole run locally just
+      # to find their names. `mutmut results` (no --all) lists exactly the
+      # survived mutant IDs (mutmut's own default filter), which is enough
+      # to target a local `mutmut show <name>` for the full diff without
+      # re-running the whole 484+-mutant suite first. `if: always()` so
+      # this still runs even if the score check above failed the job.
+      - name: List surviving mutant IDs
+        if: always()
+        working-directory: snowflake
+        run: python3 -m mutmut results > mutmut-survivors.txt
 
       - name: Upload mutation-testing results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutation-testing-stats
-          path: snowflake/mutants/mutmut-cicd-stats.json
+          path: |
+            snowflake/mutants/mutmut-cicd-stats.json
+            snowflake/mutmut-survivors.txt
           retention-days: 14
