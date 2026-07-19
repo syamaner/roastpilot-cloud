@@ -177,7 +177,7 @@ jobs:
     # connection here (same offline reasoning as snowflake-migrations above)
     # -- mutmut only re-runs this repo's own already-mocked unit tests
     # against mutated copies of the source. Verified wall time against
-    # this repo's actual two files: ~40s for all 484 mutants, so a FULL
+    # this repo's actual three files: ~40-60s for all 577 mutants, so a FULL
     # run on every PR (not diff-scoped) is the right choice -- mutmut
     # 3.6.0 has no native "mutate only the changed lines" option anyway
     # (confirmed via its own `mutmut run --help`), and this surface is
@@ -239,7 +239,7 @@ jobs:
       # to find their names. `mutmut results` (no --all) lists exactly the
       # survived mutant IDs (mutmut's own default filter), which is enough
       # to target a local `mutmut show <name>` for the full diff without
-      # re-running the whole 484+-mutant suite first. `if: always()` so
+      # re-running the whole 577-mutant suite first. `if: always()` so
       # this still runs even if the score check above failed the job.
       - name: List surviving mutant IDs
         if: always()
