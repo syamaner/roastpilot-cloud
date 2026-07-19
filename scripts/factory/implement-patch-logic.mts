@@ -203,16 +203,25 @@ export interface CoverageSuppressionMatch {
 }
 
 /**
- * Matches a coverage-suppression comment: Python's `# pragma: no cover`,
- * or a JS/TS coverage-provider ignore comment. `v8 ignore` is this repo's
- * LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
- * `c8`/`istanbul` are detected defensively even though unused here today
- * — over-matching a syntax this repo doesn't currently use is harmless,
- * and a future provider switch (or a diff copy-pasted from elsewhere)
- * shouldn't need this pattern updated to still catch it.
+ * Matches a coverage-suppression comment: Python's `# pragma: no cover`
+ * or `# pragma: no branch` (both real `coverage.py` pragmas), or a JS/TS
+ * coverage-provider ignore comment — in EITHER its block-comment
+ * (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
+ * (`// v8/c8/istanbul ignore ...`) form. `v8 ignore` (block form) is this
+ * repo's LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
+ * `c8`/`istanbul`, and the line-comment form for all three, are matched
+ * defensively even though unused here today — over-matching a syntax
+ * this repo doesn't currently use is harmless, and a future provider
+ * switch (or a diff copy-pasted from elsewhere) shouldn't need this
+ * pattern updated to still catch it. This exact set (independent
+ * factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an
+ * earlier version's docstring claimed "c8/istanbul" broadly while the
+ * regex only matched their BLOCK-comment form, missing istanbul's
+ * documented line-comment form) is what the pattern below actually
+ * matches — kept in sync deliberately, not narrowed to a stale claim.
  */
 const COVERAGE_SUPPRESSION_PATTERN =
-  /#\s*pragma:\s*no\s*cover|\/\*\s*(?:v8|c8|istanbul)\s+ignore\b/i;
+  /#\s*pragma:\s*no\s*(?:cover|branch)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
 
 /**
  * Scans raw unified-diff text for coverage-suppression comments on
@@ -330,6 +339,20 @@ export interface GamingFlag {
  * earlier one, and an edited-in-place comment could read as "already
  * seen" to a human who reviewed an earlier version.
  *
+ * Every field here is ATTACKER-CONTROLLED (a test-file path, or an added
+ * line's own content) and is rendered through {@link sanitizeStepSummaryText}
+ * before being interpolated — never raw (independent factory-security-
+ * reviewer finding, F1-S9 slice 1, issue #12): an added line containing a
+ * literal backtick could otherwise break out of its code span and inject
+ * live Markdown (a link, an `@mention`) into the factory bot's own
+ * comment — the identical injection class `sanitizeStepSummaryText` was
+ * already built to close for `$GITHUB_STEP_SUMMARY`. The harm isn't
+ * secret exfiltration (nothing sensitive is adjacent); it's that the
+ * injection could spoof or bury the very human-review signal this
+ * annotation exists to provide (e.g. append a fake "looks clean" or hide
+ * the real flagged line under an unrelated link). Sanitizing closes that
+ * regardless of which field carries the payload.
+ *
  * @param flag - What the classifier found; at least one field is
  *   expected to be non-empty (the caller only invokes this when flagged).
  * @returns The Markdown comment body.
@@ -344,14 +367,16 @@ export function buildGamingFlagAnnotation(flag: GamingFlag): string {
   if (flag.testFileEdits.length > 0) {
     lines.push("**Test file(s) edited:**");
     for (const path of flag.testFileEdits) {
-      lines.push(`- \`${path}\``);
+      lines.push(`- ${sanitizeStepSummaryText(path)}`);
     }
     lines.push("");
   }
   if (flag.suppressions.length > 0) {
     lines.push("**Coverage-suppression comment(s) added:**");
     for (const match of flag.suppressions) {
-      lines.push(`- \`${match.path}\`: \`${match.line}\``);
+      lines.push(
+        `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,
+      );
     }
     lines.push("");
   }

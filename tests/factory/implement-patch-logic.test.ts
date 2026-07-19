@@ -292,6 +292,52 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
     expect(findAddedCoverageSuppressions(istanbulPatch)).toHaveLength(1);
   });
 
+  it("flags istanbul's LINE-comment form too, not just its block-comment form (independent factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an earlier version's docstring claimed c8/istanbul coverage broadly while the regex only matched their block form)", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// istanbul ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+  });
+
+  it("flags v8/c8's line-comment form too, for the same categorical reason", () => {
+    const v8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// v8 ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(v8Patch)).toHaveLength(1);
+
+    const c8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// c8 ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(c8Patch)).toHaveLength(1);
+  });
+
+  it("flags Python's # pragma: no branch, not just # pragma: no cover", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+if x:  # pragma: no branch",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+  });
+
   it("does NOT flag an EXISTING (unmodified, context-line) suppression this diff doesn't touch", () => {
     const patch = [
       "diff --git a/lib/foo.ts b/lib/foo.ts",
@@ -391,6 +437,51 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     });
     expect(body).toContain("tests/slug.test.ts");
     expect(body).toContain("lib/foo.ts");
+  });
+
+  it("neutralizes a backtick+Markdown-injection payload in an added line's own content (independent factory-security-reviewer finding, F1-S9 slice 1, issue #12)", () => {
+    // The exact PoC: an added line whose content carries a literal
+    // backtick that would otherwise break out of the single code span
+    // this annotation wraps it in, injecting live Markdown (a link + a
+    // mention) into the factory bot's own comment — capable of
+    // spoofing/burying the very human-review signal this annotation
+    // exists to provide. sanitizeStepSummaryText STRIPS backticks (it
+    // doesn't escape them), so the link/mention TEXT still appears —
+    // the security property is that it stays trapped inside ONE
+    // unbroken code span, never rendered as live Markdown.
+    const payload =
+      "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
+    const body = buildGamingFlagAnnotation({
+      testFileEdits: [],
+      suppressions: [{ path: "lib/foo.ts", line: payload }],
+    });
+    // The exact, deterministic expected rendering: the payload's own
+    // backtick is gone, so `path` and `line` are each their OWN single,
+    // unbroken code span — the payload's backtick never gets to close
+    // the `line` span early and re-open Markdown parsing mid-string.
+    expect(body).toContain(
+      "- `lib/foo.ts`: `x = 1  # pragma: no cover [click](https://attacker.example) @some-maintainer`",
+    );
+    // Decisive proof the span isn't broken: this flagged line has
+    // EXACTLY 4 backtick characters (2 wrapping `path`, 2 wrapping
+    // `line`) — any more would mean the payload's own backtick survived
+    // sanitization and split one of those spans into pieces.
+    const flaggedLine = body.split("\n").find((l) => l.includes("lib/foo.ts"));
+    expect(flaggedLine).toBeDefined();
+    expect((flaggedLine?.match(/`/g) ?? []).length).toBe(4);
+  });
+
+  it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
+    const payload = "tests/`[click](https://attacker.example)`.test.ts";
+    const body = buildGamingFlagAnnotation({
+      testFileEdits: [payload],
+      suppressions: [],
+    });
+    const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));
+    expect(flaggedLine).toBeDefined();
+    // A single field on this line (just `path`, no `line` counterpart) —
+    // exactly 2 backticks (one unbroken code span), not more.
+    expect((flaggedLine?.match(/`/g) ?? []).length).toBe(2);
   });
 });
 
