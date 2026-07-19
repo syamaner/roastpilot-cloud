@@ -112,6 +112,63 @@ class TestEvaluate:
         baseline = {"killed": 353, "survived": 131}
         assert check_mutation_score.evaluate(current, baseline) == []
 
+    @pytest.mark.parametrize("category", ["no_tests", "suspicious", "timeout", "segfault"])
+    def test_flags_a_risen_count_in_every_unresolved_category_even_when_the_score_ratio_looks_fine(
+        self, category: str
+    ) -> None:
+        # Codex finding (F1-S9 slice 2, issue #12): an earlier version only
+        # checked no_tests -- generalized to every category representing a
+        # mutant that completed WITHOUT a clean kill (suspicious/timeout/
+        # segfault are just as much a gap in the killed/survived ratio).
+        current = {"killed": 353, "survived": 131, category: 3}
+        baseline = {"killed": 353, "survived": 131, category: 0}
+        reasons = check_mutation_score.evaluate(current, baseline)
+        assert len(reasons) == 1
+        assert f"{category} count rose" in reasons[0]
+
+    def test_flags_multiple_unresolved_categories_independently(self) -> None:
+        current = {
+            "killed": 353,
+            "survived": 131,
+            "no_tests": 2,
+            "suspicious": 4,
+            "timeout": 0,
+            "segfault": 0,
+        }
+        baseline = {
+            "killed": 353,
+            "survived": 131,
+            "no_tests": 0,
+            "suspicious": 0,
+            "timeout": 0,
+            "segfault": 0,
+        }
+        reasons = check_mutation_score.evaluate(current, baseline)
+        assert len(reasons) == 2
+        assert any("no_tests count rose" in r for r in reasons)
+        assert any("suspicious count rose" in r for r in reasons)
+
+    def test_does_not_flag_a_rise_in_check_was_interrupted_by_user(self) -> None:
+        # Deliberately excluded from UNRESOLVED_MUTANT_CATEGORIES -- an
+        # operational cancellation event, not a property of the diff or
+        # test-suite strength.
+        current = {
+            "killed": 353,
+            "survived": 131,
+            "check_was_interrupted_by_user": 1,
+        }
+        baseline = {
+            "killed": 353,
+            "survived": 131,
+            "check_was_interrupted_by_user": 0,
+        }
+        assert check_mutation_score.evaluate(current, baseline) == []
+
+    def test_does_not_flag_equal_or_improved_unresolved_counts(self) -> None:
+        current = {"killed": 353, "survived": 131, "suspicious": 0, "timeout": 0}
+        baseline = {"killed": 353, "survived": 131, "suspicious": 2, "timeout": 1}
+        assert check_mutation_score.evaluate(current, baseline) == []
+
 
 class TestMain:
     def _write_stats_and_baseline(

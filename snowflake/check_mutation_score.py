@@ -13,14 +13,25 @@ run's mutation score against the committed baseline
 1. The mutation score (`killed / (killed + survived)`) dropped below the
    baseline's score — the acceptance criterion's literal ask ("a dropped
    mutation score... fails the check").
-2. The `no_tests` count rose above the baseline's (baseline is 0) — a mutant
-   mutmut couldn't even find a test to run against at all, meaning newly
-   added code in the covered files has NO test touching it whatsoever. This
-   closes a gap the score check alone would miss: a PR that adds a brand-new,
-   completely untested function to one of these files produces `no_tests`
-   mutants, not `survived` ones, so the `killed / (killed + survived)` ratio
-   alone could stay unchanged (or even improve, if the untested function is
-   never invoked at all) while genuinely uncovered new security logic lands.
+2. Any UNRESOLVED-mutant category (Codex finding, F1-S9 slice 2, issue #12 —
+   generalizes an earlier version that checked only `no_tests`) rose above
+   its baseline count. `killed`/`survived` aren't the only outcomes mutmut
+   reports: `no_tests` (mutmut found no test to run against the mutant at
+   all — newly added, completely untested code), `suspicious` (the mutant's
+   test run behaved inconsistently — completed without being definitively
+   killed, e.g. a flaky result), `timeout` (the mutant run exceeded its
+   time budget without a clear kill), and `segfault` (the interpreter
+   crashed running it) all represent a mutant that did NOT return a clean
+   "killed" result, yet none of them appear in the `killed`/`survived`
+   ratio at all. A PR that adds a brand-new, completely untested function
+   produces `no_tests` mutants, not `survived` ones — the ratio alone could
+   stay unchanged (or even improve) while genuinely uncovered new security
+   logic lands; the same blind spot applies to a change that makes an
+   existing test flaky/inconsistent against a mutant (`suspicious`) instead
+   of reliably killing it. `UNRESOLVED_MUTANT_CATEGORIES` names every such
+   category explicitly rather than deriving them by exclusion, so a future
+   mutmut release adding a new outcome category is a visible one-line
+   addition here, not a silent gap.
 
 Both checks are necessary; neither alone catches everything the other does.
 """
@@ -33,6 +44,22 @@ from pathlib import Path
 
 DEFAULT_STATS_PATH = Path("mutants/mutmut-cicd-stats.json")
 DEFAULT_BASELINE_PATH = Path("mutation-baseline.json")
+
+# Every mutmut outcome category OTHER than killed/survived that represents a
+# mutant NOT definitively killed by the test suite (Codex finding, F1-S9
+# slice 2, issue #12) — see this module's own docstring, point 2, for why
+# each of these needs the same "must not rise above baseline" treatment as
+# `no_tests` alone got in an earlier version. Named explicitly (not derived
+# by excluding killed/survived/total from whatever keys happen to be in the
+# stats JSON) so a future mutmut release adding a new category is a visible,
+# reviewed one-line addition here, never a silent gap.
+#
+# Deliberately EXCLUDES `check_was_interrupted_by_user`: that category
+# reflects an OPERATIONAL event (someone/something cancelled the run, e.g.
+# a CI job cancellation), not a property of the diff or the test suite's
+# strength -- gating on it would fail a re-run for reasons unrelated to any
+# code change, and a genuine re-run naturally resets it to 0 anyway.
+UNRESOLVED_MUTANT_CATEGORIES = ("no_tests", "suspicious", "timeout", "segfault")
 
 
 def compute_mutation_score(killed: int, survived: int) -> float:
@@ -104,6 +131,16 @@ def load_baseline(path: Path) -> dict[str, object]:
         raise SystemExit(f"error: {path} is not valid JSON ({err})") from err
 
 
+# Human-readable descriptions for each of UNRESOLVED_MUTANT_CATEGORIES,
+# used only to build evaluate()'s failure messages.
+_UNRESOLVED_CATEGORY_DESCRIPTIONS = {
+    "no_tests": "had no test touch them at all",
+    "suspicious": "completed with an inconsistent/flaky test result, never a clean kill",
+    "timeout": "exceeded the per-mutant time budget without a clean kill",
+    "segfault": "crashed the interpreter running the mutant",
+}
+
+
 def evaluate(current: dict[str, object], baseline: dict[str, object]) -> list[str]:
     """Compares the current mutation-testing run against the baseline.
 
@@ -115,11 +152,9 @@ def evaluate(current: dict[str, object], baseline: dict[str, object]) -> list[st
     """
     current_killed = int(current.get("killed", 0))
     current_survived = int(current.get("survived", 0))
-    current_no_tests = int(current.get("no_tests", 0))
 
     baseline_killed = int(baseline.get("killed", 0))
     baseline_survived = int(baseline.get("survived", 0))
-    baseline_no_tests = int(baseline.get("no_tests", 0))
 
     reasons: list[str] = []
 
@@ -133,13 +168,16 @@ def evaluate(current: dict[str, object], baseline: dict[str, object]) -> list[st
             f"({baseline_killed} killed / {baseline_killed + baseline_survived} total)"
         )
 
-    if current_no_tests > baseline_no_tests:
-        reasons.append(
-            f"no_tests count rose: {current_no_tests} mutant(s) had no test touch them at "
-            f"all (baseline: {baseline_no_tests}) -- this means newly added code in the "
-            "covered files has zero test coverage, a gap the mutation-score ratio alone "
-            "would not catch"
-        )
+    for category in UNRESOLVED_MUTANT_CATEGORIES:
+        current_count = int(current.get(category, 0))
+        baseline_count = int(baseline.get(category, 0))
+        if current_count > baseline_count:
+            description = _UNRESOLVED_CATEGORY_DESCRIPTIONS[category]
+            reasons.append(
+                f"{category} count rose: {current_count} mutant(s) {description} "
+                f"(baseline: {baseline_count}) -- an unresolved mutant the killed/survived "
+                "ratio alone would not catch"
+            )
 
     return reasons
 
