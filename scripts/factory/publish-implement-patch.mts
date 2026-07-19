@@ -1104,12 +1104,13 @@ async function postGamingFlagAnnotation(
  * stronger response, which this predicate GATES but does not itself
  * deliver — the caller both sets `process.exitCode = 1` (an
  * operator-side signal, visible on the Actions run) AND posts a
- * REQUEST_CHANGES review via {@link postGamingBothLostFailureReview}
+ * `COMMENT`-event review via {@link postGamingBothLostFailureReview}
  * (the actual PR-VISIBLE signal — see that function's docstring for why
- * a review, not a commit status, is the right mechanism here, and why
- * the exit code alone doesn't reach the PR at all). Neither ever
- * becomes a {@link PublishRejection}: an API flake mid-publish must not
- * undo an otherwise-successful branch push + PR — the PR is still the
+ * a review, not a commit status, is the right mechanism here, why it's
+ * a `COMMENT` and not a `REQUEST_CHANGES` event, and why the exit code
+ * alone doesn't reach the PR at all). Neither ever becomes a
+ * {@link PublishRejection}: an API flake mid-publish must not undo an
+ * otherwise-successful branch push + PR — the PR is still the
  * load-bearing artifact.
  *
  * @param gamingFlagged - Whether the classifier flagged this diff at all.
@@ -1128,7 +1129,7 @@ function gamingSignalsBothLost(
 }
 
 /**
- * Posts a `REQUEST_CHANGES` PR review — the actual PR-VISIBLE signal the
+ * Posts a `COMMENT`-event PR review — the actual PR-VISIBLE signal the
  * `process.exitCode = 1` fix (see {@link gamingSignalsBothLost}) promised
  * but, on its own, doesn't deliver (Codex finding, F1-S9 slice 1, issue
  * #12, ready round 5 — REPLACES an earlier commit-status attempt entirely,
@@ -1147,18 +1148,28 @@ function gamingSignalsBothLost(
  * model that this whole classifier exists to shrink, not grow, purely to
  * revive a signal that has a working alternative anyway.
  *
- * WHY A REVIEW WORKS: this job already holds `pull-requests: write` —
- * proven by the time this function runs, since it just successfully
- * created or refreshed the PR itself via that same permission. The
- * both-lost scenario is specifically an issues-API failure (the label
- * and comment calls both use `/issues/...` endpoints), a DIFFERENT API
- * family from `/pulls/.../reviews` — so a failure in one gives no reason
- * to expect a failure in the other. A `REQUEST_CHANGES` review is also,
- * independently, a STRONGER signal than a label or comment: it renders
- * red in the PR's own merge box, exactly where a human deciding whether
- * to merge looks — and it's human-dismissible (a later approving review
- * clears it), so it can never deadlock the PR the way a required check
- * could.
+ * WHY `COMMENT`, NOT `REQUEST_CHANGES` (Codex finding, F1-S9 slice 1,
+ * issue #12, ready round 6 — a second claim-vs-runtime error, same
+ * CLASS as the commit-status one): GitHub's reviews API returns 422 for
+ * BOTH `APPROVE` and `REQUEST_CHANGES` when submitted by the PR's OWN
+ * AUTHOR — and the publisher token IS that author, since it's the
+ * identity that just created or refreshed this very PR. An earlier
+ * version of this function used `REQUEST_CHANGES`, which would 422 at
+ * runtime exactly like the commit-status attempt it replaced, just via a
+ * different restriction (author-identity, not permission scope).
+ * `COMMENT` is the one review event GitHub's own-PR restriction does NOT
+ * block — weaker than a red `REQUEST_CHANGES` (it doesn't block the
+ * merge box), but still a genuine, durable review-timeline entry, and
+ * the strongest signal the author identity can legally emit through this
+ * API.
+ *
+ * WHY A REVIEW (of either event type) WORKS AT ALL: this job already
+ * holds `pull-requests: write` — proven by the time this function runs,
+ * since it just successfully created or refreshed the PR itself via that
+ * same permission. The both-lost scenario is specifically an issues-API
+ * failure (the label and comment calls both use `/issues/...`
+ * endpoints), a DIFFERENT API family from `/pulls/.../reviews` — so a
+ * failure in one gives no reason to expect a failure in the other.
  *
  * Best-effort, like every other gaming-flag signal here: if this ALSO
  * fails, all THREE independent channels (label, comment, review) have
@@ -1183,13 +1194,13 @@ async function postGamingBothLostFailureReview(
   flag: GamingFlag,
 ): Promise<boolean> {
   return githubRequest(token, "POST", `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, {
-    event: "REQUEST_CHANGES",
+    event: "COMMENT",
     body: buildGamingBothLostReviewBody(flag),
   }).then(
     () => true,
     (err: unknown) => {
       console.error(
-        `Failed to post the anti-gaming REQUEST_CHANGES review on PR #${prNumber} (the ` +
+        `Failed to post the anti-gaming COMMENT review on PR #${prNumber} (the ` +
           `${NO_AUTO_CHAIN_LABEL} label AND the annotation comment ALSO failed — all three ` +
           `independent signal channels lost; the PR still exists and this never fails the ` +
           `publish): ${err instanceof Error ? err.message : String(err)}`,
@@ -1548,7 +1559,7 @@ export async function main(): Promise<void> {
         console.error(
           `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
             `failed to post on PR #${existingPr.number} — a flagged diff would otherwise ` +
-            `have NO visible signal on the PR itself. Posting a REQUEST_CHANGES review ` +
+            `have NO visible signal on the PR itself. Posting a COMMENT-event review ` +
             `(the actual PR-visible signal) and failing this publish job (non-zero exit, ` +
             `operator-side fallback).`,
         );
@@ -1632,7 +1643,7 @@ export async function main(): Promise<void> {
       console.error(
         `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
           `failed to post on PR #${created.number} — a flagged diff would otherwise have ` +
-          `NO visible signal on the PR itself. Posting a REQUEST_CHANGES review (the ` +
+          `NO visible signal on the PR itself. Posting a COMMENT-event review (the ` +
           `actual PR-visible signal) and failing this publish job (non-zero exit, ` +
           `operator-side fallback).`,
       );

@@ -958,7 +958,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   });
 });
 
-describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12, ready round 5)", () => {
+describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12, ready rounds 5-6)", () => {
   it("explains why the review exists and reuses buildGamingFlagAnnotation's rendering, naming the exact flagged content", () => {
     const body = buildGamingBothLostReviewBody({
       testFileEdits: ["tests/slug.test.ts"],

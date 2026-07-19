@@ -811,13 +811,16 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
 }
 
 /**
- * Builds the body for the `REQUEST_CHANGES` review posted when BOTH the
+ * Builds the body for the `COMMENT`-event review posted when BOTH the
  * `no-auto-chain` label AND the annotation comment fail to post on a
- * flagged diff (Codex finding, F1-S9 slice 1, issue #12, ready round 5)
- * — see `postGamingBothLostFailureReview` in `publish-implement-patch.mts`
- * for why a PR review, not a commit status, is the mechanism this
- * fallback uses. Reuses {@link buildGamingFlagAnnotation}'s own rendering
- * (with `labelApplied: false`, accurately reflecting that the label call
+ * flagged diff (Codex finding, F1-S9 slice 1, issue #12, ready rounds
+ * 5-6) — see `postGamingBothLostFailureReview` in
+ * `publish-implement-patch.mts` for why a PR review, not a commit
+ * status, is the mechanism this fallback uses, and why it's a `COMMENT`
+ * event specifically (GitHub disallows `REQUEST_CHANGES`/`APPROVE` from
+ * a PR's own author, which the publisher always is here). Reuses
+ * {@link buildGamingFlagAnnotation}'s own rendering (with
+ * `labelApplied: false`, accurately reflecting that the label call
  * really did fail in this scenario) rather than duplicating the
  * per-category rendering logic a second time, prefixed with a short
  * banner explaining why a review — normally never posted by this
@@ -830,8 +833,8 @@ export function buildGamingBothLostReviewBody(flag: GamingFlag): string {
   return [
     "> ⚠️ **Fallback signal:** the anti-gaming classifier flagged this diff, but both the " +
       "label and the annotation comment failed to post — this review exists so the flag " +
-      "isn't silently lost. Dismiss it once a human confirms the flagged content below is " +
-      "intentional and correct.",
+      "isn't silently lost. Confirm the flagged content below is intentional and correct " +
+      "before merging.",
     "",
     buildGamingFlagAnnotation(flag, false),
   ].join("\n");

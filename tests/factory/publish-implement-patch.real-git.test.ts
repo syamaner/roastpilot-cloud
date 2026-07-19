@@ -816,7 +816,7 @@ index 0000000..abc1234
     expect(commentCall).toBeDefined();
   });
 
-  it("refresh path (existingPr): BOTH the label AND the annotation failing on a flagged re-dispatch also fails the publish job (non-zero exit) and posts a REQUEST_CHANGES review — same both-lost fix as the creation path", async () => {
+  it("refresh path (existingPr): BOTH the label AND the annotation failing on a flagged re-dispatch also fails the publish job (non-zero exit) and posts a COMMENT-event review — same both-lost fix as the creation path", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -841,7 +841,7 @@ index 0000000..abc1234
         return new Response("server error", { status: 500 });
       }
       if (method === "POST" && url.includes("/pulls/50/reviews")) {
-        return jsonResponse({ id: 1, state: "CHANGES_REQUESTED" }, 200);
+        return jsonResponse({ id: 1, state: "COMMENTED" }, 200);
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
@@ -852,7 +852,7 @@ index 0000000..abc1234
 
     expect(process.exitCode).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Posting a REQUEST_CHANGES review"),
+      expect.stringContaining("Posting a COMMENT-event review"),
     );
     const reviewCall = (
       fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>
@@ -862,12 +862,12 @@ index 0000000..abc1234
       event: string;
       body: string;
     };
-    expect(reviewBody.event).toBe("REQUEST_CHANGES");
+    expect(reviewBody.event).toBe("COMMENT");
     expect(reviewBody.body).toContain("tests/new.test.ts");
     errorSpy.mockRestore();
   });
 
-  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent) — AND a REQUEST_CHANGES review is posted on the PR, the mechanism that ACTUALLY renders on the PR (Codex finding, F1-S9 slice 1, issue #12, ready round 5 — replaces a round-4 commit-status attempt that would have 403'd: this job never holds statuses:write, and must not be granted it)", async () => {
+  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent) — AND a COMMENT-event review is posted on the PR, the mechanism that ACTUALLY renders on the PR (Codex finding, F1-S9 slice 1, issue #12, ready round 6 — REQUEST_CHANGES would 422: GitHub disallows both APPROVE and REQUEST_CHANGES from a PR's own author, and the publisher IS the author)", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -886,7 +886,7 @@ index 0000000..abc1234
         return new Response("server error", { status: 500 });
       }
       if (method === "POST" && url.includes("/pulls/99/reviews")) {
-        return jsonResponse({ id: 1, state: "CHANGES_REQUESTED" }, 200);
+        return jsonResponse({ id: 1, state: "COMMENTED" }, 200);
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
@@ -910,7 +910,7 @@ index 0000000..abc1234
       expect.stringContaining("Failed to post the anti-gaming annotation comment"),
     );
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Posting a REQUEST_CHANGES review"),
+      expect.stringContaining("Posting a COMMENT-event review"),
     );
     const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
     const reviewCall = calls.find(
@@ -921,12 +921,12 @@ index 0000000..abc1234
       event: string;
       body: string;
     };
-    expect(reviewBody.event).toBe("REQUEST_CHANGES");
+    expect(reviewBody.event).toBe("COMMENT");
     expect(reviewBody.body).toContain("tests/new.test.ts");
     errorSpy.mockRestore();
   });
 
-  it("when the REQUEST_CHANGES review ALSO fails to post (three of three signal channels lost), it's logged, never thrown, and the publish job still exits non-zero", async () => {
+  it("when the COMMENT-event review ALSO fails to post (three of three signal channels lost), it's logged, never thrown, and the publish job still exits non-zero", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -956,7 +956,7 @@ index 0000000..abc1234
 
     expect(process.exitCode).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to post the anti-gaming REQUEST_CHANGES review"),
+      expect.stringContaining("Failed to post the anti-gaming COMMENT review"),
     );
     errorSpy.mockRestore();
   });
