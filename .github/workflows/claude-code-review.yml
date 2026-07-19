@@ -2,7 +2,11 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # `converted_to_draft` is included so converting a ready PR back to draft
+    # enters the per-PR concurrency group and CANCELS an in-progress review
+    # (the job is then skipped by the draft guard below); without it a review
+    # already running on the now-draft PR would finish and post its findings.
+    types: [opened, synchronize, ready_for_review, reopened, converted_to_draft]
 
 # Adjudicated fold (round-2 Finding 3, #35 rework): without this, a rapid
 # sequence of pushes to the same PR can leave an OLDER review run still
@@ -42,7 +46,11 @@ jobs:
     # simply not running. `head.repo.full_name == repository` is false for
     # any fork (true only when the PR's source branch lives in this same
     # repo), so this skips exactly the cases with no secret to work with.
-    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    # Skip DRAFT PRs (D103 draft-first): the diverse-lens loop opens a PR as a
+    # draft to converge Codex before "ready". Running claude-review on the draft
+    # too would double its runs and land findings pre-ready; it fires on
+    # ready_for_review once the PR is out of draft. (Factory PRs open non-draft.)
+    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
 
     runs-on: ubuntu-latest
     permissions:
