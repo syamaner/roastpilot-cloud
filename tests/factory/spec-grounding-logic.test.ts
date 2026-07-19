@@ -228,6 +228,55 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     const body = "Run `gh pr view` locally, then check <!-- a comment --> the template. Closes #12";
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
   });
+
+  it("does not treat an ESCAPED '\\<!--' as a real comment opener (Codex finding, PR #70 review round 7 — Markdown's own backslash-escaping convention means this renders as the literal text '<!--', not a live comment start; a real reference sitting between the escaped opener and the next REAL '-->' anywhere later in the body must survive)", () => {
+    const body = "Handle \\<!-- Closes #12 --> in the docs.";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("a REAL, unescaped comment is still stripped after the escape fix — regression check", () => {
+    const body = "Closes #<!-- issue this PR FULLY resolves --><!-- this PR does not close #12 -->\nRefs #8";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 8, kind: "non-closing" }]);
+  });
+
+  it("recognizes the OWNER/REPO#N qualified reference form for THIS repo (Codex finding, PR #70 review round 7 — a real, common closing-reference form GitHub honors that the bare-#N-only pattern missed)", () => {
+    expect(parseLinkedIssueReferences("Fixes syamaner/roastpilot-cloud#123")).toEqual([
+      { issueNumber: 123, kind: "closing" },
+    ]);
+  });
+
+  it("recognizes the full GitHub URL reference form for THIS repo, both issues and pull URLs", () => {
+    expect(
+      parseLinkedIssueReferences("Resolves https://github.com/syamaner/roastpilot-cloud/issues/123"),
+    ).toEqual([{ issueNumber: 123, kind: "closing" }]);
+    expect(
+      parseLinkedIssueReferences("Resolves https://github.com/syamaner/roastpilot-cloud/pull/456"),
+    ).toEqual([{ issueNumber: 456, kind: "closing" }]);
+  });
+
+  it("does NOT treat a CROSS-repo qualified reference as one of this repo's own issues", () => {
+    expect(parseLinkedIssueReferences("Fixes other/repo#5")).toEqual([]);
+  });
+
+  it("does NOT treat a CROSS-repo URL reference as one of this repo's own issues either", () => {
+    expect(parseLinkedIssueReferences("Fixes https://github.com/other/repo/issues/5")).toEqual([]);
+  });
+
+  it("the repo qualifier is injectable, not hardcoded (dependency-injection testability, same pattern as renderCriteriaDataBlock's maxBytes) — overriding thisRepo makes a DIFFERENT owner/repo count as 'this' one", () => {
+    expect(parseLinkedIssueReferences("Fixes other/repo#5", "other/repo")).toEqual([
+      { issueNumber: 5, kind: "closing" },
+    ]);
+  });
+
+  it("the OWNER/REPO comparison is case-insensitive, matching GitHub's own repo-name handling", () => {
+    expect(parseLinkedIssueReferences("Fixes SYAMANER/RoastPilot-Cloud#123")).toEqual([
+      { issueNumber: 123, kind: "closing" },
+    ]);
+  });
+
+  it("still matches the plain bare #N form exactly as before — regression check after the named-group rewrite", () => {
+    expect(parseLinkedIssueReferences("Closes #12")).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
 });
 
 describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
@@ -358,6 +407,11 @@ describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
   it("does not produce a criterion for a bare checkbox with NOTHING after it at all — not even code (the prefix-only eligibility check correctly lets this reach extraction, which correctly finds no text and skips it)", () => {
     const body = "### Acceptance criteria\n- [ ]";
     expect(parseAcceptanceCriteria(body)).toEqual([]);
+  });
+
+  it("does not produce a blank criterion for a checkbox followed by WHITESPACE ONLY (Codex finding, PR #70 review round 7 — '- [ ] ' matches CHECKBOX_LINE_PATTERN's '(.+)$' via a single trailing space, producing an empty-trimmed-text criterion; a meaningless entry in the review prompt)", () => {
+    const body = "### Acceptance criteria\n- [ ] \n- [ ] A real criterion.";
+    expect(parseAcceptanceCriteria(body)).toEqual([{ text: "A real criterion.", checked: false }]);
   });
 
   it("ignores a non-checkbox prose line within the section", () => {

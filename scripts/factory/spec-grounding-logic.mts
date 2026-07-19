@@ -125,6 +125,26 @@
  * three; this module's contribution is making sure the DATA it hands to
  * that prompt is as minimal and delimiter-safe as possible going in —
  * necessary groundwork, not the containment itself.
+ *
+ * (iv) COMMON-FORM BOUNDARY (operator decision, PR #70 review round 7 —
+ * the close of this slice's extractor-hardening arc): this module
+ * handles the COMMON, real-world markdown/reference forms this repo and
+ * GitHub itself actually use — verified against real merged PR bodies,
+ * GitHub's documented keyword-linking syntax (bare `#N`, qualified
+ * `OWNER/REPO#N`, and the full issue/PR URL form), and markdown-it's own
+ * CommonMark-complete parsing for code/heading structure. The space of
+ * EXOTIC or DELIBERATELY-ADVERSARIAL markdown/GitHub-syntax variants
+ * beyond that is effectively unbounded — the same lesson the #64
+ * anti-gaming classifier's own docstring names for its own residual
+ * textual evasions. Seven review rounds closed real gaps in the COMMON
+ * forms (parser-precision bugs producing WRONG output on ordinary input,
+ * and delimiter-BREAKOUT security gaps); beyond that boundary, this
+ * module fails in the SAFE direction — over-matching or advisory-only
+ * glance-worthy noise, never silently dropping a real reference on
+ * common input — and residual exotic-syntax mis-parses are contained the
+ * same way (ii) and (iii) above are: human review plus slice 3b's
+ * read-only tool policy, not by chasing the next rare markdown variant
+ * through another extractor round.
  */
 
 import MarkdownIt from "markdown-it";
@@ -196,12 +216,48 @@ const NON_CLOSING_KEYWORDS = ["ref", "refs", "part of"] as const;
 // itself required whitespace on either side beyond what's already
 // mandatory after it, so "Closes #12" (no colon) keeps matching exactly
 // as before.
+//
+// Three number forms (Codex finding, PR #70 review round 7 — a common,
+// real form the bare-`#N`-only pattern missed): the bare `#N` this repo's
+// own convention uses (named group `bareNumber`); the `OWNER/REPO#N`
+// qualified form GitHub also honors as a real closing keyword, e.g.
+// `Fixes syamaner/roastpilot-cloud#123` (named groups `qualifiedRepo`/
+// `qualifiedNumber`); and the full `https://github.com/OWNER/REPO/
+// issues|pull/N` URL form (named groups `urlRepo`/`urlNumber`). The
+// OWNER/REPO capture in the latter two is validated against
+// {@link DEFAULT_REPO} in {@link parseLinkedIssueReferences} itself, NOT
+// here in the pattern — a cross-repo qualified/URL reference
+// (`other/repo#5`) is correctly a DIFFERENT repo's issue, out of this
+// module's scope, and must never be treated as linking to one of THIS
+// repo's issues just because the number matched.
 const ISSUE_LINK_PATTERN = new RegExp(
-  `\\b(${[...CLOSING_KEYWORDS, ...NON_CLOSING_KEYWORDS]
+  `\\b(?<keyword>${[...CLOSING_KEYWORDS, ...NON_CLOSING_KEYWORDS]
     .map((keyword) => keyword.replace(/ /g, "\\s+"))
-    .join("|")}):?\\s+#(\\d+)\\b`,
+    .join("|")}):?\\s+` +
+    `(?:#(?<bareNumber>\\d+)` +
+    `|(?<qualifiedRepo>[\\w.-]+\\/[\\w.-]+)#(?<qualifiedNumber>\\d+)` +
+    `|https:\\/\\/github\\.com\\/(?<urlRepo>[\\w.-]+\\/[\\w.-]+)\\/(?:issues|pull)\\/(?<urlNumber>\\d+))\\b`,
   "gi",
 );
+
+/**
+ * This repo's own `owner/repo` — used to validate the qualified
+ * (`OWNER/REPO#N`) and URL (`https://github.com/OWNER/REPO/issues/N`)
+ * reference forms {@link ISSUE_LINK_PATTERN} matches, so a CROSS-repo
+ * reference is correctly excluded rather than mistaken for one of this
+ * repo's own issues.
+ *
+ * A default, not an environment read: this module is deliberately pure
+ * (see its own top-level docstring — no network, no filesystem), so it
+ * can't read `GITHUB_REPOSITORY` itself the way this factory's other,
+ * network-facing scripts do (`publish-implement-patch.mts`,
+ * `apply-triage-verdict.mts`). {@link parseLinkedIssueReferences}
+ * accepts this as an overridable parameter for the same testability
+ * reason {@link renderCriteriaDataBlock} accepts `maxBytes` — the
+ * default is correct for every real caller today, since this module
+ * only ever runs inside this one repo's own factory pipeline.
+ */
+const DEFAULT_REPO = "syamaner/roastpilot-cloud";
 
 const CLOSING_KEYWORD_SET: ReadonlySet<string> = new Set(CLOSING_KEYWORDS);
 
@@ -218,6 +274,19 @@ const structuralParser = new MarkdownIt({
   linkify: false,
   typographer: false,
 });
+
+// A NEGATIVE LOOKBEHIND excludes an ESCAPED `\<!--` from ever being
+// treated as a real comment opener (Codex finding, PR #70 review round
+// 7): Markdown's own backslash-escaping convention means `\<!--` renders
+// as the literal text "<!--", not a live comment start — GitHub would
+// never treat it as one either. Without this, an illustrative example
+// showing the escaped form (e.g. two checkbox items each demonstrating
+// half of the syntax) would have its OWN escaped opener wrongly paired
+// with the next REAL `-->` anywhere later in the body, silently masking
+// everything — including a real reference — in between. Verified
+// empirically (not assumed) that the un-fixed pattern matched a
+// backslash-preceded `<!--` before writing this fix.
+const HTML_COMMENT_PATTERN = /(?<!\\)<!--[\s\S]*?-->/g;
 
 /**
  * Produces a "structural view" of arbitrary Markdown text with the
@@ -323,7 +392,7 @@ function buildStructuralView(text: string): string {
     // parse failure: comment-stripping (below) still runs on the raw
     // text, so a real, out-of-code comment is still correctly stripped
     // even when code-region masking itself couldn't run at all.
-    return text.replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
+    return text.replace(HTML_COMMENT_PATTERN, neuterPreservingNewlines);
   }
 
   for (const token of tokens) {
@@ -426,11 +495,12 @@ function buildStructuralView(text: string): string {
 
   // HTML comments stripped SECOND, from the already CODE-MASKED text —
   // see this function's own opening comment for why this order matters.
-  return maskedLines.join("\n").replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
+  return maskedLines.join("\n").replace(HTML_COMMENT_PATTERN, neuterPreservingNewlines);
 }
 
 /**
- * Scans a PR body for every `<keyword> #<N>` issue reference and
+ * Scans a PR body for every `<keyword> #<N>` issue reference (plus the
+ * `OWNER/REPO#N` and full-URL forms, see {@link ISSUE_LINK_PATTERN}) and
  * classifies each by {@link IssueLinkKind}.
  *
  * Deliberately PR-BODY-ONLY, not commit messages: matches how the
@@ -440,31 +510,80 @@ function buildStructuralView(text: string): string {
  * not the commit log.
  *
  * @param prBody - The PR's rendered body text.
+ * @param thisRepo - This repo's own `owner/repo`, used to validate the
+ *   qualified/URL reference forms so a CROSS-repo reference is correctly
+ *   excluded — defaults to {@link DEFAULT_REPO}; see that constant's own
+ *   docstring for why this is a parameter, not an environment read.
  * @returns Every distinct issue number referenced, each with its
  *   strongest claimed link kind (see the CLOSING-wins tie-break below),
  *   in FIRST-APPEARANCE order (not sorted by issue number — see the
  *   padding-evasion mitigation in this function's own implementation).
  *   Empty if the body references no issue at all.
  */
-export function parseLinkedIssueReferences(prBody: string): LinkedIssueReference[] {
+export function parseLinkedIssueReferences(
+  prBody: string,
+  thisRepo: string = DEFAULT_REPO,
+): LinkedIssueReference[] {
   const scannable = buildStructuralView(prBody);
+  const normalizedThisRepo = thisRepo.toLowerCase();
   const byNumber = new Map<number, IssueLinkKind>();
   for (const match of scannable.matchAll(ISSUE_LINK_PATTERN)) {
-    const rawKeyword = match[1];
-    const rawNumber = match[2];
-    if (rawKeyword === undefined || rawNumber === undefined) {
-      // Defensive: both capture groups are non-optional in
-      // ISSUE_LINK_PATTERN (neither is inside a `(?:...)?` or similar), so
-      // a successful match always populates both — TS's regex typing
-      // can't express that, this can't actually be exercised by a test.
+    const groups = match.groups;
+    if (groups === undefined) {
+      // Defensive: ISSUE_LINK_PATTERN always has a `groups` object for
+      // any successful match, since it uses named capture groups
+      // throughout — unreachable by construction.
+      /* v8 ignore next */
+      continue;
+    }
+    const rawKeyword = groups.keyword;
+    if (rawKeyword === undefined) {
+      // Defensive: the `keyword` group is non-optional in
+      // ISSUE_LINK_PATTERN — a successful match always populates it —
+      // TS's regex typing can't express that, this can't actually be
+      // exercised by a test.
+      /* v8 ignore next */
+      continue;
+    }
+    // Exactly ONE of these three is populated per successful match, since
+    // ISSUE_LINK_PATTERN's number forms are mutually-exclusive alternation
+    // branches (bare `#N` XOR qualified `OWNER/REPO#N` XOR the full URL
+    // form) — never more than one, never none, for a match that reached
+    // this point at all.
+    let rawNumber: string | undefined;
+    if (groups.bareNumber !== undefined) {
+      rawNumber = groups.bareNumber;
+    } else if (groups.qualifiedNumber !== undefined) {
+      // CROSS-repo qualifier check (Codex finding, PR #70 review round
+      // 7): `OWNER/REPO#N` only counts as a reference to one of THIS
+      // repo's own issues when OWNER/REPO matches `thisRepo` — a
+      // qualified reference naming a DIFFERENT repo (`other/repo#5`) is
+      // genuinely out of scope, not a same-repo reference this module
+      // should ever surface.
+      if (groups.qualifiedRepo?.toLowerCase() !== normalizedThisRepo) {
+        continue;
+      }
+      rawNumber = groups.qualifiedNumber;
+    } else if (groups.urlNumber !== undefined) {
+      // Same cross-repo check, for the full-URL form.
+      if (groups.urlRepo?.toLowerCase() !== normalizedThisRepo) {
+        continue;
+      }
+      rawNumber = groups.urlNumber;
+    }
+    if (rawNumber === undefined) {
+      // Defensive: the alternation in ISSUE_LINK_PATTERN guarantees one
+      // of the three number groups is always populated for a match that
+      // reached this point — unreachable by construction.
       /* v8 ignore next */
       continue;
     }
     const keyword = rawKeyword.toLowerCase().replace(/\s+/g, " ");
     const issueNumber = Number(rawNumber);
     if (!Number.isFinite(issueNumber)) {
-      // Defensive: group 2 is `(\d+)` — digits only — so Number(rawNumber)
-      // is always a finite non-negative integer; unreachable by construction.
+      // Defensive: every number group matches `\d+` — digits only — so
+      // Number(rawNumber) is always a finite non-negative integer;
+      // unreachable by construction.
       /* v8 ignore next */
       continue;
     }
@@ -685,7 +804,21 @@ export function parseAcceptanceCriteria(issueBody: string): AcceptanceCriterion[
       /* v8 ignore next */
       continue;
     }
-    criteria.push({ text: text.trim(), checked: marker.toLowerCase() === "x" });
+    const trimmedText = text.trim();
+    if (trimmedText.length === 0) {
+      // Real output bug, folded (Codex finding, PR #70 review round 7):
+      // "- [ ] " (whitespace only after the checkbox) matches
+      // CHECKBOX_LINE_PATTERN's `(.+)$` (a single space still satisfies
+      // "one or more of any character"), producing a criterion with
+      // EMPTY trimmed text — a blank, meaningless entry in the review
+      // prompt. The prefix/full-pattern split (this module's own
+      // hardening for the all-inline-code case above) correctly lets
+      // this line reach extraction, but a criterion with nothing real to
+      // say once trimmed is never a genuine, actionable one; skip it
+      // rather than push a blank.
+      continue;
+    }
+    criteria.push({ text: trimmedText, checked: marker.toLowerCase() === "x" });
   }
   return criteria;
 }
