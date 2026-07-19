@@ -174,6 +174,48 @@ exception. The load-bearing points:
   of #N` otherwise, so an unfinished issue isn't auto-closed.
 - No post-open lint/format churn — run the gates before opening.
 
+### Shift-left: fold the diverse lens BEFORE "ready" (D103)
+
+The build's rework is dominated by review findings landing *after* a PR is
+marked ready — F1-S8 alone took **5 Codex rounds, ~15 real P1s, all post-open**,
+on a security keystone that two Opus `safety-reviewer` passes called clean. The
+fix is to move the lens that catches them to before the merge gate ever sees the
+PR.
+
+- **Diverse-lens pre-open loop (the flagship, interactive/human-authored PRs).**
+  Open a review-worthy PR as a **draft**, trigger `@codex review` on it, fold
+  every real finding, and only then mark it **ready**. Codex is a *different
+  model family* from the Claude authoring/review lenses, and same-family lenses
+  co-accept a bug the author has already rationalised — that is the exact ~15-P1
+  gap F1-S8 exposed. A finding folded on the draft is not rework; the identical
+  finding after "ready" is. Wait for the verdict per the **Codex-wait rule in
+  the Merge Policy** (its single source of truth) before flipping to ready —
+  don't restate that rule here. **Factory-authored PRs** don't use this
+  draft loop: the read-only implementing agent can't drive an open→ready
+  transition, so the privileged publisher opens the PR and the *same* diverse
+  lens runs **post-open** by design (the App-identity wiring exists precisely so
+  CI + Codex + Claude Code Review fire on the opened PR), with the human merge as
+  the gate the draft→ready step would otherwise be. Whether the publisher should
+  open factory PRs as drafts and have `pr-triage` mark them ready post-fold is a
+  factory-design question tracked separately, not this rule.
+- **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance
+  of a class (a sanitizer that misses one escape, one un-byte-compared
+  identifier, one un-audited grant target), fix the class in one place and
+  `grep` the whole repo for siblings before pushing. Per-symptom patching is the
+  round-2..N rework engine — one categorical fix collapses the round trip.
+- **Snowflake grant-boundary checklist** — run on any diff touching grants,
+  roles, or `snowflake/migrations/**`; it folds the recurring F1-S8 class up
+  front instead of rediscovering it per PR:
+  - no `GRANT ... TO PUBLIC`, and PUBLIC is **audited**, not assumed clean (its
+    audit's completeness limit under a minimal role is documented, #59);
+  - `USE SECONDARY ROLES NONE` is a **statement**, not a session parameter;
+  - the CI user's `DEFAULT_SECONDARY_ROLES` is **verified** empty by the assert
+    script, not assumed from a one-off manual `ALTER`;
+  - **future** grants (`SHOW FUTURE GRANTS TO ROLE`) are audited, not only
+    current grants;
+  - identifier matches are **exact byte compares** (quoted identifiers preserve
+    case + whitespace; unquoted fold to uppercase).
+
 ## Code Review Rubric
 
 The review roster (Claude Code Review + Codex, advisory-but-triaged, plus any
