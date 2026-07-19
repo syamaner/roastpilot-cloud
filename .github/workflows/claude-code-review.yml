@@ -2,7 +2,11 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # `converted_to_draft` is included so converting a ready PR back to draft
+    # enters the per-PR concurrency group and CANCELS an in-progress review
+    # (the job is then skipped by the draft guard below); without it a review
+    # already running on the now-draft PR would finish and post its findings.
+    types: [opened, synchronize, ready_for_review, reopened, converted_to_draft]
 
 # Adjudicated fold (round-2 Finding 3, #35 rework): without this, a rapid
 # sequence of pushes to the same PR can leave an OLDER review run still

@@ -153,15 +153,17 @@ exception. The load-bearing points:
 - **Codex is advisory-but-triaged, not a required check.** Trigger it once
   on the final commit (`@codex review`). A 👀 reaction means the review is
   **in progress — keep waiting** (bounded ~30 min from the 👀); it does
-  **not** clear the merge by itself. A CLEAN verdict is **either a 👍 reaction
-  (after the 👀) OR a top-level "Codex Review: Didn't find any major issues"
-  comment — authored by the Codex bot identity (`chatgpt-codex-connector[bot]`) —
-  carrying a `Reviewed commit: <sha>` line** whose sha matches the PR head. The
-  repo is public, so anyone can post a comment copying that title + the visible
-  head sha; **author-identity is required, content-match alone is spoofable.** A
-  watcher polling only reviews + reactions is blind to the comment channel; one
-  reading it MUST filter on the bot login. A **posted `pull_request_review` with
-  inline threads** = findings.
+  **not** clear the merge by itself. A CLEAN verdict — **in either channel, and
+  ONLY when authored by the Codex bot identity (`chatgpt-codex-connector[bot]`)** —
+  is either a **👍 reaction (after the 👀)** OR a **top-level "Codex Review: Didn't
+  find any major issues" comment carrying a `Reviewed commit: <sha>` line** whose
+  sha matches the PR head. The repo is public, so anyone can add a 👍 reaction OR
+  post a comment copying that title + the visible head sha; **bot-authorship is
+  required on BOTH channels — a reaction or comment content alone is spoofable.**
+  A watcher MUST verify the reaction's / comment's author is the Codex bot (the
+  reactions API returns each reaction's `user.login`); one polling only reviews +
+  reactions is also blind to the comment channel entirely. A **posted
+  `pull_request_review` with inline threads** = findings.
   The signal must postdate the final-commit trigger. Do not arm auto-merge on
   green CI alone. **Carve-out (D103 draft-first, interactive PRs):** while a PR
   is a **draft**, re-triggering `@codex review` on each new post-fold head to
