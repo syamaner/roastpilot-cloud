@@ -52,11 +52,11 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences("Refs #12")).toEqual([{ issueNumber: 12, kind: "non-closing" }]);
   });
 
-  it("finds multiple distinct issues, sorted ascending by issue number regardless of body order", () => {
+  it("finds multiple distinct issues in FIRST-APPEARANCE order, NOT sorted by issue number (Codex finding, PR #70 review round 6 — an earlier version sorted by issue number, which let a padding evasion push a real reference past the MAX_LINKED_ISSUES cap; capping by appearance order instead makes the natural multi-issue case correct)", () => {
     const body = "Some intro text.\n\nRefs #12\n\nMore text.\n\nCloses #8\n";
     expect(parseLinkedIssueReferences(body)).toEqual([
-      { issueNumber: 8, kind: "closing" },
       { issueNumber: 12, kind: "non-closing" },
+      { issueNumber: 8, kind: "closing" },
     ]);
   });
 
@@ -342,6 +342,24 @@ describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
     expect(parseAcceptanceCriteria(body)).toEqual([]);
   });
 
+  it("extracts a criterion whose ENTIRE text is a single inline-code span (Codex finding, PR #70 review round 6 — the structural view masks the code span to whitespace, and eligibility must not require any non-whitespace remainder after the checkbox for that to still count as a real criterion)", () => {
+    const body = "### Acceptance criteria\n- [ ] `npm test`";
+    expect(parseAcceptanceCriteria(body)).toEqual([{ text: "`npm test`", checked: false }]);
+  });
+
+  it.each(["-", "*", "+", "1.", "1)"])(
+    "extracts an all-inline-code criterion under every GFM marker form, not just hyphen (%s)",
+    (marker) => {
+      const body = `### Acceptance criteria\n${marker} [ ] \`npm test\``;
+      expect(parseAcceptanceCriteria(body)).toEqual([{ text: "`npm test`", checked: false }]);
+    },
+  );
+
+  it("does not produce a criterion for a bare checkbox with NOTHING after it at all — not even code (the prefix-only eligibility check correctly lets this reach extraction, which correctly finds no text and skips it)", () => {
+    const body = "### Acceptance criteria\n- [ ]";
+    expect(parseAcceptanceCriteria(body)).toEqual([]);
+  });
+
   it("ignores a non-checkbox prose line within the section", () => {
     const body = "### Acceptance criteria\nSome explanatory prose, not a checkbox.\n- [ ] The real criterion.";
     expect(parseAcceptanceCriteria(body)).toEqual([{ text: "The real criterion.", checked: false }]);
@@ -578,6 +596,19 @@ describe("selectIssuesToFetch (F1-S9 slice 3, issue #12, BLOCKER-severity Codex 
 
   it("returns empty for no references", () => {
     expect(selectIssuesToFetch([])).toEqual([]);
+  });
+
+  it("mitigates the low-numbered-reference-padding evasion end-to-end (Codex finding, PR #70 review round 6): a real Closes reference written FIRST in the PR body survives the cap even though 20 lower-numbered padding references follow it — capping by APPEARANCE order, not by issue number, means the padding can't push a genuinely-first-written reference out", () => {
+    const padding = Array.from({ length: 20 }, (_, i) => `Refs #${i + 1}`).join("\n");
+    const body = `Closes #500\n${padding}`;
+    const references = parseLinkedIssueReferences(body);
+    expect(references).toHaveLength(21);
+    const selected = selectIssuesToFetch(references);
+    expect(selected).toHaveLength(20);
+    expect(selected.some((reference) => reference.issueNumber === 500)).toBe(true);
+    // The LAST-appearing padding reference (#20) is the one that gets
+    // dropped, not the genuinely-first-written real reference.
+    expect(selected.some((reference) => reference.issueNumber === 20)).toBe(false);
   });
 });
 
