@@ -135,7 +135,7 @@ jobs:
         # in this repo. Set a few points below the current 98% so routine
         # additions (a new branch, an edge case) don't need a threshold
         # bump every time -- only a real coverage regression trips it.
-        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov-report=term-missing --cov-fail-under=90
+        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_mutation_score --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
         run: python3 snowflake/validate_migrations.py
@@ -151,3 +151,71 @@ jobs:
       - name: Check migrations for an obvious forbidden PUBLIC grant
         working-directory: snowflake
         run: python3 check_forbidden_grants.py
+
+  mutation-testing:
+    name: Mutation testing (security-critical Python)
+    runs-on: ubuntu-latest
+    # F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing
+    # over the security-critical grant-boundary Python. No Snowflake
+    # connection here (same offline reasoning as snowflake-migrations above)
+    # -- mutmut only re-runs this repo's own already-mocked unit tests
+    # against mutated copies of the source. Verified wall time against
+    # this repo's actual two files: ~40s for all 484 mutants, so a FULL
+    # run on every PR (not diff-scoped) is the right choice -- mutmut
+    # 3.6.0 has no native "mutate only the changed lines" option anyway
+    # (confirmed via its own `mutmut run --help`), and this surface is
+    # small enough that a full run costs less CI time than the Playwright
+    # job below already does. timeout-minutes is a defensive cap on top
+    # of mutmut's own per-mutant timeout_multiplier/timeout_constant
+    # defaults (a malicious or accidental infinite-loop mutant is bounded
+    # per-mutant already; this is the whole-job backstop).
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install mutmut + test tooling
+        run: pip install -r snowflake/requirements-dev.txt
+
+      # Run FROM snowflake/ (matches every other snowflake/ tooling step's
+      # working-directory, and is load-bearing here specifically: mutmut's
+      # generated trampoline names must match how snowflake/tests/*.py
+      # actually imports these modules -- a bare `import
+      # assert_dev_ci_grants`, via each test file's own sys.path insert of
+      # snowflake/ itself -- not `snowflake.assert_dev_ci_grants`. Running
+      # mutmut from the repo root with source_paths=["snowflake"] produces
+      # a "tests import the source under a different module path" failure;
+      # verified empirically in a scratch trial before writing this step.
+      - name: Run mutation testing
+        working-directory: snowflake
+        run: python3 -m mutmut run
+
+      - name: Export mutation-testing stats
+        working-directory: snowflake
+        run: python3 -m mutmut export-cicd-stats
+
+      # The actual gate: mutmut run itself always exits 0 regardless of
+      # how many mutants survived (verified empirically -- only a genuine
+      # config/setup error exits non-zero from that step). This script
+      # compares mutants/mutmut-cicd-stats.json against the committed
+      # mutation-baseline.json and fails on a dropped score OR a risen
+      # no_tests count -- see check_mutation_score.py's own module
+      # docstring for why both checks are needed.
+      - name: Check mutation score against the committed baseline
+        working-directory: snowflake
+        run: python3 check_mutation_score.py
+
+      - name: Upload mutation-testing results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-testing-stats
+          path: snowflake/mutants/mutmut-cicd-stats.json
+          retention-days: 14

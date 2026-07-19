@@ -1,0 +1,65 @@
+# mutmut configuration (F1-S9 slice 2, issue #12, acceptance criterion 1 —
+# mutation testing over the cloud repo's security-critical surface).
+#
+# This file has NO [tool.pytest.ini_options] table, so pytest reads no
+# actual settings from it — verified empirically (not assumed): rootdir
+# and the exact same 160 tests collect identically with this file present
+# or temporarily removed. Pytest's own version does label this file
+# `configfile: pyproject.toml` in its session header purely because a
+# pyproject.toml exists at all (an informational anchor, not evidence of
+# it being READ for settings) — a claim worth stating precisely, since an
+# earlier, unverified version of this comment claimed pytest "skips this
+# file entirely," which is imprecise: pytest notices it, it just applies
+# no config from it. Either way, `ci.yml`'s `pytest tests/` invocation is
+# unaffected. This file exists purely for mutmut's own `[tool.mutmut]`
+# table.
+#
+# Run from `snowflake/` (matching `ci.yml`'s own `working-directory:
+# snowflake` for every other snowflake/ tooling step) — `source_paths = ["."]`
+# is relative to that cwd, and `only_mutate` narrows it to specific files
+# WITHIN that tree (mutmut requires each pattern end in ".py" or "*"; see
+# mutmut/configuration.py's `_load_config`). Running from repo root instead
+# (source_paths pointed at "snowflake") breaks mutmut's own trampoline-name
+# matching against how these files are actually imported: every
+# snowflake/tests/*.py file inserts `snowflake/` itself onto sys.path and
+# imports its module under test as a bare top-level name (e.g.
+# `import assert_dev_ci_grants`, not `import snowflake.assert_dev_ci_grants`)
+# — verified empirically in a scratch trial: pointing source_paths at the
+# repo root produced "Stopping early... tests import the source under a
+# different module path than mutmut sees from the file path."
+[tool.mutmut]
+source_paths = ["."]
+
+# SCOPE (deliberately narrow, not "every .py file mutmut can find"): the
+# grant-boundary / PUBLIC-grant audit logic is the actual security-critical
+# surface this acceptance criterion names (factory.md §13 point 5's "secure
+# views... grants/roles" — the Snowflake-side half of that list; the
+# TypeScript half, the Zod-validated app/api routes + lib/ schemas, is C2
+# surface that doesn't exist in this repo yet and needs a SEPARATE tool —
+# see the "C2 PRE-WIRING" note below). `with_connection_env.py` (connection-
+# profile plumbing) and `validate_migrations.py` (filename/render validation)
+# are deliberately EXCLUDED: real, tested code, but not the grant-boundary
+# security logic this criterion is scoped to — mutating them would dilute
+# the baseline with noise unrelated to what this job exists to protect.
+#
+# C2 PRE-WIRING: when C2 lands a Snowflake-side Python surface (Snowflake
+# supports `LANGUAGE PYTHON` stored procedures — factory.md's "stored
+# procedures" scope could plausibly include one), add its path here; that
+# is a ONE-LINE extension of this same list, using the same mutmut/pytest
+# mechanism already proven working in this file. C2's Zod schemas (`lib/`)
+# and app/api routes are TypeScript, which mutmut cannot mutate at all —
+# THOSE need a separate Stryker-based job, not an entry in this list. The
+# intended target globs for that future job (so it doesn't have to
+# re-derive the security surface from scratch): `lib/**/*.ts` (the Zod
+# validation schemas specifically — not every lib/ helper), and
+# `app/api/**/route.ts`. Not built here: there is no code at those paths
+# yet (C2 hasn't landed), and standing up a whole second mutation-testing
+# toolchain with zero mutants to generate would be unverifiable scope-creep
+# for what this slice asks for (see PR body for the fuller reasoning).
+only_mutate = [
+    "assert_dev_ci_grants.py",
+    "check_forbidden_grants.py",
+]
+
+# Matches ci.yml's own `pytest tests/` invocation (relative to snowflake/).
+pytest_add_cli_args_test_selection = ["tests/"]

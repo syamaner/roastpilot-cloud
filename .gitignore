@@ -51,6 +51,12 @@ __pycache__/
 .coverage
 htmlcov/
 
+# F1-S9 slice 2 (issue #12): mutmut's own scratch sandbox (a copy of the
+# mutated source + tests + pyproject.toml/config it runs each mutant
+# against, plus its own stats output) -- entirely regenerated on every CI
+# run, never committed.
+/snowflake/mutants/
+
 # factory scratch dirs (F1-S3, round 6 FIX 4): the implement job writes
 # these into the SAME checkout the agent edits, so `git add -A` in the
 # diff-capture step would otherwise stage them into the patch — and from

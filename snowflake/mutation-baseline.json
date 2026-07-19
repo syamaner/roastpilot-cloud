@@ -1,0 +1,6 @@
+{
+  "_comment": "F1-S9 slice 2 (issue #12): the mutation-testing baseline for snowflake/assert_dev_ci_grants.py + snowflake/check_forbidden_grants.py, measured on main via `mutmut run` + `mutmut export-cicd-stats` (19 Jul 2026, mutmut==3.6.0). check_mutation_score.py fails the check if a later run's killed/(killed+survived) ratio drops below this baseline's ratio. Recorded as raw counts (not a pre-computed percentage) so a reviewer can recompute the ratio by hand and so a future re-baseline (after genuinely strengthening the test suite) is an honest, auditable count update, not an opaque number. Per the operator scoping decision on issue #12: this starts at whatever the surface's REAL baseline is, not an aspirational target — 484 mutants, 353 killed, 131 survived (~72.93% mutation score) on this pass.",
+  "killed": 353,
+  "survived": 131,
+  "total": 484
+}
