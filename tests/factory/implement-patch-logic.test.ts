@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
+  buildGamingBothLostReviewBody,
   buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
@@ -744,6 +745,23 @@ describe("findAddedPackageJsonTestScriptEdits (Codex finding, F1-S9 slice 1, iss
     ].join("\n");
     expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
   });
+
+  it("flags preprepare/postprepare (Codex finding, F1-S9 slice 1, issue #12, ready round 5 — npm wraps prepare with its OWN preprepare/postprepare hooks exactly like pretest/posttest wraps test; an earlier version gave prepare no prefix coverage at all)", () => {
+    for (const key of ["preprepare", "postprepare"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
 });
 
 describe("findAddedRootPytestConfigSections (Codex finding, F1-S9 slice 1, issue #12, ready round 4)", () => {
@@ -937,6 +955,30 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     // A single field on this line (just `path`, no `line` counterpart) —
     // exactly 2 backticks (one unbroken code span), not more.
     expect((flaggedLine?.match(/`/g) ?? []).length).toBe(2);
+  });
+});
+
+describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12, ready round 5)", () => {
+  it("explains why the review exists and reuses buildGamingFlagAnnotation's rendering, naming the exact flagged content", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expect(body).toContain("both the label and the annotation comment failed to post");
+    expect(body).toContain("tests/slug.test.ts");
+  });
+
+  it("says the label FAILED to apply — accurate for this scenario, since the label call really did fail (labelApplied: false is hardcoded, not a parameter)", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expect(body).toContain("FAILED to apply");
+    expect(body).not.toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
   });
 });
 

@@ -482,9 +482,18 @@ export function findAddedCoverageSuppressions(
  * that happens to read exactly `"test"` (not as a key) would also match.
  * Over-flagging is the accepted trade-off throughout this classifier;
  * this is a small instance of the same trade, not a new one.
+ *
+ * `(?:pre|post)?` ALSO applied to `prepare` (Codex finding, F1-S9 slice
+ * 1, issue #12, ready round 5): an earlier version gave `prepare` no
+ * prefix coverage at all, even though npm wraps it with its OWN
+ * `preprepare`/`postprepare` lifecycle hooks exactly the same way it
+ * wraps `test` with `pretest`/`posttest` — the identical gaming class,
+ * just one level deeper in npm's own lifecycle nesting. `prepublishOnly`
+ * has no such wrapping in npm's lifecycle model (there's no
+ * `preprepublishOnly`), so it stays unprefixed.
  */
 const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN =
-  /"(?:(?:pre|post)?(?:test|test:[\w:-]*|coverage)|(?:pre|post)?install|prepare|prepublishOnly)"/;
+  /"(?:(?:pre|post)?(?:test|test:[\w:-]*|coverage)|(?:pre|post)?install|(?:pre|post)?prepare|prepublishOnly)"/;
 
 /**
  * Matches a JSON `\uXXXX` unicode escape sequence appearing literally in
@@ -799,6 +808,33 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
       "Confirm it's intentional and correct before merging.",
   );
   return lines.join("\n");
+}
+
+/**
+ * Builds the body for the `REQUEST_CHANGES` review posted when BOTH the
+ * `no-auto-chain` label AND the annotation comment fail to post on a
+ * flagged diff (Codex finding, F1-S9 slice 1, issue #12, ready round 5)
+ * — see `postGamingBothLostFailureReview` in `publish-implement-patch.mts`
+ * for why a PR review, not a commit status, is the mechanism this
+ * fallback uses. Reuses {@link buildGamingFlagAnnotation}'s own rendering
+ * (with `labelApplied: false`, accurately reflecting that the label call
+ * really did fail in this scenario) rather than duplicating the
+ * per-category rendering logic a second time, prefixed with a short
+ * banner explaining why a review — normally never posted by this
+ * classifier — showed up here at all.
+ *
+ * @param flag - What the classifier found.
+ * @returns The Markdown review body.
+ */
+export function buildGamingBothLostReviewBody(flag: GamingFlag): string {
+  return [
+    "> ⚠️ **Fallback signal:** the anti-gaming classifier flagged this diff, but both the " +
+      "label and the annotation comment failed to post — this review exists so the flag " +
+      "isn't silently lost. Dismiss it once a human confirms the flagged content below is " +
+      "intentional and correct.",
+    "",
+    buildGamingFlagAnnotation(flag, false),
+  ].join("\n");
 }
 
 /**
