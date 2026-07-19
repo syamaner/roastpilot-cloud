@@ -46,9 +46,26 @@ body:
     id: size
     attributes:
       label: Size declaration
-      description: Target ≤ ~400 changed lines. If you cannot honestly pick the first option, split the story before filing.
+      description: One thin PR, ≤ ~400 LOGIC lines (D104). Migrations / generated files / fixtures / docs are exempt from the cap but must be their own story/PR. If you cannot honestly pick one of the first two options, split the story before filing.
       options:
-        - "Thin slice (≤ ~400 lines expected)"
+        - "Thin slice (≤ ~400 logic lines expected)"
+        - "Exempt class (migrations / generated / fixtures / docs — own PR, no logic cap)"
         - "Larger — needs splitting (triage will bounce this to ready-to-spec)"
+    validations:
+      required: true
+  - type: input
+    id: domain-reviewer
+    attributes:
+      label: Domain reviewer
+      description: Which reviewer this story's diff triggers per AGENTS.md's rubric (schema-migration-reviewer / privacy-auditor / factory-security-reviewer), or "none (docs/fixtures only)". Test-quality-critical slices should also say "flag test quality for the lead".
+      placeholder: "schema-migration-reviewer"
+    validations:
+      required: true
+  - type: input
+    id: depends-on
+    attributes:
+      label: Depends on
+      description: Another story this one builds on (issue number or draft ID), or "none". Triage checks the order is stated, not implied.
+      placeholder: "none"
     validations:
       required: true
