@@ -408,6 +408,36 @@ export interface LinkedIssueSpecsResult {
 }
 
 /**
+ * Selects which of a PR's linked-issue references slice 3b's fetcher
+ * should actually look up, applying {@link MAX_LINKED_ISSUES} BEFORE any
+ * `gh issue view` call happens.
+ *
+ * This is the PRIMARY control for the resource-exhaustion threat
+ * {@link MAX_LINKED_ISSUES} exists to bound (BLOCKER-severity Codex
+ * finding, F1-S9 slice 3, issue #12, PR #70 review): an earlier version
+ * of this module only capped `references` INSIDE
+ * {@link buildLinkedIssueSpecs}, which receives an ALREADY-FETCHED
+ * `issues` map — that cap bounded RENDERING, not FETCHING, so a PR
+ * naming thousands of issues would still make slice 3b issue thousands
+ * of fetches before this module ever saw the result; the actual DoS
+ * vector was never closed. Slice 3b's fetcher MUST call this function
+ * FIRST and only fetch the issue numbers it returns.
+ * {@link buildLinkedIssueSpecs}'s own cap on its `references` parameter
+ * stays in place as defence-in-depth for a caller that doesn't follow
+ * that contract, not as the primary control.
+ *
+ * @param references - {@link parseLinkedIssueReferences}'s full,
+ *   uncapped output.
+ * @returns At most {@link MAX_LINKED_ISSUES} references, in the same
+ *   order (already sorted ascending by issue number).
+ */
+export function selectIssuesToFetch(
+  references: readonly LinkedIssueReference[],
+): readonly LinkedIssueReference[] {
+  return references.slice(0, MAX_LINKED_ISSUES);
+}
+
+/**
  * Combines a PR's linked-issue references with each issue's fetched data,
  * producing only what slice 3b's review pass actually needs: issues that
  * (a) were successfully fetched, (b) have an "Acceptance criteria" section
@@ -419,13 +449,18 @@ export interface LinkedIssueSpecsResult {
  *
  * Applies {@link MAX_LINKED_ISSUES} and {@link MAX_CRITERIA_PER_ISSUE}
  * (Codex finding, PR #70 review — see those constants' own docstring):
- * `references` beyond the cap are never even looked up in `issues`, and
- * a single issue's unmet criteria beyond the cap are dropped, in BOTH
+ * `references` beyond the cap are never included in the result, and a
+ * single issue's unmet criteria beyond the cap are dropped, in BOTH
  * cases only after their count is recorded so {@link renderCriteriaDataBlock}
  * can render an honest truncation marker rather than silently dropping
- * data with no trace.
+ * data with no trace. The `references`-count cap here is DEFENCE-IN-DEPTH
+ * only — {@link selectIssuesToFetch} (see its own docstring) is the
+ * function that must gate FETCHING; this one only ever sees whatever
+ * `issues` its caller already fetched.
  *
- * @param references - {@link parseLinkedIssueReferences}'s output.
+ * @param references - {@link parseLinkedIssueReferences}'s output — pass
+ *   the FULL, uncapped list; this function applies its own cap
+ *   independently of whatever `issues` was already fetched for.
  * @param issues - Fetched issue data, keyed by issue number. An issue
  *   number present in `references` but ABSENT here (e.g. the fetch
  *   failed, or the issue was deleted) is treated the same as "nothing to
@@ -440,7 +475,7 @@ export function buildLinkedIssueSpecs(
   references: readonly LinkedIssueReference[],
   issues: ReadonlyMap<number, FetchedIssue>,
 ): LinkedIssueSpecsResult {
-  const cappedReferences = references.slice(0, MAX_LINKED_ISSUES);
+  const cappedReferences = selectIssuesToFetch(references);
   const truncatedIssueCount = Math.max(0, references.length - MAX_LINKED_ISSUES);
 
   const specs: LinkedIssueSpec[] = [];
@@ -485,12 +520,17 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // (but still literal-character) regex still misses, while an LLM
 // tokenizer/renderer plausibly collapses them and reads the result as the
 // real tag anyway (independent factory-security-reviewer finding, F1-S9
-// slice 3, issue #12): zero-width space/non-joiner/joiner (U+200B-200D),
-// the bidi mark/override/isolate control block (U+200E-200F, U+202A-202E),
-// word-joiner/invisible math operators (U+2060-2064), and the BOM used as
-// a zero-width no-break space (U+FEFF).
-const ZERO_WIDTH_AND_FORMAT_PATTERN =
-  /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+// slice 3, issue #12; range completed by a Codex finding on the SAME PR
+// review \u2014 the original range missed the bidi ISOLATE block and the
+// Arabic Letter Mark, both real, live Unicode format characters): the
+// Arabic Letter Mark (U+061C), zero-width space/non-joiner/joiner plus
+// the left/right-to-left MARKS (U+200B-200F), the bidi
+// embedding/override control block (U+202A-202E), word-joiner/invisible
+// math operators PLUS the bidi ISOLATE block immediately adjacent to them
+// (U+2060-2069 \u2014 LRI/RLI/FSI/PDI at U+2066-2069 specifically were the
+// Codex-found gap), and the BOM used as a zero-width no-break space
+// (U+FEFF).
+const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
@@ -532,9 +572,18 @@ const MAX_DATA_BLOCK_BYTES = 32 * 1024;
 /**
  * Truncates `text` to at most `maxBytes` UTF-8 bytes, WITHOUT landing
  * mid-codepoint. Slicing raw encoded bytes can end inside a multi-byte
- * UTF-8 sequence; decoding with a non-fatal `TextDecoder` silently drops
- * that truncated trailing sequence rather than emitting `U+FFFD`
- * replacement-character garbage into the rendered block.
+ * UTF-8 sequence; passing that slice to `TextDecoder` in its DEFAULT
+ * (non-streaming) mode DOES emit a `U+FFFD` replacement character for the
+ * truncated trailing sequence (Codex finding, PR #70 review — verified
+ * empirically before writing this fix, since an earlier version of this
+ * function's own docstring claimed the opposite, that non-fatal decoding
+ * "silently drops" the truncated bytes; that claim was simply wrong).
+ * Decoding with `{ stream: true }` instead and never calling `decode()`
+ * again to flush is what actually produces the clean drop: streaming
+ * mode treats the input as a NON-FINAL chunk, so an incomplete trailing
+ * sequence is held back internally rather than decoded into replacement-
+ * character garbage — verified against the real `TextDecoder` behavior,
+ * not assumed.
  *
  * @param text - The text to bound.
  * @param maxBytes - The UTF-8 byte budget.
@@ -546,7 +595,9 @@ function truncateToByteBudget(text: string, maxBytes: number): { text: string; t
     return { text, truncated: false };
   }
   const safeMaxBytes = Math.max(0, maxBytes);
-  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(encoded.slice(0, safeMaxBytes));
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(encoded.slice(0, safeMaxBytes), {
+    stream: true,
+  });
   return { text: decoded, truncated: true };
 }
 
@@ -577,14 +628,21 @@ function truncateToByteBudget(text: string, maxBytes: number): { text: string; t
  * @param maxBytes - The UTF-8 byte budget for the whole rendered block —
  *   defaults to {@link MAX_DATA_BLOCK_BYTES}; overridable for tests.
  * @returns The delimited DATA block, or the empty string if `result.specs`
- *   is empty — slice 3b's caller uses emptiness to skip the review pass
- *   entirely (see this module's own top-level docstring).
+ *   is empty AND nothing was truncated — slice 3b's caller uses that
+ *   emptiness to skip the review pass entirely (see this module's own
+ *   top-level docstring). A NONZERO `result.truncatedIssueCount` still
+ *   renders a (minimal) block even with empty `specs` (Codex finding, PR
+ *   #70 review): if more than {@link MAX_LINKED_ISSUES} issues were
+ *   referenced and NONE of the first {@link MAX_LINKED_ISSUES} happened
+ *   to have unmet criteria, an unconditional empty-specs-means-empty-
+ *   string return would have silently discarded the fact that other
+ *   referenced issues were never even looked up at all.
  */
 export function renderCriteriaDataBlock(
   result: LinkedIssueSpecsResult,
   maxBytes: number = MAX_DATA_BLOCK_BYTES,
 ): string {
-  if (result.specs.length === 0) {
+  if (result.specs.length === 0 && result.truncatedIssueCount === 0) {
     return "";
   }
   const bodyLines: string[] = [
