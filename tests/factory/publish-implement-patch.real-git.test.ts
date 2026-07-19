@@ -816,7 +816,45 @@ index 0000000..abc1234
     expect(commentCall).toBeDefined();
   });
 
-  it("a gaming-label-application failure and an annotation-post failure are each independently logged and never fail the publish", async () => {
+  it("refresh path (existingPr): BOTH the label AND the annotation failing on a flagged re-dispatch also fails the publish job (non-zero exit) — same both-lost fix as the creation path", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failing this publish job"),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent)", async () => {
     const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
     process.env.PATCH_PATH = path;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -841,12 +879,62 @@ index 0000000..abc1234
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
+    // The PR-creation call above (POST /pulls) already ran and returned 201
+    // before either label/comment call — proves the PR still exists; this
+    // never became a PublishRejection just because both signals failed.
+    expect(fetchMock.mock.calls.some(([url, init]) => {
+      const method = init?.method ?? "GET";
+      return method === "POST" && String(url).endsWith("/pulls");
+    })).toBe(true);
+    expect(process.exitCode).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining(`Failed to apply the no-auto-chain label`),
     );
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("Failed to post the anti-gaming annotation comment"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failing this publish job"),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("a gaming-label-application failure ALONE (annotation still posts) stays best-effort — exit code unchanged (single-channel failure is not the both-lost case fix #4 targets)", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      // The label call fails, but the annotation COMMENT call succeeds —
+      // one channel lost, one channel still visible on the PR.
+      if (method === "POST" && url.endsWith("/labels")) {
+        return new Response("server error", { status: 500 });
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Failed to apply the no-auto-chain label`),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Failing this publish job"),
     );
     errorSpy.mockRestore();
   });

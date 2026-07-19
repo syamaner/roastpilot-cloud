@@ -1085,6 +1085,43 @@ async function postGamingFlagAnnotation(
 }
 
 /**
+ * True when the anti-gaming classifier flagged this diff AND BOTH
+ * best-effort signals meant to surface that to a human have failed — the
+ * `no-auto-chain` label call AND the annotation comment (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 3).
+ *
+ * This REFINES, not reverses, the existing best-effort/fail-open scope
+ * for each signal individually: a SINGLE-channel failure (the label
+ * lands but the comment doesn't, or vice versa) still leaves something
+ * visible on the PR, so it stays best-effort — the publish itself must
+ * not fail just because a comment call flaked. But losing BOTH channels
+ * means a human looking at the PR (list view, board view, the PR page
+ * itself) sees NOTHING distinguishing a flagged diff from a clean one —
+ * the classifier ran, found something, and every signal it tried to
+ * surface silently failed. That specific combination gets its own,
+ * stronger response: this never becomes a {@link PublishRejection} (an
+ * API flake mid-publish must not undo an otherwise-successful branch
+ * push + PR — the PR is still the load-bearing artifact), but the
+ * publish JOB exiting non-zero afterwards is a THIRD, durable signal a
+ * human merging from the PR's own Checks tab cannot miss, unlike a label
+ * or comment that silently never landed.
+ *
+ * @param gamingFlagged - Whether the classifier flagged this diff at all.
+ * @param labelApplied - Whether the `no-auto-chain` label call succeeded
+ *   (`undefined` when never attempted, i.e. `gamingFlagged` is falsy).
+ * @param annotationPosted - Whether the annotation comment call succeeded
+ *   (`undefined` when never attempted, same condition).
+ * @returns Whether the publish job must exit non-zero.
+ */
+function gamingSignalsBothLost(
+  gamingFlagged: boolean,
+  labelApplied: boolean | undefined,
+  annotationPosted: boolean | undefined,
+): boolean {
+  return gamingFlagged && labelApplied === false && annotationPosted === false;
+}
+
+/**
  * Appends `markdown` to `$GITHUB_STEP_SUMMARY` (observability fix, 18 Jul
  * 2026, live App-identity commissioning: a mint failure shows
  * `conclusion=success` in the job view — `continue-on-error` masks it —
@@ -1427,6 +1464,15 @@ export async function main(): Promise<void> {
           wasRefresh: true,
         }),
       );
+      if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
+        console.error(
+          `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
+            `failed to post on PR #${existingPr.number} — a flagged diff would otherwise ` +
+            `have NO visible signal on the PR itself. Failing this publish job (non-zero ` +
+            `exit) so its own run status is the durable signal a human merging can't miss.`,
+        );
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -1500,6 +1546,15 @@ export async function main(): Promise<void> {
         wasRefresh: false,
       }),
     );
+    if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
+      console.error(
+        `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
+          `failed to post on PR #${created.number} — a flagged diff would otherwise have ` +
+          `NO visible signal on the PR itself. Failing this publish job (non-zero exit) so ` +
+          `its own run status is the durable signal a human merging can't miss.`,
+      );
+      process.exitCode = 1;
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const reasons =

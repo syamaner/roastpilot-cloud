@@ -245,6 +245,17 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     expect(isTestFilePath("pytest.toml")).toBe(false);
   });
 
+  it("flags snowflake/conftest.py (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — pytest loads conftest.py automatically and it can hook collection/reporting itself, the same class as the config files above)", () => {
+    expect(isTestFilePath("snowflake/conftest.py")).toBe(true);
+    // A repo-root conftest.py is DELIBERATELY not flagged: this repo's
+    // pytest invocation (working-directory: snowflake, no ini file
+    // anywhere) resolves rootdir to snowflake/ itself, and pytest's own
+    // conftest.py collection never walks ABOVE rootdir — same "not what
+    // this invocation would ever read" reasoning as the root-level
+    // pyproject.toml/setup.cfg exclusion.
+    expect(isTestFilePath("conftest.py")).toBe(false);
+  });
+
   it("does NOT flag a root-level pyproject.toml/setup.cfg — not what this repo's pytest invocation would ever read", () => {
     // Deliberately narrow, per the finding: over-flagging is the safe
     // direction for a REAL discovery-config path, but a root pyproject.toml
@@ -537,6 +548,75 @@ describe("findAddedPackageJsonTestScriptEdits (Codex finding, F1-S9 slice 1, iss
       "   },",
     ].join("\n");
     expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"coverage": "echo ok",']);
+  });
+
+  it("flags an added pretest lifecycle hook (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — npm auto-runs pretest before npm test, so it can neuter the suite before it even starts)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "pretest": "echo skip > tests/index.test.ts",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+      '"pretest": "echo skip > tests/index.test.ts",',
+    ]);
+  });
+
+  it("flags an added posttest lifecycle hook the same way", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "posttest": "echo done",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"posttest": "echo done",']);
+  });
+
+  it("does NOT flag an unrelated pre/post-prefixed lifecycle key like prepublish — the (pre|post)? prefix is anchored to the base key, not a general substring", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "prepublish": "npm run build",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("flags a JSON-unicode-escaped 'test' script key (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — decodes to the literal key 'test' but evades the literal-text pattern entirely)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "\\u0074\\u0065\\u0073\\u0074": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+      '"\\u0074\\u0065\\u0073\\u0074": "echo ok",',
+    ]);
+  });
+
+  it("does NOT flag an ordinary dependency line just because it happens to contain a backslash — only a real \\u escape sequence trips the unicode-escape pattern", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,2 +5,3 @@",
+      '   "dependencies": {',
+      '+    "left-pad": "file:../vendor\\\\left-pad",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
   });
 
   it("does NOT flag a dependency-only package.json edit (the targeted-fix requirement — a blanket 'any package.json edit' flag would over-trigger on routine dependency bumps)", () => {

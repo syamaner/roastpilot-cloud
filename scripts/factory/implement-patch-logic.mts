@@ -165,6 +165,26 @@ const TEST_FILENAME_PATTERNS = [
  * file isn't what it would ever read here. Exact-match, not a prefix or
  * suffix pattern: these are specific, known filenames, not a whole class
  * of paths.
+ *
+ * `snowflake/conftest.py` (Codex finding, F1-S9 slice 1, issue #12, ready
+ * round 3): pytest loads any `conftest.py` it finds automatically (no
+ * import, no opt-in) and it can hook collection/reporting itself (e.g.
+ * `pytest_runtest_makereport`, `pytest_collection_modifyitems`) —
+ * exactly the same discovery/reporting-tampering class as the config
+ * files above, just via pytest's plugin-hook mechanism instead of an INI
+ * option. `snowflake/tests/conftest.py` is already covered by {@link
+ * TEST_PATH_PREFIXES}'s `snowflake/tests/` prefix; this adds the
+ * package-root `snowflake/conftest.py` specifically, since pytest applies
+ * conftest.py files from the ROOTDIR down to the test directory, and this
+ * repo's invocation (`ci.yml`'s `working-directory: snowflake`, `pytest
+ * tests/`, no ini file anywhere) resolves rootdir to `snowflake/` itself
+ * — so `snowflake/conftest.py` is genuinely loaded. Deliberately NOT a
+ * repo-root `conftest.py`: verified none exists today, and even if one
+ * appeared, pytest's conftest collection walks from the test path UP to
+ * rootdir (inclusive) but never ABOVE rootdir — with rootdir resolving to
+ * `snowflake/` here, a repo-root conftest.py sits outside the directory
+ * range this invocation would ever load, the same reasoning as the
+ * root-level `pyproject.toml`/`setup.cfg` exclusion above.
  */
 const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
   "vitest.config.ts",
@@ -179,6 +199,7 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
   "snowflake/pyproject.toml",
   "snowflake/setup.cfg",
   "snowflake/tox.ini",
+  "snowflake/conftest.py",
 ]);
 
 /**
@@ -396,19 +417,59 @@ export function findAddedCoverageSuppressions(
  * `"jest-test-utils": "^1.0.0"` is a dependency line, not a script-key
  * line, and correctly does not match this pattern's `:`-after-the-key
  * shape requirement).
+ *
+ * Optional `(?:pre|post)?` prefix (Codex finding, F1-S9 slice 1, issue
+ * #12, ready round 3): npm auto-runs a `pretest`/`posttest` lifecycle
+ * script around `npm test` (and `pre`/`post`-prefixed variants around any
+ * `npm run <script>`), so a `pretest` script can rewrite or neuter the
+ * test suite BEFORE vitest/pytest even starts, without ever touching the
+ * `"test"` key itself — the same gaming class, reached through npm's own
+ * lifecycle hook instead of the script CI names directly. The prefix is
+ * anchored immediately before the base key (not a general substring), so
+ * an unrelated key like `"prepublish"` does not match: stripping the
+ * optional `pre`/`post` still leaves `publish`, which is neither `test`,
+ * a `test:`-prefixed variant, nor `coverage`.
  */
-const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN = /"(test|test:[\w:-]*|coverage)"\s*:/;
+const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN =
+  /"(?:pre|post)?(?:test|test:[\w:-]*|coverage)"\s*:/;
+
+/**
+ * Matches a JSON `\uXXXX` unicode escape sequence appearing literally in
+ * an added `package.json` line (Codex finding, F1-S9 slice 1, issue #12,
+ * ready round 3) — a script KEY written with each letter escaped, e.g.
+ * `"test": "echo ok"`, decodes to the ordinary key
+ * `test` once npm/`JSON.parse` reads the file, evading {@link
+ * PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN}'s literal-text match entirely
+ * (the regex only ever sees the RAW escaped bytes `t...`, never the
+ * decoded key `test`). Checked independently rather than
+ * decoding-then-matching: a hand-rolled JSON-escape decoder is its own
+ * attack surface and unnecessary complexity for what this classifier
+ * needs — a conservative, cheap over-flag. A legitimate `package.json`
+ * practically never needs a unicode escape in a script KEY (script names
+ * are plain ASCII identifiers by convention), so flagging ANY added line
+ * containing one at all — not just ones that happen to decode to
+ * something matching the script-key pattern — is the safe direction:
+ * over-flagging costs a human a few seconds, under-flagging lets a
+ * script-key rewrite sail through unflagged.
+ */
+const PACKAGE_JSON_UNICODE_ESCAPE_PATTERN = /\\u[0-9a-fA-F]{4}/;
 
 /**
  * Scans raw unified-diff text for `package.json` script-key edits/adds
- * that redefine a CI-invoked test/coverage script (Codex finding, F1-S9
- * slice 1, issue #12, ready round 2) — narrowing or replacing what `npm
- * test` / `npm run coverage` actually runs (e.g. rewriting `"test": "vitest
- * run"` to `"test": "echo ok"`) is the same gaming class as editing a test
- * file directly, but a blanket "package.json changed" flag would also
- * trip on every routine dependency bump, so this targets exactly the
- * script-KEY lines CI depends on. Consumes {@link walkAddedLines} for the
- * same hunk-tracking traversal {@link findAddedCoverageSuppressions} uses.
+ * that redefine a CI-invoked test/coverage script, OR add an npm
+ * lifecycle hook (`pretest`/`posttest`) around one, OR add a line
+ * containing a JSON unicode escape (Codex finding, F1-S9 slice 1, issue
+ * #12, ready rounds 2-3) — narrowing or replacing what `npm test` / `npm
+ * run coverage` actually runs (e.g. rewriting `"test": "vitest run"` to
+ * `"test": "echo ok"`, or adding a `"pretest"` hook that rewrites the
+ * suite first, or hiding either behind a `\uXXXX`-escaped key) is the
+ * same gaming class as editing a test file directly, but a blanket
+ * "package.json changed" flag would also trip on every routine
+ * dependency bump, so this targets exactly the script-KEY lines CI
+ * depends on (plus the unicode-escape over-flag, which is intentionally
+ * broader — see {@link PACKAGE_JSON_UNICODE_ESCAPE_PATTERN}). Consumes
+ * {@link walkAddedLines} for the same hunk-tracking traversal {@link
+ * findAddedCoverageSuppressions} uses.
  *
  * @param patchText - The raw contents of a unified diff.
  * @returns Every matching added line's trimmed content, in file order.
@@ -419,7 +480,13 @@ export function findAddedPackageJsonTestScriptEdits(
 ): string[] {
   const matches: string[] = [];
   for (const { path, line } of walkAddedLines(patchText)) {
-    if (path === "package.json" && PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN.test(line)) {
+    if (path !== "package.json") {
+      continue;
+    }
+    if (
+      PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN.test(line) ||
+      PACKAGE_JSON_UNICODE_ESCAPE_PATTERN.test(line)
+    ) {
       matches.push(line.trim());
     }
   }
@@ -471,6 +538,34 @@ export function findAddedPackageJsonTestScriptEdits(
  * triggering event's payload — that payload is a snapshot from BEFORE
  * this label could have been applied, so trusting it would silently
  * treat every flagged PR as clean.
+ *
+ * DETECTION SCOPE & RESIDUAL EVASIONS (F1-S9 slice 1, issue #12 — the
+ * decision that CAPS this slice's evasion-chasing rounds): this
+ * classifier is a DETERMINISTIC, CONSERVATIVE, ADVISORY detector for the
+ * known gaming classes found while building it — test-file edits
+ * (including renames and copies of an already-modified test), test-
+ * discovery config and lifecycle tampering (`vitest.config.ts`/
+ * `playwright.config.ts`/pytest's own config filenames including
+ * `pytest.toml`/`conftest.py`, `package.json`'s `pre`/`post`-prefixed npm
+ * lifecycle hooks, and JSON-unicode-escaped script keys), and coverage
+ * suppressions (including delivery via a `.gitattributes`-forced binary
+ * patch or a copy of an already-suppressed file). It is NOT, and is not
+ * intended to become, an exhaustive or unbeatable gate: a determined
+ * adversary with knowledge of this classifier's own source can construct
+ * FURTHER textual evasions (e.g. a novel obfuscation of a script key this
+ * classifier doesn't yet recognize) — that is an inherent property of any
+ * purely textual/deterministic detector, not a bug to keep chasing round
+ * after round. By design, this label is ONE leg of defence-in-depth,
+ * alongside mutation testing (F1-S9 slice 2, verifies tests actually
+ * catch real regressions rather than trusting their own edit history),
+ * the PR review roster (Codex, Claude Code Review, any human reviewer),
+ * and — the backstop that always applies regardless of whether this
+ * classifier catches a given evasion — factory.md §2's permanent
+ * human-merge requirement. Future evasion classes, once found, are
+ * folded via follow-up issues against this slice rather than further
+ * pre-merge rounds; a classifier this narrow-scoped by design should not
+ * be allowed to block shipping the slice indefinitely chasing the last
+ * evasion.
  */
 export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
 
