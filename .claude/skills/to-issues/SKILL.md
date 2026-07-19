@@ -90,6 +90,19 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
   — knows the order, without needing to re-derive it from the plan.
 - **Size discipline is per-story, not per-batch.** The whole batch can (and
   usually will) exceed 400 lines in total; each individual story must not.
+- **The batch is a PR PLAN (D104, factory.md §5 addendum).** Each story is
+  exactly ONE thin PR whose **logic** diff is under ~400 lines — Snowflake
+  migrations, generated files, fixtures, and docs are **exempt from the cap
+  and split into their own story/PR** (they don't need code review the way
+  logic does, and they were the historical size outliers). Per story, also
+  name the **domain reviewer** its diff will trigger per AGENTS.md's rubric
+  (`schema-migration-reviewer` for Snowflake DDL/grants/secure views/Zod-
+  Pydantic rules; `privacy-auditor` for routes/procs/reviewer-data/IP/
+  visibility/deletion; `factory-security-reviewer` for anything under
+  `.github/**` or `scripts/factory/**`; `qa` for test-quality-critical
+  slices). A drafted story missing the size, order, or reviewer tag is not
+  a compliant draft — triage will (correctly) refuse to mark the filed
+  issue `ready-to-implement`.
 
 ## Output — one Markdown block per drafted story
 
@@ -129,9 +142,14 @@ reference_roast_summaries, the roast_artifacts stage)".}
   Vitest contract test, Playwright e2e, or a manual step.}
 
 **Size declaration**
-- Thin slice (≤ ~400 lines expected) — {one line on why this is
-  plausible: how many migration files / lines of DDL / test lines this
-  realistically is.}
+- Thin slice (≤ ~400 LOGIC lines expected; migrations/fixtures/generated/docs
+  split out per D104) — {one line on why this is plausible: how many
+  migration files / lines of DDL / test lines this realistically is.}
+
+**Domain reviewer:** {which reviewer this story's diff triggers per
+AGENTS.md's rubric — `schema-migration-reviewer`, `privacy-auditor`,
+`factory-security-reviewer`, and/or `qa`; "none (docs/fixtures only)" is
+valid and should be rare.}
 
 **Depends on:** {none, or another story in this batch by its draft ID,
 e.g. "[{EpicId}-S1]" — never a vague "the schema work" reference.}
