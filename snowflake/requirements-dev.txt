@@ -14,7 +14,7 @@ pytest-cov==7.1.0
 # baseline/session database step) and direct pytest integration are a better
 # match than cosmic-ray's heavier distributed-execution config, meant for far
 # larger codebases. Pinned to an exact version (verified against this repo's
-# actual three files in a scratch run: 577 mutants, deterministic across
+# actual three files in a scratch run: 593 mutants, deterministic across
 # repeated runs) — a future mutmut release changing mutant generation would
 # silently shift the baseline in mutation-baseline.json otherwise.
 mutmut==3.6.0

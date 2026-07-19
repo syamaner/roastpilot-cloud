@@ -163,12 +163,38 @@ def load_stats(path: Path) -> dict[str, object]:
 
 
 def load_baseline(path: Path) -> dict[str, object]:
-    """Reads and parses the committed mutation-score baseline.
+    """Reads, parses, and validates the committed mutation-score baseline.
+
+    Mirrors `load_stats`'s fail-closed key validation (independent
+    factory-security-reviewer finding, F1-S9 slice 2, issue #12): unlike
+    the stats JSON, which `mutmut export-cicd-stats` generates fresh every
+    run, this file is committed, diff-editable content -- a rebaseline
+    commit (legitimate or an agent patch trying to game the gate) that
+    OMITS a field silently disables that field's own regression check via
+    `evaluate()`'s `dict.get(key, 0)` defaults, rather than visibly
+    failing. A missing `total`, for example, defaults `baseline_total` to
+    0, a floor no future run's real `total` can ever measure below --
+    exactly the "green by construction" exploit this whole gate exists to
+    prevent. Every `REQUIRED_STATS_KEYS` field must be present here too,
+    even when it's legitimately 0 (see `mutation-baseline.json`'s own
+    `_comment`, which now records all four `UNRESOLVED_MUTANT_CATEGORIES`
+    explicitly for exactly this reason).
+
+    Also validates every one of those fields is a non-negative integer
+    (not a string, float, `null`, or `bool` -- `bool` is a Python `int`
+    subclass, so `isinstance(x, int)` alone would silently accept `true`/
+    `false` as if they were `1`/`0`, checked separately below). A
+    malformed or negative value would otherwise reach `evaluate()`'s own
+    `int(...)` coercion, which either raises an unhandled, unhelpful
+    exception mid-comparison or -- for a value already an `int` subtype,
+    like `bool` -- coerces silently into a nonsensical baseline.
 
     @param path: Path to the baseline JSON file.
     @returns: The parsed JSON object (including its own `_comment` key,
         which callers reading `killed`/`survived`/`total` simply ignore).
-    @raises SystemExit: If the file is missing or not valid JSON.
+    @raises SystemExit: If the file is missing, not valid JSON, missing
+        any of `REQUIRED_STATS_KEYS`, or has a non-integer/negative value
+        for any of them.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -178,9 +204,30 @@ def load_baseline(path: Path) -> dict[str, object]:
             "-- this file must be committed to the repo"
         ) from err
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as err:
         raise SystemExit(f"error: {path} is not valid JSON ({err})") from err
+
+    missing = [key for key in REQUIRED_STATS_KEYS if key not in parsed]
+    if missing:
+        raise SystemExit(
+            f"error: {path} is missing expected key(s) {missing} -- a rebaseline that "
+            "omits a field silently disables that field's own regression check (a "
+            "missing 'total', for example, defaults to 0, a floor no future run can "
+            "ever measure below). Every REQUIRED_STATS_KEYS field must be present and "
+            "explicit here, even when it's legitimately 0."
+        )
+    invalid = [
+        key
+        for key in REQUIRED_STATS_KEYS
+        if isinstance(parsed[key], bool) or not isinstance(parsed[key], int) or parsed[key] < 0
+    ]
+    if invalid:
+        raise SystemExit(
+            f"error: {path} has a non-integer or negative value for key(s) {invalid} -- "
+            "every REQUIRED_STATS_KEYS field must be a non-negative integer"
+        )
+    return parsed
 
 
 # Human-readable descriptions for each of UNRESOLVED_MUTANT_CATEGORIES,

@@ -316,7 +316,7 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
-/** A single ADDED coverage-suppression line {@link findAddedCoverageSuppressions} found. */
+/** A single ADDED coverage- or mutation-suppression line {@link findAddedCoverageSuppressions} found. */
 export interface CoverageSuppressionMatch {
   /** The file the suppression comment was added in (normalized). */
   readonly path: string;
@@ -325,25 +325,40 @@ export interface CoverageSuppressionMatch {
 }
 
 /**
- * Matches a coverage-suppression comment: Python's `# pragma: no cover`
- * or `# pragma: no branch` (both real `coverage.py` pragmas), or a JS/TS
- * coverage-provider ignore comment — in EITHER its block-comment
- * (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
- * (`// v8/c8/istanbul ignore ...`) form. `v8 ignore` (block form) is this
- * repo's LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
- * `c8`/`istanbul`, and the line-comment form for all three, are matched
- * defensively even though unused here today — over-matching a syntax
- * this repo doesn't currently use is harmless, and a future provider
- * switch (or a diff copy-pasted from elsewhere) shouldn't need this
- * pattern updated to still catch it. This exact set (independent
- * factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an
- * earlier version's docstring claimed "c8/istanbul" broadly while the
- * regex only matched their BLOCK-comment form, missing istanbul's
- * documented line-comment form) is what the pattern below actually
- * matches — kept in sync deliberately, not narrowed to a stale claim.
+ * Matches a coverage- OR mutation-testing-suppression comment: Python's
+ * `# pragma: no cover` or `# pragma: no branch` (real `coverage.py`
+ * pragmas), a JS/TS coverage-provider ignore comment — in EITHER its
+ * block-comment (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
+ * (`// v8/c8/istanbul ignore ...`) form — or `# pragma: no mutate`
+ * (mutmut's own suppression comment, ANY of its accepted forms: bare,
+ * `no mutate block`, `no mutate start`/`no mutate end` — all share the
+ * same `no mutate` substring mutmut's own parser keys off, verified
+ * against the installed `mutmut==3.6.0` source, `mutmut/mutation/
+ * pragma_handling.py`'s `_parse_pragma_token`). `v8 ignore` (block form)
+ * is this repo's LIVE syntax (`vitest.config.ts`'s
+ * `coverage: { provider: "v8" }`); `c8`/`istanbul`, and the line-comment
+ * form for all three, are matched defensively even though unused here
+ * today — over-matching a syntax this repo doesn't currently use is
+ * harmless, and a future provider switch (or a diff copy-pasted from
+ * elsewhere) shouldn't need this pattern updated to still catch it. This
+ * exact set (independent factory-security-reviewer finding, F1-S9 slice
+ * 1, issue #12 — an earlier version's docstring claimed "c8/istanbul"
+ * broadly while the regex only matched their BLOCK-comment form, missing
+ * istanbul's documented line-comment form) is what the pattern below
+ * actually matches — kept in sync deliberately, not narrowed to a stale
+ * claim.
+ *
+ * `no mutate` was added by a Codex finding, F1-S9 slice 2, issue #12: the
+ * mutation-testing gate's own total-drop check can be offset by
+ * suppressing mutants in a security-critical branch while adding
+ * easily-killed code elsewhere — a diff-level fix belongs here, in the
+ * classifier that already flags the coverage-suppression equivalent of
+ * this exact gaming move, not in the gate script itself (which can only
+ * see aggregate counts, never which specific mutants were newly
+ * suppressed).
  */
 const COVERAGE_SUPPRESSION_PATTERN =
-  /#\s*pragma:\s*no\s*(?:cover|branch)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
+  /#\s*pragma:\s*no\s*(?:cover|branch|mutate)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
 
 /**
  * A single ADDED line, with the path of the file it was added to —
@@ -438,11 +453,12 @@ function* walkAddedLines(patchText: string): Generator<AddedLine> {
 }
 
 /**
- * Scans raw unified-diff text for coverage-suppression comments on
- * ADDED lines only — an existing suppression this diff doesn't touch is
- * not this diff's problem to flag. Consumes {@link walkAddedLines} for
- * the hunk-tracking traversal (see that function's docstring for the
- * `+++`-bypass history this depends on staying fixed).
+ * Scans raw unified-diff text for coverage- or mutation-suppression
+ * comments on ADDED lines only — an existing suppression this diff
+ * doesn't touch is not this diff's problem to flag. Consumes
+ * {@link walkAddedLines} for the hunk-tracking traversal (see that
+ * function's docstring for the `+++`-bypass history this depends on
+ * staying fixed).
  *
  * @param patchText - The raw contents of a unified diff (same file
  *   `main()` already validates the size of before ever reading it — see
@@ -663,7 +679,9 @@ export function findAddedRootPytestConfigSections(patchText: string): string[] {
  * `requirements-dev.txt`, folded into {@link isTestFilePath} via
  * `MUTATION_GATE_CONFIG_EXACT_PATHS` — a gate reading its own pass/fail
  * threshold from the same checkout it grades is the same gaming class as
- * editing a test directly), any ADDED coverage-suppression comment, any
+ * editing a test directly), any ADDED coverage- or mutation-suppression
+ * comment (`# pragma: no cover`/`no branch`/`no mutate`, or a JS/TS
+ * coverage-provider ignore comment), any
  * ADDED `package.json` test/coverage/lifecycle script-key redefinition, or
  * any ADDED pytest config section in a root-level `pyproject.toml`/
  * `setup.cfg`. All four are treated as a SINGLE, conservative class —
@@ -717,11 +735,15 @@ export function findAddedRootPytestConfigSections(patchText: string): string[] {
  * `pytest.toml`/`conftest.py`, `package.json`'s `pre`/`post`-prefixed npm
  * lifecycle hooks, and JSON-unicode-escaped script keys), coverage
  * suppressions (including delivery via a `.gitattributes`-forced binary
- * patch or a copy of an already-suppressed file), and — added in F1-S9
- * slice 2, closing a cross-slice integration gap an independent
- * factory-security pass found — edits to the mutation-testing gate's own
- * config/tooling, so a gate this classifier doesn't watch can never be
- * neutralized from inside the checkout it grades. It is NOT, and is not
+ * patch or a copy of an already-suppressed file), edits to the
+ * mutation-testing gate's own config/tooling (F1-S9 slice 2, closing a
+ * cross-slice integration gap an independent factory-security pass
+ * found, so a gate this classifier doesn't watch can never be
+ * neutralized from inside the checkout it grades), and — also F1-S9
+ * slice 2, a Codex finding — an ADDED `# pragma: no mutate` (mutmut's own
+ * suppression comment, in any of its accepted forms), which offsets the
+ * mutation gate's total-drop check without touching a test file at all.
+ * It is NOT, and is not
  * intended to become, an exhaustive or unbeatable gate: a determined
  * adversary with knowledge of this classifier's own source can construct
  * FURTHER textual evasions (e.g. a novel obfuscation of a script key this
@@ -750,13 +772,13 @@ export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
  * this stays within it.
  */
 export const NO_AUTO_CHAIN_LABEL_DESCRIPTION =
-  "Diff edits a test/gate file, or adds a coverage-suppression — needs human review.";
+  "Diff edits a test/gate file, or adds a coverage/mutation suppression — needs human review.";
 
 /** What the anti-gaming classifier found on one publish run — passed to {@link buildGamingFlagAnnotation}. */
 export interface GamingFlag {
   /** Test files the diff edits, normalized, sorted. */
   readonly testFileEdits: readonly string[];
-  /** Coverage-suppression comments the diff adds. */
+  /** Coverage- or mutation-suppression comments the diff adds. */
   readonly suppressions: readonly CoverageSuppressionMatch[];
   /**
    * `package.json` test/coverage/lifecycle script-key redefinitions the
@@ -824,7 +846,7 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
     lines.push("");
   }
   if (flag.suppressions.length > 0) {
-    lines.push("**Coverage-suppression comment(s) added:**");
+    lines.push("**Coverage- or mutation-suppression comment(s) added:**");
     for (const match of flag.suppressions) {
       lines.push(
         `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,

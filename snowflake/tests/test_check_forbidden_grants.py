@@ -10,9 +10,37 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import check_forbidden_grants  # noqa: E402
+
+
+class TestLoadSiblingModule:
+    """Tests for `_load_sibling_module`, added when CI switched this
+    script's own invocation to `-P` (PYTHONSAFEPATH, Codex finding, F1-S9
+    slice 2, issue #12) — see the function's own docstring for why a
+    plain `sys.path`-based import had to be replaced with a path-anchored
+    `importlib` load.
+    """
+
+    def test_loads_validate_migrations_and_exposes_its_real_names(self) -> None:
+        # Not a mock/fixture -- the actual sibling file, loaded exactly the
+        # way the module-level `_load_sibling_module("validate_migrations")`
+        # call already did at import time. Confirms the mechanism resolves
+        # to the SAME real module content this file depends on.
+        module = check_forbidden_grants._load_sibling_module("validate_migrations")
+        assert module.MIGRATIONS_DIR == check_forbidden_grants.MIGRATIONS_DIR
+        assert module.SNOWFLAKE_DIR == check_forbidden_grants.SNOWFLAKE_DIR
+        assert callable(module.find_candidate_migration_files)
+
+    def test_raises_import_error_for_a_module_that_does_not_exist(self) -> None:
+        # The defensive branch this function exists to fail loudly on: a
+        # missing sibling file should raise ImportError, not surface as an
+        # opaque AttributeError somewhere deeper in this script.
+        with pytest.raises(ImportError, match="cannot load sibling module"):
+            check_forbidden_grants._load_sibling_module("this_module_does_not_exist")
 
 
 class TestFindForbiddenPublicGrants:

@@ -415,6 +415,34 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
     expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
   });
 
+  it("flags mutmut's own bare # pragma: no mutate (Codex finding, F1-S9 slice 2, issue #12 — the mutation gate's total-drop check can be offset by suppressing mutants in a security branch while adding easily-killed code elsewhere; verified against mutmut==3.6.0's own pragma_handling.py, which keys off the literal 'no mutate' substring)", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+if attacker_controlled:  # pragma: no mutate",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.line).toContain("no mutate");
+  });
+
+  it("flags mutmut's block/start/end pragma forms too, not just the bare form", () => {
+    for (const form of ["no mutate block", "no mutate start", "no mutate end"]) {
+      const patch = [
+        "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+        "--- a/snowflake/foo.py",
+        "+++ b/snowflake/foo.py",
+        "@@ -1,1 +1,2 @@",
+        " existing_line = 1",
+        `+    # pragma: ${form}`,
+      ].join("\n");
+      expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+    }
+  });
+
   it("does NOT flag an EXISTING (unmodified, context-line) suppression this diff doesn't touch", () => {
     const patch = [
       "diff --git a/lib/foo.ts b/lib/foo.ts",

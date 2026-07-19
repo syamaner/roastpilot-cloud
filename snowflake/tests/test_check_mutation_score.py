@@ -89,10 +89,11 @@ class TestLoadStats:
 class TestLoadBaseline:
     def test_reads_and_parses_valid_json(self, tmp_path: Path) -> None:
         path = tmp_path / "baseline.json"
-        path.write_text(json.dumps({"killed": 5, "survived": 1, "_comment": "x"}))
+        path.write_text(json.dumps({**_FULL_STATS_SHAPE, "_comment": "x"}))
         result = check_mutation_score.load_baseline(path)
-        assert result["killed"] == 5
-        assert result["survived"] == 1
+        assert result["killed"] == _FULL_STATS_SHAPE["killed"]
+        assert result["survived"] == _FULL_STATS_SHAPE["survived"]
+        assert result["_comment"] == "x"
 
     def test_exits_when_the_file_is_missing(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit, match="could not read the mutation baseline"):
@@ -102,6 +103,43 @@ class TestLoadBaseline:
         path = tmp_path / "baseline.json"
         path.write_text("not valid json{")
         with pytest.raises(SystemExit, match="not valid JSON"):
+            check_mutation_score.load_baseline(path)
+
+    @pytest.mark.parametrize("missing_key", check_mutation_score.REQUIRED_STATS_KEYS)
+    def test_exits_when_any_required_key_is_entirely_missing(
+        self, tmp_path: Path, missing_key: str
+    ) -> None:
+        # Independent factory-security-reviewer finding (F1-S9 slice 2,
+        # issue #12): a rebaseline that OMITS a field (e.g. "total")
+        # silently disables that field's regression check via
+        # evaluate()'s dict.get default, rather than visibly failing.
+        # Named parametrized case for "total" specifically, per the
+        # reviewer's own example: `test_exits_when_any_required_key_is_
+        # entirely_missing[total]`.
+        incomplete = {k: v for k, v in _FULL_STATS_SHAPE.items() if k != missing_key}
+        path = tmp_path / "baseline.json"
+        path.write_text(json.dumps(incomplete))
+        with pytest.raises(SystemExit, match="missing expected key"):
+            check_mutation_score.load_baseline(path)
+
+    def test_reads_fine_with_an_extra_unrecognized_key_present(self, tmp_path: Path) -> None:
+        path = tmp_path / "baseline.json"
+        path.write_text(json.dumps({**_FULL_STATS_SHAPE, "_comment": "x", "future_key": 1}))
+        assert check_mutation_score.load_baseline(path)["killed"] == _FULL_STATS_SHAPE["killed"]
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1, "5", 5.5, None, True, False], ids=["negative", "string", "float", "null", "true", "false"]
+    )
+    def test_exits_when_a_required_key_has_a_non_negative_integer_violating_value(
+        self, tmp_path: Path, bad_value: object
+    ) -> None:
+        # A malformed baseline value (not just a missing key) must also
+        # fail closed -- including bool, since Python's bool is an int
+        # SUBCLASS, so isinstance(True, int) alone would silently accept
+        # true/false as if they were 1/0.
+        path = tmp_path / "baseline.json"
+        path.write_text(json.dumps({**_FULL_STATS_SHAPE, "total": bad_value}))
+        with pytest.raises(SystemExit, match="non-integer or negative value"):
             check_mutation_score.load_baseline(path)
 
 
@@ -236,9 +274,14 @@ class TestEvaluate:
         # condition (already tested above) is what catches this. This test
         # proves it against the exact deletion shape: a poorly-tested
         # function worth 60 mutants (10 killed, 50 survived -- a 17% local
-        # kill rate) is removed entirely from the 423/154/577 baseline,
-        # leaving 413/104/517 at a BETTER ratio (0.799 vs. 0.733) than the
-        # baseline -- exactly the silent-pass a ratio-only gate would allow.
+        # kill rate) is removed entirely from a fixed, self-contained
+        # EXAMPLE baseline below (deliberately NOT read from -- and not
+        # expected to track -- the live mutation-baseline.json, which
+        # moves independently as the real surface/tests change; using an
+        # example fixture here avoids this test needing an edit every time
+        # that file's numbers do), leaving a BETTER ratio (0.799 vs. 0.733)
+        # than the example baseline -- exactly the silent-pass a
+        # ratio-only gate would allow.
         baseline = {"killed": 423, "survived": 154, "total": 577}
         after_deleting_a_weakly_tested_function = {"killed": 413, "survived": 104, "total": 517}
         current_score = check_mutation_score.compute_mutation_score(
@@ -284,7 +327,7 @@ class TestMain:
             tmp_path,
             monkeypatch,
             {**_FULL_STATS_SHAPE, "killed": 353, "survived": 131, "total": 484},
-            {"killed": 353, "survived": 131, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 353, "survived": 131, "total": 484},
         )
         assert check_mutation_score.main() == 0
         assert "confirmed: mutation score" in capsys.readouterr().out
@@ -296,7 +339,7 @@ class TestMain:
             tmp_path,
             monkeypatch,
             {**_FULL_STATS_SHAPE, "killed": 300, "survived": 184, "total": 484},
-            {"killed": 353, "survived": 131, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 353, "survived": 131, "total": 484},
         )
         assert check_mutation_score.main() == 1
         stderr = capsys.readouterr().err
@@ -314,7 +357,7 @@ class TestMain:
             tmp_path,
             monkeypatch,
             {**_FULL_STATS_SHAPE, "killed": 0, "survived": 0, "total": 0},
-            {"killed": 353, "survived": 131, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 353, "survived": 131, "total": 484},
         )
         assert check_mutation_score.main() == 1
         assert "no mutation score can be computed" in capsys.readouterr().err
