@@ -230,15 +230,31 @@ const COVERAGE_SUPPRESSION_PATTERN =
  *
  * A line is only ever considered "added content" while inside a hunk
  * (after a `@@ ... @@` marker for the current file, reset at each
- * `diff --git` header) — this is what excludes the `+++ b/path` FILE
+ * `diff --git` header). This is what excludes the `+++ b/path` FILE
  * HEADER line (which always precedes any hunk marker) from being
- * misread as added content, without needing to special-case its `+++`
- * prefix directly (a real added line's own code could itself start with
- * `++`, e.g. `++i;`, making a naive `+++`-prefix check ambiguous; hunk
- * state has no such ambiguity, since `@@` markers are unique to diff
- * hunk headers). `+++ b/path` (or `+++ /dev/null` for a deletion) is
- * additionally used to track which file the CURRENT hunk belongs to, so
- * a match can be attributed to a path.
+ * misread as added content — a real added line's own code could itself
+ * start with `++`, e.g. `++i;`, so a naive `+++`-prefix check ALONE is
+ * ambiguous: it can't tell that shape apart from the genuine header.
+ * `@@` markers have no such ambiguity (unique to hunk headers), so the
+ * `+++`-header branch below is gated on `!inHunk` — the header can only
+ * be genuine BEFORE the first `@@` for its file.
+ *
+ * CLOSED BUG (independent Codex + claude-review finding, F1-S9 slice 1,
+ * issue #12): an earlier version checked the `+++ ` prefix
+ * UNCONDITIONALLY, without the `!inHunk` gate this docstring already
+ * claimed existed — so an ADDED line whose code happened to start with
+ * `++` (serializing as the raw diff line `+++counter;`) was misread as a
+ * (fake) file header REGARDLESS of hunk state, resetting `currentPath`
+ * and `inHunk` mid-hunk and causing every subsequent added line for that
+ * file — including a real suppression comment right after the decoy
+ * line — to be silently skipped. A trivially craftable, complete bypass
+ * of this whole classifier. The gate below is the actual fix; the
+ * disambiguation this docstring describes was always the INTENDED
+ * mechanism, just not, before this fix, the IMPLEMENTED one.
+ *
+ * `+++ b/path` (or `+++ /dev/null` for a deletion) is additionally used
+ * to track which file the CURRENT hunk belongs to, so a match can be
+ * attributed to a path.
  *
  * @param patchText - The raw contents of a unified diff (same file
  *   `main()` already validates the size of before ever reading it — see
@@ -256,9 +272,19 @@ export function findAddedCoverageSuppressions(
       inHunk = false;
       continue;
     }
-    if (rawLine.startsWith("+++ ")) {
+    // Gated on `!inHunk` (independent Codex + claude-review finding, F1-S9
+    // slice 1, issue #12 — a real bypass in an earlier version, which
+    // checked this UNCONDITIONALLY): a real "+++ b/path" file header only
+    // ever appears BEFORE the first `@@` for its file (`inHunk` is false
+    // there). Without this gate, an ADDED line whose own CODE happens to
+    // start with `++` (e.g. `++counter;`) serializes as the raw diff line
+    // `+++counter;` — a trivial, craftable string for an attacker to
+    // prepend immediately before a real added suppression line, since it
+    // was being misread as a (fake) file header, resetting `inHunk` to
+    // false and making the classifier skip every following added line
+    // for that file, INCLUDING the real suppression right after it.
+    if (!inHunk && rawLine.startsWith("+++ ")) {
       currentPath = normalizePatchPath(rawLine.slice("+++ ".length).trim());
-      inHunk = false;
       continue;
     }
     if (rawLine.startsWith("@@")) {
@@ -306,6 +332,20 @@ export function findAddedCoverageSuppressions(
  * actually auto-chains with no human step in between — `implement`'s
  * patch flowing straight into `publish`'s auto-opened/refreshed PR,
  * both within a single dispatched run.
+ *
+ * LABEL-AFTER-EVENT RACE (Codex finding, F1-S9 slice 1, issue #12 —
+ * doc-only, no code fix exists): this label is applied AFTER
+ * `POST /pulls` succeeds (or after the refresh force-push), so a PR's
+ * own `opened`/`synchronize` webhook event necessarily fires BEFORE the
+ * label lands — there is no way to label a PR before GitHub emits the
+ * event for its creation. Not exploitable today (nothing consumes this
+ * label yet), but binding on whatever DOES eventually consume it: a
+ * future auto-chain consumer MUST re-read this label from the API at
+ * decision time (e.g. `GET /issues/{n}/labels` or the PR's own current
+ * label list), NEVER trust a `labels` array captured from the
+ * triggering event's payload — that payload is a snapshot from BEFORE
+ * this label could have been applied, so trusting it would silently
+ * treat every flagged PR as clean.
  */
 export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
 

@@ -366,6 +366,49 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
     expect(findAddedCoverageSuppressions(patch)).toEqual([]);
   });
 
+  it("is NOT bypassed by an added ++-prefixed decoy line immediately before a real suppression (independent Codex + claude-review finding, F1-S9 slice 1, issue #12 — a real, trivially craftable classifier bypass)", () => {
+    // An added line whose own CODE starts with `++` (e.g. `++counter;`)
+    // serializes in a real diff as the raw line `+++counter;` — an
+    // earlier version of this function's `+++`-header check ran
+    // UNCONDITIONALLY (not gated on hunk state), so this decoy line was
+    // misread as a fake file header, resetting inHunk to false and
+    // silently skipping every added line that followed for the rest of
+    // this file's hunk — including the REAL suppression comment right
+    // after it. This is the exact PoC: without the fix, the pragma below
+    // would never be detected at all.
+    const pragmaPatch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,3 @@",
+      " x = 1",
+      "+++counter",
+      "+y = 2  # pragma: no cover",
+    ].join("\n");
+    const pragmaMatches = findAddedCoverageSuppressions(pragmaPatch);
+    expect(pragmaMatches).toHaveLength(1);
+    expect(pragmaMatches[0]?.line).toContain("pragma: no cover");
+
+    const v8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,3 @@",
+      " export const x = 1;",
+      "+++counter;",
+      "+/* v8 ignore next */ export const y = 2;",
+    ].join("\n");
+    const v8Matches = findAddedCoverageSuppressions(v8Patch);
+    expect(v8Matches).toHaveLength(1);
+    expect(v8Matches[0]?.line).toContain("v8 ignore");
+
+    // Decisive proof the decoy line itself is correctly treated as
+    // ordinary added CODE, not a header: it must not have reset
+    // currentPath to something else, and it must not itself be reported
+    // as a match (it carries no suppression pattern).
+    expect(pragmaMatches[0]?.path).toBe("snowflake/foo.py");
+  });
+
   it("does NOT flag a removed (-) line carrying a suppression", () => {
     const patch = [
       "diff --git a/lib/foo.ts b/lib/foo.ts",
