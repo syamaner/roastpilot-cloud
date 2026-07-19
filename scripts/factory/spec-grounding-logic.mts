@@ -113,14 +113,48 @@ const CLOSING_KEYWORDS = [
 ] as const;
 const NON_CLOSING_KEYWORDS = ["ref", "refs", "part of"] as const;
 
+// `:?` — independent factory-security-reviewer finding, F1-S9 slice 3,
+// issue #12: GitHub's own auto-close linking ALSO honors a colon form
+// ("Closes: #12", docs-confirmed), which the original space-only pattern
+// silently missed — an under-match, not just an over-match, and strictly
+// worse: a genuinely closing PR would skip spec-grounding entirely rather
+// than merely costing a human a glance. The colon is optional and never
+// itself required whitespace on either side beyond what's already
+// mandatory after it, so "Closes #12" (no colon) keeps matching exactly
+// as before.
 const ISSUE_LINK_PATTERN = new RegExp(
   `\\b(${[...CLOSING_KEYWORDS, ...NON_CLOSING_KEYWORDS]
     .map((keyword) => keyword.replace(/ /g, "\\s+"))
-    .join("|")})\\s+#(\\d+)\\b`,
+    .join("|")}):?\\s+#(\\d+)\\b`,
   "gi",
 );
 
 const CLOSING_KEYWORD_SET: ReadonlySet<string> = new Set(CLOSING_KEYWORDS);
+
+/**
+ * Strips fenced code blocks (`` ``` ... ``` ``) and inline code spans
+ * (`` `...` ``) before {@link parseLinkedIssueReferences} scans a PR body
+ * (claude-review finding, F1-S9 slice 3, issue #12): an illustrative
+ * example inside backticks — "e.g. write `Closes #12`" — otherwise parses
+ * as a REAL closing claim. This tightens this module's own stated
+ * "over-match in the safe direction" philosophy rather than contradicting
+ * it: GitHub's own auto-linking likewise does not honor a keyword inside
+ * code formatting, so code spans are the one place over-matching produces
+ * pure noise with zero chance of ever being a genuine link — stripping
+ * them first is strictly more honest in both directions at once (it does
+ * not touch the SEPARATE, deliberate over-match this module keeps
+ * elsewhere, e.g. matching every GitHub closing-keyword synonym even
+ * though only `Closes` is this repo's own convention).
+ *
+ * @param text - The raw PR body.
+ * @returns The same text with every fenced block and inline code span
+ *   replaced by a single space (never removed outright, so a keyword
+ *   straddling a stripped span on either side still can't accidentally
+ *   fuse into a false match).
+ */
+function stripCodeSpansAndFences(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+}
 
 /**
  * Scans a PR body for every `<keyword> #<N>` issue reference and
@@ -139,8 +173,9 @@ const CLOSING_KEYWORD_SET: ReadonlySet<string> = new Set(CLOSING_KEYWORDS);
  *   issue at all.
  */
 export function parseLinkedIssueReferences(prBody: string): LinkedIssueReference[] {
+  const scannable = stripCodeSpansAndFences(prBody);
   const byNumber = new Map<number, IssueLinkKind>();
-  for (const match of prBody.matchAll(ISSUE_LINK_PATTERN)) {
+  for (const match of scannable.matchAll(ISSUE_LINK_PATTERN)) {
     const rawKeyword = match[1];
     const rawNumber = match[2];
     if (rawKeyword === undefined || rawNumber === undefined) {
@@ -304,28 +339,55 @@ export function buildLinkedIssueSpecs(
 
 const DATA_BLOCK_OPEN = "<UNTRUSTED_ISSUE_DATA>";
 const DATA_BLOCK_CLOSE = "</UNTRUSTED_ISSUE_DATA>";
-const DELIMITER_TAG_PATTERN = /<(\/?)UNTRUSTED_ISSUE_DATA>/gi;
+
+// Whitespace-tolerant on EVERY side of the slash and the tag name —
+// independent factory-security-reviewer finding, F1-S9 slice 3, issue
+// #12: the original byte-exact pattern let `</UNTRUSTED_ISSUE_DATA >`
+// (trailing space) or `< /UNTRUSTED_ISSUE_DATA>` (space after `<`) pass
+// through un-neutralized, even though an LLM tokenizer plausibly still
+// reads either as the real closing delimiter — the exact breakout this
+// function exists to stop. The slash itself stays captured cleanly in
+// group 1 regardless of the surrounding whitespace, since the `\s*`
+// wrapping it sits OUTSIDE the capture group.
+const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
+
+// Zero-width / bidi-format characters an attacker could inject to split
+// the literal delimiter token into a byte sequence a whitespace-tolerant
+// (but still literal-character) regex still misses, while an LLM
+// tokenizer/renderer plausibly collapses them and reads the result as the
+// real tag anyway (independent factory-security-reviewer finding, F1-S9
+// slice 3, issue #12): zero-width space/non-joiner/joiner (U+200B-200D),
+// the bidi mark/override/isolate control block (U+200E-200F, U+202A-202E),
+// word-joiner/invisible math operators (U+2060-2064), and the BOM used as
+// a zero-width no-break space (U+FEFF).
+const ZERO_WIDTH_AND_FORMAT_PATTERN =
+  /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
  * delimiter pair from WITHIN extracted criterion/title text (Rider 1(b)/
- * (c), operator review of the slice-3 design, 19 Jul 2026): this repo is
- * public, so a criterion's text is attacker-reachable (anyone can open an
- * issue and any PR can reference it) — a checkbox line containing the
- * literal closing delimiter could otherwise end the DATA block early and
- * inject text the review prompt would read as ITS OWN instructions rather
- * than quoted data. Case-insensitive (an attacker doesn't need exact-case
- * delimiter text to attempt this) and matches EITHER delimiter (an
- * attacker forging a FAKE open tag deeper in the block is the same class
- * of attack as closing the real one early).
+ * (c), operator review of the slice-3 design, 19 Jul 2026, hardened by an
+ * independent factory-security-reviewer finding on this same PR): this
+ * repo is public, so a criterion's text is attacker-reachable (anyone can
+ * open an issue and any PR can reference it) — a checkbox line containing
+ * the literal closing delimiter (or a whitespace/zero-width-character
+ * variant of it) could otherwise end the DATA block early and inject text
+ * the review prompt would read as ITS OWN instructions rather than quoted
+ * data. NFKC-normalizes and strips zero-width/format characters FIRST
+ * (closing the tokenizer-collapses-invisible-characters gap), then
+ * matches the delimiter tag case-insensitively and whitespace-tolerantly
+ * on EITHER delimiter (an attacker forging a FAKE open tag deeper in the
+ * block is the same class of attack as closing the real one early).
  *
  * @param text - Raw extracted text (a criterion or an issue title).
- * @returns The same text with any delimiter-tag occurrence neutralized
- *   (angle brackets replaced with square brackets) — never dropped, so
- *   the finding stays legible; just unable to parse as a real tag.
+ * @returns The same text, with zero-width/format characters removed and
+ *   any delimiter-tag occurrence neutralized (angle brackets replaced
+ *   with square brackets) — never dropped outright, so the finding stays
+ *   legible; just unable to parse as a real tag.
  */
 function neutralizeDelimiterBreakout(text: string): string {
-  return text.replace(DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_ISSUE_DATA]");
+  const cleaned = text.normalize("NFKC").replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "");
+  return cleaned.replace(DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_ISSUE_DATA]");
 }
 
 /**
