@@ -57,10 +57,20 @@ and each is independently checkable:
 4. **Out-of-scope statement** — what this story deliberately does not do.
 5. **Verification notes** — which suite proves it (unit / contract vs
    `ROASTPILOT_DEV` / Playwright e2e / grants), plus any manual step.
-6. **Size declaration** — "thin slice" (~≤400 changed lines). If the issue's
-   own size declaration says "larger — needs splitting," or your reading of
-   the acceptance criteria suggests it clearly is, this is disqualifying on
-   its own.
+6. **Size declaration** — "thin slice" (≤ ~400 **logic** lines, per D104;
+   migrations / generated files / fixtures / docs are exempt from the cap but
+   must be their OWN story/PR — a story mixing an exempt class with logic
+   fails this). If the issue's own size declaration says "larger — needs
+   splitting," or your reading of the acceptance criteria suggests it clearly
+   is, this is disqualifying on its own.
+7. **PR plan (D104, factory.md §5 addendum)** — the story maps to exactly ONE
+   thin PR and states: its **dependency order** (a `Depends on:` value —
+   "none" is valid, absent is not) and its **domain reviewer** per AGENTS.md's
+   rubric (`schema-migration-reviewer` / `privacy-auditor` /
+   `factory-security-reviewer`, or an explicit "none (docs/fixtures only)").
+   "Build X" with no ordered, sized, reviewer-tagged plan is `ready-to-spec`,
+   not `ready-to-implement` — smallness and routing are decided at
+   decomposition, not discovered at review.
 
 Also check, per the Architecture Invariants in this repo's `AGENTS.md`:
 anything that looks like it would grant to `PUBLIC`, widen `PUBLIC_WEB`'s

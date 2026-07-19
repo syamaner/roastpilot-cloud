@@ -140,6 +140,14 @@ it is not itself an authorization to build anything, and no story it drafts
 is `ready-to-implement` until a human or the `triage` skill says so against
 the issue as actually filed.
 
+**Plan-small readiness bar (D104).** A story earns `ready-to-implement` only
+with an explicit **PR plan**: exactly ONE thin PR, **logic** diff under ~400
+lines (Snowflake migrations, generated files, fixtures, and docs are exempt
+and get their own issue/PR), dependencies/order named, and the **domain
+reviewer** its diff triggers tagged (rubric below). "Build X" without the
+ordered, sized, reviewer-tagged plan bounces back `ready-to-spec` — smallness
+is decided at decomposition, not discovered at review.
+
 ## PR Merge Policy
 
 Full policy: `factory.md` §9, identical to the agent repo's, no factory
@@ -271,6 +279,15 @@ inline.
 
 **Also verify**: tests assert real behavior, not a smoke check; new code is
 covered or carries a documented reason for an uncovered line.
+
+**Fix the CLASS, not the instance (review rubric rule, D104 package).** When a
+finding is one instance of a class — one un-parameterised query, one route
+missing Zod, one grant to the wrong role, one missing object-level authz check,
+one unsanitized interpolation — the fix is categorical: fix it once (a shared
+helper or pattern) and `grep` the repo for every sibling **before the PR leaves
+draft**. A reviewer seeing a per-symptom patch for a class-shaped finding should
+say so; N review rounds over one class is the failure mode this rule removes
+(the #64 sanitizer/bypass arc and the agent repo's #587 are the proof cases).
 
 **Pipeline self-modification (factory.md §13):** any **factory
 implementing-agent patch** — a manually-dispatched stage-1 run or an
