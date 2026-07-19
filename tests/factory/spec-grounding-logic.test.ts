@@ -164,6 +164,37 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
   });
 
+  it("masks a code span inside a LIST ITEM (Codex finding, round 3: markdown-it's inline token.content omits the '- ' container prefix, so an equality-based content check silently skipped masking here — 'Closes #12' formatted as code in a bullet point was left over-matchable, exactly the regression the library swap was meant to close)", () => {
+    expect(parseLinkedIssueReferences("- write `Closes #12`")).toEqual([]);
+  });
+
+  it("masks a code span inside a BLOCKQUOTE, the same container-prefix class", () => {
+    expect(parseLinkedIssueReferences("> write `Closes #12`")).toEqual([]);
+  });
+
+  it("masks a code span inside a HEADING, the same container-prefix class", () => {
+    expect(parseLinkedIssueReferences("#### write `Closes #12`")).toEqual([]);
+  });
+
+  it("still finds a REAL reference sharing a line with a masked code span inside a container — the fix is PRECISE, not a whole-line over-mask, for the single-line container case", () => {
+    const body = "- See `some code` here. Then Closes #8 for real.";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 8, kind: "closing" }]);
+  });
+
+  it("masks BOTH occurrences of a duplicate code-span content on the same line, not just the first (the mutation-based sequential search naturally lands on the second real occurrence once the first is masked out)", () => {
+    const body = "See `Closes #12` and also `Closes #12` again.";
+    expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
+  it("DOCUMENTED RESIDUAL: the multi-line-container fallback can mask a real reference sharing the SAME multi-line container paragraph as an unrelated code span (verified, not assumed — a narrower, compound case than the single-line container forms above, which the indexOf fix fully closes)", () => {
+    const body = "- Closes #12 on line one\n  `some code` on line two of the SAME item";
+    // Honest documentation of a real gap, not a claim of correctness:
+    // this SHOULD ideally find issue #12, but the whole-paragraph
+    // fallback masks line one too. See the module's own top-level
+    // "SECOND RESIDUAL, DOCUMENTED LIMITATION" docstring.
+    expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
   it("fails SAFE in the OVER-match direction when markdown-it itself throws (Codex constraint, PR #70 review): code regions stay unmasked rather than the whole scan being skipped, since a false positive here costs a human a glance while silently missing a real reference would not", () => {
     const throwingParse = vi.spyOn(MarkdownIt.prototype, "parse").mockImplementation(() => {
       throw new Error("simulated markdown-it failure");
@@ -268,6 +299,19 @@ describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
   it("a closing-hash section-boundary heading still terminates the section (the closing-hash fix must not change LEVEL detection, only recognize the acceptance heading's own closing-hash form)", () => {
     const body = "### Acceptance criteria\n- [ ] Only this one.\n\n### Verification notes ###\n- [ ] Not a criterion.";
     expect(parseAcceptanceCriteria(body)).toEqual([{ text: "Only this one.", checked: false }]);
+  });
+
+  it.each([1, 2, 3])(
+    "recognizes an ATX heading indented by %d leading space(s) — CommonMark/GFM tolerates up to 3 (Codex finding — the earlier pattern anchored '#' at column 0 exactly, silently missing every indented form)",
+    (spaces) => {
+      const body = `${" ".repeat(spaces)}### Acceptance criteria\n- [ ] x`;
+      expect(parseAcceptanceCriteria(body)).toEqual([{ text: "x", checked: false }]);
+    },
+  );
+
+  it("does NOT recognize a 4-space-indented '#' line as a heading — that shifts to CommonMark's indented-code-block construct instead, a different, higher-precedence rule", () => {
+    const body = "    ### Acceptance criteria\n- [ ] x";
+    expect(parseAcceptanceCriteria(body)).toEqual([]);
   });
 
   it("accepts an uppercase X marker as checked, same as lowercase x", () => {

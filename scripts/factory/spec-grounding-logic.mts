@@ -53,6 +53,18 @@
  * already-satisfied checkbox, not a blocked pipeline. Reconstructing merge
  * history is real scope creep against a thin slice — documented rather
  * than silently accepted.
+ *
+ * SECOND RESIDUAL, DOCUMENTED LIMITATION (Codex finding, PR #70 review
+ * round 3): {@link buildStructuralView}'s code-span masking correctly
+ * locates a code_inline span inside a SINGLE-LINE container (a list
+ * item, blockquote, or heading — the forms actually found and fixed on
+ * this PR) by substring position, but a MULTI-LINE paragraph inside a
+ * container falls back to masking that paragraph's WHOLE line range —
+ * verified empirically that this fallback can mask a REAL reference
+ * sharing the same multi-line container paragraph as an unrelated code
+ * span, a genuine (if narrow and compound) under-match. Accepted rather
+ * than chased further, same discipline as the epic-merge-history
+ * limitation above.
  */
 
 import MarkdownIt from "markdown-it";
@@ -237,14 +249,46 @@ function buildStructuralView(text: string): string {
     }
     const [start, end] = token.map;
     const joined = originalLines.slice(start, end).join("\n");
-    // Defensive: only mask if the reconstructed joined text matches what
-    // markdown-it itself reports for this span (a multi-line paragraph
-    // edge case not observed in testing, unlike the single-code-span
-    // mismatch just below, which IS reachable and tested). If it ever
-    // doesn't, skip masking this whole inline token rather than risk
-    // corrupting positions elsewhere — the same safe, over-match-
-    // favoring direction as the parse-failure fallback above.
-    if (joined !== token.content) {
+    // LOCATE by SUBSTRING, not by equality (Codex finding, PR #70 review
+    // round 3 — a real, common-case bug, not just a theoretical edge
+    // case): inside a container (a list item, blockquote, or heading),
+    // markdown-it's `token.content` OMITS the container's own markup
+    // (`- `, `> `, `#### `), while `joined` is the FULL source line
+    // including it — the earlier `joined === token.content` equality
+    // check therefore failed for EVERY container line, silently skipping
+    // code-span masking there entirely. `- write \`Closes #12\`` left
+    // `Closes #12` unmasked and scannable — the exact over-match
+    // regression this whole markdown-it swap was meant to close.
+    // `indexOf` finds `token.content` as a SUBSTRING of `joined` instead,
+    // correctly handling any single-line container prefix without this
+    // module needing to know or hand-parse that prefix's own syntax.
+    const contentOffset = joined.indexOf(token.content);
+    if (contentOffset === -1) {
+      // Residual gap `indexOf` alone doesn't close: a MULTI-LINE
+      // paragraph inside a container, where EACH continuation line
+      // carries its own prefix, so the inline content is no longer one
+      // contiguous substring of the joined lines (verified: this is
+      // genuinely a narrower, unnamed case than the single-line
+      // container forms above — Codex's own named examples, a list
+      // item/blockquote/heading each on ONE line, are fully closed by
+      // the `indexOf` fix above and never reach this branch). The
+      // fallback here masks the token's WHOLE line range if it has ANY
+      // code_inline child — this is over-matching FOR THE CODE SPAN
+      // itself (never leaves it unmasked), but is NOT purely safe
+      // overall: verified empirically that if a DIFFERENT line of the
+      // SAME multi-line container paragraph carries a real, unrelated
+      // reference, this fallback masks that line too, an honest
+      // documented UNDER-match for this specific, narrow, compound case
+      // (multi-line + container + code span + a real reference sharing
+      // the same paragraph) — accepted rather than chased further, same
+      // "fix the named gap, document the residual" discipline as the
+      // #62/#66 compressed-reference-form limitation elsewhere in this
+      // module.
+      if (token.children.some((child) => child.type === "code_inline")) {
+        for (let i = start; i < end && i < maskedLines.length; i++) {
+          maskedLines[i] = neuterPreservingNewlines(maskedLines[i] ?? "");
+        }
+      }
       continue;
     }
     let masked = joined;
@@ -253,7 +297,15 @@ function buildStructuralView(text: string): string {
         continue;
       }
       const originalSpan = `${child.markup}${child.content}${child.markup}`;
-      const index = masked.indexOf(originalSpan);
+      // Search starting from contentOffset: the span can only legitimately
+      // sit within the inline content itself, never inside a container
+      // prefix that happens to look similar. Searching the FULL (already
+      // partially-masked, on a later iteration) `masked` string from this
+      // fixed start point also correctly handles duplicate spans on the
+      // same line — once the first occurrence is masked to whitespace, it
+      // no longer literally matches `originalSpan`, so the next search
+      // naturally lands on the next real occurrence instead.
+      const index = masked.indexOf(originalSpan, contentOffset);
       if (index === -1) {
         // Genuinely reachable, not just defensive (verified empirically:
         // `` `` `text` `` `` triggers this) -- CommonMark strips exactly
@@ -356,11 +408,25 @@ export interface AcceptanceCriterion {
 // story.yml form happens to render; the level is still determined by the
 // OPENING hash count only, so the closing run (of any length) is matched
 // and discarded, never counted.
-const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^(#{2,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
+//
+// The leading ` {0,3}` (Codex finding, PR #70 review round 3) accepts
+// CommonMark/GFM's own tolerance for up to THREE leading spaces before
+// an ATX heading's `#` marker — ` ### Heading`, `  ### Heading`, and
+// `   ### Heading` are all still real headings per spec; the earlier
+// version anchored `#` at column 0 exactly, silently missing every
+// indented form (an under-match that defeats the whole feature the same
+// way finding E's original heading-boundary bug did). FOUR or more
+// leading spaces is deliberately NOT matched here — that shifts to
+// CommonMark's indented-code-block construct instead, a different,
+// higher-precedence rule, so a `#`-prefixed LINE at 4+ spaces correctly
+// stays unmatched (verified: this is exactly what markdown-it's own
+// `code_block` token already masks in {@link buildStructuralView}).
+const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^ {0,3}(#{2,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
 // Any Markdown heading line, any level — used both to find the section's
 // own heading level and to detect where the section ends (see
-// {@link parseAcceptanceCriteria}'s level comparison).
-const ANY_HEADING_LINE_PATTERN = /^(#{1,6})\s+\S/;
+// {@link parseAcceptanceCriteria}'s level comparison). Same 0-3-leading-
+// space tolerance as {@link ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN}.
+const ANY_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s+\S/;
 const CHECKBOX_LINE_PATTERN = /^\s*-\s*\[( |x|X)\]\s*(.+)$/;
 
 /**
