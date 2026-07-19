@@ -48,10 +48,43 @@
  * The categorical fix (this version): rather than parse diff TEXT in any
  * form, apply the patch to a THROWAWAY scratch git index and ask git
  * `diff-index` what actually changed — see
- * {@link getAuthoritativeChangedPaths}'s docstring. This is definitionally
+ * {@link getAuthoritativePatchAnalysis}'s docstring. This is definitionally
  * complete: it's git's own tree comparison, not a re-implementation of
  * git's diff-serialization or quoting rules, so there is no fourth
  * text-encoding variant to eventually find.
+ *
+ * 4. F1-S9 slice 1 (issue #12), round 3 — the SAME lesson, applied to the
+ *    anti-gaming content classifier: an earlier version scanned the
+ *    AGENT'S OWN raw patch bytes for coverage-suppression comments, which
+ *    is exactly the "re-parse attacker-controlled text" mistake fixes 1-3
+ *    above already closed for path detection. A `.gitattributes` change
+ *    (part of the same patch) marking a source file binary, combined
+ *    with delivering the real change via a `GIT binary patch` block
+ *    instead of textual `+`/`-` lines, hides a suppression comment from a
+ *    scan of the RAW patch entirely, even though the file's actual
+ *    content (once applied) is ordinary readable source. Fixed the same
+ *    way: {@link getAuthoritativePatchAnalysis} additionally asks git to
+ *    REGENERATE the diff from the scratch index (`git diff --cached
+ *    --text`, forcing textual output regardless of any attribute/
+ *    heuristic-driven binary classification) rather than trusting the
+ *    patch's own bytes for content scanning either.
+ * 5. F1-S9 slice 1 (issue #12), ready round 2 — a THIRD bypass of the
+ *    same content classifier, found by asking "what does asking git for
+ *    a tree comparison actually mean when a COPY is involved". Round 3's
+ *    fix (point 4) regenerated the diff via git, but that call ALSO
+ *    enabled rename/copy detection (`-M -C --find-copies-harder`,
+ *    mirroring query 3's path-analysis options) — with copy detection
+ *    ON, a patch that COPIES an existing file already containing a
+ *    suppression comment serializes as copy METADATA with ZERO hunks,
+ *    hiding the pre-existing suppression from the content scan
+ *    completely. Fixed by disabling rename/copy detection specifically
+ *    on the CONTENT-scan query (`--no-renames` — see
+ *    {@link getAuthoritativePatchAnalysis}'s own docstring, point 4),
+ *    while the PATH-analysis query (point 3) keeps full rename/copy
+ *    detection, since accurate path attribution is exactly what it
+ *    needs. The two queries against the SAME scratch index now
+ *    deliberately disagree on this option, each tuned to what it's
+ *    actually checking.
  *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
@@ -144,6 +177,8 @@ import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
   buildFallbackRefreshCommentBody,
+  buildGamingBothLostReviewBody,
+  buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
@@ -151,16 +186,24 @@ import {
   deriveBranchName,
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
+  findAddedCoverageSuppressions,
+  findAddedPackageJsonTestScriptEdits,
+  findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   isLabelAlreadyExistsError,
+  isLabelNotFoundOnIssueError,
+  NO_AUTO_CHAIN_LABEL,
+  NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
+  type GamingFlag,
   type ProvenanceContext,
   type PublishStepSummaryContext,
   type PullRequestSummary,
@@ -177,6 +220,24 @@ import {
  * stall the runner or `git apply` itself.
  */
 export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
+
+/**
+ * `maxBuffer` for EVERY `execFileSync("git", ...)` call in
+ * {@link getAuthoritativePatchAnalysis} (Codex + claude-review finding,
+ * F1-S9 slice 1, issue #12 — round 1 fixed only the content-scan call;
+ * round 2 closes the class): `execFileSync`'s own default (1 MiB) is
+ * smaller than {@link MAX_PATCH_BYTES} itself (2 MiB), so a legitimate
+ * patch anywhere near that size can ENOBUFS on ANY of these calls, not
+ * just the content-scan one — a many-files patch's `--name-status`
+ * output (paths only, no content) can still exceed 1 MiB well within the
+ * 2 MiB patch cap, and the content-scan's git-REGENERATED diff can
+ * legitimately exceed the input patch's own size (unified-diff context
+ * lines). 16 MiB gives real headroom over the 2 MiB input cap on every
+ * call rather than risk an ENOBUFS false-rejection anywhere in this
+ * function — treating a legitimate, sizeable patch as if git itself had
+ * failed.
+ */
+export const MAX_GIT_QUERY_BUFFER_BYTES = 16 * 1024 * 1024;
 
 /**
  * Raised for a validated, expected reason implementation must not
@@ -238,11 +299,26 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
   }
 }
 
+/** What {@link getAuthoritativePatchAnalysis} reports about a patch. */
+interface AuthoritativePatchAnalysis {
+  /** Every path git itself reports as touched, both sides of every rename/copy. */
+  readonly changedPaths: string[];
+  /**
+   * A git-REGENERATED, `--text`-forced diff of the same scratch tree —
+   * authoritative content for the anti-gaming classifiers
+   * ({@link findAddedCoverageSuppressions}, {@link findAddedPackageJsonTestScriptEdits})
+   * to scan, never the agent's own raw patch bytes. See this function's
+   * own docstring, point 3.
+   */
+  readonly diffText: string;
+}
+
 /**
- * Asks git itself which paths a patch touches, via a THROWAWAY scratch
- * git index — never the repo's real index or working tree, and never a
- * re-parse of the diff TEXT in any form (see the file-top comment for the
- * three rounds of diff-text-parsing exploits this categorically replaces).
+ * Asks git itself what a patch touches and contains, via a THROWAWAY
+ * scratch git index — never the repo's real index or working tree, and
+ * never a re-parse of the diff TEXT git DIDN'T generate itself (see the
+ * file-top comment for the three-plus-one rounds of diff-text-parsing
+ * exploits this categorically replaces).
  *
  * Mechanism, each step run with `GIT_INDEX_FILE` pointed at a fresh
  * temp-file index (never the real `.git/index`, so none of this touches
@@ -256,7 +332,7 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  *    fails, the patch is malformed/inapplicable — same fail-closed
  *    outcome the old `--numstat` failure produced.
  * 3. `git diff-index --cached --name-status -z -M -C --find-copies-harder
- *    HEAD` — asks git which paths differ between HEAD and the
+ *    HEAD` — asks git which PATHS differ between HEAD and the
  *    now-patched scratch index. This is git's own TREE comparison, not a
  *    diff-format re-serialization the patch's own text could ever
  *    influence the wording of — there is no quoting, no prefix-stripping
@@ -265,35 +341,71 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  *    consumption; it's git comparing two trees it already holds and
  *    reporting the result in its own `-z` (NUL-delimited, unquoted)
  *    machine format. {@link parseNameStatusZ} parses that format.
+ * 4. `git diff --cached --text --no-color --no-renames HEAD` — asks git
+ *    for the same tree comparison's CONTENT, git-regenerated rather than
+ *    the agent's own patch bytes (F1-S9 slice 1, issue #12, round 3 —
+ *    independent Codex + claude-review finding: the agent's raw patch
+ *    could mark a file binary via `.gitattributes` and deliver a real
+ *    text change through a `GIT binary patch` block, hiding it from any
+ *    scan of the agent's own bytes). `--text` forces git to render every
+ *    file's diff as ordinary `+`/`-` lines regardless of any attribute-
+ *    or heuristic-driven binary classification, so a coverage-suppression
+ *    comment delivered via that trick still appears as scannable content
+ *    in THIS regenerated diff even though it never did in the raw patch.
+ *    `--no-renames` (F1-S9 slice 1, issue #12, ready round 2 — a
+ *    SEPARATE, real bypass Codex found): this query deliberately does
+ *    NOT enable rename/copy detection, unlike query 3's `-M -C
+ *    --find-copies-harder` — with copy detection ON here, a patch that
+ *    COPIES an existing file that already contains a suppression comment
+ *    serializes as copy METADATA with ZERO hunks, hiding the pre-existing
+ *    suppression from this content scan entirely. `--no-renames` forces
+ *    a copied/renamed file to serialize as a full addition instead, every
+ *    line reported as `+` content, so a smuggled-in suppression is
+ *    visible the same as if it had been typed fresh.
  *
  * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
  * including against files the patch left otherwise UNTOUCHED — the exact
  * shape of Codex's round-4 quoted-`copy from` exploit, where the copy's
  * SOURCE file has zero other changes in the patch) together guarantee
- * BOTH sides of every rename/copy are reported. Empirically verified
- * (scratch repo): `-C` alone, without `--find-copies-harder`, misses a
- * copy whose source is otherwise unmodified — `--find-copies-harder`
- * closes that. Verified negligible cost at this repo's current size
- * (~49 tracked files, ~10ms) — `--find-copies-harder`'s cost scales with
- * repo size, not patch size, so revisit if the repo grows enormously.
+ * BOTH sides of every rename/copy are reported IN QUERY 3 (the path
+ * analysis) — deliberately NOT in query 4 (the content scan), per that
+ * point's own note above; the two queries have opposite needs here.
+ * Empirically verified (scratch repo): `-C` alone, without
+ * `--find-copies-harder`, misses a copy whose source is otherwise
+ * unmodified — `--find-copies-harder` closes that, for query 3.
+ * Verified negligible cost at this repo's current size (~49 tracked
+ * files, ~10ms) — `--find-copies-harder`'s cost scales with repo size,
+ * not patch size, so revisit if the repo grows enormously.
  *
- * Even WITHOUT rename/copy detection at all, a rename's two sides would
- * still both be reported here (as a plain delete + add, rather than an
- * `R<score>` pair) — `-M`/`-C` change the STATUS LABEL, not whether both
- * paths appear, since `diff-index` is comparing trees regardless.
+ * For query 3 specifically: even WITHOUT rename/copy detection at all, a
+ * rename's two sides would still both be reported (as a plain delete +
+ * add, rather than an `R<score>` pair) — `-M`/`-C` change the STATUS
+ * LABEL, not whether both paths appear, since `diff-index` is comparing
+ * trees regardless. Query 4 is the OPPOSITE case on purpose (see its own
+ * note above): disabling rename/copy detection there doesn't just change
+ * a status label, it's what forces a copied/renamed file's full content
+ * to appear as plain `+` lines instead of collapsing into copy/rename
+ * metadata with no hunks at all.
  *
  * @param patchPath - Path to the patch file.
- * @returns Every path git itself reports as touched, both sides of every
- *   rename/copy.
+ * @returns Every path git itself reports as touched (both sides of every
+ *   rename/copy), plus the git-regenerated, text-forced diff content.
  * @throws {PublishRejection} If the patch can't be applied to the scratch
- *   index at all (malformed, unreadable, or genuinely empty).
+ *   index at all (malformed, unreadable, or genuinely empty), or if
+ *   either authoritative query against the applied scratch index fails.
  */
-async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]> {
+async function getAuthoritativePatchAnalysis(
+  patchPath: string,
+): Promise<AuthoritativePatchAnalysis> {
   const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
     try {
-      execFileSync("git", ["read-tree", "HEAD"], { env, stdio: "pipe" });
+      execFileSync("git", ["read-tree", "HEAD"], {
+        env,
+        stdio: "pipe",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+      });
     } catch (err) {
       // Not independently exercised by a unit test: every test fixture in
       // this repo's suite runs against a checkout with a real commit
@@ -311,6 +423,7 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
       execFileSync("git", ["apply", "--cached", patchPath], {
         env,
         stdio: "pipe",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
       });
     } catch (err) {
       throw new PublishRejection(
@@ -318,9 +431,9 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
           `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    let output: string;
+    let nameStatusOutput: string;
     try {
-      output = execFileSync(
+      nameStatusOutput = execFileSync(
         "git",
         [
           "diff-index",
@@ -332,7 +445,16 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
           "--find-copies-harder",
           "HEAD",
         ],
-        { env, encoding: "utf8" },
+        {
+          env,
+          encoding: "utf8",
+          // Codex + claude-review finding, F1-S9 slice 1, issue #12,
+          // ready round 2 (fix-the-class — round 1 only fixed the sibling
+          // content-scan call below): a many-files patch's PATH-only
+          // output here can still exceed execFileSync's 1 MiB default
+          // well within the 2 MiB MAX_PATCH_BYTES cap on the input.
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
       );
     } catch (err) {
       // Not independently exercised by a unit test: if the preceding
@@ -344,14 +466,78 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
         `could not read the scratch index's changed paths: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return parseNameStatusZ(output);
+    let diffText: string;
+    try {
+      diffText = execFileSync(
+        "git",
+        [
+          "diff",
+          "--cached",
+          "--text",
+          "--no-color",
+          // Deliberately NO "-M -C --find-copies-harder" here (Codex
+          // finding, F1-S9 slice 1, issue #12, ready round 2 — a real,
+          // THIRD classifier bypass): with rename/copy detection enabled
+          // on this CONTENT-scan call, a patch that COPIES an existing
+          // file that ALREADY contains a coverage-suppression comment
+          // serializes as copy METADATA with NO hunks at all — zero
+          // added lines for findAddedCoverageSuppressions to see, so an
+          // agent could smuggle a fully-suppressed file into the tree by
+          // copying one that already has the ignore comment, entirely
+          // invisible to a content scan that only looks at ADDED lines.
+          // `--no-renames` forces every copied or renamed file to
+          // serialize as a full addition instead, with every line
+          // reported as `+` content — a pre-existing suppression in
+          // copied content is then visible and flagged, same as if it
+          // had been typed fresh. Over-flagging an ordinary rename of an
+          // already-suppressed file is the safe direction and rare. The
+          // PATH analysis above (nameStatusOutput) is UNAFFECTED — it
+          // keeps `-M -C --find-copies-harder` for accurate rename/copy
+          // tracking, since accurate PATH attribution (not content
+          // visibility) is what the forbidden-path and test-path checks
+          // need.
+          "--no-renames",
+          "HEAD",
+        ],
+        {
+          env,
+          encoding: "utf8",
+          // Codex + claude-review finding, F1-S9 slice 1, issue #12,
+          // ready round: execFileSync's default maxBuffer is 1 MiB, but
+          // MAX_PATCH_BYTES caps the INPUT patch at 2 MiB — a legitimate
+          // patch anywhere near that size would already exceed the
+          // default before this call even runs. Worse, the REGENERATED
+          // diff this call produces can legitimately be LARGER than the
+          // input patch (unified-diff context lines), so bounding it to
+          // the input size isn't enough either. MAX_GIT_QUERY_BUFFER_BYTES
+          // gives real headroom rather than risk an ENOBUFS false-
+          // rejection on an otherwise-valid, sizeable patch.
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
+      );
+    } catch (err) {
+      // Not independently exercised by a unit test: same reasoning as the
+      // diff-index catch above — this queries the identical, already-
+      // proven-valid scratch index, just asking for content instead of
+      // names.
+      throw new PublishRejection(
+        `could not read the scratch index's authoritative diff content: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { changedPaths: parseNameStatusZ(nameStatusOutput), diffText };
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }
 }
 
 function runGit(args: string[]): void {
-  execFileSync("git", args, { stdio: "pipe" });
+  // Same maxBuffer discipline as getAuthoritativePatchAnalysis's own git
+  // calls (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready
+  // round 2 — fix the whole class, not just the two calls that were
+  // actually reported): `git push`'s own progress/error output, or a
+  // large `git commit`, could in principle exceed execFileSync's 1 MiB
+  // default too.
+  execFileSync("git", args, { stdio: "pipe", maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES });
 }
 
 /**
@@ -362,7 +548,7 @@ function runGit(args: string[]): void {
  * though `execFileSync` with an argv array never invokes a shell to begin
  * with). The patch file's own content is never passed as an argv value —
  * `git apply` reads it directly from disk, with the SAME invocation (no
- * `-p` override) as `getAuthoritativeChangedPaths` used to check it.
+ * `-p` override) as `getAuthoritativePatchAnalysis` used to check it.
  *
  * The commit message carries the F1-S10 slice-3 provenance trailer (see
  * {@link buildCommitTrailer}) on EVERY commit this function makes —
@@ -725,6 +911,306 @@ async function postFallbackRefreshComment(
 }
 
 /**
+ * Ensures {@link NO_AUTO_CHAIN_LABEL} exists (idempotently, same
+ * tolerate-only-the-genuine-already-exists-422 pattern as
+ * `applyNoReviewAutomationLabel`) and applies it to `prNumber` — F1-S9
+ * slice 1 (issue #12): the durable, always-visible signal that this
+ * diff's own content (not the publisher identity) tripped the
+ * deterministic anti-gaming classifier.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ */
+async function applyNoAutoChainLabel(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<void> {
+  assertLabelDescriptionWithinLimit(
+    NO_AUTO_CHAIN_LABEL_DESCRIPTION,
+    GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+  );
+  try {
+    await githubRequest(token, "POST", `/repos/${owner}/${repo}/labels`, {
+      name: NO_AUTO_CHAIN_LABEL,
+      color: "d93f0b",
+      description: NO_AUTO_CHAIN_LABEL_DESCRIPTION,
+    });
+  } catch (err) {
+    if (!isLabelAlreadyExistsError(err)) {
+      throw err; // A real validation error must surface, not be swallowed.
+    }
+  }
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/labels`, {
+    labels: [NO_AUTO_CHAIN_LABEL],
+  });
+}
+
+/**
+ * Applies {@link NO_AUTO_CHAIN_LABEL} to `prNumber`, never throwing — same
+ * best-effort shape as `applyNoReviewAutomationLabelBestEffort`: by the
+ * time this runs the PR/branch itself is already the load-bearing
+ * artifact, and the annotation comment (`postGamingFlagAnnotation`) is a
+ * second, independent signal that survives even if the label call fails.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ * @param context - Human-readable context for the log line if this fails.
+ * @returns `true` if the label was actually applied, `false` if it failed
+ *   (logged either way) — the caller must reflect this in the step
+ *   summary, never overstate success (same discipline as
+ *   `applyNoReviewAutomationLabelBestEffort`).
+ */
+async function applyNoAutoChainLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  context: "opened" | "refreshed",
+): Promise<boolean> {
+  return applyNoAutoChainLabel(token, owner, repo, prNumber).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to apply the ${NO_AUTO_CHAIN_LABEL} label to PR #${prNumber} ` +
+          `(${context}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
+ * Best-effort REMOVES {@link NO_AUTO_CHAIN_LABEL} from `prNumber` if it's
+ * currently applied — for the REFRESH path when a re-dispatch's new
+ * commit(s) are classifier-CLEAN (Codex + claude-review finding, F1-S9
+ * slice 1, issue #12, ready round): an earlier version never removed a
+ * label an EARLIER, flagged push had applied, so a PR that was fixed
+ * stayed permanently labelled `no-auto-chain` even after the offending
+ * content was gone — a stale, contradictory signal (the step summary
+ * says "clean" while the PR's own label list still says "flagged").
+ * Only ever called on the refresh path — a brand-new PR can't have a
+ * stale label from a "previous" state that never existed.
+ *
+ * GitHub's "Remove a label from an issue" endpoint 404s when the label
+ * isn't currently applied ({@link isLabelNotFoundOnIssueError}) —
+ * tolerated as a no-op (nothing needed doing), not a failure. Never
+ * throws otherwise: a real removal failure is logged, not propagated —
+ * the PR/branch itself is already the load-bearing artifact by the time
+ * this runs.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The existing PR being refreshed.
+ * @returns `true` if the label was removed, `false` if removal was
+ *   attempted and failed for a real reason (logged either way),
+ *   `undefined` if the label wasn't present to begin with.
+ */
+async function removeNoAutoChainLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<boolean | undefined> {
+  return githubRequest(
+    token,
+    "DELETE",
+    `/repos/${owner}/${repo}/issues/${prNumber}/labels/${NO_AUTO_CHAIN_LABEL}`,
+  ).then(
+    () => true,
+    (err: unknown) => {
+      if (isLabelNotFoundOnIssueError(err)) {
+        return undefined; // Wasn't applied -- nothing to do, not a failure.
+      }
+      console.error(
+        `Failed to remove the ${NO_AUTO_CHAIN_LABEL} label from PR #${prNumber} ` +
+          `(this refresh's commit(s) are classifier-clean, so it should no longer ` +
+          `carry it): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
+ * Posts the deterministic, templated annotation naming exactly what
+ * tripped the anti-gaming classifier (F1-S9 slice 1, issue #12) — see
+ * {@link buildGamingFlagAnnotation}'s docstring for why this is always a
+ * FRESH comment, never an upsert, on both the PR-creation and PR-refresh
+ * paths alike. Never throws — a failure is logged, not propagated; the
+ * label ({@link applyNoAutoChainLabelBestEffort}) is a SEPARATE, best-effort
+ * signal, not a fallback for this one — both are tracked and reported
+ * independently (Codex + claude-review finding, F1-S9 slice 1, issue #12,
+ * round 3): an earlier version's step-summary line unconditionally
+ * pointed the operator at "the PR's annotation comment" even when THIS
+ * call had failed and no such comment existed to look at.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR (newly-created or pre-existing) to comment on.
+ * @param flag - What the classifier found.
+ * @param labelApplied - Whether the label call succeeded, threaded into
+ *   the annotation body's own wording — see
+ *   {@link buildGamingFlagAnnotation}.
+ * @returns `true` if the comment was actually posted, `false` if it
+ *   failed (logged either way) — the caller must reflect this in the
+ *   step summary, never overstate success.
+ */
+async function postGamingFlagAnnotation(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  flag: GamingFlag,
+  labelApplied: boolean,
+): Promise<boolean> {
+  return githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+    body: buildGamingFlagAnnotation(flag, labelApplied),
+  }).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to post the anti-gaming annotation comment on PR #${prNumber} (the ` +
+          `${NO_AUTO_CHAIN_LABEL} label was still applied if that call succeeded): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
+ * True when the anti-gaming classifier flagged this diff AND BOTH
+ * best-effort signals meant to surface that to a human have failed — the
+ * `no-auto-chain` label call AND the annotation comment (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 3).
+ *
+ * This REFINES, not reverses, the existing best-effort/fail-open scope
+ * for each signal individually: a SINGLE-channel failure (the label
+ * lands but the comment doesn't, or vice versa) still leaves something
+ * visible on the PR, so it stays best-effort — the publish itself must
+ * not fail just because a comment call flaked. But losing BOTH channels
+ * means a human looking at the PR (list view, board view, the PR page
+ * itself) sees NOTHING distinguishing a flagged diff from a clean one —
+ * the classifier ran, found something, and every signal it tried to
+ * surface silently failed. That specific combination gets its own,
+ * stronger response, which this predicate GATES but does not itself
+ * deliver — the caller both sets `process.exitCode = 1` (an
+ * operator-side signal, visible on the Actions run) AND posts a
+ * `COMMENT`-event review via {@link postGamingBothLostFailureReview}
+ * (the actual PR-VISIBLE signal — see that function's docstring for why
+ * a review, not a commit status, is the right mechanism here, why it's
+ * a `COMMENT` and not a `REQUEST_CHANGES` event, and why the exit code
+ * alone doesn't reach the PR at all). Neither ever becomes a
+ * {@link PublishRejection}: an API flake mid-publish must not undo an
+ * otherwise-successful branch push + PR — the PR is still the
+ * load-bearing artifact.
+ *
+ * @param gamingFlagged - Whether the classifier flagged this diff at all.
+ * @param labelApplied - Whether the `no-auto-chain` label call succeeded
+ *   (`undefined` when never attempted, i.e. `gamingFlagged` is falsy).
+ * @param annotationPosted - Whether the annotation comment call succeeded
+ *   (`undefined` when never attempted, same condition).
+ * @returns Whether both signal channels were lost.
+ */
+function gamingSignalsBothLost(
+  gamingFlagged: boolean,
+  labelApplied: boolean | undefined,
+  annotationPosted: boolean | undefined,
+): boolean {
+  return gamingFlagged && labelApplied === false && annotationPosted === false;
+}
+
+/**
+ * Posts a `COMMENT`-event PR review — the actual PR-VISIBLE signal the
+ * `process.exitCode = 1` fix (see {@link gamingSignalsBothLost}) promised
+ * but, on its own, doesn't deliver (Codex finding, F1-S9 slice 1, issue
+ * #12, ready round 5 — REPLACES an earlier commit-status attempt entirely,
+ * not a fold on top of it; see below for why that mechanism was a dead
+ * end).
+ *
+ * WHY NOT A COMMIT STATUS (the round-4 attempt this replaces): `POST
+ * /repos/{owner}/{repo}/statuses/{sha}` needs the `statuses: write`
+ * permission scope, which neither this job's `permissions:` block nor
+ * the factory App-token mint request — so that call would 403 at
+ * runtime, dead code that never actually posts anything. The fix is
+ * NOT to grant `statuses: write`: commit statuses are the SAME API
+ * family `codecov/patch` uses as a required branch-protection check, so
+ * a publisher able to write statuses could fabricate a passing required
+ * check on its own PR — a real widening of the factory-security threat
+ * model that this whole classifier exists to shrink, not grow, purely to
+ * revive a signal that has a working alternative anyway.
+ *
+ * WHY `COMMENT`, NOT `REQUEST_CHANGES` (Codex finding, F1-S9 slice 1,
+ * issue #12, ready round 6 — a second claim-vs-runtime error, same
+ * CLASS as the commit-status one): GitHub's reviews API returns 422 for
+ * BOTH `APPROVE` and `REQUEST_CHANGES` when submitted by the PR's OWN
+ * AUTHOR — and the publisher token IS that author, since it's the
+ * identity that just created or refreshed this very PR. An earlier
+ * version of this function used `REQUEST_CHANGES`, which would 422 at
+ * runtime exactly like the commit-status attempt it replaced, just via a
+ * different restriction (author-identity, not permission scope).
+ * `COMMENT` is the one review event GitHub's own-PR restriction does NOT
+ * block — weaker than a red `REQUEST_CHANGES` (it doesn't block the
+ * merge box), but still a genuine, durable review-timeline entry, and
+ * the strongest signal the author identity can legally emit through this
+ * API.
+ *
+ * WHY A REVIEW (of either event type) WORKS AT ALL: this job already
+ * holds `pull-requests: write` — proven by the time this function runs,
+ * since it just successfully created or refreshed the PR itself via that
+ * same permission. The both-lost scenario is specifically an issues-API
+ * failure (the label and comment calls both use `/issues/...`
+ * endpoints), a DIFFERENT API family from `/pulls/.../reviews` — so a
+ * failure in one gives no reason to expect a failure in the other.
+ *
+ * Best-effort, like every other gaming-flag signal here: if this ALSO
+ * fails, all THREE independent channels (label, comment, review) have
+ * now failed — logged loudly, but this still never becomes a
+ * {@link PublishRejection} (the PR itself remains the load-bearing
+ * artifact; `process.exitCode = 1` stays set regardless, as the
+ * operator-side fallback).
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to review (newly-created or pre-existing).
+ * @param flag - What the classifier found, for the review body.
+ * @returns `true` if the review was actually posted, `false` if it
+ *   failed (logged either way).
+ */
+async function postGamingBothLostFailureReview(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  flag: GamingFlag,
+): Promise<boolean> {
+  return githubRequest(token, "POST", `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, {
+    event: "COMMENT",
+    body: buildGamingBothLostReviewBody(flag),
+  }).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to post the anti-gaming COMMENT review on PR #${prNumber} (the ` +
+          `${NO_AUTO_CHAIN_LABEL} label AND the annotation comment ALSO failed — all three ` +
+          `independent signal channels lost; the PR still exists and this never fails the ` +
+          `publish): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
  * Appends `markdown` to `$GITHUB_STEP_SUMMARY` (observability fix, 18 Jul
  * 2026, live App-identity commissioning: a mint failure shows
  * `conclusion=success` in the job view — `continue-on-error` masks it —
@@ -864,6 +1350,21 @@ export async function main(): Promise<void> {
   // the $GITHUB_STEP_SUMMARY write below can never overstate "the label
   // was applied" when it might have silently failed.
   let labelApplied: boolean | undefined;
+  // Same discipline, for F1-S9 slice 1's anti-gaming label: `undefined`
+  // until the PR exists and the label is actually attempted.
+  let gamingLabelApplied: boolean | undefined;
+  // Same discipline again, for the SEPARATE annotation-comment post
+  // (Codex + claude-review finding, round 3): the label and the comment
+  // are two independent best-effort calls, so the step summary must
+  // reflect each of their REAL outcomes, not assume one implies the other.
+  let gamingAnnotationPosted: boolean | undefined;
+  // Ready-round finding: only ever set on the REFRESH path, when this
+  // run's own commit(s) are classifier-clean but the label may have
+  // survived from an earlier, flagged push. `undefined` covers BOTH
+  // "not attempted" (creation path, or a still-flagged refresh) and
+  // "attempted, but the label wasn't there to remove" — see
+  // `removeNoAutoChainLabelBestEffort`'s own three-way return.
+  let gamingLabelRemoved: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -876,14 +1377,14 @@ export async function main(): Promise<void> {
 
     await assertPatchArtifactSize(patchPath);
 
-    const changedPaths = await getAuthoritativeChangedPaths(patchPath);
+    const { changedPaths, diffText } = await getAuthoritativePatchAnalysis(patchPath);
     if (changedPaths.length === 0) {
       // Not independently exercised by a unit test: every real-patch
       // shape tried empirically (including a mode-change-only diff,
       // which has zero added/removed lines) still reports at least one
       // path once the scratch-index apply succeeds at all — a totally
       // empty diff instead fails to apply at all and is caught above, in
-      // getAuthoritativeChangedPaths. Kept as a defensive fail-closed
+      // getAuthoritativePatchAnalysis. Kept as a defensive fail-closed
       // check rather than assumed away.
       throw new PublishRejection(
         "the implement run produced no changes (empty patch)",
@@ -891,7 +1392,7 @@ export async function main(): Promise<void> {
     }
 
     // No complementary rename/copy-source check needed here (unlike
-    // earlier rounds of this guard) — getAuthoritativeChangedPaths
+    // earlier rounds of this guard) — getAuthoritativePatchAnalysis
     // already returns BOTH sides of every rename/copy, since it's asking
     // git for a tree comparison, not a diff-text parse that only ever
     // saw one side. See that function's docstring.
@@ -902,6 +1403,30 @@ export async function main(): Promise<void> {
           forbidden.join(", "),
       );
     }
+
+    // F1-S9 slice 1 (issue #12): the deterministic anti-gaming diff
+    // classifier. Unlike the forbidden-path check above, a flagged diff
+    // does NOT reject the publish — the PR still needs to exist for a
+    // human to review (that's the whole point of "routed to human
+    // review") — it's labelled (NO_AUTO_CHAIN_LABEL) and annotated
+    // (buildGamingFlagAnnotation) once the PR exists, further below.
+    // Computed from the SAME authoritative changedPaths the forbidden-
+    // path check just used, plus the git-REGENERATED diffText
+    // getAuthoritativePatchAnalysis also returns — NOT the agent's own
+    // raw patch bytes (round 3 fix, issue #12: scanning the raw patch was
+    // itself bypassable via a .gitattributes + GIT-binary-patch trick;
+    // see that function's own docstring point 4).
+    const gamingFlag: GamingFlag = {
+      testFileEdits: findTestFileEdits(changedPaths),
+      suppressions: findAddedCoverageSuppressions(diffText),
+      packageJsonTestScriptEdits: findAddedPackageJsonTestScriptEdits(diffText),
+      rootPytestConfigSections: findAddedRootPytestConfigSections(diffText),
+    };
+    const gamingFlagged =
+      gamingFlag.testFileEdits.length > 0 ||
+      gamingFlag.suppressions.length > 0 ||
+      gamingFlag.packageJsonTestScriptEdits.length > 0 ||
+      gamingFlag.rootPytestConfigSections.length > 0;
 
     // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
     // (gitleaks/trufflehog-style) of the patch content belongs right
@@ -978,10 +1503,48 @@ export async function main(): Promise<void> {
         );
         await postFallbackRefreshComment(token, owner, repo, existingPr.number, runUrl);
       }
+      if (gamingFlagged) {
+        // F1-S9 slice 1 (issue #12): orthogonal to the fallback-identity
+        // signal above — a re-dispatch's refreshed commit(s) may
+        // introduce a DIFFERENT flagged line than an earlier push, so
+        // this applies (idempotently) and annotates (freshly, never an
+        // upsert) on every flagged refresh, not just the first one.
+        gamingLabelApplied = await applyNoAutoChainLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          "refreshed",
+        );
+        gamingAnnotationPosted = await postGamingFlagAnnotation(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          gamingFlag,
+          gamingLabelApplied,
+        );
+      } else {
+        // F1-S9 slice 1 (issue #12), ready round: this refresh's own
+        // commit(s) are classifier-clean, but an EARLIER, flagged push
+        // to this same PR may have left the label on it — best-effort
+        // remove it so a fixed PR doesn't stay permanently flagged. A
+        // no-op (undefined) if the label was never applied to begin with.
+        gamingLabelRemoved = await removeNoAutoChainLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+        );
+      }
       writeStepSummary(
         buildPublishSuccessStepSummary({
           ...summaryContext,
           labelApplied,
+          gamingFlagged,
+          gamingLabelApplied,
+          gamingAnnotationPosted,
+          gamingLabelRemoved,
           prNumber: existingPr.number,
           // findExistingPrForIssue's underlying query doesn't fetch
           // html_url (PullRequestSummary has no such field) — a GitHub PR
@@ -992,6 +1555,17 @@ export async function main(): Promise<void> {
           wasRefresh: true,
         }),
       );
+      if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
+        console.error(
+          `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
+            `failed to post on PR #${existingPr.number} — a flagged diff would otherwise ` +
+            `have NO visible signal on the PR itself. Posting a COMMENT-event review ` +
+            `(the actual PR-visible signal) and failing this publish job (non-zero exit, ` +
+            `operator-side fallback).`,
+        );
+        await postGamingBothLostFailureReview(token, owner, repo, existingPr.number, gamingFlag);
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -1028,15 +1602,54 @@ export async function main(): Promise<void> {
         "opened",
       );
     }
+    if (gamingFlagged) {
+      // F1-S9 slice 1 (issue #12): orthogonal to the fallback-identity
+      // label above — always applied on a flagged diff, regardless of
+      // which identity published it. Comment posted here too (unlike
+      // no-review-automation's own creation path, which relies on the PR
+      // BODY warning already carrying its signal) because this is about
+      // THIS diff's content, not the publisher identity — the annotation
+      // names exactly which file/line tripped it, which the PR body has
+      // no room to anticipate at creation time.
+      gamingLabelApplied = await applyNoAutoChainLabelBestEffort(
+        token,
+        owner,
+        repo,
+        created.number,
+        "opened",
+      );
+      gamingAnnotationPosted = await postGamingFlagAnnotation(
+        token,
+        owner,
+        repo,
+        created.number,
+        gamingFlag,
+        gamingLabelApplied,
+      );
+    }
     writeStepSummary(
       buildPublishSuccessStepSummary({
         ...summaryContext,
         labelApplied,
+        gamingFlagged,
+        gamingLabelApplied,
+        gamingAnnotationPosted,
         prNumber: created.number,
         prUrl: created.html_url,
         wasRefresh: false,
       }),
     );
+    if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
+      console.error(
+        `Both the ${NO_AUTO_CHAIN_LABEL} label AND the anti-gaming annotation comment ` +
+          `failed to post on PR #${created.number} — a flagged diff would otherwise have ` +
+          `NO visible signal on the PR itself. Posting a COMMENT-event review (the ` +
+          `actual PR-visible signal) and failing this publish job (non-zero exit, ` +
+          `operator-side fallback).`,
+      );
+      await postGamingBothLostFailureReview(token, owner, repo, created.number, gamingFlag);
+      process.exitCode = 1;
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const reasons =

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
+  buildGamingBothLostReviewBody,
+  buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
@@ -9,14 +11,22 @@ import {
   deriveBranchName,
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
+  findAddedCoverageSuppressions,
+  findAddedPackageJsonTestScriptEdits,
+  findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isLabelAlreadyExistsError,
+  isLabelNotFoundOnIssueError,
   isProtectedPath,
+  isTestFilePath,
+  NO_AUTO_CHAIN_LABEL,
+  NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
@@ -173,6 +183,810 @@ describe("findForbiddenPatchPaths", () => {
     // magically fix an unresolved zz/ prefix — the fix has to be upstream
     // (asking git), which is exactly why publish-implement-patch.mts's
     // getAuthoritativeChangedPaths exists instead of a smarter regex here.
+  });
+});
+
+describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => {
+  it("flags a vitest test file under tests/", () => {
+    expect(isTestFilePath("tests/slug.test.ts")).toBe(true);
+    expect(isTestFilePath("tests/factory/publish-implement-patch.test.ts")).toBe(true);
+  });
+
+  it("flags a playwright spec under e2e/", () => {
+    expect(isTestFilePath("e2e/boot.spec.ts")).toBe(true);
+  });
+
+  it("flags a pytest file under snowflake/tests/", () => {
+    expect(isTestFilePath("snowflake/tests/test_assert_dev_ci_grants.py")).toBe(true);
+  });
+
+  it("flags a *.test.tsx / *.spec.tsx file by filename suffix even outside the known directories", () => {
+    expect(isTestFilePath("lib/component.test.tsx")).toBe(true);
+    expect(isTestFilePath("lib/component.spec.tsx")).toBe(true);
+  });
+
+  it("flags a test_*.py / *_test.py file by filename convention even outside snowflake/tests/", () => {
+    expect(isTestFilePath("scripts/test_helper.py")).toBe(true);
+    expect(isTestFilePath("scripts/helper_test.py")).toBe(true);
+  });
+
+  it("does NOT flag an ordinary application file", () => {
+    expect(isTestFilePath("lib/slug.ts")).toBe(false);
+    expect(isTestFilePath("scripts/factory/implement-patch-logic.mts")).toBe(false);
+    expect(isTestFilePath("snowflake/assert_dev_ci_grants.py")).toBe(false);
+  });
+
+  it("flags an edit to vitest's own test-discovery config (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", () => {
+    // Narrowing vitest.config.ts's `include` glob can make a failing test
+    // silently stop being discovered/run without touching a single test
+    // file — the same gaming class as editing a test file directly.
+    expect(isTestFilePath("vitest.config.ts")).toBe(true);
+    expect(isTestFilePath("vitest.config.mts")).toBe(true);
+    expect(isTestFilePath("vitest.config.js")).toBe(true);
+    expect(isTestFilePath("vitest.config.mjs")).toBe(true);
+    expect(isTestFilePath("vitest.config.cjs")).toBe(true);
+  });
+
+  it("flags an edit to playwright's own test-discovery config", () => {
+    expect(isTestFilePath("playwright.config.ts")).toBe(true);
+    expect(isTestFilePath("playwright.config.js")).toBe(true);
+  });
+
+  it("flags an edit to pytest's own discovery config under snowflake/, where this repo's pytest is actually invoked from", () => {
+    expect(isTestFilePath("snowflake/pytest.ini")).toBe(true);
+    expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
+    expect(isTestFilePath("snowflake/pyproject.toml")).toBe(true);
+    expect(isTestFilePath("snowflake/setup.cfg")).toBe(true);
+    expect(isTestFilePath("snowflake/tox.ini")).toBe(true);
+  });
+
+  it("flags snowflake/pytest.toml specifically (Codex finding, F1-S9 slice 1, issue #12, ready round 2 — the pinned pytest 9.x reads pytest.toml as implicit config, same as pyproject.toml)", () => {
+    expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
+  });
+
+  it("ALSO flags a root-level pytest.ini/pytest.toml/tox.ini (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — corrects a round-3 error: pytest's CONFIG-FILE discovery ASCENDS parent directories from snowflake/ looking for the first recognized file, unlike conftest.py collection, which never walks above rootdir — a repo-root pytest.ini/pytest.toml/tox.ini WOULD genuinely be honored)", () => {
+    expect(isTestFilePath("pytest.ini")).toBe(true);
+    expect(isTestFilePath("pytest.toml")).toBe(true);
+    expect(isTestFilePath("tox.ini")).toBe(true);
+  });
+
+  it("flags snowflake/conftest.py (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — pytest loads conftest.py automatically and it can hook collection/reporting itself, the same class as the config files above)", () => {
+    expect(isTestFilePath("snowflake/conftest.py")).toBe(true);
+    // A repo-root conftest.py is DELIBERATELY not flagged: this repo's
+    // pytest invocation (working-directory: snowflake, no ini file
+    // anywhere) resolves rootdir to snowflake/ itself, and pytest's own
+    // conftest.py COLLECTION never walks ABOVE rootdir — this is a
+    // DIFFERENT algorithm from config-FILE discovery above (which does
+    // ascend), so this exclusion is still correct even after round 4's
+    // pytest.ini/pytest.toml/tox.ini correction.
+    expect(isTestFilePath("conftest.py")).toBe(false);
+  });
+
+  it("does NOT flag a root-level pyproject.toml/setup.cfg BY PATH ALONE — not a blanket exclusion, just not this classifier's mechanism for these two files", () => {
+    // Deliberately narrow (round 3), STILL correct after round 4 — but
+    // for a different reason than originally claimed: pyproject.toml and
+    // setup.cfg ARE reachable by the same ascending config-file search
+    // pytest.ini/pytest.toml/tox.ini are (round 4 corrected that part of
+    // the claim). They're excluded from the PATH-only check specifically
+    // because they're high-frequency, legitimately-edited files for
+    // reasons unrelated to pytest — an unconditional path flag would
+    // over-trigger constantly. See findAddedRootPytestConfigSections's
+    // own tests for the TARGETED, content-based mechanism that actually
+    // covers these two files.
+    expect(isTestFilePath("pyproject.toml")).toBe(false);
+    expect(isTestFilePath("setup.cfg")).toBe(false);
+  });
+
+  it("findTestFileEdits normalizes, de-duplicates, and sorts the result", () => {
+    const edits = findTestFileEdits([
+      "a/tests/slug.test.ts",
+      "b/tests/slug.test.ts",
+      "a/lib/slug.ts",
+      "b/lib/slug.ts",
+      "b/e2e/boot.spec.ts",
+    ]);
+    expect(edits).toEqual(["e2e/boot.spec.ts", "tests/slug.test.ts"]);
+  });
+
+  it("findTestFileEdits returns empty for a clean patch", () => {
+    expect(findTestFileEdits(["a/lib/slug.ts", "b/lib/slug.ts"])).toEqual([]);
+  });
+
+  it("findTestFileEdits still flags a test file that was only RENAMED (both sides reported, same shape findForbiddenPatchPaths relies on)", () => {
+    // getAuthoritativeChangedPaths reports both the old and new path of a
+    // rename/copy — a test file renamed OUT of tests/ (old path) still
+    // shows up here via its old path, and a rename INTO tests/ (new path)
+    // via its new path; either way this must not miss it.
+    expect(findTestFileEdits(["lib/old-name.ts", "tests/new-name.test.ts"])).toEqual([
+      "tests/new-name.test.ts",
+    ]);
+  });
+});
+
+describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
+  it("flags an ADDED Python pragma", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "index abc..def 100644",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+new_line = 2  # pragma: no cover",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toEqual([
+      { path: "snowflake/foo.py", line: "new_line = 2  # pragma: no cover" },
+    ]);
+  });
+
+  it("flags an ADDED v8-ignore comment (this repo's live vitest coverage provider)", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "index abc..def 100644",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* v8 ignore next */ export const y = 2;",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.path).toBe("lib/foo.ts");
+  });
+
+  it("flags c8/istanbul ignore comments defensively even though unused in this repo today", () => {
+    const c8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* c8 ignore next */ export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(c8Patch)).toHaveLength(1);
+
+    const istanbulPatch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* istanbul ignore next */ export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(istanbulPatch)).toHaveLength(1);
+  });
+
+  it("flags istanbul's LINE-comment form too, not just its block-comment form (independent factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an earlier version's docstring claimed c8/istanbul coverage broadly while the regex only matched their block form)", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// istanbul ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+  });
+
+  it("flags v8/c8's line-comment form too, for the same categorical reason", () => {
+    const v8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// v8 ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(v8Patch)).toHaveLength(1);
+
+    const c8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+// c8 ignore next",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(c8Patch)).toHaveLength(1);
+  });
+
+  it("flags Python's # pragma: no branch, not just # pragma: no cover", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+if x:  # pragma: no branch",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+  });
+
+  it("does NOT flag an EXISTING (unmodified, context-line) suppression this diff doesn't touch", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const x = 1; // pragma: no cover",
+      "+export const y = 2;",
+      " export const z = 3;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("does NOT flag the +++ file-header line itself as an added line", () => {
+    const patch = [
+      "diff --git a/lib/pragma.ts b/lib/pragma.ts",
+      "new file mode 100644",
+      "index 0000000..abc1234",
+      "--- /dev/null",
+      "+++ b/lib/pragma.ts",
+      "@@ -0,0 +1,1 @@",
+      "+export const x = 1;",
+    ].join("\n");
+    // The file itself is even named "pragma.ts" — proves the +++ header
+    // line for it is never misread as added content regardless.
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("is NOT bypassed by an added ++-prefixed decoy line immediately before a real suppression (independent Codex + claude-review finding, F1-S9 slice 1, issue #12 — a real, trivially craftable classifier bypass)", () => {
+    // An added line whose own CODE starts with `++` (e.g. `++counter;`)
+    // serializes in a real diff as the raw line `+++counter;` — an
+    // earlier version of this function's `+++`-header check ran
+    // UNCONDITIONALLY (not gated on hunk state), so this decoy line was
+    // misread as a fake file header, resetting inHunk to false and
+    // silently skipping every added line that followed for the rest of
+    // this file's hunk — including the REAL suppression comment right
+    // after it. This is the exact PoC: without the fix, the pragma below
+    // would never be detected at all.
+    const pragmaPatch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,3 @@",
+      " x = 1",
+      "+++counter",
+      "+y = 2  # pragma: no cover",
+    ].join("\n");
+    const pragmaMatches = findAddedCoverageSuppressions(pragmaPatch);
+    expect(pragmaMatches).toHaveLength(1);
+    expect(pragmaMatches[0]?.line).toContain("pragma: no cover");
+
+    const v8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,3 @@",
+      " export const x = 1;",
+      "+++counter;",
+      "+/* v8 ignore next */ export const y = 2;",
+    ].join("\n");
+    const v8Matches = findAddedCoverageSuppressions(v8Patch);
+    expect(v8Matches).toHaveLength(1);
+    expect(v8Matches[0]?.line).toContain("v8 ignore");
+
+    // Decisive proof the decoy line itself is correctly treated as
+    // ordinary added CODE, not a header: it must not have reset
+    // currentPath to something else, and it must not itself be reported
+    // as a match (it carries no suppression pattern).
+    expect(pragmaMatches[0]?.path).toBe("snowflake/foo.py");
+  });
+
+  it("does NOT flag a removed (-) line carrying a suppression", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,2 +1,1 @@",
+      "-export const x = 1; // pragma: no cover",
+      " export const z = 3;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("flags multiple added suppressions across multiple files independently", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* v8 ignore next */ export const y = 2;",
+      "diff --git a/snowflake/b.py b/snowflake/b.py",
+      "--- a/snowflake/b.py",
+      "+++ b/snowflake/b.py",
+      "@@ -1,1 +1,2 @@",
+      " x = 1",
+      "+y = 2  # pragma: no cover",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(2);
+    expect(matches.map((m) => m.path)).toEqual(["lib/a.ts", "snowflake/b.py"]);
+  });
+
+  it("returns empty for a clean patch with no suppressions at all", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+});
+
+describe("findAddedPackageJsonTestScriptEdits (Codex finding, F1-S9 slice 1, issue #12, ready round 2)", () => {
+  it("flags an added/redefined test script line in package.json", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,3 +2,3 @@",
+      '   "scripts": {',
+      '-    "test": "vitest run",',
+      '+    "test": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"test": "echo ok",']);
+  });
+
+  it("flags a test:-prefixed script variant (e.g. test:unit)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "test:unit": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"test:unit": "echo ok",']);
+  });
+
+  it("flags the coverage script key", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "coverage": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"coverage": "echo ok",']);
+  });
+
+  it("flags an added pretest lifecycle hook (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — npm auto-runs pretest before npm test, so it can neuter the suite before it even starts)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "pretest": "echo skip > tests/index.test.ts",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+      '"pretest": "echo skip > tests/index.test.ts",',
+    ]);
+  });
+
+  it("flags an added posttest lifecycle hook the same way", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "posttest": "echo done",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"posttest": "echo done",']);
+  });
+
+  it("does NOT flag an unrelated pre/post-prefixed lifecycle key like prepublish — the (pre|post)? prefix is anchored to the base key, not a general substring", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "prepublish": "npm run build",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("flags a JSON-unicode-escaped 'test' script key (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — decodes to the literal key 'test' but evades the literal-text pattern entirely)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "\\u0074\\u0065\\u0073\\u0074": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+      '"\\u0074\\u0065\\u0073\\u0074": "echo ok",',
+    ]);
+  });
+
+  it("does NOT flag an ordinary dependency line just because it happens to contain a backslash — only a real \\u escape sequence trips the unicode-escape pattern", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,2 +5,3 @@",
+      '   "dependencies": {',
+      '+    "left-pad": "file:../vendor\\\\left-pad",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a dependency-only package.json edit (the targeted-fix requirement — a blanket 'any package.json edit' flag would over-trigger on routine dependency bumps)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,3 +5,3 @@",
+      '   "dependencies": {',
+      '-    "left-pad": "1.0.0",',
+      '+    "left-pad": "1.0.1",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a dependency whose NAME merely contains 'test' (e.g. jest-test-utils) — the script-KEY shape, not a substring match", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,2 +5,3 @@",
+      '   "devDependencies": {',
+      '+    "jest-test-utils": "^1.0.0",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a test-script-shaped line in a file OTHER than package.json", () => {
+    const patch = [
+      "diff --git a/lib/config.json b/lib/config.json",
+      "--- a/lib/config.json",
+      "+++ b/lib/config.json",
+      "@@ -1,1 +1,2 @@",
+      "   {",
+      '+    "test": "echo ok",',
+      "   }",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("returns empty for a clean patch that never touches package.json", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("flags a MULTILINE key-split (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — valid JSON allows the key and its colon on separate lines; an earlier version required them on the SAME line and missed this entirely)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,3 @@",
+      '   "scripts": {',
+      '+    "test"',
+      '+    : "echo ok",',
+      "   },",
+    ].join("\n");
+    // Both added lines are reported: the key-only line matches the
+    // quote-anchored key token (no trailing colon required anymore); the
+    // colon-only line matches nothing, which is fine — the KEY line alone
+    // is what proves this evasion is closed.
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toContain('"test"');
+  });
+
+  it("flags an added preinstall/install/postinstall lifecycle hook (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — npm ci runs these BEFORE this workflow's own gates)", () => {
+    for (const key of ["preinstall", "install", "postinstall"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
+
+  it("flags an added prepare or prepublishOnly hook", () => {
+    for (const key of ["prepare", "prepublishOnly"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
+
+  it("still does NOT flag prepublish (bare, without Only) — round 4's install/prepare/prepublishOnly additions don't widen the existing prepublish exclusion", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "prepublish": "npm run build",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("flags preprepare/postprepare (Codex finding, F1-S9 slice 1, issue #12, ready round 5 — npm wraps prepare with its OWN preprepare/postprepare hooks exactly like pretest/posttest wraps test; an earlier version gave prepare no prefix coverage at all)", () => {
+    for (const key of ["preprepare", "postprepare"]) {
+      const patch = [
+        "diff --git a/package.json b/package.json",
+        "--- a/package.json",
+        "+++ b/package.json",
+        "@@ -2,2 +2,2 @@",
+        '   "scripts": {',
+        `+    "${key}": "echo tampered",`,
+        "   },",
+      ].join("\n");
+      expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([
+        `"${key}": "echo tampered",`,
+      ]);
+    }
+  });
+});
+
+describe("findAddedRootPytestConfigSections (Codex finding, F1-S9 slice 1, issue #12, ready round 4)", () => {
+  it("flags an added [tool.pytest.ini_options] section in a root pyproject.toml", () => {
+    const patch = [
+      "diff --git a/pyproject.toml b/pyproject.toml",
+      "--- a/pyproject.toml",
+      "+++ b/pyproject.toml",
+      "@@ -1,1 +1,3 @@",
+      ' name = "x"',
+      "+[tool.pytest.ini_options]",
+      '+addopts = "-k not slow"',
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual(["[tool.pytest.ini_options]"]);
+  });
+
+  it("flags an added [tool:pytest] section in a root setup.cfg", () => {
+    const patch = [
+      "diff --git a/setup.cfg b/setup.cfg",
+      "--- a/setup.cfg",
+      "+++ b/setup.cfg",
+      "@@ -1,1 +1,2 @@",
+      " [metadata]",
+      "+[tool:pytest]",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual(["[tool:pytest]"]);
+  });
+
+  it("does NOT flag an ordinary root pyproject.toml edit with no pytest section (the targeted-fix requirement)", () => {
+    const patch = [
+      "diff --git a/pyproject.toml b/pyproject.toml",
+      "--- a/pyproject.toml",
+      "+++ b/pyproject.toml",
+      "@@ -1,1 +1,2 @@",
+      ' name = "x"',
+      '+version = "1.0.1"',
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a pytest-section-shaped line in a file OTHER than pyproject.toml/setup.cfg", () => {
+    const patch = [
+      "diff --git a/notes.md b/notes.md",
+      "--- a/notes.md",
+      "+++ b/notes.md",
+      "@@ -1,1 +1,2 @@",
+      " # Notes",
+      "+[tool.pytest.ini_options]",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
+
+  it("returns empty for a clean patch that never touches either root file", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedRootPytestConfigSections(patch)).toEqual([]);
+  });
+});
+
+describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
+  it("names the exact test file(s) edited", () => {
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      true,
+    );
+    expect(body).toContain(NO_AUTO_CHAIN_LABEL);
+    expect(body).toContain("tests/slug.test.ts");
+  });
+
+  it("names the exact suppression line(s) added, with their file", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expect(body).toContain("lib/foo.ts");
+    expect(body).toContain("/* v8 ignore next */");
+  });
+
+  it("includes both sections when both are present", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: ["tests/slug.test.ts"],
+        suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expect(body).toContain("tests/slug.test.ts");
+    expect(body).toContain("lib/foo.ts");
+  });
+
+  it("names the exact package.json test-script redefinition(s) added (F1-S9 slice 1, issue #12, ready round 2)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [],
+        packageJsonTestScriptEdits: ['"test": "echo ok",'],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expect(body).toContain("package.json");
+    expect(body).toContain('"test": "echo ok",');
+  });
+
+  it("names the exact root pytest config section added (F1-S9 slice 1, issue #12, ready round 4)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: ["[tool.pytest.ini_options]"],
+      },
+      true,
+    );
+    expect(body).toContain("pyproject.toml/setup.cfg");
+    expect(body).toContain("[tool.pytest.ini_options]");
+  });
+
+  it("says the label was applied when labelApplied is true", () => {
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      true,
+    );
+    expect(body).toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
+    expect(body).not.toContain("FAILED to apply");
+  });
+
+  it("says the label FAILED to apply — never claims it landed — when labelApplied is false (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3)", () => {
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      false,
+    );
+    expect(body).toContain(`the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply`);
+    expect(body).toContain("flagged for manual review anyway");
+    expect(body).not.toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
+  });
+
+  it("neutralizes a backtick+Markdown-injection payload in an added line's own content (independent factory-security-reviewer finding, F1-S9 slice 1, issue #12)", () => {
+    // The exact PoC: an added line whose content carries a literal
+    // backtick that would otherwise break out of the single code span
+    // this annotation wraps it in, injecting live Markdown (a link + a
+    // mention) into the factory bot's own comment — capable of
+    // spoofing/burying the very human-review signal this annotation
+    // exists to provide. sanitizeStepSummaryText STRIPS backticks (it
+    // doesn't escape them), so the link/mention TEXT still appears —
+    // the security property is that it stays trapped inside ONE
+    // unbroken code span, never rendered as live Markdown.
+    const payload =
+      "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      true,
+    );
+    // The exact, deterministic expected rendering: the payload's own
+    // backtick is gone, so `path` and `line` are each their OWN single,
+    // unbroken code span — the payload's backtick never gets to close
+    // the `line` span early and re-open Markdown parsing mid-string.
+    expect(body).toContain(
+      "- `lib/foo.ts`: `x = 1  # pragma: no cover [click](https://attacker.example) @some-maintainer`",
+    );
+    // Decisive proof the span isn't broken: this flagged line has
+    // EXACTLY 4 backtick characters (2 wrapping `path`, 2 wrapping
+    // `line`) — any more would mean the payload's own backtick survived
+    // sanitization and split one of those spans into pieces.
+    const flaggedLine = body.split("\n").find((l) => l.includes("lib/foo.ts"));
+    expect(flaggedLine).toBeDefined();
+    expect((flaggedLine?.match(/`/g) ?? []).length).toBe(4);
+  });
+
+  it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
+    const payload = "tests/`[click](https://attacker.example)`.test.ts";
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      true,
+    );
+    const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));
+    expect(flaggedLine).toBeDefined();
+    // A single field on this line (just `path`, no `line` counterpart) —
+    // exactly 2 backticks (one unbroken code span), not more.
+    expect((flaggedLine?.match(/`/g) ?? []).length).toBe(2);
+  });
+});
+
+describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12, ready rounds 5-6)", () => {
+  it("explains why the review exists and reuses buildGamingFlagAnnotation's rendering, naming the exact flagged content", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expect(body).toContain("both the label and the annotation comment failed to post");
+    expect(body).toContain("tests/slug.test.ts");
+  });
+
+  it("says the label FAILED to apply — accurate for this scenario, since the label call really did fail (labelApplied: false is hardcoded, not a parameter)", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expect(body).toContain("FAILED to apply");
+    expect(body).not.toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
+  });
+});
+
+describe("NO_AUTO_CHAIN_LABEL_DESCRIPTION", () => {
+  it("stays within GitHub's label-description character limit", () => {
+    expect(NO_AUTO_CHAIN_LABEL_DESCRIPTION.length).toBeLessThanOrEqual(
+      GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+    );
   });
 });
 
@@ -673,6 +1487,29 @@ describe("isLabelAlreadyExistsError", () => {
   });
 });
 
+describe("isLabelNotFoundOnIssueError (F1-S9 slice 1, issue #12, ready round)", () => {
+  function githubDeleteError(status: number, body: unknown): Error {
+    return new Error(
+      `GitHub API DELETE /repos/o/r/issues/50/labels/no-auto-chain failed: ${status} ${JSON.stringify(body)}`,
+    );
+  }
+
+  it("returns true for a 404 (label not currently applied — the benign no-op case)", () => {
+    const err = githubDeleteError(404, { message: "Label does not exist" });
+    expect(isLabelNotFoundOnIssueError(err)).toBe(true);
+  });
+
+  it("returns false for a non-404 status — a real failure must not be misread as the benign case", () => {
+    const err = githubDeleteError(500, { message: "Internal Server Error" });
+    expect(isLabelNotFoundOnIssueError(err)).toBe(false);
+  });
+
+  it("returns false for a non-Error value", () => {
+    expect(isLabelNotFoundOnIssueError("not an error")).toBe(false);
+    expect(isLabelNotFoundOnIssueError(undefined)).toBe(false);
+  });
+});
+
 describe("buildPublishSuccessStepSummary", () => {
   it("shows a minted identity and normal review-automation triggering when not on fallback", () => {
     const summary = buildPublishSuccessStepSummary({
@@ -776,6 +1613,96 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: true,
     });
     expect(summary).toContain("(refreshed, not newly opened)");
+  });
+
+  it("reports the anti-gaming classifier as clean when gamingFlagged is false/omitted", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).not.toContain("FLAGGED");
+  });
+
+  it("reports the anti-gaming classifier as FLAGGED with the label applied", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: true,
+      gamingLabelApplied: true,
+    });
+    expect(summary).toContain("🚩 **FLAGGED**");
+    expect(summary).toContain("labelled `no-auto-chain`");
+    expect(summary).not.toContain("FAILED to apply the `no-auto-chain`");
+  });
+
+  it("reports the anti-gaming label as FAILED to apply — never claims it landed — when the apply call actually failed", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: true,
+      gamingLabelApplied: false,
+    });
+    expect(summary).toContain("FAILED to apply the `no-auto-chain` label");
+    expect(summary).not.toContain("labelled `no-auto-chain`");
+  });
+
+  it("says a stale label was removed on a clean refresh (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+      gamingFlagged: false,
+      gamingLabelRemoved: true,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).toContain("was removed");
+    expect(summary).not.toContain("FLAGGED");
+  });
+
+  it("says removal of a stale label FAILED — never silently drops that signal — when removal was attempted and failed", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+      gamingFlagged: false,
+      gamingLabelRemoved: false,
+    });
+    expect(summary).toContain("FAILED to remove a stale");
+    expect(summary).toContain("may still read as flagged");
+  });
+
+  it("says plain clean with no removal mention when gamingLabelRemoved is undefined (nothing to remove, or never attempted)", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: false,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).not.toContain("was removed");
+    expect(summary).not.toContain("FAILED to remove");
   });
 });
 

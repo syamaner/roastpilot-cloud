@@ -613,6 +613,798 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
   });
 });
 
+describe("publish-implement-patch — F1-S9 slice 1 (issue #12): deterministic anti-gaming classifier", () => {
+  const TEST_FILE_DIFF = `diff --git a/tests/new.test.ts b/tests/new.test.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/tests/new.test.ts
+@@ -0,0 +1,1 @@
++test("x", () => {});
+`;
+
+  const PRAGMA_DIFF = `diff --git a/lib/new-file.ts b/lib/new-file.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/lib/new-file.ts
+@@ -0,0 +1,1 @@
++export const x = 1; /* v8 ignore next */
+`;
+
+  const VITEST_CONFIG_DIFF = `diff --git a/vitest.config.ts b/vitest.config.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/vitest.config.ts
+@@ -0,0 +1,1 @@
++export default {};
+`;
+
+  const PLAYWRIGHT_CONFIG_DIFF = `diff --git a/playwright.config.ts b/playwright.config.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/playwright.config.ts
+@@ -0,0 +1,1 @@
++export default {};
+`;
+
+  it("creation path: a vitest.config.ts edit is labelled no-auto-chain (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round — test-discovery config is the same gaming class as a test-file edit)", async () => {
+    const path = await writePatch(scratchDir, "vitest-config.diff", VITEST_CONFIG_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("vitest.config.ts");
+  });
+
+  it("creation path: a playwright.config.ts edit is labelled no-auto-chain", async () => {
+    const path = await writePatch(scratchDir, "playwright-config.diff", PLAYWRIGHT_CONFIG_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("playwright.config.ts");
+  });
+
+  it("creation path: a test-file-edit diff is labelled no-auto-chain and annotated naming the exact file", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-auto-chain"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("tests/new.test.ts");
+    expect(commentBody.body).toContain("no-auto-chain");
+  });
+
+  it("creation path: a pragma-add diff (v8 ignore) is labelled no-auto-chain and annotated naming the exact line", async () => {
+    const path = await writePatch(scratchDir, "pragma.diff", PRAGMA_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/new-file.ts");
+    expect(commentBody.body).toContain("v8 ignore");
+  });
+
+  it("creation path: a clean diff (no test-file edit, no added suppression) gets NO no-auto-chain label and NO annotation comment", async () => {
+    // Uses the module-level VALID_DIFF (a plain new application file).
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+
+    const anyCommentCall = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentCall).toBeUndefined();
+  });
+
+  it("refresh path (existingPr): a flagged diff is labelled and annotated on the EXISTING PR", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-auto-chain"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+  });
+
+  it("refresh path (existingPr): BOTH the label AND the annotation failing on a flagged re-dispatch also fails the publish job (non-zero exit) and posts a COMMENT-event review — same both-lost fix as the creation path", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      if (method === "POST" && url.includes("/pulls/50/reviews")) {
+        return jsonResponse({ id: 1, state: "COMMENTED" }, 200);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Posting a COMMENT-event review"),
+    );
+    const reviewCall = (
+      fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>
+    ).find(([url, init]) => init?.method === "POST" && String(url).includes("/pulls/50/reviews"));
+    expect(reviewCall).toBeDefined();
+    const reviewBody = JSON.parse((reviewCall?.[1]?.body as string) ?? "{}") as {
+      event: string;
+      body: string;
+    };
+    expect(reviewBody.event).toBe("COMMENT");
+    expect(reviewBody.body).toContain("tests/new.test.ts");
+    errorSpy.mockRestore();
+  });
+
+  it("a gaming-label-application failure and an annotation-post failure are each independently logged, the PR still exists, and the publish JOB fails (non-zero exit) because BOTH signals were lost (Codex finding, F1-S9 slice 1, issue #12, ready round 3 — refines the earlier accepted best-effort scope: losing one channel stays fail-open, losing BOTH must not stay silent) — AND a COMMENT-event review is posted on the PR, the mechanism that ACTUALLY renders on the PR (Codex finding, F1-S9 slice 1, issue #12, ready round 6 — REQUEST_CHANGES would 422: GitHub disallows both APPROVE and REQUEST_CHANGES from a PR's own author, and the publisher IS the author)", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      if (method === "POST" && url.includes("/pulls/99/reviews")) {
+        return jsonResponse({ id: 1, state: "COMMENTED" }, 200);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    // The PR-creation call above (POST /pulls) already ran and returned 201
+    // before either label/comment call — proves the PR still exists; this
+    // never became a PublishRejection just because both signals failed.
+    expect(fetchMock.mock.calls.some(([url, init]) => {
+      const method = init?.method ?? "GET";
+      return method === "POST" && String(url).endsWith("/pulls");
+    })).toBe(true);
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Failed to apply the no-auto-chain label`),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the anti-gaming annotation comment"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Posting a COMMENT-event review"),
+    );
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const reviewCall = calls.find(
+      ([url, init]) => init?.method === "POST" && String(url).includes("/pulls/99/reviews"),
+    );
+    expect(reviewCall).toBeDefined();
+    const reviewBody = JSON.parse((reviewCall?.[1]?.body as string) ?? "{}") as {
+      event: string;
+      body: string;
+    };
+    expect(reviewBody.event).toBe("COMMENT");
+    expect(reviewBody.body).toContain("tests/new.test.ts");
+    errorSpy.mockRestore();
+  });
+
+  it("when the COMMENT-event review ALSO fails to post (three of three signal channels lost), it's logged, never thrown, and the publish job still exits non-zero", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (
+        method === "POST" &&
+        (url.endsWith("/labels") || url.includes("/comments") || url.includes("/reviews"))
+      ) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the anti-gaming COMMENT review"),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("a gaming-label-application failure ALONE (annotation still posts) stays best-effort — exit code unchanged (single-channel failure is not the both-lost case fix #4 targets)", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      // The label call fails, but the annotation COMMENT call succeeds —
+      // one channel lost, one channel still visible on the PR.
+      if (method === "POST" && url.endsWith("/labels")) {
+        return new Response("server error", { status: 500 });
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Failed to apply the no-auto-chain label`),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Failing this publish job"),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("detects a coverage suppression delivered via a .gitattributes-forced GIT binary patch block (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3 — closes the raw-patch-text bypass class)", async () => {
+    // The exploit this closes: a `.gitattributes` entry marking a source
+    // file `binary` makes `git diff --binary` serialize its content as a
+    // `GIT binary patch` block instead of textual `+`/`-` lines — hiding
+    // a suppression comment from any scan of the RAW patch bytes, even
+    // though the file's REAL content, once applied, is ordinary readable
+    // TypeScript. Not hand-crafted: generated the same way this repo's
+    // own capture step does (`git diff --cached --binary`, implement-
+    // ready-issues.yml), so this is proven against real git, not an
+    // assumption about what a binary-patch block looks like.
+    await fsWriteFile(join(localCloneDir, ".gitattributes"), "lib/sneaky.ts binary\n");
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(
+      join(localCloneDir, "lib", "sneaky.ts"),
+      "export const x = 1; /* v8 ignore next */\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const binaryPatch = execFileSync("git", ["diff", "--cached", "--binary"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // Sanity-check the fixture itself actually tests what it claims: the
+    // malicious patch must NOT contain the suppression as readable text
+    // — if it did, this test would pass even without the fix.
+    expect(binaryPatch).not.toContain("v8 ignore");
+    expect(binaryPatch).toContain("GIT binary patch");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "binary-suppression.diff", binaryPatch);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/sneaky.ts");
+  });
+
+  it("does not ENOBUFS-reject a legitimate large patch on the re-diff (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round — execFileSync's default 1 MiB maxBuffer is smaller than MAX_PATCH_BYTES itself)", async () => {
+    // ~1.2 MiB of content: comfortably over Node's default 1 MiB
+    // execFileSync maxBuffer, comfortably under the 2 MiB MAX_PATCH_BYTES
+    // cap on the INPUT patch — exactly the gap the fix closes. The
+    // git-REGENERATED diff this classifier now scans can be even larger
+    // than the input due to diff formatting overhead, so this also
+    // exercises that path, not just the input-size boundary.
+    const bigContent = "x".repeat(1_200_000);
+    await fsWriteFile(join(localCloneDir, "big-file.txt"), `${bigContent}\n`);
+    git(localCloneDir, ["add", "-A"]);
+    const bigDiff = execFileSync("git", ["diff", "--cached"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024, // this test's OWN generation call, unrelated to the fix under test
+    });
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "big.diff", bigDiff);
+    stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("refresh path: a clean re-dispatch REMOVES a stale no-auto-chain label from an earlier, flagged push (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready round)", async () => {
+    const path = await writePatch(scratchDir, "clean-refresh.diff", VALID_DIFF);
+    process.env.PATCH_PATH = path;
+    let deleteCalled = false;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "DELETE" && url.includes("/issues/50/labels/no-auto-chain")) {
+        deleteCalled = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(deleteCalled).toBe(true);
+  });
+
+  it("refresh path: a clean re-dispatch with NO prior stale label tolerates the 404 (no-op, not a failure) and stays unlabelled", async () => {
+    const path = await writePatch(scratchDir, "clean-refresh.diff", VALID_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([
+          {
+            number: 50,
+            head: {
+              ref: "feature/6-implement-workflow",
+              repo: { full_name: "syamaner/roastpilot-cloud" },
+            },
+            base: { ref: "main" },
+          },
+        ]);
+      }
+      if (method === "DELETE" && url.includes("/issues/50/labels/no-auto-chain")) {
+        return new Response(JSON.stringify({ message: "Label does not exist" }), {
+          status: 404,
+        });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("detects a suppression smuggled in via a COPY of an already-suppressed file (Codex finding, F1-S9 slice 1, issue #12, ready round 2 — closes the copy-detection content bypass: a THIRD classifier bypass)", async () => {
+    // The exploit this closes: an EXISTING, already-committed file already
+    // carries a suppression comment. A patch that adds a NEW file with the
+    // SAME content — an ordinary "new file" diff, nothing exotic about the
+    // incoming patch's own format — gets applied into the scratch index,
+    // then re-diffed by getAuthoritativePatchAnalysis's OWN content-scan
+    // query. Before the fix, that query kept the SAME `-M -C
+    // --find-copies-harder` options as the path-analysis query, so git's
+    // own re-diff recognized the new file as a COPY of the untouched
+    // original and serialized it as copy METADATA with ZERO hunks — the
+    // suppression comment never appears as a `+` line at all, invisible to
+    // findAddedCoverageSuppressions even though the file is very much a
+    // new, suppression-carrying addition once applied. `--no-renames` on
+    // the content-scan query (only) forces this to serialize as a full
+    // addition instead, so the fix makes it visible again.
+    const suppressedContent = [
+      "export function original(): number {",
+      "  return 1; /* v8 ignore next */",
+      "}",
+      "",
+    ].join("\n");
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(join(localCloneDir, "lib", "original.ts"), suppressedContent);
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add lib/original.ts (already suppressed)"]);
+
+    // The "copy": a brand-new file with IDENTICAL content, added via an
+    // ordinary unified diff (no copy/rename syntax in the incoming patch
+    // itself — the bypass lived entirely in the RECEIVING end's own re-diff
+    // options, not in how the agent's patch happened to be formatted).
+    await fsWriteFile(join(localCloneDir, "lib", "copy.ts"), suppressedContent);
+    git(localCloneDir, ["add", "-A"]);
+    const copyPatch = execFileSync("git", ["diff", "--cached", "--no-renames"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // Sanity-check the fixture: the incoming patch is an ORDINARY addition
+    // (full `+` lines, not copy-diff syntax) — the bypass this test proves
+    // fixed is entirely about the re-diff step's own options, not about
+    // tricking git into parsing the INCOMING patch as a copy.
+    expect(copyPatch).toContain("new file mode");
+    expect(copyPatch).toContain("+  return 1; /* v8 ignore next */");
+    // Undo only the STAGED copy.ts addition — deliberately `HEAD`, not
+    // `HEAD~1`: lib/original.ts's own commit must survive as the real HEAD
+    // `main()` reads via `git read-tree HEAD`, so it's genuinely present
+    // and UNTOUCHED for git's own copy-detection to match the incoming
+    // patch's new file against (the actual shape of the bypass — the
+    // "existing, untouched file" has to really be there).
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "copy-suppression.diff", copyPatch);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/copy.ts");
+    expect(commentBody.body).toContain("v8 ignore");
+  });
+
+  it("creation path: a package.json test-script redefinition is labelled no-auto-chain and annotated naming the exact line (Codex finding, F1-S9 slice 1, issue #12, ready round 2)", async () => {
+    const packageJsonDiff = `diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,5 @@
++{
++  "scripts": {
++    "test": "echo ok"
++  }
++}
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "package-json-script.diff", packageJsonDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("package.json");
+    expect(commentBody.body).toContain(`"test": "echo ok"`);
+  });
+
+  it("creation path: a package.json DEPENDENCY-only edit is NOT flagged (the targeted-fix requirement — a blanket 'any package.json edit' rule would over-trigger on routine dependency bumps)", async () => {
+    await fsWriteFile(
+      join(localCloneDir, "package.json"),
+      JSON.stringify({ name: "x", dependencies: { "left-pad": "1.0.0" } }, null, 2) + "\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add package.json"]);
+    await fsWriteFile(
+      join(localCloneDir, "package.json"),
+      JSON.stringify({ name: "x", dependencies: { "left-pad": "1.0.1" } }, null, 2) + "\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const depBumpDiff = execFileSync("git", ["diff", "--cached"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // `HEAD`, not `HEAD~1`: the diff is a MODIFICATION of package.json
+    // (1.0.0 -> 1.0.1), so package.json@1.0.0 must still exist at HEAD for
+    // `git apply --cached` to have a base to modify — only the staged
+    // 1.0.1 edit is undone here, not the commit that added package.json.
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "package-json-dep.diff", depBumpDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+
+    const anyCommentCall = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentCall).toBeUndefined();
+  });
+
+  it("creation path: a root-level pytest.ini is labelled no-auto-chain (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — pytest's config-file discovery ascends from snowflake/ up to the repo root and would honor this file)", async () => {
+    const pytestIniDiff = `diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++addopts = -k "not slow"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "root-pytest-ini.diff", pytestIniDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("creation path: a root pyproject.toml edit adding [tool.pytest.ini_options] is flagged (Codex finding, F1-S9 slice 1, issue #12, ready round 4 — the targeted content check for the two high-frequency root files)", async () => {
+    const pyprojectDiff = `diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,2 @@
++[tool.pytest.ini_options]
++addopts = "-k not slow"
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "root-pyproject.diff", pyprojectDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("[tool.pytest.ini_options]");
+  });
+
+  it("creation path: an ORDINARY root pyproject.toml edit (no pytest section) is NOT flagged", async () => {
+    const pyprojectDiff = `diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,2 @@
++[project]
++name = "x"
+`;
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "root-pyproject-ordinary.diff",
+      pyprojectDiff,
+    );
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+  });
+});
+
 describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {
   afterEach(() => {
     delete process.env.GITHUB_STEP_SUMMARY;

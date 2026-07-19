@@ -120,6 +120,727 @@ export function findForbiddenPatchPaths(
 }
 
 /**
+ * Directory prefixes this repo's own test runners actually use for
+ * discovery (F1-S9 slice 1, issue #12 — the deterministic anti-gaming
+ * diff classifier) — verified against each tool's own config, not
+ * guessed: `vitest.config.ts`'s `include: ["tests/**\/*.test.ts"]`,
+ * `playwright.config.ts`'s `testDir: "./e2e"`, and pytest's default
+ * `test_*.py`/`*_test.py` discovery under `snowflake/tests/` (no
+ * `pytest.ini`/`pyproject.toml` overriding that convention in this repo).
+ */
+const TEST_PATH_PREFIXES = ["tests/", "e2e/", "snowflake/tests/"] as const;
+
+/**
+ * Filename-suffix patterns treated as a test file independent of
+ * directory — defense in depth against a test file someday landing
+ * outside {@link TEST_PATH_PREFIXES}, not a claim that either check alone
+ * is complete.
+ */
+const TEST_FILENAME_PATTERNS = [
+  /\.test\.tsx?$/,
+  /\.spec\.tsx?$/,
+  /^test_.*\.py$/,
+  /.*_test\.py$/,
+] as const;
+
+/**
+ * Exact test-DISCOVERY config paths (Codex + claude-review finding, F1-S9
+ * slice 1, issue #12, ready round): editing WHICH tests get discovered
+ * is the SAME gaming class as editing a test file directly — narrowing
+ * `vitest.config.ts`'s `include` glob (or `playwright.config.ts`'s
+ * `testDir`) can make a failing test silently stop being collected
+ * without touching a single test file, invisible to path/suffix matching
+ * alone. Also covers pytest's own recognized config-file names
+ * (`pytest.ini`/`pyproject.toml`/`setup.cfg`/`tox.ini`, any of which can
+ * carry a `[pytest]`/`[tool.pytest.ini_options]` section narrowing
+ * collection, plus `pytest.toml` — the pinned `pytest==9.1.1`'s own
+ * native TOML config file, read implicitly the same way
+ * `pyproject.toml` is) — scoped to `snowflake/` specifically, where this
+ * repo's pytest is actually invoked FROM (`ci.yml`'s `working-directory:
+ * snowflake`) and where pytest's own rootdir/inifile search starts.
+ * Exact-match, not a prefix or suffix pattern: these are specific, known
+ * filenames, not a whole class of paths.
+ *
+ * `snowflake/conftest.py` (Codex finding, F1-S9 slice 1, issue #12, ready
+ * round 3): pytest loads any `conftest.py` it finds automatically (no
+ * import, no opt-in) and it can hook collection/reporting itself (e.g.
+ * `pytest_runtest_makereport`, `pytest_collection_modifyitems`) —
+ * exactly the same discovery/reporting-tampering class as the config
+ * files above, just via pytest's plugin-hook mechanism instead of an INI
+ * option. `snowflake/tests/conftest.py` is already covered by {@link
+ * TEST_PATH_PREFIXES}'s `snowflake/tests/` prefix; this adds the
+ * package-root `snowflake/conftest.py` specifically, since pytest applies
+ * conftest.py files from the ROOTDIR down to the test directory, and this
+ * repo's invocation (`ci.yml`'s `working-directory: snowflake`, `pytest
+ * tests/`, no ini file anywhere) resolves rootdir to `snowflake/` itself
+ * — so `snowflake/conftest.py` is genuinely loaded.
+ *
+ * CONFTEST COLLECTION vs. CONFIG-FILE DISCOVERY — two DIFFERENT
+ * algorithms with opposite directions (Codex finding, F1-S9 slice 1,
+ * issue #12, ready round 4 — an earlier round's docstring conflated
+ * these and drew the wrong conclusion for the config-file case):
+ * - `conftest.py` COLLECTION walks from the test path UP TO rootdir
+ *   (inclusive) but never ABOVE rootdir. With rootdir resolving to
+ *   `snowflake/` here, a repo-root `conftest.py` genuinely sits outside
+ *   the range this invocation would ever load — correctly NOT flagged
+ *   (verified none exists today either).
+ * - pytest's own CONFIG-FILE discovery (`pytest.ini`/`pyproject.toml`
+ *   with `[tool.pytest.ini_options]`/`tox.ini` with `[pytest]`/`setup.cfg`
+ *   with `[tool:pytest]`) is what DETERMINES rootdir in the first place,
+ *   by ASCENDING from the common-ancestor directory (here, `snowflake/`)
+ *   through EVERY parent directory — including the repo root, one level
+ *   above `snowflake/` — looking for the first recognized file. A
+ *   repo-root `pytest.ini`/`pytest.toml`/`tox.ini`-with-`[pytest]` WOULD
+ *   therefore be discovered and honored, changing pytest's effective
+ *   config even though CWD is `snowflake/`. These three root-level,
+ *   pytest-DEDICATED filenames are exact-matched below for exactly that
+ *   reason — unlike conftest.py, over-flagging here has essentially no
+ *   false-positive cost, since nothing else in this repo would
+ *   legitimately create a root `pytest.ini`/`pytest.toml`/`tox.ini`.
+ * - Root-level `pyproject.toml`/`setup.cfg` are DELIBERATELY NOT
+ *   exact-matched, even though they're equally reachable by the same
+ *   ascending config-file search: both are HIGH-frequency, legitimately-
+ *   edited files for reasons that have nothing to do with pytest (Python
+ *   packaging metadata, build-system config, other tools' own sections),
+ *   so an unconditional flag here would over-trigger constantly. See
+ *   {@link findAddedRootPytestConfigSections} for the targeted,
+ *   content-based check that covers these two instead — flag only an
+ *   ADDED line that introduces the actual pytest section header, not
+ *   every edit to the file.
+ */
+const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
+  "vitest.config.ts",
+  "vitest.config.mts",
+  "vitest.config.js",
+  "vitest.config.mjs",
+  "vitest.config.cjs",
+  "playwright.config.ts",
+  "playwright.config.js",
+  "pytest.ini",
+  "pytest.toml",
+  "tox.ini",
+  "snowflake/pytest.ini",
+  "snowflake/pytest.toml",
+  "snowflake/pyproject.toml",
+  "snowflake/setup.cfg",
+  "snowflake/tox.ini",
+  "snowflake/conftest.py",
+]);
+
+/**
+ * True when a normalized path is a test file (or its discovery config) by
+ * this repo's own conventions — directory prefix, filename suffix, or
+ * exact discovery-config match; see {@link TEST_PATH_PREFIXES}/
+ * {@link TEST_FILENAME_PATTERNS}/{@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}.
+ *
+ * Deliberately conservative in one direction only: this is used to FLAG a
+ * diff for human review, never to silently permit anything, so a false
+ * positive (an ordinary file that happens to match a suffix pattern) costs
+ * a human a few seconds of "yes, this is fine"; a false negative would
+ * mean a real test-file edit sails through unflagged. Over-matching is the
+ * sound choice for this class (see the module's `NO_AUTO_CHAIN_LABEL`
+ * docstring for why "assertion weakening" itself isn't attempted — it's
+ * semantic and can't be reliably detected, so the whole class is flagged).
+ *
+ * @param normalizedPath - A path already run through
+ *   {@link normalizePatchPath}.
+ * @returns Whether this path is a test file or its discovery config.
+ */
+export function isTestFilePath(normalizedPath: string): boolean {
+  if (TEST_DISCOVERY_CONFIG_EXACT_PATHS.has(normalizedPath)) {
+    return true;
+  }
+  if (TEST_PATH_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
+    return true;
+  }
+  // No `?? fallback` needed here (unlike a `.split("/").pop()` form would
+  // require): `lastIndexOf` returns -1 for a path with no "/" at all, and
+  // `.slice(0)` on that is simply the whole string — every input has a
+  // well-defined result, no branch is ever unreachable.
+  const filename = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+  return TEST_FILENAME_PATTERNS.some((pattern) => pattern.test(filename));
+}
+
+/**
+ * Scans a list of changed paths and returns every one that's a test file.
+ *
+ * @param rawPaths - Paths git itself reports the patch will touch (same
+ *   authoritative source as {@link findForbiddenPatchPaths} — see that
+ *   function's docstring for why this must be the applier's own report,
+ *   not an independent diff-text parse).
+ * @returns The subset that are test files, normalized and sorted. Empty
+ *   if none.
+ */
+export function findTestFileEdits(rawPaths: readonly string[]): string[] {
+  const edits = new Set<string>();
+  for (const raw of rawPaths) {
+    const normalized = normalizePatchPath(raw);
+    if (isTestFilePath(normalized)) {
+      edits.add(normalized);
+    }
+  }
+  return Array.from(edits).sort();
+}
+
+/** A single ADDED coverage-suppression line {@link findAddedCoverageSuppressions} found. */
+export interface CoverageSuppressionMatch {
+  /** The file the suppression comment was added in (normalized). */
+  readonly path: string;
+  /** The added line's content, trimmed. */
+  readonly line: string;
+}
+
+/**
+ * Matches a coverage-suppression comment: Python's `# pragma: no cover`
+ * or `# pragma: no branch` (both real `coverage.py` pragmas), or a JS/TS
+ * coverage-provider ignore comment — in EITHER its block-comment
+ * (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
+ * (`// v8/c8/istanbul ignore ...`) form. `v8 ignore` (block form) is this
+ * repo's LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
+ * `c8`/`istanbul`, and the line-comment form for all three, are matched
+ * defensively even though unused here today — over-matching a syntax
+ * this repo doesn't currently use is harmless, and a future provider
+ * switch (or a diff copy-pasted from elsewhere) shouldn't need this
+ * pattern updated to still catch it. This exact set (independent
+ * factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an
+ * earlier version's docstring claimed "c8/istanbul" broadly while the
+ * regex only matched their BLOCK-comment form, missing istanbul's
+ * documented line-comment form) is what the pattern below actually
+ * matches — kept in sync deliberately, not narrowed to a stale claim.
+ */
+const COVERAGE_SUPPRESSION_PATTERN =
+  /#\s*pragma:\s*no\s*(?:cover|branch)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
+
+/**
+ * A single ADDED line, with the path of the file it was added to —
+ * the shared unit {@link walkAddedLines} yields, consumed by every
+ * added-line-content classifier in this module ({@link
+ * findAddedCoverageSuppressions}, {@link findAddedPackageJsonTestScriptEdits}).
+ */
+interface AddedLine {
+  /** The file this line was added to (normalized). */
+  readonly path: string;
+  /** The added line's content, WITHOUT its leading `+`, untrimmed. */
+  readonly line: string;
+}
+
+/**
+ * Walks a unified diff and yields every ADDED line, paired with the path
+ * of the file it belongs to — the single hunk-tracking traversal every
+ * added-line-content classifier in this module needs, extracted so that
+ * logic exists in exactly ONE place (F1-S9 slice 1, issue #12, ready
+ * round 2: a second classifier — {@link findAddedPackageJsonTestScriptEdits}
+ * — needed the identical walk {@link findAddedCoverageSuppressions} already
+ * had; duplicating the hunk-state loop a second time would double the
+ * surface for the exact class of bug the `+++`-bypass fix below just
+ * closed once).
+ *
+ * A line is only ever considered "added content" while inside a hunk
+ * (after a `@@ ... @@` marker for the current file, reset at each
+ * `diff --git` header). This is what excludes the `+++ b/path` FILE
+ * HEADER line (which always precedes any hunk marker) from being
+ * misread as added content — a real added line's own code could itself
+ * start with `++`, e.g. `++i;`, so a naive `+++`-prefix check ALONE is
+ * ambiguous: it can't tell that shape apart from the genuine header.
+ * `@@` markers have no such ambiguity (unique to hunk headers), so the
+ * `+++`-header branch below is gated on `!inHunk` — the header can only
+ * be genuine BEFORE the first `@@` for its file.
+ *
+ * CLOSED BUG (independent Codex + claude-review finding, F1-S9 slice 1,
+ * issue #12): an earlier version (inline in {@link findAddedCoverageSuppressions}
+ * before this extraction) checked the `+++ ` prefix UNCONDITIONALLY,
+ * without the `!inHunk` gate this docstring already claimed existed — so
+ * an ADDED line whose code happened to start with `++` (serializing as
+ * the raw diff line `+++counter;`) was misread as a (fake) file header
+ * REGARDLESS of hunk state, resetting `currentPath` and `inHunk`
+ * mid-hunk and causing every subsequent added line for that file —
+ * including a real suppression comment right after the decoy line — to
+ * be silently skipped. A trivially craftable, complete bypass of this
+ * whole classifier. The gate below is the actual fix; the disambiguation
+ * this docstring describes was always the INTENDED mechanism, just not,
+ * before this fix, the IMPLEMENTED one.
+ *
+ * `+++ b/path` (or `+++ /dev/null` for a deletion) is additionally used
+ * to track which file the CURRENT hunk belongs to, so a yielded line can
+ * be attributed to a path.
+ *
+ * @param patchText - The raw contents of a unified diff (same file
+ *   `main()` already validates the size of before ever reading it — see
+ *   `assertPatchArtifactSize`).
+ * @yields Every added line, in file order, with its file's path.
+ */
+function* walkAddedLines(patchText: string): Generator<AddedLine> {
+  let currentPath = "";
+  let inHunk = false;
+  for (const rawLine of patchText.split("\n")) {
+    if (rawLine.startsWith("diff --git ")) {
+      inHunk = false;
+      continue;
+    }
+    // Gated on `!inHunk` (independent Codex + claude-review finding, F1-S9
+    // slice 1, issue #12 — a real bypass in an earlier version, which
+    // checked this UNCONDITIONALLY): a real "+++ b/path" file header only
+    // ever appears BEFORE the first `@@` for its file (`inHunk` is false
+    // there). Without this gate, an ADDED line whose own CODE happens to
+    // start with `++` (e.g. `++counter;`) serializes as the raw diff line
+    // `+++counter;` — a trivial, craftable string for an attacker to
+    // prepend immediately before a real added suppression line, since it
+    // was being misread as a (fake) file header, resetting `inHunk` to
+    // false and making the classifier skip every following added line
+    // for that file, INCLUDING the real suppression right after it.
+    if (!inHunk && rawLine.startsWith("+++ ")) {
+      currentPath = normalizePatchPath(rawLine.slice("+++ ".length).trim());
+      continue;
+    }
+    if (rawLine.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || !rawLine.startsWith("+")) {
+      continue;
+    }
+    yield { path: currentPath, line: rawLine.slice(1) };
+  }
+}
+
+/**
+ * Scans raw unified-diff text for coverage-suppression comments on
+ * ADDED lines only — an existing suppression this diff doesn't touch is
+ * not this diff's problem to flag. Consumes {@link walkAddedLines} for
+ * the hunk-tracking traversal (see that function's docstring for the
+ * `+++`-bypass history this depends on staying fixed).
+ *
+ * @param patchText - The raw contents of a unified diff (same file
+ *   `main()` already validates the size of before ever reading it — see
+ *   `assertPatchArtifactSize`).
+ * @returns Every added-line match, in file order. Empty if none.
+ */
+export function findAddedCoverageSuppressions(
+  patchText: string,
+): CoverageSuppressionMatch[] {
+  const matches: CoverageSuppressionMatch[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (COVERAGE_SUPPRESSION_PATTERN.test(line)) {
+      matches.push({ path, line: line.trim() });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Matches a `package.json` script-KEY definition line whose key is
+ * `test`, a `test:`-prefixed variant (e.g. `test:unit`, `test:e2e`), or
+ * `coverage` — i.e. exactly the scripts CI actually invokes to gate a PR
+ * (`npm test`, `npm run test:*`, `npm run coverage`). Deliberately
+ * targeted, not a blanket "any package.json edit" flag (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 2): a dependency-only
+ * `package.json` edit (bumping a version, adding a new dep) is routine
+ * and must NOT be flagged, or this would over-trigger on nearly every
+ * PR that touches the file. Narrowing to the script-KEY line specifically
+ * (not just any line containing the word "test") also avoids flagging an
+ * unrelated added dependency whose NAME happens to contain "test" (e.g.
+ * `"jest-test-utils": "^1.0.0"` is a dependency line — the surrounding
+ * quotes wrap the WHOLE dependency name, not just `test`, so this
+ * pattern's quote-anchored key token never matches it).
+ *
+ * Optional `(?:pre|post)?` prefix (Codex finding, F1-S9 slice 1, issue
+ * #12, ready round 3): npm auto-runs a `pretest`/`posttest` lifecycle
+ * script around `npm test` (and `pre`/`post`-prefixed variants around any
+ * `npm run <script>`), so a `pretest` script can rewrite or neuter the
+ * test suite BEFORE vitest/pytest even starts, without ever touching the
+ * `"test"` key itself — the same gaming class, reached through npm's own
+ * lifecycle hook instead of the script CI names directly. The prefix is
+ * anchored immediately before the base key (not a general substring), so
+ * an unrelated key like `"prepublish"` does not match: stripping the
+ * optional `pre`/`post` still leaves `publish`, which is neither `test`,
+ * a `test:`-prefixed variant, nor `coverage`.
+ *
+ * `(?:pre|post)?install` / `prepare` / `prepublishOnly` (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 4): npm runs `preinstall` /
+ * `install` / `postinstall` / `prepare` automatically on `npm ci` —
+ * BEFORE this workflow's own lint/typecheck/test gates ever run — and
+ * `prepublishOnly` runs on `npm publish`. Any of these can tamper with
+ * the checkout (rewrite a test file, drop a suppression comment) before
+ * the gates even see it, the same install-time-hook class as the
+ * test-lifecycle hooks above, just reachable via a different npm
+ * lifecycle event. The durable root fix for install-time scripts
+ * specifically is `--ignore-scripts` on the factory's own `npm ci`
+ * (tracked as part of F1-S7, issue #10's secret-scanning-adjacent
+ * hardening — flagging it here is defence-in-depth, not a substitute for
+ * that fix landing).
+ *
+ * Colon requirement DROPPED (Codex finding, F1-S9 slice 1, issue #12,
+ * ready round 4 — closes a multiline key-split evasion): JSON permits a
+ * key and its value's colon to be split across separate lines (e.g.
+ * `"test"` on one line, `: "echo ok"` on the next) — valid JSON, and
+ * `walkAddedLines` yields these as two SEPARATE added lines. Requiring
+ * `"test":` together on one line, as an earlier version of this pattern
+ * did, missed exactly this split: the key-only line has no colon to
+ * match, and the colon-only line has no quoted key. Matching the quoted
+ * key TOKEN ALONE, with no trailing colon requirement, closes this at
+ * the cost of a narrow, accepted over-flag: a package.json STRING VALUE
+ * that happens to read exactly `"test"` (not as a key) would also match.
+ * Over-flagging is the accepted trade-off throughout this classifier;
+ * this is a small instance of the same trade, not a new one.
+ *
+ * `(?:pre|post)?` ALSO applied to `prepare` (Codex finding, F1-S9 slice
+ * 1, issue #12, ready round 5): an earlier version gave `prepare` no
+ * prefix coverage at all, even though npm wraps it with its OWN
+ * `preprepare`/`postprepare` lifecycle hooks exactly the same way it
+ * wraps `test` with `pretest`/`posttest` — the identical gaming class,
+ * just one level deeper in npm's own lifecycle nesting. `prepublishOnly`
+ * has no such wrapping in npm's lifecycle model (there's no
+ * `preprepublishOnly`), so it stays unprefixed.
+ */
+const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN =
+  /"(?:(?:pre|post)?(?:test|test:[\w:-]*|coverage)|(?:pre|post)?install|(?:pre|post)?prepare|prepublishOnly)"/;
+
+/**
+ * Matches a JSON `\uXXXX` unicode escape sequence appearing literally in
+ * an added `package.json` line (Codex finding, F1-S9 slice 1, issue #12,
+ * ready round 3) — a script KEY written with each letter escaped, e.g.
+ * `"test": "echo ok"`, decodes to the ordinary key
+ * `test` once npm/`JSON.parse` reads the file, evading {@link
+ * PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN}'s literal-text match entirely
+ * (the regex only ever sees the RAW escaped bytes `t...`, never the
+ * decoded key `test`). Checked independently rather than
+ * decoding-then-matching: a hand-rolled JSON-escape decoder is its own
+ * attack surface and unnecessary complexity for what this classifier
+ * needs — a conservative, cheap over-flag. A legitimate `package.json`
+ * practically never needs a unicode escape in a script KEY (script names
+ * are plain ASCII identifiers by convention), so flagging ANY added line
+ * containing one at all — not just ones that happen to decode to
+ * something matching the script-key pattern — is the safe direction:
+ * over-flagging costs a human a few seconds, under-flagging lets a
+ * script-key rewrite sail through unflagged.
+ */
+const PACKAGE_JSON_UNICODE_ESCAPE_PATTERN = /\\u[0-9a-fA-F]{4}/;
+
+/**
+ * Scans raw unified-diff text for `package.json` script-key edits/adds
+ * that redefine a CI-invoked test/coverage script, add an npm test- or
+ * install-time lifecycle hook (`pretest`/`posttest`/`preinstall`/
+ * `install`/`postinstall`/`prepare`/`prepublishOnly`) around one, or add
+ * a line containing a JSON unicode escape (Codex finding, F1-S9 slice 1,
+ * issue #12, ready rounds 2-4) — narrowing or replacing what `npm test` /
+ * `npm run coverage` actually runs (e.g. rewriting `"test": "vitest run"`
+ * to `"test": "echo ok"`, adding a `"pretest"` hook that rewrites the
+ * suite first, adding a `"postinstall"` hook that tampers with the
+ * checkout before the gates even see it, or hiding any of these behind a
+ * `\uXXXX`-escaped or line-split key) is the same gaming class as editing
+ * a test file directly, but a blanket "package.json changed" flag would
+ * also trip on every routine dependency bump, so this targets exactly the
+ * script-KEY tokens CI/npm actually act on (plus the unicode-escape
+ * over-flag, which is intentionally broader — see {@link
+ * PACKAGE_JSON_UNICODE_ESCAPE_PATTERN}). Consumes {@link walkAddedLines}
+ * for the same hunk-tracking traversal {@link findAddedCoverageSuppressions}
+ * uses.
+ *
+ * @param patchText - The raw contents of a unified diff.
+ * @returns Every matching added line's trimmed content, in file order.
+ *   Empty if none (including when no `package.json` is touched at all).
+ */
+export function findAddedPackageJsonTestScriptEdits(
+  patchText: string,
+): string[] {
+  const matches: string[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (path !== "package.json") {
+      continue;
+    }
+    if (
+      PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN.test(line) ||
+      PACKAGE_JSON_UNICODE_ESCAPE_PATTERN.test(line)
+    ) {
+      matches.push(line.trim());
+    }
+  }
+  return matches;
+}
+
+/**
+ * Root-level (repo-root, not `snowflake/`-scoped) filenames this
+ * classifier inspects for an ADDED pytest config-section header, rather
+ * than exact-matching the path unconditionally (Codex finding, F1-S9
+ * slice 1, issue #12, ready round 4) — see
+ * {@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}'s own docstring for why
+ * `pyproject.toml`/`setup.cfg` specifically need a content check instead
+ * of an exact-path flag: both are common, legitimately-edited files for
+ * reasons unrelated to pytest, so an unconditional flag here would
+ * over-trigger constantly; the actual gaming vector is introducing a NEW
+ * pytest section where none existed, which {@link
+ * findAddedRootPytestConfigSections} targets directly.
+ */
+const ROOT_PYTEST_CONFIG_CONTENT_PATHS = new Set(["pyproject.toml", "setup.cfg"]);
+
+/**
+ * Matches the pytest-recognized ini-section header for `pyproject.toml`
+ * (`[tool.pytest.ini_options]`), `pytest.ini`/`tox.ini` (`[pytest]`), or
+ * `setup.cfg` (`[tool:pytest]`) — introducing ANY of these into a
+ * root-level `pyproject.toml` or `setup.cfg` makes pytest honor that
+ * file as part of ITS OWN config once discovery ascends from
+ * `snowflake/` up to the repo root (see
+ * {@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}'s docstring for the
+ * config-file-discovery-ascends-parents mechanism this closes). All
+ * three header spellings are matched regardless of which of the two
+ * files is being scanned — matching `[tool:pytest]` inside a
+ * `pyproject.toml`, for instance, would never be pytest's own real
+ * syntax there, but over-matching costs nothing and keeps this one
+ * pattern simple rather than keying it per-file.
+ */
+const PYTEST_CONFIG_SECTION_HEADER_PATTERN =
+  /\[(?:tool\.pytest\.ini_options|pytest|tool:pytest)\]/;
+
+/**
+ * Scans raw unified-diff text for an ADDED pytest ini-section header
+ * introduced into a root-level `pyproject.toml` or `setup.cfg` (Codex
+ * finding, F1-S9 slice 1, issue #12, ready round 4) — see
+ * {@link ROOT_PYTEST_CONFIG_CONTENT_PATHS} and
+ * {@link PYTEST_CONFIG_SECTION_HEADER_PATTERN} for the mechanism and why
+ * a targeted content check, not a blanket exact-path flag, is the right
+ * shape for these two specific files. Consumes {@link walkAddedLines}
+ * for the same hunk-tracking traversal every other added-line classifier
+ * here uses.
+ *
+ * @param patchText - The raw contents of a unified diff.
+ * @returns Every matching added line's trimmed content, in file order.
+ *   Empty if none (including when neither root file is touched at all).
+ */
+export function findAddedRootPytestConfigSections(patchText: string): string[] {
+  const matches: string[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (
+      ROOT_PYTEST_CONFIG_CONTENT_PATHS.has(path) &&
+      PYTEST_CONFIG_SECTION_HEADER_PATTERN.test(line)
+    ) {
+      matches.push(line.trim());
+    }
+  }
+  return matches;
+}
+
+/**
+ * Applied to a PR whose diff trips the deterministic anti-gaming
+ * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions} /
+ * {@link findAddedPackageJsonTestScriptEdits} / {@link findAddedRootPytestConfigSections},
+ * F1-S9 slice 1, issue #12): any edit to a test file, any ADDED
+ * coverage-suppression comment, any ADDED `package.json` test/coverage/
+ * lifecycle script-key redefinition, or any ADDED pytest config section
+ * in a root-level `pyproject.toml`/`setup.cfg`. All four are treated as
+ * a SINGLE, conservative class — "assertion weakening" itself is
+ * semantic and can't be reliably detected (no LLM is used here; this
+ * whole classifier is deterministic string/path matching), so the
+ * entire vector is flagged rather than attempting to distinguish a
+ * legitimate test-file edit (e.g. a genuine strengthening) from a gamed
+ * one. A human confirms which it is — see {@link buildGamingFlagAnnotation}
+ * for the deterministic, templated pointer to exactly what tripped it.
+ *
+ * ENFORCEMENT CONTRACT (be honest about scope, not aspirational): this
+ * label is the durable hook every current and future auto-chain consumer
+ * MUST check and refuse to advance a PR carrying it — specifically the
+ * dormant §10-ratchet stage-2 trigger (triage's `ready-to-implement`
+ * label auto-firing `implement`, NOT wired yet — see
+ * `implement-ready-issues.yml`'s own top comment) once that's eventually
+ * enabled, and F1-S9 slice 3's spec-grounded review. It is
+ * FORWARD-ENFORCING, not a hard block on a chain that doesn't exist
+ * today: today's ACTUAL enforcement is this label (a durable, always-
+ * visible signal — PR list/board view, not just the PR body) plus the
+ * explanatory annotation naming exactly what tripped it plus
+ * factory.md §2's permanent human-merge requirement, which already means
+ * nothing merges without a human looking at it regardless of this
+ * label's presence. Applied at the ONE point in today's pipeline that
+ * actually auto-chains with no human step in between — `implement`'s
+ * patch flowing straight into `publish`'s auto-opened/refreshed PR,
+ * both within a single dispatched run.
+ *
+ * LABEL-AFTER-EVENT RACE (Codex finding, F1-S9 slice 1, issue #12 —
+ * doc-only, no code fix exists): this label is applied AFTER
+ * `POST /pulls` succeeds (or after the refresh force-push), so a PR's
+ * own `opened`/`synchronize` webhook event necessarily fires BEFORE the
+ * label lands — there is no way to label a PR before GitHub emits the
+ * event for its creation. Not exploitable today (nothing consumes this
+ * label yet), but binding on whatever DOES eventually consume it: a
+ * future auto-chain consumer MUST re-read this label from the API at
+ * decision time (e.g. `GET /issues/{n}/labels` or the PR's own current
+ * label list), NEVER trust a `labels` array captured from the
+ * triggering event's payload — that payload is a snapshot from BEFORE
+ * this label could have been applied, so trusting it would silently
+ * treat every flagged PR as clean.
+ *
+ * DETECTION SCOPE & RESIDUAL EVASIONS (F1-S9 slice 1, issue #12 — the
+ * decision that CAPS this slice's evasion-chasing rounds): this
+ * classifier is a DETERMINISTIC, CONSERVATIVE, ADVISORY detector for the
+ * known gaming classes found while building it — test-file edits
+ * (including renames and copies of an already-modified test), test-
+ * discovery config and lifecycle tampering (`vitest.config.ts`/
+ * `playwright.config.ts`/pytest's own config filenames including
+ * `pytest.toml`/`conftest.py`, `package.json`'s `pre`/`post`-prefixed npm
+ * lifecycle hooks, and JSON-unicode-escaped script keys), and coverage
+ * suppressions (including delivery via a `.gitattributes`-forced binary
+ * patch or a copy of an already-suppressed file). It is NOT, and is not
+ * intended to become, an exhaustive or unbeatable gate: a determined
+ * adversary with knowledge of this classifier's own source can construct
+ * FURTHER textual evasions (e.g. a novel obfuscation of a script key this
+ * classifier doesn't yet recognize) — that is an inherent property of any
+ * purely textual/deterministic detector, not a bug to keep chasing round
+ * after round. By design, this label is ONE leg of defence-in-depth,
+ * alongside mutation testing (F1-S9 slice 2, verifies tests actually
+ * catch real regressions rather than trusting their own edit history),
+ * the PR review roster (Codex, Claude Code Review, any human reviewer),
+ * and — the backstop that always applies regardless of whether this
+ * classifier catches a given evasion — factory.md §2's permanent
+ * human-merge requirement. Future evasion classes, once found, are
+ * folded via follow-up issues against this slice rather than further
+ * pre-merge rounds; a classifier this narrow-scoped by design should not
+ * be allowed to block shipping the slice indefinitely chasing the last
+ * evasion.
+ */
+export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
+
+/**
+ * {@link NO_AUTO_CHAIN_LABEL}'s description, applied when the publish job
+ * creates the label (idempotently — see `applyNoAutoChainLabel` in
+ * `publish-implement-patch.mts`). Kept under
+ * {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}, same reasoning as
+ * {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} — a unit test asserts
+ * this stays within it.
+ */
+export const NO_AUTO_CHAIN_LABEL_DESCRIPTION =
+  "Diff edits a test file/script, or adds a coverage-suppression comment — needs human review.";
+
+/** What the anti-gaming classifier found on one publish run — passed to {@link buildGamingFlagAnnotation}. */
+export interface GamingFlag {
+  /** Test files the diff edits, normalized, sorted. */
+  readonly testFileEdits: readonly string[];
+  /** Coverage-suppression comments the diff adds. */
+  readonly suppressions: readonly CoverageSuppressionMatch[];
+  /**
+   * `package.json` test/coverage/lifecycle script-key redefinitions the
+   * diff adds (F1-S9 slice 1, issue #12, ready rounds 2-4) — see
+   * {@link findAddedPackageJsonTestScriptEdits}.
+   */
+  readonly packageJsonTestScriptEdits: readonly string[];
+  /**
+   * Pytest config-section headers the diff adds to a root-level
+   * `pyproject.toml`/`setup.cfg` (F1-S9 slice 1, issue #12, ready round
+   * 4) — see {@link findAddedRootPytestConfigSections}.
+   */
+  readonly rootPytestConfigSections: readonly string[];
+}
+
+/**
+ * Builds the deterministic, TEMPLATED (no LLM — this whole classifier is
+ * string/path matching) annotation naming exactly what tripped the
+ * anti-gaming classifier, so "routed to human review" carries a concrete,
+ * actionable pointer rather than an opaque label. Posted as a fresh PR
+ * comment on every flagged publish run (creation or refresh alike) — see
+ * `postGamingFlagAnnotation` in `publish-implement-patch.mts` — never an
+ * upsert: a later refresh may introduce a DIFFERENT flagged line than an
+ * earlier one, and an edited-in-place comment could read as "already
+ * seen" to a human who reviewed an earlier version.
+ *
+ * Every field here is ATTACKER-CONTROLLED (a test-file path, or an added
+ * line's own content) and is rendered through {@link sanitizeStepSummaryText}
+ * before being interpolated — never raw (independent factory-security-
+ * reviewer finding, F1-S9 slice 1, issue #12): an added line containing a
+ * literal backtick could otherwise break out of its code span and inject
+ * live Markdown (a link, an `@mention`) into the factory bot's own
+ * comment — the identical injection class `sanitizeStepSummaryText` was
+ * already built to close for `$GITHUB_STEP_SUMMARY`. The harm isn't
+ * secret exfiltration (nothing sensitive is adjacent); it's that the
+ * injection could spoof or bury the very human-review signal this
+ * annotation exists to provide (e.g. append a fake "looks clean" or hide
+ * the real flagged line under an unrelated link). Sanitizing closes that
+ * regardless of which field carries the payload.
+ *
+ * @param flag - What the classifier found; at least one field is
+ *   expected to be non-empty (the caller only invokes this when flagged).
+ * @param labelApplied - Whether `applyNoAutoChainLabelBestEffort` actually
+ *   succeeded (independent Codex + claude-review finding, F1-S9 slice 1,
+ *   issue #12, round 3): an earlier version unconditionally claimed
+ *   "labelled `no-auto-chain`" even when the label call failed — the same
+ *   never-overstate-success discipline `buildPublishSuccessStepSummary`'s
+ *   own `labelApplied`/`gamingLabelApplied` fields already follow.
+ * @returns The Markdown comment body.
+ */
+export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolean): string {
+  const labelLine = labelApplied
+    ? `labelled \`${NO_AUTO_CHAIN_LABEL}\`.`
+    : `the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply — flagged for manual review anyway.`;
+  const lines: string[] = [
+    "> 🚩 **This diff was flagged by the deterministic anti-gaming classifier (F1-S9) — " +
+      `${labelLine} A human must review this before it advances any further.**`,
+    "",
+  ];
+  if (flag.testFileEdits.length > 0) {
+    lines.push("**Test file(s) edited:**");
+    for (const path of flag.testFileEdits) {
+      lines.push(`- ${sanitizeStepSummaryText(path)}`);
+    }
+    lines.push("");
+  }
+  if (flag.suppressions.length > 0) {
+    lines.push("**Coverage-suppression comment(s) added:**");
+    for (const match of flag.suppressions) {
+      lines.push(
+        `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,
+      );
+    }
+    lines.push("");
+  }
+  if (flag.packageJsonTestScriptEdits.length > 0) {
+    lines.push("**`package.json` test/coverage/lifecycle script(s) redefined:**");
+    for (const line of flag.packageJsonTestScriptEdits) {
+      lines.push(`- ${sanitizeStepSummaryText(line)}`);
+    }
+    lines.push("");
+  }
+  if (flag.rootPytestConfigSections.length > 0) {
+    lines.push("**Pytest config section added to a root-level pyproject.toml/setup.cfg:**");
+    for (const line of flag.rootPytestConfigSections) {
+      lines.push(`- ${sanitizeStepSummaryText(line)}`);
+    }
+    lines.push("");
+  }
+  lines.push(
+    "This is a conservative, deterministic flag — it does not judge whether the edit is " +
+      "legitimate, only that it falls in a class the factory can't safely auto-verify. " +
+      "Confirm it's intentional and correct before merging.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Builds the body for the `COMMENT`-event review posted when BOTH the
+ * `no-auto-chain` label AND the annotation comment fail to post on a
+ * flagged diff (Codex finding, F1-S9 slice 1, issue #12, ready rounds
+ * 5-6) — see `postGamingBothLostFailureReview` in
+ * `publish-implement-patch.mts` for why a PR review, not a commit
+ * status, is the mechanism this fallback uses, and why it's a `COMMENT`
+ * event specifically (GitHub disallows `REQUEST_CHANGES`/`APPROVE` from
+ * a PR's own author, which the publisher always is here). Reuses
+ * {@link buildGamingFlagAnnotation}'s own rendering (with
+ * `labelApplied: false`, accurately reflecting that the label call
+ * really did fail in this scenario) rather than duplicating the
+ * per-category rendering logic a second time, prefixed with a short
+ * banner explaining why a review — normally never posted by this
+ * classifier — showed up here at all.
+ *
+ * @param flag - What the classifier found.
+ * @returns The Markdown review body.
+ */
+export function buildGamingBothLostReviewBody(flag: GamingFlag): string {
+  return [
+    "> ⚠️ **Fallback signal:** the anti-gaming classifier flagged this diff, but both the " +
+      "label and the annotation comment failed to post — this review exists so the flag " +
+      "isn't silently lost. Confirm the flagged content below is intentional and correct " +
+      "before merging.",
+    "",
+    buildGamingFlagAnnotation(flag, false),
+  ].join("\n");
+}
+
+/**
  * Parses `git diff-index --cached --name-status -z -M -C --find-copies-harder
  * HEAD`'s output (run against a throwaway scratch index — see
  * `getAuthoritativeChangedPaths` in `publish-implement-patch.mts` for the
@@ -493,6 +1214,27 @@ export function isLabelAlreadyExistsError(err: unknown): boolean {
     return false; // Unparsable body: never assume it's the benign case.
   }
   return Boolean(body.errors?.some((e) => e.code === "already_exists"));
+}
+
+/**
+ * True when `err` represents GitHub's "Remove a label from an issue"
+ * 404 — the label simply isn't currently applied, a benign no-op case
+ * (F1-S9 slice 1, issue #12, ready round — see
+ * `removeNoAutoChainLabelBestEffort` in `publish-implement-patch.mts`).
+ * Unlike {@link isLabelAlreadyExistsError}, GitHub reliably reports this
+ * case as a plain 404 regardless of response body shape, so no body
+ * parsing is needed to distinguish it from a genuine failure.
+ *
+ * @param err - The error a `githubRequest` `DELETE .../labels/{name}`
+ *   call threw.
+ * @returns Whether this is specifically "the label wasn't applied".
+ */
+export function isLabelNotFoundOnIssueError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const match = err.message.match(/^GitHub API \S+ \S+ failed: (\d+) /);
+  return match?.[1] === "404";
 }
 
 /**
@@ -880,6 +1622,41 @@ export function buildPublishSuccessStepSummary(
      * applied" regardless of what actually happened.
      */
     readonly labelApplied?: boolean;
+    /**
+     * Whether the deterministic anti-gaming classifier (F1-S9 slice 1,
+     * issue #12) flagged this diff — `undefined` when the classifier
+     * hasn't run for some reason (never expected in practice, but this
+     * mirrors `labelApplied`'s optionality rather than assuming it did).
+     */
+    readonly gamingFlagged?: boolean;
+    /**
+     * Whether `applyNoAutoChainLabelBestEffort` actually succeeded —
+     * `undefined` when `gamingFlagged` is not `true` (the label is never
+     * attempted). Same "never overstate success" discipline as
+     * `labelApplied` above.
+     */
+    readonly gamingLabelApplied?: boolean;
+    /**
+     * Whether `postGamingFlagAnnotation` actually succeeded — `undefined`
+     * when `gamingFlagged` is not `true` (never attempted). Tracked
+     * SEPARATELY from `gamingLabelApplied` (Codex + claude-review finding,
+     * F1-S9 slice 1, issue #12, round 3): the label and the annotation
+     * comment are two independent best-effort calls, so this summary must
+     * never point the operator at "the PR's annotation comment" when that
+     * comment call itself failed and no such comment exists.
+     */
+    readonly gamingAnnotationPosted?: boolean;
+    /**
+     * Whether `removeNoAutoChainLabelBestEffort` removed a STALE label
+     * from an earlier, flagged push on this same PR — `true` if removed,
+     * `false` if removal was attempted and failed, `undefined` if there
+     * was nothing to remove (never attempted, or the label wasn't
+     * present). Ready-round finding: only ever set on the REFRESH path
+     * when this run's own commit(s) are classifier-clean; a brand-new PR
+     * can't have a stale label from a "previous" state that never
+     * existed.
+     */
+    readonly gamingLabelRemoved?: boolean;
   },
 ): string {
   const labelLine =
@@ -922,6 +1699,34 @@ export function buildPublishSuccessStepSummary(
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
       "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
       "PR as if Claude Code Review never ran until that's resolved.";
+  const gamingLabelClause =
+    context.gamingLabelApplied === false
+      ? `attempted but FAILED to apply the \`${NO_AUTO_CHAIN_LABEL}\` label — check the run's logs`
+      : `labelled \`${NO_AUTO_CHAIN_LABEL}\``;
+  // Independent of the label outcome above (Codex + claude-review finding,
+  // round 3): the annotation comment is a SEPARATE best-effort call, so
+  // this must only point at "the PR's annotation comment" when that call
+  // actually succeeded — never assume the label's outcome implies the
+  // comment's.
+  const gamingAnnotationClause =
+    context.gamingAnnotationPosted === false
+      ? "the annotation comment FAILED to post — check the run's logs for exactly what tripped it"
+      : "see the PR's annotation comment for exactly what tripped it";
+  // Ready-round finding: a clean refresh must say whether a STALE label
+  // from an earlier, flagged push on this same PR was cleared, rather
+  // than leaving the PR's own label list contradicting this "clean"
+  // line.
+  const gamingCleanLine =
+    context.gamingLabelRemoved === true
+      ? `✅ clean — no test-file edits, no added coverage-suppression comments (the ` +
+        `\`${NO_AUTO_CHAIN_LABEL}\` label from an earlier, flagged push on this PR was removed)`
+      : context.gamingLabelRemoved === false
+        ? `✅ clean, but FAILED to remove a stale \`${NO_AUTO_CHAIN_LABEL}\` label from an ` +
+          "earlier push — check the run's logs; the PR may still read as flagged"
+        : "✅ clean — no test-file edits, no added coverage-suppression comments";
+  const gamingLine = !context.gamingFlagged
+    ? gamingCleanLine
+    : `🚩 **FLAGGED** — ${gamingLabelClause}; ${gamingAnnotationClause} — human review required before this advances`;
   return [
     "## Factory publish summary",
     "",
@@ -929,6 +1734,7 @@ export function buildPublishSuccessStepSummary(
     `- **Publisher identity:** ${publisherIdentityLine(context)}`,
     `- **PR:** [#${context.prNumber}](${sanitizeStepSummaryUrl(context.prUrl)})${context.wasRefresh ? " (refreshed, not newly opened)" : ""}`,
     `- **Review automation:** ${reviewAutomationLine}`,
+    `- **Anti-gaming classifier:** ${gamingLine}`,
     "",
   ].join("\n");
 }
