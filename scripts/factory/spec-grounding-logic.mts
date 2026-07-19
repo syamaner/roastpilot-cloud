@@ -204,6 +204,18 @@ const structuralParser = new MarkdownIt({
  * anything special at all — it would just be ordinary paragraph text —
  * so comment-stripping stays independent of the library swap below.
  *
+ * ORDER MATTERS (operator correction, PR #70 review round 5): code-region
+ * masking runs FIRST, on the raw text, and comment-stripping runs SECOND,
+ * on the already code-masked result — not the reverse. An earlier version
+ * stripped comments before parsing for code, so a code-FORMATTED comment
+ * marker (e.g. two separate checkbox items each showing one half of the
+ * syntax as a literal example, `` `<!--` `` ... `` `-->` ``) was read by
+ * the raw pre-pass as a REAL comment opening/closing pair, silently
+ * blanking every real criterion between them — an under-match. Masking
+ * code regions first means a code-formatted marker is already blank
+ * whitespace by the time the comment regex runs, so it can only match a
+ * genuine `<!-- ... -->` pair sitting OUTSIDE any code region.
+ *
  * Code-region detection (fenced blocks — backtick OR tilde, of any
  * length, including one left unclosed through EOF; indented code blocks;
  * and inline code spans of any backtick-run length) is delegated to
@@ -233,16 +245,34 @@ const structuralParser = new MarkdownIt({
  */
 function buildStructuralView(text: string): string {
   const neuterPreservingNewlines = (match: string): string => match.replace(/[^\n]/g, " ");
-  const withoutComments = text.replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
 
-  const originalLines = withoutComments.split(/\r?\n/);
+  // CODE-REGION MASKING RUNS FIRST, comment-stripping SECOND (operator
+  // correction, PR #70 review round 5 — an ordering bug, not a pattern
+  // gap): an earlier version stripped HTML comments BEFORE parsing for
+  // code regions, so a code-FORMATTED comment marker — `` `<!--` `` ...
+  // `` `-->` `` as two SEPARATE inline code spans, e.g. two checkbox
+  // items each showing one half of the syntax as a literal example —
+  // was read by the raw regex pre-pass as a REAL comment opening/closing
+  // pair, silently blanking every real criterion between them. An
+  // under-match that could drop real, unmet criteria. Parsing the RAW
+  // text for code regions first (markdown-it never recognizes `<!--`
+  // specially with `html: false`, verified empirically, so its own
+  // parse is unaffected either way) and masking those FIRST means a
+  // code-formatted comment marker is already blank whitespace by the
+  // time the comment-stripping regex ever runs — it can only match a
+  // REAL `<!-- ... -->` pair that exists outside any code region.
+  const originalLines = text.split(/\r?\n/);
   const maskedLines = [...originalLines];
 
   let tokens: ReturnType<(typeof structuralParser)["parse"]>;
   try {
-    tokens = structuralParser.parse(withoutComments, {});
+    tokens = structuralParser.parse(text, {});
   } catch {
-    return withoutComments;
+    // Fails safe in the same over-match direction even on this earlier
+    // parse failure: comment-stripping (below) still runs on the raw
+    // text, so a real, out-of-code comment is still correctly stripped
+    // even when code-region masking itself couldn't run at all.
+    return text.replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
   }
 
   for (const token of tokens) {
@@ -343,7 +373,9 @@ function buildStructuralView(text: string): string {
     }
   }
 
-  return maskedLines.join("\n");
+  // HTML comments stripped SECOND, from the already CODE-MASKED text —
+  // see this function's own opening comment for why this order matters.
+  return maskedLines.join("\n").replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
 }
 
 /**
@@ -442,7 +474,16 @@ const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^ {0,3}(#{2,6})\s*acceptance c
 // {@link parseAcceptanceCriteria}'s level comparison). Same 0-3-leading-
 // space tolerance as {@link ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN}.
 const ANY_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s+\S/;
-const CHECKBOX_LINE_PATTERN = /^\s*-\s*\[( |x|X)\]\s*(.+)$/;
+// The marker alternation covers every GFM list marker this repo's own
+// story.yml issue-form output happens to use (`-`) PLUS every OTHER
+// valid GFM task-list marker (Codex finding, PR #70 review round 5): the
+// bullet forms `*`/`+`, and ordered markers (one or more digits followed
+// by `.` or `)`). Unlike the zero-width/format-character finding above,
+// this set IS fully bounded by the GFM spec itself — verified against
+// markdown-it's own parser (every one of these six forms produces a real
+// list-item token) — so it's enumerated completely once here, not
+// patched incrementally.
+const CHECKBOX_LINE_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s*\[( |x|X)\]\s*(.+)$/;
 
 /**
  * Extracts every acceptance-criteria checkbox line from an issue body's
@@ -714,17 +755,30 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // (but still literal-character) regex still misses, while an LLM
 // tokenizer/renderer plausibly collapses them and reads the result as the
 // real tag anyway (independent factory-security-reviewer finding, F1-S9
-// slice 3, issue #12; range completed by a Codex finding on the SAME PR
-// review \u2014 the original range missed the bidi ISOLATE block and the
-// Arabic Letter Mark, both real, live Unicode format characters): the
-// Arabic Letter Mark (U+061C), zero-width space/non-joiner/joiner plus
-// the left/right-to-left MARKS (U+200B-200F), the bidi
-// embedding/override control block (U+202A-202E), word-joiner/invisible
-// math operators PLUS the bidi ISOLATE block immediately adjacent to them
-// (U+2060-2069 \u2014 LRI/RLI/FSI/PDI at U+2066-2069 specifically were the
-// Codex-found gap), and the BOM used as a zero-width no-break space
-// (U+FEFF).
-const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+// slice 3, issue #12).
+//
+// CATEGORICAL FIX (operator correction, PR #70 review round 5 \u2014 the
+// markdown-it lesson applied one level down): this pattern was
+// previously an enumerated set of Unicode ranges, extended TWICE across
+// this same PR review as Codex found the next gap each time (U+200B-
+// 200F/202A-202E/2060-2064/FEFF, then U+061C + the bidi ISOLATE block
+// U+2066-2069, then the deprecated bidi shaping controls U+206A-206F).
+// Enumerating ranges is exactly the class of bug the markdown-it swap
+// was meant to close for code-region detection \u2014 the same lesson
+// applies here: `\p{Cf}` (the Unicode FORMAT general category, matched
+// via the `u`-flag property-escape syntax) matches EVERY assigned
+// format character in ONE pattern \u2014 every zero-width character, every
+// bidi control, soft hyphen, and any future Unicode-assigned format
+// character this module has never explicitly enumerated \u2014 closing the
+// whole class by construction rather than the next round's specific
+// gap. Verified (not assumed) against every codepoint previously
+// enumerated here: `\p{Cf}` matches all of them except U+2065, which
+// isn't a real format character at all \u2014 it's an UNASSIGNED reserved
+// codepoint inside the invisible-operators block that only ever
+// appeared here as an accidental inclusion in a convenience numeric
+// range, never a meaningful character an attacker could type or a
+// renderer could collapse.
+const ZERO_WIDTH_AND_FORMAT_PATTERN = /\p{Cf}/gu;
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
