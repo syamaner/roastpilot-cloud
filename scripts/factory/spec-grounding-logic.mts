@@ -756,8 +756,9 @@ export interface AcceptanceCriterion {
 // against a real fetched issue, #12: GitHub renders a form's textarea
 // field as `### <label>` immediately followed by the field's raw content,
 // no blank line in between) — case-insensitive and heading-level-tolerant
-// (## through ######) so a hand-written (non-form) issue using a similar
-// heading still matches. Operates on a SINGLE line (no `m` flag) — see
+// (# through ######, level 1 through 6 — see the round-9 fix note below)
+// so a hand-written (non-form) issue using a similar heading still
+// matches. Operates on a SINGLE line (no `m` flag) — see
 // {@link parseAcceptanceCriteria}'s own per-line scan.
 //
 // The optional `(?:\s+#+)?` before the end anchor (Codex finding, PR #70
@@ -780,7 +781,17 @@ export interface AcceptanceCriterion {
 // higher-precedence rule, so a `#`-prefixed LINE at 4+ spaces correctly
 // stays unmatched (verified: this is exactly what markdown-it's own
 // `code_block` token already masks in {@link buildStructuralView}).
-const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^ {0,3}(#{2,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
+//
+// `#{2,6}` — LEVEL-1 REJECTED (Codex finding, PR #70 review round 9,
+// category (b) — wrong output on a COMMON input, contradicting this
+// function's own docstring, which already claimed "any heading level"):
+// a hand-written `# Acceptance criteria` (level 1) is a common, valid
+// form this pattern silently rejected. Widened to `#{1,6}` — the level
+// is still just the opening hash count, matching {@link ANY_HEADING_LINE_PATTERN}'s
+// own `#{1,6}` range (which already accepted level 1 for section-
+// TERMINATION purposes; only the SECTION-START pattern here had the
+// narrower, inconsistent range).
+const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
 // Any Markdown heading line, any level — used both to find the section's
 // own heading level and to detect where the section ends (see
 // {@link parseAcceptanceCriteria}'s level comparison). Same 0-3-leading-
@@ -1140,7 +1151,24 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // appeared here as an accidental inclusion in a convenience numeric
 // range, never a meaningful character an attacker could type or a
 // renderer could collapse.
-const ZERO_WIDTH_AND_FORMAT_PATTERN = /\p{Cf}/gu;
+//
+// `\p{Cf}` was STILL the wrong property, one round later (Codex finding,
+// PR #70 review round 9 \u2014 a real delimiter-breakout, category (a),
+// always folds regardless of the common-form cap): the Unicode Format
+// general category and the "default-ignorable" concept invisible-
+// character attacks actually key off are OVERLAPPING, not identical.
+// Combining Grapheme Joiner (U+034F), variation selectors (U+FE00-FE0F),
+// and Mongolian free variation selectors (U+180B-180D) are all
+// default-ignorable \u2014 an LLM tokenizer/renderer plausibly collapses
+// them the same way \u2014 but are NOT in category Cf, verified empirically
+// (each tests false against `\p{Cf}` alone) before writing this fix.
+// `\p{Default_Ignorable_Code_Point}` (JS's own supported Unicode binary-
+// property syntax under the `u` flag) closes the DI half; UNIONED with
+// `\p{Cf}` (which has its own members DI doesn't cover, e.g. the Arabic
+// number sign U+0600) the two together close the whole invisible-
+// breakout class by construction, not by enumerating this round's three
+// named characters and waiting for the next.
+const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
