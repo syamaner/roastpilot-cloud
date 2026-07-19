@@ -12,10 +12,23 @@ concurrency:
 env:
   NEXT_TELEMETRY_DISABLED: "1"
 
+# Default-deny; every job declares exactly the scopes it needs (CodeQL
+# "Workflow does not contain permissions" finding, F1-S9 slice 2, issue
+# #12 — the same convention already established in triage-issues.yml,
+# implement-ready-issues.yml, and dev-snowflake-contract.yml). Every job
+# in this file only reads the checkout, runs local gates/tests, and
+# uploads its own artifacts (which use GitHub's internal artifact-upload
+# mechanism, not the job's own GITHUB_TOKEN scopes) -- none of them push,
+# comment, or otherwise write -- so `contents: read` is uniformly correct
+# and sufficient across every job here, not scope-specific per job.
+permissions: {}
+
 jobs:
   gates:
     name: Lint, typecheck, unit tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,6 +74,8 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -93,6 +108,8 @@ jobs:
   snowflake-migrations:
     name: Snowflake migrations (offline)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -170,6 +187,8 @@ jobs:
     # defaults (a malicious or accidental infinite-loop mutant is bounded
     # per-mutant already; this is the whole-job backstop).
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
