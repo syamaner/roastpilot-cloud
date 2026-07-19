@@ -35,11 +35,22 @@ class TestComputeMutationScore:
             check_mutation_score.compute_mutation_score(0, 0)
 
 
+_FULL_STATS_SHAPE = {
+    "killed": 5,
+    "survived": 1,
+    "total": 6,
+    "no_tests": 0,
+    "suspicious": 0,
+    "timeout": 0,
+    "segfault": 0,
+}
+
+
 class TestLoadStats:
     def test_reads_and_parses_valid_json(self, tmp_path: Path) -> None:
         path = tmp_path / "stats.json"
-        path.write_text(json.dumps({"killed": 5, "survived": 1}))
-        assert check_mutation_score.load_stats(path) == {"killed": 5, "survived": 1}
+        path.write_text(json.dumps(_FULL_STATS_SHAPE))
+        assert check_mutation_score.load_stats(path) == _FULL_STATS_SHAPE
 
     def test_exits_when_the_file_is_missing(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit, match="could not read mutation stats"):
@@ -50,6 +61,29 @@ class TestLoadStats:
         path.write_text("not valid json{")
         with pytest.raises(SystemExit, match="not valid JSON"):
             check_mutation_score.load_stats(path)
+
+    @pytest.mark.parametrize("missing_key", check_mutation_score.REQUIRED_STATS_KEYS)
+    def test_exits_when_any_required_key_is_entirely_missing(
+        self, tmp_path: Path, missing_key: str
+    ) -> None:
+        # Independent factory-security-reviewer finding (F1-S9 slice 2,
+        # issue #12): a key entirely ABSENT (not just present with value
+        # 0) must fail closed, not silently disable that category's
+        # regression check via dict.get's default.
+        incomplete = {k: v for k, v in _FULL_STATS_SHAPE.items() if k != missing_key}
+        path = tmp_path / "stats.json"
+        path.write_text(json.dumps(incomplete))
+        with pytest.raises(SystemExit, match="missing expected key"):
+            check_mutation_score.load_stats(path)
+
+    def test_reads_fine_with_an_extra_unrecognized_key_present(self, tmp_path: Path) -> None:
+        # Over-strict validation (rejecting UNKNOWN extra keys) isn't the
+        # goal here -- only MISSING required keys must fail closed. A
+        # future mutmut release adding a brand-new category should not
+        # break this script before that category is deliberately handled.
+        path = tmp_path / "stats.json"
+        path.write_text(json.dumps({**_FULL_STATS_SHAPE, "check_was_interrupted_by_user": 0}))
+        assert check_mutation_score.load_stats(path)["killed"] == 5
 
 
 class TestLoadBaseline:
@@ -189,6 +223,39 @@ class TestEvaluate:
         current_grown = {"killed": 380, "survived": 140, "total": 520}
         assert check_mutation_score.evaluate(current_grown, baseline) == []
 
+    def test_flags_the_exact_deletion_scenario_where_the_ratio_alone_would_have_passed_silently(
+        self,
+    ) -> None:
+        # Independent factory-security-reviewer finding (F1-S9 slice 2,
+        # issue #12): DELETING an entire covered security function removes
+        # its mutants entirely, and if that function's OWN mutants were
+        # disproportionately SURVIVED (i.e. it was the weakly-tested part
+        # of the file), removing it can IMPROVE the ratio on what remains
+        # -- deleting weak coverage looks like strengthening the suite.
+        # There is no separate killed-count check; the total-drop
+        # condition (already tested above) is what catches this. This test
+        # proves it against the exact deletion shape: a poorly-tested
+        # function worth 60 mutants (10 killed, 50 survived -- a 17% local
+        # kill rate) is removed entirely from the 423/154/577 baseline,
+        # leaving 413/104/517 at a BETTER ratio (0.799 vs. 0.733) than the
+        # baseline -- exactly the silent-pass a ratio-only gate would allow.
+        baseline = {"killed": 423, "survived": 154, "total": 577}
+        after_deleting_a_weakly_tested_function = {"killed": 413, "survived": 104, "total": 517}
+        current_score = check_mutation_score.compute_mutation_score(
+            after_deleting_a_weakly_tested_function["killed"],
+            after_deleting_a_weakly_tested_function["survived"],
+        )
+        baseline_score = check_mutation_score.compute_mutation_score(
+            baseline["killed"], baseline["survived"]
+        )
+        # Confirms the scenario is realistic: the ratio alone IMPROVES, so
+        # a ratio-only gate would have passed this deletion silently.
+        assert current_score > baseline_score
+
+        reasons = check_mutation_score.evaluate(after_deleting_a_weakly_tested_function, baseline)
+        assert len(reasons) == 1
+        assert "total mutant count dropped" in reasons[0]
+
     def test_missing_total_key_defaults_to_zero_on_both_sides(self) -> None:
         current = {"killed": 353, "survived": 131}
         baseline = {"killed": 353, "survived": 131}
@@ -216,7 +283,7 @@ class TestMain:
         self._write_stats_and_baseline(
             tmp_path,
             monkeypatch,
-            {"killed": 353, "survived": 131, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 353, "survived": 131, "total": 484},
             {"killed": 353, "survived": 131, "no_tests": 0},
         )
         assert check_mutation_score.main() == 0
@@ -228,7 +295,7 @@ class TestMain:
         self._write_stats_and_baseline(
             tmp_path,
             monkeypatch,
-            {"killed": 300, "survived": 184, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 300, "survived": 184, "total": 484},
             {"killed": 353, "survived": 131, "no_tests": 0},
         )
         assert check_mutation_score.main() == 1
@@ -246,7 +313,7 @@ class TestMain:
         self._write_stats_and_baseline(
             tmp_path,
             monkeypatch,
-            {"killed": 0, "survived": 0, "no_tests": 0},
+            {**_FULL_STATS_SHAPE, "killed": 0, "survived": 0, "total": 0},
             {"killed": 353, "survived": 131, "no_tests": 0},
         )
         assert check_mutation_score.main() == 1

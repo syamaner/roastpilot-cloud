@@ -47,6 +47,20 @@ run's mutation score against the committed baseline
    baseline.
 
 All three checks are necessary; none alone catches everything the others do.
+
+CONFIRMED (independent factory-security-reviewer finding, F1-S9 slice 2,
+issue #12 -- "does the gate fail on a killed-count DROP specifically, or
+only via score+total?"): there is no separate `killed`-count-drop check,
+and none is needed -- condition 3 (the `total` check above) already
+catches the exact exploit that finding named: DELETING an entire covered
+security function. Removing a function's code removes ITS mutants from
+the count entirely, so `total` drops; `killed` alone dropping while
+`survived` drops by the same or a greater amount (a plausible shape if the
+deleted function's own mutants were disproportionately hard-to-kill) could
+otherwise look score-neutral or score-improving, exactly like the
+mutant-suppression case condition 3 already targets. See
+`test_check_mutation_score.py`'s own explicit deletion-scenario test for
+the empirical proof, not just this claim.
 """
 
 from __future__ import annotations
@@ -97,15 +111,31 @@ def compute_mutation_score(killed: int, survived: int) -> float:
     return killed / denominator
 
 
+# Every top-level key `evaluate()` reads from the CURRENT run's stats JSON
+# (independent factory-security-reviewer finding, F1-S9 slice 2, issue #12
+# — "assert the expected keys exist, fail closed, like the killed/survived
+# path already does"): `dict.get(key, 0)` silently treats a MISSING key
+# the same as a key that's genuinely present with value 0, which means a
+# future mutmut release renaming (or dropping) one of these -- e.g.
+# `suspicious` becoming `flaky` -- would silently disable that category's
+# entire regression check rather than visibly failing. `load_stats`
+# validates every one of these is a literal key in the parsed JSON before
+# `evaluate()` ever sees it, closing that gap categorically rather than
+# per-field.
+REQUIRED_STATS_KEYS = ("killed", "survived", "total", *UNRESOLVED_MUTANT_CATEGORIES)
+
+
 def load_stats(path: Path) -> dict[str, object]:
-    """Reads and parses `mutmut export-cicd-stats`'s JSON output.
+    """Reads, parses, and validates `mutmut export-cicd-stats`'s JSON output.
 
     @param path: Path to the stats JSON file.
     @returns: The parsed JSON object.
-    @raises SystemExit: If the file is missing or not valid JSON -- a
-        missing/corrupt stats file means the mutation-testing run itself
-        didn't complete as expected, which must fail the check, not be
-        silently skipped.
+    @raises SystemExit: If the file is missing, not valid JSON, or missing
+        any of {@link REQUIRED_STATS_KEYS} -- a missing/corrupt/malformed
+        stats file means the mutation-testing run itself didn't complete
+        as expected, or mutmut's own output shape changed, either of
+        which must fail the check, not be silently skipped or partially
+        checked.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -115,12 +145,21 @@ def load_stats(path: Path) -> dict[str, object]:
             "`mutmut run` + `mutmut export-cicd-stats` run before this step?"
         ) from err
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as err:
         raise SystemExit(
             f"error: {path} is not valid JSON ({err}) -- mutmut's own "
             "export-cicd-stats output format may have changed"
         ) from err
+    missing = [key for key in REQUIRED_STATS_KEYS if key not in parsed]
+    if missing:
+        raise SystemExit(
+            f"error: {path} is missing expected key(s) {missing} -- mutmut's own "
+            "export-cicd-stats output format may have changed. Failing closed rather "
+            "than silently defaulting a missing category to 0, which would disable "
+            "its regression check entirely without any visible signal."
+        )
+    return parsed
 
 
 def load_baseline(path: Path) -> dict[str, object]:

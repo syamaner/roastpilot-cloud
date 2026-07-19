@@ -16,6 +16,7 @@ import {
   findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
+  findMutationGateConfigEdits,
   findPrForIssueNumber,
   findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
@@ -23,6 +24,7 @@ import {
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isLabelAlreadyExistsError,
   isLabelNotFoundOnIssueError,
+  isMutationGateConfigPath,
   isProtectedPath,
   isTestFilePath,
   NO_AUTO_CHAIN_LABEL,
@@ -311,6 +313,51 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     // via its new path; either way this must not miss it.
     expect(findTestFileEdits(["lib/old-name.ts", "tests/new-name.test.ts"])).toEqual([
       "tests/new-name.test.ts",
+    ]);
+  });
+});
+
+describe("isMutationGateConfigPath / findMutationGateConfigEdits (factory-security-reviewer finding, F1-S9 slice 2, issue #12 — cross-slice integration gap: the mutation-testing gate's own config was previously unwatched by this classifier)", () => {
+  it("flags the mutation-baseline.json file", () => {
+    expect(isMutationGateConfigPath("snowflake/mutation-baseline.json")).toBe(true);
+  });
+
+  it("flags the check_mutation_score.py gate script", () => {
+    expect(isMutationGateConfigPath("snowflake/check_mutation_score.py")).toBe(true);
+  });
+
+  it("flags requirements-dev.txt (the mutmut version pin)", () => {
+    expect(isMutationGateConfigPath("snowflake/requirements-dev.txt")).toBe(true);
+  });
+
+  it("does NOT flag an ordinary snowflake/ file, or the gate's own pyproject.toml section by path alone (that's a different, already-flagged mechanism via ROOT_PYTEST_CONFIG_CONTENT_PATHS's siblings — snowflake/pyproject.toml is already an exact-match test-discovery-config path)", () => {
+    expect(isMutationGateConfigPath("snowflake/assert_dev_ci_grants.py")).toBe(false);
+    expect(isMutationGateConfigPath("snowflake/check_forbidden_grants.py")).toBe(false);
+    expect(isMutationGateConfigPath("snowflake/validate_migrations.py")).toBe(false);
+  });
+
+  it("findMutationGateConfigEdits normalizes, de-duplicates, and sorts the result", () => {
+    const edits = findMutationGateConfigEdits([
+      "a/snowflake/mutation-baseline.json",
+      "b/snowflake/mutation-baseline.json",
+      "a/snowflake/assert_dev_ci_grants.py",
+      "b/snowflake/check_mutation_score.py",
+    ]);
+    expect(edits).toEqual([
+      "snowflake/check_mutation_score.py",
+      "snowflake/mutation-baseline.json",
+    ]);
+  });
+
+  it("findMutationGateConfigEdits returns empty for a clean patch that never touches the gate's own config", () => {
+    expect(
+      findMutationGateConfigEdits(["a/snowflake/assert_dev_ci_grants.py", "b/lib/slug.ts"]),
+    ).toEqual([]);
+  });
+
+  it("findMutationGateConfigEdits flags the exploit scenario: an agent patch lowering mutation-baseline.json's committed numbers (the gate would otherwise pass by construction, reading its own floor from the same checkout)", () => {
+    expect(findMutationGateConfigEdits(["snowflake/mutation-baseline.json"])).toEqual([
+      "snowflake/mutation-baseline.json",
     ]);
   });
 });
@@ -842,7 +889,7 @@ describe("findAddedRootPytestConfigSections (Codex finding, F1-S9 slice 1, issue
 describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("names the exact test file(s) edited", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [], mutationGateConfigEdits: [] },
       true,
     );
     expect(body).toContain(NO_AUTO_CHAIN_LABEL);
@@ -856,6 +903,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
         packageJsonTestScriptEdits: [],
         rootPytestConfigSections: [],
+        mutationGateConfigEdits: [],
       },
       true,
     );
@@ -870,6 +918,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
         packageJsonTestScriptEdits: [],
         rootPytestConfigSections: [],
+        mutationGateConfigEdits: [],
       },
       true,
     );
@@ -884,6 +933,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         suppressions: [],
         packageJsonTestScriptEdits: ['"test": "echo ok",'],
         rootPytestConfigSections: [],
+        mutationGateConfigEdits: [],
       },
       true,
     );
@@ -898,6 +948,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
         suppressions: [],
         packageJsonTestScriptEdits: [],
         rootPytestConfigSections: ["[tool.pytest.ini_options]"],
+        mutationGateConfigEdits: [],
       },
       true,
     );
@@ -905,9 +956,24 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     expect(body).toContain("[tool.pytest.ini_options]");
   });
 
+  it("names the exact mutation-gate config file(s) edited (factory-security-reviewer finding, F1-S9 slice 2, issue #12)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+        mutationGateConfigEdits: ["snowflake/mutation-baseline.json"],
+      },
+      true,
+    );
+    expect(body).toContain("Mutation-testing gate config/tooling edited");
+    expect(body).toContain("snowflake/mutation-baseline.json");
+  });
+
   it("says the label was applied when labelApplied is true", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [], mutationGateConfigEdits: [] },
       true,
     );
     expect(body).toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
@@ -916,7 +982,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
 
   it("says the label FAILED to apply — never claims it landed — when labelApplied is false (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3)", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [], mutationGateConfigEdits: [] },
       false,
     );
     expect(body).toContain(`the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply`);
@@ -937,7 +1003,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     const payload =
       "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [], rootPytestConfigSections: [], mutationGateConfigEdits: [] },
       true,
     );
     // The exact, deterministic expected rendering: the payload's own
@@ -959,7 +1025,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
     const payload = "tests/`[click](https://attacker.example)`.test.ts";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [] },
+      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [], rootPytestConfigSections: [], mutationGateConfigEdits: [] },
       true,
     );
     const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));
@@ -977,6 +1043,7 @@ describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12
       suppressions: [],
       packageJsonTestScriptEdits: [],
       rootPytestConfigSections: [],
+      mutationGateConfigEdits: [],
     });
     expect(body).toContain("both the label and the annotation comment failed to post");
     expect(body).toContain("tests/slug.test.ts");
@@ -988,6 +1055,7 @@ describe("buildGamingBothLostReviewBody (Codex finding, F1-S9 slice 1, issue #12
       suppressions: [],
       packageJsonTestScriptEdits: [],
       rootPytestConfigSections: [],
+      mutationGateConfigEdits: [],
     });
     expect(body).toContain("FAILED to apply");
     expect(body).not.toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
