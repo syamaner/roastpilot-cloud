@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import MarkdownIt from "markdown-it";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildLinkedIssueSpecs,
   parseAcceptanceCriteria,
@@ -8,6 +9,15 @@ import {
   type FetchedIssue,
   type LinkedIssueSpecsResult,
 } from "../../scripts/factory/spec-grounding-logic.mts";
+
+// Safety net alongside the explicit try/finally in the markdown-it-throws
+// test below — a vi.spyOn on MarkdownIt.prototype.parse affects every
+// instance (including this module's own private shared parser), so it
+// must never leak into a later test even if a future edit drops its own
+// manual restore.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
   it("returns empty for a body with no issue reference at all", () => {
@@ -121,6 +131,55 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences(body)).toEqual([]);
   });
 
+  it("ignores a reference inside a TILDE-fenced code block, not just backtick fences (Codex finding — the earlier regex-based fence stripper only recognized backtick fences at all; markdown-it's own fence token covers both CommonMark fence syntaxes by construction)", () => {
+    const body = ["~~~", "Closes #12", "~~~", "No real reference outside the fence."].join("\n");
+    expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
+  it("ignores a reference inside a fence left UNCLOSED through EOF (Codex finding — the earlier regex required a matching closing ``` and never found one for an unterminated fence, so its content leaked through as scannable text)", () => {
+    const body = ["Example (never closed):", "```", "Closes #12"].join("\n");
+    expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
+  it("ignores a reference inside a MULTI-BACKTICK inline span (Codex finding — the earlier single-backtick-only regex broke on CommonMark's variable-delimiter-length code-span rule, e.g. failing to strip content wrapped in double or triple backticks)", () => {
+    const doubleBacktick = "See the template: write ``Closes #12`` at the top.";
+    expect(parseLinkedIssueReferences(doubleBacktick)).toEqual([]);
+
+    const tripleBacktick = "See the template: write ```Closes #12``` at the top.";
+    expect(parseLinkedIssueReferences(tripleBacktick)).toEqual([]);
+  });
+
+  it("ignores a reference inside an indented (4-space) code block, the other CommonMark code-block form fences don't cover", () => {
+    const body = ["Example:", "", "    Closes #12", "", "No real reference outside the block."].join("\n");
+    expect(parseLinkedIssueReferences(body)).toEqual([]);
+  });
+
+  it("still finds a real reference immediately after a multi-backtick span closes, on the same line", () => {
+    const body = "Run ``gh pr view`` locally. Closes #12";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("does not crash and still finds the real reference when a code span triggers CommonMark's leading/trailing-space-stripping rule (verified empirically: `` `` `text` `` `` has content \"`text`\" once markdown-it strips the space, so markup+content+markup no longer literally appears in the source — the module's own defensive fallback for that reconstruction mismatch, verified against a REAL trigger rather than assumed unreachable)", () => {
+    const body = "See `` `nested` `` here. Closes #12";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("fails SAFE in the OVER-match direction when markdown-it itself throws (Codex constraint, PR #70 review): code regions stay unmasked rather than the whole scan being skipped, since a false positive here costs a human a glance while silently missing a real reference would not", () => {
+    const throwingParse = vi.spyOn(MarkdownIt.prototype, "parse").mockImplementation(() => {
+      throw new Error("simulated markdown-it failure");
+    });
+    try {
+      // With the parser unavailable, the fence below is NOT masked -- the
+      // "Closes #12" inside it is still found, which is the documented,
+      // deliberate over-match this fallback accepts rather than risking
+      // an under-match by propagating the parser's own failure.
+      const body = ["```", "Closes #12", "```"].join("\n");
+      expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+    } finally {
+      throwingParse.mockRestore();
+    }
+  });
+
   it("ignores a reference inside an HTML comment — the exact PR_REQUEST_TEMPLATE.md placeholder text (Codex finding: '<!-- this PR does not close #12 -->' otherwise parses as a real closing claim)", () => {
     const body = "Closes #<!-- issue this PR FULLY resolves --><!-- this PR does not close #12 -->\nRefs #8";
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 8, kind: "non-closing" }]);
@@ -199,6 +258,18 @@ describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
     expect(parseAcceptanceCriteria("###### Acceptance Criteria\n- [ ] x")).toEqual([{ text: "x", checked: false }]);
   });
 
+  it("recognizes the CommonMark closing-hash ATX heading form, '### Acceptance criteria ###' (Codex finding — the earlier pattern anchored the end of line right after the heading text, so a valid trailing hash run was never matched)", () => {
+    expect(parseAcceptanceCriteria("### Acceptance criteria ###\n- [ ] x")).toEqual([{ text: "x", checked: false }]);
+    expect(parseAcceptanceCriteria("### Acceptance criteria #####\n- [ ] x")).toEqual([
+      { text: "x", checked: false },
+    ]);
+  });
+
+  it("a closing-hash section-boundary heading still terminates the section (the closing-hash fix must not change LEVEL detection, only recognize the acceptance heading's own closing-hash form)", () => {
+    const body = "### Acceptance criteria\n- [ ] Only this one.\n\n### Verification notes ###\n- [ ] Not a criterion.";
+    expect(parseAcceptanceCriteria(body)).toEqual([{ text: "Only this one.", checked: false }]);
+  });
+
   it("accepts an uppercase X marker as checked, same as lowercase x", () => {
     expect(parseAcceptanceCriteria("### Acceptance criteria\n- [X] done")).toEqual([
       { text: "done", checked: true },
@@ -224,6 +295,23 @@ describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
       "### Fake heading inside the fence",
       "- [ ] A fake criterion that must NOT be extracted.",
       "```",
+      "- [ ] A second real criterion, after the fence.",
+    ].join("\n");
+    expect(parseAcceptanceCriteria(body)).toEqual([
+      { text: "The real criterion.", checked: false },
+      { text: "A second real criterion, after the fence.", checked: false },
+    ]);
+  });
+
+  it("does not treat a heading-shaped line inside a TILDE-fenced code example as a real section boundary either — the same case, the other CommonMark fence syntax (regression check on the markdown-it integration)", () => {
+    const body = [
+      "### Acceptance criteria",
+      "- [ ] The real criterion.",
+      "",
+      "~~~",
+      "### Fake heading inside the tilde fence",
+      "- [ ] A fake criterion that must NOT be extracted.",
+      "~~~",
       "- [ ] A second real criterion, after the fence.",
     ].join("\n");
     expect(parseAcceptanceCriteria(body)).toEqual([

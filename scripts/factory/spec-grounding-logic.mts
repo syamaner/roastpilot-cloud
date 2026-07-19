@@ -55,6 +55,8 @@
  * than silently accepted.
  */
 
+import MarkdownIt from "markdown-it";
+
 /**
  * Which GitHub keyword linked a PR to an issue, and therefore what
  * completion this PR is claiming for it — the single input severity
@@ -131,15 +133,28 @@ const ISSUE_LINK_PATTERN = new RegExp(
 
 const CLOSING_KEYWORD_SET: ReadonlySet<string> = new Set(CLOSING_KEYWORDS);
 
+// A single shared parser instance, configured as a PURE structural
+// tokenizer — never renders, never executes, never interprets HTML
+// (operator constraint on the markdown-it addition, F1-S9 slice 3, issue
+// #12, PR #70 review): html/linkify/typographer are all explicitly
+// disabled, and {@link buildStructuralView} only ever reads the TOKEN
+// STREAM `.parse()` returns (fence/code_block/code_inline boundaries) —
+// it never calls `.render()` or feeds any content back into the parser
+// as a template. No plugins are loaded.
+const structuralParser = new MarkdownIt({
+  html: false,
+  linkify: false,
+  typographer: false,
+});
+
 /**
  * Produces a "structural view" of arbitrary Markdown text with the
- * CONTENT of every fenced code block (`` ``` ... ``` ``), HTML comment
- * (`<!-- ... -->`), and inline code span (`` `...` ``) replaced by
- * whitespace of the SAME LENGTH — never collapsed, so line numbers and
- * character positions stay perfectly aligned with the original text. Two
- * functions in this module rely on that alignment for two different
- * reasons (claude-review + Codex findings, F1-S9 slice 3, issue #12, PR
- * #70 review):
+ * CONTENT of every fenced or indented code block, HTML comment
+ * (`<!-- ... -->`), and inline code span replaced by whitespace of the
+ * SAME LENGTH — never collapsed, so line numbers and character positions
+ * stay perfectly aligned with the original text. Two functions in this
+ * module rely on that alignment for two different reasons (claude-review
+ * + Codex findings, F1-S9 slice 3, issue #12, PR #70 review):
  *
  * - {@link parseLinkedIssueReferences} scans THIS view (not the raw
  *   body) for `<keyword> #N` references, so an illustrative example —
@@ -162,16 +177,106 @@ const CLOSING_KEYWORD_SET: ReadonlySet<string> = new Set(CLOSING_KEYWORDS);
  *   inline-code formatting WITHIN a real criterion's own text is never
  *   mangled.
  *
+ * HTML comments are stripped by a SEPARATE, dedicated regex pass, not by
+ * markdown-it (operator constraint, PR #70 review, verified empirically):
+ * with `html: false`, the parser doesn't recognize `<!-- ... -->` as
+ * anything special at all — it would just be ordinary paragraph text —
+ * so comment-stripping stays independent of the library swap below.
+ *
+ * Code-region detection (fenced blocks — backtick OR tilde, of any
+ * length, including one left unclosed through EOF; indented code blocks;
+ * and inline code spans of any backtick-run length) is delegated to
+ * markdown-it (Codex finding, PR #70 review: this module's own hand-
+ * rolled regex kept leaking new CommonMark variants — tilde fences,
+ * unclosed-to-EOF fences, multi-backtick spans — one round at a time;
+ * using a real, spec-complete parser for exactly this closes the whole
+ * variant space at once rather than incrementally). Heading detection
+ * stays a plain regex scan in {@link parseAcceptanceCriteria} — the part
+ * of that problem this module already solves well (tracking the
+ * acceptance heading's own LEVEL, not just "is this A heading") doesn't
+ * get any simpler from a parser's heading nodes, so the library is used
+ * only where the variant space was genuinely unbounded.
+ *
+ * FAILS SAFE in the OVER-match direction (operator constraint, PR #70
+ * review): if markdown-it throws on a pathological body, this function
+ * returns the comment-stripped text with NO code-region masking applied
+ * at all, rather than propagating the error. That means code REGIONS
+ * stay scannable (an illustrative example inside unparseable markdown
+ * could still false-positive as a reference) — the safe direction, since
+ * a false positive here costs a human a glance, while silently skipping
+ * a real reference or heading (the under-match direction) would not.
+ *
  * @param text - Raw Markdown text (a PR body or an issue body).
  * @returns The same text, length- and newline-preserving, with fenced/
  *   commented/inline-code CONTENT replaced by spaces.
  */
 function buildStructuralView(text: string): string {
   const neuterPreservingNewlines = (match: string): string => match.replace(/[^\n]/g, " ");
-  return text
-    .replace(/```[\s\S]*?```/g, neuterPreservingNewlines)
-    .replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines)
-    .replace(/`[^`\n]*`/g, neuterPreservingNewlines);
+  const withoutComments = text.replace(/<!--[\s\S]*?-->/g, neuterPreservingNewlines);
+
+  const originalLines = withoutComments.split(/\r?\n/);
+  const maskedLines = [...originalLines];
+
+  let tokens: ReturnType<(typeof structuralParser)["parse"]>;
+  try {
+    tokens = structuralParser.parse(withoutComments, {});
+  } catch {
+    return withoutComments;
+  }
+
+  for (const token of tokens) {
+    if ((token.type === "fence" || token.type === "code_block") && token.map !== null) {
+      const [start, end] = token.map;
+      for (let i = start; i < end && i < maskedLines.length; i++) {
+        maskedLines[i] = neuterPreservingNewlines(maskedLines[i] ?? "");
+      }
+      continue;
+    }
+    if (token.type !== "inline" || token.map === null || token.children === null) {
+      continue;
+    }
+    const [start, end] = token.map;
+    const joined = originalLines.slice(start, end).join("\n");
+    // Defensive: only mask if the reconstructed joined text matches what
+    // markdown-it itself reports for this span (a multi-line paragraph
+    // edge case not observed in testing, unlike the single-code-span
+    // mismatch just below, which IS reachable and tested). If it ever
+    // doesn't, skip masking this whole inline token rather than risk
+    // corrupting positions elsewhere — the same safe, over-match-
+    // favoring direction as the parse-failure fallback above.
+    if (joined !== token.content) {
+      continue;
+    }
+    let masked = joined;
+    for (const child of token.children) {
+      if (child.type !== "code_inline") {
+        continue;
+      }
+      const originalSpan = `${child.markup}${child.content}${child.markup}`;
+      const index = masked.indexOf(originalSpan);
+      if (index === -1) {
+        // Genuinely reachable, not just defensive (verified empirically:
+        // `` `` `text` `` `` triggers this) -- CommonMark strips exactly
+        // one leading/trailing space from a code span's content when
+        // both are present, so `markup+content+markup` can legitimately
+        // NOT match the original source verbatim. Skip masking THIS
+        // span rather than risk corrupting positions elsewhere; over-
+        // matching (leaving one real code span unmasked) is the safe
+        // direction, same as the parse-failure fallback above.
+        continue;
+      }
+      masked =
+        masked.slice(0, index) +
+        neuterPreservingNewlines(originalSpan) +
+        masked.slice(index + originalSpan.length);
+    }
+    const maskedSplit = masked.split("\n");
+    for (let i = start; i < end && i < maskedLines.length; i++) {
+      maskedLines[i] = maskedSplit[i - start] ?? maskedLines[i] ?? "";
+    }
+  }
+
+  return maskedLines.join("\n");
 }
 
 /**
@@ -243,7 +348,15 @@ export interface AcceptanceCriterion {
 // (## through ######) so a hand-written (non-form) issue using a similar
 // heading still matches. Operates on a SINGLE line (no `m` flag) — see
 // {@link parseAcceptanceCriteria}'s own per-line scan.
-const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^(#{2,6})\s*acceptance criteria\s*$/i;
+//
+// The optional `(?:\s+#+)?` before the end anchor (Codex finding, PR #70
+// review) accepts CommonMark's OTHER valid ATX-heading form, a trailing
+// run of closing `#` characters — `### Acceptance criteria ###` is just
+// as real a heading as the no-closing-hash form this repo's own
+// story.yml form happens to render; the level is still determined by the
+// OPENING hash count only, so the closing run (of any length) is matched
+// and discarded, never counted.
+const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^(#{2,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
 // Any Markdown heading line, any level — used both to find the section's
 // own heading level and to detect where the section ends (see
 // {@link parseAcceptanceCriteria}'s level comparison).
