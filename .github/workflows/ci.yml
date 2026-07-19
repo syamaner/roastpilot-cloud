@@ -12,10 +12,23 @@ concurrency:
 env:
   NEXT_TELEMETRY_DISABLED: "1"
 
+# Default-deny; every job declares exactly the scopes it needs (CodeQL
+# "Workflow does not contain permissions" finding, F1-S9 slice 2, issue
+# #12 — the same convention already established in triage-issues.yml,
+# implement-ready-issues.yml, and dev-snowflake-contract.yml). Every job
+# in this file only reads the checkout, runs local gates/tests, and
+# uploads its own artifacts (which use GitHub's internal artifact-upload
+# mechanism, not the job's own GITHUB_TOKEN scopes) -- none of them push,
+# comment, or otherwise write -- so `contents: read` is uniformly correct
+# and sufficient across every job here, not scope-specific per job.
+permissions: {}
+
 jobs:
   gates:
     name: Lint, typecheck, unit tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,6 +74,8 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -93,6 +108,8 @@ jobs:
   snowflake-migrations:
     name: Snowflake migrations (offline)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -126,6 +143,17 @@ jobs:
       # check_forbidden_grants.py (#11, F1-S8, round 4) joins the same gate
       # -- its own text-scan logic is fully unit-testable with no
       # Snowflake connection at all.
+      # `-P` (PYTHONSAFEPATH) on every python invocation below, same
+      # shadowing-class fix as the mutation-testing job (Codex finding,
+      # F1-S9 slice 2, issue #12, sweep of this job while making that fix
+      # -- these three commands run from/against snowflake/ too, so an
+      # agent patch planting e.g. `snowflake/pytest.py` or a stdlib-name
+      # shim would be just as exploitable here without it): removes
+      # cwd/script-directory from sys.path, so only the installed
+      # dependency (or actual stdlib) is ever imported. Verified this job
+      # still passes with `-P` added (no script here relies on an
+      # implicit cwd-relative import outside its own explicit
+      # `sys.path.insert`/package-relative imports).
       - name: Run snowflake/ tooling unit tests
         working-directory: snowflake
         # --cov-fail-under enforces the 98% this PR establishes on all
@@ -135,10 +163,10 @@ jobs:
         # in this repo. Set a few points below the current 98% so routine
         # additions (a new branch, an edge case) don't need a threshold
         # bump every time -- only a real coverage regression trips it.
-        run: python3 -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov-report=term-missing --cov-fail-under=90
+        run: python3 -P -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_mutation_score --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
-        run: python3 snowflake/validate_migrations.py
+        run: python3 -P snowflake/validate_migrations.py
 
       # Codex P1, PR #57, round 4, :244: a PREVENTIVE, best-effort static
       # scan for an obvious GRANT ... TO PUBLIC -- catches the class of bug
@@ -150,4 +178,113 @@ jobs:
       # why a purely textual scan can never be authoritative).
       - name: Check migrations for an obvious forbidden PUBLIC grant
         working-directory: snowflake
-        run: python3 check_forbidden_grants.py
+        run: python3 -P check_forbidden_grants.py
+
+  mutation-testing:
+    name: Mutation testing (security-critical Python)
+    runs-on: ubuntu-latest
+    # F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing
+    # over the security-critical grant-boundary Python. No Snowflake
+    # connection here (same offline reasoning as snowflake-migrations above)
+    # -- mutmut only re-runs this repo's own already-mocked unit tests
+    # against mutated copies of the source. Verified wall time against
+    # this repo's actual three files: ~40-60s for all 593 mutants, so a FULL
+    # run on every PR (not diff-scoped) is the right choice -- mutmut
+    # 3.6.0 has no native "mutate only the changed lines" option anyway
+    # (confirmed via its own `mutmut run --help`), and this surface is
+    # small enough that a full run costs less CI time than the Playwright
+    # job below already does. timeout-minutes is a defensive cap on top
+    # of mutmut's own per-mutant timeout_multiplier/timeout_constant
+    # defaults (a malicious or accidental infinite-loop mutant is bounded
+    # per-mutant already; this is the whole-job backstop).
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install mutmut + test tooling
+        run: pip install -r snowflake/requirements-dev.txt
+
+      # Run FROM snowflake/ (matches every other snowflake/ tooling step's
+      # working-directory, and is load-bearing here specifically: mutmut's
+      # generated trampoline names must match how snowflake/tests/*.py
+      # actually imports these modules -- a bare `import
+      # assert_dev_ci_grants`, via each test file's own sys.path insert of
+      # snowflake/ itself -- not `snowflake.assert_dev_ci_grants`. Running
+      # mutmut from the repo root with source_paths=["snowflake"] produces
+      # a "tests import the source under a different module path" failure;
+      # verified empirically in a scratch trial before writing this step.
+      #
+      # Every python invocation below carries `-P` (PYTHONSAFEPATH, 3.11+
+      # -- matches this job's pinned interpreter): Codex finding (F1-S9
+      # slice 2, issue #12) -- with cwd=snowflake/, a plain `python3 -m
+      # mutmut` (or a bare script invocation) puts the CURRENT DIRECTORY
+      # ahead of the installed dependency on sys.path, so an agent patch
+      # adding e.g. `snowflake/mutmut.py` (or `snowflake/json.py`,
+      # shadowing a stdlib module `check_mutation_score.py` itself
+      # imports) would silently run in place of the real package/module
+      # and could fake a clean run or a baseline-matching stats file --
+      # unflagged by the #64 classifier, since shadow filenames are an
+      # unbounded set, not something a path-based flag list can name in
+      # advance. `-P` removes cwd/script-directory from sys.path entirely,
+      # closing the whole shadowing class at the interpreter rather than
+      # chasing individual filenames. Verified empirically (scratch venv,
+      # matching this job's exact `mutmut==3.6.0` pin): every command
+      # below produces IDENTICAL output under `-P` as without it (mutmut's
+      # own trampoline mechanism imports modules via its own recorded
+      # path config, not a script-relative import, so it's unaffected);
+      # separately reproduced the exploit and confirmed `-P` defeats it --
+      # a planted `snowflake/mutmut.py` shim runs instead of the real
+      # package without `-P`, and is correctly ignored with it.
+      - name: Run mutation testing
+        working-directory: snowflake
+        run: python3 -P -m mutmut run
+
+      - name: Export mutation-testing stats
+        working-directory: snowflake
+        run: python3 -P -m mutmut export-cicd-stats
+
+      # The actual gate: mutmut run itself always exits 0 regardless of
+      # how many mutants survived (verified empirically -- only a genuine
+      # config/setup error exits non-zero from that step). This script
+      # compares mutants/mutmut-cicd-stats.json against the committed
+      # mutation-baseline.json and fails on a dropped score, a risen
+      # unresolved-mutant count, or a dropped total -- see
+      # check_mutation_score.py's own module docstring for why all three
+      # checks are needed.
+      - name: Check mutation score against the committed baseline
+        working-directory: snowflake
+        run: python3 -P check_mutation_score.py
+
+      # Codex finding (F1-S9 slice 2, issue #12, ready round): the uploaded
+      # artifact previously carried only the aggregate stats JSON, which
+      # can't identify which mutants actually survived -- a maintainer
+      # investigating a failure had to reproduce the whole run locally just
+      # to find their names. `mutmut results` (no --all) lists exactly the
+      # survived mutant IDs (mutmut's own default filter), which is enough
+      # to target a local `mutmut show <name>` for the full diff without
+      # re-running the whole 593-mutant suite first. `if: always()` so
+      # this still runs even if the score check above failed the job.
+      - name: List surviving mutant IDs
+        if: always()
+        working-directory: snowflake
+        run: python3 -P -m mutmut results > mutmut-survivors.txt
+
+      - name: Upload mutation-testing results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-testing-stats
+          path: |
+            snowflake/mutants/mutmut-cicd-stats.json
+            snowflake/mutmut-survivors.txt
+          retention-days: 14

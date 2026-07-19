@@ -333,6 +333,7 @@ already fully wired the moment this file changes.
 | Lens | Gate type | What it covers |
 |---|---|---|
 | CI (`Lint, typecheck, unit tests`, `Playwright smoke`, `Snowflake migrations (offline)`) | Required status check | Build/lint/typecheck/unit correctness; branch protection blocks merge on red |
+| `Mutation testing (security-critical Python)` | Required status check | Mutation testing over the grant-boundary Python (`assert_dev_ci_grants.py`, `check_forbidden_grants.py`, `validate_migrations.py` — the last is a genuine dependency of `check_forbidden_grants.py`'s own migration-file discovery, added F1-S9 slice 2, issue #12, ready round) fails on a dropped score, a risen unresolved-mutant count, or a dropped total mutant count against the committed baseline — see `snowflake/check_mutation_score.py`. Wired into branch protection's required-status-checks list (added same day this row was written). |
 | `codecov/patch` | Required status check, once wired | No coverage regression on changed lines |
 | CodeQL (`.github/workflows/codeql.yml`) | Not a required status check — surfaces as code-scanning alerts | Security vulnerabilities (taint flows, injection patterns) in the diff |
 | Dependency review (`.github/workflows/dependency-review.yml`) | Blocking job on `pull_request` (fails on high-severity advisory or a denied license) | Supply-chain risk on any `package.json`/`package-lock.json` change |

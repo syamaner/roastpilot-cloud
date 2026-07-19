@@ -1403,6 +1403,109 @@ index 0000000..abc1234
     });
     expect(gamingLabelCall).toBeUndefined();
   });
+
+  it("creation path: an edit to snowflake/mutation-baseline.json is flagged (factory-security-reviewer finding, F1-S9 slice 2, issue #12 — the exploit this closes: an agent patch lowering the gate's own committed floor would otherwise pass by construction, reading its floor from the same checkout)", async () => {
+    const baselineDiff = `diff --git a/snowflake/mutation-baseline.json b/snowflake/mutation-baseline.json
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/snowflake/mutation-baseline.json
+@@ -0,0 +1,1 @@
++{"killed": 1, "survived": 483, "total": 484}
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "mutation-baseline.diff", baselineDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const commentCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("snowflake/mutation-baseline.json");
+  });
+
+  it("creation path: an edit to snowflake/check_mutation_score.py is flagged (the gate script itself — the same registration gap)", async () => {
+    const gateScriptDiff = `diff --git a/snowflake/check_mutation_score.py b/snowflake/check_mutation_score.py
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/snowflake/check_mutation_score.py
+@@ -0,0 +1,1 @@
++def main() -> int: return 0
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "check-mutation-score.diff", gateScriptDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("creation path: an edit to snowflake/requirements-dev.txt is flagged (the mutmut version pin the whole gate depends on)", async () => {
+    const requirementsDiff = `diff --git a/snowflake/requirements-dev.txt b/snowflake/requirements-dev.txt
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/snowflake/requirements-dev.txt
+@@ -0,0 +1,1 @@
++mutmut==0.0.1
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "requirements-dev.diff", requirementsDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) => String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+  });
+
+  it("creation path: an edit to an UNRELATED snowflake/ file is NOT flagged by the mutation-gate registration (the targeted-fix requirement)", async () => {
+    const unrelatedDiff = `diff --git a/snowflake/README.md b/snowflake/README.md
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/snowflake/README.md
+@@ -0,0 +1,1 @@
++# Snowflake tooling
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "snowflake-readme.diff", unrelatedDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+  });
 });
 
 describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {

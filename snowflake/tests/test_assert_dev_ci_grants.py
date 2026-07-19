@@ -440,6 +440,39 @@ class TestFindUnexpectedUserRoleGrants:
         rows = [{"role": _DEV_ROLE}, {}]
         assert assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE) == []
 
+    def test_a_row_with_a_missing_role_field_does_not_stop_the_scan_of_LATER_rows(self) -> None:
+        """F1-S9 slice 2 (issue #12) mutation-testing survivor triage found
+        this: a `continue` -> `break` mutation on the empty-role-field
+        branch survived the existing suite. `test_ignores_a_row_with_a_
+        missing_role_field` above only ever puts the empty-role row LAST,
+        so `continue` and `break` produce the identical result there (the
+        loop ends either way). This test puts the empty-role row FIRST,
+        followed by a row naming a genuinely unexpected role -- `continue`
+        correctly keeps scanning and finds the violation; `break` would
+        stop the scan entirely on the empty-role row and silently miss it.
+        A row-ordering-dependent gap on the grant-boundary audit itself,
+        not a hypothetical one: `SHOW GRANTS TO USER` row order is never
+        something this script controls or can assume.
+        """
+        rows = [{}, {"role": "ACCOUNTADMIN"}]
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == ["ACCOUNTADMIN"]
+
+    def test_a_public_role_row_does_not_stop_the_scan_of_LATER_rows(self) -> None:
+        """The SAME mutation class as the test above, on the OTHER `continue`
+        in this function (the PUBLIC-role branch, not the empty-role-field
+        one) -- mutation testing found this as a second, independent
+        surviving mutant at the same `continue` -> `break` shape.
+        `test_public_is_never_flagged` only ever puts PUBLIC last, so it
+        can't distinguish `continue` from `break` there either. This test
+        puts a PUBLIC row FIRST, followed by a row naming a genuinely
+        unexpected role, proving the scan continues past PUBLIC instead of
+        stopping on it.
+        """
+        rows = [{"role": "PUBLIC"}, {"role": "ACCOUNTADMIN"}]
+        result = assert_dev_ci_grants.find_unexpected_user_role_grants(rows, _DEV_ROLE)
+        assert result == ["ACCOUNTADMIN"]
+
 
 _CI_USER = "ROASTPILOT_DEV_CI"
 

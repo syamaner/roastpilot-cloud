@@ -232,6 +232,18 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     expect(isTestFilePath("playwright.config.js")).toBe(true);
   });
 
+  it("flags an edit to the mutation gate's OWN files (independent security review of PR #68, F1-S9 slice 2 — the gate reads its baseline from the same PR checkout it judges, so lowering the baseline, weakening the gate script, or swapping the mutmut pin is test-strength tampering)", () => {
+    expect(isTestFilePath("snowflake/mutation-baseline.json")).toBe(true);
+    expect(isTestFilePath("snowflake/check_mutation_score.py")).toBe(true);
+    expect(isTestFilePath("snowflake/requirements-dev.txt")).toBe(true);
+    // The mutmut CONFIG lives in snowflake/pyproject.toml, covered by the
+    // pytest-discovery exact set (asserted in its own test above) — this
+    // set documents that coincidence and covers the three paths nothing
+    // else flags. A root-level requirements-dev.txt (doesn't exist) stays
+    // unflagged: only the snowflake one feeds the mutation job.
+    expect(isTestFilePath("requirements-dev.txt")).toBe(false);
+  });
+
   it("flags an edit to pytest's own discovery config under snowflake/, where this repo's pytest is actually invoked from", () => {
     expect(isTestFilePath("snowflake/pytest.ini")).toBe(true);
     expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
@@ -401,6 +413,34 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
       "+if x:  # pragma: no branch",
     ].join("\n");
     expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+  });
+
+  it("flags mutmut's own bare # pragma: no mutate (Codex finding, F1-S9 slice 2, issue #12 — the mutation gate's total-drop check can be offset by suppressing mutants in a security branch while adding easily-killed code elsewhere; verified against mutmut==3.6.0's own pragma_handling.py, which keys off the literal 'no mutate' substring)", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+if attacker_controlled:  # pragma: no mutate",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.line).toContain("no mutate");
+  });
+
+  it("flags mutmut's block/start/end pragma forms too, not just the bare form", () => {
+    for (const form of ["no mutate block", "no mutate start", "no mutate end"]) {
+      const patch = [
+        "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+        "--- a/snowflake/foo.py",
+        "+++ b/snowflake/foo.py",
+        "@@ -1,1 +1,2 @@",
+        " existing_line = 1",
+        `+    # pragma: ${form}`,
+      ].join("\n");
+      expect(findAddedCoverageSuppressions(patch)).toHaveLength(1);
+    }
   });
 
   it("does NOT flag an EXISTING (unmodified, context-line) suppression this diff doesn't touch", () => {
@@ -891,6 +931,20 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     );
     expect(body).toContain("pyproject.toml/setup.cfg");
     expect(body).toContain("[tool.pytest.ini_options]");
+  });
+
+  it("names the mutation-testing gate's own config file(s) under the test-file-edit section (F1-S9 slice 2, issue #12 — MUTATION_GATE_CONFIG_EXACT_PATHS is folded into isTestFilePath/findTestFileEdits, not a separate GamingFlag field)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: ["snowflake/mutation-baseline.json"],
+        suppressions: [],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expect(body).toContain("Test file(s) edited");
+    expect(body).toContain("snowflake/mutation-baseline.json");
   });
 
   it("says the label was applied when labelApplied is true", () => {

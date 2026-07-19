@@ -228,6 +228,37 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
 ]);
 
 /**
+ * The mutation-testing gate's OWN files (F1-S9 slice 2) — a test-STRENGTH
+ * tamper surface, flagged for exactly the reason the gate exists.
+ *
+ * The `mutation-testing` CI job reads `snowflake/mutation-baseline.json`
+ * and runs `snowflake/check_mutation_score.py` FROM THE SAME PR CHECKOUT
+ * it is judging, so an implementing agent can neutralise the gate without
+ * touching a single test: lower the committed baseline (the gate then
+ * "meets" the floor by construction), weaken the gate script's `evaluate`
+ * logic, or swap the pinned mutmut version in `requirements-dev.txt` for
+ * one whose mutant population differs. None of those paths is a test file,
+ * a discovery config, or a protected pipeline path — without this set they
+ * were verified invisible to every other flagged class (independent
+ * factory-security review of PR #68). The mutmut CONFIG itself
+ * (`snowflake/pyproject.toml`, `[tool.mutmut]` / `only_mutate`) is already
+ * exact-matched above via the pytest-discovery set — coincidental but
+ * sufficient, noted here so a future move of that config to its own file
+ * knows to add the new location HERE.
+ *
+ * Same one-directional conservatism as the sibling sets: a legitimate
+ * baseline recompute (e.g. new tests killing more mutants) or a deliberate
+ * gate-script improvement WILL flag — that costs a human a few seconds of
+ * "yes, intended", and such edits are rare and load-bearing enough that a
+ * human glance is exactly what they deserve.
+ */
+const MUTATION_GATE_CONFIG_EXACT_PATHS = new Set([
+  "snowflake/mutation-baseline.json",
+  "snowflake/check_mutation_score.py",
+  "snowflake/requirements-dev.txt",
+]);
+
+/**
  * True when a normalized path is a test file (or its discovery config) by
  * this repo's own conventions — directory prefix, filename suffix, or
  * exact discovery-config match; see {@link TEST_PATH_PREFIXES}/
@@ -248,6 +279,9 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
  */
 export function isTestFilePath(normalizedPath: string): boolean {
   if (TEST_DISCOVERY_CONFIG_EXACT_PATHS.has(normalizedPath)) {
+    return true;
+  }
+  if (MUTATION_GATE_CONFIG_EXACT_PATHS.has(normalizedPath)) {
     return true;
   }
   if (TEST_PATH_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
@@ -282,7 +316,7 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
-/** A single ADDED coverage-suppression line {@link findAddedCoverageSuppressions} found. */
+/** A single ADDED coverage- or mutation-suppression line {@link findAddedCoverageSuppressions} found. */
 export interface CoverageSuppressionMatch {
   /** The file the suppression comment was added in (normalized). */
   readonly path: string;
@@ -291,25 +325,40 @@ export interface CoverageSuppressionMatch {
 }
 
 /**
- * Matches a coverage-suppression comment: Python's `# pragma: no cover`
- * or `# pragma: no branch` (both real `coverage.py` pragmas), or a JS/TS
- * coverage-provider ignore comment — in EITHER its block-comment
- * (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
- * (`// v8/c8/istanbul ignore ...`) form. `v8 ignore` (block form) is this
- * repo's LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
- * `c8`/`istanbul`, and the line-comment form for all three, are matched
- * defensively even though unused here today — over-matching a syntax
- * this repo doesn't currently use is harmless, and a future provider
- * switch (or a diff copy-pasted from elsewhere) shouldn't need this
- * pattern updated to still catch it. This exact set (independent
- * factory-security-reviewer finding, F1-S9 slice 1, issue #12 — an
- * earlier version's docstring claimed "c8/istanbul" broadly while the
- * regex only matched their BLOCK-comment form, missing istanbul's
- * documented line-comment form) is what the pattern below actually
- * matches — kept in sync deliberately, not narrowed to a stale claim.
+ * Matches a coverage- OR mutation-testing-suppression comment: Python's
+ * `# pragma: no cover` or `# pragma: no branch` (real `coverage.py`
+ * pragmas), a JS/TS coverage-provider ignore comment — in EITHER its
+ * block-comment (`/* v8/c8/istanbul ignore ... *\/`) or line-comment
+ * (`// v8/c8/istanbul ignore ...`) form — or `# pragma: no mutate`
+ * (mutmut's own suppression comment, ANY of its accepted forms: bare,
+ * `no mutate block`, `no mutate start`/`no mutate end` — all share the
+ * same `no mutate` substring mutmut's own parser keys off, verified
+ * against the installed `mutmut==3.6.0` source, `mutmut/mutation/
+ * pragma_handling.py`'s `_parse_pragma_token`). `v8 ignore` (block form)
+ * is this repo's LIVE syntax (`vitest.config.ts`'s
+ * `coverage: { provider: "v8" }`); `c8`/`istanbul`, and the line-comment
+ * form for all three, are matched defensively even though unused here
+ * today — over-matching a syntax this repo doesn't currently use is
+ * harmless, and a future provider switch (or a diff copy-pasted from
+ * elsewhere) shouldn't need this pattern updated to still catch it. This
+ * exact set (independent factory-security-reviewer finding, F1-S9 slice
+ * 1, issue #12 — an earlier version's docstring claimed "c8/istanbul"
+ * broadly while the regex only matched their BLOCK-comment form, missing
+ * istanbul's documented line-comment form) is what the pattern below
+ * actually matches — kept in sync deliberately, not narrowed to a stale
+ * claim.
+ *
+ * `no mutate` was added by a Codex finding, F1-S9 slice 2, issue #12: the
+ * mutation-testing gate's own total-drop check can be offset by
+ * suppressing mutants in a security-critical branch while adding
+ * easily-killed code elsewhere — a diff-level fix belongs here, in the
+ * classifier that already flags the coverage-suppression equivalent of
+ * this exact gaming move, not in the gate script itself (which can only
+ * see aggregate counts, never which specific mutants were newly
+ * suppressed).
  */
 const COVERAGE_SUPPRESSION_PATTERN =
-  /#\s*pragma:\s*no\s*(?:cover|branch)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
+  /#\s*pragma:\s*no\s*(?:cover|branch|mutate)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
 
 /**
  * A single ADDED line, with the path of the file it was added to —
@@ -404,11 +453,12 @@ function* walkAddedLines(patchText: string): Generator<AddedLine> {
 }
 
 /**
- * Scans raw unified-diff text for coverage-suppression comments on
- * ADDED lines only — an existing suppression this diff doesn't touch is
- * not this diff's problem to flag. Consumes {@link walkAddedLines} for
- * the hunk-tracking traversal (see that function's docstring for the
- * `+++`-bypass history this depends on staying fixed).
+ * Scans raw unified-diff text for coverage- or mutation-suppression
+ * comments on ADDED lines only — an existing suppression this diff
+ * doesn't touch is not this diff's problem to flag. Consumes
+ * {@link walkAddedLines} for the hunk-tracking traversal (see that
+ * function's docstring for the `+++`-bypass history this depends on
+ * staying fixed).
  *
  * @param patchText - The raw contents of a unified diff (same file
  *   `main()` already validates the size of before ever reading it — see
@@ -623,15 +673,23 @@ export function findAddedRootPytestConfigSections(patchText: string): string[] {
  * Applied to a PR whose diff trips the deterministic anti-gaming
  * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions} /
  * {@link findAddedPackageJsonTestScriptEdits} / {@link findAddedRootPytestConfigSections},
- * F1-S9 slice 1, issue #12): any edit to a test file, any ADDED
- * coverage-suppression comment, any ADDED `package.json` test/coverage/
- * lifecycle script-key redefinition, or any ADDED pytest config section
- * in a root-level `pyproject.toml`/`setup.cfg`. All four are treated as
- * a SINGLE, conservative class — "assertion weakening" itself is
- * semantic and can't be reliably detected (no LLM is used here; this
- * whole classifier is deterministic string/path matching), so the
- * entire vector is flagged rather than attempting to distinguish a
- * legitimate test-file edit (e.g. a genuine strengthening) from a gamed
+ * F1-S9 slice 1-2, issue #12): any edit to a test file (which, since F1-S9
+ * slice 2, includes the mutation-testing gate's own config/tooling —
+ * `snowflake/mutation-baseline.json`, `check_mutation_score.py`,
+ * `requirements-dev.txt`, folded into {@link isTestFilePath} via
+ * `MUTATION_GATE_CONFIG_EXACT_PATHS` — a gate reading its own pass/fail
+ * threshold from the same checkout it grades is the same gaming class as
+ * editing a test directly), any ADDED coverage- or mutation-suppression
+ * comment (`# pragma: no cover`/`no branch`/`no mutate`, or a JS/TS
+ * coverage-provider ignore comment), any
+ * ADDED `package.json` test/coverage/lifecycle script-key redefinition, or
+ * any ADDED pytest config section in a root-level `pyproject.toml`/
+ * `setup.cfg`. All four are treated as a SINGLE, conservative class —
+ * "assertion weakening" itself is semantic and can't be reliably
+ * detected (no LLM is used here; this whole classifier is deterministic
+ * string/path matching), so the entire vector is flagged rather than
+ * attempting to distinguish a legitimate test-file edit (e.g. a genuine
+ * strengthening) from a gamed
  * one. A human confirms which it is — see {@link buildGamingFlagAnnotation}
  * for the deterministic, templated pointer to exactly what tripped it.
  *
@@ -675,9 +733,17 @@ export function findAddedRootPytestConfigSections(patchText: string): string[] {
  * discovery config and lifecycle tampering (`vitest.config.ts`/
  * `playwright.config.ts`/pytest's own config filenames including
  * `pytest.toml`/`conftest.py`, `package.json`'s `pre`/`post`-prefixed npm
- * lifecycle hooks, and JSON-unicode-escaped script keys), and coverage
+ * lifecycle hooks, and JSON-unicode-escaped script keys), coverage
  * suppressions (including delivery via a `.gitattributes`-forced binary
- * patch or a copy of an already-suppressed file). It is NOT, and is not
+ * patch or a copy of an already-suppressed file), edits to the
+ * mutation-testing gate's own config/tooling (F1-S9 slice 2, closing a
+ * cross-slice integration gap an independent factory-security pass
+ * found, so a gate this classifier doesn't watch can never be
+ * neutralized from inside the checkout it grades), and — also F1-S9
+ * slice 2, a Codex finding — an ADDED `# pragma: no mutate` (mutmut's own
+ * suppression comment, in any of its accepted forms), which offsets the
+ * mutation gate's total-drop check without touching a test file at all.
+ * It is NOT, and is not
  * intended to become, an exhaustive or unbeatable gate: a determined
  * adversary with knowledge of this classifier's own source can construct
  * FURTHER textual evasions (e.g. a novel obfuscation of a script key this
@@ -706,13 +772,13 @@ export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
  * this stays within it.
  */
 export const NO_AUTO_CHAIN_LABEL_DESCRIPTION =
-  "Diff edits a test file/script, or adds a coverage-suppression comment — needs human review.";
+  "Diff edits a test/gate file, or adds a coverage/mutation suppression — needs human review.";
 
 /** What the anti-gaming classifier found on one publish run — passed to {@link buildGamingFlagAnnotation}. */
 export interface GamingFlag {
   /** Test files the diff edits, normalized, sorted. */
   readonly testFileEdits: readonly string[];
-  /** Coverage-suppression comments the diff adds. */
+  /** Coverage- or mutation-suppression comments the diff adds. */
   readonly suppressions: readonly CoverageSuppressionMatch[];
   /**
    * `package.json` test/coverage/lifecycle script-key redefinitions the
@@ -780,7 +846,7 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
     lines.push("");
   }
   if (flag.suppressions.length > 0) {
-    lines.push("**Coverage-suppression comment(s) added:**");
+    lines.push("**Coverage- or mutation-suppression comment(s) added:**");
     for (const match of flag.suppressions) {
       lines.push(
         `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,

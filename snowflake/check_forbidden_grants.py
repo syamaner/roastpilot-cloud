@@ -42,10 +42,72 @@ set.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
+from pathlib import Path
+from types import ModuleType
 
-from validate_migrations import MIGRATIONS_DIR, SNOWFLAKE_DIR, find_candidate_migration_files
+
+def _load_sibling_module(module_name: str) -> ModuleType:
+    """Loads a sibling script in this same directory by its exact file
+    path, not via a `sys.path`-based name search.
+
+    CI invokes this script directly (`python3 -P check_forbidden_grants.py`,
+    working-directory `snowflake/`) with `-P` (PYTHONSAFEPATH, Codex
+    finding F1-S9 slice 2, issue #12): `-P` deliberately removes both the
+    current directory AND the running script's own directory from the
+    automatic `sys.path`, closing a shadow-import class where an agent
+    patch could plant e.g. `snowflake/mutmut.py` or `snowflake/json.py` to
+    silently run in place of an installed dependency or stdlib module. A
+    plain `from validate_migrations import ...` relies on exactly the
+    automatic path entry `-P` removes, so it stops resolving. Restoring it
+    with a blanket `sys.path.insert(0, <this dir>)` would reopen the same
+    hole for every OTHER import this script (or its callees) makes
+    afterwards — not just this one, intentional, same-repo sibling.
+    Loading `validate_migrations.py` by its OWN resolved path via
+    `importlib` sidesteps that: it adds nothing to `sys.path`, so no other
+    import in this process becomes shadowable by a same-named file placed
+    anywhere on a search path.
+
+    Args:
+        module_name: The sibling module's name, without the `.py` suffix
+            (must be a file directly alongside this one).
+
+    Returns:
+        The loaded, executed module object.
+
+    Raises:
+        ImportError: If the sibling file doesn't exist, or its spec/loader
+            can't be constructed — mirrors a normal import failure rather
+            than a raw `FileNotFoundError` or opaque `AttributeError`
+            surfacing deeper in this file.
+    """
+    module_path = Path(__file__).resolve().parent / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        # Defensive: spec_from_file_location only returns None/loader-less
+        # for a suffix it can't map to a loader. Every call site here
+        # passes a fixed ".py" path, which always resolves to a
+        # SourceFileLoader regardless of whether the file exists on disk
+        # -- a MISSING file surfaces later, from exec_module below, which
+        # IS exercised by test_raises_import_error_for_a_module_that_does_
+        # not_exist. Kept as a guard anyway: relying on an unverified
+        # assumption about importlib's internals for a security-relevant
+        # code path is worse than one always-true check.
+        raise ImportError(f"cannot construct a loader for sibling module {module_name!r}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except FileNotFoundError as exc:
+        raise ImportError(f"cannot load sibling module {module_name!r} from {module_path}") from exc
+    return module
+
+
+_validate_migrations = _load_sibling_module("validate_migrations")
+MIGRATIONS_DIR = _validate_migrations.MIGRATIONS_DIR
+SNOWFLAKE_DIR = _validate_migrations.SNOWFLAKE_DIR
+find_candidate_migration_files = _validate_migrations.find_candidate_migration_files
 
 # Matches a GRANT statement fragment naming PUBLIC (or ROLE PUBLIC) as its
 # target, anywhere in a `;`-delimited statement -- see the module docstring

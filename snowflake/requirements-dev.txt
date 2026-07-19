@@ -5,3 +5,16 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-cov==7.1.0
+
+# F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing over the
+# security-critical grant-boundary Python (assert_dev_ci_grants.py,
+# check_forbidden_grants.py, validate_migrations.py). mutmut chosen over
+# cosmic-ray for this repo's fit: a small, already pytest-tested surface,
+# where mutmut's lighter setup (one pyproject.toml section, no separate
+# baseline/session database step) and direct pytest integration are a better
+# match than cosmic-ray's heavier distributed-execution config, meant for far
+# larger codebases. Pinned to an exact version (verified against this repo's
+# actual three files in a scratch run: 593 mutants, deterministic across
+# repeated runs) — a future mutmut release changing mutant generation would
+# silently shift the baseline in mutation-baseline.json otherwise.
+mutmut==3.6.0
