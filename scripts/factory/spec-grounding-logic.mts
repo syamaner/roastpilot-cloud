@@ -655,17 +655,30 @@ function stripUnprotectedHtmlComments(
     lineStartOffsets.push(runningOffset);
     runningOffset += line.length + 1; // +1 for the "\n" this split consumed.
   }
+  // MONOTONIC cursor, not a per-match O(lines) rescan (claude-review
+  // finding, PR #70 review round 18 — the same resource-exhaustion class
+  // the inline-code-span masking loop was linearized for in round 10: a
+  // body with many short HTML comments paid O(lines) here on EVERY match,
+  // O(lines × comments) total). `text.matchAll` yields matches in
+  // strictly increasing `.index` order (the global-regex iteration
+  // guarantee), and `lineStartOffsets` is already ascending by
+  // construction, so `lineCursor` only ever needs to move FORWARD across
+  // the whole loop — never reset per match, never rescanned from the
+  // start. Correct, not just fast, for the same reason the round-10 fix
+  // was: the input ordering guarantee (there, markdown-it's document-
+  // order children; here, matchAll's increasing-index guarantee) is what
+  // makes a monotonic cursor equivalent to the original per-match binary/
+  // linear search, not an approximation of it.
+  let lineCursor = 0;
   const lineIndexForOffset = (charOffset: number): number => {
-    let lineIndex = 0;
-    for (let i = 0; i < lineStartOffsets.length; i++) {
-      const lineStart = lineStartOffsets[i];
-      if (lineStart !== undefined && lineStart <= charOffset) {
-        lineIndex = i;
-      } else {
+    while (lineCursor + 1 < lineStartOffsets.length) {
+      const nextLineStart = lineStartOffsets[lineCursor + 1];
+      if (nextLineStart === undefined || nextLineStart > charOffset) {
         break;
       }
+      lineCursor++;
     }
-    return lineIndex;
+    return lineCursor;
   };
 
   let result = "";
@@ -1243,6 +1256,39 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // named characters and waiting for the next.
 const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 
+// Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a real
+// delimiter-breakout, category (a), always folds): `</UNTRUSTED_ISSUE_DATA>`
+// survives {@link neutralizeDelimiterBreakout} when a NEL (U+0085) sits
+// inside the tag, e.g. between the `<` and the `/`. NEL is Unicode
+// White_Space but is NOT matched by JS's own `\s` metacharacter (verified
+// empirically: `/\s/.test("\u0085")` is `false`), so it defeats BOTH the
+// whitespace-tolerant `\s*` inside {@link DELIMITER_TAG_PATTERN} and the
+// existing `\p{Cf}`/`\p{Default_Ignorable_Code_Point}` cleanup above — yet a
+// model's tokenizer/renderer plausibly still collapses it as ordinary
+// whitespace and reads the result as the real closing delimiter, the exact
+// breakout this module exists to stop.
+//
+// CATEGORICAL FIX, same lesson as `\p{Cf}`/DI above (don't enumerate the
+// next gap character, close the class by construction): matches the full
+// Unicode `White_Space` binary property, which is a strict SUPERSET of the
+// four ordinary ASCII whitespace characters (space, tab, LF, CR) real
+// criterion text legitimately contains — verified empirically that every
+// OTHER Unicode White_Space member this module previously worried about
+// (NBSP, Ogham space, en-quad, line/paragraph separator, narrow/medium
+// math space, ideographic space) is ALREADY matched by JS's own `\s`, so
+// NEL is the one genuine gap today; matching the whole property (rather
+// than just NEL) closes any future gap the same way, not just this round's.
+const EXOTIC_WHITESPACE_PATTERN = /\p{White_Space}/gu;
+
+// The ASCII whitespace characters {@link EXOTIC_WHITESPACE_PATTERN} must
+// NEVER strip — stripping these would corrupt legitimate criterion text,
+// not just neutralize an attack. Includes every ASCII control character JS's
+// own `\s` already treats as whitespace (space, tab, LF, CR, plus VT and FF,
+// which are rare in real criterion text but equally ordinary and equally
+// harmless to a delimiter-breakout check already tolerant of `\s`), not just
+// the four most common of them.
+const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r", "\v", "\f"]);
+
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
  * delimiter pair from WITHIN extracted criterion/title text (Rider 1(b)/
@@ -1253,20 +1299,27 @@ const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/
  * the literal closing delimiter (or a whitespace/zero-width-character
  * variant of it) could otherwise end the DATA block early and inject text
  * the review prompt would read as ITS OWN instructions rather than quoted
- * data. NFKC-normalizes and strips zero-width/format characters FIRST
- * (closing the tokenizer-collapses-invisible-characters gap), then
- * matches the delimiter tag case-insensitively and whitespace-tolerantly
- * on EITHER delimiter (an attacker forging a FAKE open tag deeper in the
- * block is the same class of attack as closing the real one early).
+ * data. NFKC-normalizes and strips zero-width/format characters AND exotic
+ * Unicode whitespace (e.g. NEL) FIRST (closing both the tokenizer-
+ * collapses-invisible-characters gap and the tokenizer-collapses-exotic-
+ * whitespace gap, PR #70 review round 18 — see
+ * {@link EXOTIC_WHITESPACE_PATTERN}'s own docstring), then matches the
+ * delimiter tag case-insensitively and whitespace-tolerantly on EITHER
+ * delimiter (an attacker forging a FAKE open tag deeper in the block is the
+ * same class of attack as closing the real one early).
  *
  * @param text - Raw extracted text (a criterion or an issue title).
- * @returns The same text, with zero-width/format characters removed and
+ * @returns The same text, with zero-width/format characters and exotic
+ *   Unicode whitespace removed (ordinary ASCII whitespace preserved) and
  *   any delimiter-tag occurrence neutralized (angle brackets replaced
  *   with square brackets) — never dropped outright, so the finding stays
  *   legible; just unable to parse as a real tag.
  */
 function neutralizeDelimiterBreakout(text: string): string {
-  const cleaned = text.normalize("NFKC").replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "");
+  const cleaned = text
+    .normalize("NFKC")
+    .replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "")
+    .replace(EXOTIC_WHITESPACE_PATTERN, (ch) => (ASCII_WHITESPACE_CHARS.has(ch) ? ch : ""));
   return cleaned.replace(DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_ISSUE_DATA]");
 }
 
