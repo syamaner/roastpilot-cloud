@@ -228,6 +228,37 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
 ]);
 
 /**
+ * The mutation-testing gate's OWN files (F1-S9 slice 2) — a test-STRENGTH
+ * tamper surface, flagged for exactly the reason the gate exists.
+ *
+ * The `mutation-testing` CI job reads `snowflake/mutation-baseline.json`
+ * and runs `snowflake/check_mutation_score.py` FROM THE SAME PR CHECKOUT
+ * it is judging, so an implementing agent can neutralise the gate without
+ * touching a single test: lower the committed baseline (the gate then
+ * "meets" the floor by construction), weaken the gate script's `evaluate`
+ * logic, or swap the pinned mutmut version in `requirements-dev.txt` for
+ * one whose mutant population differs. None of those paths is a test file,
+ * a discovery config, or a protected pipeline path — without this set they
+ * were verified invisible to every other flagged class (independent
+ * factory-security review of PR #68). The mutmut CONFIG itself
+ * (`snowflake/pyproject.toml`, `[tool.mutmut]` / `only_mutate`) is already
+ * exact-matched above via the pytest-discovery set — coincidental but
+ * sufficient, noted here so a future move of that config to its own file
+ * knows to add the new location HERE.
+ *
+ * Same one-directional conservatism as the sibling sets: a legitimate
+ * baseline recompute (e.g. new tests killing more mutants) or a deliberate
+ * gate-script improvement WILL flag — that costs a human a few seconds of
+ * "yes, intended", and such edits are rare and load-bearing enough that a
+ * human glance is exactly what they deserve.
+ */
+const MUTATION_GATE_CONFIG_EXACT_PATHS = new Set([
+  "snowflake/mutation-baseline.json",
+  "snowflake/check_mutation_score.py",
+  "snowflake/requirements-dev.txt",
+]);
+
+/**
  * True when a normalized path is a test file (or its discovery config) by
  * this repo's own conventions — directory prefix, filename suffix, or
  * exact discovery-config match; see {@link TEST_PATH_PREFIXES}/
@@ -248,6 +279,9 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
  */
 export function isTestFilePath(normalizedPath: string): boolean {
   if (TEST_DISCOVERY_CONFIG_EXACT_PATHS.has(normalizedPath)) {
+    return true;
+  }
+  if (MUTATION_GATE_CONFIG_EXACT_PATHS.has(normalizedPath)) {
     return true;
   }
   if (TEST_PATH_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {

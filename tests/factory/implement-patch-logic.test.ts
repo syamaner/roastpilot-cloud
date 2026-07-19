@@ -232,6 +232,18 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
     expect(isTestFilePath("playwright.config.js")).toBe(true);
   });
 
+  it("flags an edit to the mutation gate's OWN files (independent security review of PR #68, F1-S9 slice 2 — the gate reads its baseline from the same PR checkout it judges, so lowering the baseline, weakening the gate script, or swapping the mutmut pin is test-strength tampering)", () => {
+    expect(isTestFilePath("snowflake/mutation-baseline.json")).toBe(true);
+    expect(isTestFilePath("snowflake/check_mutation_score.py")).toBe(true);
+    expect(isTestFilePath("snowflake/requirements-dev.txt")).toBe(true);
+    // The mutmut CONFIG lives in snowflake/pyproject.toml, covered by the
+    // pytest-discovery exact set (asserted in its own test above) — this
+    // set documents that coincidence and covers the three paths nothing
+    // else flags. A root-level requirements-dev.txt (doesn't exist) stays
+    // unflagged: only the snowflake one feeds the mutation job.
+    expect(isTestFilePath("requirements-dev.txt")).toBe(false);
+  });
+
   it("flags an edit to pytest's own discovery config under snowflake/, where this repo's pytest is actually invoked from", () => {
     expect(isTestFilePath("snowflake/pytest.ini")).toBe(true);
     expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
