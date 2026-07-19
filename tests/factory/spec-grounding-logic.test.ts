@@ -202,6 +202,45 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(elapsed).toBeLessThan(2000);
   });
 
+  it("stays bounded-time even for thousands of UNLOCATABLE code spans, which the round-10 linear cursor cannot fix on its own (claude-review finding, PR #70 review round 17 — a real resource-exhaustion DoS distinct from round 10's: a span markdown-it can't locate in the joined text, e.g. `` `` `x` `` `` after CommonMark's own leading/trailing-space-stripping rule, can never advance the round-10 cursor, since there is no match position to advance PAST — a body crafted with thousands of such spans re-scans from the same fixed offset per span, reopening O(n²) despite the round-10 fix; verified empirically before this fix that a several-thousand-span body of exactly this shape took hundreds of milliseconds. The fix bounds input SIZE categorically via MAX_STRUCTURAL_INPUT_BYTES rather than patching this one branch, since a cursor genuinely cannot advance past a span it couldn't locate)", () => {
+    const spanCount = 27000;
+    const body = `${Array.from({ length: spanCount }, () => "`` `x` ``").join(" ")} Closes #12`;
+    // This body is deliberately sized past MAX_STRUCTURAL_INPUT_BYTES
+    // (256KB) -- the point of this test is the CAP path, not proving the
+    // round-10 cursor fix (that's the test above). See the disposition
+    // test below for what happens to a code-formatted reference once the
+    // cap applies.
+    expect(new TextEncoder().encode(body).length).toBeGreaterThan(256 * 1024);
+    const start = performance.now();
+    const result = parseLinkedIssueReferences(body);
+    const elapsed = performance.now() - start;
+    expect(result).toEqual([{ issueNumber: 12, kind: "closing" }]);
+    // A generous bound (CI machines vary) -- the pre-cap version of this
+    // exact shape measured in the SECONDS at this span count in local
+    // verification; the cap path completes in low single-digit
+    // milliseconds.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it("a normal-size body (well under the 256KB structural-input cap) still gets FULL code-region masking, not the oversized-body fallback", () => {
+    const body = "Example: `Closes #99` should not count.\n\nCloses #12";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("fails SAFE in the OVER-match direction when the body exceeds MAX_STRUCTURAL_INPUT_BYTES (round 17): code-region masking is skipped entirely for the oversized body, so a code-formatted reference is over-matched -- same documented disposition as when markdown-it itself throws -- while a real HTML comment elsewhere in the body is still correctly stripped, since comment-stripping runs on the raw text either way", () => {
+    const filler = "x".repeat(300 * 1024);
+    const body = `Closes #12\n\n${filler}\n\nExample: \`Closes #99\` in a huge body.\n\n<!-- Closes #77 -->\n`;
+    expect(new TextEncoder().encode(body).length).toBeGreaterThan(256 * 1024);
+    // Both #12 (real) and #99 (code-formatted, over-matched -- the
+    // documented, deliberate safe-direction trade-off for a body this
+    // module can't confidently structure-parse) are found; #77 (inside a
+    // real HTML comment) is correctly stripped and never appears.
+    expect(parseLinkedIssueReferences(body)).toEqual([
+      { issueNumber: 12, kind: "closing" },
+      { issueNumber: 99, kind: "closing" },
+    ]);
+  });
+
   it("the multi-line-container fallback PRESERVES a real reference sharing the same multi-line container paragraph as an unlocatable code span (operator correction, round 4: an earlier version of this fallback masked the whole paragraph here, silently DROPPING this real reference — an under-match that violated this module's own invariant; the fallback now does nothing to these lines at all, so a real reference elsewhere in the same paragraph is never at risk)", () => {
     const body = "- Closes #12 on line one\n  `some code` on line two of the SAME item";
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);

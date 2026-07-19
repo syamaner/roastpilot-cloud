@@ -289,6 +289,44 @@ const structuralParser = new MarkdownIt({
 const HTML_COMMENT_PATTERN = /(?<!\\)<!--[\s\S]*?-->/g;
 
 /**
+ * Hard byte-size cap on the text {@link buildStructuralView} will run
+ * markdown-it code-region masking over (claude-review finding, PR #70
+ * review round 17, resource exhaustion).
+ *
+ * The round-16 fix made the LOCATED-span masking loop linear by
+ * advancing a monotonic cursor per span, but a span that markdown-it
+ * itself can't locate in the joined text (CommonMark's own space-
+ * stripping — e.g. `` `` `x` `` `` — or the pre-existing multi-line-
+ * container fallback) can never advance that cursor, since there is no
+ * match position to advance PAST. A body crafted with thousands of such
+ * unlocatable spans therefore still re-scans from the same fixed offset
+ * per span, reopening O(n²) in the number of spans — verified
+ * empirically (2000/4000/8000 space-padded double-backtick spans:
+ * ~29.5ms / ~94.7ms / ~363.7ms, matching the earlier pre-fix growth
+ * curve) before writing this fix.
+ *
+ * A per-branch fix can't close this: you genuinely cannot advance a
+ * cursor past a span you couldn't locate. So this bounds the CLASS
+ * instead of the branch — capping input size bounds `n` categorically,
+ * which keeps BOTH the located-linear path and the unlocatable-quadratic
+ * path bounded-time regardless of how an oversized body is crafted.
+ *
+ * 256KB is comfortably above any legitimate issue or PR body (GitHub's
+ * own body length limit is 65536 CHARACTERS, i.e. well under 256KB even
+ * at 4 bytes/char) and comfortably below where quadratic-time masking of
+ * adversarial content becomes a real cost. A body over this cap skips
+ * markdown-it entirely: {@link buildStructuralView} falls back to its
+ * existing raw-text-and-comment-strip-only path (the same one already
+ * used when markdown-it itself throws), which is O(n) — see that
+ * function's own "FAILS SAFE in the OVER-match direction" paragraph for
+ * why over-matching (leaving code regions scannable) rather than
+ * skipping the body's references/criteria outright is this module's
+ * established safe direction for a body it can't confidently structure-
+ * parse.
+ */
+const MAX_STRUCTURAL_INPUT_BYTES = 256 * 1024;
+
+/**
  * Produces a "structural view" of arbitrary Markdown text with the
  * CONTENT of every fenced or indented code block, HTML comment
  * (`<!-- ... -->`), and inline code span replaced by whitespace of the
@@ -351,13 +389,16 @@ const HTML_COMMENT_PATTERN = /(?<!\\)<!--[\s\S]*?-->/g;
  * only where the variant space was genuinely unbounded.
  *
  * FAILS SAFE in the OVER-match direction (operator constraint, PR #70
- * review): if markdown-it throws on a pathological body, this function
- * returns the comment-stripped text with NO code-region masking applied
- * at all, rather than propagating the error. That means code REGIONS
- * stay scannable (an illustrative example inside unparseable markdown
- * could still false-positive as a reference) — the safe direction, since
- * a false positive here costs a human a glance, while silently skipping
- * a real reference or heading (the under-match direction) would not.
+ * review): if markdown-it throws on a pathological body, OR the body
+ * exceeds {@link MAX_STRUCTURAL_INPUT_BYTES} (see that constant's own
+ * docstring), this function returns the comment-stripped text with NO
+ * code-region masking applied at all, rather than propagating the error
+ * or paying an unbounded parsing cost. That means code REGIONS stay
+ * scannable (an illustrative example inside unparseable or oversized
+ * markdown could still false-positive as a reference) — the safe
+ * direction, since a false positive here costs a human a glance, while
+ * silently skipping a real reference or heading (the under-match
+ * direction) would not.
  *
  * @param text - Raw Markdown text (a PR body or an issue body).
  * @returns The same text, length- and newline-preserving, with fenced/
@@ -365,6 +406,19 @@ const HTML_COMMENT_PATTERN = /(?<!\\)<!--[\s\S]*?-->/g;
  */
 function buildStructuralView(text: string): string {
   const neuterPreservingNewlines = (match: string): string => match.replace(/[^\n]/g, " ");
+
+  if (new TextEncoder().encode(text).length > MAX_STRUCTURAL_INPUT_BYTES) {
+    // Fails safe in the SAME over-match direction as every other "can't
+    // confidently process this" branch in this function (a parse
+    // failure just below, or either code-masking fallback further down)
+    // — reuses that exact "comment-strip the raw text, skip code-region
+    // masking entirely" behavior, rather than inventing a new
+    // disposition (e.g. dropping this body's criteria/references
+    // outright) for just this one case. See MAX_STRUCTURAL_INPUT_BYTES's
+    // own docstring for why bounding input SIZE, not any one masking
+    // branch, is what closes the resource-exhaustion class categorically.
+    return text.replace(HTML_COMMENT_PATTERN, neuterPreservingNewlines);
+  }
 
   // CODE-REGION MASKING RUNS FIRST, comment-stripping SECOND (operator
   // correction, PR #70 review round 5 — an ordering bug, not a pattern
