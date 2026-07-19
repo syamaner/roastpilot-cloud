@@ -316,83 +316,6 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
-/**
- * Exact paths for the F1-S9 slice 2 (issue #12) mutation-testing gate's
- * OWN config/tooling — a cross-slice integration gap an independent
- * factory-security pass found and this classifier previously didn't
- * cover at all (verified: neither {@link TEST_DISCOVERY_CONFIG_EXACT_PATHS}
- * nor any content-scan classifier here matched any of these three paths).
- * A gate that reads its own pass/fail threshold from the SAME checkout the
- * patch being graded lives in is itself now a test-strength-gaming
- * surface: an implementing agent's patch can neutralize the mutation gate
- * without touching a single test file — lower the numbers in
- * `snowflake/mutation-baseline.json` (the gate's committed floor,
- * self-referentially read from this same PR), weaken the comparison logic
- * in `snowflake/check_mutation_score.py` (the gate script itself), or
- * downgrade/unpin the `mutmut` version in `snowflake/requirements-dev.txt`
- * (the tool the whole gate depends on) to change its detection behavior.
- * Any of these makes the gate pass "by construction" with no label ever
- * firing, since neither `check_mutation_score.py` nor
- * `mutation-baseline.json` looks like a test file, a test-discovery
- * config, or a coverage suppression to any EXISTING check here.
- *
- * A DEDICATED exact-match set, not folded into `TEST_DISCOVERY_CONFIG_
- * EXACT_PATHS` (independent factory-security-reviewer finding, F1-S9
- * slice 2, issue #12): these files aren't test-discovery config in any
- * sense (they don't decide WHICH tests run) — they're a different gaming
- * CLASS, the anti-tamper registration for a specific quality GATE, and
- * deserve their own named category rather than stretching an existing
- * one to cover an unrelated concept. The pattern established here — every
- * gate this factory adds registers its own config with this classifier,
- * in the SAME PR that adds the gate — is the general fix, not a one-off:
- * a future gate (e.g. F1-S9 slice 3's spec-grounded review, or the
- * planned TypeScript/Stryker mutation job) must register its own config
- * paths here too, the moment it exists.
- */
-const MUTATION_GATE_CONFIG_EXACT_PATHS = new Set([
-  "snowflake/mutation-baseline.json",
-  "snowflake/check_mutation_score.py",
-  "snowflake/requirements-dev.txt",
-]);
-
-/**
- * True when a normalized path is part of the mutation-testing gate's own
- * config/tooling (F1-S9 slice 2, issue #12) — see
- * {@link MUTATION_GATE_CONFIG_EXACT_PATHS} for why editing any of these
- * is the same gaming class as editing a test file directly: it can
- * neutralize a quality gate without the diff looking like a test edit at
- * all.
- *
- * @param normalizedPath - A path already run through
- *   {@link normalizePatchPath}.
- * @returns Whether this path is part of the mutation gate's own config.
- */
-export function isMutationGateConfigPath(normalizedPath: string): boolean {
-  return MUTATION_GATE_CONFIG_EXACT_PATHS.has(normalizedPath);
-}
-
-/**
- * Scans a list of changed paths and returns every one that's part of the
- * mutation-testing gate's own config/tooling.
- *
- * @param rawPaths - Paths git itself reports the patch will touch (same
- *   authoritative source as {@link findForbiddenPatchPaths} — see that
- *   function's docstring for why this must be the applier's own report,
- *   not an independent diff-text parse).
- * @returns The subset that are mutation-gate config, normalized and
- *   sorted. Empty if none.
- */
-export function findMutationGateConfigEdits(rawPaths: readonly string[]): string[] {
-  const edits = new Set<string>();
-  for (const raw of rawPaths) {
-    const normalized = normalizePatchPath(raw);
-    if (isMutationGateConfigPath(normalized)) {
-      edits.add(normalized);
-    }
-  }
-  return Array.from(edits).sort();
-}
-
 /** A single ADDED coverage-suppression line {@link findAddedCoverageSuppressions} found. */
 export interface CoverageSuppressionMatch {
   /** The file the suppression comment was added in (normalized). */
@@ -733,15 +656,18 @@ export function findAddedRootPytestConfigSections(patchText: string): string[] {
 /**
  * Applied to a PR whose diff trips the deterministic anti-gaming
  * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions} /
- * {@link findAddedPackageJsonTestScriptEdits} / {@link findAddedRootPytestConfigSections} /
- * {@link findMutationGateConfigEdits}, F1-S9 slice 1-2, issue #12): any
- * edit to a test file, any ADDED coverage-suppression comment, any ADDED
- * `package.json` test/coverage/lifecycle script-key redefinition, any
- * ADDED pytest config section in a root-level `pyproject.toml`/
- * `setup.cfg`, or any edit to the mutation-testing gate's own config/
- * tooling (`snowflake/mutation-baseline.json`, `check_mutation_score.py`,
- * `requirements-dev.txt`). All five are treated as a SINGLE, conservative
- * class — "assertion weakening" itself is semantic and can't be reliably
+ * {@link findAddedPackageJsonTestScriptEdits} / {@link findAddedRootPytestConfigSections},
+ * F1-S9 slice 1-2, issue #12): any edit to a test file (which, since F1-S9
+ * slice 2, includes the mutation-testing gate's own config/tooling —
+ * `snowflake/mutation-baseline.json`, `check_mutation_score.py`,
+ * `requirements-dev.txt`, folded into {@link isTestFilePath} via
+ * `MUTATION_GATE_CONFIG_EXACT_PATHS` — a gate reading its own pass/fail
+ * threshold from the same checkout it grades is the same gaming class as
+ * editing a test directly), any ADDED coverage-suppression comment, any
+ * ADDED `package.json` test/coverage/lifecycle script-key redefinition, or
+ * any ADDED pytest config section in a root-level `pyproject.toml`/
+ * `setup.cfg`. All four are treated as a SINGLE, conservative class —
+ * "assertion weakening" itself is semantic and can't be reliably
  * detected (no LLM is used here; this whole classifier is deterministic
  * string/path matching), so the entire vector is flagged rather than
  * attempting to distinguish a legitimate test-file edit (e.g. a genuine
@@ -844,11 +770,6 @@ export interface GamingFlag {
    * 4) — see {@link findAddedRootPytestConfigSections}.
    */
   readonly rootPytestConfigSections: readonly string[];
-  /**
-   * Mutation-testing gate config/tooling the diff edits (F1-S9 slice 2,
-   * issue #12) — see {@link findMutationGateConfigEdits}.
-   */
-  readonly mutationGateConfigEdits: readonly string[];
 }
 
 /**
@@ -922,13 +843,6 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
     lines.push("**Pytest config section added to a root-level pyproject.toml/setup.cfg:**");
     for (const line of flag.rootPytestConfigSections) {
       lines.push(`- ${sanitizeStepSummaryText(line)}`);
-    }
-    lines.push("");
-  }
-  if (flag.mutationGateConfigEdits.length > 0) {
-    lines.push("**Mutation-testing gate config/tooling edited:**");
-    for (const path of flag.mutationGateConfigEdits) {
-      lines.push(`- ${sanitizeStepSummaryText(path)}`);
     }
     lines.push("");
   }

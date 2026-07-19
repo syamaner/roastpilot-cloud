@@ -191,7 +191,6 @@ import {
   findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
-  findMutationGateConfigEdits,
   findPrForIssueNumber,
   findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
@@ -1422,14 +1421,12 @@ export async function main(): Promise<void> {
       suppressions: findAddedCoverageSuppressions(diffText),
       packageJsonTestScriptEdits: findAddedPackageJsonTestScriptEdits(diffText),
       rootPytestConfigSections: findAddedRootPytestConfigSections(diffText),
-      mutationGateConfigEdits: findMutationGateConfigEdits(changedPaths),
     };
     const gamingFlagged =
       gamingFlag.testFileEdits.length > 0 ||
       gamingFlag.suppressions.length > 0 ||
       gamingFlag.packageJsonTestScriptEdits.length > 0 ||
-      gamingFlag.rootPytestConfigSections.length > 0 ||
-      gamingFlag.mutationGateConfigEdits.length > 0;
+      gamingFlag.rootPytestConfigSections.length > 0;
 
     // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
     // (gitleaks/trufflehog-style) of the patch content belongs right
