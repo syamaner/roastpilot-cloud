@@ -782,6 +782,59 @@ index 0000000..abc1234
     );
     errorSpy.mockRestore();
   });
+
+  it("detects a coverage suppression delivered via a .gitattributes-forced GIT binary patch block (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3 — closes the raw-patch-text bypass class)", async () => {
+    // The exploit this closes: a `.gitattributes` entry marking a source
+    // file `binary` makes `git diff --binary` serialize its content as a
+    // `GIT binary patch` block instead of textual `+`/`-` lines — hiding
+    // a suppression comment from any scan of the RAW patch bytes, even
+    // though the file's REAL content, once applied, is ordinary readable
+    // TypeScript. Not hand-crafted: generated the same way this repo's
+    // own capture step does (`git diff --cached --binary`, implement-
+    // ready-issues.yml), so this is proven against real git, not an
+    // assumption about what a binary-patch block looks like.
+    await fsWriteFile(join(localCloneDir, ".gitattributes"), "lib/sneaky.ts binary\n");
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(
+      join(localCloneDir, "lib", "sneaky.ts"),
+      "export const x = 1; /* v8 ignore next */\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const binaryPatch = execFileSync("git", ["diff", "--cached", "--binary"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // Sanity-check the fixture itself actually tests what it claims: the
+    // malicious patch must NOT contain the suppression as readable text
+    // — if it did, this test would pass even without the fix.
+    expect(binaryPatch).not.toContain("v8 ignore");
+    expect(binaryPatch).toContain("GIT binary patch");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "binary-suppression.diff", binaryPatch);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/sneaky.ts");
+  });
 });
 
 describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {

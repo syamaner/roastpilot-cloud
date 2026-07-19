@@ -48,10 +48,26 @@
  * The categorical fix (this version): rather than parse diff TEXT in any
  * form, apply the patch to a THROWAWAY scratch git index and ask git
  * `diff-index` what actually changed — see
- * {@link getAuthoritativeChangedPaths}'s docstring. This is definitionally
+ * {@link getAuthoritativePatchAnalysis}'s docstring. This is definitionally
  * complete: it's git's own tree comparison, not a re-implementation of
  * git's diff-serialization or quoting rules, so there is no fourth
  * text-encoding variant to eventually find.
+ *
+ * 4. F1-S9 slice 1 (issue #12), round 3 — the SAME lesson, applied to the
+ *    anti-gaming content classifier: an earlier version scanned the
+ *    AGENT'S OWN raw patch bytes for coverage-suppression comments, which
+ *    is exactly the "re-parse attacker-controlled text" mistake fixes 1-3
+ *    above already closed for path detection. A `.gitattributes` change
+ *    (part of the same patch) marking a source file binary, combined
+ *    with delivering the real change via a `GIT binary patch` block
+ *    instead of textual `+`/`-` lines, hides a suppression comment from a
+ *    scan of the RAW patch entirely, even though the file's actual
+ *    content (once applied) is ordinary readable source. Fixed the same
+ *    way: {@link getAuthoritativePatchAnalysis} additionally asks git to
+ *    REGENERATE the diff from the scratch index (`git diff --cached
+ *    --text`, forcing textual output regardless of any attribute/
+ *    heuristic-driven binary classification) rather than trusting the
+ *    patch's own bytes for content scanning either.
  *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
@@ -244,11 +260,25 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
   }
 }
 
+/** What {@link getAuthoritativePatchAnalysis} reports about a patch. */
+interface AuthoritativePatchAnalysis {
+  /** Every path git itself reports as touched, both sides of every rename/copy. */
+  readonly changedPaths: string[];
+  /**
+   * A git-REGENERATED, `--text`-forced diff of the same scratch tree —
+   * authoritative content for the anti-gaming classifier
+   * ({@link findAddedCoverageSuppressions}) to scan, never the agent's
+   * own raw patch bytes. See this function's own docstring, point 3.
+   */
+  readonly diffText: string;
+}
+
 /**
- * Asks git itself which paths a patch touches, via a THROWAWAY scratch
- * git index — never the repo's real index or working tree, and never a
- * re-parse of the diff TEXT in any form (see the file-top comment for the
- * three rounds of diff-text-parsing exploits this categorically replaces).
+ * Asks git itself what a patch touches and contains, via a THROWAWAY
+ * scratch git index — never the repo's real index or working tree, and
+ * never a re-parse of the diff TEXT git DIDN'T generate itself (see the
+ * file-top comment for the three-plus-one rounds of diff-text-parsing
+ * exploits this categorically replaces).
  *
  * Mechanism, each step run with `GIT_INDEX_FILE` pointed at a fresh
  * temp-file index (never the real `.git/index`, so none of this touches
@@ -262,7 +292,7 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  *    fails, the patch is malformed/inapplicable — same fail-closed
  *    outcome the old `--numstat` failure produced.
  * 3. `git diff-index --cached --name-status -z -M -C --find-copies-harder
- *    HEAD` — asks git which paths differ between HEAD and the
+ *    HEAD` — asks git which PATHS differ between HEAD and the
  *    now-patched scratch index. This is git's own TREE comparison, not a
  *    diff-format re-serialization the patch's own text could ever
  *    influence the wording of — there is no quoting, no prefix-stripping
@@ -271,6 +301,17 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  *    consumption; it's git comparing two trees it already holds and
  *    reporting the result in its own `-z` (NUL-delimited, unquoted)
  *    machine format. {@link parseNameStatusZ} parses that format.
+ * 4. `git diff --cached --text -M -C --find-copies-harder HEAD` — asks
+ *    git for the same tree comparison's CONTENT, git-regenerated rather
+ *    than the agent's own patch bytes (F1-S9 slice 1, issue #12, round 3
+ *    — independent Codex + claude-review finding: the agent's raw patch
+ *    could mark a file binary via `.gitattributes` and deliver a real
+ *    text change through a `GIT binary patch` block, hiding it from any
+ *    scan of the agent's own bytes). `--text` forces git to render every
+ *    file's diff as ordinary `+`/`-` lines regardless of any attribute-
+ *    or heuristic-driven binary classification, so a coverage-suppression
+ *    comment delivered via that trick still appears as scannable content
+ *    in THIS regenerated diff even though it never did in the raw patch.
  *
  * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
  * including against files the patch left otherwise UNTOUCHED — the exact
@@ -286,15 +327,19 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
  * Even WITHOUT rename/copy detection at all, a rename's two sides would
  * still both be reported here (as a plain delete + add, rather than an
  * `R<score>` pair) — `-M`/`-C` change the STATUS LABEL, not whether both
- * paths appear, since `diff-index` is comparing trees regardless.
+ * paths appear, since both `diff-index`/`diff` are comparing trees
+ * regardless.
  *
  * @param patchPath - Path to the patch file.
- * @returns Every path git itself reports as touched, both sides of every
- *   rename/copy.
+ * @returns Every path git itself reports as touched (both sides of every
+ *   rename/copy), plus the git-regenerated, text-forced diff content.
  * @throws {PublishRejection} If the patch can't be applied to the scratch
- *   index at all (malformed, unreadable, or genuinely empty).
+ *   index at all (malformed, unreadable, or genuinely empty), or if
+ *   either authoritative query against the applied scratch index fails.
  */
-async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]> {
+async function getAuthoritativePatchAnalysis(
+  patchPath: string,
+): Promise<AuthoritativePatchAnalysis> {
   const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
@@ -324,9 +369,9 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
           `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    let output: string;
+    let nameStatusOutput: string;
     try {
-      output = execFileSync(
+      nameStatusOutput = execFileSync(
         "git",
         [
           "diff-index",
@@ -350,7 +395,32 @@ async function getAuthoritativeChangedPaths(patchPath: string): Promise<string[]
         `could not read the scratch index's changed paths: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return parseNameStatusZ(output);
+    let diffText: string;
+    try {
+      diffText = execFileSync(
+        "git",
+        [
+          "diff",
+          "--cached",
+          "--text",
+          "--no-color",
+          "-M",
+          "-C",
+          "--find-copies-harder",
+          "HEAD",
+        ],
+        { env, encoding: "utf8" },
+      );
+    } catch (err) {
+      // Not independently exercised by a unit test: same reasoning as the
+      // diff-index catch above — this queries the identical, already-
+      // proven-valid scratch index, just asking for content instead of
+      // names.
+      throw new PublishRejection(
+        `could not read the scratch index's authoritative diff content: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { changedPaths: parseNameStatusZ(nameStatusOutput), diffText };
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }
@@ -368,7 +438,7 @@ function runGit(args: string[]): void {
  * though `execFileSync` with an argv array never invokes a shell to begin
  * with). The patch file's own content is never passed as an argv value —
  * `git apply` reads it directly from disk, with the SAME invocation (no
- * `-p` override) as `getAuthoritativeChangedPaths` used to check it.
+ * `-p` override) as `getAuthoritativePatchAnalysis` used to check it.
  *
  * The commit message carries the F1-S10 slice-3 provenance trailer (see
  * {@link buildCommitTrailer}) on EVERY commit this function makes —
@@ -811,14 +881,24 @@ async function applyNoAutoChainLabelBestEffort(
  * {@link buildGamingFlagAnnotation}'s docstring for why this is always a
  * FRESH comment, never an upsert, on both the PR-creation and PR-refresh
  * paths alike. Never throws — a failure is logged, not propagated; the
- * label ({@link applyNoAutoChainLabelBestEffort}) is the persistent signal
- * that survives even if this specific comment fails to post.
+ * label ({@link applyNoAutoChainLabelBestEffort}) is a SEPARATE, best-effort
+ * signal, not a fallback for this one — both are tracked and reported
+ * independently (Codex + claude-review finding, F1-S9 slice 1, issue #12,
+ * round 3): an earlier version's step-summary line unconditionally
+ * pointed the operator at "the PR's annotation comment" even when THIS
+ * call had failed and no such comment existed to look at.
  *
  * @param token - The publish job's own bearer token.
  * @param owner - The repo owner.
  * @param repo - The repo name.
  * @param prNumber - The PR (newly-created or pre-existing) to comment on.
  * @param flag - What the classifier found.
+ * @param labelApplied - Whether the label call succeeded, threaded into
+ *   the annotation body's own wording — see
+ *   {@link buildGamingFlagAnnotation}.
+ * @returns `true` if the comment was actually posted, `false` if it
+ *   failed (logged either way) — the caller must reflect this in the
+ *   step summary, never overstate success.
  */
 async function postGamingFlagAnnotation(
   token: string,
@@ -826,16 +906,21 @@ async function postGamingFlagAnnotation(
   repo: string,
   prNumber: number,
   flag: GamingFlag,
-): Promise<void> {
-  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
-    body: buildGamingFlagAnnotation(flag),
-  }).catch((err: unknown) => {
-    console.error(
-      `Failed to post the anti-gaming annotation comment on PR #${prNumber} (the ` +
-        `${NO_AUTO_CHAIN_LABEL} label was still applied if that call succeeded): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
-  });
+  labelApplied: boolean,
+): Promise<boolean> {
+  return githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+    body: buildGamingFlagAnnotation(flag, labelApplied),
+  }).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to post the anti-gaming annotation comment on PR #${prNumber} (the ` +
+          `${NO_AUTO_CHAIN_LABEL} label was still applied if that call succeeded): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
 }
 
 /**
@@ -981,6 +1066,11 @@ export async function main(): Promise<void> {
   // Same discipline, for F1-S9 slice 1's anti-gaming label: `undefined`
   // until the PR exists and the label is actually attempted.
   let gamingLabelApplied: boolean | undefined;
+  // Same discipline again, for the SEPARATE annotation-comment post
+  // (Codex + claude-review finding, round 3): the label and the comment
+  // are two independent best-effort calls, so the step summary must
+  // reflect each of their REAL outcomes, not assume one implies the other.
+  let gamingAnnotationPosted: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -993,14 +1083,14 @@ export async function main(): Promise<void> {
 
     await assertPatchArtifactSize(patchPath);
 
-    const changedPaths = await getAuthoritativeChangedPaths(patchPath);
+    const { changedPaths, diffText } = await getAuthoritativePatchAnalysis(patchPath);
     if (changedPaths.length === 0) {
       // Not independently exercised by a unit test: every real-patch
       // shape tried empirically (including a mode-change-only diff,
       // which has zero added/removed lines) still reports at least one
       // path once the scratch-index apply succeeds at all — a totally
       // empty diff instead fails to apply at all and is caught above, in
-      // getAuthoritativeChangedPaths. Kept as a defensive fail-closed
+      // getAuthoritativePatchAnalysis. Kept as a defensive fail-closed
       // check rather than assumed away.
       throw new PublishRejection(
         "the implement run produced no changes (empty patch)",
@@ -1008,7 +1098,7 @@ export async function main(): Promise<void> {
     }
 
     // No complementary rename/copy-source check needed here (unlike
-    // earlier rounds of this guard) — getAuthoritativeChangedPaths
+    // earlier rounds of this guard) — getAuthoritativePatchAnalysis
     // already returns BOTH sides of every rename/copy, since it's asking
     // git for a tree comparison, not a diff-text parse that only ever
     // saw one side. See that function's docstring.
@@ -1027,13 +1117,14 @@ export async function main(): Promise<void> {
     // review") — it's labelled (NO_AUTO_CHAIN_LABEL) and annotated
     // (buildGamingFlagAnnotation) once the PR exists, further below.
     // Computed from the SAME authoritative changedPaths the forbidden-
-    // path check just used, plus the raw patch text (already size-capped
-    // by assertPatchArtifactSize above, so reading it into memory here is
-    // bounded).
-    const patchText = await readFile(patchPath, "utf8");
+    // path check just used, plus the git-REGENERATED diffText
+    // getAuthoritativePatchAnalysis also returns — NOT the agent's own
+    // raw patch bytes (round 3 fix, issue #12: scanning the raw patch was
+    // itself bypassable via a .gitattributes + GIT-binary-patch trick;
+    // see that function's own docstring point 4).
     const gamingFlag: GamingFlag = {
       testFileEdits: findTestFileEdits(changedPaths),
-      suppressions: findAddedCoverageSuppressions(patchText),
+      suppressions: findAddedCoverageSuppressions(diffText),
     };
     const gamingFlagged =
       gamingFlag.testFileEdits.length > 0 || gamingFlag.suppressions.length > 0;
@@ -1126,7 +1217,14 @@ export async function main(): Promise<void> {
           existingPr.number,
           "refreshed",
         );
-        await postGamingFlagAnnotation(token, owner, repo, existingPr.number, gamingFlag);
+        gamingAnnotationPosted = await postGamingFlagAnnotation(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          gamingFlag,
+          gamingLabelApplied,
+        );
       }
       writeStepSummary(
         buildPublishSuccessStepSummary({
@@ -1134,6 +1232,7 @@ export async function main(): Promise<void> {
           labelApplied,
           gamingFlagged,
           gamingLabelApplied,
+          gamingAnnotationPosted,
           prNumber: existingPr.number,
           // findExistingPrForIssue's underlying query doesn't fetch
           // html_url (PullRequestSummary has no such field) — a GitHub PR
@@ -1196,7 +1295,14 @@ export async function main(): Promise<void> {
         created.number,
         "opened",
       );
-      await postGamingFlagAnnotation(token, owner, repo, created.number, gamingFlag);
+      gamingAnnotationPosted = await postGamingFlagAnnotation(
+        token,
+        owner,
+        repo,
+        created.number,
+        gamingFlag,
+        gamingLabelApplied,
+      );
     }
     writeStepSummary(
       buildPublishSuccessStepSummary({
@@ -1204,6 +1310,7 @@ export async function main(): Promise<void> {
         labelApplied,
         gamingFlagged,
         gamingLabelApplied,
+        gamingAnnotationPosted,
         prNumber: created.number,
         prUrl: created.html_url,
         wasRefresh: false,

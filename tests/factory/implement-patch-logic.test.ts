@@ -456,30 +456,55 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
 
 describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("names the exact test file(s) edited", () => {
-    const body = buildGamingFlagAnnotation({
-      testFileEdits: ["tests/slug.test.ts"],
-      suppressions: [],
-    });
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      true,
+    );
     expect(body).toContain(NO_AUTO_CHAIN_LABEL);
     expect(body).toContain("tests/slug.test.ts");
   });
 
   it("names the exact suppression line(s) added, with their file", () => {
-    const body = buildGamingFlagAnnotation({
-      testFileEdits: [],
-      suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
-    });
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
+      },
+      true,
+    );
     expect(body).toContain("lib/foo.ts");
     expect(body).toContain("/* v8 ignore next */");
   });
 
   it("includes both sections when both are present", () => {
-    const body = buildGamingFlagAnnotation({
-      testFileEdits: ["tests/slug.test.ts"],
-      suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
-    });
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: ["tests/slug.test.ts"],
+        suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
+      },
+      true,
+    );
     expect(body).toContain("tests/slug.test.ts");
     expect(body).toContain("lib/foo.ts");
+  });
+
+  it("says the label was applied when labelApplied is true", () => {
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      true,
+    );
+    expect(body).toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
+    expect(body).not.toContain("FAILED to apply");
+  });
+
+  it("says the label FAILED to apply — never claims it landed — when labelApplied is false (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3)", () => {
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      false,
+    );
+    expect(body).toContain(`the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply`);
+    expect(body).toContain("flagged for manual review anyway");
+    expect(body).not.toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
   });
 
   it("neutralizes a backtick+Markdown-injection payload in an added line's own content (independent factory-security-reviewer finding, F1-S9 slice 1, issue #12)", () => {
@@ -494,10 +519,10 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     // unbroken code span, never rendered as live Markdown.
     const payload =
       "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
-    const body = buildGamingFlagAnnotation({
-      testFileEdits: [],
-      suppressions: [{ path: "lib/foo.ts", line: payload }],
-    });
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }] },
+      true,
+    );
     // The exact, deterministic expected rendering: the payload's own
     // backtick is gone, so `path` and `line` are each their OWN single,
     // unbroken code span — the payload's backtick never gets to close
@@ -516,10 +541,10 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
 
   it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
     const payload = "tests/`[click](https://attacker.example)`.test.ts";
-    const body = buildGamingFlagAnnotation({
-      testFileEdits: [payload],
-      suppressions: [],
-    });
+    const body = buildGamingFlagAnnotation(
+      { testFileEdits: [payload], suppressions: [] },
+      true,
+    );
     const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));
     expect(flaggedLine).toBeDefined();
     // A single field on this line (just `path`, no `line` counterpart) —

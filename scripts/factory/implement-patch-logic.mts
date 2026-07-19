@@ -395,13 +395,21 @@ export interface GamingFlag {
  *
  * @param flag - What the classifier found; at least one field is
  *   expected to be non-empty (the caller only invokes this when flagged).
+ * @param labelApplied - Whether `applyNoAutoChainLabelBestEffort` actually
+ *   succeeded (independent Codex + claude-review finding, F1-S9 slice 1,
+ *   issue #12, round 3): an earlier version unconditionally claimed
+ *   "labelled `no-auto-chain`" even when the label call failed — the same
+ *   never-overstate-success discipline `buildPublishSuccessStepSummary`'s
+ *   own `labelApplied`/`gamingLabelApplied` fields already follow.
  * @returns The Markdown comment body.
  */
-export function buildGamingFlagAnnotation(flag: GamingFlag): string {
+export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolean): string {
+  const labelLine = labelApplied
+    ? `labelled \`${NO_AUTO_CHAIN_LABEL}\`.`
+    : `the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply — flagged for manual review anyway.`;
   const lines: string[] = [
     "> 🚩 **This diff was flagged by the deterministic anti-gaming classifier (F1-S9) — " +
-      `labelled \`${NO_AUTO_CHAIN_LABEL}\`. A human must review this before it advances ` +
-      "any further.**",
+      `${labelLine} A human must review this before it advances any further.**`,
     "",
   ];
   if (flag.testFileEdits.length > 0) {
@@ -1203,6 +1211,16 @@ export function buildPublishSuccessStepSummary(
      * `labelApplied` above.
      */
     readonly gamingLabelApplied?: boolean;
+    /**
+     * Whether `postGamingFlagAnnotation` actually succeeded — `undefined`
+     * when `gamingFlagged` is not `true` (never attempted). Tracked
+     * SEPARATELY from `gamingLabelApplied` (Codex + claude-review finding,
+     * F1-S9 slice 1, issue #12, round 3): the label and the annotation
+     * comment are two independent best-effort calls, so this summary must
+     * never point the operator at "the PR's annotation comment" when that
+     * comment call itself failed and no such comment exists.
+     */
+    readonly gamingAnnotationPosted?: boolean;
   },
 ): string {
   const labelLine =
@@ -1245,13 +1263,22 @@ export function buildPublishSuccessStepSummary(
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
       "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
       "PR as if Claude Code Review never ran until that's resolved.";
+  const gamingLabelClause =
+    context.gamingLabelApplied === false
+      ? `attempted but FAILED to apply the \`${NO_AUTO_CHAIN_LABEL}\` label — check the run's logs`
+      : `labelled \`${NO_AUTO_CHAIN_LABEL}\``;
+  // Independent of the label outcome above (Codex + claude-review finding,
+  // round 3): the annotation comment is a SEPARATE best-effort call, so
+  // this must only point at "the PR's annotation comment" when that call
+  // actually succeeded — never assume the label's outcome implies the
+  // comment's.
+  const gamingAnnotationClause =
+    context.gamingAnnotationPosted === false
+      ? "the annotation comment FAILED to post — check the run's logs for exactly what tripped it"
+      : "see the PR's annotation comment for exactly what tripped it";
   const gamingLine = !context.gamingFlagged
     ? "✅ clean — no test-file edits, no added coverage-suppression comments"
-    : `🚩 **FLAGGED** — ${
-        context.gamingLabelApplied === false
-          ? `attempted but FAILED to apply the \`${NO_AUTO_CHAIN_LABEL}\` label — check the run's logs`
-          : `labelled \`${NO_AUTO_CHAIN_LABEL}\``
-      }; see the PR's annotation comment for exactly what tripped it — human review required before this advances`;
+    : `🚩 **FLAGGED** — ${gamingLabelClause}; ${gamingAnnotationClause} — human review required before this advances`;
   return [
     "## Factory publish summary",
     "",
