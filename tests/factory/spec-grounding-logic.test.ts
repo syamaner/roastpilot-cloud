@@ -186,13 +186,21 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences(body)).toEqual([]);
   });
 
-  it("DOCUMENTED RESIDUAL: the multi-line-container fallback can mask a real reference sharing the SAME multi-line container paragraph as an unrelated code span (verified, not assumed — a narrower, compound case than the single-line container forms above, which the indexOf fix fully closes)", () => {
+  it("the multi-line-container fallback PRESERVES a real reference sharing the same multi-line container paragraph as an unlocatable code span (operator correction, round 4: an earlier version of this fallback masked the whole paragraph here, silently DROPPING this real reference — an under-match that violated this module's own invariant; the fallback now does nothing to these lines at all, so a real reference elsewhere in the same paragraph is never at risk)", () => {
     const body = "- Closes #12 on line one\n  `some code` on line two of the SAME item";
-    // Honest documentation of a real gap, not a claim of correctness:
-    // this SHOULD ideally find issue #12, but the whole-paragraph
-    // fallback masks line one too. See the module's own top-level
-    // "SECOND RESIDUAL, DOCUMENTED LIMITATION" docstring.
-    expect(parseLinkedIssueReferences(body)).toEqual([]);
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("the residual's OTHER direction: a reference genuinely embedded in an un-locatable multi-line-container code span may be OVER-counted (harmless, the module's stated safe direction) rather than silently dropped", () => {
+    const body = "- see this\n  `Closes #12` code example on line two of the SAME item";
+    // The fallback leaves this code span unmasked (can't precisely
+    // locate it), so "Closes #12" — cosmetically code-formatted — is
+    // still found. A false positive here costs a human a glance; the
+    // alternative (masking the whole paragraph, as an earlier version
+    // did) risked dropping a REAL reference elsewhere in the same
+    // paragraph instead, which is the direction this module must never
+    // take.
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
   });
 
   it("fails SAFE in the OVER-match direction when markdown-it itself throws (Codex constraint, PR #70 review): code regions stay unmasked rather than the whole scan being skipped, since a false positive here costs a human a glance while silently missing a real reference would not", () => {

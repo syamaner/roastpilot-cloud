@@ -55,16 +55,25 @@
  * than silently accepted.
  *
  * SECOND RESIDUAL, DOCUMENTED LIMITATION (Codex finding, PR #70 review
- * round 3): {@link buildStructuralView}'s code-span masking correctly
- * locates a code_inline span inside a SINGLE-LINE container (a list
- * item, blockquote, or heading — the forms actually found and fixed on
- * this PR) by substring position, but a MULTI-LINE paragraph inside a
- * container falls back to masking that paragraph's WHOLE line range —
- * verified empirically that this fallback can mask a REAL reference
- * sharing the same multi-line container paragraph as an unrelated code
- * span, a genuine (if narrow and compound) under-match. Accepted rather
- * than chased further, same discipline as the epic-merge-history
- * limitation above.
+ * round 3, fallback direction corrected in round 4): {@link
+ * buildStructuralView}'s code-span masking correctly locates a
+ * code_inline span inside a SINGLE-LINE container (a list item,
+ * blockquote, or heading) by substring position, but a MULTI-LINE
+ * paragraph inside a container — where each continuation line carries
+ * its own container prefix, so the inline content is no longer one
+ * contiguous substring — can't be precisely located that way. The
+ * fallback for that narrow case is to leave those lines UNMASKED rather
+ * than guess at a range to mask: an earlier version masked the token's
+ * whole line range instead, which verified empirically COULD drop a
+ * real, unrelated reference sharing the same multi-line paragraph — an
+ * under-match that contradicted this module's own repeatedly-enforced
+ * invariant (findings B/E/2/C were all folded specifically to keep this
+ * module over-matching, never under-matching). Leaving the lines
+ * unmasked instead means a reference genuinely embedded in an
+ * un-locatable code span may be over-counted (harmless: a spurious
+ * advisory finding a human glances at and dismisses) — the correct,
+ * consistently-safe direction in every branch, not an accepted
+ * exception to it.
  */
 
 import MarkdownIt from "markdown-it";
@@ -271,24 +280,30 @@ function buildStructuralView(text: string): string {
       // genuinely a narrower, unnamed case than the single-line
       // container forms above — Codex's own named examples, a list
       // item/blockquote/heading each on ONE line, are fully closed by
-      // the `indexOf` fix above and never reach this branch). The
-      // fallback here masks the token's WHOLE line range if it has ANY
-      // code_inline child — this is over-matching FOR THE CODE SPAN
-      // itself (never leaves it unmasked), but is NOT purely safe
-      // overall: verified empirically that if a DIFFERENT line of the
-      // SAME multi-line container paragraph carries a real, unrelated
-      // reference, this fallback masks that line too, an honest
-      // documented UNDER-match for this specific, narrow, compound case
-      // (multi-line + container + code span + a real reference sharing
-      // the same paragraph) — accepted rather than chased further, same
-      // "fix the named gap, document the residual" discipline as the
-      // #62/#66 compressed-reference-form limitation elsewhere in this
-      // module.
-      if (token.children.some((child) => child.type === "code_inline")) {
-        for (let i = start; i < end && i < maskedLines.length; i++) {
-          maskedLines[i] = neuterPreservingNewlines(maskedLines[i] ?? "");
-        }
-      }
+      // the `indexOf` fix above and never reach this branch).
+      //
+      // FLIPPED DIRECTION (operator correction, PR #70 review round 4):
+      // an earlier version of this fallback masked the token's WHOLE
+      // line range whenever it had any code_inline child — verified
+      // empirically that this could mask an UNRELATED real reference on
+      // a different line of the SAME multi-line container paragraph, a
+      // genuine under-match. That contradicts this module's own
+      // repeatedly-enforced invariant (findings B/E/2/C were all folded
+      // specifically to keep this module OVER-matching, never under-
+      // matching) — documenting an under-match as an "accepted residual"
+      // was wrong regardless of how narrow the case is; the code must
+      // agree with its own stated safety direction in every branch, not
+      // just most of them. Correct fallback: do nothing here at all —
+      // leave this token's lines exactly as they already are in
+      // `maskedLines` (unmasked, or already masked by an EARLIER token
+      // this same pass, e.g. a sibling fence on an adjacent line). Any
+      // code_inline content this can't precisely locate simply stays
+      // scannable, same as the CommonMark-space-stripping single-span
+      // case just below — a reference genuinely embedded in an
+      // un-locatable code span may be over-counted (harmless: a spurious
+      // advisory finding a human glances at and dismisses), but a real
+      // reference elsewhere can NEVER be silently dropped by this
+      // branch, because this branch never touches `maskedLines` at all.
       continue;
     }
     let masked = joined;
