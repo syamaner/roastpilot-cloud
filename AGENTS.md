@@ -182,15 +182,22 @@ on a security keystone that two Opus `safety-reviewer` passes called clean. The
 fix is to move the lens that catches them to before the merge gate ever sees the
 PR.
 
-- **Diverse-lens pre-open loop (the flagship).** Open a review-worthy PR as a
-  **draft**, trigger `@codex review` on it, fold every real finding, and only
-  then mark it **ready**. Codex is a *different model family* from the Claude
-  authoring/review lenses, and same-family lenses co-accept a bug the author has
-  already rationalised — that is the exact ~15-P1 gap F1-S8 exposed. A finding
-  folded on the draft is not rework; the identical finding after "ready" is.
-  Trigger once per commit and **wait for the verdict on the head sha before
-  flipping to ready** — read Codex's `Reviewed commit:` sha and match it to the
-  PR head; never guess a time (see the Codex-wait rule in the Merge Policy).
+- **Diverse-lens pre-open loop (the flagship, interactive/human-authored PRs).**
+  Open a review-worthy PR as a **draft**, trigger `@codex review` on it, fold
+  every real finding, and only then mark it **ready**. Codex is a *different
+  model family* from the Claude authoring/review lenses, and same-family lenses
+  co-accept a bug the author has already rationalised — that is the exact ~15-P1
+  gap F1-S8 exposed. A finding folded on the draft is not rework; the identical
+  finding after "ready" is. Wait for the verdict per the **Codex-wait rule in
+  the Merge Policy** (its single source of truth) before flipping to ready —
+  don't restate that rule here. **Factory-authored PRs** don't use this
+  draft loop: the read-only implementing agent can't drive an open→ready
+  transition, so the privileged publisher opens the PR and the *same* diverse
+  lens runs **post-open** by design (the App-identity wiring exists precisely so
+  CI + Codex + Claude Code Review fire on the opened PR), with the human merge as
+  the gate the draft→ready step would otherwise be. Whether the publisher should
+  open factory PRs as drafts and have `pr-triage` mark them ready post-fold is a
+  factory-design question tracked separately, not this rule.
 - **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance
   of a class (a sanitizer that misses one escape, one un-byte-compared
   identifier, one un-audited grant target), fix the class in one place and
