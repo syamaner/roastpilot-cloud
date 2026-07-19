@@ -274,15 +274,24 @@ Do this for every run Step 1 found — there's no shortcut for a large
 backlog beyond scripting the loop yourself; don't leave a paused-window
 issue silently un-triaged.
 
-## Cost/budget caps (operator-console, not code — tracked here for completeness)
+## Cost/budget caps — N/A by billing model (D102)
 
-factory.md §13 point 7 also calls for **aggregate** cost caps (a per-run
-token cap alone can't see N runs × cap, or a runaway retry loop):
+factory.md §13 point 7 called for **aggregate** cost caps (a per-run token
+cap alone can't see N runs × cap, or a runaway retry loop) — **reconciled
+by D102 (18 Jul 2026): there is no metered spend to cap, so this checklist
+is closed by the billing model, not by console configuration.**
 
-- [ ] Anthropic Console: a monthly spend hard limit + a lower usage alert.
-- [ ] GitHub: an Actions minutes budget/alert on the organization or repo.
+- Anthropic: the factory runs on the flat-fee Claude Code subscription
+  token, not the pay-per-token API — there is no dollar spend limit to
+  set. Runaway protection is the factory's own controls instead: the
+  per-run `max_turns` cap plus the kill-switch (F1-S10, this doc's own
+  first section).
+- GitHub Actions: free/unlimited on this **public** repo with **no
+  payment method on file**, so it cannot incur charges — fail-safe by
+  construction, nothing to budget or alert on.
 
-These are operator-set console configuration, not something a workflow
-file or this repo's code can enforce — no PR closes this checklist. Mark
-each item done here once set, with the date, so this stays the single
-source of truth for "is the factory's blast radius actually bounded."
+**REVISIT if any of these change** — repo goes private (Actions minutes
+become metered), a payment method is ever added, or the factory switches
+to metered Anthropic API billing. At that point, set a real Anthropic
+monthly spend limit + usage alert and a GitHub Actions minutes budget,
+and reopen this checklist.

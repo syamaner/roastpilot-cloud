@@ -1,0 +1,376 @@
+name: DEV Snowflake Contract Check
+
+# F1-S8 (#11, factory.md §8) -- the live-key counterpart ci.yml's
+# "Snowflake migrations (offline)" job has always deferred: that job's own
+# comment says "A live contract check against ROASTPILOT_DEV with a
+# CI-scoped key is deferred to the human-gated secret-CI story (F1-S8/C7)".
+# This is that story.
+#
+# SECURITY MODEL: this is the ONLY workflow in this repo that holds a real,
+# writable Snowflake credential (SNOWFLAKE_DEV_PRIVATE_KEY). Every control
+# below exists specifically because of that, not as generic hardening:
+#
+# 1. `environment: dev-snowflake-ci` (below) is the REAL gate — a GitHub
+#    Environment with a required reviewer (the operator), provisioned
+#    directly in repo settings, not in this file. A job declaring this
+#    environment PAUSES for human approval before a single step runs,
+#    regardless of what triggered the workflow run. Agent-authored code
+#    (or anyone else) cannot make this key active without that approval.
+#    `SNOWFLAKE_DEV_PRIVATE_KEY` is an ENVIRONMENT secret scoped to
+#    `dev-snowflake-ci` specifically, NOT a repository secret (moved there
+#    and the repo-level copy deleted after the round-2 security review) --
+#    no other workflow in this repo can read `secrets.SNOWFLAKE_DEV_
+#    PRIVATE_KEY`, so this environment gate is a real credential boundary,
+#    not just a UI speed bump in front of a secret every job could already
+#    see.
+# 2. `workflow_dispatch` only — deliberately not `pull_request` (even
+#    scoped to snowflake/**) for this first slice. Same dispatch-first,
+#    staged-autonomy pattern as implement-ready-issues.yml: a human
+#    explicitly chooses to run this, rather than it firing automatically
+#    on every commit that touches migrations. Broadening the trigger is a
+#    conscious later decision, not a default.
+# 3. `egress-policy: block` (not `audit`) — unlike implement-ready-
+#    issues.yml's deliberately cautious audit-mode rollout (that job
+#    doesn't hold a real credential; this one does), a job with a live
+#    Snowflake key defaults to fail-closed from the start. If the
+#    allowed-endpoints list below is ever wrong, this job simply FAILS
+#    (blocked egress -> connection error) rather than silently reaching
+#    somewhere unintended — a safe failure mode either way.
+# 4. This job runs no `npm`/Node step at all (it's Python-only, unlike the
+#    Next.js-touching jobs elsewhere in this repo) — deliberately kept that
+#    way (claude-review finding, PR #57): an earlier draft ran
+#    `npm ci --ignore-scripts` here as blanket defense-in-depth, but with no
+#    other npm/Node step in this job to justify it, that was unnecessary
+#    attack surface in the one job that specifically minimizes footprint
+#    around a live credential — removed rather than kept "just in case".
+# 5. The private key never touches disk for the grants-assertion step
+#    (assert_dev_ci_grants.py loads it from memory via
+#    snowflake-connector-python's own `private_key` bytes parameter). The
+#    schemachange deploy step DOES need a temp file — schemachange's own
+#    env-var layer only accepts SNOWFLAKE_PRIVATE_KEY_FILE, a path, never
+#    raw key content (verified against the installed package's source,
+#    #18) — written with `umask 077`, removed via `trap ... EXIT` so it's
+#    gone even if the step fails partway.
+# 6. The grants-assertion runs TWICE, not once (Codex P1, PR #57, round
+#    3): once BEFORE the deploy step (Codex P1, PR #57, round 1 — the
+#    drift gate: checking the boundary only AFTER migrations have already
+#    been applied would let a drifted role's damage happen before this job
+#    ever reports it), and once AFTER it (the migration-output gate: a
+#    migration that ITSELF grants something forbidden -- e.g. a bad
+#    `GRANT ... TO PUBLIC` -- succeeds as valid SQL and would sail through
+#    a pre-deploy-only check, since that check ran before the migration
+#    existed in the database at all). Both runs are the exact same script;
+#    see the two steps' own comments for why the second one also runs even
+#    if the deploy step itself failed partway.
+# 7. Secondary roles are kept off for BOTH Snowflake connections in this
+#    job, by two DIFFERENT mechanisms (Codex P1, PR #57, round 2 — an
+#    earlier attempt tried a single `session_parameters`/
+#    `SNOWFLAKE_SESSION_PARAMETERS` mechanism for both, which turned out to
+#    be invalid; `USE SECONDARY ROLES` is a SQL statement, not a settable
+#    session parameter):
+#      - the grants-assertion step issues `USE SECONDARY ROLES NONE` as a
+#        real statement on its own connection (assert_dev_ci_grants.py);
+#      - the deploy step has no equivalent mid-session hook (schemachange
+#        owns that connection), so the OPERATOR runs
+#        `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
+#        once, account-side, which stops secondary roles activating by
+#        default on ANY connection this user makes — the deploy step's
+#        included. See the deploy step's own comment.
+#    Without one of these covering each connection, ANY other role granted
+#    to the CI user could contribute unaudited privileges to an effective
+#    session, regardless of what the PRIMARY role's own grants/visibility
+#    checks report.
+# 8. `concurrency` (below) serializes dispatches of this job so two
+#    concurrent runs can never execute `schemachange deploy` against the
+#    same change-history table at once — `cancel-in-progress: false`
+#    because a mid-migration run must never be orphaned by a newer
+#    dispatch, the same reasoning implement-ready-issues.yml uses for its
+#    own concurrency group.
+#
+# NOTE (operator-supervised validation required): the live-connection code
+# paths in with_connection_env.py/assert_dev_ci_grants.py, and this
+# workflow's own step sequencing, have never run against a real Snowflake
+# session — no credentials are available to the agent that wrote them, per
+# factory.md's own "agent jobs hold no Snowflake secrets" invariant. The
+# FIRST real dispatch of this job, by the operator, is this workflow's
+# actual validation.
+
+on:
+  workflow_dispatch: {}
+
+# Default-deny; the job below declares exactly the scope it needs.
+permissions: {}
+
+# Serializes dispatches (Codex P2, PR #57, round 2): two concurrent runs
+# executing `schemachange deploy` against the same change-history table at
+# once is a migration race. cancel-in-progress stays false -- never cancel
+# a run that may be mid-migration, same reasoning implement-ready-issues.yml
+# uses for its own concurrency group.
+concurrency:
+  group: dev-snowflake-contract
+  cancel-in-progress: false
+
+jobs:
+  contract-check:
+    name: Live contract check + grants assertion (ROASTPILOT_DEV)
+    runs-on: ubuntu-latest
+    environment: dev-snowflake-ci
+    # Codex P2, PR #57, round 2: bounds how long this job can hold the
+    # writable key + the DEV warehouse resource before GitHub force-
+    # terminates it -- without this, a stalled/locked migration would keep
+    # both alive until Actions' own default (hours), not this job's actual
+    # expected runtime (a schema migration against a tiny XSMALL warehouse).
+    #
+    # BUDGET (Codex P1, PR #57, round 6, :275 -- the round-5 :123 fix was
+    # INCOMPLETE): the job-level timeout starts at JOB start, before
+    # checkout/deps/the static scan/the pre-deploy audit ever run -- a
+    # 15-minute job timeout with only a 10-minute deploy-step timeout does
+    # NOT actually reserve time for the post-deploy audit, because ~5
+    # minutes of pre-deploy overhead plus a full 10-minute deploy stall
+    # already equals the whole 15-minute job budget, killing the job
+    # before `grants-post` ever runs -- exactly the failure round 5's fix
+    # was meant to prevent, just moved one step later. The invariant this
+    # timeout must satisfy:
+    #   job_timeout > pre_deploy_overhead + deploy_step_timeout + post_audit_window
+    # Budgeted here as ~5 min pre-deploy overhead (checkout, dependency
+    # install, the static scan, the live pre-deploy audit) + 10 min deploy
+    # step (unchanged) + ~3 min post-deploy audit window + slack ⇒ 20.
+    # Keep the deploy step's own timeout at 10 -- only the job-level number
+    # needs to grow to restore the guarantee.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (block all egress except what this job needs)
+        # allowed-endpoints is this job's own best specification (GitHub
+        # checkout, PyPI for the Python dependency install, and Snowflake's
+        # account/OCSP/telemetry hosts) — not yet empirically
+        # confirmed against a live run, per the NOTE above. Adjust based on
+        # what the operator's first real dispatch actually shows in this
+        # step's own Harden-Runner Insights, the same "audit, then trust"
+        # discipline implement-ready-issues.yml's own egress step describes
+        # (that job just stopped at audit mode; this one starts at block
+        # because a live credential is at stake and a wrong list should
+        # fail the job, not silently under-restrict it).
+        # `ocsp.snowflakecomputing.com:80` (Codex P2, PR #57, round 4): the
+        # main `*.snowflakecomputing.com:443` entry above covers the actual
+        # Snowflake connection, but snowflake-connector-python's OCSP
+        # certificate-revocation check fetches from a SEPARATE OCSP
+        # response cache server, over plain HTTP (port 80 -- OCSP responses
+        # are individually signed, so the protocol itself doesn't require
+        # TLS). Without this entry, that fetch is blocked by egress-policy:
+        # block, and the connector FAILS OPEN on an OCSP cache miss (skips
+        # the revocation check rather than erroring) -- a silent security
+        # degradation, not a loud failure, which is worse than either
+        # extreme on its own.
+
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            *.snowflakecomputing.com:443
+            ocsp.snowflakecomputing.com:80
+
+      - name: Checkout roastpilot-cloud
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install schemachange + Snowflake connector dependencies
+        run: pip install -r snowflake/requirements.txt
+
+      - name: Check migrations for an obvious forbidden PUBLIC grant
+        id: forbidden-grants-scan
+        # A cheap, best-effort PREVENTIVE guard (Codex P1, PR #57, round 4,
+        # :244) -- runs FIRST, before even attempting a live Snowflake
+        # connection, since it needs neither credentials nor network access
+        # to Snowflake. Deliberately NOT the authoritative control: this is
+        # a text scan, not a SQL parser, so it can miss a Jinja-templated or
+        # otherwise non-obvious forbidden grant. The `(post-deploy)` grants
+        # audit below is what actually stays authoritative for that residual
+        # gap -- see check_forbidden_grants.py's own module docstring for
+        # the full reasoning, including why a caught-late bad grant is still
+        # a contained, DEV-only, operator-revocable incident, not a PROD
+        # exposure.
+        working-directory: snowflake
+        run: python3 check_forbidden_grants.py
+
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH (pre-deploy)
+        id: grants
+        # The DRIFT gate -- runs BEFORE the deploy step below (Codex P1, PR
+        # #57): checking the boundary only AFTER migrations have already
+        # been applied would let a drifted role's damage happen before this
+        # script ever reports it. No `if:` needed — a normal
+        # (non-continue-on-error) step failure here automatically skips the
+        # deploy step that follows, GitHub Actions' own default behavior,
+        # so a boundary violation blocks the deploy without any extra
+        # conditional logic to get wrong. This is NOT the only run of this
+        # script in this job -- see the "(post-deploy)" step below, the
+        # MIGRATION-OUTPUT gate, for why a pre-deploy-only check would miss
+        # a migration that itself introduces a forbidden grant.
+        # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
+        # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW FUTURE GRANTS TO
+        # ROLE (for the role and for PUBLIC), SHOW DATABASES, or SHOW
+        # WAREHOUSES report anything outside the DEV database/warehouse
+        # this role is provisioned to touch, or if PUBLIC holds any current
+        # or future grant VISIBLE TO THIS ROLE (assert_dev_ci_grants.py,
+        # #11 -- the PUBLIC checks are a DEV-visibility-scoped, best-effort
+        # detective control, not an account-wide completeness guarantee;
+        # true completeness would need MANAGE GRANTS, which this minimal
+        # role deliberately doesn't hold -- tracked #59, see the script's
+        # own docstring), or if the CI user's DEFAULT_SECONDARY_ROLES isn't
+        # verifiably empty (SHOW USERS LIKE, Codex P1, PR #57, round 5).
+        # Connects directly via snowflake-connector-python with the key
+        # held in memory only, never written to disk (unlike the deploy
+        # step below, which needs schemachange's file-based env layer).
+        # Secondary roles are disabled for this session via a real `USE
+        # SECONDARY ROLES NONE` statement the script issues right after
+        # connecting (Codex P1, PR #57, round 2 -- an earlier
+        # `session_parameters` attempt here was invalid and never actually
+        # worked). The deploy connection below has no equivalent
+        # mid-session hook, so it's covered instead by an operator-run
+        # `ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()`
+        # -- see that step's own comment. This step's SHOW USERS check
+        # verifies that operator action actually took effect, rather than
+        # silently trusting it happened.
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          # Same var the deploy step below uses for SNOWFLAKE_DATABASE —
+          # assert_dev_ci_grants.py checks grants against THIS value, not a
+          # hardcoded literal (claude-review finding, PR #57), so the two
+          # steps can never silently check a different database boundary
+          # than what's actually deployed to. The script itself separately
+          # asserts this var (and the warehouse one) hasn't drifted from
+          # its known-correct literal (Codex P2, PR #57, round 2).
+          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: python3 assert_dev_ci_grants.py
+
+      - name: Deploy migrations for real against ROASTPILOT_DEV
+        id: deploy
+        # Only reached if the grants-assertion step above succeeded (see
+        # its own comment for why it now runs first). Relies on
+        # with_connection_env.py's per-field connection merge (#18,
+        # build_launch_env): this runner has no config.toml at all, which
+        # the merge tolerates (never fatal) — and since every SNOWFLAKE_*
+        # field is already set below, there's no profile field for it to
+        # fill in even if a config.toml somehow existed, so it execs
+        # schemachange straight through with this step's own environment
+        # unchanged. The SAME command a local dev would run, unmodified —
+        # no CI-specific fork of the deploy path to drift out of sync with
+        # local usage.
+        # `timeout-minutes` here, SHORTER than the job's own 20 (Codex P1,
+        # PR #57, round 5, :123, hardened round 6, :275 -- see the job-level
+        # timeout's own comment for the full budget math): the job-level
+        # timeout alone kills the RUNNER mid-stall, which would also kill
+        # the `if: always()` post-deploy audit below before it ever runs --
+        # and DDL already auto-commits, so a stall here doesn't undo
+        # whatever the migration already applied. A step-level timeout
+        # shorter than the job's, WITH the job's own timeout budgeted to
+        # actually cover pre-deploy overhead + this step + a post-deploy
+        # window (round 6 fixed an incomplete round-5 budget that didn't
+        # account for pre-deploy overhead), leaves enough job time for the
+        # post-deploy audit to actually run and report on whatever state
+        # the stalled deploy left behind, rather than the whole job just
+        # vanishing mid-migration with no final audit at all.
+        timeout-minutes: 10
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+          # OPERATOR DEPENDENCY (Codex P1, PR #57, round 2): this
+          # connection has no mid-session hook to disable secondary roles
+          # the way the grants-assertion step's own `USE SECONDARY ROLES
+          # NONE` statement does -- schemachange owns the connection and
+          # runs its own migration SQL, not ours. An earlier attempt set
+          # `SNOWFLAKE_SESSION_PARAMETERS: '{"USE_SECONDARY_ROLES":
+          # "NONE"}'` here; that was invalid (USE SECONDARY ROLES is a SQL
+          # statement, not a settable session parameter) and never actually
+          # worked. Instead, the operator runs, once, account-side:
+          #   ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()
+          # which stops secondary roles activating by default on ANY
+          # connection this user makes -- this one included -- without
+          # needing a per-connection mechanism at all.
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          umask 077
+          printf '%s' "$SNOWFLAKE_DEV_PRIVATE_KEY" > "$KEY_FILE"
+          export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
+          python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
+
+      - name: Assert the DEV CI role's grants never extend beyond ROASTPILOT_DEV/DEV_CI_WH (post-deploy)
+        id: grants-post
+        # The MIGRATION-OUTPUT gate (Codex P1, PR #57, round 3): the
+        # pre-deploy step above can only ever catch a boundary problem that
+        # ALREADY existed before this run's migrations were applied -- a
+        # migration that itself contains a forbidden grant (e.g. `GRANT
+        # SELECT ON ... TO PUBLIC`) is valid SQL, so schemachange applies it
+        # successfully, and the pre-deploy audit has no way to have seen it
+        # since it hadn't been applied yet. Re-running the exact same audit
+        # here, against the now-migrated database, is what actually catches
+        # that class of bad migration -- a failure here means the migration
+        # under test introduced a forbidden grant, and fails the job.
+        # `if: always()` + explicitly checking the pre-deploy step's own
+        # outcome (rather than relying on the default "skip after a
+        # failure" behavior) so this still runs even if the deploy step
+        # itself exited non-zero -- schemachange applies migrations one at
+        # a time, so a batch that fails partway through may still have
+        # already applied an earlier, bad grant; skipping this check in
+        # that case would let that grant go unaudited. It does NOT run if
+        # the pre-deploy step itself failed (no deploy was attempted, so
+        # there's nothing new to audit, and the state is identical to what
+        # pre-deploy already reported).
+        if: always() && steps.grants.outcome == 'success'
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_DEV_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+          SNOWFLAKE_DEV_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SNOWFLAKE_DEV_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+          SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+        run: python3 assert_dev_ci_grants.py
+
+      - name: Write summary
+        # Purely observability — this is a rarely-run, human-approved job
+        # holding a real credential, so the operator reviewing a run should
+        # see a clear pass/fail signal for both halves without opening the
+        # raw step logs. steps.<id>.outcome (not .conclusion) reflects each
+        # step's REAL pass/fail result. Never a reason to fail the job on
+        # its own — if: always() runs this regardless of what came before.
+        if: always()
+        run: |
+          {
+            echo "## DEV Snowflake contract check"
+            echo ""
+            echo "- **Migrations pass the preventive PUBLIC-grant scan:** ${{ steps.forbidden-grants-scan.outcome }}"
+            echo "- **Grants stay within DEV (pre-deploy):** ${{ steps.grants.outcome }}"
+            echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
+            echo "- **Grants stay within DEV (post-deploy):** ${{ steps.grants-post.outcome }}"
+            echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
+            echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
+            echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
