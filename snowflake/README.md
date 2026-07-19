@@ -270,13 +270,22 @@ egress LOCKED to a fixed allowlist (GitHub, PyPI, Snowflake) rather than
 the audit-only mode the rest of this factory's jobs use, since a live
 credential is genuinely at stake here.
 
-The job has a 15-minute `timeout-minutes`; the deploy step inside it has
-its OWN, shorter 10-minute timeout. That gap is deliberate: a job-level
-timeout alone kills the runner mid-stall and takes the post-deploy grants
-audit down with it — the deploy step's own shorter timeout means a stalled
-deploy gets killed first, leaving the job enough budget left to still run
-that audit and report on whatever the stalled deploy left behind (DDL
-auto-commits, so a stall doesn't undo it).
+The job has a 20-minute `timeout-minutes`; the deploy step inside it has
+its OWN, shorter 10-minute timeout. That gap is deliberate and budgeted
+explicitly, not just "bigger than the step" — the job-level timer starts
+at job start, before checkout/deps/the static scan/the pre-deploy audit
+ever run, so it has to cover all of that PLUS the deploy step PLUS a
+window for the post-deploy audit: `job_timeout > pre_deploy_overhead +
+deploy_step_timeout + post_audit_window` (~5 + 10 + ~3, with slack ⇒ 20).
+An earlier version set the job timeout to only 15, which — while still
+"longer than the deploy step" in isolation — didn't actually leave enough
+room once pre-deploy overhead was accounted for, and could still kill the
+job before the post-deploy audit ran. A job-level timeout alone kills the
+runner mid-stall and takes the post-deploy grants audit down with it — the
+deploy step's own shorter timeout means a stalled deploy gets killed
+first, leaving the job enough budget left to still run that audit and
+report on whatever the stalled deploy left behind (DDL auto-commits, so a
+stall doesn't undo it).
 
 `validate_migrations.py` mirrors schemachange's own deploy-time collector
 exactly (issue #18): it discovers every migration RECURSIVELY, in any

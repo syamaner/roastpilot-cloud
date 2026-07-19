@@ -103,7 +103,14 @@ independent things, all of which must pass:
    protection silently disappears with no code-visible signal. This check
    turns that silent operator dependency into a verified precondition,
    checked on every dispatch, in both the pre- and post-deploy audits
-   (`find_default_secondary_roles_violation`).
+   (`find_default_secondary_roles_violation`). `LIKE` treats each
+   underscore as a wildcard, so the query can over-match a lookalike user
+   name -- `find_default_secondary_roles_violation` never trusts row
+   order or assumes the first row is the real one; it filters to the
+   row(s) whose own `name` exactly matches the configured user
+   (uppercase-compared) and fails closed unless exactly one such row
+   exists (Codex P1, PR #57, round 6, :709/:710 -- a real bug in the
+   round-5 version, where `user_rows[0]` was trusted unconditionally).
 
 This is the F1-S8 acceptance bar: a compromised or misbehaving agent
 holding this role must never be able to touch PROD, PREVIEW, or any other
@@ -617,6 +624,33 @@ def find_default_secondary_roles_violation(user_rows: list[dict[str, object]], u
     secondary-roles protection would silently disappear with no other
     signal anywhere in this job.
 
+    Never trusts `user_rows[0]` (Codex P1, PR #57, round 6, :709/:710 -- a
+    real bug in the round-5 version): `SHOW USERS LIKE` treats each
+    underscore in the pattern as a single-character wildcard, so a
+    lookalike user name (e.g. `ROASTPILOT0DEV0CI` for `ROASTPILOT_DEV_CI`)
+    can ALSO match and could sort ahead of the real one -- trusting row
+    order would let a lookalike's (possibly compliant) setting silently
+    stand in for the real CI user's, verifying nothing. LIKE-matching is
+    never treated as identity: this filters `user_rows` down to the row(s)
+    whose OWN `name` column equals `user` EXACTLY, uppercase-compared on
+    both sides (Snowflake folds unquoted identifiers to uppercase at
+    creation, so this is the correct equivalence for an operator-supplied
+    env var naming the same account object regardless of how it happened
+    to be typed -- a DIFFERENT comparison from `identifiers_match`'s
+    deliberately no-fold policy elsewhere in this module, which exists to
+    reject a quoted, differently-cased LOOKALIKE object as a security
+    boundary; here there's no boundary being enforced by case, only an
+    identity lookup against this single user's own name), and fails CLOSED
+    unless EXACTLY ONE such row is found -- zero exact matches (only
+    wildcard lookalikes, if any), or more than one (which should never
+    legitimately happen for a single username but is not assumed away),
+    are both violations. `LIKE` itself is intentionally NOT hardened with
+    an `ESCAPE` clause here: the exact-name post-filter is what makes this
+    sound regardless of how permissively `LIKE` over-matches, and adding
+    unverified escape syntax without a live session to test it against
+    would risk a different failure mode (a malformed query) for no
+    correctness gain over the post-filter alone.
+
     Accepts ONLY the specific empty-set representations expected for
     `DEFAULT_SECONDARY_ROLES = ()` -- the JSON array string `"[]"`, or an
     already-parsed empty Python list (in case the connector parses this
@@ -634,9 +668,16 @@ def find_default_secondary_roles_violation(user_rows: list[dict[str, object]], u
     @param user: The CI service user being checked.
     @returns: A violation description, or `None` if verifiably empty.
     """
-    if not user_rows:
-        return f"SHOW USERS LIKE '{user}' returned no rows -- cannot verify DEFAULT_SECONDARY_ROLES"
-    value = user_rows[0].get("default_secondary_roles", "<column missing>")
+    expected_name = user.upper()
+    exact_matches = [row for row in user_rows if str(row.get("name", "")).upper() == expected_name]
+    if len(exact_matches) != 1:
+        return (
+            f"SHOW USERS LIKE '{user}' returned {len(user_rows)} row(s), of which "
+            f"{len(exact_matches)} had a name exactly matching {user!r} -- cannot verify "
+            "DEFAULT_SECONDARY_ROLES (LIKE-matching is not identity; a wildcard-lookalike "
+            "user name could match instead of, or alongside, the real one)"
+        )
+    value = exact_matches[0].get("default_secondary_roles", "<column missing>")
     if value == "[]" or value == []:
         return None
     return (

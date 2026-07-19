@@ -120,11 +120,24 @@ jobs:
     # terminates it -- without this, a stalled/locked migration would keep
     # both alive until Actions' own default (hours), not this job's actual
     # expected runtime (a schema migration against a tiny XSMALL warehouse).
-    # Deliberately LONGER than the deploy step's own 10-minute timeout
-    # below (Codex P1, PR #57, round 5, :123) -- the gap is budget for the
-    # post-deploy audit to run and report even after a stalled deploy is
-    # killed, not slack to raise casually.
-    timeout-minutes: 15
+    #
+    # BUDGET (Codex P1, PR #57, round 6, :275 -- the round-5 :123 fix was
+    # INCOMPLETE): the job-level timeout starts at JOB start, before
+    # checkout/deps/the static scan/the pre-deploy audit ever run -- a
+    # 15-minute job timeout with only a 10-minute deploy-step timeout does
+    # NOT actually reserve time for the post-deploy audit, because ~5
+    # minutes of pre-deploy overhead plus a full 10-minute deploy stall
+    # already equals the whole 15-minute job budget, killing the job
+    # before `grants-post` ever runs -- exactly the failure round 5's fix
+    # was meant to prevent, just moved one step later. The invariant this
+    # timeout must satisfy:
+    #   job_timeout > pre_deploy_overhead + deploy_step_timeout + post_audit_window
+    # Budgeted here as ~5 min pre-deploy overhead (checkout, dependency
+    # install, the static scan, the live pre-deploy audit) + 10 min deploy
+    # step (unchanged) + ~3 min post-deploy audit window + slack ⇒ 20.
+    # Keep the deploy step's own timeout at 10 -- only the job-level number
+    # needs to grow to restore the guarantee.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -262,16 +275,20 @@ jobs:
         # unchanged. The SAME command a local dev would run, unmodified —
         # no CI-specific fork of the deploy path to drift out of sync with
         # local usage.
-        # `timeout-minutes` here, SHORTER than the job's own 15 (Codex P1,
-        # PR #57, round 5, :123): the job-level timeout alone kills the
-        # RUNNER mid-stall, which would also kill the `if: always()`
-        # post-deploy audit below before it ever runs -- and DDL already
-        # auto-commits, so a stall here doesn't undo whatever the migration
-        # already applied. A step-level timeout shorter than the job's
-        # leaves enough job budget for the post-deploy audit to actually
-        # run and report on whatever state the stalled deploy left behind,
-        # rather than the whole job just vanishing mid-migration with no
-        # final audit at all.
+        # `timeout-minutes` here, SHORTER than the job's own 20 (Codex P1,
+        # PR #57, round 5, :123, hardened round 6, :275 -- see the job-level
+        # timeout's own comment for the full budget math): the job-level
+        # timeout alone kills the RUNNER mid-stall, which would also kill
+        # the `if: always()` post-deploy audit below before it ever runs --
+        # and DDL already auto-commits, so a stall here doesn't undo
+        # whatever the migration already applied. A step-level timeout
+        # shorter than the job's, WITH the job's own timeout budgeted to
+        # actually cover pre-deploy overhead + this step + a post-deploy
+        # window (round 6 fixed an incomplete round-5 budget that didn't
+        # account for pre-deploy overhead), leaves enough job time for the
+        # post-deploy audit to actually run and report on whatever state
+        # the stalled deploy left behind, rather than the whole job just
+        # vanishing mid-migration with no final audit at all.
         timeout-minutes: 10
         working-directory: snowflake
         env:

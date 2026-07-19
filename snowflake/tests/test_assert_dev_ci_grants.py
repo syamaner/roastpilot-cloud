@@ -444,27 +444,42 @@ class TestFindUnexpectedUserRoleGrants:
 _CI_USER = "ROASTPILOT_DEV_CI"
 
 
+_LOOKALIKE_USER = "ROASTPILOT0DEV0CI"  # matches ROASTPILOT_DEV_CI under LIKE's `_` wildcard
+
+
 class TestFindDefaultSecondaryRolesViolation:
-    """Codex P1, PR #57, round 5, :270: turns the operator-run `ALTER USER
-    ... SET DEFAULT_SECONDARY_ROLES = ()` dependency into a VERIFIED
-    precondition instead of a silently-trusted one.
+    """Codex P1, PR #57, round 5, :270 + round 6, :709/:710: turns the
+    operator-run `ALTER USER ... SET DEFAULT_SECONDARY_ROLES = ()`
+    dependency into a VERIFIED precondition instead of a silently-trusted
+    one -- and never trusts row order or `SHOW USERS LIKE`'s own
+    wildcard over-matching as identity (round 6 closed a real bug where
+    `user_rows[0]` was trusted unconditionally).
     """
 
     def test_none_when_the_json_array_string_is_empty(self) -> None:
-        rows = [{"default_secondary_roles": "[]"}]
+        rows = [{"name": _CI_USER, "default_secondary_roles": "[]"}]
         assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
 
     def test_none_when_the_connector_already_parsed_an_empty_list(self) -> None:
         # In case the connector parses this particular column into a
         # Python object rather than leaving it as a raw JSON string.
-        rows = [{"default_secondary_roles": []}]
+        rows = [{"name": _CI_USER, "default_secondary_roles": []}]
+        assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
+
+    def test_name_comparison_is_uppercase_folded_deliberately_unlike_identifiers_match(self) -> None:
+        # A DIFFERENT comparison policy from identifiers_match's no-fold
+        # rule elsewhere in this module: this is an identity lookup for a
+        # single operator-supplied env var against Snowflake's own
+        # canonical (unquoted-creation) uppercase name, not a security
+        # boundary being enforced by case.
+        rows = [{"name": _CI_USER.lower(), "default_secondary_roles": "[]"}]
         assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
 
     def test_flags_all_as_a_violation(self) -> None:
         # The exact misconfiguration this check exists to catch: the
         # operator-run ALTER USER ... DEFAULT_SECONDARY_ROLES = () was
         # never run, or was reset, leaving ALL secondary roles active.
-        rows = [{"default_secondary_roles": '["ALL"]'}]
+        rows = [{"name": _CI_USER, "default_secondary_roles": '["ALL"]'}]
         violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
         assert violation is not None
         assert "DEFAULT_SECONDARY_ROLES" in violation
@@ -477,14 +492,55 @@ class TestFindDefaultSecondaryRolesViolation:
         assert violation is not None
 
     def test_flags_none_value_as_a_violation_fails_closed(self) -> None:
-        rows = [{"default_secondary_roles": None}]
+        rows = [{"name": _CI_USER, "default_secondary_roles": None}]
         violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
         assert violation is not None
 
     def test_flags_no_rows_at_all_as_a_violation(self) -> None:
         violation = assert_dev_ci_grants.find_default_secondary_roles_violation([], _CI_USER)
         assert violation is not None
-        assert "no rows" in violation
+        assert "DEFAULT_SECONDARY_ROLES" in violation
+
+    def test_a_wildcard_lookalike_alongside_the_real_user_is_ignored_codex_p1_709(self) -> None:
+        # The exact bug this closes: SHOW USERS LIKE treats each
+        # underscore as a single-char wildcard, so a lookalike name
+        # (ROASTPILOT0DEV0CI for ROASTPILOT_DEV_CI) can match too and
+        # could sort ahead of the real one -- trusting row order/row[0]
+        # would let the lookalike's (here, compliant) setting silently
+        # stand in for the real CI user's.
+        rows = [
+            {"name": _LOOKALIKE_USER, "default_secondary_roles": "[]"},
+            {"name": _CI_USER, "default_secondary_roles": "[]"},
+        ]
+        assert assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER) is None
+
+    def test_a_wildcard_lookalikes_compliant_row_never_masks_the_real_users_violation(self) -> None:
+        # Even with the lookalike's row compliant AND sorted first, the
+        # REAL user's own violating row must still be what's evaluated --
+        # this is the unsound direction the round-5 bug actually enabled.
+        rows = [
+            {"name": _LOOKALIKE_USER, "default_secondary_roles": "[]"},
+            {"name": _CI_USER, "default_secondary_roles": '["ALL"]'},
+        ]
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
+
+    def test_only_a_wildcard_lookalike_with_no_exact_match_is_a_violation_codex_p1_710(self) -> None:
+        # No row for the real user at all -- fails closed rather than
+        # silently accepting the lookalike's row as a stand-in.
+        rows = [{"name": _LOOKALIKE_USER, "default_secondary_roles": "[]"}]
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
+
+    def test_more_than_one_exact_match_is_a_violation_fails_closed(self) -> None:
+        # Should never legitimately happen for a single username, but not
+        # assumed away -- ambiguity fails closed rather than picking one.
+        rows = [
+            {"name": _CI_USER, "default_secondary_roles": "[]"},
+            {"name": _CI_USER, "default_secondary_roles": "[]"},
+        ]
+        violation = assert_dev_ci_grants.find_default_secondary_roles_violation(rows, _CI_USER)
+        assert violation is not None
 
 
 class TestMain:
@@ -532,7 +588,9 @@ class TestMain:
             user_role_rows if user_role_rows is not None else [{"role": _DEV_ROLE}],
             future_grant_rows if future_grant_rows is not None else [],
             public_future_grant_rows if public_future_grant_rows is not None else [],
-            show_user_rows if show_user_rows is not None else [{"default_secondary_roles": "[]"}],
+            show_user_rows
+            if show_user_rows is not None
+            else [{"name": _CI_USER, "default_secondary_roles": "[]"}],
         ]
         return mock_cursor
 
@@ -647,7 +705,30 @@ class TestMain:
         self._set_required_env(monkeypatch, _generate_test_pem())
         mock_cursor = self._mock_cursor(
             [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
-            show_user_rows=[{"default_secondary_roles": '["ALL"]'}],
+            show_user_rows=[{"name": _CI_USER, "default_secondary_roles": '["ALL"]'}],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "DEFAULT_SECONDARY_ROLES" in stderr
+
+    def test_returns_1_when_only_a_wildcard_lookalike_user_matches_codex_p1_round6(
+        self, monkeypatch, capsys
+    ) -> None:
+        # The exact bug round 6 closed: SHOW USERS LIKE 'ROASTPILOT_DEV_CI'
+        # can ALSO match a lookalike like ROASTPILOT0DEV0CI (LIKE's `_`
+        # wildcard). If the real user's own row is absent (or the
+        # lookalike's row were trusted as row[0]), this must fail closed,
+        # not pass on the lookalike's compliant-looking setting.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            show_user_rows=[{"name": "ROASTPILOT0DEV0CI", "default_secondary_roles": "[]"}],
         )
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
