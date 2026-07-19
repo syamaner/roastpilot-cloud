@@ -1002,6 +1002,169 @@ index 0000000..abc1234
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  it("detects a suppression smuggled in via a COPY of an already-suppressed file (Codex finding, F1-S9 slice 1, issue #12, ready round 2 — closes the copy-detection content bypass: a THIRD classifier bypass)", async () => {
+    // The exploit this closes: an EXISTING, already-committed file already
+    // carries a suppression comment. A patch that adds a NEW file with the
+    // SAME content — an ordinary "new file" diff, nothing exotic about the
+    // incoming patch's own format — gets applied into the scratch index,
+    // then re-diffed by getAuthoritativePatchAnalysis's OWN content-scan
+    // query. Before the fix, that query kept the SAME `-M -C
+    // --find-copies-harder` options as the path-analysis query, so git's
+    // own re-diff recognized the new file as a COPY of the untouched
+    // original and serialized it as copy METADATA with ZERO hunks — the
+    // suppression comment never appears as a `+` line at all, invisible to
+    // findAddedCoverageSuppressions even though the file is very much a
+    // new, suppression-carrying addition once applied. `--no-renames` on
+    // the content-scan query (only) forces this to serialize as a full
+    // addition instead, so the fix makes it visible again.
+    const suppressedContent = [
+      "export function original(): number {",
+      "  return 1; /* v8 ignore next */",
+      "}",
+      "",
+    ].join("\n");
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(join(localCloneDir, "lib", "original.ts"), suppressedContent);
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add lib/original.ts (already suppressed)"]);
+
+    // The "copy": a brand-new file with IDENTICAL content, added via an
+    // ordinary unified diff (no copy/rename syntax in the incoming patch
+    // itself — the bypass lived entirely in the RECEIVING end's own re-diff
+    // options, not in how the agent's patch happened to be formatted).
+    await fsWriteFile(join(localCloneDir, "lib", "copy.ts"), suppressedContent);
+    git(localCloneDir, ["add", "-A"]);
+    const copyPatch = execFileSync("git", ["diff", "--cached", "--no-renames"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // Sanity-check the fixture: the incoming patch is an ORDINARY addition
+    // (full `+` lines, not copy-diff syntax) — the bypass this test proves
+    // fixed is entirely about the re-diff step's own options, not about
+    // tricking git into parsing the INCOMING patch as a copy.
+    expect(copyPatch).toContain("new file mode");
+    expect(copyPatch).toContain("+  return 1; /* v8 ignore next */");
+    // Undo only the STAGED copy.ts addition — deliberately `HEAD`, not
+    // `HEAD~1`: lib/original.ts's own commit must survive as the real HEAD
+    // `main()` reads via `git read-tree HEAD`, so it's genuinely present
+    // and UNTOUCHED for git's own copy-detection to match the incoming
+    // patch's new file against (the actual shape of the bypass — the
+    // "existing, untouched file" has to really be there).
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "copy-suppression.diff", copyPatch);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/copy.ts");
+    expect(commentBody.body).toContain("v8 ignore");
+  });
+
+  it("creation path: a package.json test-script redefinition is labelled no-auto-chain and annotated naming the exact line (Codex finding, F1-S9 slice 1, issue #12, ready round 2)", async () => {
+    const packageJsonDiff = `diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,5 @@
++{
++  "scripts": {
++    "test": "echo ok"
++  }
++}
+`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "package-json-script.diff", packageJsonDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("package.json");
+    expect(commentBody.body).toContain(`"test": "echo ok"`);
+  });
+
+  it("creation path: a package.json DEPENDENCY-only edit is NOT flagged (the targeted-fix requirement — a blanket 'any package.json edit' rule would over-trigger on routine dependency bumps)", async () => {
+    await fsWriteFile(
+      join(localCloneDir, "package.json"),
+      JSON.stringify({ name: "x", dependencies: { "left-pad": "1.0.0" } }, null, 2) + "\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "add package.json"]);
+    await fsWriteFile(
+      join(localCloneDir, "package.json"),
+      JSON.stringify({ name: "x", dependencies: { "left-pad": "1.0.1" } }, null, 2) + "\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const depBumpDiff = execFileSync("git", ["diff", "--cached"], {
+      cwd: localCloneDir,
+      encoding: "utf8",
+    });
+    // `HEAD`, not `HEAD~1`: the diff is a MODIFICATION of package.json
+    // (1.0.0 -> 1.0.1), so package.json@1.0.0 must still exist at HEAD for
+    // `git apply --cached` to have a base to modify — only the staged
+    // 1.0.1 edit is undone here, not the commit that added package.json.
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+
+    process.env.PATCH_PATH = await writePatch(scratchDir, "package-json-dep.diff", depBumpDiff);
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+
+    const anyCommentCall = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentCall).toBeUndefined();
+  });
 });
 
 describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {

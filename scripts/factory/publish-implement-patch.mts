@@ -68,6 +68,23 @@
  *    --text`, forcing textual output regardless of any attribute/
  *    heuristic-driven binary classification) rather than trusting the
  *    patch's own bytes for content scanning either.
+ * 5. F1-S9 slice 1 (issue #12), ready round 2 — a THIRD bypass of the
+ *    same content classifier, found by asking "what does asking git for
+ *    a tree comparison actually mean when a COPY is involved". Round 3's
+ *    fix (point 4) regenerated the diff via git, but that call ALSO
+ *    enabled rename/copy detection (`-M -C --find-copies-harder`,
+ *    mirroring query 3's path-analysis options) — with copy detection
+ *    ON, a patch that COPIES an existing file already containing a
+ *    suppression comment serializes as copy METADATA with ZERO hunks,
+ *    hiding the pre-existing suppression from the content scan
+ *    completely. Fixed by disabling rename/copy detection specifically
+ *    on the CONTENT-scan query (`--no-renames` — see
+ *    {@link getAuthoritativePatchAnalysis}'s own docstring, point 4),
+ *    while the PATH-analysis query (point 3) keeps full rename/copy
+ *    detection, since accurate path attribution is exactly what it
+ *    needs. The two queries against the SAME scratch index now
+ *    deliberately disagree on this option, each tuned to what it's
+ *    actually checking.
  *
  * Exactly one outcome, always: either the patch is valid and a PR is
  * opened/refreshed, or it isn't and a single explanatory comment is posted
@@ -169,6 +186,7 @@ import {
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
+  findAddedPackageJsonTestScriptEdits,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -202,17 +220,22 @@ import {
 export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 
 /**
- * `maxBuffer` for the `git diff --cached --text ...` call in
+ * `maxBuffer` for EVERY `execFileSync("git", ...)` call in
  * {@link getAuthoritativePatchAnalysis} (Codex + claude-review finding,
- * F1-S9 slice 1, issue #12, ready round) — `execFileSync`'s own default
- * (1 MiB) is smaller than {@link MAX_PATCH_BYTES} itself, and the
- * git-REGENERATED diff this call produces can legitimately exceed the
- * input patch's own size (unified-diff context lines, rename/copy
- * detection expanding what's reported). 16 MiB gives real headroom over
- * the 2 MiB input cap rather than risk an ENOBUFS false-rejection —
- * treating a legitimate, sizeable patch as if git itself had failed.
+ * F1-S9 slice 1, issue #12 — round 1 fixed only the content-scan call;
+ * round 2 closes the class): `execFileSync`'s own default (1 MiB) is
+ * smaller than {@link MAX_PATCH_BYTES} itself (2 MiB), so a legitimate
+ * patch anywhere near that size can ENOBUFS on ANY of these calls, not
+ * just the content-scan one — a many-files patch's `--name-status`
+ * output (paths only, no content) can still exceed 1 MiB well within the
+ * 2 MiB patch cap, and the content-scan's git-REGENERATED diff can
+ * legitimately exceed the input patch's own size (unified-diff context
+ * lines). 16 MiB gives real headroom over the 2 MiB input cap on every
+ * call rather than risk an ENOBUFS false-rejection anywhere in this
+ * function — treating a legitimate, sizeable patch as if git itself had
+ * failed.
  */
-export const MAX_DIFF_TEXT_BUFFER_BYTES = 16 * 1024 * 1024;
+export const MAX_GIT_QUERY_BUFFER_BYTES = 16 * 1024 * 1024;
 
 /**
  * Raised for a validated, expected reason implementation must not
@@ -280,9 +303,10 @@ interface AuthoritativePatchAnalysis {
   readonly changedPaths: string[];
   /**
    * A git-REGENERATED, `--text`-forced diff of the same scratch tree —
-   * authoritative content for the anti-gaming classifier
-   * ({@link findAddedCoverageSuppressions}) to scan, never the agent's
-   * own raw patch bytes. See this function's own docstring, point 3.
+   * authoritative content for the anti-gaming classifiers
+   * ({@link findAddedCoverageSuppressions}, {@link findAddedPackageJsonTestScriptEdits})
+   * to scan, never the agent's own raw patch bytes. See this function's
+   * own docstring, point 3.
    */
   readonly diffText: string;
 }
@@ -315,10 +339,10 @@ interface AuthoritativePatchAnalysis {
  *    consumption; it's git comparing two trees it already holds and
  *    reporting the result in its own `-z` (NUL-delimited, unquoted)
  *    machine format. {@link parseNameStatusZ} parses that format.
- * 4. `git diff --cached --text -M -C --find-copies-harder HEAD` — asks
- *    git for the same tree comparison's CONTENT, git-regenerated rather
- *    than the agent's own patch bytes (F1-S9 slice 1, issue #12, round 3
- *    — independent Codex + claude-review finding: the agent's raw patch
+ * 4. `git diff --cached --text --no-color --no-renames HEAD` — asks git
+ *    for the same tree comparison's CONTENT, git-regenerated rather than
+ *    the agent's own patch bytes (F1-S9 slice 1, issue #12, round 3 —
+ *    independent Codex + claude-review finding: the agent's raw patch
  *    could mark a file binary via `.gitattributes` and deliver a real
  *    text change through a `GIT binary patch` block, hiding it from any
  *    scan of the agent's own bytes). `--text` forces git to render every
@@ -326,23 +350,40 @@ interface AuthoritativePatchAnalysis {
  *    or heuristic-driven binary classification, so a coverage-suppression
  *    comment delivered via that trick still appears as scannable content
  *    in THIS regenerated diff even though it never did in the raw patch.
+ *    `--no-renames` (F1-S9 slice 1, issue #12, ready round 2 — a
+ *    SEPARATE, real bypass Codex found): this query deliberately does
+ *    NOT enable rename/copy detection, unlike query 3's `-M -C
+ *    --find-copies-harder` — with copy detection ON here, a patch that
+ *    COPIES an existing file that already contains a suppression comment
+ *    serializes as copy METADATA with ZERO hunks, hiding the pre-existing
+ *    suppression from this content scan entirely. `--no-renames` forces
+ *    a copied/renamed file to serialize as a full addition instead, every
+ *    line reported as `+` content, so a smuggled-in suppression is
+ *    visible the same as if it had been typed fresh.
  *
  * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
  * including against files the patch left otherwise UNTOUCHED — the exact
  * shape of Codex's round-4 quoted-`copy from` exploit, where the copy's
  * SOURCE file has zero other changes in the patch) together guarantee
- * BOTH sides of every rename/copy are reported. Empirically verified
- * (scratch repo): `-C` alone, without `--find-copies-harder`, misses a
- * copy whose source is otherwise unmodified — `--find-copies-harder`
- * closes that. Verified negligible cost at this repo's current size
- * (~49 tracked files, ~10ms) — `--find-copies-harder`'s cost scales with
- * repo size, not patch size, so revisit if the repo grows enormously.
+ * BOTH sides of every rename/copy are reported IN QUERY 3 (the path
+ * analysis) — deliberately NOT in query 4 (the content scan), per that
+ * point's own note above; the two queries have opposite needs here.
+ * Empirically verified (scratch repo): `-C` alone, without
+ * `--find-copies-harder`, misses a copy whose source is otherwise
+ * unmodified — `--find-copies-harder` closes that, for query 3.
+ * Verified negligible cost at this repo's current size (~49 tracked
+ * files, ~10ms) — `--find-copies-harder`'s cost scales with repo size,
+ * not patch size, so revisit if the repo grows enormously.
  *
- * Even WITHOUT rename/copy detection at all, a rename's two sides would
- * still both be reported here (as a plain delete + add, rather than an
- * `R<score>` pair) — `-M`/`-C` change the STATUS LABEL, not whether both
- * paths appear, since both `diff-index`/`diff` are comparing trees
- * regardless.
+ * For query 3 specifically: even WITHOUT rename/copy detection at all, a
+ * rename's two sides would still both be reported (as a plain delete +
+ * add, rather than an `R<score>` pair) — `-M`/`-C` change the STATUS
+ * LABEL, not whether both paths appear, since `diff-index` is comparing
+ * trees regardless. Query 4 is the OPPOSITE case on purpose (see its own
+ * note above): disabling rename/copy detection there doesn't just change
+ * a status label, it's what forces a copied/renamed file's full content
+ * to appear as plain `+` lines instead of collapsing into copy/rename
+ * metadata with no hunks at all.
  *
  * @param patchPath - Path to the patch file.
  * @returns Every path git itself reports as touched (both sides of every
@@ -358,7 +399,11 @@ async function getAuthoritativePatchAnalysis(
   try {
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
     try {
-      execFileSync("git", ["read-tree", "HEAD"], { env, stdio: "pipe" });
+      execFileSync("git", ["read-tree", "HEAD"], {
+        env,
+        stdio: "pipe",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+      });
     } catch (err) {
       // Not independently exercised by a unit test: every test fixture in
       // this repo's suite runs against a checkout with a real commit
@@ -376,6 +421,7 @@ async function getAuthoritativePatchAnalysis(
       execFileSync("git", ["apply", "--cached", patchPath], {
         env,
         stdio: "pipe",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
       });
     } catch (err) {
       throw new PublishRejection(
@@ -397,7 +443,16 @@ async function getAuthoritativePatchAnalysis(
           "--find-copies-harder",
           "HEAD",
         ],
-        { env, encoding: "utf8" },
+        {
+          env,
+          encoding: "utf8",
+          // Codex + claude-review finding, F1-S9 slice 1, issue #12,
+          // ready round 2 (fix-the-class — round 1 only fixed the sibling
+          // content-scan call below): a many-files patch's PATH-only
+          // output here can still exceed execFileSync's 1 MiB default
+          // well within the 2 MiB MAX_PATCH_BYTES cap on the input.
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
       );
     } catch (err) {
       // Not independently exercised by a unit test: if the preceding
@@ -418,9 +473,28 @@ async function getAuthoritativePatchAnalysis(
           "--cached",
           "--text",
           "--no-color",
-          "-M",
-          "-C",
-          "--find-copies-harder",
+          // Deliberately NO "-M -C --find-copies-harder" here (Codex
+          // finding, F1-S9 slice 1, issue #12, ready round 2 — a real,
+          // THIRD classifier bypass): with rename/copy detection enabled
+          // on this CONTENT-scan call, a patch that COPIES an existing
+          // file that ALREADY contains a coverage-suppression comment
+          // serializes as copy METADATA with NO hunks at all — zero
+          // added lines for findAddedCoverageSuppressions to see, so an
+          // agent could smuggle a fully-suppressed file into the tree by
+          // copying one that already has the ignore comment, entirely
+          // invisible to a content scan that only looks at ADDED lines.
+          // `--no-renames` forces every copied or renamed file to
+          // serialize as a full addition instead, with every line
+          // reported as `+` content — a pre-existing suppression in
+          // copied content is then visible and flagged, same as if it
+          // had been typed fresh. Over-flagging an ordinary rename of an
+          // already-suppressed file is the safe direction and rare. The
+          // PATH analysis above (nameStatusOutput) is UNAFFECTED — it
+          // keeps `-M -C --find-copies-harder` for accurate rename/copy
+          // tracking, since accurate PATH attribution (not content
+          // visibility) is what the forbidden-path and test-path checks
+          // need.
+          "--no-renames",
           "HEAD",
         ],
         {
@@ -432,12 +506,11 @@ async function getAuthoritativePatchAnalysis(
           // patch anywhere near that size would already exceed the
           // default before this call even runs. Worse, the REGENERATED
           // diff this call produces can legitimately be LARGER than the
-          // input patch (unified-diff context lines, rename/copy-detection
-          // expansion), so bounding it to the input size isn't enough
-          // either. MAX_DIFF_TEXT_BUFFER_BYTES gives real headroom rather
-          // than risk an ENOBUFS false-rejection on an otherwise-valid,
-          // sizeable patch.
-          maxBuffer: MAX_DIFF_TEXT_BUFFER_BYTES,
+          // input patch (unified-diff context lines), so bounding it to
+          // the input size isn't enough either. MAX_GIT_QUERY_BUFFER_BYTES
+          // gives real headroom rather than risk an ENOBUFS false-
+          // rejection on an otherwise-valid, sizeable patch.
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
         },
       );
     } catch (err) {
@@ -456,7 +529,13 @@ async function getAuthoritativePatchAnalysis(
 }
 
 function runGit(args: string[]): void {
-  execFileSync("git", args, { stdio: "pipe" });
+  // Same maxBuffer discipline as getAuthoritativePatchAnalysis's own git
+  // calls (Codex + claude-review finding, F1-S9 slice 1, issue #12, ready
+  // round 2 — fix the whole class, not just the two calls that were
+  // actually reported): `git push`'s own progress/error output, or a
+  // large `git commit`, could in principle exceed execFileSync's 1 MiB
+  // default too.
+  execFileSync("git", args, { stdio: "pipe", maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES });
 }
 
 /**
@@ -1214,9 +1293,12 @@ export async function main(): Promise<void> {
     const gamingFlag: GamingFlag = {
       testFileEdits: findTestFileEdits(changedPaths),
       suppressions: findAddedCoverageSuppressions(diffText),
+      packageJsonTestScriptEdits: findAddedPackageJsonTestScriptEdits(diffText),
     };
     const gamingFlagged =
-      gamingFlag.testFileEdits.length > 0 || gamingFlag.suppressions.length > 0;
+      gamingFlag.testFileEdits.length > 0 ||
+      gamingFlag.suppressions.length > 0 ||
+      gamingFlag.packageJsonTestScriptEdits.length > 0;
 
     // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
     // (gitleaks/trufflehog-style) of the patch content belongs right

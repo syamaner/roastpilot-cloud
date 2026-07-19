@@ -153,8 +153,10 @@ const TEST_FILENAME_PATTERNS = [
  * alone. Also covers pytest's own recognized config-file names
  * (`pytest.ini`/`pyproject.toml`/`setup.cfg`/`tox.ini`, any of which can
  * carry a `[pytest]`/`[tool.pytest.ini_options]` section narrowing
- * collection) — scoped to `snowflake/` specifically, where this repo's
- * pytest is actually invoked FROM (`ci.yml`'s `working-directory:
+ * collection, plus `pytest.toml` — the pinned `pytest==9.1.1`'s own
+ * native TOML config file, read implicitly the same way
+ * `pyproject.toml` is) — scoped to `snowflake/` specifically, where this
+ * repo's pytest is actually invoked FROM (`ci.yml`'s `working-directory:
  * snowflake`) and where pytest's own rootdir/inifile search starts.
  * Deliberately NOT a root-level `pyproject.toml`/`setup.cfg`: verified
  * neither exists in this repo today, and if one appeared it would almost
@@ -173,6 +175,7 @@ const TEST_DISCOVERY_CONFIG_EXACT_PATHS = new Set([
   "playwright.config.ts",
   "playwright.config.js",
   "snowflake/pytest.ini",
+  "snowflake/pytest.toml",
   "snowflake/pyproject.toml",
   "snowflake/setup.cfg",
   "snowflake/tox.ini",
@@ -263,9 +266,28 @@ const COVERAGE_SUPPRESSION_PATTERN =
   /#\s*pragma:\s*no\s*(?:cover|branch)|(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b/i;
 
 /**
- * Scans raw unified-diff text for coverage-suppression comments on
- * ADDED lines only — an existing suppression this diff doesn't touch is
- * not this diff's problem to flag.
+ * A single ADDED line, with the path of the file it was added to —
+ * the shared unit {@link walkAddedLines} yields, consumed by every
+ * added-line-content classifier in this module ({@link
+ * findAddedCoverageSuppressions}, {@link findAddedPackageJsonTestScriptEdits}).
+ */
+interface AddedLine {
+  /** The file this line was added to (normalized). */
+  readonly path: string;
+  /** The added line's content, WITHOUT its leading `+`, untrimmed. */
+  readonly line: string;
+}
+
+/**
+ * Walks a unified diff and yields every ADDED line, paired with the path
+ * of the file it belongs to — the single hunk-tracking traversal every
+ * added-line-content classifier in this module needs, extracted so that
+ * logic exists in exactly ONE place (F1-S9 slice 1, issue #12, ready
+ * round 2: a second classifier — {@link findAddedPackageJsonTestScriptEdits}
+ * — needed the identical walk {@link findAddedCoverageSuppressions} already
+ * had; duplicating the hunk-state loop a second time would double the
+ * surface for the exact class of bug the `+++`-bypass fix below just
+ * closed once).
  *
  * A line is only ever considered "added content" while inside a hunk
  * (after a `@@ ... @@` marker for the current file, reset at each
@@ -279,31 +301,29 @@ const COVERAGE_SUPPRESSION_PATTERN =
  * be genuine BEFORE the first `@@` for its file.
  *
  * CLOSED BUG (independent Codex + claude-review finding, F1-S9 slice 1,
- * issue #12): an earlier version checked the `+++ ` prefix
- * UNCONDITIONALLY, without the `!inHunk` gate this docstring already
- * claimed existed — so an ADDED line whose code happened to start with
- * `++` (serializing as the raw diff line `+++counter;`) was misread as a
- * (fake) file header REGARDLESS of hunk state, resetting `currentPath`
- * and `inHunk` mid-hunk and causing every subsequent added line for that
- * file — including a real suppression comment right after the decoy
- * line — to be silently skipped. A trivially craftable, complete bypass
- * of this whole classifier. The gate below is the actual fix; the
- * disambiguation this docstring describes was always the INTENDED
- * mechanism, just not, before this fix, the IMPLEMENTED one.
+ * issue #12): an earlier version (inline in {@link findAddedCoverageSuppressions}
+ * before this extraction) checked the `+++ ` prefix UNCONDITIONALLY,
+ * without the `!inHunk` gate this docstring already claimed existed — so
+ * an ADDED line whose code happened to start with `++` (serializing as
+ * the raw diff line `+++counter;`) was misread as a (fake) file header
+ * REGARDLESS of hunk state, resetting `currentPath` and `inHunk`
+ * mid-hunk and causing every subsequent added line for that file —
+ * including a real suppression comment right after the decoy line — to
+ * be silently skipped. A trivially craftable, complete bypass of this
+ * whole classifier. The gate below is the actual fix; the disambiguation
+ * this docstring describes was always the INTENDED mechanism, just not,
+ * before this fix, the IMPLEMENTED one.
  *
  * `+++ b/path` (or `+++ /dev/null` for a deletion) is additionally used
- * to track which file the CURRENT hunk belongs to, so a match can be
- * attributed to a path.
+ * to track which file the CURRENT hunk belongs to, so a yielded line can
+ * be attributed to a path.
  *
  * @param patchText - The raw contents of a unified diff (same file
  *   `main()` already validates the size of before ever reading it — see
  *   `assertPatchArtifactSize`).
- * @returns Every added-line match, in file order. Empty if none.
+ * @yields Every added line, in file order, with its file's path.
  */
-export function findAddedCoverageSuppressions(
-  patchText: string,
-): CoverageSuppressionMatch[] {
-  const matches: CoverageSuppressionMatch[] = [];
+function* walkAddedLines(patchText: string): Generator<AddedLine> {
   let currentPath = "";
   let inHunk = false;
   for (const rawLine of patchText.split("\n")) {
@@ -333,9 +353,74 @@ export function findAddedCoverageSuppressions(
     if (!inHunk || !rawLine.startsWith("+")) {
       continue;
     }
-    const content = rawLine.slice(1);
-    if (COVERAGE_SUPPRESSION_PATTERN.test(content)) {
-      matches.push({ path: currentPath, line: content.trim() });
+    yield { path: currentPath, line: rawLine.slice(1) };
+  }
+}
+
+/**
+ * Scans raw unified-diff text for coverage-suppression comments on
+ * ADDED lines only — an existing suppression this diff doesn't touch is
+ * not this diff's problem to flag. Consumes {@link walkAddedLines} for
+ * the hunk-tracking traversal (see that function's docstring for the
+ * `+++`-bypass history this depends on staying fixed).
+ *
+ * @param patchText - The raw contents of a unified diff (same file
+ *   `main()` already validates the size of before ever reading it — see
+ *   `assertPatchArtifactSize`).
+ * @returns Every added-line match, in file order. Empty if none.
+ */
+export function findAddedCoverageSuppressions(
+  patchText: string,
+): CoverageSuppressionMatch[] {
+  const matches: CoverageSuppressionMatch[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (COVERAGE_SUPPRESSION_PATTERN.test(line)) {
+      matches.push({ path, line: line.trim() });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Matches a `package.json` script-KEY definition line whose key is
+ * `test`, a `test:`-prefixed variant (e.g. `test:unit`, `test:e2e`), or
+ * `coverage` — i.e. exactly the scripts CI actually invokes to gate a PR
+ * (`npm test`, `npm run test:*`, `npm run coverage`). Deliberately
+ * targeted, not a blanket "any package.json edit" flag (Codex finding,
+ * F1-S9 slice 1, issue #12, ready round 2): a dependency-only
+ * `package.json` edit (bumping a version, adding a new dep) is routine
+ * and must NOT be flagged, or this would over-trigger on nearly every
+ * PR that touches the file. Narrowing to the script-KEY line specifically
+ * (not just any line containing the word "test") also avoids flagging an
+ * unrelated added dependency whose NAME happens to contain "test" (e.g.
+ * `"jest-test-utils": "^1.0.0"` is a dependency line, not a script-key
+ * line, and correctly does not match this pattern's `:`-after-the-key
+ * shape requirement).
+ */
+const PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN = /"(test|test:[\w:-]*|coverage)"\s*:/;
+
+/**
+ * Scans raw unified-diff text for `package.json` script-key edits/adds
+ * that redefine a CI-invoked test/coverage script (Codex finding, F1-S9
+ * slice 1, issue #12, ready round 2) — narrowing or replacing what `npm
+ * test` / `npm run coverage` actually runs (e.g. rewriting `"test": "vitest
+ * run"` to `"test": "echo ok"`) is the same gaming class as editing a test
+ * file directly, but a blanket "package.json changed" flag would also
+ * trip on every routine dependency bump, so this targets exactly the
+ * script-KEY lines CI depends on. Consumes {@link walkAddedLines} for the
+ * same hunk-tracking traversal {@link findAddedCoverageSuppressions} uses.
+ *
+ * @param patchText - The raw contents of a unified diff.
+ * @returns Every matching added line's trimmed content, in file order.
+ *   Empty if none (including when no `package.json` is touched at all).
+ */
+export function findAddedPackageJsonTestScriptEdits(
+  patchText: string,
+): string[] {
+  const matches: string[] = [];
+  for (const { path, line } of walkAddedLines(patchText)) {
+    if (path === "package.json" && PACKAGE_JSON_TEST_SCRIPT_KEY_PATTERN.test(line)) {
+      matches.push(line.trim());
     }
   }
   return matches;
@@ -343,16 +428,17 @@ export function findAddedCoverageSuppressions(
 
 /**
  * Applied to a PR whose diff trips the deterministic anti-gaming
- * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions},
- * F1-S9 slice 1, issue #12): any edit to a test file, OR any ADDED
- * coverage-suppression comment. Both are treated as a SINGLE, conservative
- * class — "assertion weakening" itself is semantic and can't be reliably
- * detected (no LLM is used here; this whole classifier is deterministic
- * string/path matching), so the entire vector is flagged rather than
- * attempting to distinguish a legitimate test-file edit (e.g. a genuine
- * strengthening) from a gamed one. A human confirms which it is — see
- * {@link buildGamingFlagAnnotation} for the deterministic, templated
- * pointer to exactly what tripped it.
+ * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions} /
+ * {@link findAddedPackageJsonTestScriptEdits}, F1-S9 slice 1, issue #12):
+ * any edit to a test file, any ADDED coverage-suppression comment, or any
+ * ADDED `package.json` test/coverage script-key redefinition. All three
+ * are treated as a SINGLE, conservative class — "assertion weakening"
+ * itself is semantic and can't be reliably detected (no LLM is used here;
+ * this whole classifier is deterministic string/path matching), so the
+ * entire vector is flagged rather than attempting to distinguish a
+ * legitimate test-file edit (e.g. a genuine strengthening) from a gamed
+ * one. A human confirms which it is — see {@link buildGamingFlagAnnotation}
+ * for the deterministic, templated pointer to exactly what tripped it.
  *
  * ENFORCEMENT CONTRACT (be honest about scope, not aspirational): this
  * label is the durable hook every current and future auto-chain consumer
@@ -397,7 +483,7 @@ export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
  * this stays within it.
  */
 export const NO_AUTO_CHAIN_LABEL_DESCRIPTION =
-  "Diff edits a test file or adds a coverage-suppression comment — needs human review first.";
+  "Diff edits a test file/script, or adds a coverage-suppression comment — needs human review.";
 
 /** What the anti-gaming classifier found on one publish run — passed to {@link buildGamingFlagAnnotation}. */
 export interface GamingFlag {
@@ -405,6 +491,12 @@ export interface GamingFlag {
   readonly testFileEdits: readonly string[];
   /** Coverage-suppression comments the diff adds. */
   readonly suppressions: readonly CoverageSuppressionMatch[];
+  /**
+   * `package.json` test/coverage script-key redefinitions the diff adds
+   * (F1-S9 slice 1, issue #12, ready round 2) — see
+   * {@link findAddedPackageJsonTestScriptEdits}.
+   */
+  readonly packageJsonTestScriptEdits: readonly string[];
 }
 
 /**
@@ -464,6 +556,13 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
       lines.push(
         `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,
       );
+    }
+    lines.push("");
+  }
+  if (flag.packageJsonTestScriptEdits.length > 0) {
+    lines.push("**`package.json` test/coverage script(s) redefined:**");
+    for (const line of flag.packageJsonTestScriptEdits) {
+      lines.push(`- ${sanitizeStepSummaryText(line)}`);
     }
     lines.push("");
   }

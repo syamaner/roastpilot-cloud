@@ -11,6 +11,7 @@ import {
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
+  findAddedPackageJsonTestScriptEdits,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -231,9 +232,17 @@ describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => 
 
   it("flags an edit to pytest's own discovery config under snowflake/, where this repo's pytest is actually invoked from", () => {
     expect(isTestFilePath("snowflake/pytest.ini")).toBe(true);
+    expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
     expect(isTestFilePath("snowflake/pyproject.toml")).toBe(true);
     expect(isTestFilePath("snowflake/setup.cfg")).toBe(true);
     expect(isTestFilePath("snowflake/tox.ini")).toBe(true);
+  });
+
+  it("flags snowflake/pytest.toml specifically (Codex finding, F1-S9 slice 1, issue #12, ready round 2 — the pinned pytest 9.x reads pytest.toml as implicit config, same as pyproject.toml)", () => {
+    expect(isTestFilePath("snowflake/pytest.toml")).toBe(true);
+    // Not the root-level file — same "not what this repo's pytest would
+    // ever read" reasoning as the other pytest config exact-matches.
+    expect(isTestFilePath("pytest.toml")).toBe(false);
   });
 
   it("does NOT flag a root-level pyproject.toml/setup.cfg — not what this repo's pytest invocation would ever read", () => {
@@ -489,10 +498,104 @@ describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
   });
 });
 
+describe("findAddedPackageJsonTestScriptEdits (Codex finding, F1-S9 slice 1, issue #12, ready round 2)", () => {
+  it("flags an added/redefined test script line in package.json", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,3 +2,3 @@",
+      '   "scripts": {',
+      '-    "test": "vitest run",',
+      '+    "test": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"test": "echo ok",']);
+  });
+
+  it("flags a test:-prefixed script variant (e.g. test:unit)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "test:unit": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"test:unit": "echo ok",']);
+  });
+
+  it("flags the coverage script key", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -2,2 +2,2 @@",
+      '   "scripts": {',
+      '+    "coverage": "echo ok",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual(['"coverage": "echo ok",']);
+  });
+
+  it("does NOT flag a dependency-only package.json edit (the targeted-fix requirement — a blanket 'any package.json edit' flag would over-trigger on routine dependency bumps)", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,3 +5,3 @@",
+      '   "dependencies": {',
+      '-    "left-pad": "1.0.0",',
+      '+    "left-pad": "1.0.1",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a dependency whose NAME merely contains 'test' (e.g. jest-test-utils) — the script-KEY shape, not a substring match", () => {
+    const patch = [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,2 +5,3 @@",
+      '   "devDependencies": {',
+      '+    "jest-test-utils": "^1.0.0",',
+      "   },",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a test-script-shaped line in a file OTHER than package.json", () => {
+    const patch = [
+      "diff --git a/lib/config.json b/lib/config.json",
+      "--- a/lib/config.json",
+      "+++ b/lib/config.json",
+      "@@ -1,1 +1,2 @@",
+      "   {",
+      '+    "test": "echo ok",',
+      "   }",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+
+  it("returns empty for a clean patch that never touches package.json", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedPackageJsonTestScriptEdits(patch)).toEqual([]);
+  });
+});
+
 describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("names the exact test file(s) edited", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
       true,
     );
     expect(body).toContain(NO_AUTO_CHAIN_LABEL);
@@ -504,6 +607,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
       {
         testFileEdits: [],
         suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
+        packageJsonTestScriptEdits: [],
       },
       true,
     );
@@ -516,6 +620,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
       {
         testFileEdits: ["tests/slug.test.ts"],
         suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
+        packageJsonTestScriptEdits: [],
       },
       true,
     );
@@ -523,9 +628,22 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     expect(body).toContain("lib/foo.ts");
   });
 
+  it("names the exact package.json test-script redefinition(s) added (F1-S9 slice 1, issue #12, ready round 2)", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [],
+        packageJsonTestScriptEdits: ['"test": "echo ok",'],
+      },
+      true,
+    );
+    expect(body).toContain("package.json");
+    expect(body).toContain('"test": "echo ok",');
+  });
+
   it("says the label was applied when labelApplied is true", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
       true,
     );
     expect(body).toContain(`labelled \`${NO_AUTO_CHAIN_LABEL}\`.`);
@@ -534,7 +652,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
 
   it("says the label FAILED to apply — never claims it landed — when labelApplied is false (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3)", () => {
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: ["tests/slug.test.ts"], suppressions: [] },
+      { testFileEdits: ["tests/slug.test.ts"], suppressions: [], packageJsonTestScriptEdits: [] },
       false,
     );
     expect(body).toContain(`the \`${NO_AUTO_CHAIN_LABEL}\` label FAILED to apply`);
@@ -555,7 +673,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
     const payload =
       "x = 1  # pragma: no cover `[click](https://attacker.example) @some-maintainer";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }] },
+      { testFileEdits: [], suppressions: [{ path: "lib/foo.ts", line: payload }], packageJsonTestScriptEdits: [] },
       true,
     );
     // The exact, deterministic expected rendering: the payload's own
@@ -577,7 +695,7 @@ describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
   it("neutralizes a backtick+Markdown-injection payload in a test-file path too (the same injection class, not just the suppression line)", () => {
     const payload = "tests/`[click](https://attacker.example)`.test.ts";
     const body = buildGamingFlagAnnotation(
-      { testFileEdits: [payload], suppressions: [] },
+      { testFileEdits: [payload], suppressions: [], packageJsonTestScriptEdits: [] },
       true,
     );
     const flaggedLine = body.split("\n").find((l) => l.includes("attacker.example"));
