@@ -613,6 +613,177 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
   });
 });
 
+describe("publish-implement-patch — F1-S9 slice 1 (issue #12): deterministic anti-gaming classifier", () => {
+  const TEST_FILE_DIFF = `diff --git a/tests/new.test.ts b/tests/new.test.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/tests/new.test.ts
+@@ -0,0 +1,1 @@
++test("x", () => {});
+`;
+
+  const PRAGMA_DIFF = `diff --git a/lib/new-file.ts b/lib/new-file.ts
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/lib/new-file.ts
+@@ -0,0 +1,1 @@
++export const x = 1; /* v8 ignore next */
+`;
+
+  it("creation path: a test-file-edit diff is labelled no-auto-chain and annotated naming the exact file", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-auto-chain"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("tests/new.test.ts");
+    expect(commentBody.body).toContain("no-auto-chain");
+  });
+
+  it("creation path: a pragma-add diff (v8 ignore) is labelled no-auto-chain and annotated naming the exact line", async () => {
+    const path = await writePatch(scratchDir, "pragma.diff", PRAGMA_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/99/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+    const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
+      body: string;
+    };
+    expect(commentBody.body).toContain("lib/new-file.ts");
+    expect(commentBody.body).toContain("v8 ignore");
+  });
+
+  it("creation path: a clean diff (no test-file edit, no added suppression) gets NO no-auto-chain label and NO annotation comment", async () => {
+    // Uses the module-level VALID_DIFF (a plain new application file).
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const gamingLabelCall = calls.find(([url, init]) => {
+      if (init?.method !== "POST" || !String(url).endsWith("/labels")) {
+        return false;
+      }
+      const body = JSON.parse((init.body as string) ?? "{}") as {
+        name?: string;
+        labels?: string[];
+      };
+      return body.name === "no-auto-chain" || body.labels?.includes("no-auto-chain");
+    });
+    expect(gamingLabelCall).toBeUndefined();
+
+    const anyCommentCall = calls.find(
+      ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+    );
+    expect(anyCommentCall).toBeUndefined();
+  });
+
+  it("refresh path (existingPr): a flagged diff is labelled and annotated on the EXISTING PR", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const applyLabelCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/labels") && init?.method === "POST",
+    );
+    expect(applyLabelCall).toBeDefined();
+    const applyLabelBody = JSON.parse((applyLabelCall?.[1]?.body as string) ?? "{}") as {
+      labels: string[];
+    };
+    expect(applyLabelBody.labels).toEqual(["no-auto-chain"]);
+
+    const commentCall = calls.find(
+      ([url, init]) =>
+        String(url).includes("/issues/50/comments") && init?.method === "POST",
+    );
+    expect(commentCall).toBeDefined();
+  });
+
+  it("a gaming-label-application failure and an annotation-post failure are each independently logged and never fail the publish", async () => {
+    const path = await writePatch(scratchDir, "test-file.diff", TEST_FILE_DIFF);
+    process.env.PATCH_PATH = path;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+      }
+      if (method === "GET" && url.includes("/pulls?state=open")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.endsWith("/pulls")) {
+        return jsonResponse({ number: 99, html_url: "https://github.com/o/r/pull/99" }, 201);
+      }
+      if (method === "POST" && (url.endsWith("/labels") || url.includes("/comments"))) {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Failed to apply the no-auto-chain label`),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to post the anti-gaming annotation comment"),
+    );
+    errorSpy.mockRestore();
+  });
+});
+
 describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 18 Jul 2026)", () => {
   afterEach(() => {
     delete process.env.GITHUB_STEP_SUMMARY;

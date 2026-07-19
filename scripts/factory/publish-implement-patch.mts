@@ -144,6 +144,7 @@ import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
   buildFallbackRefreshCommentBody,
+  buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
@@ -151,16 +152,21 @@ import {
   deriveBranchName,
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
+  findAddedCoverageSuppressions,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   isLabelAlreadyExistsError,
+  NO_AUTO_CHAIN_LABEL,
+  NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   type ExistingComment,
+  type GamingFlag,
   type ProvenanceContext,
   type PublishStepSummaryContext,
   type PullRequestSummary,
@@ -725,6 +731,114 @@ async function postFallbackRefreshComment(
 }
 
 /**
+ * Ensures {@link NO_AUTO_CHAIN_LABEL} exists (idempotently, same
+ * tolerate-only-the-genuine-already-exists-422 pattern as
+ * `applyNoReviewAutomationLabel`) and applies it to `prNumber` — F1-S9
+ * slice 1 (issue #12): the durable, always-visible signal that this
+ * diff's own content (not the publisher identity) tripped the
+ * deterministic anti-gaming classifier.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ */
+async function applyNoAutoChainLabel(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<void> {
+  assertLabelDescriptionWithinLimit(
+    NO_AUTO_CHAIN_LABEL_DESCRIPTION,
+    GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+  );
+  try {
+    await githubRequest(token, "POST", `/repos/${owner}/${repo}/labels`, {
+      name: NO_AUTO_CHAIN_LABEL,
+      color: "d93f0b",
+      description: NO_AUTO_CHAIN_LABEL_DESCRIPTION,
+    });
+  } catch (err) {
+    if (!isLabelAlreadyExistsError(err)) {
+      throw err; // A real validation error must surface, not be swallowed.
+    }
+  }
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/labels`, {
+    labels: [NO_AUTO_CHAIN_LABEL],
+  });
+}
+
+/**
+ * Applies {@link NO_AUTO_CHAIN_LABEL} to `prNumber`, never throwing — same
+ * best-effort shape as `applyNoReviewAutomationLabelBestEffort`: by the
+ * time this runs the PR/branch itself is already the load-bearing
+ * artifact, and the annotation comment (`postGamingFlagAnnotation`) is a
+ * second, independent signal that survives even if the label call fails.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR to label (newly-created or pre-existing).
+ * @param context - Human-readable context for the log line if this fails.
+ * @returns `true` if the label was actually applied, `false` if it failed
+ *   (logged either way) — the caller must reflect this in the step
+ *   summary, never overstate success (same discipline as
+ *   `applyNoReviewAutomationLabelBestEffort`).
+ */
+async function applyNoAutoChainLabelBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  context: "opened" | "refreshed",
+): Promise<boolean> {
+  return applyNoAutoChainLabel(token, owner, repo, prNumber).then(
+    () => true,
+    (err: unknown) => {
+      console.error(
+        `Failed to apply the ${NO_AUTO_CHAIN_LABEL} label to PR #${prNumber} ` +
+          `(${context}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    },
+  );
+}
+
+/**
+ * Posts the deterministic, templated annotation naming exactly what
+ * tripped the anti-gaming classifier (F1-S9 slice 1, issue #12) — see
+ * {@link buildGamingFlagAnnotation}'s docstring for why this is always a
+ * FRESH comment, never an upsert, on both the PR-creation and PR-refresh
+ * paths alike. Never throws — a failure is logged, not propagated; the
+ * label ({@link applyNoAutoChainLabelBestEffort}) is the persistent signal
+ * that survives even if this specific comment fails to post.
+ *
+ * @param token - The publish job's own bearer token.
+ * @param owner - The repo owner.
+ * @param repo - The repo name.
+ * @param prNumber - The PR (newly-created or pre-existing) to comment on.
+ * @param flag - What the classifier found.
+ */
+async function postGamingFlagAnnotation(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  flag: GamingFlag,
+): Promise<void> {
+  await githubRequest(token, "POST", `/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+    body: buildGamingFlagAnnotation(flag),
+  }).catch((err: unknown) => {
+    console.error(
+      `Failed to post the anti-gaming annotation comment on PR #${prNumber} (the ` +
+        `${NO_AUTO_CHAIN_LABEL} label was still applied if that call succeeded): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+}
+
+/**
  * Appends `markdown` to `$GITHUB_STEP_SUMMARY` (observability fix, 18 Jul
  * 2026, live App-identity commissioning: a mint failure shows
  * `conclusion=success` in the job view — `continue-on-error` masks it —
@@ -864,6 +978,9 @@ export async function main(): Promise<void> {
   // the $GITHUB_STEP_SUMMARY write below can never overstate "the label
   // was applied" when it might have silently failed.
   let labelApplied: boolean | undefined;
+  // Same discipline, for F1-S9 slice 1's anti-gaming label: `undefined`
+  // until the PR exists and the label is actually attempted.
+  let gamingLabelApplied: boolean | undefined;
 
   try {
     if (implementJobResult !== "success") {
@@ -902,6 +1019,24 @@ export async function main(): Promise<void> {
           forbidden.join(", "),
       );
     }
+
+    // F1-S9 slice 1 (issue #12): the deterministic anti-gaming diff
+    // classifier. Unlike the forbidden-path check above, a flagged diff
+    // does NOT reject the publish — the PR still needs to exist for a
+    // human to review (that's the whole point of "routed to human
+    // review") — it's labelled (NO_AUTO_CHAIN_LABEL) and annotated
+    // (buildGamingFlagAnnotation) once the PR exists, further below.
+    // Computed from the SAME authoritative changedPaths the forbidden-
+    // path check just used, plus the raw patch text (already size-capped
+    // by assertPatchArtifactSize above, so reading it into memory here is
+    // bounded).
+    const patchText = await readFile(patchPath, "utf8");
+    const gamingFlag: GamingFlag = {
+      testFileEdits: findTestFileEdits(changedPaths),
+      suppressions: findAddedCoverageSuppressions(patchText),
+    };
+    const gamingFlagged =
+      gamingFlag.testFileEdits.length > 0 || gamingFlag.suppressions.length > 0;
 
     // DEFERRED (Codex round 3, P1, factory.md §13.4) — secret scanning
     // (gitleaks/trufflehog-style) of the patch content belongs right
@@ -978,10 +1113,27 @@ export async function main(): Promise<void> {
         );
         await postFallbackRefreshComment(token, owner, repo, existingPr.number, runUrl);
       }
+      if (gamingFlagged) {
+        // F1-S9 slice 1 (issue #12): orthogonal to the fallback-identity
+        // signal above — a re-dispatch's refreshed commit(s) may
+        // introduce a DIFFERENT flagged line than an earlier push, so
+        // this applies (idempotently) and annotates (freshly, never an
+        // upsert) on every flagged refresh, not just the first one.
+        gamingLabelApplied = await applyNoAutoChainLabelBestEffort(
+          token,
+          owner,
+          repo,
+          existingPr.number,
+          "refreshed",
+        );
+        await postGamingFlagAnnotation(token, owner, repo, existingPr.number, gamingFlag);
+      }
       writeStepSummary(
         buildPublishSuccessStepSummary({
           ...summaryContext,
           labelApplied,
+          gamingFlagged,
+          gamingLabelApplied,
           prNumber: existingPr.number,
           // findExistingPrForIssue's underlying query doesn't fetch
           // html_url (PullRequestSummary has no such field) — a GitHub PR
@@ -1028,10 +1180,30 @@ export async function main(): Promise<void> {
         "opened",
       );
     }
+    if (gamingFlagged) {
+      // F1-S9 slice 1 (issue #12): orthogonal to the fallback-identity
+      // label above — always applied on a flagged diff, regardless of
+      // which identity published it. Comment posted here too (unlike
+      // no-review-automation's own creation path, which relies on the PR
+      // BODY warning already carrying its signal) because this is about
+      // THIS diff's content, not the publisher identity — the annotation
+      // names exactly which file/line tripped it, which the PR body has
+      // no room to anticipate at creation time.
+      gamingLabelApplied = await applyNoAutoChainLabelBestEffort(
+        token,
+        owner,
+        repo,
+        created.number,
+        "opened",
+      );
+      await postGamingFlagAnnotation(token, owner, repo, created.number, gamingFlag);
+    }
     writeStepSummary(
       buildPublishSuccessStepSummary({
         ...summaryContext,
         labelApplied,
+        gamingFlagged,
+        gamingLabelApplied,
         prNumber: created.number,
         prUrl: created.html_url,
         wasRefresh: false,

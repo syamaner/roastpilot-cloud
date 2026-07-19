@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
+  buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
@@ -9,14 +10,19 @@ import {
   deriveBranchName,
   extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
+  findAddedCoverageSuppressions,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
+  findTestFileEdits,
   GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
   IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN,
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isLabelAlreadyExistsError,
   isProtectedPath,
+  isTestFilePath,
+  NO_AUTO_CHAIN_LABEL,
+  NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
@@ -173,6 +179,226 @@ describe("findForbiddenPatchPaths", () => {
     // magically fix an unresolved zz/ prefix — the fix has to be upstream
     // (asking git), which is exactly why publish-implement-patch.mts's
     // getAuthoritativeChangedPaths exists instead of a smarter regex here.
+  });
+});
+
+describe("isTestFilePath / findTestFileEdits (F1-S9 slice 1, issue #12)", () => {
+  it("flags a vitest test file under tests/", () => {
+    expect(isTestFilePath("tests/slug.test.ts")).toBe(true);
+    expect(isTestFilePath("tests/factory/publish-implement-patch.test.ts")).toBe(true);
+  });
+
+  it("flags a playwright spec under e2e/", () => {
+    expect(isTestFilePath("e2e/boot.spec.ts")).toBe(true);
+  });
+
+  it("flags a pytest file under snowflake/tests/", () => {
+    expect(isTestFilePath("snowflake/tests/test_assert_dev_ci_grants.py")).toBe(true);
+  });
+
+  it("flags a *.test.tsx / *.spec.tsx file by filename suffix even outside the known directories", () => {
+    expect(isTestFilePath("lib/component.test.tsx")).toBe(true);
+    expect(isTestFilePath("lib/component.spec.tsx")).toBe(true);
+  });
+
+  it("flags a test_*.py / *_test.py file by filename convention even outside snowflake/tests/", () => {
+    expect(isTestFilePath("scripts/test_helper.py")).toBe(true);
+    expect(isTestFilePath("scripts/helper_test.py")).toBe(true);
+  });
+
+  it("does NOT flag an ordinary application file", () => {
+    expect(isTestFilePath("lib/slug.ts")).toBe(false);
+    expect(isTestFilePath("scripts/factory/implement-patch-logic.mts")).toBe(false);
+    expect(isTestFilePath("snowflake/assert_dev_ci_grants.py")).toBe(false);
+  });
+
+  it("findTestFileEdits normalizes, de-duplicates, and sorts the result", () => {
+    const edits = findTestFileEdits([
+      "a/tests/slug.test.ts",
+      "b/tests/slug.test.ts",
+      "a/lib/slug.ts",
+      "b/lib/slug.ts",
+      "b/e2e/boot.spec.ts",
+    ]);
+    expect(edits).toEqual(["e2e/boot.spec.ts", "tests/slug.test.ts"]);
+  });
+
+  it("findTestFileEdits returns empty for a clean patch", () => {
+    expect(findTestFileEdits(["a/lib/slug.ts", "b/lib/slug.ts"])).toEqual([]);
+  });
+
+  it("findTestFileEdits still flags a test file that was only RENAMED (both sides reported, same shape findForbiddenPatchPaths relies on)", () => {
+    // getAuthoritativeChangedPaths reports both the old and new path of a
+    // rename/copy — a test file renamed OUT of tests/ (old path) still
+    // shows up here via its old path, and a rename INTO tests/ (new path)
+    // via its new path; either way this must not miss it.
+    expect(findTestFileEdits(["lib/old-name.ts", "tests/new-name.test.ts"])).toEqual([
+      "tests/new-name.test.ts",
+    ]);
+  });
+});
+
+describe("findAddedCoverageSuppressions (F1-S9 slice 1, issue #12)", () => {
+  it("flags an ADDED Python pragma", () => {
+    const patch = [
+      "diff --git a/snowflake/foo.py b/snowflake/foo.py",
+      "index abc..def 100644",
+      "--- a/snowflake/foo.py",
+      "+++ b/snowflake/foo.py",
+      "@@ -1,1 +1,2 @@",
+      " existing_line = 1",
+      "+new_line = 2  # pragma: no cover",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toEqual([
+      { path: "snowflake/foo.py", line: "new_line = 2  # pragma: no cover" },
+    ]);
+  });
+
+  it("flags an ADDED v8-ignore comment (this repo's live vitest coverage provider)", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "index abc..def 100644",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* v8 ignore next */ export const y = 2;",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.path).toBe("lib/foo.ts");
+  });
+
+  it("flags c8/istanbul ignore comments defensively even though unused in this repo today", () => {
+    const c8Patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* c8 ignore next */ export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(c8Patch)).toHaveLength(1);
+
+    const istanbulPatch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* istanbul ignore next */ export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(istanbulPatch)).toHaveLength(1);
+  });
+
+  it("does NOT flag an EXISTING (unmodified, context-line) suppression this diff doesn't touch", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const x = 1; // pragma: no cover",
+      "+export const y = 2;",
+      " export const z = 3;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("does NOT flag the +++ file-header line itself as an added line", () => {
+    const patch = [
+      "diff --git a/lib/pragma.ts b/lib/pragma.ts",
+      "new file mode 100644",
+      "index 0000000..abc1234",
+      "--- /dev/null",
+      "+++ b/lib/pragma.ts",
+      "@@ -0,0 +1,1 @@",
+      "+export const x = 1;",
+    ].join("\n");
+    // The file itself is even named "pragma.ts" — proves the +++ header
+    // line for it is never misread as added content regardless.
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("does NOT flag a removed (-) line carrying a suppression", () => {
+    const patch = [
+      "diff --git a/lib/foo.ts b/lib/foo.ts",
+      "--- a/lib/foo.ts",
+      "+++ b/lib/foo.ts",
+      "@@ -1,2 +1,1 @@",
+      "-export const x = 1; // pragma: no cover",
+      " export const z = 3;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+
+  it("flags multiple added suppressions across multiple files independently", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+/* v8 ignore next */ export const y = 2;",
+      "diff --git a/snowflake/b.py b/snowflake/b.py",
+      "--- a/snowflake/b.py",
+      "+++ b/snowflake/b.py",
+      "@@ -1,1 +1,2 @@",
+      " x = 1",
+      "+y = 2  # pragma: no cover",
+    ].join("\n");
+    const matches = findAddedCoverageSuppressions(patch);
+    expect(matches).toHaveLength(2);
+    expect(matches.map((m) => m.path)).toEqual(["lib/a.ts", "snowflake/b.py"]);
+  });
+
+  it("returns empty for a clean patch with no suppressions at all", () => {
+    const patch = [
+      "diff --git a/lib/a.ts b/lib/a.ts",
+      "--- a/lib/a.ts",
+      "+++ b/lib/a.ts",
+      "@@ -1,1 +1,2 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+    ].join("\n");
+    expect(findAddedCoverageSuppressions(patch)).toEqual([]);
+  });
+});
+
+describe("buildGamingFlagAnnotation (F1-S9 slice 1, issue #12)", () => {
+  it("names the exact test file(s) edited", () => {
+    const body = buildGamingFlagAnnotation({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [],
+    });
+    expect(body).toContain(NO_AUTO_CHAIN_LABEL);
+    expect(body).toContain("tests/slug.test.ts");
+  });
+
+  it("names the exact suppression line(s) added, with their file", () => {
+    const body = buildGamingFlagAnnotation({
+      testFileEdits: [],
+      suppressions: [{ path: "lib/foo.ts", line: "/* v8 ignore next */" }],
+    });
+    expect(body).toContain("lib/foo.ts");
+    expect(body).toContain("/* v8 ignore next */");
+  });
+
+  it("includes both sections when both are present", () => {
+    const body = buildGamingFlagAnnotation({
+      testFileEdits: ["tests/slug.test.ts"],
+      suppressions: [{ path: "lib/foo.ts", line: "# pragma: no cover" }],
+    });
+    expect(body).toContain("tests/slug.test.ts");
+    expect(body).toContain("lib/foo.ts");
+  });
+});
+
+describe("NO_AUTO_CHAIN_LABEL_DESCRIPTION", () => {
+  it("stays within GitHub's label-description character limit", () => {
+    expect(NO_AUTO_CHAIN_LABEL_DESCRIPTION.length).toBeLessThanOrEqual(
+      GITHUB_LABEL_DESCRIPTION_MAX_LENGTH,
+    );
   });
 });
 
@@ -776,6 +1002,50 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: true,
     });
     expect(summary).toContain("(refreshed, not newly opened)");
+  });
+
+  it("reports the anti-gaming classifier as clean when gamingFlagged is false/omitted", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("✅ clean");
+    expect(summary).not.toContain("FLAGGED");
+  });
+
+  it("reports the anti-gaming classifier as FLAGGED with the label applied", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: true,
+      gamingLabelApplied: true,
+    });
+    expect(summary).toContain("🚩 **FLAGGED**");
+    expect(summary).toContain("labelled `no-auto-chain`");
+    expect(summary).not.toContain("FAILED to apply the `no-auto-chain`");
+  });
+
+  it("reports the anti-gaming label as FAILED to apply — never claims it landed — when the apply call actually failed", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+      gamingFlagged: true,
+      gamingLabelApplied: false,
+    });
+    expect(summary).toContain("FAILED to apply the `no-auto-chain` label");
+    expect(summary).not.toContain("labelled `no-auto-chain`");
   });
 });
 

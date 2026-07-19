@@ -120,6 +120,250 @@ export function findForbiddenPatchPaths(
 }
 
 /**
+ * Directory prefixes this repo's own test runners actually use for
+ * discovery (F1-S9 slice 1, issue #12 — the deterministic anti-gaming
+ * diff classifier) — verified against each tool's own config, not
+ * guessed: `vitest.config.ts`'s `include: ["tests/**\/*.test.ts"]`,
+ * `playwright.config.ts`'s `testDir: "./e2e"`, and pytest's default
+ * `test_*.py`/`*_test.py` discovery under `snowflake/tests/` (no
+ * `pytest.ini`/`pyproject.toml` overriding that convention in this repo).
+ */
+const TEST_PATH_PREFIXES = ["tests/", "e2e/", "snowflake/tests/"] as const;
+
+/**
+ * Filename-suffix patterns treated as a test file independent of
+ * directory — defense in depth against a test file someday landing
+ * outside {@link TEST_PATH_PREFIXES}, not a claim that either check alone
+ * is complete.
+ */
+const TEST_FILENAME_PATTERNS = [
+  /\.test\.tsx?$/,
+  /\.spec\.tsx?$/,
+  /^test_.*\.py$/,
+  /.*_test\.py$/,
+] as const;
+
+/**
+ * True when a normalized path is a test file by this repo's own
+ * conventions (directory OR filename-suffix match — see
+ * {@link TEST_PATH_PREFIXES}/{@link TEST_FILENAME_PATTERNS}).
+ *
+ * Deliberately conservative in one direction only: this is used to FLAG a
+ * diff for human review, never to silently permit anything, so a false
+ * positive (an ordinary file that happens to match a suffix pattern) costs
+ * a human a few seconds of "yes, this is fine"; a false negative would
+ * mean a real test-file edit sails through unflagged. Over-matching is the
+ * sound choice for this class (see the module's `NO_AUTO_CHAIN_LABEL`
+ * docstring for why "assertion weakening" itself isn't attempted — it's
+ * semantic and can't be reliably detected, so the whole class is flagged).
+ *
+ * @param normalizedPath - A path already run through
+ *   {@link normalizePatchPath}.
+ * @returns Whether this path is a test file.
+ */
+export function isTestFilePath(normalizedPath: string): boolean {
+  if (TEST_PATH_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
+    return true;
+  }
+  // No `?? fallback` needed here (unlike a `.split("/").pop()` form would
+  // require): `lastIndexOf` returns -1 for a path with no "/" at all, and
+  // `.slice(0)` on that is simply the whole string — every input has a
+  // well-defined result, no branch is ever unreachable.
+  const filename = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+  return TEST_FILENAME_PATTERNS.some((pattern) => pattern.test(filename));
+}
+
+/**
+ * Scans a list of changed paths and returns every one that's a test file.
+ *
+ * @param rawPaths - Paths git itself reports the patch will touch (same
+ *   authoritative source as {@link findForbiddenPatchPaths} — see that
+ *   function's docstring for why this must be the applier's own report,
+ *   not an independent diff-text parse).
+ * @returns The subset that are test files, normalized and sorted. Empty
+ *   if none.
+ */
+export function findTestFileEdits(rawPaths: readonly string[]): string[] {
+  const edits = new Set<string>();
+  for (const raw of rawPaths) {
+    const normalized = normalizePatchPath(raw);
+    if (isTestFilePath(normalized)) {
+      edits.add(normalized);
+    }
+  }
+  return Array.from(edits).sort();
+}
+
+/** A single ADDED coverage-suppression line {@link findAddedCoverageSuppressions} found. */
+export interface CoverageSuppressionMatch {
+  /** The file the suppression comment was added in (normalized). */
+  readonly path: string;
+  /** The added line's content, trimmed. */
+  readonly line: string;
+}
+
+/**
+ * Matches a coverage-suppression comment: Python's `# pragma: no cover`,
+ * or a JS/TS coverage-provider ignore comment. `v8 ignore` is this repo's
+ * LIVE syntax (`vitest.config.ts`'s `coverage: { provider: "v8" }`);
+ * `c8`/`istanbul` are detected defensively even though unused here today
+ * — over-matching a syntax this repo doesn't currently use is harmless,
+ * and a future provider switch (or a diff copy-pasted from elsewhere)
+ * shouldn't need this pattern updated to still catch it.
+ */
+const COVERAGE_SUPPRESSION_PATTERN =
+  /#\s*pragma:\s*no\s*cover|\/\*\s*(?:v8|c8|istanbul)\s+ignore\b/i;
+
+/**
+ * Scans raw unified-diff text for coverage-suppression comments on
+ * ADDED lines only — an existing suppression this diff doesn't touch is
+ * not this diff's problem to flag.
+ *
+ * A line is only ever considered "added content" while inside a hunk
+ * (after a `@@ ... @@` marker for the current file, reset at each
+ * `diff --git` header) — this is what excludes the `+++ b/path` FILE
+ * HEADER line (which always precedes any hunk marker) from being
+ * misread as added content, without needing to special-case its `+++`
+ * prefix directly (a real added line's own code could itself start with
+ * `++`, e.g. `++i;`, making a naive `+++`-prefix check ambiguous; hunk
+ * state has no such ambiguity, since `@@` markers are unique to diff
+ * hunk headers). `+++ b/path` (or `+++ /dev/null` for a deletion) is
+ * additionally used to track which file the CURRENT hunk belongs to, so
+ * a match can be attributed to a path.
+ *
+ * @param patchText - The raw contents of a unified diff (same file
+ *   `main()` already validates the size of before ever reading it — see
+ *   `assertPatchArtifactSize`).
+ * @returns Every added-line match, in file order. Empty if none.
+ */
+export function findAddedCoverageSuppressions(
+  patchText: string,
+): CoverageSuppressionMatch[] {
+  const matches: CoverageSuppressionMatch[] = [];
+  let currentPath = "";
+  let inHunk = false;
+  for (const rawLine of patchText.split("\n")) {
+    if (rawLine.startsWith("diff --git ")) {
+      inHunk = false;
+      continue;
+    }
+    if (rawLine.startsWith("+++ ")) {
+      currentPath = normalizePatchPath(rawLine.slice("+++ ".length).trim());
+      inHunk = false;
+      continue;
+    }
+    if (rawLine.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || !rawLine.startsWith("+")) {
+      continue;
+    }
+    const content = rawLine.slice(1);
+    if (COVERAGE_SUPPRESSION_PATTERN.test(content)) {
+      matches.push({ path: currentPath, line: content.trim() });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Applied to a PR whose diff trips the deterministic anti-gaming
+ * classifier ({@link findTestFileEdits} / {@link findAddedCoverageSuppressions},
+ * F1-S9 slice 1, issue #12): any edit to a test file, OR any ADDED
+ * coverage-suppression comment. Both are treated as a SINGLE, conservative
+ * class — "assertion weakening" itself is semantic and can't be reliably
+ * detected (no LLM is used here; this whole classifier is deterministic
+ * string/path matching), so the entire vector is flagged rather than
+ * attempting to distinguish a legitimate test-file edit (e.g. a genuine
+ * strengthening) from a gamed one. A human confirms which it is — see
+ * {@link buildGamingFlagAnnotation} for the deterministic, templated
+ * pointer to exactly what tripped it.
+ *
+ * ENFORCEMENT CONTRACT (be honest about scope, not aspirational): this
+ * label is the durable hook every current and future auto-chain consumer
+ * MUST check and refuse to advance a PR carrying it — specifically the
+ * dormant §10-ratchet stage-2 trigger (triage's `ready-to-implement`
+ * label auto-firing `implement`, NOT wired yet — see
+ * `implement-ready-issues.yml`'s own top comment) once that's eventually
+ * enabled, and F1-S9 slice 3's spec-grounded review. It is
+ * FORWARD-ENFORCING, not a hard block on a chain that doesn't exist
+ * today: today's ACTUAL enforcement is this label (a durable, always-
+ * visible signal — PR list/board view, not just the PR body) plus the
+ * explanatory annotation naming exactly what tripped it plus
+ * factory.md §2's permanent human-merge requirement, which already means
+ * nothing merges without a human looking at it regardless of this
+ * label's presence. Applied at the ONE point in today's pipeline that
+ * actually auto-chains with no human step in between — `implement`'s
+ * patch flowing straight into `publish`'s auto-opened/refreshed PR,
+ * both within a single dispatched run.
+ */
+export const NO_AUTO_CHAIN_LABEL = "no-auto-chain";
+
+/**
+ * {@link NO_AUTO_CHAIN_LABEL}'s description, applied when the publish job
+ * creates the label (idempotently — see `applyNoAutoChainLabel` in
+ * `publish-implement-patch.mts`). Kept under
+ * {@link GITHUB_LABEL_DESCRIPTION_MAX_LENGTH}, same reasoning as
+ * {@link NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION} — a unit test asserts
+ * this stays within it.
+ */
+export const NO_AUTO_CHAIN_LABEL_DESCRIPTION =
+  "Diff edits a test file or adds a coverage-suppression comment — needs human review first.";
+
+/** What the anti-gaming classifier found on one publish run — passed to {@link buildGamingFlagAnnotation}. */
+export interface GamingFlag {
+  /** Test files the diff edits, normalized, sorted. */
+  readonly testFileEdits: readonly string[];
+  /** Coverage-suppression comments the diff adds. */
+  readonly suppressions: readonly CoverageSuppressionMatch[];
+}
+
+/**
+ * Builds the deterministic, TEMPLATED (no LLM — this whole classifier is
+ * string/path matching) annotation naming exactly what tripped the
+ * anti-gaming classifier, so "routed to human review" carries a concrete,
+ * actionable pointer rather than an opaque label. Posted as a fresh PR
+ * comment on every flagged publish run (creation or refresh alike) — see
+ * `postGamingFlagAnnotation` in `publish-implement-patch.mts` — never an
+ * upsert: a later refresh may introduce a DIFFERENT flagged line than an
+ * earlier one, and an edited-in-place comment could read as "already
+ * seen" to a human who reviewed an earlier version.
+ *
+ * @param flag - What the classifier found; at least one field is
+ *   expected to be non-empty (the caller only invokes this when flagged).
+ * @returns The Markdown comment body.
+ */
+export function buildGamingFlagAnnotation(flag: GamingFlag): string {
+  const lines: string[] = [
+    "> 🚩 **This diff was flagged by the deterministic anti-gaming classifier (F1-S9) — " +
+      `labelled \`${NO_AUTO_CHAIN_LABEL}\`. A human must review this before it advances ` +
+      "any further.**",
+    "",
+  ];
+  if (flag.testFileEdits.length > 0) {
+    lines.push("**Test file(s) edited:**");
+    for (const path of flag.testFileEdits) {
+      lines.push(`- \`${path}\``);
+    }
+    lines.push("");
+  }
+  if (flag.suppressions.length > 0) {
+    lines.push("**Coverage-suppression comment(s) added:**");
+    for (const match of flag.suppressions) {
+      lines.push(`- \`${match.path}\`: \`${match.line}\``);
+    }
+    lines.push("");
+  }
+  lines.push(
+    "This is a conservative, deterministic flag — it does not judge whether the edit is " +
+      "legitimate, only that it falls in a class the factory can't safely auto-verify. " +
+      "Confirm it's intentional and correct before merging.",
+  );
+  return lines.join("\n");
+}
+
+/**
  * Parses `git diff-index --cached --name-status -z -M -C --find-copies-harder
  * HEAD`'s output (run against a throwaway scratch index — see
  * `getAuthoritativeChangedPaths` in `publish-implement-patch.mts` for the
@@ -880,6 +1124,20 @@ export function buildPublishSuccessStepSummary(
      * applied" regardless of what actually happened.
      */
     readonly labelApplied?: boolean;
+    /**
+     * Whether the deterministic anti-gaming classifier (F1-S9 slice 1,
+     * issue #12) flagged this diff — `undefined` when the classifier
+     * hasn't run for some reason (never expected in practice, but this
+     * mirrors `labelApplied`'s optionality rather than assuming it did).
+     */
+    readonly gamingFlagged?: boolean;
+    /**
+     * Whether `applyNoAutoChainLabelBestEffort` actually succeeded —
+     * `undefined` when `gamingFlagged` is not `true` (the label is never
+     * attempted). Same "never overstate success" discipline as
+     * `labelApplied` above.
+     */
+    readonly gamingLabelApplied?: boolean;
   },
 ): string {
   const labelLine =
@@ -922,6 +1180,13 @@ export function buildPublishSuccessStepSummary(
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
       "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
       "PR as if Claude Code Review never ran until that's resolved.";
+  const gamingLine = !context.gamingFlagged
+    ? "✅ clean — no test-file edits, no added coverage-suppression comments"
+    : `🚩 **FLAGGED** — ${
+        context.gamingLabelApplied === false
+          ? `attempted but FAILED to apply the \`${NO_AUTO_CHAIN_LABEL}\` label — check the run's logs`
+          : `labelled \`${NO_AUTO_CHAIN_LABEL}\``
+      }; see the PR's annotation comment for exactly what tripped it — human review required before this advances`;
   return [
     "## Factory publish summary",
     "",
@@ -929,6 +1194,7 @@ export function buildPublishSuccessStepSummary(
     `- **Publisher identity:** ${publisherIdentityLine(context)}`,
     `- **PR:** [#${context.prNumber}](${sanitizeStepSummaryUrl(context.prUrl)})${context.wasRefresh ? " (refreshed, not newly opened)" : ""}`,
     `- **Review automation:** ${reviewAutomationLine}`,
+    `- **Anti-gaming classifier:** ${gamingLine}`,
     "",
   ].join("\n");
 }
