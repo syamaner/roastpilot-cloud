@@ -203,6 +203,22 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
     expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
   });
 
+  it("PRESERVES a real reference when a fallback-unmasked code span contains a literal '<!--' (Codex finding, PR #70 review round 8 — a real interaction bug: the fallback correctly left this span's text unmasked for over-match reasons, but the comment-stripping pass then treated its literal '<!--' as a real comment opener, silently blanking a genuine reference between it and a later, unrelated '-->' — an under-match violating this module's own invariant)", () => {
+    const body = "- line one has real text\n  `<!--` is on line two of the SAME item\n\nCloses #12\n\nend -->";
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 12, kind: "closing" }]);
+  });
+
+  it("a real out-of-code comment is STILL correctly stripped even when a fallback protected some OTHER, unrelated lines elsewhere in the same body — regression check that fallback-protection doesn't over-broadly disable comment-stripping everywhere", () => {
+    const body = [
+      "- line one has real text",
+      "  `<!--` is on line two of the SAME item (fallback-protected)",
+      "",
+      "Closes #<!-- issue this PR FULLY resolves --><!-- this PR does not close #12 -->",
+      "Refs #8",
+    ].join("\n");
+    expect(parseLinkedIssueReferences(body)).toEqual([{ issueNumber: 8, kind: "non-closing" }]);
+  });
+
   it("fails SAFE in the OVER-match direction when markdown-it itself throws (Codex constraint, PR #70 review): code regions stay unmasked rather than the whole scan being skipped, since a false positive here costs a human a glance while silently missing a real reference would not", () => {
     const throwingParse = vi.spyOn(MarkdownIt.prototype, "parse").mockImplementation(() => {
       throw new Error("simulated markdown-it failure");

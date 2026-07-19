@@ -383,6 +383,23 @@ function buildStructuralView(text: string): string {
   // REAL `<!-- ... -->` pair that exists outside any code region.
   const originalLines = text.split(/\r?\n/);
   const maskedLines = [...originalLines];
+  // Lines a code-masking FALLBACK deliberately left unmasked (Codex
+  // finding, PR #70 review round 8 — a real interaction bug between two
+  // already-hardened pieces, not a syntax-completeness variant the
+  // common-form boundary would dismiss): when a fallback below leaves a
+  // code_inline span's real text in place (over-match-safe for THAT
+  // span), a literal `<!--` inside it could otherwise still be read as a
+  // real comment opener by the comment-stripping pass further down —
+  // silently blanking a genuine reference between it and the next REAL
+  // `-->` anywhere later in the body. Verified empirically before fixing:
+  // a multi-line list item with `` `<!--` `` on its continuation line,
+  // followed by a real "Closes #12", followed by an unrelated later
+  // "-->", dropped the reference entirely. Every line a fallback below
+  // touches is recorded here and EXCLUDED from comment-stripping by
+  // {@link stripUnprotectedHtmlComments} — a genuine `<!-- ... -->` pair
+  // can only ever be recognized when its OPENING `<!--` sits on a line
+  // this module was actually able to mask with confidence.
+  const fallbackProtectedLines = new Set<number>();
 
   let tokens: ReturnType<(typeof structuralParser)["parse"]>;
   try {
@@ -391,7 +408,12 @@ function buildStructuralView(text: string): string {
     // Fails safe in the same over-match direction even on this earlier
     // parse failure: comment-stripping (below) still runs on the raw
     // text, so a real, out-of-code comment is still correctly stripped
-    // even when code-region masking itself couldn't run at all.
+    // even when code-region masking itself couldn't run at all. No line-
+    // protection is possible here — parsing itself failed, so there are
+    // no tokens to know which lines even ARE code regions; this is a
+    // documented, already-accepted coarser residual for this rare,
+    // essentially-untestable-with-real-input path (see this function's
+    // own docstring), not a gap this fix extends to.
     return text.replace(HTML_COMMENT_PATTERN, neuterPreservingNewlines);
   }
 
@@ -454,6 +476,13 @@ function buildStructuralView(text: string): string {
       // advisory finding a human glances at and dismisses), but a real
       // reference elsewhere can NEVER be silently dropped by this
       // branch, because this branch never touches `maskedLines` at all.
+      // Every line in this token's range is recorded as fallback-
+      // protected (Codex finding, PR #70 review round 8) so the
+      // comment-stripping pass further down never treats a literal
+      // `<!--` left unmasked here as a real comment opener.
+      for (let i = start; i < end; i++) {
+        fallbackProtectedLines.add(i);
+      }
       continue;
     }
     let masked = joined;
@@ -479,7 +508,14 @@ function buildStructuralView(text: string): string {
         // NOT match the original source verbatim. Skip masking THIS
         // span rather than risk corrupting positions elsewhere; over-
         // matching (leaving one real code span unmasked) is the safe
-        // direction, same as the parse-failure fallback above.
+        // direction, same as the parse-failure fallback above. Same
+        // fallback-protection as the multi-line-container case above
+        // (Codex finding, PR #70 review round 8): this token's line
+        // range is recorded so a literal `<!--` inside the unmasked
+        // span can't be mistaken for a real comment opener downstream.
+        for (let i = start; i < end; i++) {
+          fallbackProtectedLines.add(i);
+        }
         continue;
       }
       masked =
@@ -495,7 +531,94 @@ function buildStructuralView(text: string): string {
 
   // HTML comments stripped SECOND, from the already CODE-MASKED text —
   // see this function's own opening comment for why this order matters.
-  return maskedLines.join("\n").replace(HTML_COMMENT_PATTERN, neuterPreservingNewlines);
+  // Uses {@link stripUnprotectedHtmlComments}, not a plain `.replace`,
+  // so a literal `<!--` a FALLBACK above left unmasked is never treated
+  // as a real comment opener (Codex finding, PR #70 review round 8).
+  return stripUnprotectedHtmlComments(
+    maskedLines.join("\n"),
+    fallbackProtectedLines,
+    neuterPreservingNewlines,
+  );
+}
+
+/**
+ * Strips `<!-- ... -->` comments from `text`, except a match whose
+ * OPENING `<!--` sits on a line index present in `protectedLines` — see
+ * {@link buildStructuralView}'s own `fallbackProtectedLines` docstring
+ * for why those specific lines must never have a comment stripped from
+ * them: a code-masking fallback deliberately left them unmasked (the
+ * safe, over-match direction for THAT code span), and treating a literal
+ * `<!--` inside one as a real comment opener would silently blank a
+ * real reference between it and the next genuine `-->` anywhere later
+ * in the body — an under-match, and the exact bug this function exists
+ * to close (Codex finding, PR #70 review round 8, verified against a
+ * real reproduction before writing this fix).
+ *
+ * @param text - The code-masked text to strip comments from.
+ * @param protectedLines - Line indices (0-based, matching `text.split
+ *   ("\n")`) a comment match must never START on.
+ * @param neuter - The same length-and-newline-preserving neutering
+ *   function {@link buildStructuralView} already uses for every other
+ *   masking pass, reused here for a consistent replacement shape.
+ * @returns `text` with every UNPROTECTED comment match neutered to
+ *   whitespace; a match starting on a protected line is left completely
+ *   untouched.
+ */
+function stripUnprotectedHtmlComments(
+  text: string,
+  protectedLines: ReadonlySet<number>,
+  neuter: (match: string) => string,
+): string {
+  if (protectedLines.size === 0) {
+    // The common case (no fallback ever fired): behaves exactly like the
+    // plain `.replace` this function replaces, with none of the extra
+    // per-match line-lookup overhead below.
+    return text.replace(HTML_COMMENT_PATTERN, neuter);
+  }
+  const lines = text.split("\n");
+  const lineStartOffsets: number[] = [];
+  let runningOffset = 0;
+  for (const line of lines) {
+    lineStartOffsets.push(runningOffset);
+    runningOffset += line.length + 1; // +1 for the "\n" this split consumed.
+  }
+  const lineIndexForOffset = (charOffset: number): number => {
+    let lineIndex = 0;
+    for (let i = 0; i < lineStartOffsets.length; i++) {
+      const lineStart = lineStartOffsets[i];
+      if (lineStart !== undefined && lineStart <= charOffset) {
+        lineIndex = i;
+      } else {
+        break;
+      }
+    }
+    return lineIndex;
+  };
+
+  let result = "";
+  let lastConsumedIndex = 0;
+  for (const match of text.matchAll(HTML_COMMENT_PATTERN)) {
+    const matchIndex = match.index;
+    const matchText = match[0];
+    if (matchIndex === undefined) {
+      // Defensive: matchAll always populates `.index` for a real regex
+      // match — unreachable by construction.
+      /* v8 ignore next */
+      continue;
+    }
+    if (protectedLines.has(lineIndexForOffset(matchIndex))) {
+      // Leave this match completely untouched -- do not even advance
+      // past it specially; it will be copied verbatim by the final
+      // `text.slice(lastConsumedIndex)` below (or by the NEXT match's
+      // own leading slice, if another unprotected match follows it).
+      continue;
+    }
+    result += text.slice(lastConsumedIndex, matchIndex);
+    result += neuter(matchText);
+    lastConsumedIndex = matchIndex + matchText.length;
+  }
+  result += text.slice(lastConsumedIndex);
+  return result;
 }
 
 /**
