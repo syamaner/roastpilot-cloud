@@ -155,9 +155,13 @@ exception. The load-bearing points:
   **in progress — keep waiting** (bounded ~30 min from the 👀); it does
   **not** clear the merge by itself. A CLEAN verdict is **either a 👍 reaction
   (after the 👀) OR a top-level "Codex Review: Didn't find any major issues"
-  comment carrying a `Reviewed commit: <sha>` line** whose sha matches the PR
-  head (the more common channel — a watcher polling only reviews + reactions is
-  blind to it); a **posted `pull_request_review` with inline threads** = findings.
+  comment — authored by the Codex bot identity (`chatgpt-codex-connector[bot]`) —
+  carrying a `Reviewed commit: <sha>` line** whose sha matches the PR head. The
+  repo is public, so anyone can post a comment copying that title + the visible
+  head sha; **author-identity is required, content-match alone is spoofable.** A
+  watcher polling only reviews + reactions is blind to the comment channel; one
+  reading it MUST filter on the bot login. A **posted `pull_request_review` with
+  inline threads** = findings.
   The signal must postdate the final-commit trigger. Do not arm auto-merge on
   green CI alone. **Carve-out (D103 draft-first, interactive PRs):** while a PR
   is a **draft**, re-triggering `@codex review` on each new post-fold head to
