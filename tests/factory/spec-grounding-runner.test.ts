@@ -82,6 +82,13 @@ function prResponse(
 const PULLS_JSON_KEY = `GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`;
 const COMPARE_DIFF_KEY = `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${DIFF_ACCEPT}`;
 
+// A fixed, injected nonce for deterministic test fixtures (F1-S9 slice
+// 3b-ii-a, issue #12 -- team-lead's sign-off explicitly calls for this:
+// "Fixed-inject the nonce in tests for determinism"). DELIMITER_NONCE_OVERRIDE
+// is read ONLY by generateDelimiterNonce() -- never set by any real
+// workflow, so this has no effect outside this test file.
+const TEST_NONCE = "deadbeefcafef00d";
+
 let workdir: string;
 let criteriaBlockPath: string;
 let criteriaSpinePath: string;
@@ -103,6 +110,7 @@ beforeEach(async () => {
   process.env.CRITERIA_SPINE_PATH = criteriaSpinePath;
   process.env.PR_DIFF_BLOCK_PATH = prDiffBlockPath;
   process.env.GITHUB_OUTPUT = githubOutputPath;
+  process.env.DELIMITER_NONCE_OVERRIDE = TEST_NONCE;
 });
 
 afterEach(async () => {
@@ -116,6 +124,7 @@ afterEach(async () => {
   delete process.env.CRITERIA_SPINE_PATH;
   delete process.env.PR_DIFF_BLOCK_PATH;
   delete process.env.GITHUB_OUTPUT;
+  delete process.env.DELIMITER_NONCE_OVERRIDE;
 });
 
 async function readOutput(): Promise<string> {
@@ -187,11 +196,11 @@ describe("main — real unmet criteria", () => {
 
     await main();
 
-    expect(await readOutput()).toBe("has-criteria=true\n");
+    expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
 
     const criteriaBlock = await readFile(criteriaBlockPath, "utf-8");
     expect(criteriaBlock).toContain("Do the thing.");
-    expect(criteriaBlock.startsWith("<UNTRUSTED_ISSUE_DATA>")).toBe(true);
+    expect(criteriaBlock.startsWith(`<UNTRUSTED_ISSUE_DATA_${TEST_NONCE}>`)).toBe(true);
 
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
     // No criterionText field -- the spine carries only trusted metadata
@@ -199,11 +208,60 @@ describe("main — real unmet criteria", () => {
     expect(spine).toEqual([{ issueNumber: 12, kind: "closing", criterionId: "12:0" }]);
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
-    expect(diffBlock.startsWith("<UNTRUSTED_PR_DIFF>")).toBe(true);
+    expect(diffBlock.startsWith(`<UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
     expect(diffBlock).toContain("+did the thing");
     // The PR changed well under GitHub's 300-file compare cap, so no
     // file-count truncation warning appears.
     expect(diffBlock).not.toContain("more files than GitHub's compare API");
+  });
+
+  it("generates a REAL CSPRNG nonce (128 bits, 32 lowercase hex chars) when DELIMITER_NONCE_OVERRIDE is unset -- the production path, never exercised by any other test in this file (F1-S9 slice 3b-ii-a, issue #12, team-lead's sign-off: >=128-bit CSPRNG floor)", async () => {
+    delete process.env.DELIMITER_NONCE_OVERRIDE;
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "An issue",
+          body: "### Acceptance criteria\n- [ ] Do the thing.",
+        }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const output = await readOutput();
+    const match = /delimiter-nonce=([0-9a-f]+)\n/.exec(output);
+    expect(match).not.toBeNull();
+    // 16 bytes = 32 lowercase hex characters.
+    expect(match?.[1]).toHaveLength(32);
+  });
+
+  it("uses a DIFFERENT nonce on each separate run (proving real randomness, not a hardcoded or memoized fallback)", async () => {
+    delete process.env.DELIMITER_NONCE_OVERRIDE;
+    const makeHandlers = (): Record<string, (call: FetchCall) => Response> => ({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({ title: "An issue", body: "### Acceptance criteria\n- [ ] Do the thing." }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
+    });
+
+    vi.stubGlobal("fetch", mockFetch(makeHandlers()).fetchMock);
+    await main();
+    const firstOutput = await readOutput();
+    const firstNonce = /delimiter-nonce=([0-9a-f]+)\n/.exec(firstOutput)?.[1];
+
+    // Fresh output file + fresh mock for the second run.
+    githubOutputPath = join(workdir, "github-output-2.txt");
+    process.env.GITHUB_OUTPUT = githubOutputPath;
+    vi.stubGlobal("fetch", mockFetch(makeHandlers()).fetchMock);
+    await main();
+    const secondOutput = await readOutput();
+    const secondNonce = /delimiter-nonce=([0-9a-f]+)\n/.exec(secondOutput)?.[1];
+
+    expect(firstNonce).toBeDefined();
+    expect(secondNonce).toBeDefined();
+    expect(firstNonce).not.toBe(secondNonce);
   });
 
   it("surfaces a file-count truncation warning when the PR changes more files than GitHub's compare API returns in one response (Codex finding, PR #72 review round 2, MEDIUM -- a real silent-truncation gap: the diff media type carries no in-band marker for this, so the runner must detect it from the PR's own trusted changed_files count)", async () => {
@@ -222,8 +280,8 @@ describe("main — real unmet criteria", () => {
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
     expect(diffBlock).toContain("more files than GitHub's compare API");
-    expect(diffBlock.startsWith("<UNTRUSTED_PR_DIFF>")).toBe(true);
-    expect(diffBlock.endsWith("</UNTRUSTED_PR_DIFF>")).toBe(true);
+    expect(diffBlock.startsWith(`<UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
+    expect(diffBlock.endsWith(`</UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
   });
 
   it("does NOT warn when changed_files is exactly at the cap (300), only when it exceeds it", async () => {
@@ -260,7 +318,7 @@ describe("main — real unmet criteria", () => {
 
     await main();
 
-    expect(await readOutput()).toBe("has-criteria=true\n");
+    expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
     // Only issue #8's criterion survives -- #12's verified 404 degraded to
     // silence, not a thrown error and not a fabricated entry.
@@ -344,7 +402,7 @@ describe("main — real unmet criteria", () => {
     // a non-empty block when truncatedIssueCount > 0, so the fact that 5
     // referenced issues were never even looked up surfaces to the human
     // reviewer rather than being silently dropped.
-    expect(await readOutput()).toBe("has-criteria=true\n");
+    expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
     const criteriaBlock = await readFile(criteriaBlockPath, "utf-8");
     expect(criteriaBlock).toContain("5 more referenced issue(s) not shown");
   });

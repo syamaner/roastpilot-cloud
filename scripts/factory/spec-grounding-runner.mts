@@ -75,6 +75,7 @@
  * - `PR_DIFF_BLOCK_PATH` (default `review-context/pr-diff-block.txt`)
  */
 
+import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -129,6 +130,37 @@ function resolvePaths(): RunnerPaths {
     criteriaSpinePath: process.env.CRITERIA_SPINE_PATH ?? DEFAULT_PATHS.criteriaSpinePath,
     prDiffBlockPath: process.env.PR_DIFF_BLOCK_PATH ?? DEFAULT_PATHS.prDiffBlockPath,
   };
+}
+
+/**
+ * Bytes of CSPRNG entropy in the per-run delimiter nonce — 16 bytes
+ * (128 bits), team-lead's explicit floor from the #12 3b-ii PR-plan
+ * sign-off, hex-encoded into the fence name
+ * (`spec-grounding-logic.mts`'s `buildDataBlockOpen` /
+ * `spec-grounding-runner-logic.mts`'s `wrapUntrustedDiffBlock`).
+ */
+const DELIMITER_NONCE_BYTES = 16;
+
+/**
+ * Generates this run's delimiter nonce — the categorical end of the
+ * three-round delimiter-breakout arms race (F1-S9 slice 3b-ii-a, issue
+ * #12): a fresh, unpredictable, CSPRNG-sourced token untrusted text
+ * cannot forge, appended to BOTH fence names for this run
+ * (`UNTRUSTED_ISSUE_DATA_<nonce>` / `UNTRUSTED_PR_DIFF_<nonce>` — ONE
+ * shared token, per team-lead's sign-off: the two fences already stay
+ * distinguishable by NAME, and both are read by the same agent in the
+ * same prompt regardless).
+ *
+ * `DELIMITER_NONCE_OVERRIDE` exists ONLY for deterministic test fixtures
+ * (team-lead's sign-off: "Fixed-inject the nonce in tests for
+ * determinism") — never read in a real Actions run, since no workflow
+ * sets it; production always takes the `crypto.randomBytes` branch.
+ *
+ * @returns A lowercase hex string, {@link DELIMITER_NONCE_BYTES} bytes
+ *   (128 bits) of entropy in the production path.
+ */
+function generateDelimiterNonce(): string {
+  return process.env.DELIMITER_NONCE_OVERRIDE ?? randomBytes(DELIMITER_NONCE_BYTES).toString("hex");
 }
 
 async function fetchPr(token: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequest> {
@@ -247,6 +279,10 @@ export async function main(): Promise<void> {
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
   const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
   const paths = resolvePaths();
+  // One shared per-run nonce for BOTH fences — see generateDelimiterNonce's
+  // own docstring. Generated unconditionally (cheap, no I/O) even though
+  // an early exit below may never use it.
+  const nonce = generateDelimiterNonce();
 
   const pr = await fetchPr(token, owner, repo, prNumber);
   if (pr.head.sha !== trustedHeadSha) {
@@ -278,7 +314,7 @@ export async function main(): Promise<void> {
   }
 
   const result = buildLinkedIssueSpecs(references, issuesMap);
-  const criteriaBlock = renderCriteriaDataBlock(result);
+  const criteriaBlock = renderCriteriaDataBlock(result, nonce);
 
   if (criteriaBlock === "") {
     console.log(
@@ -295,7 +331,7 @@ export async function main(): Promise<void> {
   // no in-band truncation marker, so this compares the PR's OWN reported
   // total against the documented cap — a trusted source independent of
   // the diff text itself.
-  const diffBlock = wrapUntrustedDiffBlock(diff, undefined, {
+  const diffBlock = wrapUntrustedDiffBlock(diff, nonce, undefined, {
     knownFileCountTruncated: pr.changed_files > GITHUB_COMPARE_DIFF_FILE_LIMIT,
   });
 
@@ -308,6 +344,14 @@ export async function main(): Promise<void> {
       `across ${result.specs.length} linked issue(s).`,
   );
   writeGithubOutput("has-criteria", "true");
+  // The nonce is trusted, short, and non-attacker-influenced (this
+  // process generated it), so slice 3b-ii-c's prompt-composition step can
+  // safely interpolate it directly into the workflow's prompt string —
+  // unlike the criteria/spine/diff CONTENT above, which stays file-based
+  // and reaches the agent only via its Read tool, never spliced into
+  // workflow YAML (see the #12 3b-ii PR-plan sign-off for why that
+  // boundary matters).
+  writeGithubOutput("delimiter-nonce", nonce);
 }
 
 // Only self-invoke when run directly, not when imported by a test —
