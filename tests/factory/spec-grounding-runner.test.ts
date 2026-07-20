@@ -1,8 +1,12 @@
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../../scripts/factory/spec-grounding-runner.mts";
+
+const SCRIPT_PATH = fileURLToPath(new URL("../../scripts/factory/spec-grounding-runner.mts", import.meta.url));
 
 /**
  * Integration-style tests for slice 3b-i's CLI entrypoint: stub `fetch`
@@ -379,5 +383,28 @@ describe("main — malformed GITHUB_REPOSITORY", () => {
   it("throws a clear error rather than silently misrouting a fetch", async () => {
     process.env.GITHUB_REPOSITORY = "not-a-valid-repo-slug";
     await expect(main()).rejects.toThrow(/owner\/repo/);
+  });
+});
+
+describe("self-invoke guard (codecov/patch coverage, PR #72 review, final gate)", () => {
+  it("running the script directly (node --experimental-strip-types, the exact form triage-issues.yml/implement-ready-issues.yml use for their own sibling scripts) actually invokes main() and reports a failure on stderr with a non-zero exit code -- exercised as a REAL subprocess, not mocked, since this is the one path `import { main }`-style unit tests structurally cannot reach", () => {
+    // Explicitly WITHOUT GH_TOKEN (and the other vars this suite's own
+    // beforeEach sets for other describe blocks) -- requireEnv("GH_TOKEN")
+    // throws synchronously before any network call, so this stays fast and
+    // fully offline while still exercising main().catch(...) and the
+    // exitCode assignment for real.
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete childEnv.GH_TOKEN;
+    delete childEnv.GITHUB_REPOSITORY;
+    delete childEnv.TRUSTED_PR_NUMBER;
+    delete childEnv.TRUSTED_HEAD_SHA;
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", SCRIPT_PATH], {
+      encoding: "utf-8",
+      env: childEnv,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("spec-grounding-runner failed:");
+    expect(result.stderr).toContain("missing required environment variable: GH_TOKEN");
   });
 });
