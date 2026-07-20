@@ -35,6 +35,7 @@
 
 import {
   ASCII_WHITESPACE_CHARS,
+  buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
   truncateToByteBudget,
   UNTRUSTED_DATA_BREAKOUT_PATTERN,
@@ -104,9 +105,10 @@ export interface CriteriaSpineEntry {
  *
  * Fixed by deriving the spine from the SAME rendered text the agent reads,
  * not from `result` in isolation: each candidate criterion's exact
- * checkbox-line rendering (`  - [ ] ${neutralizeDelimiterBreakout(criterion)}`
- * — byte-identical to the line `renderCriteriaDataBlock` itself emits) must
- * be an EXACT, WHOLE-LINE match somewhere in `renderedCriteriaBlock`
+ * checkbox-line rendering (`  - [ ] ${marker} ${neutralizeDelimiterBreakout(criterion)}`,
+ * where `marker` is `buildCriterionIdMarker`'s own output for this
+ * criterion — byte-identical to the line `renderCriteriaDataBlock` itself
+ * emits) must be an EXACT, WHOLE-LINE match somewhere in `renderedCriteriaBlock`
  * (Codex finding, PR #72 review round 3, MEDIUM — a real bug in round 1's
  * own fix, this time in the MATCHING itself, not just the loop control:
  * the round-1 fix used `String.prototype.indexOf` for a bare SUBSTRING
@@ -146,9 +148,25 @@ export interface CriteriaSpineEntry {
  * paragraph above, just now actually enforced — is skipped without even
  * being searched for.
  *
+ * NONCE'D INLINE ID MARKER (F1-S9 slice 3b-ii-c1, issue #12 — team-lead's
+ * design correction to the original 3b-ii-c prompt draft: the review
+ * agent must NOT correlate a criterion to its `criterionId` by COUNTING
+ * checkbox position, which a truncation warning, a nested list, or plain
+ * miscounting can silently get wrong): the checkbox line this function
+ * reconstructs to search for now includes the SAME trusted marker
+ * `renderCriteriaDataBlock` prefixes onto it (`buildCriterionIdMarker`,
+ * `spec-grounding-logic.mts`) — one shared function builds the marker on
+ * both the writing and matching side, so they can never drift apart the
+ * way the two delimiter-breakout guards once did across three review
+ * rounds.
+ *
  * @param result - `buildLinkedIssueSpecs`'s output.
- * @param renderedCriteriaBlock - `renderCriteriaDataBlock(result)`'s
+ * @param renderedCriteriaBlock - `renderCriteriaDataBlock(result, nonce)`'s
  *   output — the EXACT text the review agent will read, byte-cap and all.
+ * @param nonce - The SAME per-run nonce `renderCriteriaDataBlock` was
+ *   called with for this run — see `spec-grounding-logic.mts`'s
+ *   `buildDataBlockOpen` for the full design reasoning shared by every
+ *   nonce'd primitive in this slice.
  * @returns Spine entries for every criterion whose full checkbox line is
  *   actually present, as a whole rendered line, in `renderedCriteriaBlock`,
  *   UP TO AND EXCLUDING the first one that is not, in the same issue
@@ -157,6 +175,7 @@ export interface CriteriaSpineEntry {
 export function buildCriteriaSpine(
   result: LinkedIssueSpecsResult,
   renderedCriteriaBlock: string,
+  nonce: string,
 ): readonly CriteriaSpineEntry[] {
   const entries: CriteriaSpineEntry[] = [];
   const renderedLines = renderedCriteriaBlock.split("\n");
@@ -167,7 +186,8 @@ export function buildCriteriaSpine(
       break;
     }
     for (const [index, criterionText] of spec.unmetCriteria.entries()) {
-      const checkboxLine = `  - [ ] ${neutralizeDelimiterBreakout(criterionText)}`;
+      const marker = buildCriterionIdMarker(nonce, spec.issueNumber, index);
+      const checkboxLine = `  - [ ] ${marker} ${neutralizeDelimiterBreakout(criterionText)}`;
       let foundLineIndex = -1;
       for (let i = lineCursor; i < renderedLines.length; i++) {
         // EXACT whole-line equality, never a substring match — see this

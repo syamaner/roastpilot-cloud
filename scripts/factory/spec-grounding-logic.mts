@@ -1227,6 +1227,60 @@ function buildDataBlockClose(nonce: string): string {
   return `</UNTRUSTED_ISSUE_DATA_${nonce}>`;
 }
 
+/**
+ * Builds the TRUSTED inline marker `renderCriteriaDataBlock` prefixes
+ * onto each rendered checkbox line, so slice 3b-ii-c's review agent can
+ * identify which spine `criterionId` a given line of DATA corresponds to
+ * WITHOUT relying on positional counting (F1-S9 slice 3b-ii-c1, issue
+ * #12 — team-lead's design correction to the original 3b-ii-c prompt
+ * draft's plan, which asked the agent to correlate the Nth checkbox
+ * under an issue heading to `${issueNumber}:${index}` purely by
+ * position: a truncation warning, a nested list, or plain miscounting
+ * would silently produce a WRONG verdict, and verdict correctness is the
+ * entire point of this gate).
+ *
+ * NONCE'D for the exact same reason the fences are (see
+ * {@link buildDataBlockOpen}'s own docstring): a NAKED marker (e.g. a
+ * bare `[[ID 12:3]]`) would be spoofable from WITHIN an attacker-authored
+ * criterion's own text — nothing stops a crafted criterion from
+ * containing a marker-shaped string claiming to BE a different
+ * criterion's ID, and the agent has no way to tell a real marker from a
+ * forged one without an independent signal. Appending this run's
+ * unpredictable nonce closes that: an attacker authors their criterion
+ * text before this run's nonce is ever generated, so any marker-shaped
+ * string they embed is necessarily missing the nonce, or carries the
+ * wrong one — exactly the same temporal-ordering argument that makes the
+ * fences themselves unforgeable.
+ *
+ * ORDERING MATTERS (explicitly called out in the design correction, and
+ * verified against `renderCriteriaDataBlock`'s own existing ordering
+ * below): this marker is prepended to a criterion's text AFTER
+ * {@link neutralizeDelimiterBreakout} has already run on that text, never
+ * before. Neutralizing first means any exotic/invisible characters an
+ * attacker embedded inside a forged marker attempt are already stripped
+ * by the time the REAL, trusted marker is added — so the real marker is
+ * never itself exposed to whatever character-level trick the criterion
+ * text might otherwise have tried against it.
+ *
+ * Shared between `renderCriteriaDataBlock` (which builds the marker to
+ * WRITE) and slice 3b-i's `buildCriteriaSpine` (which builds the SAME
+ * marker to MATCH, in `spec-grounding-runner-logic.mts`) — one function,
+ * not two independently-maintained string templates, closing off the
+ * exact "two guards drift onto different shapes" class three prior
+ * rounds of the delimiter-breakout arms race were caused by.
+ *
+ * @param nonce - This run's shared delimiter nonce — see
+ *   {@link buildDataBlockOpen}.
+ * @param issueNumber - The linked issue this criterion belongs to.
+ * @param index - This criterion's position within `issueNumber`'s own
+ *   unmet-criteria list (matches `buildCriteriaSpine`'s own
+ *   `criterionId` construction, `${issueNumber}:${index}`).
+ * @returns The trusted marker text, e.g. `[[ID a1b2c3:12:3]]`.
+ */
+export function buildCriterionIdMarker(nonce: string, issueNumber: number, index: number): string {
+  return `[[ID ${nonce}:${issueNumber}:${index}]]`;
+}
+
 // Whitespace-tolerant on EVERY side of the slash and the tag name —
 // independent factory-security-reviewer finding, F1-S9 slice 3, issue
 // #12: the original byte-exact pattern let `</UNTRUSTED_ISSUE_DATA >`
@@ -1479,6 +1533,16 @@ export function truncateToByteBudget(text: string, maxBytes: number): { text: st
  * NEUTRALIZATION side stays nonce-agnostic even though the fence-building
  * side (here) is not.
  *
+ * NONCE'D INLINE ID MARKERS (F1-S9 slice 3b-ii-c1, issue #12): each
+ * rendered checkbox line is prefixed with a trusted, nonce'd marker (see
+ * {@link buildCriterionIdMarker}) identifying which spine `criterionId`
+ * it corresponds to — slice 3b-ii's review agent uses this to correlate
+ * a criterion's rendered text to its trusted metadata WITHOUT relying on
+ * positional counting (a truncation warning, a nested list, or plain
+ * miscounting would otherwise silently produce a wrong verdict). Slice
+ * 3b-i's `buildCriteriaSpine` (`spec-grounding-runner-logic.mts`) builds
+ * the identical marker to match against, using the SAME shared function.
+ *
  * @param result - {@link buildLinkedIssueSpecs}'s output.
  * @param nonce - A fresh, unpredictable, per-run token — see
  *   {@link buildDataBlockOpen}.
@@ -1520,9 +1584,14 @@ export function renderCriteriaDataBlock(
           "expected here, so an unmet criterion below is NOT itself a " +
           "finding unless this PR's own description claims it as done";
     bodyLines.push(`Issue #${spec.issueNumber} — ${neutralizeDelimiterBreakout(spec.title)} (${stance}):`);
-    for (const criterion of spec.unmetCriteria) {
-      bodyLines.push(`  - [ ] ${neutralizeDelimiterBreakout(criterion)}`);
-    }
+    spec.unmetCriteria.forEach((criterion, index) => {
+      // Marker built from the ALREADY-neutralized criterion text's own
+      // position — see buildCriterionIdMarker's own docstring for why
+      // this ordering (neutralize first, prepend the trusted marker
+      // after) matters.
+      const marker = buildCriterionIdMarker(nonce, spec.issueNumber, index);
+      bodyLines.push(`  - [ ] ${marker} ${neutralizeDelimiterBreakout(criterion)}`);
+    });
     if (spec.truncatedCriteriaCount > 0) {
       bodyLines.push(
         `  - (${spec.truncatedCriteriaCount} more unmet criterion/criteria on this issue not ` +

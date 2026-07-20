@@ -398,7 +398,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  const spine = buildCriteriaSpine(result, criteriaBlock);
+  const spine = buildCriteriaSpine(result, criteriaBlock, nonce);
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   // Detects GitHub's compare-endpoint 300-changed-file cap (Codex finding,
   // PR #72 review round 2, MEDIUM): the diff media type is plain text with
