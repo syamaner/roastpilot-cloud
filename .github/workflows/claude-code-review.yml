@@ -6,7 +6,20 @@ on:
     # enters the per-PR concurrency group and CANCELS an in-progress review
     # (the job is then skipped by the draft guard below); without it a review
     # already running on the now-draft PR would finish and post its findings.
-    types: [opened, synchronize, ready_for_review, reopened, converted_to_draft]
+    #
+    # `edited` (Codex finding, PR #76 review, L316, F1-S9 issue #12): the
+    # spec-grounded-review job derives its ENTIRE linked-issue set, and
+    # each reference's closing-vs-non-closing classification, from the
+    # PR's own (mutable) body — without `edited`, an author could get a
+    # clean spec-grounded verdict, then edit the body afterward to ADD a
+    # new `Closes #N` or FLIP an existing `Refs` to `Closes`, and the gate
+    # would never re-run against that materially different closing claim
+    # — a direct gaming vector (make the closing claim only after review).
+    # `claude-review` itself does NOT need to react to `edited` at all (a
+    # body edit doesn't change the diff a code review judges) — see that
+    # job's own `if:` below, which explicitly excludes `edited` so a body
+    # edit doesn't burn a full code review, only the cheap spec re-ground.
+    types: [opened, synchronize, ready_for_review, reopened, converted_to_draft, edited]
 
 # Adjudicated fold (round-2 Finding 3, #35 rework): without this, a rapid
 # sequence of pushes to the same PR can leave an OLDER review run still
@@ -22,6 +35,18 @@ on:
 # — the same stale-findings-against-changed-code problem this concurrency
 # block already closes for `claude-review` applies identically to a
 # spec-grounded verdict racing a newer diff.
+#
+# EDITED-TRIGGERED RUNS (Codex finding, PR #76 review, L316) use this
+# SAME group too — an `edited` event with a body change cancels whatever
+# spec-grounded-review run was still in flight for this PR and starts a
+# fresh one against the NEW body, the identical "supersede, don't stack"
+# behavior this block already gives a `synchronize` push. Slice 3b-iii's
+# privileged publisher must treat that fresh run's verdict the same way
+# it treats any other — its own comment-upsert idempotency (an existing
+# summary comment gets PATCHed, not duplicated) is what makes an
+# edited-triggered re-run update the PR's standing verdict in place
+# rather than piling on a second one. Noted here for 3b-iii's own
+# implementation, not something this PR needs to build.
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -57,7 +82,14 @@ jobs:
     # draft to converge Codex before "ready". Running claude-review on the draft
     # too would double its runs and land findings pre-ready; it fires on
     # ready_for_review once the PR is out of draft. (Factory PRs open non-draft.)
-    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    #
+    # Excludes `edited` entirely (Codex finding, PR #76 review, L316): this
+    # job reviews the DIFF, which a body edit never changes — reacting to
+    # `edited` here would burn a full code review on every title/body
+    # tweak for no reason. `edited` exists in this workflow's trigger
+    # types ONLY for `spec-grounded-review` below, which DOES need to
+    # react to a body edit (see that job's own `if:`).
+    if: ${{ github.event.action != 'edited' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
 
     runs-on: ubuntu-latest
     permissions:
@@ -193,7 +225,22 @@ jobs:
     # discipline (D103) applies — a draft PR's diff isn't final yet, so
     # reviewing it against acceptance criteria this early would produce
     # verdicts on a moving target.
-    if: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    #
+    # UNLIKE `claude-review`, this job MUST react to `edited` — but only
+    # when the PR's BODY actually changed (Codex finding, PR #76 review,
+    # L316): the runner derives its entire linked-issue set, and each
+    # reference's closing-vs-non-closing classification, from the body
+    # text alone, so an author could get a clean verdict, then edit the
+    # body afterward to add a new `Closes #N` (or flip an existing `Refs`
+    # to `Closes`), leaving a stale verdict standing for a materially
+    # different closing claim — the direct gaming vector this guard
+    # closes. `github.event.changes.body` is present in the `edited`
+    # event's payload ONLY when the body itself was part of the edit
+    # (GitHub's own documented shape) — a title-only edit has no `changes
+    # .body` key at all, so `!= null` correctly skips it, and every
+    # NON-`edited` action (opened/synchronize/etc.) short-circuits past
+    # this check entirely via the leading `action != 'edited'` disjunct.
+    if: ${{ (github.event.action != 'edited' || github.event.changes.body != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
