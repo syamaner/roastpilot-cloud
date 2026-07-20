@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { main } from "../../scripts/factory/spec-grounding-runner.mts";
+import { generateDelimiterNonce, main } from "../../scripts/factory/spec-grounding-runner.mts";
 
 const SCRIPT_PATH = fileURLToPath(new URL("../../scripts/factory/spec-grounding-runner.mts", import.meta.url));
 
@@ -441,6 +441,51 @@ describe("main — malformed GITHUB_REPOSITORY", () => {
   it("throws a clear error rather than silently misrouting a fetch", async () => {
     process.env.GITHUB_REPOSITORY = "not-a-valid-repo-slug";
     await expect(main()).rejects.toThrow(/owner\/repo/);
+  });
+});
+
+describe("generateDelimiterNonce (F1-S9 slice 3b-ii-a, issue #12, PR pre-open pass fold)", () => {
+  it("test mode (VITEST=true, always the case in this suite) accepts a valid lowercase-hex override", () => {
+    process.env.DELIMITER_NONCE_OVERRIDE = "0123456789abcdef";
+    expect(generateDelimiterNonce()).toBe("0123456789abcdef");
+    delete process.env.DELIMITER_NONCE_OVERRIDE;
+  });
+
+  it("test mode REJECTS an empty override -- the '??' foot-gun this fold closes: an empty string is not null/undefined, so a naive '??' fallback would have silently produced nonce=''", () => {
+    process.env.DELIMITER_NONCE_OVERRIDE = "";
+    expect(() => generateDelimiterNonce()).toThrow(/non-empty lowercase hex/);
+    delete process.env.DELIMITER_NONCE_OVERRIDE;
+  });
+
+  it.each([
+    ["uppercase hex", "DEADBEEF"],
+    ["non-hex characters", "not-hex-at-all"],
+    ["a literal newline -- the $GITHUB_OUTPUT-injection vector this fold closes", "x\nhas-criteria=false"],
+  ])("test mode REJECTS %s", (_label, invalidOverride) => {
+    process.env.DELIMITER_NONCE_OVERRIDE = invalidOverride;
+    expect(() => generateDelimiterNonce()).toThrow(/non-empty lowercase hex/);
+    delete process.env.DELIMITER_NONCE_OVERRIDE;
+  });
+
+  it("PRODUCTION (VITEST unset) ALWAYS ignores DELIMITER_NONCE_OVERRIDE and takes the real CSPRNG path, even when an override is set -- re-imports the module fresh (vi.resetModules) since the production/test gate is evaluated once at module load, the same class of 'must genuinely run outside the test runner's own signal' case the self-invoke guard's subprocess test already established a precedent for in this file", async () => {
+    const originalVitest = process.env.VITEST;
+    process.env.DELIMITER_NONCE_OVERRIDE = "0123456789abcdef";
+    delete process.env.VITEST;
+    vi.resetModules();
+    try {
+      const freshModule = await import("../../scripts/factory/spec-grounding-runner.mts");
+      const nonce = freshModule.generateDelimiterNonce();
+      expect(nonce).not.toBe("0123456789abcdef");
+      expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      if (originalVitest === undefined) {
+        delete process.env.VITEST;
+      } else {
+        process.env.VITEST = originalVitest;
+      }
+      delete process.env.DELIMITER_NONCE_OVERRIDE;
+      vi.resetModules();
+    }
   });
 });
 
