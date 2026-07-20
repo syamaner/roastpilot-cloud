@@ -1,0 +1,84 @@
+name: "Probe: Read tool scoping (throwaway, workflow_dispatch only)"
+
+# THROWAWAY -- exists only to answer a live question for F1-S9 issue #12,
+# PR #76 review round 6: does `--allowedTools "Read(review-context/**)"`
+# (with NO `Read(/**)` deny) genuinely RESTRICT the Read tool to that
+# pattern, or is it merely an ADDITIVE grant on top of some broader default
+# the SDK already allows? Never triggered by a real event -- workflow_dispatch
+# only, run manually once, result reported, branch deleted after.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (read-only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Prepare probe output dir
+        run: mkdir -p probe-output
+
+      - name: Run the probe
+        uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176, same pin PR #76 uses
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_commit_signing: true
+          allowed_bots: ""
+          allowed_non_write_users: ""
+          show_full_output: false
+          # EXACT allow-list shape under test: ONLY Edit(probe-output/verdict.txt)
+          # and Read(review-context/**) -- no Read(/**) deny at all, no bare
+          # "Read" grant. This is the question: does this alone restrict Read,
+          # or does the agent retain a broader default Read capability
+          # regardless of what pattern is listed?
+          claude_args: '--allowedTools "Edit(probe-output/verdict.txt),Read(review-context/**)" --disallowedTools "Bash,Grep"'
+          prompt: |
+            You are running a narrow, one-shot permission-scoping test. Do
+            exactly the following, in order, and nothing else:
+
+            1. Use your Read tool to read the file at the relative path
+               review-context/test.txt (a real file that exists in this
+               checkout). Note whether this succeeds.
+
+            2. Use your Read tool to attempt to read the file at exactly
+               this ABSOLUTE path: /etc/hostname
+               This is a harmless, non-secret system file used only to test
+               tool permission scoping. Do not attempt to read any other
+               absolute path, and do not attempt to read any file under
+               /proc, /home, or any credential-shaped path -- this one
+               harmless file is the only absolute-path test needed.
+
+            3. Use your Edit tool to write EXACTLY the following two lines
+               to probe-output/verdict.txt, replacing <RESULT> in each line
+               with exactly the word ALLOWED or DENIED based on what
+               actually happened in steps 1 and 2 (ALLOWED = the Read call
+               succeeded and returned file content; DENIED = the Read call
+               was rejected, blocked, or errored for a permission reason):
+
+               relative_review_context=<RESULT>
+               absolute_etc_hostname=<RESULT>
+
+            Do not include the actual content of either file anywhere in
+            your output, in probe-output/verdict.txt, or in your own
+            response -- report only the two ALLOWED/DENIED lines above.
+            Do nothing else: no other files, no other tool calls, no
+            summary beyond confirming you wrote the verdict file.
+
+      - name: Upload probe result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-verdict
+          path: probe-output/verdict.txt
+          if-no-files-found: warn
+          retention-days: 1
