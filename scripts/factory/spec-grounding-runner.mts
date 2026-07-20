@@ -11,7 +11,7 @@
  * invokes an LLM. It is pure orchestration + I/O over already-reviewed,
  * already-tested pure logic:
  *
- * 1. Fetches the PR body, and parses it with
+ * 1. Fetches the PR (body + head/base SHAs), and parses the body with
  *    {@link parseLinkedIssueReferences}. Empty references ⇒ nothing to
  *    spec-ground; exits early (`has-criteria=false`) before any further
  *    fetch, matching that function's own graceful-no-op contract.
@@ -19,37 +19,53 @@
  *    primary control for the fetch-count resource-exhaustion vector that
  *    function's own docstring describes; only its capped output is ever
  *    fetched.
- * 3. Fetches each capped issue number, tolerating a per-issue failure (a
- *    404, a deleted issue, a transient error) as "nothing to say" for
- *    that one issue — {@link buildLinkedIssueSpecs}'s own documented
- *    contract for an issue number present in `references` but absent from
- *    the fetched map — rather than failing the whole run over one bad
- *    fetch.
+ * 3. Fetches each capped issue number. Only a VERIFIED 404 degrades to
+ *    "nothing to say" for that one issue — {@link buildLinkedIssueSpecs}'s
+ *    own documented contract for an issue number present in `references`
+ *    but absent from the fetched map. Any OTHER failure (403, 429, a 5xx,
+ *    a network error) FAILS the whole run (Codex finding, PR #72 review —
+ *    a fail-OPEN security bug in an earlier version of this script: since
+ *    an omitted issue's unmet criteria never reach the gate at all, a
+ *    gaming PR could evade review via an induced or merely lucky transient
+ *    fetch failure on its own `Closes`-kind issue. Failing the whole run
+ *    is the correct direction — a red CI run over a silently-defanged
+ *    gate).
  * 4. Renders the criteria data block ({@link renderCriteriaDataBlock}) and
- *    the trusted criteria spine ({@link buildCriteriaSpine}). An empty
+ *    the trusted criteria spine ({@link buildCriteriaSpine}, built from
+ *    that SAME rendered block — see its own docstring for why). An empty
  *    block (every linked issue's criteria already met, or no issue had an
  *    acceptance-criteria section at all) is the SECOND early exit —
  *    still before ever fetching the diff, since there is nothing left to
  *    judge it against.
- * 5. Only once there is real work does it fetch the PR's own diff and wrap
- *    it in its own untrusted-data delimiter
+ * 5. Only once there is real work does it fetch the PR's own diff — for
+ *    the TRUSTED head SHA specifically, verified against the PR's current
+ *    head before the fetch (Codex finding, PR #72 review — the mutable
+ *    `/pulls/{n}` diff endpoint always serves whatever the branch
+ *    currently points to; a push landing between the PR-fetch and the
+ *    diff-fetch could otherwise pair an earlier body with a later,
+ *    unreviewed diff) — and wraps it in its own untrusted-data delimiter
  *    ({@link wrapUntrustedDiffBlock}) — the diff is author-controlled on
  *    this public repo exactly like an issue body is, so it never reaches
  *    slice 3b-ii's prompt unwrapped.
  *
- * TRUSTED PR identity (factory-security-reviewer invariant 6, and a named
- * must-cover for slice 3b-ii's pre-open security-reviewer pass per the #12
- * 3b PR-plan sign-off): `TRUSTED_PR_NUMBER` must come from the GitHub
- * Actions event context (`github.event.pull_request.number`, wired into
- * this env var by the workflow YAML) — NEVER re-derived from the PR's own
- * title, body, or branch name, all of which are attacker-influenced on a
- * public repo. This script never reads any of those three to determine
- * which PR it is reviewing.
+ * TRUSTED PR identity and TRUSTED HEAD SHA (factory-security-reviewer
+ * invariant 6, and a named must-cover for slice 3b-ii's pre-open
+ * security-reviewer pass per the #12 3b PR-plan sign-off): both
+ * `TRUSTED_PR_NUMBER` and `TRUSTED_HEAD_SHA` must come from the GitHub
+ * Actions event context (`github.event.pull_request.number` /
+ * `github.event.pull_request.head.sha`, wired into these env vars by the
+ * workflow YAML) — NEVER re-derived from the PR's own title, body,
+ * branch name, or current mutable state, all of which are
+ * attacker-influenced (the first three) or racy (the last) on a public
+ * repo. This script verifies the PR's OWN reported head SHA against
+ * `TRUSTED_HEAD_SHA` before fetching the diff, and fails closed on a
+ * mismatch.
  *
  * Required environment variables:
  * - `GH_TOKEN` — the calling job's read-only token.
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
  * - `TRUSTED_PR_NUMBER` — from `github.event.pull_request.number`.
+ * - `TRUSTED_HEAD_SHA` — from `github.event.pull_request.head.sha`.
  *
  * Optional environment variables (output paths, overridable for tests /
  * local runs; default to the paths slice 3b-ii's workflow step reads
@@ -62,7 +78,7 @@
 import { appendFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { githubRequest, requireEnv } from "./github-api.mts";
+import { GithubApiError, githubRequest, requireEnv } from "./github-api.mts";
 import {
   buildLinkedIssueSpecs,
   parseLinkedIssueReferences,
@@ -74,6 +90,8 @@ import { buildCriteriaSpine, wrapUntrustedDiffBlock } from "./spec-grounding-run
 
 interface GitHubPullRequest {
   readonly body: string | null;
+  readonly head: { readonly sha: string };
+  readonly base: { readonly sha: string };
 }
 
 interface GitHubIssue {
@@ -101,22 +119,21 @@ function resolvePaths(): RunnerPaths {
   };
 }
 
-async function fetchPrBody(token: string, owner: string, repo: string, prNumber: number): Promise<string> {
-  const pr = await githubRequest<GitHubPullRequest>(
-    token,
-    "GET",
-    `/repos/${owner}/${repo}/pulls/${prNumber}`,
-  );
-  return pr.body ?? "";
+async function fetchPr(token: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequest> {
+  return githubRequest<GitHubPullRequest>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
 }
 
 /**
- * Fetches one linked issue's title/body, tolerating any failure (404 for a
- * deleted issue, a transient error) as `null` rather than throwing — see
- * this module's own top-level docstring, point 3: {@link buildLinkedIssueSpecs}
- * already treats a missing map entry as "nothing to say" for that issue,
- * so a per-issue fetch failure degrades the same way a real 404 would,
- * never failing the whole run.
+ * Fetches one linked issue's title/body. Only a VERIFIED 404 degrades to
+ * `null` — see this module's own top-level docstring, point 3 (Codex
+ * finding, PR #72 review, a fail-open security bug): {@link GithubApiError}'s
+ * `status` field is what makes this distinction possible at all; a plain
+ * `Error` (the previous shape) gave this function no reliable way to tell
+ * a genuine "issue doesn't exist" apart from "the fetch failed for some
+ * OTHER reason" short of parsing the error message's text.
+ *
+ * @throws Any error that is NOT a `GithubApiError` with `status === 404`
+ *   — propagates uncaught, failing the whole run.
  */
 async function fetchIssue(
   token: string,
@@ -132,27 +149,48 @@ async function fetchIssue(
     );
     return { title: issue.title, body: issue.body ?? "" };
   } catch (err) {
-    console.warn(
-      `Failed to fetch issue #${issueNumber} (treated as "nothing to say" for this issue): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+    if (err instanceof GithubApiError && err.status === 404) {
+      console.warn(`Issue #${issueNumber} not found (404) — treated as "nothing to say" for this issue.`);
+      return null;
+    }
+    // FAIL CLOSED (Codex finding, PR #72 review): any failure other than
+    // a verified 404 — auth/403, rate-limit/429, a 5xx, a network error —
+    // must fail the whole run rather than silently omit this issue's
+    // unmet criteria from the anti-gaming gate. See this module's own
+    // top-level docstring, point 3.
+    throw new Error(
+      `Failed to fetch issue #${issueNumber} for a reason other than a verified 404 — ` +
+        `failing closed rather than silently omitting this issue's criteria from the ` +
+        `review: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return null;
   }
 }
 
 /**
- * Fetches the PR's raw unified diff via GitHub's diff media type — a plain
+ * Fetches the PR's raw unified diff for the EXACT `baseSha...headSha`
+ * range via GitHub's compare endpoint (not the mutable `/pulls/{n}` diff
+ * endpoint, which always serves whatever the branch currently points to —
+ * Codex finding, PR #72 review, low severity but cheap to fix: pins the
+ * diff to the same trusted head SHA {@link main} already verified the PR
+ * against, so a push landing between the PR-fetch and this call can never
+ * pair an earlier-fetched body with a later, unreviewed diff). A plain
  * text response, not JSON (see {@link githubRequest}'s `responseType`
- * option, added for exactly this call). Unlike {@link fetchIssue}, a
- * failure here propagates: there is no meaningful "nothing to say"
- * degradation for the PR's OWN diff — without it, there is nothing for
- * slice 3b-ii's review agent to check the criteria against at all.
+ * option). Unlike {@link fetchIssue}, a failure here propagates
+ * uncaught: there is no meaningful "nothing to say" degradation for the
+ * PR's OWN diff — without it, there is nothing for slice 3b-ii's review
+ * agent to check the criteria against at all.
  */
-async function fetchPrDiff(token: string, owner: string, repo: string, prNumber: number): Promise<string> {
+async function fetchPrDiff(
+  token: string,
+  owner: string,
+  repo: string,
+  baseSha: string,
+  headSha: string,
+): Promise<string> {
   return githubRequest<string>(
     token,
     "GET",
-    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+    `/repos/${owner}/${repo}/compare/${baseSha}...${headSha}`,
     undefined,
     { accept: "application/vnd.github.v3.diff", responseType: "text" },
   );
@@ -192,12 +230,25 @@ export async function main(): Promise<void> {
       `GITHUB_REPOSITORY must be "owner/repo", got ${process.env.GITHUB_REPOSITORY}`,
     );
   }
-  // TRUSTED PR identity — see this module's own top-level docstring.
+  // TRUSTED PR identity and head SHA — see this module's own top-level
+  // docstring.
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
+  const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
   const paths = resolvePaths();
 
-  const prBody = await fetchPrBody(token, owner, repo, prNumber);
-  const references = parseLinkedIssueReferences(prBody, `${owner}/${repo}`);
+  const pr = await fetchPr(token, owner, repo, prNumber);
+  if (pr.head.sha !== trustedHeadSha) {
+    // FAIL CLOSED (Codex finding, PR #72 review): the PR moved between
+    // whatever triggered this run and this fetch — reviewing a diff that
+    // may not match the trusted event this run was actually triggered for
+    // would be worse than failing outright.
+    throw new Error(
+      `PR #${prNumber}'s current head SHA (${pr.head.sha}) does not match the trusted ` +
+        `event head SHA (${trustedHeadSha}) — the PR moved between the review trigger and ` +
+        `this fetch; failing closed rather than reviewing a possibly-stale or possibly-newer diff.`,
+    );
+  }
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
 
   if (references.length === 0) {
     console.log(`PR #${prNumber} references no issue; nothing to spec-ground.`);
@@ -225,8 +276,8 @@ export async function main(): Promise<void> {
     return;
   }
 
-  const spine = buildCriteriaSpine(result);
-  const diff = await fetchPrDiff(token, owner, repo, prNumber);
+  const spine = buildCriteriaSpine(result, criteriaBlock);
+  const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   const diffBlock = wrapUntrustedDiffBlock(diff);
 
   await writeOutputFile(paths.criteriaBlockPath, criteriaBlock);

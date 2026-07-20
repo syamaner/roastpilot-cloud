@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   computeBackoffMs,
+  GithubApiError,
   githubRequest,
   isRateLimitedResponse,
   MAX_RATE_LIMIT_RETRIES,
@@ -76,6 +77,25 @@ describe("githubRequest", () => {
     await expect(githubRequest("tok", "GET", "/error")).rejects.toThrow(
       /403/,
     );
+  });
+
+  it("throws a GithubApiError carrying the status as a structured field (F1-S9 slice 3b-i, issue #12, PR #72 review -- a caller needs to distinguish a verified 404 from every other failure for a fail-closed decision, which a plain Error's message text alone can't do reliably)", async () => {
+    await expect(githubRequest("tok", "GET", "/error")).rejects.toMatchObject({
+      name: "GithubApiError",
+      status: 403,
+    });
+  });
+
+  it("GithubApiError is a real Error subclass (instanceof works, so a catch block can narrow on it)", async () => {
+    let caught: unknown;
+    try {
+      await githubRequest("tok", "GET", "/error");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GithubApiError);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as GithubApiError).status).toBe(403);
   });
 
   it("sends the bearer token and a JSON body when provided", async () => {

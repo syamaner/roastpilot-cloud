@@ -10,8 +10,9 @@ import { main } from "../../scripts/factory/spec-grounding-runner.mts";
  * the workflow wires up. The extraction/rendering decisions themselves are
  * unit-tested in spec-grounding-logic.test.ts and
  * spec-grounding-runner-logic.test.ts; this file proves the entrypoint
- * wires them together correctly end to end, including both early exits and
- * the fetch-count cap.
+ * wires them together correctly end to end, including both early exits,
+ * the fetch-count cap, the fail-closed issue-fetch behavior, and the
+ * trusted-head-SHA verification (all PR #72 review folds).
  */
 
 interface FetchCall {
@@ -58,6 +59,20 @@ function textResponse(body: string, status = 200): Response {
 
 const JSON_ACCEPT = "application/vnd.github+json";
 const DIFF_ACCEPT = "application/vnd.github.v3.diff";
+const HEAD_SHA = "head-sha-abc123";
+const BASE_SHA = "base-sha-def456";
+
+/** A PR JSON response with the trusted head/base SHAs, overridable per test. */
+function prResponse(body: string | null, overrides?: { headSha?: string; baseSha?: string }): Response {
+  return jsonResponse({
+    body,
+    head: { sha: overrides?.headSha ?? HEAD_SHA },
+    base: { sha: overrides?.baseSha ?? BASE_SHA },
+  });
+}
+
+const PULLS_JSON_KEY = `GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`;
+const COMPARE_DIFF_KEY = `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${DIFF_ACCEPT}`;
 
 let workdir: string;
 let criteriaBlockPath: string;
@@ -75,6 +90,7 @@ beforeEach(async () => {
   process.env.GH_TOKEN = "test-token";
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_PR_NUMBER = "70";
+  process.env.TRUSTED_HEAD_SHA = HEAD_SHA;
   process.env.CRITERIA_BLOCK_PATH = criteriaBlockPath;
   process.env.CRITERIA_SPINE_PATH = criteriaSpinePath;
   process.env.PR_DIFF_BLOCK_PATH = prDiffBlockPath;
@@ -87,6 +103,7 @@ afterEach(async () => {
   delete process.env.GH_TOKEN;
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_PR_NUMBER;
+  delete process.env.TRUSTED_HEAD_SHA;
   delete process.env.CRITERIA_BLOCK_PATH;
   delete process.env.CRITERIA_SPINE_PATH;
   delete process.env.PR_DIFF_BLOCK_PATH;
@@ -100,8 +117,7 @@ async function readOutput(): Promise<string> {
 describe("main — no linked issue (first early exit)", () => {
   it("writes has-criteria=false and no context files, without ever fetching an issue or the diff", async () => {
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: "Just a plain description, no keyword." }),
+      [PULLS_JSON_KEY]: () => prResponse("Just a plain description, no keyword."),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -117,8 +133,7 @@ describe("main — no linked issue (first early exit)", () => {
 describe("main — linked issue with no unmet criteria (second early exit)", () => {
   it("writes has-criteria=false and no context files, without ever fetching the diff", async () => {
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: "Closes #12" }),
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
       [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
         jsonResponse({
           title: "An issue",
@@ -136,18 +151,29 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
   });
 });
 
-describe("main — real unmet criteria", () => {
-  it("writes all three context files and has-criteria=true", async () => {
+describe("main — trusted head SHA verification (PR #72 review fold)", () => {
+  it("fails closed when the PR's current head SHA does not match the trusted event head SHA", async () => {
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: "Closes #12" }),
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12", { headSha: "some-other-sha-the-pr-moved-to" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/does not match the trusted/);
+    // Never reaches an issue or diff fetch once the SHA check fails.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("main — real unmet criteria", () => {
+  it("writes all three context files and has-criteria=true, fetching the diff via the SHA-pinned compare endpoint", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
       [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
         jsonResponse({
           title: "An issue",
           body: "### Acceptance criteria\n- [ ] Do the thing.",
         }),
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${DIFF_ACCEPT}`]: () =>
-        textResponse("diff --git a/x b/x\n+did the thing\n"),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n+did the thing\n"),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -169,10 +195,9 @@ describe("main — real unmet criteria", () => {
     expect(diffBlock).toContain("+did the thing");
   });
 
-  it("tolerates a per-issue fetch failure as \"nothing to say\" for that issue, without failing the whole run (buildLinkedIssueSpecs's own documented contract for a missing map entry)", async () => {
+  it("tolerates a VERIFIED 404 issue fetch as \"nothing to say\" for that issue, without failing the whole run (buildLinkedIssueSpecs's own documented contract for a missing map entry)", async () => {
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: "Closes #12\nRefs #8" }),
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12\nRefs #8"),
       [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
         new Response("not found", { status: 404 }),
       [`GET /repos/syamaner/roastpilot-cloud/issues/8 accept=${JSON_ACCEPT}`]: () =>
@@ -180,8 +205,7 @@ describe("main — real unmet criteria", () => {
           title: "Another issue",
           body: "### Acceptance criteria\n- [ ] Still open.",
         }),
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${DIFF_ACCEPT}`]: () =>
-        textResponse("diff --git a/x b/x\n"),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -189,20 +213,66 @@ describe("main — real unmet criteria", () => {
 
     expect(await readOutput()).toBe("has-criteria=true\n");
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
-    // Only issue #8's criterion survives -- #12's 404 degraded to silence,
-    // not a thrown error and not a fabricated entry.
+    // Only issue #8's criterion survives -- #12's verified 404 degraded to
+    // silence, not a thrown error and not a fabricated entry.
     expect(spine).toEqual([
       { issueNumber: 8, kind: "non-closing", criterionId: "8:0", criterionText: "Still open." },
     ]);
   });
 
+  it.each([
+    ["403 (auth/permissions, no Retry-After -- fails immediately, not a rate-limit case)", 403, undefined],
+    // A Retry-After exceeding MAX_RETRY_AFTER_SECONDS (60) makes
+    // shouldGiveUpOnRateLimit give up on the FIRST attempt, so this test
+    // stays fast -- an unbounded/small Retry-After would exercise
+    // githubRequest's real (slow) exponential-backoff retry loop instead,
+    // which is githubRequest's own concern, already covered by
+    // github-api.test.ts, not this test's.
+    ["429 (rate limited, requested wait exceeds this client's retry budget)", 429, "9999"],
+    ["500 (server error)", 500, undefined],
+  ])(
+    "FAILS CLOSED (does not tolerate, does not omit) on a %s issue-fetch failure -- a real fail-open security bug in an earlier version: a transient failure on a CLOSING issue must never silently omit its unmet criteria from the gate",
+    async (_label, status, retryAfter) => {
+      const { fetchMock } = mockFetch({
+        [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
+        [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+          new Response("failure", {
+            status,
+            headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(/other than a verified 404/);
+      // Never reaches has-criteria at all -- the whole run fails.
+      expect(await readOutput()).toBe("");
+    },
+  );
+
+  it("FAILS CLOSED on a network-level issue-fetch failure (fetch itself rejecting, not just a non-ok response)", async () => {
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const accept =
+        init?.headers && typeof init.headers === "object"
+          ? (init.headers as Record<string, string>)["Accept"]
+          : undefined;
+      if (`${method} ${url.replace("https://api.github.com", "")} accept=${accept}` === PULLS_JSON_KEY) {
+        return prResponse("Closes #12");
+      }
+      throw new TypeError("fetch failed: network error");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/other than a verified 404/);
+    expect(await readOutput()).toBe("");
+  });
+
   it("caps issue fetches at MAX_LINKED_ISSUES (20), per selectIssuesToFetch's own contract -- never fetches a reference beyond the cap", async () => {
     const manyRefs = Array.from({ length: 25 }, (_, i) => `Refs #${i + 1}`).join("\n");
     const handlers: Record<string, (call: FetchCall) => Response> = {
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: manyRefs }),
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${DIFF_ACCEPT}`]: () =>
-        textResponse("diff --git a/x b/x\n"),
+      [PULLS_JSON_KEY]: () => prResponse(manyRefs),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
     };
     // Only the first 20 (first-appearance order) may ever be fetched --
     // registering handlers for just those 20 means fetch #21-25 would
@@ -216,7 +286,7 @@ describe("main — real unmet criteria", () => {
 
     await main();
 
-    // 1 (PR body) + 20 (capped issue fetches) + 1 (diff), no more -- none of
+    // 1 (PR) + 20 (capped issue fetches) + 1 (diff), no more -- none of
     // the fetch handlers above cover issue #21-25, so the cap being
     // violated would fail this test with "unexpected fetch call" before
     // ever reaching these assertions.
@@ -236,8 +306,7 @@ describe("main — real unmet criteria", () => {
 describe("main — a PR with no body at all", () => {
   it("treats a null PR body as empty text, not a crash", async () => {
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: null }),
+      [PULLS_JSON_KEY]: () => prResponse(null),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -251,12 +320,10 @@ describe("main — GITHUB_OUTPUT unset", () => {
   it("still completes and writes context files, just without a has-criteria output line (matches a local/test invocation, never a real Actions run)", async () => {
     delete process.env.GITHUB_OUTPUT;
     const { fetchMock } = mockFetch({
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`]: () =>
-        jsonResponse({ body: "Closes #12" }),
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
       [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
         jsonResponse({ title: "t", body: "### Acceptance criteria\n- [ ] c" }),
-      [`GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${DIFF_ACCEPT}`]: () =>
-        textResponse("diff --git a/x b/x\n"),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
     });
     vi.stubGlobal("fetch", fetchMock);
 

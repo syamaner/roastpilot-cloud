@@ -1325,6 +1325,13 @@ export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "
  * delimiter (an attacker forging a FAKE open tag deeper in the block is the
  * same class of attack as closing the real one early).
  *
+ * Exported (F1-S9 slice 3b-i, issue #12, PR #72 review): slice 3b-i's
+ * `buildCriteriaSpine` calls this directly to reconstruct the EXACT
+ * checkbox-line text `renderCriteriaDataBlock` itself renders for a given
+ * criterion, so it can search the rendered (and possibly byte-truncated)
+ * block for that exact line rather than re-deriving or approximating it —
+ * see that function's own docstring.
+ *
  * @param text - Raw extracted text (a criterion or an issue title).
  * @returns The same text, with zero-width/format characters and exotic
  *   Unicode whitespace removed (ordinary ASCII whitespace preserved) and
@@ -1332,7 +1339,7 @@ export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "
  *   with square brackets) — never dropped outright, so the finding stays
  *   legible; just unable to parse as a real tag.
  */
-function neutralizeDelimiterBreakout(text: string): string {
+export function neutralizeDelimiterBreakout(text: string): string {
   const cleaned = text
     .normalize("NFKC")
     .replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "")

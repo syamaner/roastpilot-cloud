@@ -18,6 +18,28 @@
 const GITHUB_API = "https://api.github.com";
 
 /**
+ * Thrown by {@link githubRequest} for a non-2xx response, carrying the
+ * HTTP status code as a structured field (F1-S9 slice 3b-i, issue #12,
+ * PR #72 review — Codex finding: a caller that needs to distinguish a
+ * verified 404 from every OTHER failure — 403, 429 past the retry budget,
+ * a 5xx, a network error — for a fail-closed decision had no reliable way
+ * to do so against the previous plain `Error`, short of regex-parsing its
+ * message. `spec-grounding-runner.mts`'s per-issue fetch is exactly this
+ * case: only a genuine 404 may degrade to "issue not found"; anything
+ * else must fail the whole run rather than silently omit that issue's
+ * unmet criteria from the anti-gaming gate).
+ */
+export class GithubApiError extends Error {
+  readonly status: number;
+
+  constructor(method: string, path: string, status: number, bodyText: string) {
+    super(`GitHub API ${method} ${path} failed: ${status} ${bodyText}`);
+    this.name = "GithubApiError";
+    this.status = status;
+  }
+}
+
+/**
  * Upper bound on additional attempts `githubRequest` makes after an
  * initial rate-limited response, before giving up and letting the
  * failure surface for real. GitHub's own guidance is to honor
@@ -239,7 +261,8 @@ export function requireEnv(name: string): string {
  *   see {@link GithubRequestOptions}.
  * @returns The parsed JSON response (or raw text, with
  *   `responseType: "text"`), or `undefined` for a 204.
- * @throws If the response status is not ok (2xx) and either isn't rate
+ * @throws A {@link GithubApiError} (carrying the response's status code)
+ *   if the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
  *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
  *   or the retry budget is exhausted.
@@ -300,9 +323,7 @@ export async function githubRequest<T>(
       // triggerable against a mocked Response in tests, kept as a defensive
       // fallback so a real occurrence still produces a readable error.
       const text = await response.text().catch(() => "<unreadable body>");
-      throw new Error(
-        `GitHub API ${method} ${path} failed: ${response.status} ${text}`,
-      );
+      throw new GithubApiError(method, path, response.status, text);
     }
     if (response.status === 204) {
       return undefined as T;

@@ -21,24 +21,22 @@
  *    so a prompt-injected agent relabelling a `closing` reference as
  *    `non-closing` can't walk a real gap past the blocker gate it exists
  *    to catch.
- * 2. {@link wrapUntrustedDiffBlock} — a SIBLING delimiter-breakout guard
- *    for the PR diff, the second untrusted surface slice 3b-ii's prompt
- *    carries (the first being the criteria data block `renderCriteriaDataBlock`
- *    already produces). A PR's diff is author-controlled on a public repo
- *    exactly like an issue body is, so it gets the identical categorical
- *    Unicode-cleaning treatment `neutralizeDelimiterBreakout` already
- *    applies to criterion/title text — reusing those exported primitives
- *    directly (not duplicating them) keeps both guards' invisible-
- *    character coverage in lockstep — but under ITS OWN tag name
- *    (`UNTRUSTED_PR_DIFF`, not `UNTRUSTED_ISSUE_DATA`), so a breakout
- *    attempt crafted against one delimiter can't cross into the other.
+ * 2. {@link wrapUntrustedDiffBlock} — a delimiter-breakout guard for the PR
+ *    diff, the second untrusted surface slice 3b-ii's prompt carries (the
+ *    first being the criteria data block `renderCriteriaDataBlock` already
+ *    produces). Deliberately NOT the same treatment as criterion/title text
+ *    (Codex finding, PR #72 review — see {@link neutralizeDiffDelimiterBreakout}'s
+ *    own docstring for why criteria and diff content play genuinely
+ *    different roles here, and silently stripping invisible characters
+ *    from the diff — safe and correct for criteria DATA — would blind the
+ *    review agent to exactly the class of attack (Trojan-Source, bidi
+ *    overrides, homoglyphs) a security-minded review exists to catch).
  */
 
 import {
   ASCII_WHITESPACE_CHARS,
-  EXOTIC_WHITESPACE_PATTERN,
+  neutralizeDelimiterBreakout,
   truncateToByteBudget,
-  ZERO_WIDTH_AND_FORMAT_PATTERN,
   type IssueLinkKind,
   type LinkedIssueSpecsResult,
 } from "./spec-grounding-logic.mts";
@@ -72,19 +70,67 @@ export interface CriteriaSpineEntry {
 
 /**
  * Derives the trusted criteria spine from {@link buildLinkedIssueSpecs}'s
- * output — one entry per unmet criterion actually rendered into the
- * criteria data block (never a criterion `renderCriteriaDataBlock` itself
- * dropped via a truncation cap; those were never shown to the agent, so
- * asking it to judge them would be asking about text it never saw).
+ * output — one entry per unmet criterion that ACTUALLY SURVIVED into the
+ * rendered criteria data block, never one `renderCriteriaDataBlock` itself
+ * dropped.
+ *
+ * Codex finding, PR #72 review — a real spine/criteria truncation
+ * mismatch that hit the anti-gaming property directly: `result.specs`
+ * reflects `buildLinkedIssueSpecs`'s per-issue/per-reference COUNT caps
+ * (`MAX_LINKED_ISSUES`, `MAX_CRITERIA_PER_ISSUE`), but
+ * `renderCriteriaDataBlock` applies a SEPARATE, later whole-body BYTE cap
+ * (`MAX_DATA_BLOCK_BYTES`) on top of that — a large-enough body can still
+ * get cut off mid-render, dropping trailing criteria (or even trailing
+ * issues) from the text the agent actually sees. Building the spine from
+ * `result` alone, as an earlier version of this function did, could
+ * therefore assign a stable ID to a criterion the agent was NEVER SHOWN —
+ * asking it to judge text it never read, with slice 3b-iii's deterministic
+ * join then grading whatever the agent does (or doesn't) say about that ID
+ * as if it were a real verdict.
+ *
+ * Fixed by deriving the spine from the SAME rendered text the agent reads,
+ * not from `result` in isolation: each candidate criterion's exact
+ * checkbox-line rendering (`  - [ ] ${neutralizeDelimiterBreakout(criterion)}`
+ * — byte-identical to the line `renderCriteriaDataBlock` itself emits) is
+ * searched for in `renderedCriteriaBlock` with a MONOTONICALLY ADVANCING
+ * cursor (document order, same idiom as this module's other guards) —
+ * found ⇒ shown ⇒ gets a spine entry; not found (truncated away, in whole
+ * or in part — a byte cut landing mid-line means the FULL line text never
+ * appears) ⇒ skipped, silently but not unaccounted-for: `renderCriteriaDataBlock`
+ * already writes a visible `[TRUNCATED ...]` marker into the block itself
+ * when this happens, which the agent (and any human reading the same
+ * text) sees directly — this function's job is only to keep the spine
+ * from asking about anything beyond that point, not to duplicate that
+ * surfacing.
  *
  * @param result - `buildLinkedIssueSpecs`'s output.
- * @returns The full spine, in the same issue order as `result.specs`, and
- *   in criterion order within each issue.
+ * @param renderedCriteriaBlock - `renderCriteriaDataBlock(result)`'s
+ *   output — the EXACT text the review agent will read, byte-cap and all.
+ * @returns Spine entries for every criterion whose full checkbox line is
+ *   actually present in `renderedCriteriaBlock`, in the same issue order
+ *   as `result.specs`, and in criterion order within each issue.
  */
-export function buildCriteriaSpine(result: LinkedIssueSpecsResult): readonly CriteriaSpineEntry[] {
+export function buildCriteriaSpine(
+  result: LinkedIssueSpecsResult,
+  renderedCriteriaBlock: string,
+): readonly CriteriaSpineEntry[] {
   const entries: CriteriaSpineEntry[] = [];
+  let searchCursor = 0;
   for (const spec of result.specs) {
     spec.unmetCriteria.forEach((criterionText, index) => {
+      const checkboxLine = `  - [ ] ${neutralizeDelimiterBreakout(criterionText)}`;
+      const foundAt = renderedCriteriaBlock.indexOf(checkboxLine, searchCursor);
+      if (foundAt === -1) {
+        // Not shown (truncated away). renderCriteriaDataBlock's byte cap
+        // truncates a single CONTIGUOUS suffix of the assembled text, in
+        // the same spec-then-criterion order this function iterates in --
+        // so once one criterion's line is missing, every criterion after
+        // it in that same order is missing too. The cursor is simply left
+        // where it is; every later search in this same run will correctly
+        // keep missing as well.
+        return;
+      }
+      searchCursor = foundAt + checkboxLine.length;
       entries.push({
         issueNumber: spec.issueNumber,
         kind: spec.kind,
@@ -100,33 +146,110 @@ export function buildCriteriaSpine(result: LinkedIssueSpecsResult): readonly Cri
  * Whitespace-tolerant, case-insensitive match for the diff's OWN delimiter
  * tag — the sibling of `spec-grounding-logic.mts`'s `DELIMITER_TAG_PATTERN`,
  * under a DIFFERENT tag name so a breakout attempt inside a criterion
- * can't close the diff block (or vice versa).
+ * can't close the diff block (or vice versa). Deliberately only
+ * ORDINARY-whitespace-tolerant (`\s`), not the categorical Unicode-
+ * property tolerance `DELIMITER_TAG_PATTERN` itself doesn't need either —
+ * an invisible-character-based evasion attempt is caught upstream by
+ * {@link escapeInvisibleCharactersVisibly} instead (see that function's
+ * own docstring for why detection happens there, not by widening this
+ * pattern).
  */
 const DIFF_DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_PR_DIFF\s*>/gi;
 
 /**
- * Neutralizes an attempt to break out of {@link wrapUntrustedDiffBlock}'s
- * delimiter pair from WITHIN the diff text itself — the diff's own analogue
- * of `spec-grounding-logic.mts`'s `neutralizeDelimiterBreakout`, reusing
- * that function's exact categorical Unicode-cleaning primitives (NFKC-
- * normalize, then strip zero-width/format characters and exotic Unicode
- * whitespace, preserving ordinary ASCII whitespace) rather than
- * duplicating them, so a future gap found in one guard is closed in both
- * by construction. See this module's own top-level docstring for why this
- * is a SEPARATE tag/function rather than reusing `UNTRUSTED_ISSUE_DATA`'s
- * guard directly.
+ * The Unicode properties this function treats as "invisible or exotic
+ * whitespace" — the UNION of the two property classes
+ * `spec-grounding-logic.mts` already established as complete for this
+ * threat class (its `ZERO_WIDTH_AND_FORMAT_PATTERN`, `\p{Cf}` ∪
+ * `\p{Default_Ignorable_Code_Point}`, and its `EXOTIC_WHITESPACE_PATTERN`,
+ * `\p{White_Space}`), combined into one pattern here rather than composing
+ * two separate imports at call time. Both are canonical Unicode BINARY
+ * properties, not enumerated ranges, so there is no "next gap" specific to
+ * this combination to chase independently of that module's own coverage.
+ */
+const INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{White_Space}]/gu;
+
+/**
+ * Renders every zero-width/format/exotic-whitespace character in `text`
+ * as a VISIBLE `[U+XXXX]` marker instead of silently removing it (Codex
+ * finding, PR #72 review — a real bug in the original version of this
+ * module: it reused `spec-grounding-logic.mts`'s criteria-text guard,
+ * which STRIPS these characters, on the diff too).
+ *
+ * DELIBERATELY DIFFERENT from `neutralizeDelimiterBreakout` (criterion/
+ * title text). That function's silent-strip approach is correct THERE
+ * because criteria are untrusted DATA — their only job is to be read as a
+ * checklist, and an invisible character in them has no legitimate meaning
+ * worth preserving. The PR diff is a fundamentally different kind of
+ * untrusted input: it is CONTENT THE REVIEW AGENT MUST INSPECT for
+ * exactly this class of attack. A bidi override hiding malicious code
+ * behind visually-reordered text (Trojan-Source), a zero-width character
+ * splitting a homoglyph identifier, or any other invisible-character
+ * trick IN THE DIFF ITSELF is precisely what a security-minded review
+ * exists to catch — silently stripping it before the agent ever sees the
+ * diff would make the review BLIND to that exact attack class, a
+ * strictly worse outcome than the delimiter-breakout risk the original
+ * (wrong) version of this function was guarding against.
+ *
+ * Rendering each such character as a literal, visible marker instead
+ * PRESERVES the evidence (the agent can see "there is a suspicious
+ * invisible character right here") rather than destroying it, and as a
+ * side effect also defeats an invisible-character-based delimiter-
+ * breakout attempt on the diff's own wrapper tag — an invisible character
+ * sitting between `<` and `/` becomes literal, visible marker text once
+ * this pass runs, so it no longer reads as whitespace to the plain,
+ * ordinary-whitespace-tolerant tag-neutralization pass
+ * {@link neutralizeDiffDelimiterBreakout} applies next.
+ *
+ * NEVER applies `.normalize("NFKC")` (Codex finding, same review round):
+ * NFKC normalization can silently change WHICH glyph represents a
+ * homoglyph-adjacent character before the agent ever sees the original —
+ * exactly the kind of transformation that could mask, not reveal, a
+ * homoglyph-substitution attack. This function does not normalize the
+ * diff at all.
  *
  * @param text - Raw diff text.
- * @returns The same text, with zero-width/format characters and exotic
- *   Unicode whitespace removed, and any `UNTRUSTED_PR_DIFF` tag occurrence
- *   neutralized (angle brackets replaced with square brackets).
+ * @returns The same text, byte-for-byte, EXCEPT every zero-width/format/
+ *   exotic-whitespace character (ordinary ASCII whitespace excluded) is
+ *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
+ */
+function escapeInvisibleCharactersVisibly(text: string): string {
+  return text.replace(INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN, (ch) => {
+    if (ASCII_WHITESPACE_CHARS.has(ch)) {
+      return ch;
+    }
+    const codePoint = ch.codePointAt(0);
+    if (codePoint === undefined) {
+      // Defensive: this pattern only ever matches a single real codepoint,
+      // never an empty string — unreachable by construction.
+      /* v8 ignore next */
+      return ch;
+    }
+    return `[U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}]`;
+  });
+}
+
+/**
+ * Neutralizes an attempt to break out of {@link wrapUntrustedDiffBlock}'s
+ * delimiter pair from WITHIN the diff text itself — the diff's own
+ * analogue of `spec-grounding-logic.mts`'s `neutralizeDelimiterBreakout`,
+ * but a DIFFERENT mechanism (Codex finding, PR #72 review — see
+ * {@link escapeInvisibleCharactersVisibly}'s own docstring for the full
+ * reasoning): first renders every invisible/exotic-whitespace character
+ * VISIBLY (which also breaks apart any invisible-character-based tag-
+ * breakout attempt before the next step even runs), then neutralizes any
+ * REMAINING, ordinary-whitespace-tolerant `UNTRUSTED_PR_DIFF` tag
+ * occurrence the same way `neutralizeDelimiterBreakout` neutralizes its
+ * own tag (angle brackets replaced with square brackets).
+ *
+ * @param text - Raw diff text.
+ * @returns The same text, with invisible/exotic-whitespace characters
+ *   rendered as visible `[U+XXXX]` markers (never removed) and any
+ *   `UNTRUSTED_PR_DIFF` tag occurrence neutralized.
  */
 export function neutralizeDiffDelimiterBreakout(text: string): string {
-  const cleaned = text
-    .normalize("NFKC")
-    .replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "")
-    .replace(EXOTIC_WHITESPACE_PATTERN, (ch) => (ASCII_WHITESPACE_CHARS.has(ch) ? ch : ""));
-  return cleaned.replace(DIFF_DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_PR_DIFF]");
+  const marked = escapeInvisibleCharactersVisibly(text);
+  return marked.replace(DIFF_DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_PR_DIFF]");
 }
 
 /**
