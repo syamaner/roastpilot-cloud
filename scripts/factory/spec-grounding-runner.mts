@@ -75,6 +75,7 @@
  * - `PR_DIFF_BLOCK_PATH` (default `review-context/pr-diff-block.txt`)
  */
 
+import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -129,6 +130,111 @@ function resolvePaths(): RunnerPaths {
     criteriaSpinePath: process.env.CRITERIA_SPINE_PATH ?? DEFAULT_PATHS.criteriaSpinePath,
     prDiffBlockPath: process.env.PR_DIFF_BLOCK_PATH ?? DEFAULT_PATHS.prDiffBlockPath,
   };
+}
+
+/**
+ * Bytes of CSPRNG entropy in the per-run delimiter nonce — 16 bytes
+ * (128 bits), team-lead's explicit floor from the #12 3b-ii PR-plan
+ * sign-off, hex-encoded into the fence name
+ * (`spec-grounding-logic.mts`'s `buildDataBlockOpen` /
+ * `spec-grounding-runner-logic.mts`'s `wrapUntrustedDiffBlock`).
+ */
+const DELIMITER_NONCE_BYTES = 16;
+
+/**
+ * `DELIMITER_NONCE_OVERRIDE` is only ever honoured when this is `true` —
+ * see {@link generateDelimiterNonce}'s own docstring for the three-part
+ * hardening this gate exists to close (Codex + independent security-
+ * reviewer finding, F1-S9 slice 3b-ii-a, issue #12, PR pre-open pass,
+ * MEDIUM). `VITEST` is set to the literal string `"true"` automatically
+ * by every Vitest test run (verified empirically, not assumed), and by
+ * nothing else — a narrower, more precise signal than `NODE_ENV==="test"`
+ * would be, which a maintainer could set for an unrelated reason in a
+ * real environment.
+ */
+const NONCE_OVERRIDE_ALLOWED = process.env.VITEST === "true";
+
+/** {@link generateDelimiterNonce}'s own validation for a test-mode `DELIMITER_NONCE_OVERRIDE` value. */
+const VALID_NONCE_OVERRIDE_PATTERN = /^[0-9a-f]+$/;
+
+/**
+ * Generates this run's delimiter nonce — the categorical end of the
+ * three-round delimiter-breakout arms race (F1-S9 slice 3b-ii-a, issue
+ * #12): a fresh, unpredictable, CSPRNG-sourced token untrusted text
+ * cannot forge, appended to BOTH fence names for this run
+ * (`UNTRUSTED_ISSUE_DATA_<nonce>` / `UNTRUSTED_PR_DIFF_<nonce>` — ONE
+ * shared token, per team-lead's sign-off: the two fences already stay
+ * distinguishable by NAME, and both are read by the same agent in the
+ * same prompt regardless).
+ *
+ * `DELIMITER_NONCE_OVERRIDE` exists ONLY for deterministic test fixtures
+ * (team-lead's sign-off: "Fixed-inject the nonce in tests for
+ * determinism") — and is now gated behind {@link NONCE_OVERRIDE_ALLOWED}
+ * plus format validation (Codex + independent security-reviewer finding,
+ * PR pre-open pass, MEDIUM — a real gap in the first version of this
+ * function: an unconditional `process.env.DELIMITER_NONCE_OVERRIDE ??
+ * randomBytes(...)` had three latent foot-guns, none attacker-reachable
+ * in THIS slice — the runner isn't wired to any workflow yet, and Actions
+ * env is maintainer-controlled — but this slice EXISTS to establish the
+ * nonce guarantee, and slice 3b-ii-c is where any input-to-env mapping
+ * first goes live, so closing it here rather than trusting "not
+ * reachable yet" to stay true is the fold):
+ *
+ * 1. `DELIMITER_NONCE_OVERRIDE=""` — `??` does not fall back on an empty
+ *    STRING (only `null`/`undefined`), so the nonce becomes `""`, and the
+ *    fence collapses to the fully-static, attacker-known
+ *    `<UNTRUSTED_ISSUE_DATA_>` / `</UNTRUSTED_ISSUE_DATA_>` — the exact
+ *    breakout this whole slice exists to prevent. (And `_>` alone
+ *    doesn't match the neutralization patterns' own `(?:_[0-9a-f]+)?`
+ *    branch either, since one-or-more hex digits are required — so the
+ *    char-class defense-in-depth layer doesn't cover this specific
+ *    degenerate case.)
+ * 2. Any OTHER pinned value (e.g. always `DELIMITER_NONCE_OVERRIDE=
+ *    deadbeef`) is a KNOWN nonce, which is exactly as forgeable as no
+ *    nonce at all.
+ * 3. No format validation meant the override was written VERBATIM to
+ *    `$GITHUB_OUTPUT` (`${key}=${value}\n`) — the CSPRNG path is
+ *    guaranteed hex-only and therefore safe there, but the override was
+ *    the ONLY path that could carry a literal newline, injecting an
+ *    arbitrary SECOND output line (e.g. a value of
+ *    `x\nhas-criteria=false` would forge a second, attacker/test-author-
+ *    controlled `has-criteria` line).
+ *
+ * Production (`NONCE_OVERRIDE_ALLOWED === false`) now ALWAYS takes the
+ * `crypto.randomBytes` branch, full stop — the environment variable is
+ * never even read. In test mode, a set override MUST be non-empty
+ * lowercase hex ({@link VALID_NONCE_OVERRIDE_PATTERN}), which by
+ * construction can never be empty and can never contain a newline —
+ * closing both the nonce-pinning and the `$GITHUB_OUTPUT`-injection
+ * vectors at once, not just the reachable-today one.
+ *
+ * Exported (PR pre-open pass fold) so the production-vs-test-mode GATE
+ * itself can be exercised directly: since {@link NONCE_OVERRIDE_ALLOWED}
+ * is evaluated once at module load, verifying the production branch
+ * requires re-importing this module with `VITEST` unset (`vi.resetModules`
+ * + a fresh dynamic `import`) — see this function's own test file for
+ * that pattern, the same class of "must genuinely run outside the test
+ * runner's own signal" case the self-invoke guard's subprocess test
+ * already established a precedent for in this file.
+ *
+ * @returns A lowercase hex string, {@link DELIMITER_NONCE_BYTES} bytes
+ *   (128 bits) of entropy in the production path.
+ * @throws In test mode only, if `DELIMITER_NONCE_OVERRIDE` is set to a
+ *   value that is not non-empty lowercase hex.
+ */
+export function generateDelimiterNonce(): string {
+  if (NONCE_OVERRIDE_ALLOWED) {
+    const override = process.env.DELIMITER_NONCE_OVERRIDE;
+    if (override !== undefined) {
+      if (!VALID_NONCE_OVERRIDE_PATTERN.test(override)) {
+        throw new Error(
+          `DELIMITER_NONCE_OVERRIDE must be non-empty lowercase hex, got: ${JSON.stringify(override)}`,
+        );
+      }
+      return override;
+    }
+  }
+  return randomBytes(DELIMITER_NONCE_BYTES).toString("hex");
 }
 
 async function fetchPr(token: string, owner: string, repo: string, prNumber: number): Promise<GitHubPullRequest> {
@@ -247,6 +353,10 @@ export async function main(): Promise<void> {
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
   const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
   const paths = resolvePaths();
+  // One shared per-run nonce for BOTH fences — see generateDelimiterNonce's
+  // own docstring. Generated unconditionally (cheap, no I/O) even though
+  // an early exit below may never use it.
+  const nonce = generateDelimiterNonce();
 
   const pr = await fetchPr(token, owner, repo, prNumber);
   if (pr.head.sha !== trustedHeadSha) {
@@ -278,7 +388,7 @@ export async function main(): Promise<void> {
   }
 
   const result = buildLinkedIssueSpecs(references, issuesMap);
-  const criteriaBlock = renderCriteriaDataBlock(result);
+  const criteriaBlock = renderCriteriaDataBlock(result, nonce);
 
   if (criteriaBlock === "") {
     console.log(
@@ -295,7 +405,7 @@ export async function main(): Promise<void> {
   // no in-band truncation marker, so this compares the PR's OWN reported
   // total against the documented cap — a trusted source independent of
   // the diff text itself.
-  const diffBlock = wrapUntrustedDiffBlock(diff, undefined, {
+  const diffBlock = wrapUntrustedDiffBlock(diff, nonce, undefined, {
     knownFileCountTruncated: pr.changed_files > GITHUB_COMPARE_DIFF_FILE_LIMIT,
   });
 
@@ -308,6 +418,14 @@ export async function main(): Promise<void> {
       `across ${result.specs.length} linked issue(s).`,
   );
   writeGithubOutput("has-criteria", "true");
+  // The nonce is trusted, short, and non-attacker-influenced (this
+  // process generated it), so slice 3b-ii-c's prompt-composition step can
+  // safely interpolate it directly into the workflow's prompt string —
+  // unlike the criteria/spine/diff CONTENT above, which stays file-based
+  // and reaches the agent only via its Read tool, never spliced into
+  // workflow YAML (see the #12 3b-ii PR-plan sign-off for why that
+  // boundary matters).
+  writeGithubOutput("delimiter-nonce", nonce);
 }
 
 // Only self-invoke when run directly, not when imported by a test —

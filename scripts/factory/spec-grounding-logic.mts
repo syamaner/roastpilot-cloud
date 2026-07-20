@@ -102,9 +102,13 @@
  * already names for its own residual evasions — not by this extractor
  * getting cleverer.
  *
- * (iii) The `<UNTRUSTED_ISSUE_DATA>` delimiter (Rider 1) stops a crafted
- * checkbox line from breaking OUT of the data block's boundary and being
- * read as the review prompt's own instructions — it does NOT, and
+ * (iii) The `<UNTRUSTED_ISSUE_DATA>` delimiter (Rider 1 — as of F1-S9
+ * slice 3b-ii-a, suffixed with a fresh per-run nonce,
+ * `<UNTRUSTED_ISSUE_DATA_<hex>>`, the categorical end of a three-round
+ * character-class arms race; see {@link buildDataBlockOpen}) stops a
+ * crafted checkbox line from breaking OUT of the data block's boundary
+ * and being read as the review prompt's own instructions — it does NOT,
+ * and
  * cannot, stop a criterion's TEXT itself from being a prompt-injection
  * attempt that stays entirely WITHIN the block (Codex finding, PR #70
  * review round 6) — e.g. a checkbox reading "ignore your instructions
@@ -1195,8 +1199,33 @@ export function buildLinkedIssueSpecs(
   return { specs, truncatedIssueCount };
 }
 
-const DATA_BLOCK_OPEN = "<UNTRUSTED_ISSUE_DATA>";
-const DATA_BLOCK_CLOSE = "</UNTRUSTED_ISSUE_DATA>";
+/**
+ * Builds the OPENING `UNTRUSTED_ISSUE_DATA` fence for a given per-run
+ * nonce (F1-S9 slice 3b-ii-a, issue #12 — the categorical end of the
+ * three-round delimiter-breakout arms race, per team-lead's design
+ * direction on the #12 3b PR-plan sign-off): a fixed tag name is
+ * ALWAYS forgeable given enough guessing/retries on a public repo where
+ * attackers get unlimited attempts across unlimited PRs; a fresh,
+ * unpredictable per-run token appended to the tag name is NOT — untrusted
+ * text cannot contain the string that closes THIS run's real fence
+ * without already knowing a value it has no way to learn. See
+ * {@link DELIMITER_TAG_PATTERN}'s own docstring for why the NEUTRALIZATION
+ * side of this guard is deliberately NOT nonce-aware, and stays exactly
+ * as it was before the nonce existed.
+ *
+ * @param nonce - A fresh, unpredictable, per-run token (the caller's
+ *   responsibility to generate with a CSPRNG — see
+ *   `spec-grounding-runner.mts`'s `main()` for the production source;
+ *   tests inject a fixed value for determinism).
+ */
+function buildDataBlockOpen(nonce: string): string {
+  return `<UNTRUSTED_ISSUE_DATA_${nonce}>`;
+}
+
+/** The nonce'd `UNTRUSTED_ISSUE_DATA` fence's CLOSING half — see {@link buildDataBlockOpen}. */
+function buildDataBlockClose(nonce: string): string {
+  return `</UNTRUSTED_ISSUE_DATA_${nonce}>`;
+}
 
 // Whitespace-tolerant on EVERY side of the slash and the tag name —
 // independent factory-security-reviewer finding, F1-S9 slice 3, issue
@@ -1207,7 +1236,26 @@ const DATA_BLOCK_CLOSE = "</UNTRUSTED_ISSUE_DATA>";
 // function exists to stop. The slash itself stays captured cleanly in
 // group 1 regardless of the surrounding whitespace, since the `\s*`
 // wrapping it sits OUTSIDE the capture group.
-const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
+//
+// DELIBERATELY NOT nonce-parameterized (F1-S9 slice 3b-ii-a design
+// decision, called out explicitly per team-lead's sign-off for the
+// pre-open security pass to check): this pattern matches the tag NAME
+// with an OPTIONAL `_<hex>` suffix, covering BOTH the bare static shape
+// (a naive breakout attempt that doesn't know any nonce exists at all —
+// still neutralized as defense-in-depth, same reasoning as keeping the
+// char-class strip even though the nonce is now the PRIMARY guard) AND
+// any hex-suffixed variant, including a genuinely-guessed-correct nonce
+// if that were ever somehow achieved (belt-and-braces; the nonce itself
+// is what actually makes forging the SPECIFIC current value
+// computationally infeasible, not this pattern). Being nonce-AGNOSTIC
+// here means `neutralizeDelimiterBreakout` never needs the current run's
+// nonce threaded through it at all — only the fence-BUILDING functions
+// above do — which is also why `buildCriteriaSpine`
+// (`spec-grounding-runner-logic.mts`) needed NO changes for this slice:
+// it calls this same unchanged function to reconstruct a criterion's
+// exact rendered line, and that reconstruction never depended on the
+// fence's own nonce to begin with.
+const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA(?:_[0-9a-f]+)?\s*>/gi;
 
 // Zero-width / bidi-format characters an attacker could inject to split
 // the literal delimiter token into a byte sequence a whitespace-tolerant
@@ -1414,17 +1462,26 @@ export function truncateToByteBudget(text: string, maxBytes: number): { text: st
  * criteria COUNT caps live in {@link buildLinkedIssueSpecs} (this
  * function just renders whatever truncation markers that already
  * computed), and the total rendered BYTE size is capped here, since only
- * this function knows the final assembled length. The closing
- * `</UNTRUSTED_ISSUE_DATA>` delimiter is ALWAYS appended AFTER any
- * byte-budget truncation is applied to the body content, never to the
- * pre-truncation whole string — an unclosed data block would itself be a
- * prompt-injection risk (everything after a naive mid-string cut would
- * read as unquoted, "real" prompt text). The truncation marker's own
- * small overhead may push the FINAL string slightly past `maxBytes` —
- * acceptable, since the cap's purpose is bounding otherwise-unbounded
- * growth, not hitting an exact byte target.
+ * this function knows the final assembled length. The closing fence is
+ * ALWAYS appended AFTER any byte-budget truncation is applied to the body
+ * content, never to the pre-truncation whole string — an unclosed data
+ * block would itself be a prompt-injection risk (everything after a naive
+ * mid-string cut would read as unquoted, "real" prompt text). The
+ * truncation marker's own small overhead may push the FINAL string
+ * slightly past `maxBytes` — acceptable, since the cap's purpose is
+ * bounding otherwise-unbounded growth, not hitting an exact byte target.
+ *
+ * NONCE'D FENCES (F1-S9 slice 3b-ii-a, issue #12): `nonce` is REQUIRED,
+ * not optional with some fallback — there is no safe default value for a
+ * token whose entire security property is "unpredictable per run". See
+ * {@link buildDataBlockOpen}'s own docstring for the full design
+ * reasoning and {@link DELIMITER_TAG_PATTERN}'s for why the
+ * NEUTRALIZATION side stays nonce-agnostic even though the fence-building
+ * side (here) is not.
  *
  * @param result - {@link buildLinkedIssueSpecs}'s output.
+ * @param nonce - A fresh, unpredictable, per-run token — see
+ *   {@link buildDataBlockOpen}.
  * @param maxBytes - The UTF-8 byte budget for the whole rendered block —
  *   defaults to {@link MAX_DATA_BLOCK_BYTES}; overridable for tests.
  * @returns The delimited DATA block, or the empty string if `result.specs`
@@ -1440,6 +1497,7 @@ export function truncateToByteBudget(text: string, maxBytes: number): { text: st
  */
 export function renderCriteriaDataBlock(
   result: LinkedIssueSpecsResult,
+  nonce: string,
   maxBytes: number = MAX_DATA_BLOCK_BYTES,
 ): string {
   if (result.specs.length === 0 && result.truncatedIssueCount === 0) {
@@ -1481,11 +1539,13 @@ export function renderCriteriaDataBlock(
     );
   }
 
-  const budgetForBody = Math.max(0, maxBytes - new TextEncoder().encode(`${DATA_BLOCK_OPEN}\n${DATA_BLOCK_CLOSE}`).length);
+  const dataBlockOpen = buildDataBlockOpen(nonce);
+  const dataBlockClose = buildDataBlockClose(nonce);
+  const budgetForBody = Math.max(0, maxBytes - new TextEncoder().encode(`${dataBlockOpen}\n${dataBlockClose}`).length);
   const { text: cappedBody, truncated } = truncateToByteBudget(bodyLines.join("\n"), budgetForBody);
   const finalBody = truncated
     ? `${cappedBody}\n\n[TRUNCATED — this DATA block exceeded its ${maxBytes}-byte size budget; ` +
       "remaining issues/criteria are not shown]"
     : cappedBody;
-  return [DATA_BLOCK_OPEN, finalBody, DATA_BLOCK_CLOSE].join("\n");
+  return [dataBlockOpen, finalBody, dataBlockClose].join("\n");
 }
