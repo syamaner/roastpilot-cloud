@@ -18,6 +18,28 @@
 const GITHUB_API = "https://api.github.com";
 
 /**
+ * Thrown by {@link githubRequest} for a non-2xx response, carrying the
+ * HTTP status code as a structured field (F1-S9 slice 3b-i, issue #12,
+ * PR #72 review — Codex finding: a caller that needs to distinguish a
+ * verified 404 from every OTHER failure — 403, 429 past the retry budget,
+ * a 5xx, a network error — for a fail-closed decision had no reliable way
+ * to do so against the previous plain `Error`, short of regex-parsing its
+ * message. `spec-grounding-runner.mts`'s per-issue fetch is exactly this
+ * case: only a genuine 404 may degrade to "issue not found"; anything
+ * else must fail the whole run rather than silently omit that issue's
+ * unmet criteria from the anti-gaming gate).
+ */
+export class GithubApiError extends Error {
+  readonly status: number;
+
+  constructor(method: string, path: string, status: number, bodyText: string) {
+    super(`GitHub API ${method} ${path} failed: ${status} ${bodyText}`);
+    this.name = "GithubApiError";
+    this.status = status;
+  }
+}
+
+/**
  * Upper bound on additional attempts `githubRequest` makes after an
  * initial rate-limited response, before giving up and letting the
  * failure surface for real. GitHub's own guidance is to honor
@@ -169,19 +191,84 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Optional per-call overrides for {@link githubRequest}'s retry behavior
- * — never needed in production (both fields default to the real,
- * production-sane values), but lets a test swap in a fast/no-op sleep
- * function so a retry-path test doesn't need to wait out a real backoff,
- * and lets a test shrink the retry budget to exercise "exhausted retries"
- * without 5 real (mocked) round-trips.
+ * Optional per-call overrides for {@link githubRequest} — retry behavior,
+ * the request's media type / response parsing, and the text-response size
+ * ceiling. Every field defaults to a real, production-sane value, so
+ * `options` itself is never REQUIRED; some fields exist for test
+ * convenience (`sleepFn`, `maxRateLimitRetries`, `maxTextResponseLength`
+ * let a test swap in a fast sleep, shrink the retry budget, or shrink the
+ * size ceiling, instead of waiting out a real backoff or generating a
+ * multi-megabyte fixture), others (`accept`, `responseType`) are needed in
+ * production too, for a non-JSON endpoint like the PR diff fetch.
  */
 export interface GithubRequestOptions {
   /** Overrides {@link MAX_RATE_LIMIT_RETRIES}. */
   readonly maxRateLimitRetries?: number;
   /** Overrides the real `setTimeout`-based wait — test-only. */
   readonly sleepFn?: (ms: number) => Promise<void>;
+  /**
+   * Overrides the default `Accept: application/vnd.github+json` header
+   * (F1-S9 slice 3b, issue #12): the pulls endpoint serves the raw unified
+   * diff, instead of the normal JSON resource, when asked with
+   * `application/vnd.github.v3.diff` — slice 3b-i's runner needs exactly
+   * that to fetch a PR's diff text. Defaults to the JSON media type, so
+   * every existing caller is unaffected.
+   */
+  readonly accept?: string;
+  /**
+   * Whether to parse the response body as JSON (the default, and every
+   * existing caller's behavior) or return it as raw text (F1-S9 slice 3b —
+   * the diff fetch above; GitHub's diff media type is plain text, not
+   * JSON, and `response.json()` would throw trying to parse it).
+   */
+  readonly responseType?: "json" | "text";
+  /**
+   * Overrides {@link MAX_TEXT_RESPONSE_LENGTH} — test-only; only applies
+   * when `responseType` is `"text"`.
+   */
+  readonly maxTextResponseLength?: number;
 }
+
+/**
+ * Hard ceiling on a `responseType: "text"` response (security-reviewer
+ * finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW — cheap to
+ * close even though the severity is low: GitHub's own server-side caps
+ * and this running in ephemeral CI both already bound the worst case).
+ * Without a ceiling here, an unusually large diff forces `response.text()`
+ * to buffer the WHOLE body into memory, and
+ * `spec-grounding-runner-logic.mts`'s `neutralizeDiffDelimiterBreakout`
+ * then runs a full-length scan over it BEFORE `truncateToByteBudget` ever
+ * gets a chance to bound the work — the truncation happening AFTER the
+ * scan (not before) is itself correct (truncating first could cut mid-
+ * breakout-attempt and miss it), so the fix is a ceiling on the INPUT
+ * size here, not a reorder downstream.
+ *
+ * ENFORCED IN TWO LAYERS (Codex finding, PR #72 review round 4 — a real
+ * gap in the first version of this cap: checking `rawText.length` AFTER
+ * `response.text()` had already fully buffered the body meant the
+ * documented "memory bound" was not actually bounding memory at all, only
+ * bounding what the CALLER received back):
+ *
+ * 1. `githubRequest` reads the response's `Content-Length` header (a
+ *    genuine, GitHub-supplied byte count on these REST endpoints, never
+ *    attacker-influenced content this module is parsing) and rejects the
+ *    request BEFORE ever calling `response.text()` if that header already
+ *    exceeds this ceiling — the body is never buffered at all in the
+ *    common case, which is what actually makes the bound real.
+ * 2. If `Content-Length` is absent (chunked transfer encoding is
+ *    possible, if unlikely, on these endpoints) the length is still
+ *    checked and truncated AFTER `response.text()`, as before — a
+ *    weaker, buffer-then-check fallback (does not itself prevent an
+ *    OOM against a truly pathological, header-less response; a full
+ *    streaming read stopped at this ceiling would close that residual
+ *    gap too, but is not required given the already-small blast radius
+ *    this finding is LOW severity for).
+ *
+ * A generous multiple of `spec-grounding-runner-logic.mts`'s own
+ * `MAX_PR_DIFF_BYTES` (200KiB) — comfortably above any diff that cap will
+ * ever let through unflagged, comfortably below a pathological response.
+ */
+export const MAX_TEXT_RESPONSE_LENGTH = 2_000_000;
 
 /**
  * Reads a required environment variable, throwing a clear error if it's
@@ -218,13 +305,21 @@ export function requireEnv(name: string): string {
  * @param method - The HTTP method.
  * @param path - The API path, e.g. `/repos/{owner}/{repo}/issues/{n}`.
  * @param body - An optional JSON-serializable request body.
- * @param options - Test-only retry overrides; see
- *   {@link GithubRequestOptions}.
- * @returns The parsed JSON response, or `undefined` for a 204.
- * @throws If the response status is not ok (2xx) and either isn't rate
+ * @param options - Retry overrides (test-only), and the `accept`/
+ *   `responseType` overrides a non-JSON endpoint (e.g. a PR diff) needs;
+ *   see {@link GithubRequestOptions}.
+ * @returns The parsed JSON response (or raw text, with `responseType:
+ *   "text"`, capped at {@link MAX_TEXT_RESPONSE_LENGTH} UTF-16 code
+ *   units), or `undefined` for a 204.
+ * @throws A {@link GithubApiError} (carrying the response's status code)
+ *   if the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
  *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
- *   or the retry budget is exhausted.
+ *   or the retry budget is exhausted. Also throws a plain `Error` (not a
+ *   `GithubApiError` — this is a client-side rejection, not an HTTP
+ *   response) for a `responseType: "text"` call whose response declares
+ *   a `Content-Length` exceeding {@link MAX_TEXT_RESPONSE_LENGTH}, BEFORE
+ *   the body is ever read into memory.
  */
 export async function githubRequest<T>(
   token: string,
@@ -235,13 +330,15 @@ export async function githubRequest<T>(
 ): Promise<T> {
   const maxRetries = options?.maxRateLimitRetries ?? MAX_RATE_LIMIT_RETRIES;
   const sleepFn = options?.sleepFn ?? sleep;
+  const accept = options?.accept ?? "application/vnd.github+json";
+  const responseType = options?.responseType ?? "json";
 
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(`${GITHUB_API}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
+        Accept: accept,
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
       },
@@ -280,12 +377,32 @@ export async function githubRequest<T>(
       // triggerable against a mocked Response in tests, kept as a defensive
       // fallback so a real occurrence still produces a readable error.
       const text = await response.text().catch(() => "<unreadable body>");
-      throw new Error(
-        `GitHub API ${method} ${path} failed: ${response.status} ${text}`,
-      );
+      throw new GithubApiError(method, path, response.status, text);
     }
     if (response.status === 204) {
       return undefined as T;
+    }
+    if (responseType === "text") {
+      const maxLength = options?.maxTextResponseLength ?? MAX_TEXT_RESPONSE_LENGTH;
+      // Layer 1: reject BEFORE ever buffering the body, using GitHub's own
+      // Content-Length header — see MAX_TEXT_RESPONSE_LENGTH's own
+      // docstring for why checking only AFTER `response.text()` (layer 2,
+      // below) does not actually bound memory use at all.
+      const contentLengthHeader = response.headers.get("content-length");
+      if (contentLengthHeader !== null) {
+        const contentLength = Number(contentLengthHeader);
+        if (Number.isFinite(contentLength) && contentLength > maxLength) {
+          throw new Error(
+            `GitHub API ${method} ${path} response declares Content-Length ` +
+              `${contentLength}, exceeding the ${maxLength}-character text-response ` +
+              "cap — rejected before buffering the body into memory.",
+          );
+        }
+      }
+      // Layer 2: a weaker buffer-then-check fallback for the rare case
+      // where Content-Length was absent (chunked transfer encoding).
+      const rawText = await response.text();
+      return (rawText.length > maxLength ? rawText.slice(0, maxLength) : rawText) as T;
     }
     return (await response.json()) as T;
   }

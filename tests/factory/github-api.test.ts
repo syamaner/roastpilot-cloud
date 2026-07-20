@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   computeBackoffMs,
+  GithubApiError,
   githubRequest,
   isRateLimitedResponse,
   MAX_RATE_LIMIT_RETRIES,
   MAX_RETRY_AFTER_SECONDS,
+  MAX_TEXT_RESPONSE_LENGTH,
   parseRetryAfterMs,
   requireEnv,
   shouldGiveUpOnRateLimit,
@@ -78,6 +80,25 @@ describe("githubRequest", () => {
     );
   });
 
+  it("throws a GithubApiError carrying the status as a structured field (F1-S9 slice 3b-i, issue #12, PR #72 review -- a caller needs to distinguish a verified 404 from every other failure for a fail-closed decision, which a plain Error's message text alone can't do reliably)", async () => {
+    await expect(githubRequest("tok", "GET", "/error")).rejects.toMatchObject({
+      name: "GithubApiError",
+      status: 403,
+    });
+  });
+
+  it("GithubApiError is a real Error subclass (instanceof works, so a catch block can narrow on it)", async () => {
+    let caught: unknown;
+    try {
+      await githubRequest("tok", "GET", "/error");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GithubApiError);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as GithubApiError).status).toBe(403);
+  });
+
   it("sends the bearer token and a JSON body when provided", async () => {
     // `input` is typed but intentionally unused: it's here only so
     // fetchMock's inferred type matches fetch's signature, which is what
@@ -99,6 +120,151 @@ describe("githubRequest", () => {
       Authorization: "Bearer secret-token",
     });
     expect(init?.body).toBe(JSON.stringify({ a: 1 }));
+  });
+
+  it("defaults to the JSON media type when `accept` is not overridden", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response(JSON.stringify({}), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await githubRequest("tok", "GET", "/ok");
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init?.headers).toMatchObject({ Accept: "application/vnd.github+json" });
+  });
+
+  it("sends a custom `accept` header when provided (F1-S9 slice 3b — the PR diff media type)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("diff --git a/x b/x\n", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await githubRequest("tok", "GET", "/ok", undefined, {
+      accept: "application/vnd.github.v3.diff",
+      responseType: "text",
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init?.headers).toMatchObject({ Accept: "application/vnd.github.v3.diff" });
+  });
+
+  it('returns the response as raw text when `responseType: "text"` is requested, instead of parsing it as JSON', async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        // Deliberately NOT valid JSON -- a raw unified diff never is. A
+        // `responseType: "json"` (or default) call against this same body
+        // would throw inside `response.json()`; this test's whole point is
+        // proving the text path never attempts that parse at all.
+        new Response("diff --git a/x b/x\n+added line\n", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, {
+      responseType: "text",
+    });
+
+    expect(result).toBe("diff --git a/x b/x\n+added line\n");
+  });
+
+  it("LAYER 2 fallback: caps a text response at MAX_TEXT_RESPONSE_LENGTH after buffering, when Content-Length was absent (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW -- this is the weaker post-buffer check; the Response constructor in this test does NOT set a Content-Length header for a plain string body, verified empirically, so this exercises the fallback path specifically, not the pre-check)", async () => {
+    const oversized = "x".repeat(MAX_TEXT_RESPONSE_LENGTH + 1000);
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(oversized, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" });
+
+    expect(result.length).toBe(MAX_TEXT_RESPONSE_LENGTH);
+  });
+
+  it("LAYER 1: rejects BEFORE buffering when the response's Content-Length header already exceeds the cap (Codex finding, PR #72 review round 4 -- the fix that makes the memory bound actually real, not just a post-hoc truncation of an already-fully-buffered body)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("short body -- the declared Content-Length is what matters here, not the actual body", {
+          status: 200,
+          headers: { "content-length": String(MAX_TEXT_RESPONSE_LENGTH + 1) },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" })).rejects.toThrow(
+      /Content-Length/,
+    );
+  });
+
+  it("LAYER 1: does NOT reject when Content-Length is exactly at the cap", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("body", { status: 200, headers: { "content-length": String(MAX_TEXT_RESPONSE_LENGTH) } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" }),
+    ).resolves.toBe("body");
+  });
+
+  it("LAYER 1: a non-numeric Content-Length header does not crash -- falls through to the layer-2 buffer-then-check path instead", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("body", { status: 200, headers: { "content-length": "not-a-number" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" }),
+    ).resolves.toBe("body");
+  });
+
+  it("does not truncate a text response at or under MAX_TEXT_RESPONSE_LENGTH", async () => {
+    const body = "diff --git a/x b/x\n";
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(body, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" });
+
+    expect(result).toBe(body);
+  });
+
+  it("honors a smaller `maxTextResponseLength` override (test-only convenience, exercised here instead of generating a multi-megabyte fixture)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response("0123456789", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, {
+      responseType: "text",
+      maxTextResponseLength: 5,
+    });
+
+    expect(result).toBe("01234");
+  });
+
+  it("never applies the text-response cap to a JSON response", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(JSON.stringify({ hello: "world" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<{ hello: string }>("tok", "GET", "/ok");
+
+    expect(result).toEqual({ hello: "world" });
   });
 });
 

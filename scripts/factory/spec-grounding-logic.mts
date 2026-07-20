@@ -1239,14 +1239,14 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // renderer could collapse.
 //
 // `\p{Cf}` was STILL the wrong property, one round later (Codex finding,
-// PR #70 review round 9 \u2014 a real delimiter-breakout, category (a),
+// PR #70 review round 9 — a real delimiter-breakout, category (a),
 // always folds regardless of the common-form cap): the Unicode Format
 // general category and the "default-ignorable" concept invisible-
 // character attacks actually key off are OVERLAPPING, not identical.
 // Combining Grapheme Joiner (U+034F), variation selectors (U+FE00-FE0F),
 // and Mongolian free variation selectors (U+180B-180D) are all
-// default-ignorable \u2014 an LLM tokenizer/renderer plausibly collapses
-// them the same way \u2014 but are NOT in category Cf, verified empirically
+// default-ignorable — an LLM tokenizer/renderer plausibly collapses
+// them the same way — but are NOT in category Cf, verified empirically
 // (each tests false against `\p{Cf}` alone) before writing this fix.
 // `\p{Default_Ignorable_Code_Point}` (JS's own supported Unicode binary-
 // property syntax under the `u` flag) closes the DI half; UNIONED with
@@ -1254,40 +1254,64 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // number sign U+0600) the two together close the whole invisible-
 // breakout class by construction, not by enumerating this round's three
 // named characters and waiting for the next.
-const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-
-// Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a real
-// delimiter-breakout, category (a), always folds): `</UNTRUSTED_ISSUE_DATA>`
-// survives {@link neutralizeDelimiterBreakout} when a NEL (U+0085) sits
-// inside the tag, e.g. between the `<` and the `/`. NEL is Unicode
-// White_Space but is NOT matched by JS's own `\s` metacharacter (verified
-// empirically: `/\s/.test("\u0085")` is `false`), so it defeats BOTH the
-// whitespace-tolerant `\s*` inside {@link DELIMITER_TAG_PATTERN} and the
-// existing `\p{Cf}`/`\p{Default_Ignorable_Code_Point}` cleanup above — yet a
-// model's tokenizer/renderer plausibly still collapses it as ordinary
-// whitespace and reads the result as the real closing delimiter, the exact
-// breakout this module exists to stop.
 //
-// CATEGORICAL FIX, same lesson as `\p{Cf}`/DI above (don't enumerate the
-// next gap character, close the class by construction): matches the full
-// Unicode `White_Space` binary property, which is a strict SUPERSET of the
-// four ordinary ASCII whitespace characters (space, tab, LF, CR) real
-// criterion text legitimately contains — verified empirically that every
-// OTHER Unicode White_Space member this module previously worried about
-// (NBSP, Ogham space, en-quad, line/paragraph separator, narrow/medium
-// math space, ideographic space) is ALREADY matched by JS's own `\s`, so
-// NEL is the one genuine gap today; matching the whole property (rather
-// than just NEL) closes any future gap the same way, not just this round's.
-const EXOTIC_WHITESPACE_PATTERN = /\p{White_Space}/gu;
+// Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a
+// real delimiter-breakout, category (a), always folds):
+// `</UNTRUSTED_ISSUE_DATA>` survives when a NEL (U+0085) sits inside the
+// tag, e.g. between the `<` and the `/`. NEL is Unicode White_Space but is
+// NOT matched by JS's own `\s` metacharacter (verified empirically:
+// `/\s/.test("\u0085")` is `false`), so it defeated BOTH the whitespace-
+// tolerant `\s*` inside {@link DELIMITER_TAG_PATTERN} and the `\p{Cf}`/DI
+// cleanup above — yet a model's tokenizer/renderer plausibly still
+// collapses it as ordinary whitespace and reads the result as the real
+// closing delimiter.
+//
+// STILL not categorically complete, TWO rounds later (Codex + an
+// independent security-reviewer pass, PR #72 review round 3 — BOTH
+// found real breakout gaps sharing ONE root cause: the diff guard added in
+// slice 3b-i for the PR diff had drifted onto a DIFFERENT character set
+// than this one, and neither set alone was complete):
+// - The diff guard's `\p{C}` (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs)
+//   MISSED `\p{Default_Ignorable_Code_Point}`'s own members outside
+//   category C — Combining Grapheme Joiner (U+034F) and the variation
+//   selectors (U+FE00-FE0F) are category Mn, not any C subcategory, so a
+//   `</UNTRUSTED_PR_DIFF>` split by one survived. (This traces to an error
+//   in the guidance that produced the diff guard's pattern: "invert to
+//   `\p{C}`" silently dropped `Default_Ignorable_Code_Point`, which the
+//   ORIGINAL criteria guard, right here, had never lost.)
+// - This module's own criteria guard, in turn, had never picked up
+//   `\p{Cc}` (plain control characters — U+0008 BACKSPACE, U+001B
+//   ESCAPE, U+007F DELETE, verified empirically to break
+//   `</UNTRUSTED_ISSUE_DATA>` out the same way NEL once did) or the
+//   Co/Cn/Cs members `\p{C}` closes, on the PRIMARY anti-gaming surface —
+//   a real, reproduced gap, not a theoretical one.
+//
+// CANONICAL FIX: exactly ONE breakout-character pattern, used by BOTH
+// guards, combining every class either one individually needed: `\p{C}`
+// (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs — controls, format
+// characters, unassigned, private-use, surrogates) UNIONED with
+// `\p{Default_Ignorable_Code_Point}` (closes the Mn-category default-
+// ignorables `\p{C}` alone misses) UNIONED with `\p{White_Space}` (closes
+// NEL and every other exotic space/separator). Sharing this SINGLE
+// exported primitive between `neutralizeDelimiterBreakout` here and slice
+// 3b-i's diff guard (`spec-grounding-runner-logic.mts`) makes "both guards
+// cover the same breakout class" a fact enforced by construction —
+// reusing one constant — rather than a claim in a comment two
+// independently-maintained patterns could silently drift apart from,
+// which is exactly what happened here.
+export const UNTRUSTED_DATA_BREAKOUT_PATTERN = /[\p{C}\p{Default_Ignorable_Code_Point}\p{White_Space}]/gu;
 
-// The ASCII whitespace characters {@link EXOTIC_WHITESPACE_PATTERN} must
-// NEVER strip — stripping these would corrupt legitimate criterion text,
-// not just neutralize an attack. Includes every ASCII control character JS's
-// own `\s` already treats as whitespace (space, tab, LF, CR, plus VT and FF,
-// which are rare in real criterion text but equally ordinary and equally
-// harmless to a delimiter-breakout check already tolerant of `\s`), not just
-// the four most common of them.
-const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r", "\v", "\f"]);
+// The ONLY characters {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} must never
+// strip or visibly mark — the four ordinary ASCII whitespace
+// characters (space, tab, LF, CR) real criterion/diff text legitimately
+// contains. Deliberately does NOT also exempt VT/FF (Codex + security-
+// reviewer finding, PR #72 review round 3 — narrowed from an earlier
+// six-character exemption set that also spared those two): VT and FF are
+// themselves `\p{Cc}` control characters, and this guard's whole point,
+// after the same review round found `\p{Cc}` was a real gap, is to
+// surface a control character sitting where it doesn't belong — not
+// carve out two more as "harmless" the same way NEL once was.
+export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
@@ -1299,27 +1323,34 @@ const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\
  * the literal closing delimiter (or a whitespace/zero-width-character
  * variant of it) could otherwise end the DATA block early and inject text
  * the review prompt would read as ITS OWN instructions rather than quoted
- * data. NFKC-normalizes and strips zero-width/format characters AND exotic
- * Unicode whitespace (e.g. NEL) FIRST (closing both the tokenizer-
- * collapses-invisible-characters gap and the tokenizer-collapses-exotic-
- * whitespace gap, PR #70 review round 18 — see
- * {@link EXOTIC_WHITESPACE_PATTERN}'s own docstring), then matches the
- * delimiter tag case-insensitively and whitespace-tolerantly on EITHER
- * delimiter (an attacker forging a FAKE open tag deeper in the block is the
- * same class of attack as closing the real one early).
+ * data. NFKC-normalizes and strips every character
+ * {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} matches FIRST (the single
+ * canonical breakout-character set this module now shares with slice
+ * 3b-i's diff guard — see that constant's own docstring for the full
+ * history of why it took three rounds to become exactly one pattern),
+ * then matches the delimiter tag case-insensitively and whitespace-
+ * tolerantly on EITHER delimiter (an attacker forging a FAKE open tag
+ * deeper in the block is the same class of attack as closing the real
+ * one early).
+ *
+ * Exported (F1-S9 slice 3b-i, issue #12, PR #72 review): slice 3b-i's
+ * `buildCriteriaSpine` calls this directly to reconstruct the EXACT
+ * checkbox-line text `renderCriteriaDataBlock` itself renders for a given
+ * criterion, so it can search the rendered (and possibly byte-truncated)
+ * block for that exact line rather than re-deriving or approximating it —
+ * see that function's own docstring.
  *
  * @param text - Raw extracted text (a criterion or an issue title).
- * @returns The same text, with zero-width/format characters and exotic
- *   Unicode whitespace removed (ordinary ASCII whitespace preserved) and
- *   any delimiter-tag occurrence neutralized (angle brackets replaced
- *   with square brackets) — never dropped outright, so the finding stays
- *   legible; just unable to parse as a real tag.
+ * @returns The same text, with every breakout-capable character removed
+ *   (ordinary ASCII whitespace preserved) and any delimiter-tag
+ *   occurrence neutralized (angle brackets replaced with square
+ *   brackets) — never dropped outright, so the finding stays legible;
+ *   just unable to parse as a real tag.
  */
-function neutralizeDelimiterBreakout(text: string): string {
+export function neutralizeDelimiterBreakout(text: string): string {
   const cleaned = text
     .normalize("NFKC")
-    .replace(ZERO_WIDTH_AND_FORMAT_PATTERN, "")
-    .replace(EXOTIC_WHITESPACE_PATTERN, (ch) => (ASCII_WHITESPACE_CHARS.has(ch) ? ch : ""));
+    .replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, (ch) => (ASCII_WHITESPACE_CHARS.has(ch) ? ch : ""));
   return cleaned.replace(DELIMITER_TAG_PATTERN, "[$1UNTRUSTED_ISSUE_DATA]");
 }
 
@@ -1349,11 +1380,16 @@ const MAX_DATA_BLOCK_BYTES = 32 * 1024;
  * character garbage — verified against the real `TextDecoder` behavior,
  * not assumed.
  *
+ * Exported (F1-S9 slice 3b, issue #12): slice 3b-i's runner reuses this to
+ * byte-cap the PR diff before wrapping it in its own untrusted-data
+ * delimiter, the same resource-exhaustion reasoning as this module's own
+ * {@link MAX_DATA_BLOCK_BYTES} cap, applied to a second untrusted surface.
+ *
  * @param text - The text to bound.
  * @param maxBytes - The UTF-8 byte budget.
  * @returns The possibly-shortened text, and whether truncation occurred.
  */
-function truncateToByteBudget(text: string, maxBytes: number): { text: string; truncated: boolean } {
+export function truncateToByteBudget(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const encoded = new TextEncoder().encode(text);
   if (encoded.length <= maxBytes) {
     return { text, truncated: false };
