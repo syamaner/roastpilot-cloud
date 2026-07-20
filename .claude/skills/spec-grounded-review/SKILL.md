@@ -90,7 +90,9 @@ text. A spine entry's `criterionId` (shape `<issueNumber>:<index>`, e.g.
 `"12:0"`) corresponds to the checkbox line whose marker is
 `[[ID {{DELIMITER_NONCE}}:12:0]]` — build that exact marker string by
 prepending `{{DELIMITER_NONCE}}:` to the `criterionId`, and find the line
-that starts with it.
+whose checkbox prefix `  - [ ] ` is immediately followed by it (the
+checkbox prefix comes FIRST on every rendered line, then the marker right
+after it — the line does not start with the marker itself).
 
 **This marker is the ONLY thing that tells you which criterion's text you
 are looking at. Do NOT correlate criteria by position, order, or count** —
@@ -132,9 +134,14 @@ said.
 ## Judging each criterion
 
 For EACH entry in `criteria-spine.json`, judge whether the diff in
-`pr-diff-block.txt` actually satisfies that criterion. Your rationale must
-clearly say ONE of two different things, because they mean different things
-to the human who reads it:
+`pr-diff-block.txt` actually satisfies that criterion, and write a
+rationale in one of THREE forms depending on your verdict — which form
+applies depends on `satisfied`, and each `satisfied` value has exactly one
+valid form:
+
+**If `satisfied: false`**, your rationale must clearly say ONE of two
+different things, because they mean different things to the human who
+reads it:
 
 - the diff **CONTRADICTS** this criterion (it does something the criterion
   says should not happen, or omits something the criterion requires and the
@@ -143,10 +150,16 @@ to the human who reads it:
   describes a manual/hardware validation step, an operator action, or
   something outside what a text diff can show).
 
-Both cases must be reported as `satisfied: false` — an unverifiable
+Both of these forms are reported as `satisfied: false` — an unverifiable
 criterion is not evidence the work was done, and a genuine gap must never be
-marked satisfied just because you are uncertain. Only mark `satisfied: true`
-when the diff itself gives you clear, direct evidence the criterion is met.
+marked satisfied just because you are uncertain.
+
+**If `satisfied: true`**, your rationale must **CITE the specific evidence**
+in the diff that satisfies the criterion — name the file, function, test, or
+change that does it, concretely enough that a human reading only your
+rationale (not the diff itself) can see why you judged it met. Only mark
+`satisfied: true` when the diff itself gives you this kind of clear, direct
+evidence; a vague or general rationale is not sufficient grounds for `true`.
 
 You are NOT responsible for deciding how serious a gap is, and you must
 **NOT** include any `severity`, `priority`, or `kind` field in your output —

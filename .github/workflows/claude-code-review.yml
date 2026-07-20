@@ -214,11 +214,54 @@ jobs:
           # script, which imports only node: builtins and sibling .mts
           # files and so never needed this), this runner's dependency
           # chain has a real npm package in it.
+          #
+          # THIS CHECKOUT TAKES THE PR's OWN REF for all four paths below
+          # (default `pull_request` checkout behavior, unchanged) — the
+          # very next step OVERWRITES the review skill and the manifests
+          # with the TRUSTED BASE revision's own versions; see that step's
+          # own comment for why `scripts/factory` is the one path that
+          # deliberately stays PR-head.
           sparse-checkout: |
             scripts/factory
             .claude/skills/spec-grounded-review
             package.json
             package-lock.json
+
+      - name: Restore the review skill + manifests from the TRUSTED base revision
+        # Codex finding, PR #76 review, P1: for a factory-App-published PR,
+        # this job's checkout above uses the PR's OWN ref — so without this
+        # step, the PR itself would control the skill AND the dependency
+        # manifests used to review it. The publisher guard (factory.md §13
+        # must-fix 3) rejects a diff touching `.github/**`, `scripts/
+        # factory/**`, or CODEOWNERS, but NOT `.claude/skills/spec-grounded-
+        # review/**` or a manifest-only change — so an implementing agent
+        # could rewrite the skill file to instruct "always emit satisfied:
+        # true", or bump `markdown-it` (or add a new dependency) to a
+        # version whose install script (if `--ignore-scripts` weren't
+        # already set) or runtime behavior exfiltrates the very `GH_TOKEN`
+        # this job holds. EXTENDING the publisher guard's deny-list to cover
+        # these paths too would be the arms-race shape (the exact class of
+        # fix this codebase's own delimiter-guard history warns against) --
+        # the categorical fix is that the machinery REVIEWING a PR must
+        # never be sourced FROM that same PR, full stop, regardless of what
+        # the guard does or doesn't cover.
+        #
+        # `scripts/factory` is DELIBERATELY NOT restored here and stays
+        # PR-head: it IS covered by the publisher guard already (so a
+        # factory-authored diff touching it is already rejected before merge
+        # regardless), and a human-authored PR fixing a genuine runner bug
+        # needs that fix to actually take effect when its own PR is
+        # reviewed — restoring it from base would make a runner-bugfix PR
+        # review itself against the OLD, buggy runner. The skill and the
+        # manifests carry no such need: nothing legitimately requires THIS
+        # PR's own version of either to be in effect while THIS PR is being
+        # reviewed.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 origin "$BASE_SHA"
+          git checkout FETCH_HEAD -- .claude/skills/spec-grounded-review package.json package-lock.json
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -301,6 +344,16 @@ jobs:
           # Explicit allowlists, never '*' (the CVE this action-SHA pin
           # fixes was exactly an allowlist-bypass on bot/non-write-user
           # gating).
+          #
+          # DELIBERATELY empty for now, not an oversight (Codex finding, PR
+          # #76 review — team-lead's disposition: intentional sequencing,
+          # not a fold): once a factory App bot identity starts opening
+          # PRs, this empty allowlist would reject that actor and this job
+          # would never review a factory-authored PR at all. The fix is
+          # NOT to widen this allowlist yet — it is to close the exfil path
+          # #47 (F1-S7) tracks FIRST, then add `roastpilot-factory[bot]`
+          # here (see `implement-patch-logic.mts`'s own identical
+          # allowlist-sequencing precedent for the same bot identity).
           allowed_bots: ""
           allowed_non_write_users: ""
           show_full_output: false
