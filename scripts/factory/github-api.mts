@@ -191,12 +191,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Optional per-call overrides for {@link githubRequest}'s retry behavior
- * — never needed in production (both fields default to the real,
- * production-sane values), but lets a test swap in a fast/no-op sleep
- * function so a retry-path test doesn't need to wait out a real backoff,
- * and lets a test shrink the retry budget to exercise "exhausted retries"
- * without 5 real (mocked) round-trips.
+ * Optional per-call overrides for {@link githubRequest} — retry behavior,
+ * the request's media type / response parsing, and the text-response size
+ * ceiling. Every field defaults to a real, production-sane value, so
+ * `options` itself is never REQUIRED; some fields exist for test
+ * convenience (`sleepFn`, `maxRateLimitRetries`, `maxTextResponseLength`
+ * let a test swap in a fast sleep, shrink the retry budget, or shrink the
+ * size ceiling, instead of waiting out a real backoff or generating a
+ * multi-megabyte fixture), others (`accept`, `responseType`) are needed in
+ * production too, for a non-JSON endpoint like the PR diff fetch.
  */
 export interface GithubRequestOptions {
   /** Overrides {@link MAX_RATE_LIMIT_RETRIES}. */
@@ -219,7 +222,31 @@ export interface GithubRequestOptions {
    * JSON, and `response.json()` would throw trying to parse it).
    */
   readonly responseType?: "json" | "text";
+  /**
+   * Overrides {@link MAX_TEXT_RESPONSE_LENGTH} — test-only; only applies
+   * when `responseType` is `"text"`.
+   */
+  readonly maxTextResponseLength?: number;
 }
+
+/**
+ * Hard UTF-16-code-unit ceiling on a `responseType: "text"` response
+ * (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review,
+ * LOW — cheap to close even though the severity is low: GitHub's own
+ * server-side caps and this running in ephemeral CI both already bound the
+ * worst case). Without a ceiling here, an unusually large diff forces
+ * `response.text()` to buffer the WHOLE body into memory, and
+ * `spec-grounding-runner-logic.mts`'s `neutralizeDiffDelimiterBreakout`
+ * then runs a full-length scan over it BEFORE `truncateToByteBudget` ever
+ * gets a chance to bound the work — the truncation happening AFTER the
+ * scan (not before) is itself correct (truncating first could cut mid-
+ * breakout-attempt and miss it), so the fix is a ceiling on the INPUT
+ * size here, not a reorder downstream. A generous multiple of
+ * `spec-grounding-runner-logic.mts`'s own `MAX_PR_DIFF_BYTES` (200KiB) —
+ * comfortably above any diff that cap will ever let through unflagged,
+ * comfortably below a pathological response.
+ */
+export const MAX_TEXT_RESPONSE_LENGTH = 2_000_000;
 
 /**
  * Reads a required environment variable, throwing a clear error if it's
@@ -259,8 +286,9 @@ export function requireEnv(name: string): string {
  * @param options - Retry overrides (test-only), and the `accept`/
  *   `responseType` overrides a non-JSON endpoint (e.g. a PR diff) needs;
  *   see {@link GithubRequestOptions}.
- * @returns The parsed JSON response (or raw text, with
- *   `responseType: "text"`), or `undefined` for a 204.
+ * @returns The parsed JSON response (or raw text, with `responseType:
+ *   "text"`, capped at {@link MAX_TEXT_RESPONSE_LENGTH} UTF-16 code
+ *   units), or `undefined` for a 204.
  * @throws A {@link GithubApiError} (carrying the response's status code)
  *   if the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
@@ -329,7 +357,9 @@ export async function githubRequest<T>(
       return undefined as T;
     }
     if (responseType === "text") {
-      return (await response.text()) as T;
+      const rawText = await response.text();
+      const maxLength = options?.maxTextResponseLength ?? MAX_TEXT_RESPONSE_LENGTH;
+      return (rawText.length > maxLength ? rawText.slice(0, maxLength) : rawText) as T;
     }
     return (await response.json()) as T;
   }

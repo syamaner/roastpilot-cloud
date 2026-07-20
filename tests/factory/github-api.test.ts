@@ -6,6 +6,7 @@ import {
   isRateLimitedResponse,
   MAX_RATE_LIMIT_RETRIES,
   MAX_RETRY_AFTER_SECONDS,
+  MAX_TEXT_RESPONSE_LENGTH,
   parseRetryAfterMs,
   requireEnv,
   shouldGiveUpOnRateLimit,
@@ -169,6 +170,59 @@ describe("githubRequest", () => {
     });
 
     expect(result).toBe("diff --git a/x b/x\n+added line\n");
+  });
+
+  it("caps a text response at MAX_TEXT_RESPONSE_LENGTH (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW -- bounds memory + downstream scan cost for a pathologically large response)", async () => {
+    const oversized = "x".repeat(MAX_TEXT_RESPONSE_LENGTH + 1000);
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(oversized, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" });
+
+    expect(result.length).toBe(MAX_TEXT_RESPONSE_LENGTH);
+  });
+
+  it("does not truncate a text response at or under MAX_TEXT_RESPONSE_LENGTH", async () => {
+    const body = "diff --git a/x b/x\n";
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(body, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" });
+
+    expect(result).toBe(body);
+  });
+
+  it("honors a smaller `maxTextResponseLength` override (test-only convenience, exercised here instead of generating a multi-megabyte fixture)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response("0123456789", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, {
+      responseType: "text",
+      maxTextResponseLength: 5,
+    });
+
+    expect(result).toBe("01234");
+  });
+
+  it("never applies the text-response cap to a JSON response", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) => new Response(JSON.stringify({ hello: "world" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<{ hello: string }>("tok", "GET", "/ok");
+
+    expect(result).toEqual({ hello: "world" });
   });
 });
 

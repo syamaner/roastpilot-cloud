@@ -34,8 +34,10 @@
  */
 
 import {
+  ASCII_WHITESPACE_CHARS,
   neutralizeDelimiterBreakout,
   truncateToByteBudget,
+  UNTRUSTED_DATA_BREAKOUT_PATTERN,
   type IssueLinkKind,
   type LinkedIssueSpecsResult,
 } from "./spec-grounding-logic.mts";
@@ -103,12 +105,25 @@ export interface CriteriaSpineEntry {
  * Fixed by deriving the spine from the SAME rendered text the agent reads,
  * not from `result` in isolation: each candidate criterion's exact
  * checkbox-line rendering (`  - [ ] ${neutralizeDelimiterBreakout(criterion)}`
- * — byte-identical to the line `renderCriteriaDataBlock` itself emits) is
- * searched for in `renderedCriteriaBlock` with a MONOTONICALLY ADVANCING
- * cursor (document order, same idiom as this module's other guards) —
- * found ⇒ shown ⇒ gets a spine entry; not found (truncated away, in whole
- * or in part — a byte cut landing mid-line means the FULL line text never
- * appears) ⇒ skipped, silently but not unaccounted-for: `renderCriteriaDataBlock`
+ * — byte-identical to the line `renderCriteriaDataBlock` itself emits) must
+ * be an EXACT, WHOLE-LINE match somewhere in `renderedCriteriaBlock`
+ * (Codex finding, PR #72 review round 3, MEDIUM — a real bug in round 1's
+ * own fix, this time in the MATCHING itself, not just the loop control:
+ * the round-1 fix used `String.prototype.indexOf` for a bare SUBSTRING
+ * match, unanchored to line boundaries. When the byte cap truncates the
+ * block right after an issue's heading line but before its own checkbox,
+ * an attacker-controlled ISSUE TITLE containing the literal substring
+ * `  - [ ] <a later criterion's exact text>` could make that unanchored
+ * `indexOf` report the later criterion as "found" — inside the HEADING
+ * line, not any real checkbox — handing it a spine entry for a checkbox
+ * the agent never actually saw rendered. Fixed by splitting the block into
+ * LINES and requiring the checkbox line to equal one of them EXACTLY —
+ * the heading line's own fixed `Issue #N — TITLE (stance):` shape can
+ * never equal a bare `  - [ ] ...` line under `===`, closing this
+ * regardless of what an attacker puts in a title) — found on some line at
+ * or after a MONOTONICALLY ADVANCING line cursor (document order, same
+ * idiom as this module's other guards) ⇒ shown ⇒ gets a spine entry; not
+ * found ⇒ skipped, silently but not unaccounted-for: `renderCriteriaDataBlock`
  * already writes a visible `[TRUNCATED ...]` marker into the block itself
  * when this happens, which the agent (and any human reading the same
  * text) sees directly — this function's job is only to keep the spine
@@ -135,16 +150,17 @@ export interface CriteriaSpineEntry {
  * @param renderedCriteriaBlock - `renderCriteriaDataBlock(result)`'s
  *   output — the EXACT text the review agent will read, byte-cap and all.
  * @returns Spine entries for every criterion whose full checkbox line is
- *   actually present in `renderedCriteriaBlock`, UP TO AND EXCLUDING the
- *   first one that is not, in the same issue order as `result.specs`, and
- *   in criterion order within each issue.
+ *   actually present, as a whole rendered line, in `renderedCriteriaBlock`,
+ *   UP TO AND EXCLUDING the first one that is not, in the same issue
+ *   order as `result.specs`, and in criterion order within each issue.
  */
 export function buildCriteriaSpine(
   result: LinkedIssueSpecsResult,
   renderedCriteriaBlock: string,
 ): readonly CriteriaSpineEntry[] {
   const entries: CriteriaSpineEntry[] = [];
-  let searchCursor = 0;
+  const renderedLines = renderedCriteriaBlock.split("\n");
+  let lineCursor = 0;
   let truncatedAway = false;
   for (const spec of result.specs) {
     if (truncatedAway) {
@@ -152,8 +168,16 @@ export function buildCriteriaSpine(
     }
     for (const [index, criterionText] of spec.unmetCriteria.entries()) {
       const checkboxLine = `  - [ ] ${neutralizeDelimiterBreakout(criterionText)}`;
-      const foundAt = renderedCriteriaBlock.indexOf(checkboxLine, searchCursor);
-      if (foundAt === -1) {
+      let foundLineIndex = -1;
+      for (let i = lineCursor; i < renderedLines.length; i++) {
+        // EXACT whole-line equality, never a substring match — see this
+        // function's own docstring for the exact attack this closes.
+        if (renderedLines[i] === checkboxLine) {
+          foundLineIndex = i;
+          break;
+        }
+      }
+      if (foundLineIndex === -1) {
         // Not shown (truncated away). renderCriteriaDataBlock's byte cap
         // truncates a single CONTIGUOUS suffix of the assembled text, in
         // the same spec-then-criterion order this function iterates in --
@@ -163,7 +187,7 @@ export function buildCriteriaSpine(
         truncatedAway = true;
         break;
       }
-      searchCursor = foundAt + checkboxLine.length;
+      lineCursor = foundLineIndex + 1;
       entries.push({
         issueNumber: spec.issueNumber,
         kind: spec.kind,
@@ -189,56 +213,23 @@ export function buildCriteriaSpine(
 const DIFF_DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_PR_DIFF\s*>/gi;
 
 /**
- * The Unicode properties this function treats as "invisible or
- * unprintable" — CATEGORICAL, a keep-set inversion rather than an
- * enumerated block-set (Codex finding, PR #72 review round 2, BLOCKER: an
- * earlier version of this pattern covered `\p{Cf}` ∪
- * `\p{Default_Ignorable_Code_Point}` ∪ `\p{White_Space}` — the same set
- * `spec-grounding-logic.mts`'s criteria-text guard uses — but MISSED
- * `\p{Cc}` control characters, e.g. U+0008 BACKSPACE, U+001B ESCAPE,
- * U+007F DELETE, which can sit inside an `UNTRUSTED_PR_DIFF` tag and be
- * discarded or reinterpreted by a downstream tokenizer, reopening the
- * exact delimiter-breakout class this whole guard exists to close).
+ * Renders every character {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} matches
+ * as a VISIBLE `[U+XXXX]` marker instead of silently removing it (Codex
+ * finding, PR #72 review — a real bug in the original version of this
+ * module: it reused `spec-grounding-logic.mts`'s criteria-text guard,
+ * which STRIPS these characters, on the diff too).
  *
- * Rather than add `\p{Cc}` and invite a round-3 "you missed class Y", this
- * is INVERTED to a keep-set: visibly encode everything in `\p{C}` — the
- * full Unicode general category "Other", which is ITSELF the union of Cc
- * (control) ∪ Cf (format) ∪ Cn (unassigned) ∪ Co (private-use) ∪ Cs
- * (surrogate) — plus `\p{White_Space}` for exotic (non-ASCII) whitespace,
- * MINUS the ordinary ASCII whitespace `DIFF_PRESERVED_ASCII_WHITESPACE`
- * exempts below. `\p{C}` and `\p{White_Space}` are both canonical Unicode
- * BINARY/general-category properties, not enumerated ranges, so this
- * closes control characters, format characters, default-ignorable
- * characters, private-use characters, surrogates, and exotic whitespace
- * in ONE rule, categorically, with no further per-class round expected.
- * Ordinary printable Unicode — letters, marks, numbers, punctuation,
- * symbols, and normal spaces/newlines, including legitimate international
- * text — is untouched, so the diff stays readable.
- */
-const INVISIBLE_OR_UNPRINTABLE_PATTERN = /[\p{C}\p{White_Space}]/gu;
-
-/**
- * The ONLY characters {@link INVISIBLE_OR_UNPRINTABLE_PATTERN} must never
- * visibly mark — ordinary ASCII whitespace a diff legitimately uses for
- * formatting (a normal space, tab, or newline/CR). Deliberately NARROWER
- * than `spec-grounding-logic.mts`'s `ASCII_WHITESPACE_CHARS` (which also
- * exempts VT/FF as "harmless"): those are still `\p{Cc}` control
- * characters, and Fold 2's whole point is that a control character
- * sitting where it doesn't belong is exactly what this guard must
- * surface, not silently exempt.
- */
-const DIFF_PRESERVED_ASCII_WHITESPACE: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
-
-/**
- * Renders every invisible/unprintable character in `text` as a VISIBLE
- * `[U+XXXX]` marker instead of silently removing it (Codex finding, PR
- * #72 review — a real bug in the original version of this module: it
- * reused `spec-grounding-logic.mts`'s criteria-text guard, which STRIPS
- * these characters, on the diff too).
+ * Uses the SAME shared, canonical breakout-character pattern
+ * `neutralizeDelimiterBreakout` (criteria/title text) uses — see that
+ * pattern's own docstring for why this took three review rounds to become
+ * exactly one shared primitive (PR #72 review round 3, BLOCKER: two
+ * independently-drifting local patterns — one here, one there — each
+ * missed a class the other one covered).
  *
- * DELIBERATELY DIFFERENT from `neutralizeDelimiterBreakout` (criterion/
- * title text). That function's silent-strip approach is correct THERE
- * because criteria are untrusted DATA — their only job is to be read as a
+ * DELIBERATELY DIFFERENT TREATMENT from `neutralizeDelimiterBreakout`,
+ * even though the DETECTION pattern is now identical (criterion/title
+ * text). That function's silent-strip approach is correct THERE because
+ * criteria are untrusted DATA — their only job is to be read as a
  * checklist, and an invisible character in them has no legitimate meaning
  * worth preserving. The PR diff is a fundamentally different kind of
  * untrusted input: it is CONTENT THE REVIEW AGENT MUST INSPECT for
@@ -275,8 +266,8 @@ const DIFF_PRESERVED_ASCII_WHITESPACE: ReadonlySet<string> = new Set([" ", "\t",
  *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
  */
 function escapeInvisibleCharactersVisibly(text: string): string {
-  return text.replace(INVISIBLE_OR_UNPRINTABLE_PATTERN, (ch) => {
-    if (DIFF_PRESERVED_ASCII_WHITESPACE.has(ch)) {
+  return text.replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, (ch) => {
+    if (ASCII_WHITESPACE_CHARS.has(ch)) {
       return ch;
     }
     const codePoint = ch.codePointAt(0);
