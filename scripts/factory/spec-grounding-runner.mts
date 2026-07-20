@@ -86,12 +86,24 @@ import {
   selectIssuesToFetch,
   type FetchedIssue,
 } from "./spec-grounding-logic.mts";
-import { buildCriteriaSpine, wrapUntrustedDiffBlock } from "./spec-grounding-runner-logic.mts";
+import {
+  buildCriteriaSpine,
+  GITHUB_COMPARE_DIFF_FILE_LIMIT,
+  wrapUntrustedDiffBlock,
+} from "./spec-grounding-runner-logic.mts";
 
 interface GitHubPullRequest {
   readonly body: string | null;
   readonly head: { readonly sha: string };
   readonly base: { readonly sha: string };
+  /**
+   * The PR's TRUE total changed-file count, from the PR resource itself —
+   * used to detect when {@link fetchPrDiff}'s compare-endpoint response
+   * silently truncated at {@link GITHUB_COMPARE_DIFF_FILE_LIMIT} (Codex
+   * finding, PR #72 review round 2, MEDIUM). See
+   * `wrapUntrustedDiffBlock`'s `knownFileCountTruncated` option.
+   */
+  readonly changed_files: number;
 }
 
 interface GitHubIssue {
@@ -278,7 +290,14 @@ export async function main(): Promise<void> {
 
   const spine = buildCriteriaSpine(result, criteriaBlock);
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
-  const diffBlock = wrapUntrustedDiffBlock(diff);
+  // Detects GitHub's compare-endpoint 300-changed-file cap (Codex finding,
+  // PR #72 review round 2, MEDIUM): the diff media type is plain text with
+  // no in-band truncation marker, so this compares the PR's OWN reported
+  // total against the documented cap — a trusted source independent of
+  // the diff text itself.
+  const diffBlock = wrapUntrustedDiffBlock(diff, undefined, {
+    knownFileCountTruncated: pr.changed_files > GITHUB_COMPARE_DIFF_FILE_LIMIT,
+  });
 
   await writeOutputFile(paths.criteriaBlockPath, criteriaBlock);
   await writeOutputFile(paths.criteriaSpinePath, JSON.stringify(spine, null, 2));

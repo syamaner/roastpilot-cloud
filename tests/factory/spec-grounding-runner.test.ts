@@ -63,11 +63,15 @@ const HEAD_SHA = "head-sha-abc123";
 const BASE_SHA = "base-sha-def456";
 
 /** A PR JSON response with the trusted head/base SHAs, overridable per test. */
-function prResponse(body: string | null, overrides?: { headSha?: string; baseSha?: string }): Response {
+function prResponse(
+  body: string | null,
+  overrides?: { headSha?: string; baseSha?: string; changedFiles?: number },
+): Response {
   return jsonResponse({
     body,
     head: { sha: overrides?.headSha ?? HEAD_SHA },
     base: { sha: overrides?.baseSha ?? BASE_SHA },
+    changed_files: overrides?.changedFiles ?? 1,
   });
 }
 
@@ -186,13 +190,54 @@ describe("main — real unmet criteria", () => {
     expect(criteriaBlock.startsWith("<UNTRUSTED_ISSUE_DATA>")).toBe(true);
 
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
-    expect(spine).toEqual([
-      { issueNumber: 12, kind: "closing", criterionId: "12:0", criterionText: "Do the thing." },
-    ]);
+    // No criterionText field -- the spine carries only trusted metadata
+    // (Codex finding, PR #72 review round 2, BLOCKER).
+    expect(spine).toEqual([{ issueNumber: 12, kind: "closing", criterionId: "12:0" }]);
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
     expect(diffBlock.startsWith("<UNTRUSTED_PR_DIFF>")).toBe(true);
     expect(diffBlock).toContain("+did the thing");
+    // The PR changed well under GitHub's 300-file compare cap, so no
+    // file-count truncation warning appears.
+    expect(diffBlock).not.toContain("more files than GitHub's compare API");
+  });
+
+  it("surfaces a file-count truncation warning when the PR changes more files than GitHub's compare API returns in one response (Codex finding, PR #72 review round 2, MEDIUM -- a real silent-truncation gap: the diff media type carries no in-band marker for this, so the runner must detect it from the PR's own trusted changed_files count)", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12", { changedFiles: 301 }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "An issue",
+          body: "### Acceptance criteria\n- [ ] Do the thing.",
+        }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n+did the thing\n"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const diffBlock = await readFile(prDiffBlockPath, "utf-8");
+    expect(diffBlock).toContain("more files than GitHub's compare API");
+    expect(diffBlock.startsWith("<UNTRUSTED_PR_DIFF>")).toBe(true);
+    expect(diffBlock.endsWith("</UNTRUSTED_PR_DIFF>")).toBe(true);
+  });
+
+  it("does NOT warn when changed_files is exactly at the cap (300), only when it exceeds it", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12", { changedFiles: 300 }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "An issue",
+          body: "### Acceptance criteria\n- [ ] Do the thing.",
+        }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n+did the thing\n"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const diffBlock = await readFile(prDiffBlockPath, "utf-8");
+    expect(diffBlock).not.toContain("more files than GitHub's compare API");
   });
 
   it("tolerates a VERIFIED 404 issue fetch as \"nothing to say\" for that issue, without failing the whole run (buildLinkedIssueSpecs's own documented contract for a missing map entry)", async () => {
@@ -215,9 +260,7 @@ describe("main — real unmet criteria", () => {
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
     // Only issue #8's criterion survives -- #12's verified 404 degraded to
     // silence, not a thrown error and not a fabricated entry.
-    expect(spine).toEqual([
-      { issueNumber: 8, kind: "non-closing", criterionId: "8:0", criterionText: "Still open." },
-    ]);
+    expect(spine).toEqual([{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }]);
   });
 
   it.each([

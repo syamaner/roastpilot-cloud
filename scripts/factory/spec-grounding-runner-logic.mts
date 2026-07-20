@@ -34,7 +34,6 @@
  */
 
 import {
-  ASCII_WHITESPACE_CHARS,
   neutralizeDelimiterBreakout,
   truncateToByteBudget,
   type IssueLinkKind,
@@ -44,6 +43,21 @@ import {
 /**
  * One criterion the review agent must judge, identified by a stable ID
  * computed once per run — never accepted from the agent.
+ *
+ * Deliberately carries ONLY trusted metadata (Codex finding, PR #72
+ * review round 2, BLOCKER: an earlier version also carried the raw
+ * `criterionText`, i.e. the ORIGINAL attacker-controlled criterion string
+ * — including any literal `</UNTRUSTED_ISSUE_DATA>`, bidi override, or
+ * zero-width character it contained). The agent reads this spine
+ * alongside the ALREADY-NEUTRALIZED criteria data block
+ * (`renderCriteriaDataBlock`'s own output, keyed to this spine by
+ * `criterionId`) — so a raw-text field here handed the agent a SECOND,
+ * unwrapped, un-neutralized copy of the exact hostile text the data
+ * block's delimiter guard exists to contain, defeating that guard
+ * entirely. This is the whole point of the spine being "trusted": it can
+ * never carry untrusted payload, only metadata the runner itself computed
+ * deterministically. The agent looks up a criterion's actual text from
+ * the neutralized data block by ID, never from this spine.
  */
 export interface CriteriaSpineEntry {
   /** The linked issue this criterion belongs to. */
@@ -64,8 +78,6 @@ export interface CriteriaSpineEntry {
    * legitimately).
    */
   readonly criterionId: string;
-  /** The exact unmet-criterion text shown in the criteria data block. */
-  readonly criterionText: string;
 }
 
 /**
@@ -103,12 +115,29 @@ export interface CriteriaSpineEntry {
  * from asking about anything beyond that point, not to duplicate that
  * surfacing.
  *
+ * TERMINATES THE WHOLE SCAN at the first missing criterion (Codex finding,
+ * PR #72 review round 2, MEDIUM — a real bug in round 1's own fix): the
+ * first version of this fix only `return`ed from the innermost
+ * `.forEach` callback on a miss, which exits THAT callback invocation but
+ * lets the outer loop keep scanning every later criterion (and later
+ * issues) for a match anywhere in the rest of the text. Since
+ * `renderCriteriaDataBlock`'s byte cut can land mid-line, a crafted
+ * partial line could still happen to CONTAIN a later criterion's complete
+ * checkbox text, letting that later, genuinely-unseen criterion slip back
+ * in with a spine entry after all. A `break`-equivalent (a hoisted flag
+ * checked at every loop level, since `.forEach` itself cannot be broken
+ * out of) is required: once ANY criterion in document order is missing,
+ * every criterion after it — same reasoning as this docstring's own
+ * paragraph above, just now actually enforced — is skipped without even
+ * being searched for.
+ *
  * @param result - `buildLinkedIssueSpecs`'s output.
  * @param renderedCriteriaBlock - `renderCriteriaDataBlock(result)`'s
  *   output — the EXACT text the review agent will read, byte-cap and all.
  * @returns Spine entries for every criterion whose full checkbox line is
- *   actually present in `renderedCriteriaBlock`, in the same issue order
- *   as `result.specs`, and in criterion order within each issue.
+ *   actually present in `renderedCriteriaBlock`, UP TO AND EXCLUDING the
+ *   first one that is not, in the same issue order as `result.specs`, and
+ *   in criterion order within each issue.
  */
 export function buildCriteriaSpine(
   result: LinkedIssueSpecsResult,
@@ -116,8 +145,12 @@ export function buildCriteriaSpine(
 ): readonly CriteriaSpineEntry[] {
   const entries: CriteriaSpineEntry[] = [];
   let searchCursor = 0;
+  let truncatedAway = false;
   for (const spec of result.specs) {
-    spec.unmetCriteria.forEach((criterionText, index) => {
+    if (truncatedAway) {
+      break;
+    }
+    for (const [index, criterionText] of spec.unmetCriteria.entries()) {
       const checkboxLine = `  - [ ] ${neutralizeDelimiterBreakout(criterionText)}`;
       const foundAt = renderedCriteriaBlock.indexOf(checkboxLine, searchCursor);
       if (foundAt === -1) {
@@ -125,19 +158,18 @@ export function buildCriteriaSpine(
         // truncates a single CONTIGUOUS suffix of the assembled text, in
         // the same spec-then-criterion order this function iterates in --
         // so once one criterion's line is missing, every criterion after
-        // it in that same order is missing too. The cursor is simply left
-        // where it is; every later search in this same run will correctly
-        // keep missing as well.
-        return;
+        // it in that same order is ALSO missing, and must never be
+        // searched for at all (see this function's own docstring, above).
+        truncatedAway = true;
+        break;
       }
       searchCursor = foundAt + checkboxLine.length;
       entries.push({
         issueNumber: spec.issueNumber,
         kind: spec.kind,
         criterionId: `${spec.issueNumber}:${index}`,
-        criterionText,
       });
-    });
+    }
   }
   return entries;
 }
@@ -157,24 +189,52 @@ export function buildCriteriaSpine(
 const DIFF_DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_PR_DIFF\s*>/gi;
 
 /**
- * The Unicode properties this function treats as "invisible or exotic
- * whitespace" — the UNION of the two property classes
- * `spec-grounding-logic.mts` already established as complete for this
- * threat class (its `ZERO_WIDTH_AND_FORMAT_PATTERN`, `\p{Cf}` ∪
- * `\p{Default_Ignorable_Code_Point}`, and its `EXOTIC_WHITESPACE_PATTERN`,
- * `\p{White_Space}`), combined into one pattern here rather than composing
- * two separate imports at call time. Both are canonical Unicode BINARY
- * properties, not enumerated ranges, so there is no "next gap" specific to
- * this combination to chase independently of that module's own coverage.
+ * The Unicode properties this function treats as "invisible or
+ * unprintable" — CATEGORICAL, a keep-set inversion rather than an
+ * enumerated block-set (Codex finding, PR #72 review round 2, BLOCKER: an
+ * earlier version of this pattern covered `\p{Cf}` ∪
+ * `\p{Default_Ignorable_Code_Point}` ∪ `\p{White_Space}` — the same set
+ * `spec-grounding-logic.mts`'s criteria-text guard uses — but MISSED
+ * `\p{Cc}` control characters, e.g. U+0008 BACKSPACE, U+001B ESCAPE,
+ * U+007F DELETE, which can sit inside an `UNTRUSTED_PR_DIFF` tag and be
+ * discarded or reinterpreted by a downstream tokenizer, reopening the
+ * exact delimiter-breakout class this whole guard exists to close).
+ *
+ * Rather than add `\p{Cc}` and invite a round-3 "you missed class Y", this
+ * is INVERTED to a keep-set: visibly encode everything in `\p{C}` — the
+ * full Unicode general category "Other", which is ITSELF the union of Cc
+ * (control) ∪ Cf (format) ∪ Cn (unassigned) ∪ Co (private-use) ∪ Cs
+ * (surrogate) — plus `\p{White_Space}` for exotic (non-ASCII) whitespace,
+ * MINUS the ordinary ASCII whitespace `DIFF_PRESERVED_ASCII_WHITESPACE`
+ * exempts below. `\p{C}` and `\p{White_Space}` are both canonical Unicode
+ * BINARY/general-category properties, not enumerated ranges, so this
+ * closes control characters, format characters, default-ignorable
+ * characters, private-use characters, surrogates, and exotic whitespace
+ * in ONE rule, categorically, with no further per-class round expected.
+ * Ordinary printable Unicode — letters, marks, numbers, punctuation,
+ * symbols, and normal spaces/newlines, including legitimate international
+ * text — is untouched, so the diff stays readable.
  */
-const INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{White_Space}]/gu;
+const INVISIBLE_OR_UNPRINTABLE_PATTERN = /[\p{C}\p{White_Space}]/gu;
 
 /**
- * Renders every zero-width/format/exotic-whitespace character in `text`
- * as a VISIBLE `[U+XXXX]` marker instead of silently removing it (Codex
- * finding, PR #72 review — a real bug in the original version of this
- * module: it reused `spec-grounding-logic.mts`'s criteria-text guard,
- * which STRIPS these characters, on the diff too).
+ * The ONLY characters {@link INVISIBLE_OR_UNPRINTABLE_PATTERN} must never
+ * visibly mark — ordinary ASCII whitespace a diff legitimately uses for
+ * formatting (a normal space, tab, or newline/CR). Deliberately NARROWER
+ * than `spec-grounding-logic.mts`'s `ASCII_WHITESPACE_CHARS` (which also
+ * exempts VT/FF as "harmless"): those are still `\p{Cc}` control
+ * characters, and Fold 2's whole point is that a control character
+ * sitting where it doesn't belong is exactly what this guard must
+ * surface, not silently exempt.
+ */
+const DIFF_PRESERVED_ASCII_WHITESPACE: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
+
+/**
+ * Renders every invisible/unprintable character in `text` as a VISIBLE
+ * `[U+XXXX]` marker instead of silently removing it (Codex finding, PR
+ * #72 review — a real bug in the original version of this module: it
+ * reused `spec-grounding-logic.mts`'s criteria-text guard, which STRIPS
+ * these characters, on the diff too).
  *
  * DELIBERATELY DIFFERENT from `neutralizeDelimiterBreakout` (criterion/
  * title text). That function's silent-strip approach is correct THERE
@@ -183,22 +243,23 @@ const INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code
  * worth preserving. The PR diff is a fundamentally different kind of
  * untrusted input: it is CONTENT THE REVIEW AGENT MUST INSPECT for
  * exactly this class of attack. A bidi override hiding malicious code
- * behind visually-reordered text (Trojan-Source), a zero-width character
- * splitting a homoglyph identifier, or any other invisible-character
- * trick IN THE DIFF ITSELF is precisely what a security-minded review
- * exists to catch — silently stripping it before the agent ever sees the
- * diff would make the review BLIND to that exact attack class, a
- * strictly worse outcome than the delimiter-breakout risk the original
- * (wrong) version of this function was guarding against.
+ * behind visually-reordered text (Trojan-Source), a control character
+ * hidden mid-line, a zero-width character splitting a homoglyph
+ * identifier, or any other invisible/unprintable-character trick IN THE
+ * DIFF ITSELF is precisely what a security-minded review exists to
+ * catch — silently stripping it before the agent ever sees the diff
+ * would make the review BLIND to that exact attack class, a strictly
+ * worse outcome than the delimiter-breakout risk the original (wrong)
+ * version of this function was guarding against.
  *
  * Rendering each such character as a literal, visible marker instead
  * PRESERVES the evidence (the agent can see "there is a suspicious
- * invisible character right here") rather than destroying it, and as a
- * side effect also defeats an invisible-character-based delimiter-
- * breakout attempt on the diff's own wrapper tag — an invisible character
- * sitting between `<` and `/` becomes literal, visible marker text once
- * this pass runs, so it no longer reads as whitespace to the plain,
- * ordinary-whitespace-tolerant tag-neutralization pass
+ * invisible or unprintable character right here") rather than destroying
+ * it, and as a side effect also defeats an invisible-character-based
+ * delimiter-breakout attempt on the diff's own wrapper tag — an invisible
+ * character sitting between `<` and `/` becomes literal, visible marker
+ * text once this pass runs, so it no longer reads as whitespace to the
+ * plain, ordinary-whitespace-tolerant tag-neutralization pass
  * {@link neutralizeDiffDelimiterBreakout} applies next.
  *
  * NEVER applies `.normalize("NFKC")` (Codex finding, same review round):
@@ -209,13 +270,13 @@ const INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code
  * diff at all.
  *
  * @param text - Raw diff text.
- * @returns The same text, byte-for-byte, EXCEPT every zero-width/format/
- *   exotic-whitespace character (ordinary ASCII whitespace excluded) is
+ * @returns The same text, byte-for-byte, EXCEPT every invisible/
+ *   unprintable character (ordinary ASCII whitespace excluded) is
  *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
  */
 function escapeInvisibleCharactersVisibly(text: string): string {
-  return text.replace(INVISIBLE_OR_EXOTIC_WHITESPACE_PATTERN, (ch) => {
-    if (ASCII_WHITESPACE_CHARS.has(ch)) {
+  return text.replace(INVISIBLE_OR_UNPRINTABLE_PATTERN, (ch) => {
+    if (DIFF_PRESERVED_ASCII_WHITESPACE.has(ch)) {
       return ch;
     }
     const codePoint = ch.codePointAt(0);
@@ -262,6 +323,18 @@ export function neutralizeDiffDelimiterBreakout(text: string): string {
 export const MAX_PR_DIFF_BYTES = 200 * 1024;
 
 /**
+ * The number of changed files GitHub's compare API (`GET
+ * /repos/{owner}/{repo}/compare/{base}...{head}`, the endpoint
+ * {@link fetchPrDiff} uses) returns in a SINGLE response before silently
+ * truncating — GitHub's own documented ceiling. Above this many changed
+ * files, the diff text {@link wrapUntrustedDiffBlock} receives may cover
+ * only SOME of the PR's actual changes, with no in-band marker of its own
+ * (the diff media type is plain text; nothing in it signals truncation)
+ * — see {@link wrapUntrustedDiffBlock}'s `knownFileCountTruncated` option.
+ */
+export const GITHUB_COMPARE_DIFF_FILE_LIMIT = 300;
+
+/**
  * Wraps a PR's raw diff text in an explicit, sanitization-enforced
  * `UNTRUSTED_PR_DIFF` delimiter pair with a "this is DATA, not
  * instructions" guard baked into the block itself — the diff's own
@@ -277,15 +350,31 @@ export const MAX_PR_DIFF_BYTES = 200 * 1024;
  * @param diff - The PR's raw unified diff text.
  * @param maxBytes - The UTF-8 byte budget for the diff content — defaults
  *   to {@link MAX_PR_DIFF_BYTES}; overridable for tests.
+ * @param options.knownFileCountTruncated - Set when the CALLER already
+ *   knows (Codex finding, PR #72 review round 2, MEDIUM — a real silent-
+ *   truncation gap: a PR with hundreds of small files can stay well under
+ *   `maxBytes` while GitHub's compare API has ALREADY silently capped the
+ *   diff at {@link GITHUB_COMPARE_DIFF_FILE_LIMIT} changed files, with no
+ *   in-band signal in the diff text itself — so `spec-grounding-runner.mts`
+ *   must detect this from a SEPARATE trusted source, the PR's own reported
+ *   `changed_files` count, and pass the result in here) that the diff this
+ *   function was handed covers FEWER files than the PR actually changed —
+ *   adds a visible truncation warning to the wrapped block, the same shape
+ *   as the byte-cap warning below, so the agent never mistakes a silently-
+ *   partial diff for a complete one.
  * @returns The delimited `UNTRUSTED_PR_DIFF` block, always non-empty (an
  *   empty diff still renders the wrapper and its guard text — unlike
  *   `renderCriteriaDataBlock`, there is no "skip the review pass" signal
  *   here; that decision is made earlier, from whether the criteria spine
  *   itself is empty, not from the diff).
  */
-export function wrapUntrustedDiffBlock(diff: string, maxBytes: number = MAX_PR_DIFF_BYTES): string {
+export function wrapUntrustedDiffBlock(
+  diff: string,
+  maxBytes: number = MAX_PR_DIFF_BYTES,
+  options?: { readonly knownFileCountTruncated?: boolean },
+): string {
   const neutralized = neutralizeDiffDelimiterBreakout(diff);
-  const { text, truncated } = truncateToByteBudget(neutralized, maxBytes);
+  const { text, truncated: byteTruncated } = truncateToByteBudget(neutralized, maxBytes);
 
   const lines: string[] = [
     "<UNTRUSTED_PR_DIFF>",
@@ -297,12 +386,21 @@ export function wrapUntrustedDiffBlock(diff: string, maxBytes: number = MAX_PR_D
     "",
     text,
   ];
-  if (truncated) {
+  if (byteTruncated) {
     lines.push(
       "",
       `(TRUNCATED — this diff exceeds the ${maxBytes}-byte review limit; only the` +
         " portion above was shown. Judge only what you can actually see; do not" +
         " assume the unseen portion satisfies any criterion.)",
+    );
+  }
+  if (options?.knownFileCountTruncated === true) {
+    lines.push(
+      "",
+      "(TRUNCATED — this PR changes more files than GitHub's compare API returns in " +
+        `a single response (${GITHUB_COMPARE_DIFF_FILE_LIMIT}); the diff above covers ` +
+        "only SOME of the changed files. Do not assume any file not shown here is " +
+        "unchanged or satisfies any criterion.)",
     );
   }
   lines.push("</UNTRUSTED_PR_DIFF>");
