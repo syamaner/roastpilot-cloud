@@ -338,16 +338,34 @@ jobs:
             verdict to review-output/spec-grounding-verdict.json (the only
             path you may write to) and do nothing else.
 
-      - name: Upload verdict artifact
+      - name: Upload verdict + spine artifact
         # Runs even if the skill step was skipped (no criteria) or failed
         # outright — the (not yet built) 3b-iii publish job's own
         # validation treats a missing/empty artifact as a fail-closed
         # case, the same discipline as `triage-issues.yml`'s own identical
         # upload step.
+        #
+        # Carries BOTH the agent's verdict AND the runner's own trusted
+        # criteria-spine.json (not just the verdict, as an earlier version
+        # of this step did): 3b-iii's join logic must join the agent's
+        # findings against the EXACT spine this run's agent was actually
+        # shown, never a spine recomputed independently in the publish
+        # job — a re-fetch there could legitimately differ from what was
+        # reviewed if the underlying issue changed between the two jobs'
+        # runs (the same "never ask about a criterion the agent wasn't
+        # shown" invariant `buildCriteriaSpine`'s own docstring already
+        # establishes, extended across the job boundary). Multiple
+        # `path:` entries preserve each file's own relative path under
+        # their common ancestor (the repo root here), so the downloaded
+        # artifact keeps both `review-output/spec-grounding-verdict.json`
+        # and `review-context/criteria-spine.json` at their original
+        # paths — no renaming needed on the download side.
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: spec-grounding-verdict
-          path: review-output/spec-grounding-verdict.json
+          name: spec-grounding-review-artifacts
+          path: |
+            review-output/spec-grounding-verdict.json
+            review-context/criteria-spine.json
           if-no-files-found: warn
           retention-days: 1
