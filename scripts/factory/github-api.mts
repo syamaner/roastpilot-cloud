@@ -230,21 +230,43 @@ export interface GithubRequestOptions {
 }
 
 /**
- * Hard UTF-16-code-unit ceiling on a `responseType: "text"` response
- * (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review,
- * LOW — cheap to close even though the severity is low: GitHub's own
- * server-side caps and this running in ephemeral CI both already bound the
- * worst case). Without a ceiling here, an unusually large diff forces
- * `response.text()` to buffer the WHOLE body into memory, and
+ * Hard ceiling on a `responseType: "text"` response (security-reviewer
+ * finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW — cheap to
+ * close even though the severity is low: GitHub's own server-side caps
+ * and this running in ephemeral CI both already bound the worst case).
+ * Without a ceiling here, an unusually large diff forces `response.text()`
+ * to buffer the WHOLE body into memory, and
  * `spec-grounding-runner-logic.mts`'s `neutralizeDiffDelimiterBreakout`
  * then runs a full-length scan over it BEFORE `truncateToByteBudget` ever
  * gets a chance to bound the work — the truncation happening AFTER the
  * scan (not before) is itself correct (truncating first could cut mid-
  * breakout-attempt and miss it), so the fix is a ceiling on the INPUT
- * size here, not a reorder downstream. A generous multiple of
- * `spec-grounding-runner-logic.mts`'s own `MAX_PR_DIFF_BYTES` (200KiB) —
- * comfortably above any diff that cap will ever let through unflagged,
- * comfortably below a pathological response.
+ * size here, not a reorder downstream.
+ *
+ * ENFORCED IN TWO LAYERS (Codex finding, PR #72 review round 4 — a real
+ * gap in the first version of this cap: checking `rawText.length` AFTER
+ * `response.text()` had already fully buffered the body meant the
+ * documented "memory bound" was not actually bounding memory at all, only
+ * bounding what the CALLER received back):
+ *
+ * 1. `githubRequest` reads the response's `Content-Length` header (a
+ *    genuine, GitHub-supplied byte count on these REST endpoints, never
+ *    attacker-influenced content this module is parsing) and rejects the
+ *    request BEFORE ever calling `response.text()` if that header already
+ *    exceeds this ceiling — the body is never buffered at all in the
+ *    common case, which is what actually makes the bound real.
+ * 2. If `Content-Length` is absent (chunked transfer encoding is
+ *    possible, if unlikely, on these endpoints) the length is still
+ *    checked and truncated AFTER `response.text()`, as before — a
+ *    weaker, buffer-then-check fallback (does not itself prevent an
+ *    OOM against a truly pathological, header-less response; a full
+ *    streaming read stopped at this ceiling would close that residual
+ *    gap too, but is not required given the already-small blast radius
+ *    this finding is LOW severity for).
+ *
+ * A generous multiple of `spec-grounding-runner-logic.mts`'s own
+ * `MAX_PR_DIFF_BYTES` (200KiB) — comfortably above any diff that cap will
+ * ever let through unflagged, comfortably below a pathological response.
  */
 export const MAX_TEXT_RESPONSE_LENGTH = 2_000_000;
 
@@ -293,7 +315,11 @@ export function requireEnv(name: string): string {
  *   if the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
  *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
- *   or the retry budget is exhausted.
+ *   or the retry budget is exhausted. Also throws a plain `Error` (not a
+ *   `GithubApiError` — this is a client-side rejection, not an HTTP
+ *   response) for a `responseType: "text"` call whose response declares
+ *   a `Content-Length` exceeding {@link MAX_TEXT_RESPONSE_LENGTH}, BEFORE
+ *   the body is ever read into memory.
  */
 export async function githubRequest<T>(
   token: string,
@@ -357,8 +383,25 @@ export async function githubRequest<T>(
       return undefined as T;
     }
     if (responseType === "text") {
-      const rawText = await response.text();
       const maxLength = options?.maxTextResponseLength ?? MAX_TEXT_RESPONSE_LENGTH;
+      // Layer 1: reject BEFORE ever buffering the body, using GitHub's own
+      // Content-Length header — see MAX_TEXT_RESPONSE_LENGTH's own
+      // docstring for why checking only AFTER `response.text()` (layer 2,
+      // below) does not actually bound memory use at all.
+      const contentLengthHeader = response.headers.get("content-length");
+      if (contentLengthHeader !== null) {
+        const contentLength = Number(contentLengthHeader);
+        if (Number.isFinite(contentLength) && contentLength > maxLength) {
+          throw new Error(
+            `GitHub API ${method} ${path} response declares Content-Length ` +
+              `${contentLength}, exceeding the ${maxLength}-character text-response ` +
+              "cap — rejected before buffering the body into memory.",
+          );
+        }
+      }
+      // Layer 2: a weaker buffer-then-check fallback for the rare case
+      // where Content-Length was absent (chunked transfer encoding).
+      const rawText = await response.text();
       return (rawText.length > maxLength ? rawText.slice(0, maxLength) : rawText) as T;
     }
     return (await response.json()) as T;

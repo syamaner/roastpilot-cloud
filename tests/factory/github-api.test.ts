@@ -172,7 +172,7 @@ describe("githubRequest", () => {
     expect(result).toBe("diff --git a/x b/x\n+added line\n");
   });
 
-  it("caps a text response at MAX_TEXT_RESPONSE_LENGTH (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW -- bounds memory + downstream scan cost for a pathologically large response)", async () => {
+  it("LAYER 2 fallback: caps a text response at MAX_TEXT_RESPONSE_LENGTH after buffering, when Content-Length was absent (security-reviewer finding, F1-S9 slice 3b-i, issue #12, PR #72 review, LOW -- this is the weaker post-buffer check; the Response constructor in this test does NOT set a Content-Length header for a plain string body, verified empirically, so this exercises the fallback path specifically, not the pre-check)", async () => {
     const oversized = "x".repeat(MAX_TEXT_RESPONSE_LENGTH + 1000);
     const fetchMock = vi.fn(
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -183,6 +183,48 @@ describe("githubRequest", () => {
     const result = await githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" });
 
     expect(result.length).toBe(MAX_TEXT_RESPONSE_LENGTH);
+  });
+
+  it("LAYER 1: rejects BEFORE buffering when the response's Content-Length header already exceeds the cap (Codex finding, PR #72 review round 4 -- the fix that makes the memory bound actually real, not just a post-hoc truncation of an already-fully-buffered body)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("short body -- the declared Content-Length is what matters here, not the actual body", {
+          status: 200,
+          headers: { "content-length": String(MAX_TEXT_RESPONSE_LENGTH + 1) },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" })).rejects.toThrow(
+      /Content-Length/,
+    );
+  });
+
+  it("LAYER 1: does NOT reject when Content-Length is exactly at the cap", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("body", { status: 200, headers: { "content-length": String(MAX_TEXT_RESPONSE_LENGTH) } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" }),
+    ).resolves.toBe("body");
+  });
+
+  it("LAYER 1: a non-numeric Content-Length header does not crash -- falls through to the layer-2 buffer-then-check path instead", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("body", { status: 200, headers: { "content-length": "not-a-number" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      githubRequest<string>("tok", "GET", "/ok", undefined, { responseType: "text" }),
+    ).resolves.toBe("body");
   });
 
   it("does not truncate a text response at or under MAX_TEXT_RESPONSE_LENGTH", async () => {
