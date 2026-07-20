@@ -31,6 +31,24 @@ on:
 # silently losing a code review for that head with no visible trace. Two
 # independent groups mean an edited-triggered run supersedes only
 # `spec-grounded-review`'s own prior run, never an in-flight code review.
+#
+# ACCEPTED RESIDUAL (Codex finding, PR #76 review, round 4 — a real
+# regression from the split above, deliberately not fixed): BOTH jobs'
+# own `if:` conditions exclude draft PRs entirely, and a draft-excluded
+# job never joins its own concurrency group at all — so a
+# `converted_to_draft` event no longer cancels an in-flight run of
+# EITHER job the way the old, single workflow-level group used to. A
+# review already running when the PR is converted back to draft mid-run
+# now continues to completion and posts its findings/verdict, instead of
+# being cancelled. Re-adding a shared workflow-level group would bring
+# the edited/claude-review griefing vector (above) straight back — a
+# worse trade. Accepted as harmless: a draft PR can't merge regardless
+# of what either job posts on it, `claude-review`'s findings are
+# non-blocking on a draft either way, and `spec-grounded-review`'s own
+# verdict (once slice 3b-iii exists) surfaces at most a resolvable
+# comment or an inline finding — no destructive or merge-affecting
+# action is possible from a stale in-flight result either way. Revisit
+# only if a real harm from the stale-findings case turns up.
 jobs:
   claude-review:
     # Skip Dependabot PRs: GitHub withholds repository secrets from
@@ -287,77 +305,101 @@ jobs:
           sparse-checkout: |
             scripts/factory
             .claude
+            .mcp.json
             CLAUDE.md
             AGENTS.md
             package.json
             package-lock.json
 
       - name: Restore trusted Claude configuration + manifests from the BASE revision
-        # Codex findings, PR #76 review (P1, two rounds): for a factory-
+        # Codex findings, PR #76 review (P1, three rounds): for a factory-
         # App-published PR, this job's checkout above uses the PR's OWN
         # ref — so without this step, the PR itself would control every
         # input the review agent's own runtime trusts: the skill file, ANY
         # other `.claude/` content (a PR could add `.claude/settings.json`
-        # with a shell hook the agent's own tool runtime would honor —
+        # with a shell hook the agent's own tool runtime would honor — or,
+        # round 3's own catch, `.mcp.json`, which can point at a
+        # PR-controlled COMMAND the agent's own runtime would execute —
         # verified empirically: the cone-mode checkout above brings in
         # sibling `.claude/*` content, not just the narrow skill
         # subdirectory, and root-level CLAUDE.md/AGENTS.md regardless of
         # what's listed at all — cone mode always includes a repo's own
         # root files), and the dependency manifests (a compromised
         # `markdown-it` version, or a wholly new malicious dependency).
-        # EXTENDING the publisher guard's deny-list to cover each of these
-        # paths individually would be the arms-race shape (the exact class
-        # of fix this codebase's own delimiter-guard history warns
-        # against) — the categorical fix is that the machinery REVIEWING a
-        # PR must never be sourced FROM that same PR, full stop, for
-        # ANYTHING Claude Code's own runtime reads as configuration.
         #
-        # RESTORES ABSENCE, not just content (round 2 finding): `git
-        # checkout <base> -- <path>` alone would never DELETE a file the
-        # PR added that base doesn't have (it only overlays what base DOES
-        # have) — so a bare checkout-from-base, without first removing the
-        # PR-head version, would leave a PR-added `.claude/settings.json`
-        # in place untouched. `rm -rf` FIRST, then checkout-from-base only
-        # if base actually has that path, closes this: anything the PR
-        # added beyond what base has is deleted and never restored.
+        # RESTORES CATEGORICALLY (round 3 finding — the enumeration itself
+        # was the bug, not a missing line item: `.claude/settings.json` was
+        # the first path this list forgot, `.mcp.json` the second; a THIRD
+        # forgotten path is only a matter of time under an enumerated
+        # list). Instead of naming each restored path individually, this
+        # reads `git sparse-checkout list` — the SAME source of truth the
+        # checkout step above already declared — and restores EVERY entry
+        # in it EXCEPT `scripts/factory`. There is now only ONE place cone
+        # membership is declared at all (the checkout step's own
+        # `sparse-checkout:` list); anything added there for a future
+        # config surface is automatically restored-from-base here too,
+        # with no second list to remember to update.
         #
-        # BOOTSTRAP GUARD, per path (round 2 finding — corrects an earlier,
-        # WRONG claim that this workflow file only ever runs from base for
-        # a PR editing `.github/workflows/**`; that base-read behavior is
+        # RESTORES ABSENCE, not just content: `git checkout <base> --
+        # <path>` alone would never DELETE a file the PR added that base
+        # doesn't have (it only overlays what base DOES have) — so a bare
+        # checkout-from-base, without first removing the PR-head version,
+        # would leave a PR-added file in place untouched. `rm -rf` FIRST,
+        # then checkout-from-base only if base actually has that path,
+        # closes this: anything the PR added beyond what base has is
+        # deleted and never restored.
+        #
+        # BOOTSTRAP GUARD, per path (corrects an earlier, WRONG claim that
+        # this workflow file only ever runs from base for a PR editing
+        # `.github/workflows/**`; that base-read behavior is
         # `pull_request_target`-only, and this workflow runs on plain
         # `pull_request`, which always executes the PR's OWN version of
-        # itself): base may genuinely lack a path this PR itself is
-        # introducing (verified for THIS PR: `.claude/skills/spec-grounded-
-        # review` does not exist at any pre-#76 commit, even though
-        # `.claude` itself — via `.claude/agents/*`, `.claude/skills/
-        # triage`, `.claude/skills/to-issues` — already does). An
-        # unconditional `rm -rf` + checkout-from-base would hard-fail
-        # (`git checkout` errors on a pathspec base doesn't have) and
-        # silently DELETE this PR's own legitimate first-time addition —
-        # either way, breaking THIS PR's own review run and stalling any
-        # auto-merge watching it. Guarding each path with `git cat-file -e
-        # <base>:<path>` first, and skipping (leaving the PR-head version
-        # in effect, logged) when absent, makes this PR's own bootstrap
-        # run succeed; the guard's "absent" branch stops firing, for good,
-        # the moment this PR merges and base always has these paths.
+        # itself): `git checkout <base> -- <path>` hard-fails (`git
+        # checkout` errors on a pathspec base doesn't have) for a path
+        # base genuinely lacks — which would break THIS PR's own review
+        # run outright and stall any auto-merge watching it, for THE ONE
+        # path this PR itself is legitimately introducing
+        # (`.claude/skills/spec-grounded-review`, verified absent at every
+        # pre-#76 commit, even though `.claude` itself — via `.claude/
+        # agents/*`, `.claude/skills/triage`, `.claude/skills/to-issues` —
+        # already exists there). Guarding each path with `git cat-file -e
+        # <base>:<path>` first avoids that hard failure — but the guard's
+        # OWN "absent" branch does NOT leave the PR-head version in place
+        # (round 4 finding, correcting an earlier version of this exact
+        # step): it deletes the path outright, since "absent at base"
+        # generally means nothing legitimate has EVER established it (see
+        # `restore_from_base`'s own comment, and its `.mcp.json` example —
+        # a path with no history in this repo at all, which must never
+        # survive a malicious PR's own first-time addition just because
+        # base "doesn't have it yet"). The ONE narrow exception where
+        # "absent means leave the PR version" is genuinely correct —
+        # `.claude/skills/spec-grounded-review`, THIS PR's own bootstrap
+        # case — is handled separately, by name, below; it self-closes
+        # the moment this PR merges and base always has that one path too.
         #
-        # `scripts/factory` is DELIBERATELY NOT restored here and stays
-        # PR-head: it IS covered by the publisher guard already (so a
+        # `scripts/factory` is DELIBERATELY EXCLUDED from this restore and
+        # stays PR-head: it IS covered by the publisher guard already (so a
         # factory-authored diff touching it is already rejected before merge
         # regardless), and a human-authored PR fixing a genuine runner bug
         # needs that fix to actually take effect when its own PR is
         # reviewed — restoring it from base would make a runner-bugfix PR
         # review itself against the OLD, buggy runner.
         #
-        # Verified end-to-end (both directions): simulated a malicious
-        # PR-head commit adding `.claude/settings.json` (a shell-command
-        # hook) and editing `CLAUDE.md`, confirmed both are gone after this
-        # step runs against an ALREADY-ESTABLISHED base (the steady state
-        # every PR after this one runs under); separately confirmed a base
-        # that genuinely lacks `.claude/skills/spec-grounded-review` (this
-        # PR's own bootstrap case) correctly falls through to the narrow
-        # exception below instead of deleting this PR's own legitimate
-        # content or failing the step outright.
+        # Verified end-to-end (round 4): simulated a malicious PR-head
+        # commit adding `.mcp.json` (a command-backed MCP server pointed
+        # at `curl`), adding `.claude/settings.json` (a `PreToolUse` hook
+        # curling `$GH_TOKEN`), editing `CLAUDE.md`, AND editing
+        # `scripts/factory/spec-grounding-runner.mts` — ran this exact
+        # restore sequence against an ALREADY-ESTABLISHED base (the steady
+        # state every PR after this one runs under) and confirmed: the
+        # `.mcp.json` and `.claude/settings.json` additions are both gone,
+        # the `CLAUDE.md` edit is reverted, the `scripts/factory` edit
+        # SURVIVES (deliberately PR-head), the legitimate skill content
+        # survives via the narrow exception, and `npm ci` + the runner
+        # script both still run correctly afterward. Separately re-verified
+        # (unchanged from the prior round) that a base genuinely lacking
+        # `.claude/skills/spec-grounded-review` (this PR's own bootstrap
+        # case) correctly falls through to the narrow exception below.
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -370,15 +412,36 @@ jobs:
               rm -rf -- "$restore_path"
               git checkout "$BASE_SHA" -- "$restore_path"
             else
-              echo "::notice::bootstrap: $restore_path not present at base ($BASE_SHA) -- PR-head version stays in effect for this run only; closes once this PR merges."
+              # Base genuinely lacks this path -- DELETE it outright, never
+              # leave the PR-head version in place (Codex finding, PR #76
+              # review, round 4 — a real gap this exact wording almost
+              # reopened: "absent at base" here means NOTHING LEGITIMATE
+              # has ever established this path at all, not "this PR is
+              # introducing something new" — verified concretely with
+              # `.mcp.json`, which exists nowhere in this repo's history
+              # yet, so an unconditional "leave PR version in effect" would
+              # let a malicious PR-added `.mcp.json` survive this step
+              # untouched, indefinitely, since base will never have it
+              # until some legitimate PR adds a real one first. The ONE
+              # deliberate exception to "absent means delete" is
+              # `.claude/skills/spec-grounded-review` specifically — THIS
+              # PR's own core purpose, re-applied by name in its own
+              # narrow step below, not handled here.
+              rm -rf -- "$restore_path"
+              echo "::notice::$restore_path not present at base ($BASE_SHA) -- removed outright (no legitimate content has ever existed for this path)."
             fi
           }
 
-          restore_from_base ".claude"
-          restore_from_base "CLAUDE.md"
-          restore_from_base "AGENTS.md"
-          restore_from_base "package.json"
-          restore_from_base "package-lock.json"
+          # Every cone path EXCEPT scripts/factory, read from the SAME
+          # sparse-checkout declaration the checkout step above already
+          # made -- see this step's own comment for why this must never go
+          # back to an enumerated list.
+          for cone_path in $(git sparse-checkout list); do
+            if [ "$cone_path" = "scripts/factory" ]; then
+              continue
+            fi
+            restore_from_base "$cone_path"
+          done
 
           # NARROW bootstrap exception, scoped to exactly this PR's own new
           # skill path (see the step's own comment above for the general
@@ -492,20 +555,75 @@ jobs:
           # requests no `id-token: write` — the OIDC exchange path is
           # never reached.)
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Fixes the read token's leak surface AT SOURCE, not by denying a
+          # path (Codex finding, PR #76 review, round 4, P1): without this,
+          # `prepareAgentMode()` embeds this job's own (read-only,
+          # short-lived) GH_TOKEN in PLAINTEXT into `.git/config`'s remote
+          # URL — the SAME mechanism `triage-issues.yml`'s own identical
+          # comment documents for its sibling agent-mode job. The
+          # `--disallowedTools "...,Read(.git/**),..."` deny below only
+          # blocks a LITERAL `.git/...` path string; a PR-added symlink
+          # (`some-file -> .git/config`) reads the SAME file content under
+          # a DIFFERENT path string the deny pattern never matches,
+          # sidestepping it entirely. `use_commit_signing: true` makes
+          # `prepareAgentMode()` skip `configureGitAuth()` (the ONLY
+          # function that ever writes the token into `.git/config`)
+          # altogether — verified by reading the pinned action's own
+          # source at this exact SHA (`src/modes/agent/index.ts`):
+          # `configureGitAuth()` runs only in the
+          # `else if (!useApiCommitSigning)` branch, so with this input set
+          # the token is NEVER placed in `.git/config` at all, for ANY
+          # symlink to expose — closing the vulnerability class, not one
+          # instance of it. (This CORRECTS an inference this codebase drew
+          # elsewhere — `triage-issues.yml`'s own comment claims
+          # `prepareAgentMode()` calls `configureGitAuth()`
+          # "unconditionally"; reading the actual source shows that's only
+          # true because that workflow happens to leave `use_commit_signing`
+          # unset, not because the function itself is unconditional — worth
+          # revisiting there too, out of scope for this PR.) The existing
+          # `Read(.git/**)`/`Grep(.git/**)` denies below stay as
+          # defense-in-depth regardless.
+          #
+          # Side effect verified in the same source read: setting this
+          # input also makes the action install an ADDITIONAL MCP server,
+          # `github_file_ops` (`mcp__github_file_ops__commit_files` /
+          # `__delete_files`), backed by this SAME read-only token — so
+          # even if reachable, an actual commit/delete call would 403 at
+          # the API layer regardless. Denied explicitly below anyway
+          # (defense-in-depth, matching `claude-review`'s own identical
+          # denial of these two tool names) rather than relying on the
+          # token-scope failure alone.
+          #
+          # Not live-fired against a real run (verified by source reading
+          # only, same limitation as this PR's earlier `edited`-trigger
+          # guard) — this repo has no throwaway probe wired for it yet.
+          use_commit_signing: true
           # Explicit allowlists, never '*' (the CVE this action-SHA pin
           # fixes was exactly an allowlist-bypass on bot/non-write-user
           # gating).
           #
-          # DELIBERATELY empty for now, not an oversight (Codex finding, PR
-          # #76 review — team-lead's disposition: intentional sequencing,
-          # not a fold): once a factory App bot identity starts opening
-          # PRs, this empty allowlist would reject that actor and this job
-          # would never review a factory-authored PR at all. The fix is
-          # NOT to widen this allowlist yet — it is to close the exfil path
-          # #47 (F1-S7) tracks FIRST, then add `roastpilot-factory[bot]`
-          # here (see `implement-patch-logic.mts`'s own identical
-          # allowlist-sequencing precedent for the same bot identity).
-          allowed_bots: ""
+          # `claude,claude[bot]` (Codex finding, PR #76 review, round 4 —
+          # DISTINCT from the factory-bot deferral below): mirrors
+          # `claude-review`'s own identical allowlist entry, above. A
+          # `synchronize` push made by the Claude GitHub App itself (e.g. a
+          # human re-running Claude Code locally against this PR) has actor
+          # `claude[bot]`; without this entry, this job would reject that
+          # actor and the spec gate would silently never re-run for that
+          # push, the same class of gap `claude-review`'s own comment on
+          # this exact allowlist already documents.
+          #
+          # `roastpilot-factory[bot]` is DELIBERATELY NOT added here yet,
+          # not an oversight (Codex finding, PR #76 review — team-lead's
+          # disposition: intentional sequencing, not a fold): once a
+          # factory App bot identity starts opening PRs, this allowlist's
+          # absence of that identity would reject it and this job would
+          # never review a factory-authored PR at all. The fix is NOT to
+          # widen this allowlist for that bot yet — it is to close the
+          # exfil path #47 (F1-S7) tracks FIRST, then add
+          # `roastpilot-factory[bot]` here (see `implement-patch-logic.mts`'s
+          # own identical allowlist-sequencing precedent for the same bot
+          # identity).
+          allowed_bots: 'claude,claude[bot]'
           allowed_non_write_users: ""
           show_full_output: false
           # Grant Edit ONLY for the one file this skill is allowed to
@@ -517,7 +635,14 @@ jobs:
           # to Read it and echo it back in a rationale — the same
           # token-leak path `triage-issues.yml`'s own identical deny
           # closes).
-          claude_args: '--allowedTools "Edit(review-output/spec-grounding-verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**)"'
+          # `mcp__github_file_ops__commit_files`/`__delete_files` denied
+          # explicitly (round 4): `use_commit_signing: true` above installs
+          # this MCP server as a side effect; see that input's own comment
+          # for why denying these two tool names here is defense-in-depth,
+          # not the primary control (the token itself lacks `contents:
+          # write`, matching `claude-review`'s own identical denial of the
+          # same two tool names).
+          claude_args: '--allowedTools "Edit(review-output/spec-grounding-verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"'
           prompt: |
             Use the spec-grounded-review skill at
             .claude/skills/spec-grounded-review/SKILL.md to review PR
