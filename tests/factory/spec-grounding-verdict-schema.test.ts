@@ -333,6 +333,37 @@ describe("validateSpecGroundingVerdict — rejects malformed/adversarial per-fin
     expect(result.ok).toBe(true);
   });
 
+  it("REJECTS a rationale that is pure zero-width space (U+200B) -- category Cf, so neither trim() nor hasDisallowedControlCharacter's \\p{Cc}-only check catches it, and it renders as a completely EMPTY rationale to a human reviewer (Codex finding, PR #74 review round 3, FOLD 2)", () => {
+    const result = validateSpecGroundingVerdict(validVerdict([validFinding({ rationale: "\u200b\u200b\u200b" })]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/no visible character/);
+    }
+  });
+
+  it("REJECTS a rationale that is pure default-ignorable content of a DIFFERENT shape too (a zero-width joiner alone, with no base character to join)", () => {
+    const result = validateSpecGroundingVerdict(validVerdict([validFinding({ rationale: "\u200d\u200d" })]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/no visible character/);
+    }
+  });
+
+  it("REJECTS a rationale that is pure exotic whitespace (NO-BREAK SPACE, U+00A0) -- confirms the visible-character check still catches whitespace-only content beyond what trim() alone covers", () => {
+    const result = validateSpecGroundingVerdict(validVerdict([validFinding({ rationale: "\u00a0\u00a0\u00a0" })]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/no visible character|must be a non-empty string/);
+    }
+  });
+
+  it("ACCEPTS a rationale containing a Zero Width Joiner as part of a real multi-codepoint emoji sequence, alongside real text -- NOT a blanket rejection of every default-ignorable character, only of a rationale where NOTHING visible survives (Codex finding, PR #74 review round 3, FOLD 2: the finding's rejected alternative -- banning all category Cf outright -- would have broken this legitimate case)", () => {
+    const result = validateSpecGroundingVerdict(
+      validVerdict([validFinding({ rationale: `The diff handles the family-emoji case correctly: 👨${"\u200d"}👩${"\u200d"}👧.` })]),
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it("REJECTS a duplicate criterionId across two findings, rather than silently picking a first-wins/last-wins resolution", () => {
     const result = validateSpecGroundingVerdict(
       validVerdict([
@@ -378,6 +409,40 @@ describe("parseAndValidateVerdict — THE entry point for reading a raw verdict 
     const raw = Buffer.from(JSON.stringify(validVerdict()), "utf8");
     const result = parseAndValidateVerdict(raw);
     expect(result.ok).toBe(true);
+  });
+
+  it("REJECTS a Buffer containing malformed UTF-8 (a truncated multi-byte sequence) inside an otherwise well-formed verdict, WITHOUT reaching a parse-as-ok result (Codex finding, PR #74 review round 3, FOLD 1: Buffer.prototype.toString('utf8') silently replaces an invalid byte sequence with U+FFFD rather than failing, so without this check a corrupted artifact would decode into a DIFFERENT, silently-mutated string and could go on to parse and validate successfully -- directly violating the fail-closed promise for a corrupted artifact)", () => {
+    // A lone 0xC3 (the start of a valid 2-byte UTF-8 sequence) immediately
+    // followed by a `"` (0x22) -- not a valid continuation byte (those are
+    // 0x80-0xBF) -- inside an otherwise well-formed verdict's rationale
+    // field. If this were decoded with the silently-lossy
+    // Buffer.toString("utf8") and then parsed, it would produce a valid
+    // (if slightly mangled) JSON string and PASS validation entirely.
+    const prefix = Buffer.from(
+      '{"findings":[{"criterionId":"12:0","satisfied":false,"rationale":"a',
+      "utf8",
+    );
+    const suffix = Buffer.from('"}]}', "utf8");
+    const raw = Buffer.concat([prefix, Buffer.from([0xc3]), suffix]);
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([expect.stringMatching(/not valid UTF-8/)]);
+    }
+  });
+
+  it("does NOT run the UTF-8 well-formedness check on a string argument -- a string is, by this function's own contract, already UTF-8-decoded text with no raw-byte-validity question left to ask", () => {
+    // A JS string containing an unpaired surrogate is perfectly valid AS A
+    // JS STRING (it just isn't representable as well-formed UTF-8 bytes) --
+    // this must reach field-level validation (and be rejected THERE, by
+    // hasUnpairedSurrogate, not by a UTF-8 check that doesn't apply to
+    // strings at all).
+    const raw = JSON.stringify(validVerdict([validFinding({ rationale: "Looks fine \ud800 but isn't." })]));
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/unpaired UTF-16 surrogate/);
+    }
   });
 
   it("REJECTS an over-budget RAW artifact WITHOUT ever calling JSON.parse on it (Codex finding, PR #74 review round 2, FOLD 2: validateSpecGroundingVerdict alone can't catch this, since it only ever sees an already-parsed value)", () => {

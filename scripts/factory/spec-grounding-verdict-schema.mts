@@ -16,6 +16,15 @@
  * directly unit-testable against adversarial input (a prompt-injected or
  * malformed verdict must be rejected, never acted on).
  *
+ * ONE deliberate exception to the numeric-constants' own
+ * zero-dependency precedent (see {@link MAX_FINDINGS}'s docstring): this
+ * module imports `spec-grounding-logic.mts`'s `UNTRUSTED_DATA_BREAKOUT_PATTERN`
+ * (see {@link hasNoVisibleCharacter}) rather than re-deriving an
+ * equivalent character class locally — a shared SECURITY-CRITICAL
+ * character class must stay literally shared code, not two
+ * independently-drifting copies (the exact class of bug three prior
+ * delimiter-breakout-guard review rounds were caused by, PR #72).
+ *
  * DELIBERATELY MINIMAL, per team-lead's Q2 hardening refinement (the #12
  * 3b PR-plan sign-off, carried through slice 3b-i's trusted spine and
  * now this schema): the agent contributes ONLY `criterionId`,
@@ -38,6 +47,10 @@
  * same way `triage-verdict-schema.mts`'s format validation stays separate
  * from `apply-triage-verdict-logic.mts`'s label-computation logic.
  */
+
+import { isUtf8 } from "node:buffer";
+
+import { UNTRUSTED_DATA_BREAKOUT_PATTERN } from "./spec-grounding-logic.mts";
 
 /**
  * Upper bound on the number of findings a verdict may contain. Set to
@@ -207,6 +220,42 @@ function hasUnpairedSurrogate(text: string): boolean {
 }
 
 /**
+ * Detects a rationale with NO visible character left at all, after
+ * removing every character {@link UNTRUSTED_DATA_BREAKOUT_PATTERN}
+ * matches — the SAME shared character class (category C, default-
+ * ignorable, and whitespace) `spec-grounding-logic.mts`'s own delimiter-
+ * breakout guard uses, imported here rather than re-derived, so this
+ * check can never independently drift from that primitive the way the
+ * delimiter guards once did across three review rounds (Codex finding, PR
+ * #74 review round 3, FOLD 2).
+ *
+ * A rationale of pure zero-width space (U+200B, category Cf) would
+ * otherwise pass every existing check: `String.prototype.trim()` only
+ * strips `White_Space` plus a small fixed set, not `Cf`, and
+ * {@link hasDisallowedControlCharacter}'s `\p{Cc}`-only pattern doesn't
+ * cover `Cf` either — so it renders as a completely EMPTY rationale to
+ * the human reviewer, defeating the mandatory-rationale intent this
+ * schema exists to enforce.
+ *
+ * Deliberately NOT a blanket rejection of every `\p{Cf}` character
+ * anywhere in the text (the finding's OTHER, rejected option): a
+ * legitimate rationale can contain a Zero Width Joiner (U+200D, also
+ * `Cf`) as part of a real multi-codepoint emoji sequence (e.g. a family
+ * emoji) alongside plenty of real, visible text — banning `Cf` outright
+ * would reject that legitimate content as collateral damage. This check
+ * only rejects a rationale where NOTHING survives the strip, never one
+ * that merely CONTAINS a default-ignorable character somewhere alongside
+ * real content.
+ *
+ * @param text - The candidate `rationale` value.
+ * @returns Whether `text` has no visible character left after stripping
+ *   every {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} match.
+ */
+function hasNoVisibleCharacter(text: string): boolean {
+  return text.replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, "").length === 0;
+}
+
+/**
  * The exact shape `spec-grounding-runner-logic.mts`'s `buildCriteriaSpine`
  * constructs (`${issueNumber}:${index}`) — validated independently here
  * (this module does not import that one, matching the zero-dependency
@@ -329,6 +378,11 @@ function validateFinding(
     );
   } else if (hasUnpairedSurrogate(rationale)) {
     errors.push(`findings[${index}].rationale contains an unpaired UTF-16 surrogate`);
+  } else if (hasNoVisibleCharacter(rationale)) {
+    errors.push(
+      `findings[${index}].rationale contains no visible character` +
+        ` (only whitespace, control, or default-ignorable content)`,
+    );
   } else {
     validRationale = rationale;
   }
@@ -450,19 +504,40 @@ export function validateSpecGroundingVerdict(raw: unknown): SpecGroundingVerdict
  * BEFORE calling `JSON.parse` at all, so an over-budget artifact is
  * rejected without ever being parsed.
  *
+ * Also validates a `Buffer` argument is well-formed UTF-8 BEFORE decoding
+ * it (Codex finding, PR #74 review round 3, FOLD 1): `Buffer.prototype
+ * .toString("utf8")` silently REPLACES any malformed byte sequence with
+ * U+FFFD (the Unicode replacement character) rather than failing —
+ * without this check, a corrupted or truncated artifact (e.g. a byte
+ * sequence cut off mid-multi-byte-character) would decode into a
+ * DIFFERENT, silently-mutated string, which could then go on to parse and
+ * validate successfully, directly violating this module's fail-closed
+ * promise for a corrupted artifact. `node:buffer`'s `isUtf8` runs against
+ * the RAW bytes, before any decoding, so this is caught as its own
+ * distinct failure rather than silently becoming (or masking) some other
+ * validation outcome. Not applicable to a `string` argument — by this
+ * function's own contract, a `string` is already UTF-8-decoded text, so
+ * there is no raw-byte-validity question left to ask of it.
+ *
  * @param raw - The verdict artifact's raw bytes, exactly as read from its
  *   source — a `string` (already UTF-8-decoded text) or a `Buffer` (not
- *   yet decoded; this function measures its byte length directly, so an
- *   over-budget artifact is never even decoded, let alone parsed).
+ *   yet decoded; this function measures its byte length AND validates its
+ *   UTF-8 well-formedness directly on the bytes, so an over-budget or
+ *   malformed artifact is never even decoded, let alone parsed).
  * @returns The same discriminated result {@link validateSpecGroundingVerdict}
  *   returns — `{ ok: true, verdict }` or `{ ok: false, errors }` — with a
- *   payload-too-large or a malformed-JSON result produced WITHOUT ever
- *   calling `JSON.parse` on an over-budget artifact.
+ *   payload-too-large, a malformed-UTF-8, or a malformed-JSON result
+ *   produced WITHOUT ever calling `JSON.parse` on an over-budget or
+ *   invalid-UTF-8 artifact.
  */
 export function parseAndValidateVerdict(raw: string | Buffer): SpecGroundingVerdictValidationResult {
   const rawBytes = Buffer.byteLength(raw, "utf8");
   if (rawBytes > MAX_PAYLOAD_BYTES) {
     return { ok: false, errors: [`payload too large: ${rawBytes} bytes exceeds ${MAX_PAYLOAD_BYTES}`] };
+  }
+
+  if (typeof raw !== "string" && !isUtf8(raw)) {
+    return { ok: false, errors: ["payload is not valid UTF-8"] };
   }
 
   let parsed: unknown;
