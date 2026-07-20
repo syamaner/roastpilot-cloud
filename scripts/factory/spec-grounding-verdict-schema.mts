@@ -6,7 +6,11 @@
  * of this shape to a file (via the ONE narrow `Edit` grant its tool
  * policy allows); the privileged step in slice 3b-iii (not yet built)
  * reads that file back and MUST run it through
- * {@link validateSpecGroundingVerdict} before acting on it. Mirrors
+ * {@link parseAndValidateVerdict} — THE entry point for reading the raw
+ * artifact — before acting on it (see that function's own docstring for
+ * why the RAW-bytes check it does before parsing is not optional;
+ * {@link validateSpecGroundingVerdict} alone, on an already-parsed value,
+ * cannot bound the cost of parsing itself). Mirrors
  * `triage-verdict-schema.mts`'s shape and discipline exactly: nothing
  * here calls the network or touches the filesystem, so it is pure and
  * directly unit-testable against adversarial input (a prompt-injected or
@@ -96,21 +100,111 @@ export const MAX_CRITERION_ID_LENGTH = 32;
  *   false,"rationale":"…"}`, the `,`/`[`/`]` around the array, and the
  *   top-level `{"findings":…}` wrapper) adds a fixed, small overhead per
  *   entry — measured directly (see this constant's own boundary test)
- *   rather than hand-derived, since JSON-escaping cost varies by content
- *   (a quote-heavy rationale escapes to 2 bytes/char, LESS than a CJK
- *   rationale's 3 bytes/char, so CJK is the dominant worst case here, not
- *   quotes).
+ *   rather than hand-derived, since JSON-escaping cost varies by content.
  *
- * `MAX_FINDINGS` (1000) × the true CJK worst case measured this way is
- * ~6,084,014 bytes (~6.08MB) — verified directly by constructing that
- * exact payload and measuring `Buffer.byteLength(JSON.stringify(…),
- * "utf8")` (this constant's own boundary test does the same
- * construction). `8,000,000` keeps a real margin above that measured
- * figure while staying a trivial size to parse, so it remains a genuine
- * parse-cost bound rather than a tight fit that could itself start
- * rejecting legitimate verdicts if wording or content shifts slightly.
+ * A rationale's WORST-CASE escaping cost is bounded by CONTENT, not just
+ * length, and this constant's derivation only holds for content this
+ * module actually allows (Codex finding, PR #74 review round 2, FOLD 1 —
+ * a real gap one level deeper than the first fold: a raw control
+ * character or an unpaired surrogate `JSON.stringify`s to a 6-byte
+ * `\uXXXX` escape, WORSE than a CJK character's 3-bytes-per-unit worst
+ * case, so a rationale satisfying every field-level cap as originally
+ * written could still push the true total past `MAX_PAYLOAD_BYTES` —
+ * `MAX_FINDINGS` × `MAX_RATIONALE_LENGTH` control characters ≈ 12.1MB.
+ * Rather than chase the ceiling to match that, {@link hasDisallowedControlCharacter}
+ * and {@link hasUnpairedSurrogate} now reject that content at the field
+ * level — content no legitimate agent rationale would ever contain
+ * anyway). With that content excluded, the CJK case (one UTF-16 unit,
+ * the maximum 3 UTF-8 bytes) is the true worst LEGAL payload:
+ * `MAX_FINDINGS` (1000) × that measured worst case is ~6,084,014 bytes
+ * (~6.08MB) — verified directly by constructing that exact payload and
+ * measuring `Buffer.byteLength(JSON.stringify(…), "utf8")` (this
+ * constant's own boundary test does the same construction). `8,000,000`
+ * keeps a real margin above that measured figure while staying a trivial
+ * size to parse, so it remains a genuine parse-cost bound rather than a
+ * tight fit that could itself start rejecting legitimate verdicts if
+ * wording or content shifts slightly.
+ *
+ * This constant only bounds an ALREADY-PARSED value's re-serialized size
+ * (see {@link validateSpecGroundingVerdict}'s own docstring) — reading an
+ * untrusted verdict artifact off disk must go through
+ * {@link parseAndValidateVerdict} instead, which checks the RAW artifact
+ * bytes against this same constant BEFORE ever calling `JSON.parse`.
  */
 export const MAX_PAYLOAD_BYTES = 8_000_000;
+
+/**
+ * Characters {@link hasDisallowedControlCharacter} treats as legitimate in
+ * a multi-line `rationale` — an ordinary newline and an ordinary tab, and
+ * nothing else. Every other `\p{Cc}` control character (Codex finding, PR
+ * #74 review round 2, FOLD 1 — see {@link MAX_PAYLOAD_BYTES}'s own
+ * docstring for the encoding argument this closes) is rejected, including
+ * `\r`: a rationale legitimately needs to wrap onto multiple lines, which
+ * `\n` alone already provides, so accepting `\r` too would only widen the
+ * accepted set without adding anything a real rationale needs.
+ */
+const ALLOWED_RATIONALE_CONTROL_CHARACTERS = new Set<string>(["\n", "\t"]);
+
+/**
+ * Detects a `\p{Cc}` control character in `text` OTHER than the ones
+ * {@link ALLOWED_RATIONALE_CONTROL_CHARACTERS} permits.
+ *
+ * Closes an encoding-cost gap `MAX_PAYLOAD_BYTES`'s per-field-cap
+ * derivation didn't account for (Codex finding, PR #74 review round 2,
+ * FOLD 1): `JSON.stringify` escapes a raw control character as a 6-byte
+ * `\uXXXX` sequence — worse than a CJK character's already-worst-case
+ * 3-bytes-per-UTF-16-unit expansion — so a `rationale` field satisfying
+ * every OTHER documented cap could still push the true worst-case
+ * serialized size well past `MAX_PAYLOAD_BYTES` (`MAX_FINDINGS` ×
+ * `MAX_RATIONALE_LENGTH` control characters ≈ 12.1MB) purely through
+ * JSON escaping. Rather than chase the ceiling upward again, this
+ * excludes the pathological CONTENT at the field level instead: a
+ * rationale full of NUL bytes (or similar) is never legitimate agent
+ * output for a field a human is meant to read, so rejecting it closes the
+ * encoding gap AND keeps garbage out of a human-read field in one move.
+ *
+ * @param text - The candidate `rationale` value.
+ * @returns Whether `text` contains any disallowed control character.
+ */
+function hasDisallowedControlCharacter(text: string): boolean {
+  for (const match of text.matchAll(/\p{Cc}/gu)) {
+    if (!ALLOWED_RATIONALE_CONTROL_CHARACTERS.has(match[0])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detects an unpaired UTF-16 surrogate code unit in `text` — a lone high
+ * surrogate (U+D800–U+DBFF) not immediately followed by a matching low
+ * surrogate, or a lone low surrogate (U+DC00–U+DFFF) not immediately
+ * preceded by one (Codex finding, PR #74 review round 2, FOLD 1 — the
+ * same encoding-cost reasoning as {@link hasDisallowedControlCharacter}:
+ * `JSON.stringify` escapes an unpaired surrogate as a 6-byte `\uXXXX`
+ * sequence, and an unpaired surrogate is never legitimate agent output —
+ * it cannot represent any real character on its own).
+ *
+ * @param text - The candidate `rationale` value.
+ * @returns Whether `text` contains any unpaired surrogate code unit.
+ */
+function hasUnpairedSurrogate(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) {
+        return true;
+      }
+      i++; // Skip the low surrogate this high surrogate correctly pairs with.
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      // A low surrogate reached WITHOUT having been skipped by a preceding
+      // high-surrogate branch above is, by construction, unpaired.
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * The exact shape `spec-grounding-runner-logic.mts`'s `buildCriteriaSpine`
@@ -223,28 +317,52 @@ function validateFinding(
   }
 
   const rationale = raw.rationale;
+  let validRationale: string | null = null;
   if (typeof rationale !== "string" || rationale.trim().length === 0) {
     errors.push(`findings[${index}].rationale must be a non-empty string`);
   } else if (rationale.length > MAX_RATIONALE_LENGTH) {
     errors.push(`findings[${index}].rationale exceeds ${MAX_RATIONALE_LENGTH} characters (${rationale.length})`);
+  } else if (hasDisallowedControlCharacter(rationale)) {
+    errors.push(
+      `findings[${index}].rationale contains a disallowed control character` +
+        ` (only ordinary newline "\\n" and tab "\\t" are permitted)`,
+    );
+  } else if (hasUnpairedSurrogate(rationale)) {
+    errors.push(`findings[${index}].rationale contains an unpaired UTF-16 surrogate`);
+  } else {
+    validRationale = rationale;
   }
 
-  if (
-    validCriterionId === null ||
-    typeof satisfied !== "boolean" ||
-    typeof rationale !== "string" ||
-    rationale.trim().length === 0 ||
-    rationale.length > MAX_RATIONALE_LENGTH
-  ) {
+  if (validCriterionId === null || typeof satisfied !== "boolean" || validRationale === null) {
     return null;
   }
 
-  return { criterionId: validCriterionId, satisfied, rationale };
+  return { criterionId: validCriterionId, satisfied, rationale: validRationale };
 }
 
 /**
  * Validates a raw (untrusted, possibly prompt-injected) spec-grounding
  * verdict against the JSON contract described above.
+ *
+ * NOT a resource bound on READING an untrusted artifact (Codex finding,
+ * PR #74 review round 2, FOLD 2): this function receives an
+ * ALREADY-PARSED JavaScript value. Its own `MAX_PAYLOAD_BYTES` check
+ * below re-serializes that value with a fresh `JSON.stringify` to measure
+ * it — useful as a defense-in-depth sanity check, but NOT a substitute
+ * for bounding the cost of `JSON.parse` itself: an artifact that is
+ * gigabytes of insignificant whitespace, or bloated with duplicate JSON
+ * keys `JSON.parse` silently collapses to their last value, parses down
+ * to a small in-memory value and would PASS this function's own check —
+ * even though the memory and CPU `MAX_PAYLOAD_BYTES` exists to bound was
+ * already spent producing that value. {@link parseAndValidateVerdict} is
+ * THE documented entry point for reading an untrusted verdict artifact
+ * (e.g. off disk, in slice 3b-iii): it checks the RAW artifact's own byte
+ * length against `MAX_PAYLOAD_BYTES` BEFORE calling `JSON.parse` at all,
+ * which is the only place that check can actually prevent the resource
+ * cost it exists to bound. Call this function directly only when the
+ * caller already holds an in-memory, already-parsed value obtained some
+ * other, already-size-bounded way (e.g. a unit test constructing a value
+ * directly — never a raw artifact read from an untrusted source).
  *
  * @param raw - The parsed JSON value read from the verdict artifact slice
  *   3b-ii-c's read-only review agent wrote.
@@ -316,4 +434,46 @@ export function validateSpecGroundingVerdict(raw: unknown): SpecGroundingVerdict
   }
 
   return { ok: true, verdict: { findings: validatedFindings } };
+}
+
+/**
+ * Reads a verdict artifact's RAW bytes and validates it — THE documented
+ * entry point for reading an untrusted verdict artifact (e.g. off disk,
+ * slice 3b-iii's own upcoming responsibility), never `JSON.parse` +
+ * {@link validateSpecGroundingVerdict} called directly on the result
+ * (Codex finding, PR #74 review round 2, FOLD 2 — see
+ * {@link validateSpecGroundingVerdict}'s own docstring for the full
+ * reasoning: that function's internal byte check runs AFTER parsing, on
+ * an already-parsed value's re-serialization, so it cannot bound the cost
+ * `JSON.parse` itself already paid by the time it runs). This function
+ * checks the RAW artifact's own byte length against `MAX_PAYLOAD_BYTES`
+ * BEFORE calling `JSON.parse` at all, so an over-budget artifact is
+ * rejected without ever being parsed.
+ *
+ * @param raw - The verdict artifact's raw bytes, exactly as read from its
+ *   source — a `string` (already UTF-8-decoded text) or a `Buffer` (not
+ *   yet decoded; this function measures its byte length directly, so an
+ *   over-budget artifact is never even decoded, let alone parsed).
+ * @returns The same discriminated result {@link validateSpecGroundingVerdict}
+ *   returns — `{ ok: true, verdict }` or `{ ok: false, errors }` — with a
+ *   payload-too-large or a malformed-JSON result produced WITHOUT ever
+ *   calling `JSON.parse` on an over-budget artifact.
+ */
+export function parseAndValidateVerdict(raw: string | Buffer): SpecGroundingVerdictValidationResult {
+  const rawBytes = Buffer.byteLength(raw, "utf8");
+  if (rawBytes > MAX_PAYLOAD_BYTES) {
+    return { ok: false, errors: [`payload too large: ${rawBytes} bytes exceeds ${MAX_PAYLOAD_BYTES}`] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+  } catch (err) {
+    return {
+      ok: false,
+      errors: [`payload is not valid JSON: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+
+  return validateSpecGroundingVerdict(parsed);
 }

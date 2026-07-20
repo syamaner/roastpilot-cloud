@@ -4,6 +4,7 @@ import {
   MAX_FINDINGS,
   MAX_PAYLOAD_BYTES,
   MAX_RATIONALE_LENGTH,
+  parseAndValidateVerdict,
   validateSpecGroundingVerdict,
 } from "../../scripts/factory/spec-grounding-verdict-schema.mts";
 
@@ -102,6 +103,13 @@ describe("validateSpecGroundingVerdict — accepts well-formed verdicts", () => 
       MAX_FINDINGS * MAX_RATIONALE_LENGTH,
     );
     const result = validateSpecGroundingVerdict(verdict);
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a rationale containing ordinary newlines and tabs -- legitimate in a multi-line rationale (F1-S9 slice 3b-ii-b, PR #74 review round 2, FOLD 1: only these two control characters are permitted, everything else in \\p{Cc} is rejected)", () => {
+    const result = validateSpecGroundingVerdict(
+      validVerdict([validFinding({ rationale: "Line one.\nLine two, after a tab:\tindented detail." })]),
+    );
     expect(result.ok).toBe(true);
   });
 });
@@ -281,6 +289,50 @@ describe("validateSpecGroundingVerdict — rejects malformed/adversarial per-fin
     }
   });
 
+  it.each([
+    ["NUL, U+0000", "\u0000"],
+    ["BACKSPACE, U+0008", "\u0008"],
+    ["ESCAPE, U+001B", "\u001b"],
+    ["carriage return, U+000D -- deliberately REJECTED even though it is whitespace-adjacent (a rationale only needs \\n to wrap lines)", "\r"],
+    ["DELETE, U+007F", "\u007f"],
+  ])(
+    "REJECTS a rationale containing a disallowed control character, %s (Codex finding, PR #74 review round 2, FOLD 1: JSON.stringify escapes a raw control character as a 6-byte \\uXXXX sequence, worse than a CJK character's 3-bytes-per-unit worst case -- excluded at the field level rather than chasing MAX_PAYLOAD_BYTES's ceiling upward again)",
+    (_label, controlChar) => {
+      const result = validateSpecGroundingVerdict(
+        validVerdict([validFinding({ rationale: `Looks fine${controlChar} but isn't.` })]),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.join(" ")).toMatch(/disallowed control character/);
+      }
+    },
+  );
+
+  it("REJECTS a rationale containing an unpaired high surrogate", () => {
+    const result = validateSpecGroundingVerdict(
+      validVerdict([validFinding({ rationale: "Looks fine \ud800 but isn't." })]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/unpaired UTF-16 surrogate/);
+    }
+  });
+
+  it("REJECTS a rationale containing an unpaired low surrogate", () => {
+    const result = validateSpecGroundingVerdict(
+      validVerdict([validFinding({ rationale: "Looks fine \udc00 but isn't." })]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/unpaired UTF-16 surrogate/);
+    }
+  });
+
+  it("does NOT flag a properly-paired surrogate pair (a real astral character, e.g. an emoji) as unpaired", () => {
+    const result = validateSpecGroundingVerdict(validVerdict([validFinding({ rationale: "Looks fine 🎉 celebratory emoji." })]));
+    expect(result.ok).toBe(true);
+  });
+
   it("REJECTS a duplicate criterionId across two findings, rather than silently picking a first-wins/last-wins resolution", () => {
     const result = validateSpecGroundingVerdict(
       validVerdict([
@@ -306,6 +358,71 @@ describe("validateSpecGroundingVerdict — rejects malformed/adversarial per-fin
       expect(result.errors.length).toBeGreaterThanOrEqual(2);
       expect(result.errors.join(" ")).toMatch(/findings\[0\]/);
       expect(result.errors.join(" ")).toMatch(/findings\[1\]/);
+    }
+  });
+});
+
+describe("parseAndValidateVerdict — THE entry point for reading a raw verdict artifact (F1-S9 slice 3b-ii-b, PR #74 review round 2, FOLD 2)", () => {
+  it("parses and validates a well-formed raw JSON string under MAX_PAYLOAD_BYTES", () => {
+    const raw = JSON.stringify(validVerdict());
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.verdict.findings).toEqual([
+        { criterionId: "12:0", satisfied: false, rationale: "The diff does not add the requested validation." },
+      ]);
+    }
+  });
+
+  it("parses and validates a well-formed raw JSON Buffer, not just a string", () => {
+    const raw = Buffer.from(JSON.stringify(validVerdict()), "utf8");
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(true);
+  });
+
+  it("REJECTS an over-budget RAW artifact WITHOUT ever calling JSON.parse on it (Codex finding, PR #74 review round 2, FOLD 2: validateSpecGroundingVerdict alone can't catch this, since it only ever sees an already-parsed value)", () => {
+    // Padding whitespace BEFORE a small, otherwise well-formed verdict --
+    // if this were parsed first, it would parse down to a TINY in-memory
+    // value and pass validateSpecGroundingVerdict's own byte check (which
+    // re-serializes the ALREADY-PARSED value, discarding the padding).
+    // The raw artifact itself is still over MAX_PAYLOAD_BYTES, so this
+    // must be rejected on the RAW bytes, before any parsing is attempted.
+    const raw = " ".repeat(MAX_PAYLOAD_BYTES + 1000) + JSON.stringify(validVerdict());
+    expect(Buffer.byteLength(raw, "utf8")).toBeGreaterThan(MAX_PAYLOAD_BYTES);
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([expect.stringMatching(/payload too large/)]);
+    }
+  });
+
+  it("REJECTS an over-budget RAW artifact even when it isn't even valid JSON -- proof the byte check runs BEFORE JSON.parse is ever attempted, not just before validation", () => {
+    // Deliberately unparseable (an unterminated object) -- if JSON.parse
+    // ran on this at all, it would throw a syntax error, not a "payload
+    // too large" error. Getting "payload too large" back proves the byte
+    // check short-circuited before JSON.parse was ever called.
+    const raw = " ".repeat(MAX_PAYLOAD_BYTES + 1000) + '{"findings": [';
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([expect.stringMatching(/payload too large/)]);
+    }
+  });
+
+  it("rejects a raw artifact that is valid UTF-8 text but not valid JSON, when it IS within MAX_PAYLOAD_BYTES", () => {
+    const result = parseAndValidateVerdict("{ this is not valid JSON");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([expect.stringMatching(/not valid JSON/)]);
+    }
+  });
+
+  it("still runs full field-level validation on an under-budget, syntactically-valid artifact -- a malformed verdict is rejected with the SAME errors validateSpecGroundingVerdict itself would produce", () => {
+    const raw = JSON.stringify(validVerdict([validFinding({ kind: "non-closing" })]));
+    const result = parseAndValidateVerdict(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toMatch(/unexpected key.*kind/);
     }
   });
 });
