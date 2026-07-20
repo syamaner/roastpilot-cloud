@@ -100,6 +100,56 @@ describe("githubRequest", () => {
     });
     expect(init?.body).toBe(JSON.stringify({ a: 1 }));
   });
+
+  it("defaults to the JSON media type when `accept` is not overridden", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response(JSON.stringify({}), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await githubRequest("tok", "GET", "/ok");
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init?.headers).toMatchObject({ Accept: "application/vnd.github+json" });
+  });
+
+  it("sends a custom `accept` header when provided (F1-S9 slice 3b — the PR diff media type)", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response("diff --git a/x b/x\n", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await githubRequest("tok", "GET", "/ok", undefined, {
+      accept: "application/vnd.github.v3.diff",
+      responseType: "text",
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init?.headers).toMatchObject({ Accept: "application/vnd.github.v3.diff" });
+  });
+
+  it('returns the response as raw text when `responseType: "text"` is requested, instead of parsing it as JSON', async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        // Deliberately NOT valid JSON -- a raw unified diff never is. A
+        // `responseType: "json"` (or default) call against this same body
+        // would throw inside `response.json()`; this test's whole point is
+        // proving the text path never attempts that parse at all.
+        new Response("diff --git a/x b/x\n+added line\n", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await githubRequest<string>("tok", "GET", "/ok", undefined, {
+      responseType: "text",
+    });
+
+    expect(result).toBe("diff --git a/x b/x\n+added line\n");
+  });
 });
 
 describe("isRateLimitedResponse (F1-S10, factory.md §13 point 8)", () => {

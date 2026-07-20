@@ -181,6 +181,22 @@ export interface GithubRequestOptions {
   readonly maxRateLimitRetries?: number;
   /** Overrides the real `setTimeout`-based wait — test-only. */
   readonly sleepFn?: (ms: number) => Promise<void>;
+  /**
+   * Overrides the default `Accept: application/vnd.github+json` header
+   * (F1-S9 slice 3b, issue #12): the pulls endpoint serves the raw unified
+   * diff, instead of the normal JSON resource, when asked with
+   * `application/vnd.github.v3.diff` — slice 3b-i's runner needs exactly
+   * that to fetch a PR's diff text. Defaults to the JSON media type, so
+   * every existing caller is unaffected.
+   */
+  readonly accept?: string;
+  /**
+   * Whether to parse the response body as JSON (the default, and every
+   * existing caller's behavior) or return it as raw text (F1-S9 slice 3b —
+   * the diff fetch above; GitHub's diff media type is plain text, not
+   * JSON, and `response.json()` would throw trying to parse it).
+   */
+  readonly responseType?: "json" | "text";
 }
 
 /**
@@ -218,9 +234,11 @@ export function requireEnv(name: string): string {
  * @param method - The HTTP method.
  * @param path - The API path, e.g. `/repos/{owner}/{repo}/issues/{n}`.
  * @param body - An optional JSON-serializable request body.
- * @param options - Test-only retry overrides; see
- *   {@link GithubRequestOptions}.
- * @returns The parsed JSON response, or `undefined` for a 204.
+ * @param options - Retry overrides (test-only), and the `accept`/
+ *   `responseType` overrides a non-JSON endpoint (e.g. a PR diff) needs;
+ *   see {@link GithubRequestOptions}.
+ * @returns The parsed JSON response (or raw text, with
+ *   `responseType: "text"`), or `undefined` for a 204.
  * @throws If the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
  *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
@@ -235,13 +253,15 @@ export async function githubRequest<T>(
 ): Promise<T> {
   const maxRetries = options?.maxRateLimitRetries ?? MAX_RATE_LIMIT_RETRIES;
   const sleepFn = options?.sleepFn ?? sleep;
+  const accept = options?.accept ?? "application/vnd.github+json";
+  const responseType = options?.responseType ?? "json";
 
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(`${GITHUB_API}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
+        Accept: accept,
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
       },
@@ -286,6 +306,9 @@ export async function githubRequest<T>(
     }
     if (response.status === 204) {
       return undefined as T;
+    }
+    if (responseType === "text") {
+      return (await response.text()) as T;
     }
     return (await response.json()) as T;
   }

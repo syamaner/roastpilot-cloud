@@ -1254,7 +1254,18 @@ const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA\s*>/gi;
 // number sign U+0600) the two together close the whole invisible-
 // breakout class by construction, not by enumerating this round's three
 // named characters and waiting for the next.
-const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+//
+// Exported (F1-S9 slice 3b, issue #12): slice 3b-i's runner reuses this,
+// {@link EXOTIC_WHITESPACE_PATTERN}, and {@link ASCII_WHITESPACE_CHARS} to
+// build a SIBLING delimiter-breakout guard for a different untrusted
+// surface (the PR diff, wrapped in its own `UNTRUSTED_PR_DIFF` tag, not
+// `UNTRUSTED_ISSUE_DATA`) — sharing these categorical Unicode-cleaning
+// primitives keeps both guards' invisible-character coverage in lockstep
+// (a future gap found in one applies to both, by construction) rather than
+// duplicating them or coupling the diff guard to this module's own
+// issue-data-specific tag name and rendering logic. No behavior change for
+// any existing caller here.
+export const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 
 // Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a real
 // delimiter-breakout, category (a), always folds): `</UNTRUSTED_ISSUE_DATA>`
@@ -1278,7 +1289,10 @@ const ZERO_WIDTH_AND_FORMAT_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/
 // math space, ideographic space) is ALREADY matched by JS's own `\s`, so
 // NEL is the one genuine gap today; matching the whole property (rather
 // than just NEL) closes any future gap the same way, not just this round's.
-const EXOTIC_WHITESPACE_PATTERN = /\p{White_Space}/gu;
+// Exported for slice 3b-i's diff-delimiter guard — see
+// {@link ZERO_WIDTH_AND_FORMAT_PATTERN}'s own docstring for why sharing
+// this primitive rather than duplicating it.
+export const EXOTIC_WHITESPACE_PATTERN = /\p{White_Space}/gu;
 
 // The ASCII whitespace characters {@link EXOTIC_WHITESPACE_PATTERN} must
 // NEVER strip — stripping these would corrupt legitimate criterion text,
@@ -1287,7 +1301,10 @@ const EXOTIC_WHITESPACE_PATTERN = /\p{White_Space}/gu;
 // which are rare in real criterion text but equally ordinary and equally
 // harmless to a delimiter-breakout check already tolerant of `\s`), not just
 // the four most common of them.
-const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r", "\v", "\f"]);
+// Exported for slice 3b-i's diff-delimiter guard — see
+// {@link ZERO_WIDTH_AND_FORMAT_PATTERN}'s own docstring for why sharing
+// this primitive rather than duplicating it.
+export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r", "\v", "\f"]);
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s
@@ -1349,11 +1366,16 @@ const MAX_DATA_BLOCK_BYTES = 32 * 1024;
  * character garbage — verified against the real `TextDecoder` behavior,
  * not assumed.
  *
+ * Exported (F1-S9 slice 3b, issue #12): slice 3b-i's runner reuses this to
+ * byte-cap the PR diff before wrapping it in its own untrusted-data
+ * delimiter, the same resource-exhaustion reasoning as this module's own
+ * {@link MAX_DATA_BLOCK_BYTES} cap, applied to a second untrusted surface.
+ *
  * @param text - The text to bound.
  * @param maxBytes - The UTF-8 byte budget.
  * @returns The possibly-shortened text, and whether truncation occurred.
  */
-function truncateToByteBudget(text: string, maxBytes: number): { text: string; truncated: boolean } {
+export function truncateToByteBudget(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const encoded = new TextEncoder().encode(text);
   if (encoded.length <= maxBytes) {
     return { text, truncated: false };
