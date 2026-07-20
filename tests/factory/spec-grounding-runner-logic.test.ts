@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCriteriaSpine,
+  computeCriteriaSpineTruncation,
   GITHUB_COMPARE_DIFF_FILE_LIMIT,
   MAX_PR_DIFF_BYTES,
   neutralizeDiffDelimiterBreakout,
   wrapUntrustedDiffBlock,
 } from "../../scripts/factory/spec-grounding-runner-logic.mts";
-import type { LinkedIssueSpecsResult } from "../../scripts/factory/spec-grounding-logic.mts";
+import type {
+  LinkedIssueReference,
+  LinkedIssueSpecsResult,
+} from "../../scripts/factory/spec-grounding-logic.mts";
 
 // A fixed, injected nonce for deterministic test fixtures (F1-S9 slice
 // 3b-ii-a, issue #12 -- team-lead's sign-off explicitly calls for this:
@@ -254,6 +258,157 @@ describe("buildCriteriaSpine (F1-S9 slice 3b-i, issue #12)", () => {
     expect(buildCriteriaSpine(result, rendered, TEST_NONCE)).toEqual([
       { issueNumber: 12, kind: "closing", criterionId: "12:0" },
     ]);
+  });
+});
+
+describe("computeCriteriaSpineTruncation (F1-S9 slice 3b-iii, issue #12, PR #76 review, L181)", () => {
+  it("reports no truncation and an empty dropped-list for a run where nothing was capped or cut", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 12, kind: "closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 0,
+    };
+    const spine = [{ issueNumber: 12, kind: "closing" as const, criterionId: "12:0" }];
+    expect(computeCriteriaSpineTruncation(references, result, spine)).toEqual({
+      truncated: false,
+      droppedClosingIssueNumbers: [],
+    });
+  });
+
+  it("flags a CLOSING reference never fetched at all (beyond MAX_LINKED_ISSUES) as dropped", () => {
+    // 21 closing references -- selectIssuesToFetch's own MAX_LINKED_ISSUES
+    // cap (20) means the 21st is never even attempted.
+    const references: LinkedIssueReference[] = Array.from({ length: 21 }, (_, i) => ({
+      issueNumber: i + 1,
+      kind: "closing" as const,
+    }));
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 1, kind: "closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 1,
+    };
+    const spine = [{ issueNumber: 1, kind: "closing" as const, criterionId: "1:0" }];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(true);
+    expect(summary.droppedClosingIssueNumbers).toEqual([21]);
+  });
+
+  it("does NOT flag a NON-CLOSING reference never fetched at all -- only closing references escalate", () => {
+    const references: LinkedIssueReference[] = Array.from({ length: 21 }, (_, i) => ({
+      issueNumber: i + 1,
+      kind: "non-closing" as const,
+    }));
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 1, kind: "non-closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 1,
+    };
+    const spine = [{ issueNumber: 1, kind: "non-closing" as const, criterionId: "1:0" }];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    // Still a general truncation signal (some reference was capped) --
+    // just not an ESCALATION-worthy one, since nothing closing was dropped.
+    expect(summary.truncated).toBe(true);
+    expect(summary.droppedClosingIssueNumbers).toEqual([]);
+  });
+
+  it("flags a CLOSING issue that WAS fetched and had unmet criteria but got entirely byte-cap-dropped from the rendered block", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    // result.specs says issue #12 DID have a real unmet criterion -- but
+    // the spine (simulating renderCriteriaDataBlock's byte cap cutting the
+    // block short before reaching #12's own checkbox line) has NO entry
+    // for it at all.
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 12, kind: "closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 0,
+    };
+    const spine: { issueNumber: number; kind: "closing" | "non-closing"; criterionId: string }[] = [];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(true);
+    expect(summary.droppedClosingIssueNumbers).toEqual([12]);
+  });
+
+  it("does NOT flag a CLOSING reference that legitimately has NO unmet criteria at all -- buildLinkedIssueSpecs already omits it from result.specs, and that is a normal outcome, not a gap", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    // Issue #12 is referenced, but buildLinkedIssueSpecs found nothing
+    // unmet for it (already fully checked, or no acceptance-criteria
+    // section at all) -- so it simply never appears in result.specs.
+    const result: LinkedIssueSpecsResult = { specs: [], truncatedIssueCount: 0 };
+    const spine: { issueNumber: number; kind: "closing" | "non-closing"; criterionId: string }[] = [];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(false);
+    expect(summary.droppedClosingIssueNumbers).toEqual([]);
+  });
+
+  it("does NOT flag a CLOSING reference that failed to fetch with a VERIFIED 404 -- an accepted, deliberate no-op, not a truncation gap", () => {
+    // Same shape as the "legitimately has no unmet criteria" case from
+    // buildCriteriaSpine's own perspective: a 404'd issue never makes it
+    // into result.specs either (buildLinkedIssueSpecs's documented
+    // contract), so there is no way to distinguish "404'd" from
+    // "genuinely nothing unmet" from this function's own inputs alone --
+    // and that is fine, since BOTH are non-truncation, non-escalating
+    // outcomes by design (spec-grounding-runner.mts's own top-level
+    // docstring already documents the verified-404 case as an accepted
+    // graceful no-op).
+    const references: LinkedIssueReference[] = [
+      { issueNumber: 12, kind: "closing" },
+      { issueNumber: 8, kind: "non-closing" },
+    ];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 8, kind: "non-closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 0,
+    };
+    const spine = [{ issueNumber: 8, kind: "non-closing" as const, criterionId: "8:0" }];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(false);
+    expect(summary.droppedClosingIssueNumbers).toEqual([]);
+  });
+
+  it("flags truncated:true when a spec's own truncatedCriteriaCount is nonzero, even with no dropped CLOSING issue at all", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 12, kind: "closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 5 },
+      ],
+      truncatedIssueCount: 0,
+    };
+    const spine = [{ issueNumber: 12, kind: "closing" as const, criterionId: "12:0" }];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(true);
+    expect(summary.droppedClosingIssueNumbers).toEqual([]);
+  });
+
+  it("deduplicates a CLOSING issue number appearing in both drop categories (defensive -- not reachable via the real runner's own data flow, since buildLinkedIssueSpecs applies the SAME cap internally, so result.specs can only ever contain an issue selectIssuesToFetch also selected)", () => {
+    // Issue #12 placed at position 21 (index 20) of 21 closing references
+    // -- beyond MAX_LINKED_ISSUES (20), so selectIssuesToFetch's own
+    // output does NOT include it (triggers the "never fetched" branch).
+    // ALSO placed in result.specs and left out of spine (contrived,
+    // internally-inconsistent test input -- a real caller could never
+    // produce this, since buildLinkedIssueSpecs re-applies the same cap
+    // to its own references input) to additionally trigger the
+    // "byte-cap-dropped" branch for the SAME issue number, proving the
+    // Set-based union actually deduplicates rather than double-counting.
+    const references: LinkedIssueReference[] = [
+      ...Array.from({ length: 20 }, (_, i) => ({ issueNumber: i + 1, kind: "closing" as const })),
+      { issueNumber: 12000, kind: "closing" },
+    ];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 12000, kind: "closing", title: "t", unmetCriteria: ["c"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 1,
+    };
+    const spine: { issueNumber: number; kind: "closing" | "non-closing"; criterionId: string }[] = [];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.droppedClosingIssueNumbers).toEqual([12000]);
+    expect(summary.droppedClosingIssueNumbers.length).toBe(1);
   });
 });
 
