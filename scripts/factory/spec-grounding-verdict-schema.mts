@@ -69,14 +69,48 @@ export const MAX_CRITERION_ID_LENGTH = 32;
  * Upper bound on the serialized verdict size, in UTF-8 bytes. Guards
  * against a runaway or adversarial payload before any of the field-level
  * checks below even run — same resource-exhaustion reasoning as
- * `triage-verdict-schema.mts`'s own `MAX_PAYLOAD_BYTES`, sized generously
- * above the worst-case LEGITIMATE total under the per-field caps above
- * (`MAX_FINDINGS` × (`MAX_CRITERION_ID_LENGTH` + `MAX_RATIONALE_LENGTH`)
- * ≈ 1000 × 2032 ≈ 2MB) so a maximal-but-legitimate verdict is never
- * itself rejected by this coarse check before the precise per-field
- * checks get a chance to run.
+ * `triage-verdict-schema.mts`'s own `MAX_PAYLOAD_BYTES`.
+ *
+ * Sized above the worst-case LEGITIMATE total under the per-field caps
+ * above — computed with the ENCODING actually in play, not
+ * `rationale.length` directly (Codex finding, PR #74 review: an earlier
+ * version of this constant added the per-field caps as if `.length`
+ * (UTF-16 code units) equalled serialized UTF-8 bytes, which
+ * undercounted the true worst case and made the documented "sized above
+ * the worst-case legitimate total" claim false — a maximal-but-legitimate
+ * verdict could be rejected here before its own per-field checks ever
+ * ran):
+ *
+ * - `rationale` is capped at `MAX_RATIONALE_LENGTH` (2000) UTF-16 code
+ *   units, not bytes. A single UTF-16 code unit's WORST-CASE UTF-8
+ *   encoding is 3 bytes — every BMP code point up to U+FFFF (which
+ *   includes the whole CJK Unified Ideographs block, one UTF-16 unit
+ *   each) encodes to at most 3 UTF-8 bytes; a surrogate pair (2 UTF-16
+ *   units) encodes to 4 UTF-8 bytes, i.e. 2 bytes/unit, strictly less. So
+ *   `MAX_RATIONALE_LENGTH × 3` (6,000 bytes) is the true per-finding
+ *   worst case for this field alone, not `MAX_RATIONALE_LENGTH × 1`.
+ * - `criterionId` is capped at `MAX_CRITERION_ID_LENGTH` (32) characters,
+ *   plain ASCII by {@link CRITERION_ID_PATTERN}'s own shape — 1 byte each
+ *   either way, no JSON-escaping surface.
+ * - Per-finding JSON structural overhead (`{"criterionId":"…","satisfied":
+ *   false,"rationale":"…"}`, the `,`/`[`/`]` around the array, and the
+ *   top-level `{"findings":…}` wrapper) adds a fixed, small overhead per
+ *   entry — measured directly (see this constant's own boundary test)
+ *   rather than hand-derived, since JSON-escaping cost varies by content
+ *   (a quote-heavy rationale escapes to 2 bytes/char, LESS than a CJK
+ *   rationale's 3 bytes/char, so CJK is the dominant worst case here, not
+ *   quotes).
+ *
+ * `MAX_FINDINGS` (1000) × the true CJK worst case measured this way is
+ * ~6,084,014 bytes (~6.08MB) — verified directly by constructing that
+ * exact payload and measuring `Buffer.byteLength(JSON.stringify(…),
+ * "utf8")` (this constant's own boundary test does the same
+ * construction). `8,000,000` keeps a real margin above that measured
+ * figure while staying a trivial size to parse, so it remains a genuine
+ * parse-cost bound rather than a tight fit that could itself start
+ * rejecting legitimate verdicts if wording or content shifts slightly.
  */
-export const MAX_PAYLOAD_BYTES = 3_000_000;
+export const MAX_PAYLOAD_BYTES = 8_000_000;
 
 /**
  * The exact shape `spec-grounding-runner-logic.mts`'s `buildCriteriaSpine`

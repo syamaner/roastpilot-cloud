@@ -73,6 +73,37 @@ describe("validateSpecGroundingVerdict — accepts well-formed verdicts", () => 
     const result = validateSpecGroundingVerdict(validVerdict(findings));
     expect(result.ok).toBe(true);
   });
+
+  it("accepts a MAX_FINDINGS-entry verdict with CJK-heavy MAX_RATIONALE_LENGTH rationales -- the true worst-case serialized size under the per-field caps (Codex finding, PR #74 review: an earlier MAX_PAYLOAD_BYTES was sized as if rationale.length (UTF-16 code units) equalled serialized UTF-8 bytes, undercounting a CJK rationale's true 3-bytes-per-unit worst case and REJECTING a payload that satisfies every documented per-field cap)", () => {
+    // A CJK ideograph is one UTF-16 code unit that encodes to 3 UTF-8
+    // bytes -- the worst-case byte expansion for any BMP character, so
+    // this is the true worst case MAX_PAYLOAD_BYTES must sit above, not
+    // an ASCII stand-in.
+    const cjkRationale = "中".repeat(MAX_RATIONALE_LENGTH);
+    expect(cjkRationale).toHaveLength(MAX_RATIONALE_LENGTH);
+    // A FIXED-width, zero-padded index (3 digits comfortably covers
+    // 0..MAX_FINDINGS-1) keeps every criterionId at exactly
+    // MAX_CRITERION_ID_LENGTH -- a variable-width suffix would exceed the
+    // cap once the index reaches 3 digits, silently invalidating this
+    // "worst case under the caps" construction for the later entries.
+    const indexWidth = 3;
+    expect(MAX_FINDINGS - 1).toBeLessThan(10 ** indexWidth);
+    const digitsWidth = MAX_CRITERION_ID_LENGTH - 1 - indexWidth;
+    const findings = Array.from({ length: MAX_FINDINGS }, (_, i) =>
+      validFinding({
+        criterionId: `${"9".repeat(digitsWidth)}:${String(i).padStart(indexWidth, "0")}`,
+        rationale: cjkRationale,
+      }),
+    );
+    const verdict = validVerdict(findings);
+    // Confirms this really IS above the naive (wrong) UTF-16-length-as-
+    // bytes estimate, so the test exercises the actual encoding-aware fix.
+    expect(Buffer.byteLength(JSON.stringify(verdict), "utf8")).toBeGreaterThan(
+      MAX_FINDINGS * MAX_RATIONALE_LENGTH,
+    );
+    const result = validateSpecGroundingVerdict(verdict);
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("validateSpecGroundingVerdict — rejects malformed/adversarial verdict-level input", () => {
