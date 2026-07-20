@@ -233,7 +233,28 @@ jobs:
         # matches `implement-ready-issues.yml`'s own precedent of a plain
         # `npm ci` for factory tooling, since scripts/factory is
         # build/tooling surface, not the deployed Next.js app itself.
-        run: npm ci
+        #
+        # `--ignore-scripts` is NOT optional here (team-lead's pre-open
+        # security-pass fold, F1-S9 slice 3b-ii-c2): this is the FIRST
+        # factory agent job that runs `npm ci` before a token-bearing step
+        # in the SAME job — `triage-issues.yml` deliberately never installs
+        # anything (its script imports only `node:` builtins). The
+        # `pull_request` checkout above takes the PR-HEAD's own
+        # `package-lock.json`, so with lifecycle scripts enabled, a
+        # malicious or compromised dependency version a PR's lock points at
+        # runs arbitrary code at install time — no secrets are in this
+        # step's own env, but that code can rewrite files in the workspace
+        # (e.g. `scripts/factory/spec-grounding-runner.mts` itself), and
+        # the VERY NEXT step runs that (now possibly poisoned) script with
+        # `GH_TOKEN` in its environment: a poison-then-exfiltrate chain
+        # entirely within this one job. `markdown-it`'s whole dependency
+        # tree (`linkify-it`, `mdurl`, `punycode.js`, `entities`,
+        # `uc.micro`, `argparse`) needs no install-time scripts, so this
+        # flag costs nothing here. Do NOT remove this when F1-S7's
+        # repo-wide install-script pass lands — that pass should ADD
+        # `--ignore-scripts` elsewhere, not find it already here and
+        # "simplify" it away.
+        run: npm ci --ignore-scripts
 
       - name: Run the spec-grounding runner (deterministic, read-only)
         id: runner
