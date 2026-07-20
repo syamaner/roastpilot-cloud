@@ -269,194 +269,117 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - name: Checkout runner + review-skill assets (read-only)
+      - name: Checkout (read-only, FULL — no sparse-checkout)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          # package.json/package-lock.json are included so `npm ci` below
-          # has something to install FROM — verified empirically (not
-          # assumed) that the runner needs this: spec-grounding-logic.mts
-          # imports the npm package `markdown-it`, so running the runner
-          # script against a bare scripts/factory checkout with no
-          # node_modules throws ERR_MODULE_NOT_FOUND immediately. Unlike
-          # `apply-triage-verdict.mts` (triage-issues.yml's own sibling
-          # script, which imports only node: builtins and sibling .mts
-          # files and so never needed this), this runner's dependency
-          # chain has a real npm package in it.
-          #
-          # THIS CHECKOUT TAKES THE PR's OWN REF for every path below
-          # (default `pull_request` checkout behavior, unchanged) — the
-          # very next step OVERWRITES `.claude/`, CLAUDE.md, AGENTS.md, and
-          # the manifests with the TRUSTED BASE revision's own versions
-          # (restoring ABSENCE too, not just content — see that step's own
-          # comment); `scripts/factory` is the one path that deliberately
-          # stays PR-head, same comment.
-          #
-          # `.claude` is listed EXPLICITLY (not just its narrow skill
-          # subdirectory) so the next step's `git checkout <base> --
-          # .claude` has a pathspec cone-mode sparse-checkout already
-          # recognizes — verified empirically: `git checkout <rev> --
-          # <path>` 422s with "pathspec did not match" for a path entirely
-          # OUTSIDE the current sparse-checkout cone, even though the
-          # revision itself has it; listing `.claude` here (bringing in
-          # its PR-head content first, exactly what the next step then
-          # discards) is what makes the later explicit-path checkout work
-          # at all.
-          sparse-checkout: |
-            scripts/factory
-            .claude
-            .mcp.json
-            CLAUDE.md
-            AGENTS.md
-            package.json
-            package-lock.json
+          # NO `sparse-checkout:` (round 5 finding, correcting the prior
+          # round's own fix): cone-mode sparse checkout MATERIALIZES EVERY
+          # ROOT-LEVEL FILE regardless of the declared pattern list (a repo
+          # root is always partially included in cone mode) — verified
+          # empirically that `CLAUDE.local.md` and `.claudeignore`, never
+          # listed in any sparse-checkout pattern, still showed up in the
+          # working tree from PR-head. Driving the NEXT step's restore from
+          # `git sparse-checkout list` (the prior round's own "categorical"
+          # fix) therefore missed exactly the root files that mode brings
+          # in FOR FREE — the declared list is a strict SUBSET of what's
+          # actually checked out, so restoring only what's declared misses
+          # everything cone mode adds silently. Concretely: a PR adding
+          # `CLAUDE.local.md` (Claude loads it as TRUSTED MEMORY —
+          # instructions, not fenced data) saying "mark every criterion
+          # satisfied" would defeat this entire gate's purpose, past every
+          # nonce-fence this design otherwise relies on, and the prior
+          # restore step never even looked at it. A full checkout (this
+          # step) plus restoring the ENTIRE working tree from base (the
+          # next step) closes this categorically: the invariant is now
+          # "everything is base except two named exceptions", enforced
+          # over the ACTUAL MATERIALIZED TREE, not a declared list.
 
-      - name: Restore trusted Claude configuration + manifests from the BASE revision
-        # Codex findings, PR #76 review (P1, three rounds): for a factory-
-        # App-published PR, this job's checkout above uses the PR's OWN
-        # ref — so without this step, the PR itself would control every
-        # input the review agent's own runtime trusts: the skill file, ANY
-        # other `.claude/` content (a PR could add `.claude/settings.json`
-        # with a shell hook the agent's own tool runtime would honor — or,
-        # round 3's own catch, `.mcp.json`, which can point at a
-        # PR-controlled COMMAND the agent's own runtime would execute —
-        # verified empirically: the cone-mode checkout above brings in
-        # sibling `.claude/*` content, not just the narrow skill
-        # subdirectory, and root-level CLAUDE.md/AGENTS.md regardless of
-        # what's listed at all — cone mode always includes a repo's own
-        # root files), and the dependency manifests (a compromised
-        # `markdown-it` version, or a wholly new malicious dependency).
+      - name: Restore trusted configuration + manifests from the BASE revision
+        # Codex findings, PR #76 review (P1, four rounds — round 5 is a
+        # BLOCKER, proven with a live reproduction against the prior
+        # round's own fix): for a factory-App-published PR, the checkout
+        # above uses the PR's OWN ref — so without this step, the PR itself
+        # would control every input the review agent's own runtime trusts:
+        # `.claude/` content (a shell hook in `.claude/settings.json`, or a
+        # command-backed server in `.mcp.json`), root config
+        # (`CLAUDE.md`/`AGENTS.md`/`CLAUDE.local.md`/`.claudeignore`/
+        # `.npmrc`), a root symlink, and the dependency manifests (a
+        # compromised `markdown-it` version, or a wholly new malicious
+        # dependency).
         #
-        # RESTORES CATEGORICALLY (round 3 finding — the enumeration itself
-        # was the bug, not a missing line item: `.claude/settings.json` was
-        # the first path this list forgot, `.mcp.json` the second; a THIRD
-        # forgotten path is only a matter of time under an enumerated
-        # list). Instead of naming each restored path individually, this
-        # reads `git sparse-checkout list` — the SAME source of truth the
-        # checkout step above already declared — and restores EVERY entry
-        # in it EXCEPT `scripts/factory`. There is now only ONE place cone
-        # membership is declared at all (the checkout step's own
-        # `sparse-checkout:` list); anything added there for a future
-        # config surface is automatically restored-from-base here too,
-        # with no second list to remember to update.
+        # ENFORCED OVER THE WORKING TREE, not a declared list (round 5 —
+        # corrects the prior round's own "restore every `git
+        # sparse-checkout list` entry" fix, which the checkout step's own
+        # comment explains was the wrong axis: that list is a STRICT
+        # SUBSET of what cone mode actually materializes). The invariant
+        # this step enforces is unconditional: "the working tree equals
+        # base, except `scripts/factory` and (bootstrap-only)
+        # `.claude/skills/spec-grounded-review`" — verified by restoring
+        # EVERY tracked path, not by naming which ones to check.
         #
-        # RESTORES ABSENCE, not just content: `git checkout <base> --
-        # <path>` alone would never DELETE a file the PR added that base
-        # doesn't have (it only overlays what base DOES have) — so a bare
-        # checkout-from-base, without first removing the PR-head version,
-        # would leave a PR-added file in place untouched. `rm -rf` FIRST,
-        # then checkout-from-base only if base actually has that path,
-        # closes this: anything the PR added beyond what base has is
-        # deleted and never restored.
+        # MECHANISM, three steps:
+        # 1. `git checkout "$BASE_SHA" -- .` overlays base's own content
+        #    onto every path base tracks, across the WHOLE checkout (no
+        #    sparse cone to silently exclude anything, per the checkout
+        #    step above) — this alone reverts any MODIFICATION to an
+        #    existing base-tracked path (a `CLAUDE.md` edit, a base file
+        #    replaced in-place by a malicious symlink, etc.), since
+        #    `checkout -- <path>` always overlays base's exact tracked
+        #    content (including its type — file, symlink, whatever)
+        #    regardless of what the working tree currently has there.
+        # 2. `git checkout` alone never DELETES a path the PR added that
+        #    base doesn't have (it only overlays what base DOES have) —
+        #    so `git diff --diff-filter=A "$BASE_SHA" HEAD -- .` finds
+        #    every path ADDED in this PR's own HEAD relative to base
+        #    (`.mcp.json`, `.claude/settings.json`, `CLAUDE.local.md`,
+        #    `.claudeignore`, `.npmrc`, a root symlink — all of these are
+        #    genuinely NEW paths, not existing ones the PR edited), and
+        #    removes each one outright. This is what closes "restore
+        #    absence", not just content.
+        # 3. Re-apply the two named exceptions from PR-HEAD:
+        #    `scripts/factory` (covered by the publisher guard already, and
+        #    a human-authored runner bugfix needs to take effect when its
+        #    own PR is reviewed — restoring it from base would review a
+        #    runner-bugfix PR against the OLD, buggy runner), and — ONLY
+        #    when base genuinely lacks it — `.claude/skills/spec-grounded-
+        #    review` (THIS PR's own bootstrap case: nothing "trusted"
+        #    exists for this path yet, since this PR is what establishes
+        #    it; self-closing the moment this PR merges and base always
+        #    has it too).
         #
-        # BOOTSTRAP GUARD, per path (corrects an earlier, WRONG claim that
-        # this workflow file only ever runs from base for a PR editing
-        # `.github/workflows/**`; that base-read behavior is
-        # `pull_request_target`-only, and this workflow runs on plain
-        # `pull_request`, which always executes the PR's OWN version of
-        # itself): `git checkout <base> -- <path>` hard-fails (`git
-        # checkout` errors on a pathspec base doesn't have) for a path
-        # base genuinely lacks — which would break THIS PR's own review
-        # run outright and stall any auto-merge watching it, for THE ONE
-        # path this PR itself is legitimately introducing
-        # (`.claude/skills/spec-grounded-review`, verified absent at every
-        # pre-#76 commit, even though `.claude` itself — via `.claude/
-        # agents/*`, `.claude/skills/triage`, `.claude/skills/to-issues` —
-        # already exists there). Guarding each path with `git cat-file -e
-        # <base>:<path>` first avoids that hard failure — but the guard's
-        # OWN "absent" branch does NOT leave the PR-head version in place
-        # (round 4 finding, correcting an earlier version of this exact
-        # step): it deletes the path outright, since "absent at base"
-        # generally means nothing legitimate has EVER established it (see
-        # `restore_from_base`'s own comment, and its `.mcp.json` example —
-        # a path with no history in this repo at all, which must never
-        # survive a malicious PR's own first-time addition just because
-        # base "doesn't have it yet"). The ONE narrow exception where
-        # "absent means leave the PR version" is genuinely correct —
-        # `.claude/skills/spec-grounded-review`, THIS PR's own bootstrap
-        # case — is handled separately, by name, below; it self-closes
-        # the moment this PR merges and base always has that one path too.
-        #
-        # `scripts/factory` is DELIBERATELY EXCLUDED from this restore and
-        # stays PR-head: it IS covered by the publisher guard already (so a
-        # factory-authored diff touching it is already rejected before merge
-        # regardless), and a human-authored PR fixing a genuine runner bug
-        # needs that fix to actually take effect when its own PR is
-        # reviewed — restoring it from base would make a runner-bugfix PR
-        # review itself against the OLD, buggy runner.
-        #
-        # Verified end-to-end (round 4): simulated a malicious PR-head
-        # commit adding `.mcp.json` (a command-backed MCP server pointed
-        # at `curl`), adding `.claude/settings.json` (a `PreToolUse` hook
-        # curling `$GH_TOKEN`), editing `CLAUDE.md`, AND editing
-        # `scripts/factory/spec-grounding-runner.mts` — ran this exact
-        # restore sequence against an ALREADY-ESTABLISHED base (the steady
-        # state every PR after this one runs under) and confirmed: the
-        # `.mcp.json` and `.claude/settings.json` additions are both gone,
-        # the `CLAUDE.md` edit is reverted, the `scripts/factory` edit
-        # SURVIVES (deliberately PR-head), the legitimate skill content
-        # survives via the narrow exception, and `npm ci` + the runner
-        # script both still run correctly afterward. Separately re-verified
-        # (unchanged from the prior round) that a base genuinely lacking
-        # `.claude/skills/spec-grounded-review` (this PR's own bootstrap
-        # case) correctly falls through to the narrow exception below.
+        # Verified end-to-end (round 5): simulated a malicious PR-head
+        # adding `.mcp.json` (pointed at `curl`), `.claude/settings.json`
+        # (a `PreToolUse` hook curling `$GH_TOKEN`), `CLAUDE.local.md`
+        # (an instruction to mark every criterion satisfied — the exact
+        # gate-defeat vector this round exists to close), `.claudeignore`,
+        # `.npmrc` (a malicious registry), a root symlink, AND editing both
+        # `CLAUDE.md` and `scripts/factory/spec-grounding-runner.mts` — ran
+        # this exact three-step sequence against an ALREADY-ESTABLISHED
+        # base (the steady state every PR after this one runs under) and
+        # confirmed: all six additions are gone, the `CLAUDE.md` edit is
+        # reverted, the `scripts/factory` edit SURVIVES (deliberately
+        # PR-head), the legitimate skill content survives via the
+        # bootstrap exception, and `npm ci` + the runner script both still
+        # run correctly afterward. Also re-confirmed (unchanged from the
+        # prior round) that a base genuinely lacking `.claude/skills/
+        # spec-grounded-review` correctly falls through to the bootstrap
+        # exception rather than hard-failing or being silently dropped.
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git fetch --depth 1 origin "$BASE_SHA"
 
-          restore_from_base() {
-            local restore_path="$1"
-            if git cat-file -e "$BASE_SHA:$restore_path" 2>/dev/null; then
-              rm -rf -- "$restore_path"
-              git checkout "$BASE_SHA" -- "$restore_path"
-            else
-              # Base genuinely lacks this path -- DELETE it outright, never
-              # leave the PR-head version in place (Codex finding, PR #76
-              # review, round 4 — a real gap this exact wording almost
-              # reopened: "absent at base" here means NOTHING LEGITIMATE
-              # has ever established this path at all, not "this PR is
-              # introducing something new" — verified concretely with
-              # `.mcp.json`, which exists nowhere in this repo's history
-              # yet, so an unconditional "leave PR version in effect" would
-              # let a malicious PR-added `.mcp.json` survive this step
-              # untouched, indefinitely, since base will never have it
-              # until some legitimate PR adds a real one first. The ONE
-              # deliberate exception to "absent means delete" is
-              # `.claude/skills/spec-grounded-review` specifically — THIS
-              # PR's own core purpose, re-applied by name in its own
-              # narrow step below, not handled here.
-              rm -rf -- "$restore_path"
-              echo "::notice::$restore_path not present at base ($BASE_SHA) -- removed outright (no legitimate content has ever existed for this path)."
-            fi
-          }
+          git checkout "$BASE_SHA" -- .
 
-          # Every cone path EXCEPT scripts/factory, read from the SAME
-          # sparse-checkout declaration the checkout step above already
-          # made -- see this step's own comment for why this must never go
-          # back to an enumerated list.
-          for cone_path in $(git sparse-checkout list); do
-            if [ "$cone_path" = "scripts/factory" ]; then
-              continue
-            fi
-            restore_from_base "$cone_path"
+          git diff --name-only --diff-filter=A "$BASE_SHA" HEAD -- . | while IFS= read -r added_path; do
+            echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
+            rm -rf -- "$added_path"
           done
 
-          # NARROW bootstrap exception, scoped to exactly this PR's own new
-          # skill path (see the step's own comment above for the general
-          # reasoning): the coarse `.claude` restore just above already
-          # correctly wiped ANY malicious addition under `.claude/` and
-          # restored base's own already-established content (agents/,
-          # skills/triage, skills/to-issues) — but base doesn't have
-          # `.claude/skills/spec-grounded-review` AT ALL yet, so that
-          # restore also wiped THIS PR's own legitimate, not-yet-merged
-          # skill file along with it. Nothing "trusted" exists for this one
-          # path yet — this PR is what establishes it — so re-apply ONLY
-          # this run's own PR-head version of it. Self-closing: once this
-          # PR merges, base always has this path too, so the coarse
-          # restore above already brings it in correctly and this becomes
-          # a no-op.
+          git checkout HEAD -- scripts/factory
+
           if ! git cat-file -e "$BASE_SHA:.claude/skills/spec-grounded-review" 2>/dev/null; then
             echo "::notice::bootstrap: .claude/skills/spec-grounded-review not present at base ($BASE_SHA) -- restoring this run's own PR-head version."
             git checkout HEAD -- .claude/skills/spec-grounded-review
@@ -536,8 +459,47 @@ jobs:
           HAS_CRITERIA: ${{ steps.runner.outputs.has-criteria }}
         run: |
           set -euo pipefail
-          mkdir -p review-output
+          # `rm -rf` THEN `mkdir` (Codex finding, PR #76 review, round 5,
+          # MEDIUM): asserts `review-output` is a genuinely FRESH directory
+          # this step itself creates, never something a PR could have
+          # smuggled in as e.g. a symlink to elsewhere (`review-output ->
+          # /elsewhere`) that a bare `mkdir -p` would silently follow
+          # rather than create — which would let the skill's own
+          # `Edit(review-output/spec-grounding-verdict.json)` grant below
+          # write wherever that symlink actually points. This path is
+          # ALREADY covered by the restore step above (any PR-added path,
+          # including one named `review-output`, is a path ADDED relative
+          # to base and gets removed there) — this is belt-and-braces on
+          # top of that, not the primary control.
+          rm -rf review-output
+          mkdir review-output
           jq -n --argjson hasCriteria "$HAS_CRITERIA" '{hasCriteria: $hasCriteria}' > review-output/outcome.json
+
+      - name: Strip any symlinks before the agent runs (defense-in-depth)
+        # Codex finding, PR #76 review, round 5, MEDIUM: with only
+        # `Read(.git/**)` denied, a PR-added root symlink (e.g. `envdump ->
+        # /proc/self/environ`, or one pointed at a credential file
+        # somewhere in the runner's own home directory) would let the
+        # agent `Read` it under a path string the deny pattern never
+        # matches, copy the contents into a rationale, and have that
+        # rationale uploaded in the verdict artifact — a real exfiltration
+        # path even though this job's own token is read-only and
+        # short-lived.
+        #
+        # ALREADY covered by the restore step above for anything git
+        # itself tracks (a PR-added symlink is a path ADDED relative to
+        # base, removed there) — this is independent, unconditional
+        # defense-in-depth for the SAME reason `review-output`'s own
+        # rm-then-mkdir is: never trust that the one control already in
+        # place is the only thing standing between untrusted content and
+        # the agent's own filesystem view. Excludes `.git/` (its own
+        # internals may contain symlink-like objects that are none of this
+        # step's concern) and `node_modules/` (npm's own legitimate
+        # `node_modules/.bin/*` symlinks, created by the `npm ci` step
+        # above from a manifest the restore step already re-verified
+        # against base — breaking these would break the runner itself).
+        if: steps.runner.outputs.has-criteria == 'true'
+        run: find . -type l -not -path './.git/*' -not -path './node_modules/*' -delete
 
       - name: Run the spec-grounded-review skill
         id: spec-grounded-review
@@ -629,12 +591,43 @@ jobs:
           # Grant Edit ONLY for the one file this skill is allowed to
           # produce — no Bash (the runner step above already fetched
           # everything this skill needs; it has no legitimate reason to
-          # shell out), no read access to .git/** (holds a git remote URL
-          # with an embedded, short-lived token this job's own read-only
-          # credential would otherwise expose to a prompt-injected attempt
-          # to Read it and echo it back in a rationale — the same
-          # token-leak path `triage-issues.yml`'s own identical deny
-          # closes).
+          # shell out).
+          #
+          # `Read(review-context/**)` / `Read(.claude/skills/spec-grounded-
+          # review/**)` ATTEMPT POSITIVE SCOPING (Codex finding, PR #76
+          # review, round 5, MEDIUM — team-lead's preferred fix over
+          # deny-listing alone): a deny-only `Read(.git/**)` blocks a
+          # LITERAL path string, but a PR-added symlink (`envdump ->
+          # /proc/self/environ`, or one pointed at a credential file in the
+          # runner's own home) reads the SAME underlying content under a
+          # DIFFERENT path string the deny pattern never matches at all —
+          # positive scoping to exactly the two locations this skill
+          # legitimately reads (the three `review-context/*` files
+          # SKILL.md itself describes, and SKILL.md's own path) would close
+          # `/proc`, home-directory credentials, and any surviving symlink
+          # in ONE move, categorically, rather than deny-listing each newly
+          # discovered vector.
+          #
+          # UNVERIFIED, honestly (checked what I could, not further):
+          # traced `--allowedTools`/`--disallowedTools` through the pinned
+          # action's own source (`base-action/src/parse-sdk-options.ts`) —
+          # both are parsed into plain string arrays and passed straight
+          # through to `@anthropic-ai/claude-agent-sdk`'s own `Options`,
+          # with NO enforcement logic in this action's code at all; whether
+          # the SDK treats a `Read(<pattern>)` entry as an EXCLUSIVE
+          # restriction (only that pattern is readable) or an ADDITIVE
+          # hint (any Read call is allowed, the pattern is cosmetic) is
+          # enforced entirely inside the SDK's own closed internals, which
+          # I have no local source for and did not verify with a live
+          # probe (the same method this repo's `Edit(path)`-vs-`Write
+          # (path)` precedent used to settle an equally ambiguous
+          # permission-matching question). Added here as a genuine attempt
+          # at the STRONGER fix, alongside — not instead of — the existing
+          # `Read(.git/**)`/`Grep(.git/**)` deny and the unconditional
+          # symlink-strip step above, which are the CONFIRMED defenses this
+          # PR's own security posture actually rests on regardless of
+          # whether this allow-list attempt does anything at all.
+          #
           # `mcp__github_file_ops__commit_files`/`__delete_files` denied
           # explicitly (round 4): `use_commit_signing: true` above installs
           # this MCP server as a side effect; see that input's own comment
@@ -642,7 +635,7 @@ jobs:
           # not the primary control (the token itself lacks `contents:
           # write`, matching `claude-review`'s own identical denial of the
           # same two tool names).
-          claude_args: '--allowedTools "Edit(review-output/spec-grounding-verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"'
+          claude_args: '--allowedTools "Edit(review-output/spec-grounding-verdict.json),Read(review-context/**),Read(.claude/skills/spec-grounded-review/**)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"'
           prompt: |
             Use the spec-grounded-review skill at
             .claude/skills/spec-grounded-review/SKILL.md to review PR
