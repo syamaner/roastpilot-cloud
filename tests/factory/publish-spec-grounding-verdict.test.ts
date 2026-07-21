@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
-import { main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
+import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
 import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
 
 /**
@@ -513,5 +513,33 @@ describe("main — input validation and transport edge cases", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).rejects.toThrow(/403/);
+  });
+});
+
+describe("formatUncaughtErrorForLog", () => {
+  it("prefers an Error's own stack over its message alone, neutralized", () => {
+    const err = new Error("boom");
+    const formatted = formatUncaughtErrorForLog(err);
+    expect(formatted).toContain("boom");
+    // Real Error.stack starts with "Error: <message>" on its own first line.
+    expect(formatted).toContain("Error: boom");
+  });
+
+  it("stringifies a non-Error value thrown as the uncaught rejection", () => {
+    expect(formatUncaughtErrorForLog("a plain string rejection")).toBe("a plain string rejection");
+    expect(formatUncaughtErrorForLog(42)).toBe("42");
+  });
+
+  it("falls back to err.message when a genuinely stack-less Error reaches it (defensive -- a real Error's own .stack is virtually always present, but not a runtime guarantee)", () => {
+    const err = new Error("boom without a stack");
+    err.stack = undefined;
+    expect(formatUncaughtErrorForLog(err)).toBe("boom without a stack");
+  });
+
+  it("neutralizes a workflow-command injection attempt transitively carried in an Error's own message (e.g. a GithubApiError echoing a raw API response body)", () => {
+    const err = new Error('request failed: {"message":"bad"}\n::error title=spoofed::message');
+    const formatted = formatUncaughtErrorForLog(err);
+    expect(formatted).not.toMatch(/\n::error/);
+    expect(formatted).not.toContain("::");
   });
 });

@@ -108,7 +108,11 @@ import {
   type JoinedCriterionResult,
 } from "./publish-spec-grounding-verdict-logic.mts";
 import { buildAnchorFallbackSummarySupplement } from "./publish-spec-grounding-blocker-logic.mts";
-import { publishFallback, upsertSummaryComment } from "./publish-spec-grounding-comment-io.mts";
+import {
+  neutralizeReasonForLog,
+  publishFallback,
+  upsertSummaryComment,
+} from "./publish-spec-grounding-comment-io.mts";
 
 interface RunPaths {
   readonly outcomePath: string;
@@ -384,6 +388,43 @@ async function publishSummary(
   }
 }
 
+/**
+ * Formats an uncaught top-level error for the workflow log — factored out
+ * of the self-invoke guard below (proactive fold, PR #12 3b-iii-d3, per
+ * team-lead's disposition generalizing PR #85's own log-neutralization
+ * finding to this entrypoint's own top-level catch-all): `main()`'s own
+ * uncaught rejection can transitively carry untrusted text — a
+ * `GithubApiError` echoing a raw GitHub API response body, or a wrapped
+ * validation-error string surfaced from `readArtifactFile`/
+ * `parseAndValidateVerdict`/`parseCriteriaSpineArtifact` — reaching a raw
+ * `console.error(..., err)` call untouched would carry the SAME
+ * workflow-command/ANSI-escape/bidi-override risk `neutralizeReasonForLog`
+ * already closes for `publishFallback`'s own reasons. Reuses that
+ * function (now exported from `publish-spec-grounding-comment-io.mts` via
+ * PR #85) rather than a second, independently-maintained copy.
+ *
+ * Prefers `err.stack` over `err.message` alone when available (the
+ * top-level catch-all is the LAST chance to log a real stack trace for
+ * diagnosis — every other `catch` in this file already extracts just
+ * `.message` for a user-facing fallback reason, a narrower need this one
+ * doesn't share).
+ *
+ * EXPORTED for direct unit testing: the self-invoke guard itself
+ * (`import.meta.url === ...`) is genuinely unreachable in-process (v8/
+ * istanbul coverage instrumentation only tracks code executed by the
+ * vitest worker itself, matching `spec-grounding-runner.mts`'s own
+ * identical guard and reasoning), but the neutralization behavior itself
+ * is ordinary, testable logic and does not need to inherit that
+ * limitation.
+ *
+ * @param err - The uncaught value `main()`'s own top-level rejection carries.
+ * @returns A single neutralized, length-bounded line safe for a workflow log.
+ */
+export function formatUncaughtErrorForLog(err: unknown): string {
+  const raw = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  return neutralizeReasonForLog(raw);
+}
+
 // Only self-invoke when run directly, not when imported by a test —
 // matches `apply-triage-verdict.mts`'s own identical guard. Genuinely
 // uncovered by unit tests (they import `main` directly): v8/istanbul
@@ -393,7 +434,7 @@ async function publishSummary(
 /* v8 ignore start */
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err: unknown) => {
-    console.error("publish-spec-grounding-verdict failed:", err);
+    console.error("publish-spec-grounding-verdict failed:", formatUncaughtErrorForLog(err));
     process.exitCode = 1;
   });
 }
