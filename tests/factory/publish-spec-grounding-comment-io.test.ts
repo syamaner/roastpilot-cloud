@@ -223,6 +223,45 @@ describe("publishFallback", () => {
     expect(loggedText).not.toContain("::");
     errorSpy.mockRestore();
   });
+
+  it("bounds the TOTAL logged reasons list, reporting the remainder as an omitted count, rather than emitting an unbounded log entry for a malformed artifact with many findings (PR #85 review round 3, Codex, MEDIUM)", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    // Each reason is well under the per-reason cap, but there are enough
+    // of them that the TOTAL would otherwise be unbounded.
+    const manyReasons = Array.from({ length: 2000 }, (_, i) => `reason number ${i}`);
+    await publishFallback("token", "o", "r", 5, manyReasons);
+
+    const loggedText = errorSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(loggedText.length).toBeLessThan(30_000);
+    expect(loggedText).toMatch(/further reason\(s\) omitted to keep this log entry bounded/);
+    errorSpy.mockRestore();
+  });
+
+  it("logs the reasons BEFORE attempting the comment write, so the diagnostic survives a write failure (PR #85 review round 3, Codex, MEDIUM)", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => {
+        throw new Error("simulated transient API failure");
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(publishFallback("token", "o", "r", 5, ["the real reason"])).rejects.toThrow(
+      "simulated transient API failure",
+    );
+
+    // The write threw, but the diagnostic still made it to the log.
+    const loggedText = errorSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(loggedText).toContain("the real reason");
+    errorSpy.mockRestore();
+  });
 });
 
 describe("neutralizeReasonForLog", () => {

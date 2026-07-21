@@ -187,9 +187,69 @@ export function neutralizeReasonForLog(value: string): string {
 }
 
 /**
+ * Upper bound on the fallback log entry's own reasons LIST length, in
+ * characters, after each reason is already capped by {@link
+ * MAX_LOGGED_REASON_LENGTH} (PR #85 review round 3, Codex, MEDIUM — the
+ * PER-reason cap alone still leaves the TOTAL unbounded: a malformed
+ * artifact can carry up to `MAX_CRITERIA_SPINE_ENTRIES` findings, several
+ * reasons each, all mapped into one `console.error` call, so thousands of
+ * individually-capped reasons could still add up to a multi-megabyte log
+ * entry). Layered the same two-tier way {@link
+ * buildSpecGroundingFallbackCommentBody}'s own `MAX_REASONS_LIST_LENGTH`
+ * layers with its per-reason cap — a separate constant here rather than
+ * reusing that one, since a log entry's readability budget is a distinct
+ * concern from a GitHub comment's hard size limit.
+ */
+const MAX_LOGGED_REASONS_LIST_LENGTH = 20_000;
+
+/**
+ * Logs the (neutralized, bounded) fallback reasons for CI-run visibility
+ * — split out of {@link publishFallback} so it can run BEFORE the
+ * comment write is attempted (PR #85 review round 3, Codex, MEDIUM: the
+ * diagnostic must survive a write failure). Bounds the reasons in two
+ * layers, mirroring {@link buildSpecGroundingFallbackCommentBody}'s own
+ * pattern: each reason via {@link neutralizeReasonForLog} ({@link
+ * MAX_LOGGED_REASON_LENGTH}), then the joined list as a whole via {@link
+ * MAX_LOGGED_REASONS_LIST_LENGTH}, reporting any remainder as an omitted
+ * count rather than silently dropping it or letting the log entry grow
+ * unbounded.
+ *
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param reasons - One or more human-readable explanations.
+ */
+function logFallbackReasons(prNumber: number, reasons: readonly string[]): void {
+  const reasonLines: string[] = [];
+  let reasonsListLength = 0;
+  let addedCount = 0;
+  for (const reason of reasons) {
+    const bullet = `  - ${neutralizeReasonForLog(reason)}`;
+    if (reasonsListLength + bullet.length + 1 > MAX_LOGGED_REASONS_LIST_LENGTH) {
+      break; // Remaining reasons are reported as an omitted count below, not silently dropped.
+    }
+    reasonLines.push(bullet);
+    reasonsListLength += bullet.length + 1;
+    addedCount += 1;
+  }
+  const omittedCount = reasons.length - addedCount;
+  if (omittedCount > 0) {
+    reasonLines.push(`  - (${omittedCount} further reason(s) omitted to keep this log entry bounded.)`);
+  }
+  console.error(`Spec-grounded review publish failed for PR #${prNumber}. Reasons:\n` + reasonLines.join("\n"));
+}
+
+/**
  * Publishes the fallback comment (see {@link buildSpecGroundingFallbackCommentBody})
  * for a run that could not produce a real summary, and logs the reasons
  * for CI-run visibility.
+ *
+ * Logs the reasons {@link logFallbackReasons} FIRST, THEN attempts the
+ * comment write (PR #85 review round 3, Codex, MEDIUM — reversed from an
+ * earlier version that awaited the write first: if `upsertSummaryComment`
+ * itself throws (a transient API error, or a permissions regression), the
+ * original validation/artifact diagnostic must still reach the job log —
+ * losing it behind a comment-I/O failure would leave a human with only
+ * "the write failed", none of the reasons that made this a fallback run
+ * in the first place).
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -204,9 +264,6 @@ export async function publishFallback(
   prNumber: number,
   reasons: readonly string[],
 ): Promise<void> {
+  logFallbackReasons(prNumber, reasons);
   await upsertSummaryComment(token, owner, repo, prNumber, buildSpecGroundingFallbackCommentBody(reasons));
-  console.error(
-    `Spec-grounded review publish failed for PR #${prNumber}. Reasons:\n` +
-      reasons.map((r) => `  - ${neutralizeReasonForLog(r)}`).join("\n"),
-  );
 }
