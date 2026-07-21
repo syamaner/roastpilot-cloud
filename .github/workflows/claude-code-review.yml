@@ -788,18 +788,27 @@ jobs:
   publish-spec-grounding-review:
     name: Publish spec-grounded review (privileged)
     needs: spec-grounded-review
-    # Run on everything EXCEPT a cancelled run (team-lead's full pre-open
-    # pass, non-blocking improvement folded before open): still fires on
-    # "success"/"failure"/"skipped" -- the entrypoint's own tri-state gate
-    # handles all three internally (a visible fallback, or a silent
-    # no-op), so every branch of that gate stays the SCRIPT's own
-    # responsibility, not re-derived here. `!cancelled()` specifically
-    # skips spinning up this privileged job at all on a run that a NEWER
-    # push already superseded (`spec-grounded-review`'s own concurrency
-    # group cancels the stale run) -- publish never needed to run there
-    # anyway (a cancelled review is already a silent no-op by design), so
-    # this saves a runner with no correctness loss over `always()`.
-    if: ${{ !cancelled() }}
+    # Runs on SUCCESS (publishes the real verdict) and FAILURE (posts the
+    # entrypoint's own visible fallback) -- but NOT on "skipped" or
+    # "cancelled" (corrected from an earlier draft's `!cancelled()` alone,
+    # PR #91 review, Codex, must-fix): `spec-grounded-review` is skipped
+    # outright for a draft PR, a Dependabot PR, a fork PR, or a
+    # title-only `edited` event (that job's own `if:`), and this job's
+    # dedicated concurrency group has `cancel-in-progress: false` -- so
+    # with `!cancelled()` alone, a SKIPPED review (e.g. a title-only edit
+    # on an otherwise-substantive PR) would still spin up this privileged
+    # job, which would join the SAME per-PR group a genuinely pending
+    # publish (for a real, substantive verdict from an earlier push) may
+    # already be queued in. GitHub collapses a `cancel-in-progress: false`
+    # group to the NEWEST pending run, so that no-op publisher could
+    # DISPLACE the real one, and the substantive verdict this PR actually
+    # needs published would never run at all. Excluding "skipped" here
+    # stops a no-op run from ever joining the group in the first place --
+    # the entrypoint's own tri-state gate's "skipped"/"cancelled" silent
+    # no-op handling stays in place regardless, as defense-in-depth for
+    # any OTHER way this job could still end up invoked with that result
+    # (this `if:` is the primary control, not the only one).
+    if: ${{ !cancelled() && needs.spec-grounded-review.result != 'skipped' }}
 
     # OWN group, separate from spec-grounded-review's own (mirrors this
     # file's per-job philosophy, top-of-file comment, rather than a single
