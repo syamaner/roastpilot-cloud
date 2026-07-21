@@ -845,6 +845,22 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
 export type NoCriteriaReason = "no-references" | "no-unmet-criteria";
 
 /**
+ * Every case {@link buildSpecGroundingClearedSummaryCommentBody} can
+ * explain — {@link NoCriteriaReason} (what `outcome.json` itself
+ * reports) plus one PUBLISHER-INTERNAL case that never comes from the
+ * artifact at all: `"race-detected-before-delete"` (PR #87 review round
+ * 3, Codex, P1, gate-integrity TOCTOU) — the `"no-references"` branch's
+ * own pre-delete revalidation found the PR's state has changed (head
+ * moved, or a new closing reference now exists) since the read-only
+ * runner produced this `outcome.json`, so the caller degrades to the
+ * SAME non-destructive treatment `"no-unmet-criteria"` gets, but the
+ * message must say WHY accurately — never implying inline threads were
+ * cleared when a race, not a genuine self-attested-criteria case, is
+ * why they were not.
+ */
+export type ClearedSummaryReason = NoCriteriaReason | "race-detected-before-delete";
+
+/**
  * Builds the comment body the privileged publish entrypoint upserts when
  * a PR that previously had a spec-grounded summary or fallback comment no
  * longer has any UNMET linked-issue criteria to review (`hasCriteria:
@@ -856,14 +872,19 @@ export type NoCriteriaReason = "no-references" | "no-unmet-criteria";
  * `hasCriteria: false` path was a pure silent no-op with no upsert at
  * all.
  *
- * The message differs by {@link NoCriteriaReason} (PR #87 review, Codex,
- * P1/medium fold): `"no-references"` states plainly that nothing applies
- * any more (matches the caller ALSO deleting inline blocker threads);
- * `"no-unmet-criteria"` (or any reason the caller could not positively
- * confirm as `"no-references"`) explicitly tells a human the criteria are
- * self-attested, not diff-verified, and that any remaining inline blocker
- * threads were deliberately LEFT IN PLACE for them to triage — never
- * implying inline threads were cleared when they were not.
+ * The message differs by {@link ClearedSummaryReason} (PR #87 review,
+ * Codex, P1/medium fold + round 3's own TOCTOU fold): `"no-references"`
+ * states plainly that nothing applies any more (matches the caller ALSO
+ * deleting inline blocker threads); `"no-unmet-criteria"` (or any reason
+ * the caller could not positively confirm as `"no-references"`)
+ * explicitly tells a human the criteria are self-attested, not
+ * diff-verified; `"race-detected-before-delete"` explicitly tells a
+ * human the PR's state changed (head moved, or a new closing reference
+ * appeared) since the review ran, so this run degraded rather than
+ * deleting a thread it could not re-verify. The LAST TWO cases both
+ * explicitly say any remaining inline blocker thread was deliberately
+ * LEFT IN PLACE for a human (or a fresh run) — never implying inline
+ * threads were cleared when they were not.
  *
  * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} every
  * other summary/fallback body uses, for the identical reason {@link
@@ -871,22 +892,29 @@ export type NoCriteriaReason = "no-references" | "no-unmet-criteria";
  * finds criteria again must PATCH this exact comment in place, not post
  * a second one alongside it.
  *
- * @param reason - Why this run found `hasCriteria: false`.
+ * @param reason - Why this run is clearing/updating this comment.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildSpecGroundingClearedSummaryCommentBody(reason: NoCriteriaReason): string {
+export function buildSpecGroundingClearedSummaryCommentBody(reason: ClearedSummaryReason): string {
   const explanation =
     reason === "no-references"
       ? "An earlier run of the spec-grounded review posted a summary or fallback comment here, but " +
         "this PR no longer references any issue this workflow can spec-ground against — the comment " +
         "below (and any inline blocker threads from that earlier run) no longer apply and have been " +
         "cleared."
-      : "An earlier run of the spec-grounded review posted a summary or fallback comment here. This " +
-        "PR's linked issue(s) now show every acceptance criterion marked complete — but that is " +
-        "SELF-ATTESTED (checked off in the issue), not verified against this PR's own diff, so any " +
-        "inline blocker thread from that earlier run has been deliberately LEFT IN PLACE, not " +
-        "cleared: please verify the linked issue's own criteria genuinely hold and resolve any " +
-        "remaining blocker thread yourself.";
+      : reason === "no-unmet-criteria"
+        ? "An earlier run of the spec-grounded review posted a summary or fallback comment here. This " +
+          "PR's linked issue(s) now show every acceptance criterion marked complete — but that is " +
+          "SELF-ATTESTED (checked off in the issue), not verified against this PR's own diff, so any " +
+          "inline blocker thread from that earlier run has been deliberately LEFT IN PLACE, not " +
+          "cleared: please verify the linked issue's own criteria genuinely hold and resolve any " +
+          "remaining blocker thread yourself."
+        : "An earlier run of the spec-grounded review posted a summary or fallback comment here. " +
+          "Since then, this PR's own state changed (its head moved, or its body now shows a new " +
+          "closing-issue reference) in a way this run could not safely re-verify against the earlier " +
+          "review, so any inline blocker thread from that earlier run has been deliberately LEFT IN " +
+          "PLACE, not cleared: a fresh spec-grounded review run will re-evaluate them against this " +
+          "PR's current state.";
   return [
     `**This PR's linked-issue acceptance criteria are no longer being actively spec-ground.** ${explanation}`,
     "",

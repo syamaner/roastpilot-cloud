@@ -111,6 +111,7 @@ import {
   parseAndValidateVerdict,
   type SpecGroundingVerdict,
 } from "./spec-grounding-verdict-schema.mts";
+import { parseLinkedIssueReferences } from "./spec-grounding-logic.mts";
 import { fetchPrDiff } from "./spec-grounding-runner.mts";
 import {
   MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
@@ -143,6 +144,14 @@ import {
 interface GitHubPullRequestShas {
   readonly head: { readonly sha: string };
   readonly base: { readonly sha: string };
+  /**
+   * The PR's own current body — added alongside the SHAs (PR #87 review
+   * round 3, Codex, P1, gate-integrity TOCTOU) so {@link
+   * isStillSafeToDeleteInlineBlockerThreads} can re-parse it without a
+   * second GET. Unused by {@link fetchAndVerifyPrShas}'s own existing
+   * caller (`tryPostBlockersInline`), which only ever needed the SHAs.
+   */
+  readonly body: string | null;
 }
 
 /**
@@ -181,6 +190,73 @@ async function fetchAndVerifyPrShas(
     );
   }
   return pr;
+}
+
+/**
+ * Re-validates, immediately before the DESTRUCTIVE inline-blocker-thread
+ * deletion in {@link clearStaleSpecGroundingStateOnDisappearedCriteria}'s
+ * own `"no-references"` branch, that the "no linked-issue reference at
+ * all" signal `spec-grounding-runner.mts` reported is STILL true right
+ * now — not just at the moment that read-only run happened to check (PR
+ * #87 review round 3, Codex, P1 — a genuine gate-integrity TOCTOU): a
+ * body-only edit does NOT bump the PR's own head SHA, so a PR whose body
+ * is edited to ADD a closing reference (or that gets a superseding run
+ * posting new blockers for that reference) AFTER the read-only runner
+ * finished but BEFORE this publish run reaches the delete would
+ * otherwise have an OLDER publish run delete valid, currently-gating
+ * inline blocker thread(s) for a claim the runner never actually saw —
+ * an anti-gaming hole distinct from (but the same root class as) the
+ * self-attested-criteria one PR #87's own earlier round already closed.
+ *
+ * Re-checks TWO independent things against the PR's CURRENT state,
+ * fetched fresh here (never reused from any earlier call in this same
+ * run):
+ * 1. The PR's current head SHA still matches `trustedHeadSha` — the SAME
+ *    check {@link fetchAndVerifyPrShas} makes, but surfaced as a plain
+ *    boolean here, never a throw: a mismatch is an EXPECTED race outcome
+ *    this function's caller degrades from gracefully, not a genuine
+ *    error worth failing the whole run over.
+ * 2. The PR's CURRENT body, re-parsed with the SAME {@link
+ *    parseLinkedIssueReferences} the runner itself uses, still yields
+ *    ZERO linked-issue references.
+ *
+ * Only when BOTH still hold is it actually safe to delete. A genuine
+ * network/API failure while re-fetching still propagates uncaught (this
+ * function only absorbs the two SPECIFIC, expected-race conditions
+ * above — never a real error, which the caller's own existing "never
+ * silent" fallback handling already covers).
+ *
+ * IRREDUCIBLE RESIDUAL, documented rather than hidden: this closes the
+ * window between the READ-ONLY runner's own execution and this
+ * revalidation, but cannot close the window between THIS revalidation
+ * and the delete call immediately following it — true atomicity across
+ * two separate REST calls isn't achievable via GitHub's API. That final
+ * sub-second gap is accepted; a human's own merge action (never this
+ * job) is the actual backstop for anything landing in it.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context — the value this run's OWN read-only pass was
+ *   reviewed against, never re-derived.
+ * @returns `true` only if the PR's CURRENT head SHA still matches AND
+ *   its CURRENT body still yields zero linked-issue references.
+ */
+async function isStillSafeToDeleteInlineBlockerThreads(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+): Promise<boolean> {
+  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  if (pr.head.sha !== trustedHeadSha) {
+    return false;
+  }
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  return references.length === 0;
 }
 
 interface RunPaths {
@@ -403,12 +479,21 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  * original version of this function treated every `hasCriteria: false`
  * run identically, an anti-gaming hole):
  * - `"no-references"` — no closing-keyword reference exists at all, so
- *   there was never any obligation. Clears BOTH channels: the summary
- *   comment (via {@link clearStaleSpecGroundingSummary}, a no-op if none
- *   exists) AND deletes any prior inline blocker comments (via {@link
- *   clearStaleInlineBlockerComments}, matched generically since there is
- *   no run plan at all once criteria are gone) — correct, since no
- *   closing claim means no obligation to verify.
+ *   there was never any obligation. RE-VALIDATES this is STILL true right
+ *   now, immediately before deleting, via {@link
+ *   isStillSafeToDeleteInlineBlockerThreads} (PR #87 review round 3,
+ *   Codex, P1 — a genuine gate-integrity TOCTOU: a body-only edit does
+ *   NOT bump the trusted head SHA, so a PR body edited to ADD a closing
+ *   reference AFTER the read-only runner finished but BEFORE this delete
+ *   would otherwise have this run delete a currently-gating thread for a
+ *   claim the runner never saw). If STILL safe: clears BOTH channels —
+ *   the summary comment (via {@link clearStaleSpecGroundingSummary}, a
+ *   no-op if none exists) AND deletes any prior inline blocker comments
+ *   (via {@link clearStaleInlineBlockerComments}, matched generically
+ *   since there is no run plan at all once criteria are gone). If NOT
+ *   still safe (an expected race outcome, never treated as an error):
+ *   degrades to the SAME non-destructive treatment `"no-unmet-criteria"`
+ *   gets below — accurate summary, inline threads left untouched.
  * - `"no-unmet-criteria"` (or any reason this run could not positively
  *   confirm as `"no-references"`, per {@link readOutcomeArtifact}'s own
  *   fail-closed coercion) — a closing claim STILL exists; the linked
@@ -433,15 +518,19 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  * exactly what was verified).
  *
  * A genuine failure while clearing (anything other than the benign
- * "nothing to clear"/"already gone" cases, which never throw) is
- * surfaced as a visible fallback, the same "never silent" policy every
- * other network failure in this entrypoint follows.
+ * "nothing to clear"/"already gone" cases, or the expected-race
+ * degrade above, none of which throw) is surfaced as a visible
+ * fallback, the same "never silent" policy every other network failure
+ * in this entrypoint follows.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param reason - Why this run found `hasCriteria: false`.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context — needed for the `"no-references"` branch's own
+ *   pre-delete revalidation.
  */
 async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   token: string,
@@ -449,21 +538,50 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   repo: string,
   prNumber: number,
   reason: NoCriteriaReason,
+  trustedHeadSha: string,
 ): Promise<void> {
   try {
-    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, reason);
     if (reason === "no-references") {
-      const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+      const stillSafeToDelete = await isStillSafeToDeleteInlineBlockerThreads(
+        token,
+        owner,
+        repo,
+        prNumber,
+        trustedHeadSha,
+      );
+      if (stillSafeToDelete) {
+        const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, "no-references");
+        const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+        console.log(
+          `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
+            `reason=no-references, revalidated) — cleared stale prior state (summary comment cleared=` +
+            `${summaryCleared}, ${clearedInlineCount} inline comment(s) removed).`,
+        );
+        return;
+      }
+      // Expected race, NOT an error: the PR's head moved, or its current
+      // body now yields a closing reference the read-only runner never
+      // saw. Degrade to the non-destructive treatment -- never delete a
+      // thread this run could not actually re-verify is obligation-free.
+      const summaryCleared = await clearStaleSpecGroundingSummary(
+        token,
+        owner,
+        repo,
+        prNumber,
+        "race-detected-before-delete",
+      );
       console.log(
-        `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
-          `reason=no-references) — cleared stale prior state (summary comment cleared=` +
-          `${summaryCleared}, ${clearedInlineCount} inline comment(s) removed).`,
+        `PR #${prNumber}'s state changed since the spec-grounded review ran (head moved, or a new ` +
+          `closing reference now exists) — degrading to the non-destructive path: summary comment ` +
+          `updated (cleared=${summaryCleared}); any prior inline blocker thread(s) were deliberately ` +
+          `LEFT UNTOUCHED for a fresh run to re-evaluate.`,
       );
       return;
     }
     // "no-unmet-criteria" (or a coerced-to-safe unknown/missing reason):
     // a closing claim STILL exists, self-attested only -- inline blocker
     // threads are deliberately left untouched for a human to triage.
+    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, reason);
     console.log(
       `PR #${prNumber}'s linked issue(s) show every acceptance criterion self-attested complete ` +
         `(hasCriteria: false, reason=${reason}) — summary comment updated (cleared=${summaryCleared}); ` +
@@ -527,7 +645,14 @@ export async function main(): Promise<void> {
     return;
   }
   if (!outcome.hasCriteria) {
-    await clearStaleSpecGroundingStateOnDisappearedCriteria(token, owner, repo, prNumber, outcome.noCriteriaReason);
+    await clearStaleSpecGroundingStateOnDisappearedCriteria(
+      token,
+      owner,
+      repo,
+      prNumber,
+      outcome.noCriteriaReason,
+      trustedHeadSha,
+    );
     return;
   }
 

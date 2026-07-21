@@ -25,8 +25,8 @@ import {
   buildSpecGroundingClearedSummaryCommentBody,
   buildSpecGroundingFallbackCommentBody,
   findExistingSpecGroundingSummaryCommentId,
+  type ClearedSummaryReason,
   type ExistingComment,
-  type NoCriteriaReason,
 } from "./publish-spec-grounding-verdict-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 
@@ -281,10 +281,10 @@ export async function publishFallback(
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
- * @param reason - Why this run found `hasCriteria: false` (PR #87 review,
- *   Codex, P1/medium fold) — passed straight through to {@link
- *   buildSpecGroundingClearedSummaryCommentBody} so the posted message is
- *   accurate for the case that actually applies.
+ * @param reason - Why this run is clearing/updating this comment (PR #87
+ *   review, Codex, P1/medium fold + round 3's own TOCTOU fold) — passed
+ *   straight through to {@link buildSpecGroundingClearedSummaryCommentBody}
+ *   so the posted message is accurate for the case that actually applies.
  * @returns `true` if a prior comment was found and cleared in place,
  *   `false` if there was nothing to clear.
  */
@@ -293,7 +293,7 @@ export async function clearStaleSpecGroundingSummary(
   owner: string,
   repo: string,
   prNumber: number,
-  reason: NoCriteriaReason,
+  reason: ClearedSummaryReason,
 ): Promise<boolean> {
   const existingId = await findExistingSummaryComment(token, owner, repo, prNumber);
   if (existingId === null) {

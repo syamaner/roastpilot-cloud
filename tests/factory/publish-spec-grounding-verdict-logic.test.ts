@@ -754,6 +754,15 @@ describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2;
     expect(body).not.toMatch(/have been\s+cleared/i);
   });
 
+  it("for reason=race-detected-before-delete, explains the PR's state changed since the review ran and that inline threads were LEFT IN PLACE for a fresh run, never claiming they were cleared (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody("race-detected-before-delete");
+    expect(body).toMatch(/own state changed/i);
+    expect(body).toMatch(/could not safely re-verify/i);
+    expect(body).toMatch(/left in place/i);
+    expect(body).toMatch(/fresh spec-grounded review run will re-evaluate/i);
+    expect(body).not.toMatch(/have been\s+cleared/i);
+  });
+
   it("ends with the SAME marker a normal summary/fallback comment uses, so a later run that finds criteria again upserts over this cleared comment", () => {
     const body = buildSpecGroundingClearedSummaryCommentBody("no-references");
     expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);

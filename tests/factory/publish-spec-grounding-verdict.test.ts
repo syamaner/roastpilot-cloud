@@ -113,7 +113,25 @@ afterEach(async () => {
 
 /** Standard PR-identity fetch handler, matching the trusted head SHA set in beforeEach. */
 function prFetchHandler() {
-  return jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: TRUSTED_BASE_SHA } });
+  return jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: TRUSTED_BASE_SHA }, body: null });
+}
+
+/**
+ * Sibling of {@link prFetchHandler} with explicit overrides (PR #87
+ * review round 3, Codex, P1, TOCTOU fold) so a test can simulate the PR
+ * having moved (`headSha`) or gained a new closing reference (`body`)
+ * since the read-only runner ran -- both inputs {@link
+ * isStillSafeToDeleteInlineBlockerThreads}'s own revalidation re-checks.
+ * A separate function (not an optional param on `prFetchHandler` itself)
+ * so every existing bare `prFetchHandler` usage (passed directly as a
+ * mockFetch handler) keeps its own simple, argument-free signature.
+ */
+function prFetchHandlerWithOverrides(overrides: { headSha?: string; body?: string | null }): Response {
+  return jsonResponse({
+    head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
+    base: { sha: TRUSTED_BASE_SHA },
+    body: overrides.body ?? null,
+  });
 }
 
 describe("main — the three-way job-result gate", () => {
@@ -298,6 +316,7 @@ describe("main — the outcome.json tri-state", () => {
     await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
     });
@@ -314,6 +333,7 @@ describe("main — the outcome.json tri-state", () => {
     await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -342,6 +362,68 @@ describe("main — the outcome.json tri-state", () => {
     expect(patch).toBeDefined();
     expect((patch?.body as { body: string }).body).toMatch(/no longer references any issue/i);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
+  });
+
+  it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ headSha: "differentsha0000000000000000000000000000" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
+    expect((patch?.body as { body: string }).body).toMatch(/left in place/i);
+    // The inline blocker comments endpoint is NEVER even fetched, let
+    // alone anything DELETEd -- the revalidation failed BEFORE the
+    // destructive path was ever reached.
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("reason=no-references BUT the PR's CURRENT body now shows a closing reference (added after the review ran, head SHA unchanged): degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      // Same head SHA as trusted (a body-only edit never bumps it), but
+      // the body NOW carries a real closing reference the runner never saw.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   it("reason=no-unmet-criteria: updates the summary with the self-attested caveat but LEAVES inline blocker threads untouched -- deleting a required_conversation_resolution-gating thread on a self-attested, non-diff-verified signal would be an anti-gaming hole (PR #87 review, Codex, P1/medium fold)", async () => {
@@ -401,6 +483,7 @@ describe("main — the outcome.json tri-state", () => {
     // block, must still succeed so the fallback comment can genuinely post.
     let summaryLookupCalls = 0;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => {
         summaryLookupCalls += 1;
         return summaryLookupCalls === 1
