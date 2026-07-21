@@ -656,4 +656,57 @@ describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12
     ];
     expect(findExistingSpecGroundingSummaryCommentId(comments)).toBe(42);
   });
+
+  it("truncates a single reason exceeding the per-reason display cap, rather than echoing an untrusted-sized value verbatim (PR #84 review, Codex, FOLD 2)", () => {
+    const hugeReason = "x".repeat(10_000);
+    const body = buildSpecGroundingFallbackCommentBody([hugeReason]);
+    expect(body.length).toBeLessThan(2000);
+    expect(body).toContain("…");
+    expect(body).not.toContain(hugeReason);
+  });
+
+  it("caps a single reason on a CODE POINT boundary, never splitting a surrogate pair (same discipline as sanitizeAgentRationaleForDisplay)", () => {
+    // An astral emoji (2 UTF-16 units, 1 code point) placed exactly at the
+    // 500-code-point cap boundary -- a naive UTF-16 .slice() would split it.
+    const reason = "a".repeat(499) + "\u{1F600}" + "b".repeat(50);
+    const body = buildSpecGroundingFallbackCommentBody([reason]);
+    // No lone surrogate anywhere in the body.
+    for (let i = 0; i < body.length; i++) {
+      const code = body.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = body.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xdc00);
+        expect(next).toBeLessThanOrEqual(0xdfff);
+      }
+    }
+  });
+
+  it("does NOT truncate a reason within the per-reason display cap", () => {
+    const reason = "a short, ordinary reason";
+    const body = buildSpecGroundingFallbackCommentBody([reason]);
+    expect(body).toContain(reason);
+    expect(body).not.toContain(`${reason}…`);
+  });
+
+  it("bounds the TOTAL reasons list length even when every individual reason is within its own per-reason cap, reporting an omitted count rather than growing unboundedly (PR #84 review, Codex, FOLD 2, MEDIUM)", () => {
+    // 500 reasons at ~490 chars each (within the 500-char per-reason cap,
+    // so each survives individually) totals ~245,000 chars -- well past
+    // the 50,000-char list budget, so this specifically exercises the
+    // LIST-level cap, not the per-reason one.
+    const manyReasons = Array.from({ length: 500 }, (_unused, i) => `entries[${i}] ` + "x".repeat(480));
+    const body = buildSpecGroundingFallbackCommentBody(manyReasons);
+    expect(body.length).toBeLessThan(65_536);
+    expect(body).toMatch(/further reason\(s\) omitted/i);
+  });
+
+  it("never exceeds GitHub's 65,536-character comment limit even at the worst case (many reasons, each at the per-reason cap)", () => {
+    const worstCaseReasons = Array.from({ length: 2000 }, () => "x".repeat(600));
+    const body = buildSpecGroundingFallbackCommentBody(worstCaseReasons);
+    expect(body.length).toBeLessThan(65_536);
+  });
+
+  it("does not report an omitted-reason count when every reason fits comfortably within the list budget", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["one reason", "another reason"]);
+    expect(body).not.toMatch(/omitted/i);
+  });
 });

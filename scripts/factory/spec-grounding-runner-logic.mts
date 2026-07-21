@@ -466,13 +466,73 @@ export type ParsedCriteriaSpineResult =
  */
 export const MAX_CRITERIA_SPINE_ARTIFACT_BYTES = 4_000_000;
 
+/**
+ * Upper bound on the NUMBER of elements `entries`/`unreviewedClosingIssues`
+ * may contain, checked BEFORE either array is iterated element-by-element
+ * (PR #84 review, Codex, FOLD 3, LOW): a corrupted spine artifact well
+ * under {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} (4MB) can still encode a
+ * densely-packed array of millions of tiny elements — validating each one
+ * individually would produce one error string per element, hundreds of MB
+ * of accumulated error text, risking an OOM before the caller's own
+ * fallback comment (built FROM those errors) ever gets a chance to post.
+ * Rejecting on COUNT alone, with a single error, closes this before any
+ * per-element work begins. Generous relative to the spine's own real-world
+ * size (at most `MAX_LINKED_ISSUES` (20) × `MAX_CRITERIA_PER_ISSUE` (50) =
+ * 1000 entries for a legitimate run).
+ */
+const MAX_CRITERIA_SPINE_ENTRIES = 5000;
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
+ * Matches a `criterionId`'s own leading `<issueNumber>:` prefix (`spec-
+ * grounding-runner-logic.mts`'s own `buildCriteriaSpine` produces the
+ * shape `${issueNumber}:${index}`) — used only to cross-check that prefix
+ * against the SAME entry's own separate `issueNumber` field (PR #84
+ * review, Codex, FOLD 1); never used to derive `issueNumber` itself, which
+ * always comes from the entry's own dedicated field.
+ */
+const CRITERION_ID_ISSUE_PREFIX_PATTERN = /^(\d+):/;
+
+/**
+ * Whether `criterionId`'s own leading `<issueNumber>:` prefix matches
+ * `issueNumber` — the two are independently-encoded copies of the SAME
+ * fact in a well-formed spine (`buildCriteriaSpine` always derives both
+ * from the same source), so a well-formed artifact always agrees; a
+ * corrupted one might not (PR #84 review, Codex, FOLD 1, the consequential
+ * one — see {@link validateCriteriaSpineEntry}'s own docstring for the
+ * downstream join-collision this closes).
+ *
+ * @param criterionId - The candidate `criterionId`.
+ * @param issueNumber - The same entry's own `issueNumber` field.
+ * @returns Whether the two agree.
+ */
+function criterionIdIssueNumberMatches(criterionId: string, issueNumber: number): boolean {
+  const match = CRITERION_ID_ISSUE_PREFIX_PATTERN.exec(criterionId);
+  return match !== null && Number(match[1]) === issueNumber;
+}
+
+/**
  * Validates one raw `entries[]` element against {@link CriteriaSpineEntry}'s
  * own shape.
+ *
+ * ALSO cross-checks `criterionId`'s own `<issueNumber>:` prefix against
+ * this SAME entry's `issueNumber` field (PR #84 review, Codex, FOLD 1,
+ * BLOCKER-class — the consequential one: `publish-spec-grounding-verdict-
+ * logic.mts`'s own `joinFindingsToSpine` indexes the agent's verdict
+ * findings by `criterionId` alone. A corrupted spine with a MISMATCHED
+ * pair — e.g. `issueNumber: 12` paired with `criterionId: "13:0"` — would
+ * silently join issue #12's spine entry against whatever finding the
+ * agent submitted for criterion `13:0`, misattributing a verdict across
+ * criteria. Rejecting the whole artifact here, rather than trusting either
+ * field alone, closes it at the SOURCE rather than downstream in the join).
+ * Duplicate-`criterionId` rejection (the sibling half of the SAME
+ * join-collision class — see {@link parseCriteriaSpineArtifact}'s own
+ * body) is cross-entry state and lives there instead, mirroring `spec-
+ * grounding-verdict-schema.mts`'s own identical `seenCriterionIds`
+ * precedent for the agent's verdict.
  *
  * @param raw - The candidate entry value.
  * @param index - This entry's position, used only to make error messages
@@ -491,7 +551,8 @@ function validateCriteriaSpineEntry(
   }
   const { issueNumber, kind, criterionId } = raw;
   let ok = true;
-  if (typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+  const validIssueNumber = typeof issueNumber === "number" && Number.isInteger(issueNumber) && issueNumber > 0;
+  if (!validIssueNumber) {
     errors.push(`entries[${index}].issueNumber must be a positive integer`);
     ok = false;
   }
@@ -501,6 +562,13 @@ function validateCriteriaSpineEntry(
   }
   if (typeof criterionId !== "string" || criterionId.length === 0) {
     errors.push(`entries[${index}].criterionId must be a non-empty string`);
+    ok = false;
+  } else if (validIssueNumber && !criterionIdIssueNumberMatches(criterionId, issueNumber as number)) {
+    errors.push(
+      `entries[${index}].criterionId "${criterionId}" does not match entries[${index}].issueNumber ` +
+        `(${issueNumber}) -- a corrupted spine could otherwise let a verdict finding for one ` +
+        `criterion be silently misattributed to a different one`,
+    );
     ok = false;
   }
   if (!ok) {
@@ -619,12 +687,45 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     return { ok: false, errors };
   }
 
+  // Cardinality cap, checked BEFORE either array is iterated
+  // element-by-element (PR #84 review, Codex, FOLD 3, LOW) -- see {@link
+  // MAX_CRITERIA_SPINE_ENTRIES}'s own docstring for the OOM this closes.
+  // A single error each, never one per element.
+  if ((entries as unknown[]).length > MAX_CRITERIA_SPINE_ENTRIES) {
+    errors.push(`"entries" has ${(entries as unknown[]).length} elements, exceeds ${MAX_CRITERIA_SPINE_ENTRIES}`);
+  }
+  if ((unreviewedClosingIssues as unknown[]).length > MAX_CRITERIA_SPINE_ENTRIES) {
+    errors.push(
+      `"unreviewedClosingIssues" has ${(unreviewedClosingIssues as unknown[]).length} elements, exceeds ` +
+        `${MAX_CRITERIA_SPINE_ENTRIES}`,
+    );
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
   const validatedEntries: CriteriaSpineEntry[] = [];
+  // Duplicate-criterionId rejection (PR #84 review, Codex, FOLD 1 --
+  // the sibling half of validateCriteriaSpineEntry's own issueNumber-
+  // prefix cross-check, see that function's own docstring for the full
+  // join-collision reasoning): a duplicate criterionId would let
+  // publish-spec-grounding-verdict-logic.mts's own joinFindingsToSpine
+  // (which indexes findings by criterionId via a plain Map) silently let
+  // ONE verdict finding satisfy TWO different spine entries. Mirrors
+  // spec-grounding-verdict-schema.mts's own identical seenCriterionIds
+  // precedent for the agent's own verdict.
+  const seenCriterionIds = new Set<string>();
   (entries as unknown[]).forEach((e, i) => {
     const entry = validateCriteriaSpineEntry(e, i, errors);
-    if (entry !== null) {
-      validatedEntries.push(entry);
+    if (entry === null) {
+      return;
     }
+    if (seenCriterionIds.has(entry.criterionId)) {
+      errors.push(`entries[${i}].criterionId "${entry.criterionId}" is a duplicate`);
+      return;
+    }
+    seenCriterionIds.add(entry.criterionId);
+    validatedEntries.push(entry);
   });
   const validatedUnreviewed: UnreviewedClosingIssueResult[] = [];
   (unreviewedClosingIssues as unknown[]).forEach((e, i) => {

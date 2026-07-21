@@ -878,4 +878,88 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: [] })));
     expect(result.ok).toBe(true);
   });
+
+  it("rejects a duplicate criterionId across entries (PR #84 review, Codex, FOLD 1) -- a Map-keyed downstream join could otherwise let one verdict finding satisfy TWO different criteria", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "non-closing", criterionId: "12:0" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[1\]\.criterionId "12:0" is a duplicate/);
+    }
+  });
+
+  it("rejects an entry whose criterionId's own issueNumber prefix does not match its own issueNumber field (PR #84 review, Codex, FOLD 1, the consequential one) -- a corrupted spine could otherwise misattribute a verdict finding across criteria", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [{ issueNumber: 12, kind: "closing", criterionId: "13:0" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\]\.criterionId "13:0" does not match entries\[0\]\.issueNumber \(12\)/);
+    }
+  });
+
+  it("accepts entries with the SAME issueNumber and different, correctly-prefixed criterionIds (the normal multi-criterion case)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "closing", criterionId: "12:1" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects when entries has more than MAX_CRITERIA_SPINE_ENTRIES elements, with a SINGLE error rather than one per element (PR #84 review, Codex, FOLD 3, LOW)", () => {
+    const manyEntries = Array.from({ length: 5001 }, (_unused, i) => ({
+      issueNumber: 1,
+      kind: "closing",
+      criterionId: `1:${i}`,
+    }));
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: manyEntries })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toMatch(/"entries" has 5001 elements, exceeds 5000/);
+    }
+  });
+
+  it("rejects when unreviewedClosingIssues has more than MAX_CRITERIA_SPINE_ENTRIES elements, with a SINGLE error rather than one per element", () => {
+    const manyIssues = Array.from({ length: 5001 }, (_unused, i) => ({
+      issueNumber: i + 1,
+      truncationKind: "fully-dropped",
+    }));
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ unreviewedClosingIssues: manyIssues })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toMatch(/"unreviewedClosingIssues" has 5001 elements, exceeds 5000/);
+    }
+  });
+
+  it("accepts exactly MAX_CRITERIA_SPINE_ENTRIES elements (the cap boundary itself is not rejected)", () => {
+    const exactlyMax = Array.from({ length: 5000 }, (_unused, i) => ({
+      issueNumber: 1,
+      kind: "closing",
+      criterionId: `1:${i}`,
+    }));
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: exactlyMax })));
+    expect(result.ok).toBe(true);
+  });
 });
