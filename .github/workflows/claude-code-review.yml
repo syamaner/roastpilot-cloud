@@ -784,3 +784,185 @@ jobs:
             review-output/outcome.json
           if-no-files-found: warn
           retention-days: 1
+
+  publish-spec-grounding-review:
+    name: Publish spec-grounded review (privileged)
+    needs: spec-grounded-review
+    # Run on everything EXCEPT a cancelled run (team-lead's full pre-open
+    # pass, non-blocking improvement folded before open): still fires on
+    # "success"/"failure"/"skipped" -- the entrypoint's own tri-state gate
+    # handles all three internally (a visible fallback, or a silent
+    # no-op), so every branch of that gate stays the SCRIPT's own
+    # responsibility, not re-derived here. `!cancelled()` specifically
+    # skips spinning up this privileged job at all on a run that a NEWER
+    # push already superseded (`spec-grounded-review`'s own concurrency
+    # group cancels the stale run) -- publish never needed to run there
+    # anyway (a cancelled review is already a silent no-op by design), so
+    # this saves a runner with no correctness loss over `always()`.
+    if: ${{ !cancelled() }}
+
+    # OWN group, separate from spec-grounded-review's own (mirrors this
+    # file's per-job philosophy, top-of-file comment, rather than a single
+    # shared group): spec-grounded-review's own group only cancels an
+    # in-flight REVIEW run on a newer push -- it says nothing about two
+    # overlapping WORKFLOW RUNS (e.g. an edited-triggered run and a
+    # synchronize-triggered run close together) each reaching their own
+    # publish job and racing on the SAME PR's comment API calls
+    # concurrently.
+    #
+    # cancel-in-progress: FALSE (team-lead's call, the highest-risk job
+    # in this workflow is worth a dedicated group over a documented
+    # residual): a running publish must complete UNINTERRUPTED --
+    # cancelling mid-DELETE-loop would leave a partial clear. With
+    # false, GitHub runs the current publish to completion and collapses
+    # any queued runs to the newest pending one (latest state wins), and
+    # each publish's own pre-delete TOCTOU revalidation (publish-spec-
+    # grounding-verdict.mts's own isStillSafeToDeleteInlineBlockerThreads,
+    # PR #87 review round 3) re-checks the PR's head SHA + body against
+    # CURRENT state immediately before deleting -- so a queued publish
+    # that starts after a body edit correctly sees the new closing
+    # reference and degrades to the non-destructive path instead of
+    # deleting. Clean composition: no partial-clear, no stale delete.
+    concurrency:
+      group: spec-grounded-publish-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout TRUSTED base only -- never the PR's own head
+        # THE load-bearing security decision for this job (team-lead
+        # ENDORSED, with one rationale correction -- see below): this is
+        # the FIRST privileged (write-token) job in a `pull_request`-
+        # triggered workflow anywhere in this repo. `spec-grounded-
+        # review`'s own job deliberately checks out and runs the PR's OWN
+        # version of scripts/factory (its "Restore trusted configuration"
+        # step unconditionally reapplies scripts/factory from PR-head) --
+        # correct THERE because it's read-only (a malicious/buggy edit can
+        # at worst make the REVIEW wrong, not misuse a token). That
+        # reasoning does NOT transfer here: this job holds `pull-requests:
+        # write`, so if it ran the PR's own (possibly attacker-modified)
+        # publish-spec-grounding-verdict.mts (or any sibling file in its
+        # import graph), a malicious PR could rewrite this script to do
+        # ANYTHING with that token. Pinning `ref:` to `base.sha`
+        # (immutable, event-pinned -- never `base.ref`, a branch tip that
+        # could race) means every scripts/factory/*.mts file this job ever
+        # executes is ALWAYS the already-reviewed, already-merged base
+        # version, independent of the PR's own head.
+        #
+        # WHAT THIS PIN DOES NOT COVER (correction to an earlier draft of
+        # this reasoning -- do not rely on the wrong version): the
+        # WORKFLOW FILE itself (this YAML) is read from the PR's own HEAD
+        # (merge commit) for a `pull_request` event, NOT from base -- so a
+        # same-repo PR COULD edit this file directly (remove this very
+        # pin, escalate this job's own `permissions:`, etc.). What
+        # actually guards the WORKFLOW STRUCTURE is a different set of
+        # controls entirely: the workflow-edit-detection guard, required
+        # human review + branch protection on `main`, and (for an
+        # EXTERNAL attacker specifically) fork PRs getting a read-only
+        # token regardless of what this file's `permissions:` requests --
+        # so an outside attacker can't reach write capability here at all,
+        # and the entrypoint's own tri-state gate silently no-ops on the
+        # resulting `skipped` review either way. This pin's real,
+        # necessary job is protecting the SCRIPTS specifically, which
+        # none of those other controls cover -- the two are complementary,
+        # not redundant.
+        #
+        # THREAT MODEL: the write-token + attacker-code risk here is real
+        # for SAME-REPO PRs only (a fork PR gets a read-only token and the
+        # review it would have needed is skipped entirely). A same-repo
+        # PR is an agent- or owner-authored branch, so the realistic
+        # threat this pin closes is a compromised agent, or the
+        # anti-gaming property itself -- a PR must never be able to alter
+        # its own judge -- not a random external actor.
+        #
+        # FULL checkout, no `sparse-checkout:` (corrected from an earlier
+        # draft of this job, team-lead's ruling, PR #87-adjacent finding):
+        # `npm ci` below needs `package.json` + `package-lock.json`, which
+        # a `scripts/factory`-only sparse checkout excludes outright --
+        # `spec-grounded-review`'s own job abandoned sparse-checkout for
+        # exactly this class of reliability problem at ITS round 5 (see
+        # that job's own checkout step comment). A full checkout here
+        # exposes no PR content at all, unlike that job's checkout: this
+        # step already pins `ref:` to `base.sha`, so the working tree is
+        # ALWAYS the trusted, already-reviewed base revision end to end --
+        # there is no PR-head content to restore away afterward, making
+        # this job's own checkout simpler AND safer than the read-only
+        # job's checkout-PR-then-restore-from-base sequence.
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        # RESTORED (corrected from an earlier draft of this job that
+        # dropped this step entirely, team-lead's ruling): the "zero
+        # third-party deps" premise that draft rested on was wrong --
+        # `publish-spec-grounding-verdict.mts` imports
+        # `parseLinkedIssueReferences` from `spec-grounding-logic.mts`,
+        # which has its own unconditional top-level `import MarkdownIt
+        # from "markdown-it"` (a real devDependency) -- ESM resolves every
+        # static import eagerly at load time, so without this step the
+        # entrypoint throws `ERR_MODULE_NOT_FOUND` before `main()` ever
+        # runs, on EVERY invocation. Verified concretely: `node
+        # --experimental-strip-types scripts/factory/publish-spec-
+        # grounding-verdict.mts` against a bare checkout (no
+        # `node_modules`) throws that error immediately; the identical
+        # command after this step runs clean and correctly reaches the
+        # expected "missing GH_TOKEN" failure once env vars are absent, as
+        # intended for a smoke test.
+        #
+        # `npm ci --ignore-scripts`, mirroring `spec-grounded-review`'s
+        # OWN install step exactly -- same package (`markdown-it`), same
+        # `--ignore-scripts` reasoning that job's own comment already
+        # documents (a PR-controlled lock file + lifecycle scripts + a
+        # token-bearing next step in the same job is a poison-then-
+        # exfiltrate chain). Here that risk is even smaller than in that
+        # job: this checkout is pinned to `base.sha`, so `npm ci` installs
+        # from the BASE revision's own `package-lock.json`, never a PR's
+        # own lock file -- a PR cannot inject or pin a malicious
+        # dependency version into what this job installs at all. Kept
+        # anyway, matching the same job's own defence-in-depth posture
+        # rather than relying solely on the checkout pin.
+        run: npm ci --ignore-scripts
+
+      - name: Download spec-grounding review artifacts
+        # May legitimately not exist (the review job crashed before its
+        # own upload step, or genuinely never produced anything) -- the
+        # entrypoint's own readOutcomeArtifact/readArtifactFile already
+        # treat a missing file as the "outcome.json not found" fallback
+        # case, so a missing download here must not fail this STEP.
+        # Restores to the SAME relative paths the review job's own
+        # upload-artifact step preserved (review-output/*,
+        # review-context/*) -- no `path:` override needed, matching the
+        # entrypoint's own default OUTCOME_PATH/CRITERIA_SPINE_PATH/
+        # VERDICT_PATH exactly.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spec-grounding-review-artifacts
+
+      - name: Publish the spec-grounded review verdict (privileged)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # TRUSTED PR identity and head SHA, from the workflow's own
+          # event context -- never re-derived from the PR's own mutable
+          # state. publish-spec-grounding-verdict.mts's own
+          # fetchAndVerifyPrShas re-checks the PR's CURRENT head against
+          # this value before selecting an inline-comment anchor.
+          TRUSTED_PR_NUMBER: ${{ github.event.pull_request.number }}
+          TRUSTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The tri-state gate's own first signal -- see this script's own
+          # top-level docstring for the full skipped/cancelled/failure/
+          # success handling.
+          SPEC_GROUNDED_REVIEW_JOB_RESULT: ${{ needs.spec-grounded-review.result }}
+        run: node --experimental-strip-types scripts/factory/publish-spec-grounding-verdict.mts
