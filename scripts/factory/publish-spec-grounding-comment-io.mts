@@ -26,6 +26,7 @@ import {
   findExistingSpecGroundingSummaryCommentId,
   type ExistingComment,
 } from "./publish-spec-grounding-verdict-logic.mts";
+import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 
 interface GitHubComment {
   readonly id: number;
@@ -109,6 +110,23 @@ export async function upsertSummaryComment(
 }
 
 /**
+ * Round-2 fold (PR #85 review, Codex, MEDIUM — the "no bidi/invisible
+ * concern for a plain-text log" scoping in this function's first version
+ * was itself the miss): a workflow log line is RENDERED, in a terminal or
+ * the GitHub Actions log viewer, so it carries the same visual-spoofing
+ * risk as a posted comment, PLUS the log-specific workflow-command risk
+ * below. An ANSI escape sequence (`\x1b`, a `\p{Cc}` control character)
+ * can manipulate cursor position or color in a terminal viewer; a bidi
+ * override can visually reorder or hide part of the logged text; and an
+ * unbounded value (e.g. a multi-megabyte artifact field echoed into a
+ * validation-error reason) can emit a multi-megabyte log line. None of
+ * that is covered by newline-collapse alone.
+ *
+ * @see MAX_LOGGED_REASON_LENGTH
+ */
+const MAX_LOGGED_REASON_LENGTH = 2000;
+
+/**
  * Neutralizes a reason (or any other untrusted-derived string) before it
  * reaches a WORKFLOW LOG line (`console.error`/`console.log`) — a
  * DIFFERENT untrusted-output channel than the posted bot comment (PR #85
@@ -124,11 +142,27 @@ export async function upsertSummaryComment(
  * neutralization does NOT cover this: the log is a separate channel
  * entirely.
  *
- * The LOAD-BEARING defense is collapsing newlines: a workflow command
- * must START a line, so a value with no newline in it can never inject
- * one regardless of what text follows. Also strips the literal `::`
- * marker itself as defense-in-depth, in case some other log consumer
- * ever parses it without requiring a true line start.
+ * Three layered defenses, in order:
+ *  1. {@link escapeInvisibleCharactersVisibly} — the SAME comment-grade
+ *     primitive `neutralizeUntrustedTextForBotComment` uses, rendering
+ *     every control/format character (`\p{C}`, including ANSI escapes and
+ *     bidi overrides) as a visible `[U+XXXX]` marker (round-2 fold: a log
+ *     line is rendered too, so this channel needs the full comment-grade
+ *     treatment, not a narrower one). Leaves the four ordinary ASCII
+ *     whitespace characters — space, tab, LF, CR — untouched.
+ *  2. Newline-collapse (`\r`/`\n` -> space) — the LOAD-BEARING defense
+ *     against workflow-command injection specifically: a workflow command
+ *     must START a line, so a value with no newline in it can never
+ *     inject one regardless of what text follows. Runs AFTER step 1 since
+ *     that step deliberately leaves real newlines as literal newlines.
+ *  3. Strips the literal `::` marker as defense-in-depth, in case some
+ *     other log consumer ever parses it without requiring a true line
+ *     start.
+ *
+ * Finally bounds the result to {@link MAX_LOGGED_REASON_LENGTH} CODE
+ * POINTS (never a UTF-16-unit `slice`, so an astral character at the
+ * boundary can't be split into a lone surrogate — same technique
+ * `sanitizeReasonForDisplay` already uses for the comment path).
  *
  * EXPORTED (PR #85 review follow-up, ahead of slice 3b-iii-d3's own
  * proactive fold — team-lead's disposition on the same finding
@@ -143,7 +177,13 @@ export async function upsertSummaryComment(
  * @returns The value, safe to interpolate into a `console.error`/log call.
  */
 export function neutralizeReasonForLog(value: string): string {
-  return value.replace(/[\r\n]+/g, " ").replace(/::/g, " ");
+  const visible = escapeInvisibleCharactersVisibly(value);
+  const collapsed = visible.replace(/[\r\n]+/g, " ").replace(/::/g, " ");
+  const codePoints = Array.from(collapsed);
+  if (codePoints.length > MAX_LOGGED_REASON_LENGTH) {
+    return `${codePoints.slice(0, MAX_LOGGED_REASON_LENGTH).join("")}…(truncated)`;
+  }
+  return collapsed;
 }
 
 /**

@@ -247,4 +247,34 @@ describe("neutralizeReasonForLog", () => {
     expect(neutralized).not.toMatch(/\n::error/);
     expect(neutralized).not.toContain("::");
   });
+
+  it("renders an ANSI escape sequence visibly instead of letting it manipulate the terminal viewer (PR #85 review round 2, Codex, MEDIUM)", () => {
+    // ESC [ 31 m is a real "set foreground red" ANSI SGR sequence.
+    const neutralized = neutralizeReasonForLog("before\x1b[31mafter");
+    expect(neutralized).not.toContain("\x1b");
+    expect(neutralized).toContain("[U+001B]");
+  });
+
+  it("renders a bidi override character visibly instead of letting it reorder the logged text", () => {
+    const neutralized = neutralizeReasonForLog("safe-looking\u202etxt.exe");
+    expect(neutralized).not.toContain("\u202e");
+    expect(neutralized).toContain("[U+202E]");
+  });
+
+  it("bounds an oversized reason to MAX_LOGGED_REASON_LENGTH code points with a truncation marker, rather than emitting a multi-megabyte log line", () => {
+    const oversized = "x".repeat(5000);
+    const neutralized = neutralizeReasonForLog(oversized);
+    expect(neutralized.length).toBeLessThan(oversized.length);
+    expect(neutralized.endsWith("…(truncated)")).toBe(true);
+  });
+
+  it("neutralizes and bounds an ANSI escape, a bidi override, AND a newline-based command-injection attempt together, in one oversized reason", () => {
+    const attempt = `${"a".repeat(2000)}\x1b[31m\u202e\n::error title=spoofed::message`;
+    const neutralized = neutralizeReasonForLog(attempt);
+    expect(neutralized).not.toContain("\x1b");
+    expect(neutralized).not.toContain("\u202e");
+    expect(neutralized).not.toMatch(/\n::error/);
+    expect(neutralized).not.toContain("::");
+    expect(neutralized.endsWith("…(truncated)")).toBe(true);
+  });
 });
