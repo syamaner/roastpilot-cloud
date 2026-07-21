@@ -109,6 +109,34 @@ export async function upsertSummaryComment(
 }
 
 /**
+ * Neutralizes a reason string before it reaches a WORKFLOW LOG line
+ * (`console.error`) — a DIFFERENT untrusted-output channel than the
+ * posted bot comment (PR #85 review, Codex, MEDIUM): GitHub Actions
+ * parses `::command::` lines anywhere in a step's own stdout, so a
+ * malformed verdict's own unknown-key name or invalid field value —
+ * echoed VERBATIM into a validation-error reason, the SAME untrusted
+ * content `publish-spec-grounding-verdict-logic.mts`'s own
+ * `sanitizeReasonForDisplay` already neutralizes for the posted comment —
+ * reaching a raw `console.error` call could inject a workflow command on
+ * its own line: `"\n::error title=spoofed::message"` (or, on older
+ * runners, `"\n::set-env::"` / `"\n::add-mask::"`) spoofs an annotation
+ * at minimum. The comment's own neutralization does NOT cover this: the
+ * log is a separate channel entirely.
+ *
+ * The LOAD-BEARING defense is collapsing newlines: a workflow command
+ * must START a line, so a reason with no newline in it can never inject
+ * one regardless of what text follows. Also strips the literal `::`
+ * marker itself as defense-in-depth, in case some other log consumer
+ * ever parses it without requiring a true line start.
+ *
+ * @param reason - The untrusted reason string.
+ * @returns The reason, safe to interpolate into a `console.error`/log call.
+ */
+function neutralizeReasonForLog(reason: string): string {
+  return reason.replace(/[\r\n]+/g, " ").replace(/::/g, " ");
+}
+
+/**
  * Publishes the fallback comment (see {@link buildSpecGroundingFallbackCommentBody})
  * for a run that could not produce a real summary, and logs the reasons
  * for CI-run visibility.
@@ -129,6 +157,6 @@ export async function publishFallback(
   await upsertSummaryComment(token, owner, repo, prNumber, buildSpecGroundingFallbackCommentBody(reasons));
   console.error(
     `Spec-grounded review publish failed for PR #${prNumber}. Reasons:\n` +
-      reasons.map((r) => `  - ${r}`).join("\n"),
+      reasons.map((r) => `  - ${neutralizeReasonForLog(r)}`).join("\n"),
   );
 }

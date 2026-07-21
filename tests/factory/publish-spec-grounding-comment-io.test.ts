@@ -201,4 +201,25 @@ describe("publishFallback", () => {
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  it("neutralizes a workflow-command injection attempt in a reason before logging it (PR #85 review, Codex, MEDIUM) -- GitHub Actions parses ::command:: lines anywhere in stdout, so a malformed verdict's own reason could otherwise spoof an annotation on a SECOND log line", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await publishFallback("token", "o", "r", 5, ['unexpected key(s): "\n::error title=spoofed::message"']);
+
+    const loggedText = errorSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+    // The reason's own embedded newline never reaches the log as a real
+    // line break -- the injected "::error ...::" text stays glued onto
+    // the SAME line as the reason's own leading text, and the "::" marker
+    // itself is also stripped, so it could never be parsed as a workflow
+    // command even if it somehow did start a line.
+    expect(loggedText).not.toMatch(/\n::error/);
+    expect(loggedText).not.toContain("::");
+    errorSpy.mockRestore();
+  });
 });
