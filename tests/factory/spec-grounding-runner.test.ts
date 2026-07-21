@@ -207,12 +207,12 @@ describe("main — real unmet criteria", () => {
     // (Codex finding, PR #72 review round 2, BLOCKER). Top-level wrapper
     // shape (Codex finding, PR #76 review, L181): `entries` is the array
     // the agent's own criterionId correlation matches against; `truncated`
-    // / `droppedClosingIssueNumbers` are new trusted metadata for slice
+    // / `unreviewedClosingIssues` are new trusted metadata for slice
     // 3b-iii only -- both false/empty here, nothing was truncated.
     expect(spine).toEqual({
       entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
       truncated: false,
-      droppedClosingIssueNumbers: [],
+      unreviewedClosingIssues: [],
       diffTruncated: false,
     });
 
@@ -342,13 +342,13 @@ describe("main — real unmet criteria", () => {
     // CLOSING reference ("Closes #12") that ends up with zero spine
     // entries too, same as a genuinely truncated one would -- but a
     // verified 404 is an accepted, deliberate no-op (the issue is simply
-    // gone), NOT a truncation gap, so droppedClosingIssueNumbers must stay
+    // gone), NOT a truncation gap, so unreviewedClosingIssues must stay
     // empty here (Codex finding, PR #76 review, L181's own scope: only a
     // resource-capped drop escalates, never a confirmed-deleted issue).
     expect(spine).toEqual({
       entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
       truncated: false,
-      droppedClosingIssueNumbers: [],
+      unreviewedClosingIssues: [],
       diffTruncated: false,
     });
   });

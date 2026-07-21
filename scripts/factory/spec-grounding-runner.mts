@@ -420,10 +420,13 @@ export async function main(): Promise<void> {
   // criteria-spine.json's TOP-LEVEL shape is now a wrapper object, not a
   // bare array (Codex finding, PR #76 review, L181): `entries` is the
   // array the review agent's own criterionId correlation matches against
-  // (unchanged shape from before); `truncated`/`droppedClosingIssueNumbers`
+  // (unchanged shape from before); `truncated`/`unreviewedClosingIssues`
   // /`diffTruncated` are new trusted metadata for slice 3b-iii's
   // privileged publisher only — the read-only review agent never reads or
-  // acts on these fields.
+  // acts on these fields. `unreviewedClosingIssues` (PR #82 round 2
+  // review, FOLD 1) covers BOTH a fully-dropped closing issue and a
+  // partially-truncated one — see computeCriteriaSpineTruncation's own
+  // docstring for the full reasoning.
   //
   // `diffTruncated` (Codex finding, PR #76 review, L733): `pr-diff-
   // block.txt` itself is never uploaded as an artifact — only this file
@@ -433,14 +436,14 @@ export async function main(): Promise<void> {
   // (the byte cap or GitHub's own file-count cap silently cutting it
   // short). Lets the privileged publisher fail-closed on EITHER kind of
   // truncation this run could have, not just the criteria/issue kind
-  // `truncated`/`droppedClosingIssueNumbers` already cover.
+  // `truncated`/`unreviewedClosingIssues` already cover.
   await writeOutputFile(
     paths.criteriaSpinePath,
     JSON.stringify(
       {
         entries: spine,
         truncated: truncationSummary.truncated,
-        droppedClosingIssueNumbers: truncationSummary.droppedClosingIssueNumbers,
+        unreviewedClosingIssues: truncationSummary.unreviewedClosingIssues,
         diffTruncated: diffBlock.truncated,
       },
       null,
