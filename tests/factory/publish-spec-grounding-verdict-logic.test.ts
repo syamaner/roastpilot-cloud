@@ -127,6 +127,10 @@ describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
     expect(result).toMatch(/not addressed/i);
     expect(result).toMatch(/unsatisfied/i);
   });
+
+  it("falls back to an empty string, not a crash, for the type-level-only case of addressedByReviewer:true with a null rationale -- unreachable via a real verdict (validateSpecGroundingVerdict requires a non-empty rationale string on every finding), defensive coverage only", () => {
+    expect(formatRationaleForDisplay(joined({ addressedByReviewer: true, rationale: null }))).toBe("");
+  });
 });
 
 describe("findExistingSpecGroundingSummaryCommentId (F1-S9 slice 3b-iii, issue #12)", () => {
@@ -181,6 +185,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "non-closing", satisfied: false, criterionId: "8:0", issueNumber: 8 })],
       [],
+      { truncated: false, diffTruncated: false },
     );
     expect(body).toContain("No blocking findings.");
     expect(body).toContain("Issue #8");
@@ -192,6 +197,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: false, rationale: "SECRET_RATIONALE_TEXT" })],
       [],
+      { truncated: false, diffTruncated: false },
     );
     expect(body).toContain("1 blocking finding(s)");
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
@@ -201,17 +207,24 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: false })],
       [{ issueNumber: 99 }],
+      { truncated: false, diffTruncated: false },
     );
     expect(body).toContain("2 blocking finding(s)");
   });
 
   it("reports a dropped-closing-issue-only blocker count correctly when there are no criterion-level blockers at all", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [{ issueNumber: 99 }]);
+    const body = buildSpecGroundingSummaryCommentBody([], [{ issueNumber: 99 }], {
+      truncated: false,
+      diffTruncated: false,
+    });
     expect(body).toContain("1 blocking finding(s)");
   });
 
   it("reports that no unmet acceptance criteria were found at all when both inputs are empty", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: false,
+      diffTruncated: false,
+    });
     expect(body).toContain("No unmet acceptance criteria were found at all");
   });
 
@@ -219,6 +232,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "non-closing", satisfied: true })],
       [],
+      { truncated: false, diffTruncated: false },
     );
     expect(body.endsWith(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
   });
@@ -227,9 +241,68 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: true, rationale: "Confirmed in file Y." })],
       [],
+      { truncated: false, diffTruncated: false },
     );
     expect(body).toContain("No blocking findings.");
     expect(body).toContain("satisfied");
     expect(body).toContain("Confirmed in file Y.");
+  });
+
+  it("does NOT render a truncation caveat when neither flag is set", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: false,
+      diffTruncated: false,
+    });
+    expect(body).not.toContain("may be incomplete");
+  });
+
+  it("renders a truncation caveat mentioning the linked issues' criteria when truncated is true", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: true,
+      diffTruncated: false,
+    });
+    expect(body).toContain("may be incomplete");
+    expect(body).toContain("the linked issues' own acceptance criteria");
+    expect(body).not.toContain("this PR's own diff");
+  });
+
+  it("renders a truncation caveat mentioning the diff when diffTruncated is true", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: false,
+      diffTruncated: true,
+    });
+    expect(body).toContain("may be incomplete");
+    expect(body).toContain("this PR's own diff");
+    expect(body).not.toContain("the linked issues' own acceptance criteria");
+  });
+
+  it("mentions BOTH causes when truncated AND diffTruncated are both true", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: true,
+      diffTruncated: true,
+    });
+    expect(body).toContain("the linked issues' own acceptance criteria");
+    expect(body).toContain("this PR's own diff");
+  });
+
+  it("renders the truncation caveat BEFORE the blocker/non-blocking sections -- a human must see 'may be incomplete' before 'no blocking findings'", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: true,
+      diffTruncated: false,
+    });
+    const caveatIndex = body.indexOf("may be incomplete");
+    const noBlockersIndex = body.indexOf("No blocking findings.");
+    expect(caveatIndex).toBeGreaterThanOrEqual(0);
+    expect(noBlockersIndex).toBeGreaterThan(caveatIndex);
+  });
+
+  it("a truncation caveat and a real blocker are not mutually exclusive -- both can appear together", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "closing", satisfied: false })],
+      [],
+      { truncated: true, diffTruncated: true },
+    );
+    expect(body).toContain("may be incomplete");
+    expect(body).toContain("1 blocking finding(s)");
   });
 });

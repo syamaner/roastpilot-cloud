@@ -228,6 +228,38 @@ export function findExistingSpecGroundingSummaryCommentId(
 }
 
 /**
+ * Whether this run's own trusted `criteria-spine.json` reported either
+ * kind of truncation — `truncated`/`diffTruncated`,
+ * `spec-grounding-runner-logic.mts`'s {@link computeCriteriaSpineTruncation}
+ * and `wrapUntrustedDiffBlock`'s own return value respectively (F1-S9
+ * slice 1, issue #12). Passed straight through from the spine artifact —
+ * this module never recomputes either flag itself, since both are already
+ * trusted, runner-computed booleans by the time they reach here.
+ */
+export interface SpecGroundingTruncationFlags {
+  /**
+   * `criteria-spine.json`'s own `truncated` field — broader than
+   * {@link DroppedClosingIssueResult} alone: also true when a NON-closing
+   * reference's own criteria were byte-capped, when a linked issue was
+   * never fetched at all due to the per-PR issue cap, or when the spine
+   * ended up shorter than the total unmet-criteria count for any other
+   * reason. A dropped CLOSING reference already escalates to a blocker on
+   * its own via {@link DroppedClosingIssueResult}; this flag is the
+   * broader "the criteria set itself may be incomplete" signal, covering
+   * cases that don't individually escalate.
+   */
+  readonly truncated: boolean;
+  /**
+   * `criteria-spine.json`'s own `diffTruncated` field — the diff the
+   * agent judged was itself byte-capped or exceeded GitHub's compare-API
+   * file-count limit (Codex finding, PR #76 review, L733). A `satisfied:
+   * true` verdict is only as trustworthy as the diff the agent actually
+   * saw; this flag says that diff may have been incomplete.
+   */
+  readonly diffTruncated: boolean;
+}
+
+/**
  * Builds the single, non-blocking summary comment body.
  *
  * Lists every NON-blocking joined result ({@link deriveSeverity} !==
@@ -241,23 +273,55 @@ export function findExistingSpecGroundingSummaryCommentId(
  * human "resolve" the issue by treating the summary as sufficient while
  * the actual blocking thread stays open.
  *
+ * A truncation caveat (F1-S9 slice 1, issue #12), when either
+ * {@link SpecGroundingTruncationFlags} field is true, is rendered FIRST —
+ * before the blocker/non-blocking sections — deliberately: a human
+ * reading only the top of this comment before deciding to merge must see
+ * "this review may be incomplete" before "no blocking findings", never
+ * after. This is distinct from, and does not replace, the per-issue
+ * {@link DroppedClosingIssueResult} blocker escalation above: a dropped
+ * CLOSING reference is serious enough to block on its own; this caveat
+ * covers the broader, non-blocking-by-default cases (a byte-capped
+ * NON-closing reference, a byte-capped or file-count-capped diff) that
+ * still deserve a human's attention before merging.
+ *
  * @param joined - Every spine criterion's joined result.
  * @param droppedClosingIssues - {@link buildDroppedClosingIssueResults}'s
  *   output for this run — whole closing-kind issues never reviewed at
  *   all due to truncation, escalating the same way an unsatisfied
  *   criterion does (team-lead's disposition, Codex finding, PR #76
  *   review, L181).
+ * @param truncation - This run's own `truncated`/`diffTruncated` flags
+ *   from `criteria-spine.json`, straight through, unmodified.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
   joined: readonly JoinedCriterionResult[],
   droppedClosingIssues: readonly DroppedClosingIssueResult[],
+  truncation: SpecGroundingTruncationFlags,
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
   const totalBlockerCount = criterionBlockers.length + droppedClosingIssues.length;
 
   const lines: string[] = ["**Spec-grounded review summary**", ""];
+
+  if (truncation.truncated || truncation.diffTruncated) {
+    const causes: string[] = [];
+    if (truncation.truncated) {
+      causes.push("the linked issues' own acceptance criteria");
+    }
+    if (truncation.diffTruncated) {
+      causes.push("this PR's own diff");
+    }
+    lines.push(
+      `> ⚠️ **This review may be incomplete.** ${causes.join(" and ")} exceeded a resource cap ` +
+        "during this run, so the reviewer may not have seen every criterion or every change. " +
+        "Treat a clean result here with appropriate caution and consider a manual pass on the " +
+        "parts a byte/file-count cap could have cut off.",
+      "",
+    );
+  }
 
   if (totalBlockerCount > 0) {
     lines.push(
