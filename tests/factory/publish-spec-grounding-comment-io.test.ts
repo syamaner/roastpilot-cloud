@@ -1,0 +1,191 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  findExistingSummaryComment,
+  publishFallback,
+  upsertSummaryComment,
+} from "../../scripts/factory/publish-spec-grounding-comment-io.mts";
+import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+
+/**
+ * Direct unit tests for the comment I/O module, independent of the
+ * privileged entrypoint that consumes it (`publish-spec-grounding-
+ * verdict.mts`, slice d3, split from this module for AGENTS.md's
+ * 400-logic-line PR-hygiene cap) — same mockFetch harness as
+ * `apply-triage-verdict.test.ts`'s own precedent.
+ */
+
+interface FetchCall {
+  readonly url: string;
+  readonly method: string;
+  readonly body: unknown;
+}
+
+function mockFetch(
+  handlers: Record<string, (call: FetchCall) => Response>,
+): { fetchMock: ReturnType<typeof vi.fn>; calls: FetchCall[] } {
+  const calls: FetchCall[] = [];
+  const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(init.body as string) : undefined;
+    const call: FetchCall = { url, method, body };
+    calls.push(call);
+    const key = `${method} ${url.replace("https://api.github.com", "")}`;
+    const handler = handlers[key];
+    if (!handler) {
+      throw new Error(`unexpected fetch call: ${key}`);
+    }
+    return handler(call);
+  });
+  return { fetchMock, calls };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("findExistingSummaryComment", () => {
+  it("returns null when no comment on the PR carries the marker", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User", login: "someone" } }]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const found = await findExistingSummaryComment("token", "o", "r", 5);
+    expect(found).toBeNull();
+  });
+
+  it("finds this run's own prior comment by bot identity + structural marker match", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 42,
+            body: `prior summary\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const found = await findExistingSummaryComment("token", "o", "r", 5);
+    expect(found).toBe(42);
+  });
+
+  it("does not match a DIFFERENT bot's comment carrying the marker as a substring, not a standalone line", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 7,
+            body: `unrelated content embedding ${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} mid-line`,
+            user: { type: "Bot", login: "some-other-app[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const found = await findExistingSummaryComment("token", "o", "r", 5);
+    expect(found).toBeNull();
+  });
+
+  it("paginates through every page, finding the marker on a later page", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      id: i,
+      body: `unrelated ${i}`,
+      user: { type: "User", login: "someone" },
+    }));
+    const page2 = [
+      {
+        id: 999,
+        body: `prior summary\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`,
+        user: { type: "Bot", login: "github-actions[bot]" },
+      },
+    ];
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse(page1),
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=2": () => jsonResponse(page2),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const found = await findExistingSummaryComment("token", "o", "r", 5);
+    expect(found).toBe(999);
+    expect(calls.some((c) => c.url.includes("page=2"))).toBe(true);
+  });
+
+  it("stops after the last (partial) page rather than requesting a nonexistent next one", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User", login: "someone" } }]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await findExistingSummaryComment("token", "o", "r", 5);
+    expect(calls.some((c) => c.url.includes("page=2"))).toBe(false);
+  });
+});
+
+describe("upsertSummaryComment", () => {
+  it("PATCHes the existing comment when one is found", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `prior\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await upsertSummaryComment("token", "o", "r", 5, "new body");
+
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toBe("new body");
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("POSTs a new comment when none exists yet", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await upsertSummaryComment("token", "o", "r", 5, "new body");
+
+    const post = calls.find((c) => c.method === "POST");
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toBe("new body");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("publishFallback", () => {
+  it("posts a fallback comment carrying every given reason", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await publishFallback("token", "o", "r", 5, ["reason one", "reason two"]);
+
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("reason one");
+    expect(body).toContain("reason two");
+    expect(body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
