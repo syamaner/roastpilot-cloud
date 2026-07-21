@@ -58,6 +58,7 @@ import {
   type BlockerCommentPlan,
   type InlinePostingDegradeReason,
 } from "./publish-spec-grounding-blocker-logic.mts";
+import { parseLinkedIssueReferences } from "./spec-grounding-logic.mts";
 import {
   bodyContainsMarkerAsStandaloneLine,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
@@ -388,20 +389,39 @@ export async function clearStaleInlineBlockerComments(
  * this UNCONDITIONALLY on every `hasCriteria: true` publish, regardless
  * of this run's own blocker count or posting outcome.
  *
- * Tolerates a 404 on an individual DELETE (a human already resolved or
- * deleted that thread) the SAME way {@link clearStaleInlineBlockerComments}
- * does.
+ * RE-VERIFIES `currentlyClosingIssueNumbers` ITSELF, AFTER pagination,
+ * IMMEDIATELY BEFORE THE FIRST DELETE (F1-S9 slice 90.4, PR #95 review
+ * round 4, Codex, P1, cid 3625635476 — round 3's own re-verify, in the
+ * CALLER, ran before this function was ever invoked, leaving this
+ * function's own {@link findExistingInlineComments} pagination — a
+ * multi-page GET loop, not instantaneous — still inside the TOCTOU
+ * window). Re-fetching and re-parsing the body here, after pagination
+ * completes and immediately before the delete loop below, narrows that
+ * window to the delete loop's own execution time — as tight as this
+ * mechanism can get without true API-level atomicity, which GitHub's
+ * REST API does not offer across multiple separate calls.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param currentlyClosingIssueNumbers - Every issue number this PR's
- *   CURRENT (already head/base-verified) body references with a
- *   `closing`-kind keyword, right now.
+ *   CURRENT (already head/base-verified) body referenced with a
+ *   `closing`-kind keyword, AT THE TIME the caller took this snapshot —
+ *   re-verified fresh by this function itself before it is trusted for
+ *   any delete (see above).
  * @param currentGeneration - This run's own validated, canonicalized
  *   `github.run_number`, as a number.
- * @returns The number of de-referenced inline comments actually deleted.
+ * @returns `{ ok: true, deletedCount }` once every eligible de-referenced
+ *   comment has been deleted (`deletedCount` may be `0`); `{ ok: false,
+ *   reason: "closing-references-changed" }` if the re-verify found the
+ *   PR's closing-kind reference set no longer matches
+ *   `currentlyClosingIssueNumbers` — NO delete is attempted in that case,
+ *   for ANY comment, since the caller's own posting decisions (computed
+ *   against the SAME now-stale snapshot) are equally suspect; the caller
+ *   is expected to treat this as a fail-closed signal for the WHOLE run,
+ *   not merely skip this one function's own work (see
+ *   `publish-spec-grounding-verdict.mts`'s own `publishSummary`).
  */
 export async function deleteDeReferencedInlineBlockerComments(
   token: string,
@@ -410,8 +430,28 @@ export async function deleteDeReferencedInlineBlockerComments(
   prNumber: number,
   currentlyClosingIssueNumbers: ReadonlySet<number>,
   currentGeneration: number,
-): Promise<number> {
+): Promise<
+  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "closing-references-changed" }
+> {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
+
+  const pr = await githubRequest<{ readonly body: string | null }>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+  );
+  const freshClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+  const unchanged =
+    freshClosingIssueNumbers.size === currentlyClosingIssueNumbers.size &&
+    [...freshClosingIssueNumbers].every((issueNumber) => currentlyClosingIssueNumbers.has(issueNumber));
+  if (!unchanged) {
+    return { ok: false, reason: "closing-references-changed" };
+  }
+
   const deReferenced = existing.filter((c) => {
     if (c.authorType !== "Bot" || c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) {
       return false;
@@ -441,5 +481,5 @@ export async function deleteDeReferencedInlineBlockerComments(
       throw err;
     }
   }
-  return deletedCount;
+  return { ok: true, deletedCount };
 }

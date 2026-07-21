@@ -1075,7 +1075,7 @@ describe("main — the happy path", () => {
     );
   });
 
-  it("SKIPS the de-reference reconciliation non-destructively (never deletes) when the PR's closing-reference SET SIZE changed between this run's own earlier snapshot and the re-verify immediately before the delete (F1-S9 slice 90.4, PR #95 review round 2, Codex, P1 -- the TOCTOU re-verify)", async () => {
+  it("FAILS CLOSED (visible fallback, exit 1, no summary posted) when the PR's closing-reference SET SIZE changed between this run's own earlier snapshot and the re-verify inside the reconcile, immediately before its first delete (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 -- a mismatch means BOTH this run's own posting decisions AND the reconcile are stale, so the whole run fails closed rather than publishing a stale summary)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "34:0", satisfied: false, rationale: "Still genuinely unmet." }] },
       spine: {
@@ -1097,8 +1097,9 @@ describe("main — the happy path", () => {
         prFetchCount += 1;
         // FIRST call (fetchAndVerifyPrShas, the early snapshot): body has
         // no closing reference at all -- #34 is de-referenced, snapshot
-        // set is EMPTY. SECOND call (the re-verify, immediately before
-        // the delete): a race landed -- the body now ALSO references
+        // set is EMPTY. SECOND call (the reconcile's own internal
+        // re-verify, after its own comment pagination, immediately before
+        // its delete loop): a race landed -- the body now ALSO references
         // #99 as closing, growing the set from size 0 to size 1 (a size
         // MISMATCH, not just a different single element).
         return prFetchHandlerWithOverrides({ body: prFetchCount === 1 ? "" : "Closes #99" });
@@ -1113,14 +1114,17 @@ describe("main — the happy path", () => {
 
     await main();
 
-    // The reconciliation's own comment-fetch never even runs -- the
-    // re-verify's own OWN fetch to /pulls/83 (the second GET) happens,
-    // but no DELETE at all follows, since the snapshot no longer matches.
+    expect(process.exitCode).toBe(1);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
     expect(prFetchCount).toBe(2);
+    const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/closing references changed since this run's own earlier snapshot/i);
   });
 
-  it("SKIPS the de-reference reconciliation non-destructively when the closing-reference set is the SAME SIZE but a DIFFERENT issue number between the snapshot and the re-verify (F1-S9 slice 90.4, PR #95 review round 2, Codex, P1 -- the element-mismatch branch, distinct from the size-mismatch one)", async () => {
+  it("FAILS CLOSED when the closing-reference set is the SAME SIZE but a DIFFERENT issue number between the snapshot and the reconcile's own internal re-verify (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1 -- the element-mismatch branch, distinct from the size-mismatch one)", async () => {
     const marker = criterionBlockerCommentMarker("34:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "34:0", satisfied: false, rationale: "Still genuinely unmet." }] },
@@ -1141,10 +1145,11 @@ describe("main — the happy path", () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
         prFetchCount += 1;
-        // FIRST call: closing set is {34}. SECOND call (re-verify): SAME
-        // SIZE (one closing reference) but a DIFFERENT issue number (#99,
-        // not #34) -- #34 was de-referenced AND #99 was newly closed in
-        // the same edit, landing between the snapshot and the re-verify.
+        // FIRST call: closing set is {34}. SECOND call (the reconcile's
+        // own internal re-verify): SAME SIZE (one closing reference) but
+        // a DIFFERENT issue number (#99, not #34) -- #34 was
+        // de-referenced AND #99 was newly closed in the same edit,
+        // landing between the snapshot and the re-verify.
         return prFetchHandlerWithOverrides({ body: prFetchCount === 1 ? "Closes #34" : "Closes #99" });
       },
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
@@ -1159,7 +1164,9 @@ describe("main — the happy path", () => {
         ]),
       // #34 already has a matching existing comment (id 201) at the
       // snapshot body ("Closes #34"), so tryPostBlockersInline PATCHes it
-      // in place rather than creating a new one.
+      // in place rather than creating a new one -- this run's own
+      // POSTING succeeds normally; only the LATER reconcile detects the
+      // race and fails the whole run closed.
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/201": () => jsonResponse({}),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
@@ -1168,11 +1175,16 @@ describe("main — the happy path", () => {
 
     await main();
 
-    // #34's own PRIOR comment (id 201) is left untouched -- the re-verify
-    // detected the set changed (even though the SIZE matched) and skipped
-    // the delete non-destructively.
+    expect(process.exitCode).toBe(1);
+    // #34's own PRIOR comment (id 201) is left untouched -- the
+    // reconcile's own re-verify detected the set changed (even though the
+    // SIZE matched) and never reached its delete loop at all.
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
     expect(prFetchCount).toBe(2);
+    const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/closing references changed since this run's own earlier snapshot/i);
   });
 
   it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {

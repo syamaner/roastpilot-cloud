@@ -294,68 +294,6 @@ async function isStillSafeToDeleteInlineBlockerThreads(
   return references.length === 0;
 }
 
-/**
- * Re-verifies, immediately before the DESTRUCTIVE de-reference delete in
- * `publishSummary`, that this PR's CURRENT closing-kind reference set is
- * UNCHANGED from the earlier snapshot (`currentClosingIssueNumbers`) that
- * delete's own membership test was built from (F1-S9 slice 90.4, PR #95
- * review round 2, Codex, P1 — a genuine gate-integrity TOCTOU, the
- * de-reference-delete sibling of {@link isStillSafeToDeleteInlineBlockerThreads}'s
- * own identical concern for the no-references path): that snapshot is
- * taken ONCE, early in `publishSummary` — before the diff fetch, inline-
- * comment posting, and the delete's OWN comment-pagination fetch, none of
- * which is instantaneous. A body-only edit landing in that window (most
- * concerning: UPGRADING a plain `Refs #N` to a genuine `Closes #N`) never
- * bumps the trusted head SHA, so an unrevalidated snapshot could have
- * this run delete #N's prior blocker comment using now-stale membership
- * while a brand-new closing obligation for #N is actually live — a gap
- * that would persist until a LATER `edited`-event run re-establishes it.
- *
- * Mirrors {@link isStillSafeToDeleteInlineBlockerThreads}'s own "re-fetch
- * fresh, compare, never throw for an expected mismatch" shape, but
- * compares a SET (the closing-kind issue numbers), not a boolean — an
- * expected-race SET CHANGE (in either direction: an addition OR a
- * removal) means the earlier snapshot can no longer be trusted for this
- * delete, so this function reports `false` rather than partially
- * reconciling against a mix of old and new information. A genuine
- * network/API failure while re-fetching still propagates uncaught (the
- * caller's own existing "never silent" fallback handling covers that
- * case, same as every other artifact/network failure in this
- * entrypoint).
- *
- * @param token - The job's own `pull-requests: write` token.
- * @param owner - The repository owner.
- * @param repo - The repository name.
- * @param prNumber - The trusted PR number this run is publishing for.
- * @param snapshotClosingIssueNumbers - The closing-kind issue-number set
- *   `publishSummary` computed earlier in this same run.
- * @returns `true` only if a FRESH re-fetch of the PR's current body
- *   yields the IDENTICAL closing-kind issue-number set as `snapshotClosingIssueNumbers`.
- */
-async function isSnapshotClosingIssueNumbersStillCurrent(
-  token: string,
-  owner: string,
-  repo: string,
-  prNumber: number,
-  snapshotClosingIssueNumbers: ReadonlySet<number>,
-): Promise<boolean> {
-  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
-  const freshClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
-  );
-  if (freshClosingIssueNumbers.size !== snapshotClosingIssueNumbers.size) {
-    return false;
-  }
-  for (const issueNumber of freshClosingIssueNumbers) {
-    if (!snapshotClosingIssueNumbers.has(issueNumber)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 interface RunPaths {
   readonly outcomePath: string;
   readonly criteriaSpinePath: string;
@@ -1186,42 +1124,43 @@ async function publishSummary(
   // whether THIS run's own new blockers happened to post inline
   // successfully, so there is nothing left to gate on.
   //
-  // RE-VERIFIED immediately before the delete (F1-S9 slice 90.4, PR #95
-  // review round 2, Codex, P1 -- the TOCTOU sibling of
-  // isStillSafeToDeleteInlineBlockerThreads's own identical concern for
-  // the no-references path): `currentClosingIssueNumbers` was snapshotted
-  // EARLY, before the diff fetch, inline posting, and this delete's own
-  // comment-pagination fetch -- a body-only edit landing in that window
-  // (e.g. upgrading a plain `Refs #N` to a genuine `Closes #N`) never
-  // bumps the trusted head SHA, so an unrevalidated snapshot could
-  // delete #N's prior blocker using now-stale membership while a
-  // brand-new closing obligation for #N is actually live. An expected
-  // race (the set changed) degrades to a NON-DESTRUCTIVE skip, logged but
-  // not treated as an error -- a fresh run will reconcile against
-  // whatever the PR's body says by then.
+  // FAIL CLOSED on a snapshot mismatch, not merely a non-destructive skip
+  // (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 --
+  // round 3's own fix only skipped THIS delete and logged, then fell
+  // through to build and post the summary anyway. That summary's own
+  // `blockersPostedInline`/`staleBlockerIssueNumbers` were computed by
+  // `tryPostBlockersInline` against the SAME now-stale
+  // `currentClosingIssueNumbers` snapshot -- so a `Refs #N` upgraded to
+  // `Closes #N` mid-run would have this job exit 0 with a clean-looking
+  // summary while #N's own blocker was never actually posted inline at
+  // all (the posting-time filter still saw it as non-closing). The
+  // mismatch means BOTH this run's own posting decisions AND this
+  // delete are stale, so the caller now treats it as a single fail-closed
+  // signal covering both -- no stale delete AND no stale summary --
+  // rather than trying to partially salvage a summary this run can no
+  // longer vouch for. `deleteDeReferencedInlineBlockerComments`'s own
+  // re-verify (after its own comment pagination, immediately before its
+  // first DELETE call -- see that function's own docstring, cid
+  // 3625635476) is what actually detects the mismatch; this is purely
+  // the caller's own response to that signal.
   try {
-    const snapshotStillCurrent = await isSnapshotClosingIssueNumbersStillCurrent(
+    const reconcileResult = await deleteDeReferencedInlineBlockerComments(
       token,
       owner,
       repo,
       prNumber,
       currentClosingIssueNumbers,
+      currentGeneration,
     );
-    if (snapshotStillCurrent) {
-      await deleteDeReferencedInlineBlockerComments(
-        token,
-        owner,
-        repo,
-        prNumber,
-        currentClosingIssueNumbers,
-        currentGeneration,
-      );
-    } else {
-      console.log(
-        `PR #${prNumber}'s linked-issue closing references changed since this run's own earlier ` +
-          `snapshot was taken -- skipping this run's own de-reference reconciliation non-destructively; ` +
-          `a fresh spec-grounded review run will reconcile against the PR's current state.`,
-      );
+    if (!reconcileResult.ok) {
+      await publishFallback(token, owner, repo, prNumber, [
+        `this PR's linked-issue closing references changed since this run's own earlier snapshot was ` +
+          `taken -- the blocker posting/skip decisions computed against that snapshot may now be ` +
+          `stale; failing closed rather than publishing a summary this run can no longer vouch for. A ` +
+          `fresh spec-grounded review run will re-evaluate against the PR's current state.`,
+      ]);
+      process.exitCode = 1;
+      return;
     }
   } catch (err) {
     // Same "visible fallback, never silent" treatment as every other
