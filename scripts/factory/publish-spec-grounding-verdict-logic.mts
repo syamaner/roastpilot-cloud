@@ -580,6 +580,17 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   there are no blockers at all) — the wording this governs is never
  *   reached in that case, but a `null` is still required rather than
  *   defaulted, matching `blockersPostedInline`'s own discipline.
+ * @param staleBlockerIssueNumbers - The issue numbers `tryPostBlockersInline`
+ *   skipped because the PR's CURRENT body no longer references them at
+ *   all (PR #87 review round 4b, Codex, P1 — a follow-up wording fold:
+ *   `totalBlockerCount` below is still the REVIEW-TIME count, including
+ *   any stale ones, deliberately NOT filtered here — see issue #89 for
+ *   the deeper "should the count/exit-code reflect only the still-
+ *   referenced subset" design question, tracked ahead of the gate-enable
+ *   decision #47. When this array is non-empty, the headline below is
+ *   reworded to state the count is REVIEW-TIME and explicitly reconciles
+ *   it against the posted subset, rather than implying every counted
+ *   finding has its own inline thread when some do not.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -588,6 +599,7 @@ export function buildSpecGroundingSummaryCommentBody(
   truncation: SpecGroundingTruncationFlags,
   blockersPostedInline: boolean,
   degradeReason: InlinePostingDegradeReason | null,
+  staleBlockerIssueNumbers: readonly number[],
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
@@ -632,14 +644,38 @@ export function buildSpecGroundingSummaryCommentBody(
           "attempt)"
         : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
           "only deletes content)";
+    // PR #87 review round 4b, Codex, P1 -- a cheap, honest-wording fold:
+    // when some (not all) blockers were skipped as stale, `totalBlockerCount`
+    // (deliberately still the REVIEW-TIME count, see this function's own
+    // `staleBlockerIssueNumbers` param docs and issue #89) must not be
+    // presented as if every one of them has its own inline thread or
+    // summary listing below -- reword the headline to say the count is
+    // review-time and explicitly reconcile it against the posted/listed
+    // subset, pointing at the separate stale-skip note for the rest.
+    const staleReconciliation =
+      staleBlockerIssueNumbers.length > 0
+        ? ` (${staleBlockerIssueNumbers.length} of these were skipped as no longer referenced by this ` +
+          "PR's current body — see the note below, not repeated here.)"
+        : "";
     lines.push(
       blockersPostedInline
-        ? `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
-            "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
-            `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-            `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
-            `them. ${blockerKindsExplanation}`,
+        ? staleBlockerIssueNumbers.length > 0
+          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
+              "still applicable to this PR's current linked issues are reported as separate, " +
+              `resolvable inline review comment(s) below — see those threads, not this summary, ` +
+              `to resolve them.${staleReconciliation} ${blockerKindsExplanation} See the inline ` +
+              "comment for which case applies and why."
+          : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
+              "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
+              `${blockerKindsExplanation} See the inline comment for which case applies and why.`
+        : staleBlockerIssueNumbers.length > 0
+          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
+              "still applicable are listed below in THIS summary, not as separate inline comments " +
+              `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
+              blockerKindsExplanation
+          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
+              `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
+              `them. ${blockerKindsExplanation}`,
       "",
     );
   } else {

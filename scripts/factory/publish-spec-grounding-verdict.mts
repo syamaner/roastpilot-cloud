@@ -778,23 +778,27 @@ interface TryPostBlockersInlineResult {
  * are reported back to the caller (never silently dropped) so the summary
  * can say so, never posted inline.
  *
- * KNOWN RESIDUAL, NOT fixed here (flagged, not silently shipped): the
+ * DELIBERATE DESIGN (team-lead's ruling, PR #87 review round 4b): the
  * caller's own {@link buildSpecGroundingSummaryCommentBody} still counts
  * `criterionBlockers.length + unreviewedClosingIssues.length` from the
- * UNFILTERED (runner-time) sets for its own "N blocking finding(s)"
- * wording and exit-code decision — it does not know about the staleness
- * filtering this function does internally. When some (not all) blockers
- * are stale-skipped and `postedInline` is still `true` for the rest, the
- * summary's own "N blocking finding(s) reported as separate, resolvable
- * inline review comment(s)" sentence can overclaim the count relative to
- * how many inline threads actually exist — {@link
- * buildStaleBlockerSkippedNote}'s own separate note is the only place
- * that reconciles the difference. Recomputing `buildSpecGroundingSummaryCommentBody`'s
- * own internal count to reflect the filtered set would require passing
- * it FILTERED `joined`/`unreviewedClosingIssues` arrays, which also
- * carry non-blocking findings that should NOT be filtered by this same
- * staleness logic — a real restructuring, not a cheap fold, deliberately
- * left for a follow-up decision rather than expanded into this one.
+ * UNFILTERED (review-time) sets for its own "N blocking finding(s)"
+ * wording and exit-code decision — it does NOT recompute that count from
+ * the staleness filtering this function does internally. This is
+ * intentionally FAIL-SAFE, not a bug: it can only ever OVER-gate (exit
+ * nonzero, or keep counting a stale finding) never UNDER-gate (erase a
+ * real one), and `buildSpecGroundingSummaryCommentBody` (round 4b, this
+ * same fold) now labels the count explicitly as review-time and
+ * reconciles it against `staleBlockerIssueNumbers` whenever any exist —
+ * so the headline stays ACCURATE, not misleading, without needing to
+ * restructure the count itself. The DEEPER design question — should the
+ * count/exit-code instead reflect only the still-referenced subset, and
+ * should non-blocking findings get the same staleness treatment — is
+ * tracked in issue #89, ahead of the gate-enable decision (#47); not
+ * folded into this one, since it would require passing
+ * `buildSpecGroundingSummaryCommentBody` FILTERED `joined`/
+ * `unreviewedClosingIssues` arrays, which also carry non-blocking
+ * findings that should NOT be filtered by this same staleness logic — a
+ * real restructuring, not a cheap fold.
  *
  * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
  *   successfully posted as a real inline comment; `{ postedInline: false,
@@ -918,6 +922,7 @@ async function publishSummary(
     { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
     blockersPostedInline,
     degradeReason,
+    staleBlockerIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
