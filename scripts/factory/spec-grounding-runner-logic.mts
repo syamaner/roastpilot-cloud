@@ -503,6 +503,19 @@ export interface ParsedCriteriaSpine {
    * this field exists to unblock).
    */
   readonly reviewedClosingIssueNumbers: readonly number[];
+  /**
+   * The EXACT `pr.base.sha` this run's own diff fetch (`fetchPrDiff` in
+   * `spec-grounding-runner.mts`) diffed against — review PROVENANCE
+   * (F1-S9 slice 90.2, reordered per the #90 PR-plan revision): the
+   * privileged publisher verifies the PR's CURRENT base against THIS
+   * value, never a workflow-event-derived proxy for it (an earlier
+   * design, #92/90.1, compared against `github.event.pull_request
+   * .base.sha` instead — WRONG, since the runner's own diff fetch always
+   * uses whatever base was current at RUNNER-FETCH time, which can
+   * differ from the event's own base if the target branch advanced in
+   * the event-to-runner-fetch window).
+   */
+  readonly reviewedBaseSha: string;
 }
 
 export type ParsedCriteriaSpineResult =
@@ -603,6 +616,20 @@ const MAX_VALIDATION_ERRORS_PER_ARRAY = 200;
  * parser's).
  */
 const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
+
+/**
+ * Upper bound on `reviewedBaseSha`'s own length, in characters (F1-S9
+ * slice 90.2) — a real git SHA is always exactly 40 hex characters, so
+ * this is a generous ceiling against a corrupted or runaway value, not a
+ * tight fit to the expected shape (matching {@link
+ * MAX_CRITERION_ID_LENGTH}'s own identical "generous, not tight"
+ * reasoning). No format/hex-shape regex is enforced beyond the length
+ * cap — `reviewedBaseSha` is compared for plain equality against the
+ * publisher's own freshly-fetched `pr.base.sha`, the same opaque-string
+ * treatment `pr.head.sha`/`trustedHeadSha` already get everywhere else in
+ * this pipeline (never format-validated, only ever compared).
+ */
+const MAX_REVIEWED_BASE_SHA_LENGTH = 200;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1136,7 +1163,8 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   }
 
   const errors: string[] = [];
-  const { entries, truncated, unreviewedClosingIssues, diffTruncated, reviewedClosingIssueNumbers } = parsed;
+  const { entries, truncated, unreviewedClosingIssues, diffTruncated, reviewedClosingIssueNumbers, reviewedBaseSha } =
+    parsed;
 
   if (!Array.isArray(entries)) {
     errors.push('"entries" must be an array');
@@ -1158,6 +1186,19 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   // not need to tolerate (runner and publisher always deploy together).
   if (!Array.isArray(reviewedClosingIssueNumbers)) {
     errors.push('"reviewedClosingIssueNumbers" must be an array');
+  }
+  // reviewedBaseSha (F1-S9 slice 90.2, reordered per the #90 PR-plan
+  // revision): required non-empty string, length-capped -- see {@link
+  // MAX_REVIEWED_BASE_SHA_LENGTH}'s own docstring for why no hex-shape
+  // regex is enforced beyond the length bound.
+  if (
+    typeof reviewedBaseSha !== "string" ||
+    reviewedBaseSha.length === 0 ||
+    reviewedBaseSha.length > MAX_REVIEWED_BASE_SHA_LENGTH
+  ) {
+    errors.push(
+      `"reviewedBaseSha" must be a non-empty string of at most ${MAX_REVIEWED_BASE_SHA_LENGTH} characters`,
+    );
   }
   if (errors.length > 0) {
     return { ok: false, errors };
@@ -1322,6 +1363,7 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
       unreviewedClosingIssues: validatedUnreviewed,
       diffTruncated: diffTruncated as boolean,
       reviewedClosingIssueNumbers: validatedReviewedClosingIssueNumbers,
+      reviewedBaseSha: reviewedBaseSha as string,
     },
   };
 }

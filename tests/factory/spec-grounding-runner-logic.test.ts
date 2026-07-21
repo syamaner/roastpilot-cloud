@@ -751,6 +751,7 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
       unreviewedClosingIssues: [],
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: "basesha000000000000000000000000000000000",
       ...overrides,
     };
   }
@@ -765,6 +766,7 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
         unreviewedClosingIssues: [],
         diffTruncated: false,
         reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: "basesha000000000000000000000000000000000",
       },
     });
   });
@@ -855,7 +857,14 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     }
   });
 
-  it.each(["entries", "truncated", "unreviewedClosingIssues", "diffTruncated", "reviewedClosingIssueNumbers"])(
+  it.each([
+    "entries",
+    "truncated",
+    "unreviewedClosingIssues",
+    "diffTruncated",
+    "reviewedClosingIssueNumbers",
+    "reviewedBaseSha",
+  ])(
     "rejects a payload missing the required top-level field %s",
     (field) => {
       const artifact = validArtifact();
@@ -1200,6 +1209,49 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     }
   });
 
+  it("rejects an empty-string reviewedBaseSha (F1-S9 slice 90.2, reordered per the #90 PR-plan revision)", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ reviewedBaseSha: "" })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/"reviewedBaseSha" must be a non-empty string/);
+    }
+  });
+
+  it("rejects a non-string reviewedBaseSha", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ reviewedBaseSha: 12345 })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/"reviewedBaseSha" must be a non-empty string/);
+    }
+  });
+
+  it("rejects a reviewedBaseSha exceeding MAX_REVIEWED_BASE_SHA_LENGTH (200 characters)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ reviewedBaseSha: "a".repeat(201) })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/"reviewedBaseSha" must be a non-empty string of at most 200 characters/);
+    }
+  });
+
+  it("accepts a reviewedBaseSha at exactly MAX_REVIEWED_BASE_SHA_LENGTH (the cap boundary itself is not rejected)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ reviewedBaseSha: "a".repeat(200) })),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a real-shaped 40-character hex SHA for reviewedBaseSha (the normal case) and returns it verbatim in the parsed spine", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ reviewedBaseSha: "0123456789abcdef0123456789abcdef01234567" })),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spine.reviewedBaseSha).toBe("0123456789abcdef0123456789abcdef01234567");
+    }
+  });
+
   it("accepts exactly MAX_CRITERIA_SPINE_ENTRIES elements (the cap boundary itself is not rejected)", () => {
     const exactlyMax = Array.from({ length: 5000 }, (_unused, i) => ({
       issueNumber: 1,
@@ -1265,7 +1317,7 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
       '{"entries":[{"issueNumber":1,"kind":' +
       deeplyNestedArrayJsonText(50_000) +
       ',"criterionId":"1:0"}],"truncated":false,"unreviewedClosingIssues":[],"diffTruncated":false,' +
-      '"reviewedClosingIssueNumbers":[1]}';
+      '"reviewedClosingIssueNumbers":[1],"reviewedBaseSha":"basesha000000000000000000000000000000000"}';
     expect(() => parseCriteriaSpineArtifact(artifactText)).not.toThrow();
     const result = parseCriteriaSpineArtifact(artifactText);
     expect(result.ok).toBe(false);
@@ -1279,7 +1331,8 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     const artifactText =
       '{"entries":[],"truncated":false,"unreviewedClosingIssues":[{"issueNumber":1,"truncationKind":' +
       deeplyNestedArrayJsonText(50_000) +
-      '}],"diffTruncated":false,"reviewedClosingIssueNumbers":[]}';
+      '}],"diffTruncated":false,"reviewedClosingIssueNumbers":[],' +
+      '"reviewedBaseSha":"basesha000000000000000000000000000000000"}';
     expect(() => parseCriteriaSpineArtifact(artifactText)).not.toThrow();
     const result = parseCriteriaSpineArtifact(artifactText);
     expect(result.ok).toBe(false);

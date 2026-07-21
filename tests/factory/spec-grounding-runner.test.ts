@@ -218,12 +218,15 @@ describe("main — real unmet criteria", () => {
     // 3b-iii only -- both false/empty here, nothing was truncated.
     // `reviewedClosingIssueNumbers` (F1-S9 slice 90.2) includes #12 --
     // it's the sole closing-kind reference, fetched within cap.
+    // `reviewedBaseSha` (F1-S9 slice 90.2) is the EXACT base this run's
+    // own diff fetch used, matching the base handed to prResponse.
     expect(spine).toEqual({
       entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
     });
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
@@ -368,6 +371,7 @@ describe("main — real unmet criteria", () => {
       unreviewedClosingIssues: [],
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
     });
   });
 
@@ -406,6 +410,7 @@ describe("main — real unmet criteria", () => {
       unreviewedClosingIssues: [],
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
     });
   });
 

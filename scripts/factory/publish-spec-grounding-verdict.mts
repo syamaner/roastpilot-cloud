@@ -915,6 +915,33 @@ async function publishSummary(
     return;
   }
 
+  // Base-SHA verification, sourced from the SPINE's own reviewedBaseSha,
+  // never a workflow-event value (F1-S9 slice 90.2, reordered per the #90
+  // PR-plan revision -- corrects a real design bug in the original,
+  // standalone 90.1, closed as #92 on Codex cid 3624140965 before it ever
+  // merged): the review agent's diff was fetched against
+  // `spine.reviewedBaseSha` (the runner's own `pr.base.sha` at the time it
+  // called `fetchPrDiff`), which can legitimately differ from `github
+  // .event.pull_request.base.sha` if the target branch advanced in the
+  // window between the event firing and the runner's own fetch -- an
+  // event-sourced comparison would spuriously degrade a verdict validly
+  // produced against a base the event never captured. Comparing against
+  // the runner-observed value instead means this check only ever fires
+  // when the base ACTUALLY advanced between the review and this publish,
+  // never on a merely-late-arriving event. Same fail-closed treatment as
+  // the head-SHA check just above: this run has no legitimate business
+  // publishing (an all-clear OR a blocker) against a base different from
+  // the one the verdict was actually produced against.
+  if (pr.base.sha !== spine.reviewedBaseSha) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `this PR's current base SHA (${pr.base.sha}) does not match the base this run's own review actually ` +
+        `diffed against (${spine.reviewedBaseSha}) -- the target branch advanced since the review ran; ` +
+        `failing closed rather than publishing a verdict produced against a different base.`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];

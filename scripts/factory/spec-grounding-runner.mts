@@ -480,6 +480,23 @@ export async function main(): Promise<void> {
   // this slice — no consumer reads it yet (slice 90.5 does). Included
   // now so the artifact contract is complete and stable before the
   // reference-revalidation work that consumes it lands.
+  //
+  // `reviewedBaseSha` (F1-S9 slice 90.2, reordered per the #90 PR-plan
+  // revision, Codex cid 3624140965 on the original standalone 90.1): the
+  // EXACT `pr.base.sha` this run's own `fetchPrDiff` call, just above,
+  // diffed against — review PROVENANCE, not a re-derivation. An earlier
+  // design (90.1) had the privileged publisher verify the PR's current
+  // base against `github.event.pull_request.base.sha` (the WORKFLOW
+  // EVENT's own base at trigger time) instead of this value — WRONG,
+  // because this runner's own diff fetch always uses whatever base was
+  // CURRENT at RUNNER-FETCH time, which can differ from the event's own
+  // base if the target branch advanced in the event-to-runner-fetch
+  // window; comparing against the event's base would spuriously
+  // degrade a verdict that was validly produced against a base the
+  // event never captured. Persisting the runner's own OBSERVED base
+  // here — the same value already in hand for `fetchPrDiff`, no new
+  // fetch — lets the publisher verify against what was ACTUALLY
+  // reviewed, not a proxy for it.
   await writeOutputFile(
     paths.criteriaSpinePath,
     JSON.stringify(
@@ -489,6 +506,7 @@ export async function main(): Promise<void> {
         unreviewedClosingIssues: truncationSummary.unreviewedClosingIssues,
         diffTruncated: diffBlock.truncated,
         reviewedClosingIssueNumbers,
+        reviewedBaseSha: pr.base.sha,
       },
       null,
       2,
