@@ -498,6 +498,30 @@ export const MAX_CRITERIA_SPINE_ARTIFACT_BYTES = 4_000_000;
  */
 const MAX_CRITERIA_SPINE_ENTRIES = 5000;
 
+/**
+ * Upper bound on how many PER-ELEMENT validation errors either the
+ * `entries` or `unreviewedClosingIssues` validation loop may accumulate
+ * before this module stops validating that array's remaining elements
+ * entirely (PR #84 review, independent pass + Codex, FOLD 1): removing
+ * the flat cardinality cap on `unreviewedClosingIssues` (round 4, FOLD 1
+ * — a genuinely LEGITIMATE array can exceed {@link
+ * MAX_CRITERIA_SPINE_ENTRIES}) reopened the per-element-error
+ * accumulation THAT cap also happened to bound. A corrupted array well
+ * under the artifact's own {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} (4MB)
+ * byte cap can still encode millions of tiny malformed elements (e.g.
+ * `[0, 0, 0, ...]`), each producing its own error string — unbounded
+ * validation work and unbounded accumulated error text, the SAME OOM
+ * class {@link MAX_CRITERIA_SPINE_ENTRIES} bounds for `entries`, but
+ * which no longer bounds `unreviewedClosingIssues` now that its own
+ * cardinality cap is gone. Stops calling the per-element validator
+ * ENTIRELY (not merely truncating how many errors are kept) once this
+ * many errors have already accumulated for that array, appending ONE
+ * summary line reporting how many elements were never validated —
+ * applied to BOTH loops, each with its OWN independent budget, so a
+ * problem in one array can never starve the other's own reporting.
+ */
+const MAX_VALIDATION_ERRORS_PER_ARRAY = 200;
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -632,7 +656,16 @@ function validateCriteriaSpineEntry(
   }
   const { issueNumber, kind, criterionId } = raw;
   let ok = true;
-  const validIssueNumber = typeof issueNumber === "number" && Number.isInteger(issueNumber) && issueNumber > 0;
+  // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
+  // pass + Codex, FOLD 2): JSON.parse itself rounds a value beyond
+  // Number.MAX_SAFE_INTEGER (e.g. 9007199254740993) to the nearest
+  // representable float BEFORE this check ever runs -- Number.isInteger
+  // still returns true for that rounded value, silently accepting a
+  // corrupted issueNumber that no longer represents the digit sequence
+  // the artifact's own bytes actually encoded. GitHub issue numbers are
+  // never remotely close to this range, so this rejects exactly the
+  // rounding-prone values with no legitimate false-reject.
+  const validIssueNumber = typeof issueNumber === "number" && Number.isSafeInteger(issueNumber) && issueNumber > 0;
   if (!validIssueNumber) {
     errors.push(`entries[${index}].issueNumber must be a positive integer`);
     ok = false;
@@ -702,7 +735,14 @@ function validateUnreviewedClosingIssue(
   }
   const { issueNumber, truncationKind } = raw;
   let ok = true;
-  if (typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+  // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
+  // pass + Codex, FOLD 2 -- see validateCriteriaSpineEntry's own identical
+  // fix for the full reasoning): a "fully-dropped" entry here has NO
+  // criterionId to cross-check against at all, so an issueNumber rounded
+  // by JSON.parse past Number.MAX_SAFE_INTEGER would otherwise be
+  // silently accepted as a DIFFERENT (wrong) issue with no other check to
+  // catch it.
+  if (typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
     errors.push(`unreviewedClosingIssues[${index}].issueNumber must be a positive integer`);
     ok = false;
   }
@@ -998,38 +1038,66 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   // ONE verdict finding satisfy TWO different spine entries. Mirrors
   // spec-grounding-verdict-schema.mts's own identical seenCriterionIds
   // precedent for the agent's own verdict.
+  //
+  // A plain `for` loop, not `.forEach` (PR #84 review, independent pass +
+  // Codex, FOLD 1): bounds how many PER-ELEMENT errors this loop
+  // accumulates -- see MAX_VALIDATION_ERRORS_PER_ARRAY's own docstring.
+  // `.forEach` cannot be broken out of; a `for` loop can stop entirely,
+  // never even validating the remaining elements once the budget is hit.
   const seenCriterionIds = new Set<string>();
-  (entries as unknown[]).forEach((e, i) => {
-    const entry = validateCriteriaSpineEntry(e, i, errors);
+  const entriesArray = entries as unknown[];
+  const entriesErrorsStart = errors.length;
+  for (let i = 0; i < entriesArray.length; i++) {
+    if (errors.length - entriesErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"entries": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation error(s) -- ` +
+          `${entriesArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const entry = validateCriteriaSpineEntry(entriesArray[i], i, errors);
     if (entry === null) {
-      return;
+      continue;
     }
     if (seenCriterionIds.has(entry.criterionId)) {
       errors.push(`entries[${i}].criterionId "${entry.criterionId}" is a duplicate`);
-      return;
+      continue;
     }
     seenCriterionIds.add(entry.criterionId);
     validatedEntries.push(entry);
-  });
+  }
   // Duplicate-issueNumber rejection (PR #84 review round 2, Codex, FOLD 4)
   // -- a duplicate would let publish-spec-grounding-blocker-logic.mts's
   // own planBlockerInlineComments build multiple identical inline-comment
   // plans for the SAME issue, posting duplicate blocker comments.
-  // Mirrors the entries[] duplicate-criterionId rejection above exactly.
+  // Mirrors the entries[] duplicate-criterionId rejection above exactly,
+  // including the SAME bounded-error-loop discipline (this array has no
+  // cardinality cap of its own -- see MAX_CRITERIA_SPINE_ENTRIES's own
+  // docstring for why -- so bounding the ERROR list here is this array's
+  // only OOM defense).
   const validatedUnreviewed: UnreviewedClosingIssueResult[] = [];
   const seenUnreviewedIssueNumbers = new Set<number>();
-  (unreviewedClosingIssues as unknown[]).forEach((e, i) => {
-    const entry = validateUnreviewedClosingIssue(e, i, errors);
+  const unreviewedArray = unreviewedClosingIssues as unknown[];
+  const unreviewedErrorsStart = errors.length;
+  for (let i = 0; i < unreviewedArray.length; i++) {
+    if (errors.length - unreviewedErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"unreviewedClosingIssues": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation error(s) -- ` +
+          `${unreviewedArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const entry = validateUnreviewedClosingIssue(unreviewedArray[i], i, errors);
     if (entry === null) {
-      return;
+      continue;
     }
     if (seenUnreviewedIssueNumbers.has(entry.issueNumber)) {
       errors.push(`unreviewedClosingIssues[${i}].issueNumber ${entry.issueNumber} is a duplicate`);
-      return;
+      continue;
     }
     seenUnreviewedIssueNumbers.add(entry.issueNumber);
     validatedUnreviewed.push(entry);
-  });
+  }
 
   if (errors.length > 0) {
     return { ok: false, errors };

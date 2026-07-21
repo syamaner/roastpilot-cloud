@@ -976,19 +976,42 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("rejects a criterionId prefix that DISAGREES with issueNumber even when a NUMERIC comparison would spuriously agree due to float64 precision loss beyond Number.MAX_SAFE_INTEGER (PR #84 review round 4, Codex, FOLD 4) -- empirically verified: Number(\"9007199254740993\") === 9007199254740992 is true (both round to the same float), but the two digit strings are genuinely different", () => {
+  it("rejects a leading-zero-padded criterionId prefix that a NUMERIC comparison would spuriously accept, but a STRING comparison correctly rejects (PR #84 review round 4, Codex, FOLD 4) -- empirically verified: Number(\"012\") === 12 is true, but \"012\" !== String(12); buildCriteriaSpine's own template-literal interpolation never produces a leading-zero-padded prefix, so this can only be a corrupted artifact", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: 12, kind: "closing", criterionId: "012:0" }] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/criterionId "012:0" does not match entries\[0\]\.issueNumber \(12\)/);
+    }
+  });
+
+  it("rejects an issueNumber beyond Number.MAX_SAFE_INTEGER outright (PR #84 review round 5, independent pass + Codex, FOLD 2) -- caught even earlier than the criterionId cross-check now, since JSON.parse itself rounds such a value to a DIFFERENT (also unsafe) float before any check runs; Number.isSafeInteger rejects it directly rather than relying on the string cross-check alone to catch the resulting corruption", () => {
     const result = parseCriteriaSpineArtifact(
       JSON.stringify(
         validArtifact({
-          entries: [
-            { issueNumber: 9_007_199_254_740_992, kind: "closing", criterionId: "9007199254740993:0" },
-          ],
+          entries: [{ issueNumber: 9_007_199_254_740_992, kind: "closing", criterionId: "9007199254740992:0" }],
         }),
       ),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors[0]).toMatch(/criterionId "9007199254740993:0" does not match entries\[0\]\.issueNumber \(9007199254740992\)/);
+      expect(result.errors[0]).toMatch(/entries\[0\]\.issueNumber must be a positive integer/);
+    }
+  });
+
+  it("rejects an unreviewedClosingIssues issueNumber beyond Number.MAX_SAFE_INTEGER (PR #84 review round 5, independent pass + Codex, FOLD 2) -- a fully-dropped entry has NO criterionId to cross-check against at all, so this is the ONLY defense for that shape", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 9_007_199_254_740_992, truncationKind: "fully-dropped" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/unreviewedClosingIssues\[0\]\.issueNumber must be a positive integer/);
     }
   });
 
@@ -1017,6 +1040,51 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.spine.unreviewedClosingIssues).toHaveLength(5001);
+    }
+  });
+
+  it("bounds accumulated errors for a corrupted unreviewedClosingIssues array (PR #84 review round 5, independent pass + Codex, FOLD 1) -- since the cardinality cap on this array is gone (round 4), a corrupted array with many malformed elements must not accumulate an unbounded number of per-element error strings; stops validating remaining elements and reports a single summary instead", () => {
+    const manyMalformed = Array.from({ length: 10_000 }, () => ({ issueNumber: 0, truncationKind: "bogus" }));
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ truncated: true, unreviewedClosingIssues: manyMalformed })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Each malformed element produces 2 errors (bad issueNumber + bad
+      // truncationKind), so the loop stops mid-way through element ~100,
+      // then appends exactly one summary line -- never one line per
+      // remaining element.
+      expect(result.errors.length).toBeLessThan(250);
+      expect(result.errors[result.errors.length - 1]).toMatch(
+        /"unreviewedClosingIssues": stopped after \d+ validation error\(s\) -- \d+ more element\(s\) not validated/,
+      );
+    }
+  });
+
+  it("bounds accumulated errors for a corrupted entries array the SAME way", () => {
+    // Stays under entries' own MAX_CRITERIA_SPINE_ENTRIES cardinality cap
+    // (5000) deliberately, so THIS test exercises the error-budget stop
+    // specifically, not the separate cardinality-cap rejection.
+    const manyMalformed = Array.from({ length: 3000 }, () => ({ issueNumber: 0, kind: "bogus", criterionId: "" }));
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: manyMalformed })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.length).toBeLessThan(250);
+      expect(result.errors[result.errors.length - 1]).toMatch(
+        /"entries": stopped after \d+ validation error\(s\) -- \d+ more element\(s\) not validated/,
+      );
+    }
+  });
+
+  it("does NOT stop early for a well-formed-but-oversized... wait, entries still has its own cardinality cap, so this exercises unreviewedClosingIssues with fewer than the error budget's worth of malformed elements -- every one gets validated, no early stop, no summary line", () => {
+    const fewMalformed = Array.from({ length: 10 }, (_unused, i) => ({ issueNumber: -(i + 1), truncationKind: "fully-dropped" }));
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ unreviewedClosingIssues: fewMalformed })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(10);
+      expect(result.errors.some((e) => /stopped after/.test(e))).toBe(false);
     }
   });
 
