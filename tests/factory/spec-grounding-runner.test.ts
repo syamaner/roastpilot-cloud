@@ -204,8 +204,17 @@ describe("main — real unmet criteria", () => {
 
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
     // No criterionText field -- the spine carries only trusted metadata
-    // (Codex finding, PR #72 review round 2, BLOCKER).
-    expect(spine).toEqual([{ issueNumber: 12, kind: "closing", criterionId: "12:0" }]);
+    // (Codex finding, PR #72 review round 2, BLOCKER). Top-level wrapper
+    // shape (Codex finding, PR #76 review, L181): `entries` is the array
+    // the agent's own criterionId correlation matches against; `truncated`
+    // / `droppedClosingIssueNumbers` are new trusted metadata for slice
+    // 3b-iii only -- both false/empty here, nothing was truncated.
+    expect(spine).toEqual({
+      entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+      truncated: false,
+      droppedClosingIssueNumbers: [],
+      diffTruncated: false,
+    });
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
     expect(diffBlock.startsWith(`<UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
@@ -282,6 +291,14 @@ describe("main — real unmet criteria", () => {
     expect(diffBlock).toContain("more files than GitHub's compare API");
     expect(diffBlock.startsWith(`<UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
     expect(diffBlock.endsWith(`</UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
+
+    // Slice 3b-iii, issue #12, PR #76 review, L733: pr-diff-block.txt
+    // itself is never uploaded as an artifact -- only criteria-spine.json
+    // and the agent's verdict are. So the spine is where this truncation
+    // signal must also surface, alongside (not instead of) criteria
+    // truncation, so 3b-iii can fail-closed on either kind.
+    const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
+    expect(spine).toMatchObject({ diffTruncated: true });
   });
 
   it("does NOT warn when changed_files is exactly at the cap (300), only when it exceeds it", async () => {
@@ -321,8 +338,19 @@ describe("main — real unmet criteria", () => {
     expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
     const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
     // Only issue #8's criterion survives -- #12's verified 404 degraded to
-    // silence, not a thrown error and not a fabricated entry.
-    expect(spine).toEqual([{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }]);
+    // silence, not a thrown error and not a fabricated entry. #12 is a
+    // CLOSING reference ("Closes #12") that ends up with zero spine
+    // entries too, same as a genuinely truncated one would -- but a
+    // verified 404 is an accepted, deliberate no-op (the issue is simply
+    // gone), NOT a truncation gap, so droppedClosingIssueNumbers must stay
+    // empty here (Codex finding, PR #76 review, L181's own scope: only a
+    // resource-capped drop escalates, never a confirmed-deleted issue).
+    expect(spine).toEqual({
+      entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
+      truncated: false,
+      droppedClosingIssueNumbers: [],
+      diffTruncated: false,
+    });
   });
 
   it.each([

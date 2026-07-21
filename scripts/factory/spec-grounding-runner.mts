@@ -89,6 +89,7 @@ import {
 } from "./spec-grounding-logic.mts";
 import {
   buildCriteriaSpine,
+  computeCriteriaSpineTruncation,
   GITHUB_COMPARE_DIFF_FILE_LIMIT,
   wrapUntrustedDiffBlock,
 } from "./spec-grounding-runner-logic.mts";
@@ -399,6 +400,12 @@ export async function main(): Promise<void> {
   }
 
   const spine = buildCriteriaSpine(result, criteriaBlock, nonce);
+  // Trusted truncation metadata (Codex finding, PR #76 review, L181 —
+  // slice 3b-iii's own disposition): computed ADDITIVELY from data already
+  // in hand, never a change to buildCriteriaSpine's own signature or
+  // internal truncation tracking — see computeCriteriaSpineTruncation's
+  // own docstring for the full reasoning.
+  const truncationSummary = computeCriteriaSpineTruncation(references, result, spine);
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   // Detects GitHub's compare-endpoint 300-changed-file cap (Codex finding,
   // PR #72 review round 2, MEDIUM): the diff media type is plain text with
@@ -410,8 +417,37 @@ export async function main(): Promise<void> {
   });
 
   await writeOutputFile(paths.criteriaBlockPath, criteriaBlock);
-  await writeOutputFile(paths.criteriaSpinePath, JSON.stringify(spine, null, 2));
-  await writeOutputFile(paths.prDiffBlockPath, diffBlock);
+  // criteria-spine.json's TOP-LEVEL shape is now a wrapper object, not a
+  // bare array (Codex finding, PR #76 review, L181): `entries` is the
+  // array the review agent's own criterionId correlation matches against
+  // (unchanged shape from before); `truncated`/`droppedClosingIssueNumbers`
+  // /`diffTruncated` are new trusted metadata for slice 3b-iii's
+  // privileged publisher only — the read-only review agent never reads or
+  // acts on these fields.
+  //
+  // `diffTruncated` (Codex finding, PR #76 review, L733): `pr-diff-
+  // block.txt` itself is never uploaded as an artifact — only this file
+  // and the agent's own verdict are — so without surfacing
+  // `wrapUntrustedDiffBlock`'s own `truncated` result here, 3b-iii would
+  // have NO way to know the diff the agent judged was ever incomplete
+  // (the byte cap or GitHub's own file-count cap silently cutting it
+  // short). Lets the privileged publisher fail-closed on EITHER kind of
+  // truncation this run could have, not just the criteria/issue kind
+  // `truncated`/`droppedClosingIssueNumbers` already cover.
+  await writeOutputFile(
+    paths.criteriaSpinePath,
+    JSON.stringify(
+      {
+        entries: spine,
+        truncated: truncationSummary.truncated,
+        droppedClosingIssueNumbers: truncationSummary.droppedClosingIssueNumbers,
+        diffTruncated: diffBlock.truncated,
+      },
+      null,
+      2,
+    ),
+  );
+  await writeOutputFile(paths.prDiffBlockPath, diffBlock.text);
 
   console.log(
     `Wrote spec-grounding context for PR #${prNumber}: ${spine.length} unmet criterion(ia) ` +

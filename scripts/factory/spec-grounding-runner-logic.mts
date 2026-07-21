@@ -37,9 +37,11 @@ import {
   ASCII_WHITESPACE_CHARS,
   buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
+  selectIssuesToFetch,
   truncateToByteBudget,
   UNTRUSTED_DATA_BREAKOUT_PATTERN,
   type IssueLinkKind,
+  type LinkedIssueReference,
   type LinkedIssueSpecsResult,
 } from "./spec-grounding-logic.mts";
 
@@ -219,6 +221,117 @@ export function buildCriteriaSpine(
 }
 
 /**
+ * Whether ANY truncation happened anywhere in this run's criteria
+ * pipeline, and which CLOSING-kind issue numbers ended up with ZERO
+ * spine entries at all as a result — the trusted metadata slice 3b-iii's
+ * privileged publisher uses to escalate an entirely-unreviewed closing
+ * reference the same way it escalates an unsatisfied one (Codex finding,
+ * PR #76 review, team-lead's disposition: "on a closing-kind PR,
+ * unreviewed-due-to-truncation escalates like unsatisfied").
+ */
+export interface CriteriaSpineTruncationSummary {
+  /**
+   * `true` if ANY truncation occurred anywhere in this run's pipeline —
+   * `references` beyond `MAX_LINKED_ISSUES`, a single issue's criteria
+   * beyond `MAX_CRITERIA_PER_ISSUE`, OR `renderCriteriaDataBlock`'s own
+   * byte cap cutting the rendered block short. A general "this run's
+   * context may be incomplete" signal, broader than (and not implying)
+   * {@link droppedClosingIssueNumbers} being non-empty — e.g. a
+   * `non-closing` reference's criteria being byte-cap-truncated sets
+   * this `true` without adding anything to that list.
+   */
+  readonly truncated: boolean;
+  /**
+   * Every `closing`-kind issue number this PR's own body references that
+   * ends up with ZERO entries in `spine` — either never fetched at all
+   * (beyond `MAX_LINKED_ISSUES`) or entirely cut by the rendered block's
+   * byte cap before any of its criteria's checkbox lines survived into
+   * it. Deliberately EXCLUDES a `closing` reference that legitimately has
+   * NO unmet criteria at all (never truncated — `buildLinkedIssueSpecs`
+   * simply omits an issue with nothing unmet, a normal outcome, not a
+   * gap) and a reference that failed to fetch with a VERIFIED 404
+   * (`spec-grounding-runner.mts`'s own top-level docstring already
+   * documents that as an accepted, deliberate graceful no-op — a
+   * genuinely deleted issue has nothing left to escalate about, unlike a
+   * resource-capped one that was simply never looked at).
+   */
+  readonly droppedClosingIssueNumbers: readonly number[];
+}
+
+/**
+ * Computes {@link CriteriaSpineTruncationSummary} from data every caller
+ * of {@link buildCriteriaSpine} already has in hand — deliberately NOT a
+ * change to {@link buildCriteriaSpine}'s own signature or internal
+ * `truncatedAway` tracking (Codex finding, PR #76 review, L181 — the
+ * runner can render a truncation warning without any corresponding spine
+ * entry, so an entirely-dropped closing reference silently passes review
+ * with no way for slice 3b-iii to know it was ever incomplete). Every
+ * signal this function needs is a pure comparison across already-computed
+ * outputs, so it stays a small, additive, non-behavior-changing function
+ * alongside the already-shipped, already-reviewed spine-building logic,
+ * rather than a change to it.
+ *
+ * Two distinct "dropped entirely" cases, both computed by set comparison:
+ *
+ * 1. **Never even fetched** — a `closing`-kind reference in `references`
+ *    (the FULL, uncapped list) that isn't in `selectIssuesToFetch
+ *    (references)`'s own capped subset at all (`MAX_LINKED_ISSUES`, the
+ *    resource-exhaustion cap `spec-grounding-logic.mts` documents).
+ * 2. **Fetched, had unmet criteria, but byte-cap-dropped from the
+ *    rendered block before any of it survived** — a `closing`-kind entry
+ *    in `result.specs` (which, by `buildLinkedIssueSpecs`'s own contract,
+ *    only ever contains an issue that DID have at least one real unmet
+ *    criterion) with NO matching `issueNumber` anywhere in `spine` at
+ *    all. Since every spec in `result.specs` has ≥1 unmet criterion, the
+ *    ONLY way it can produce zero spine entries is `buildCriteriaSpine`'s
+ *    own byte-cap truncation cutting the rendered block short before
+ *    reaching any of that issue's checkbox lines.
+ *
+ * @param references - `parseLinkedIssueReferences`'s full, UNCAPPED
+ *   output — the same value this run's `main()` already passed to
+ *   `buildLinkedIssueSpecs`.
+ * @param result - `buildLinkedIssueSpecs`'s own output for this run.
+ * @param spine - `buildCriteriaSpine`'s own output for this run, built
+ *   from the SAME `result` and the SAME rendered criteria block.
+ * @returns The truncation summary described above.
+ */
+export function computeCriteriaSpineTruncation(
+  references: readonly LinkedIssueReference[],
+  result: LinkedIssueSpecsResult,
+  spine: readonly CriteriaSpineEntry[],
+): CriteriaSpineTruncationSummary {
+  const fetchedIssueNumbers = new Set(
+    selectIssuesToFetch(references).map((r) => r.issueNumber),
+  );
+  const neverFetchedClosing = references.filter(
+    (r) => r.kind === "closing" && !fetchedIssueNumbers.has(r.issueNumber),
+  );
+
+  const spineIssueNumbers = new Set(spine.map((e) => e.issueNumber));
+  const byteCapDroppedClosing = result.specs.filter(
+    (s) => s.kind === "closing" && !spineIssueNumbers.has(s.issueNumber),
+  );
+
+  const droppedClosingIssueNumbers = Array.from(
+    new Set<number>([
+      ...neverFetchedClosing.map((r) => r.issueNumber),
+      ...byteCapDroppedClosing.map((s) => s.issueNumber),
+    ]),
+  );
+
+  const totalUnmetCriteriaCount = result.specs.reduce(
+    (sum, s) => sum + s.unmetCriteria.length,
+    0,
+  );
+  const truncated =
+    result.truncatedIssueCount > 0 ||
+    result.specs.some((s) => s.truncatedCriteriaCount > 0) ||
+    spine.length < totalUnmetCriteriaCount;
+
+  return { truncated, droppedClosingIssueNumbers };
+}
+
+/**
  * Whitespace-tolerant, case-insensitive match for the diff's OWN delimiter
  * tag — the sibling of `spec-grounding-logic.mts`'s `DELIMITER_TAG_PATTERN`,
  * under a DIFFERENT tag name so a breakout attempt inside a criterion
@@ -391,22 +504,36 @@ export const GITHUB_COMPARE_DIFF_FILE_LIMIT = 300;
  *   adds a visible truncation warning to the wrapped block, the same shape
  *   as the byte-cap warning below, so the agent never mistakes a silently-
  *   partial diff for a complete one.
- * @returns The delimited `UNTRUSTED_PR_DIFF` block, always non-empty (an
- *   empty diff still renders the wrapper and its guard text — unlike
- *   `renderCriteriaDataBlock`, there is no "skip the review pass" signal
- *   here; that decision is made earlier, from whether the criteria spine
- *   itself is empty, not from the diff).
+ * @returns `text` — the delimited `UNTRUSTED_PR_DIFF` block, always
+ *   non-empty (an empty diff still renders the wrapper and its guard text —
+ *   unlike `renderCriteriaDataBlock`, there is no "skip the review pass"
+ *   signal here; that decision is made earlier, from whether the criteria
+ *   spine itself is empty, not from the diff) — and `truncated`, `true` if
+ *   EITHER the byte cap or the known file-count cap fired (Codex finding,
+ *   PR #76 review, L733: `pr-diff-block.txt` itself is never uploaded as
+ *   an artifact — only `criteria-spine.json` and `spec-grounding-
+ *   verdict.json` are — so without surfacing this boolean, slice 3b-iii's
+ *   privileged publisher has NO way to know the diff the agent judged was
+ *   ever incomplete; a closing-kind PR whose diff silently omitted the
+ *   file that would have satisfied (or contradicted) a criterion could
+ *   pass review on a partial view with no trace anywhere downstream. The
+ *   VISIBLE in-block warnings above are for the review agent's own
+ *   benefit; this boolean is the machine-readable twin for the privileged
+ *   publisher, the same "trusted metadata alongside the untrusted
+ *   content" pattern {@link computeCriteriaSpineTruncation} already
+ *   establishes for criteria/issue truncation).
  */
 export function wrapUntrustedDiffBlock(
   diff: string,
   nonce: string,
   maxBytes: number = MAX_PR_DIFF_BYTES,
   options?: { readonly knownFileCountTruncated?: boolean },
-): string {
+): { readonly text: string; readonly truncated: boolean } {
   const neutralized = neutralizeDiffDelimiterBreakout(diff);
   const { text, truncated: byteTruncated } = truncateToByteBudget(neutralized, maxBytes);
   const diffBlockOpen = `<UNTRUSTED_PR_DIFF_${nonce}>`;
   const diffBlockClose = `</UNTRUSTED_PR_DIFF_${nonce}>`;
+  const knownFileCountTruncated = options?.knownFileCountTruncated === true;
 
   const lines: string[] = [
     diffBlockOpen,
@@ -426,7 +553,7 @@ export function wrapUntrustedDiffBlock(
         " assume the unseen portion satisfies any criterion.)",
     );
   }
-  if (options?.knownFileCountTruncated === true) {
+  if (knownFileCountTruncated) {
     lines.push(
       "",
       "(TRUNCATED — this PR changes more files than GitHub's compare API returns in " +
@@ -436,5 +563,5 @@ export function wrapUntrustedDiffBlock(
     );
   }
   lines.push(diffBlockClose);
-  return lines.join("\n");
+  return { text: lines.join("\n"), truncated: byteTruncated || knownFileCountTruncated };
 }

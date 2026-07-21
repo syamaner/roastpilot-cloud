@@ -82,6 +82,12 @@ describe("isProtectedPath", () => {
     expect(isProtectedPath("docs/CODEOWNERS")).toBe(true);
   });
 
+  it("protects everything under .claude/skills/spec-grounded-review/ (F1-S9 issue #12, PR #81 review completion: claude-code-review.yml's restore step reapplies this path unconditionally from PR-head, same as scripts/factory/, so an implementing agent's own patch must never be able to reach it either)", () => {
+    expect(
+      isProtectedPath(".claude/skills/spec-grounded-review/SKILL.md"),
+    ).toBe(true);
+  });
+
   it("does not protect ordinary application paths", () => {
     expect(isProtectedPath("lib/slug.ts")).toBe(false);
     expect(isProtectedPath("app/r/[slug]/page.tsx")).toBe(false);
@@ -96,11 +102,17 @@ describe("isProtectedPath", () => {
     expect(isProtectedPath("/etc/passwd")).toBe(true);
   });
 
-  it("does NOT false-positive on a path that merely starts with a similar prefix (.github-like/ or scripts/factory-like/)", () => {
+  it("does NOT false-positive on a path that merely starts with a similar prefix (.github-like/ or scripts/factory-like/ or a sibling skill directory)", () => {
     // Guards against an overly loose prefix check (e.g. a plain substring
     // match) that would over-block legitimate paths.
     expect(isProtectedPath(".github-archive/notes.md")).toBe(false);
     expect(isProtectedPath("scripts/factory-notes/readme.md")).toBe(false);
+    // A DIFFERENT skill directory is not protected -- only
+    // spec-grounded-review's own path is, since that's the only one
+    // claude-code-review.yml's restore step reapplies unconditionally.
+    expect(isProtectedPath(".claude/skills/some-other-skill/SKILL.md")).toBe(
+      false,
+    );
   });
 });
 
@@ -132,6 +144,14 @@ describe("findForbiddenPatchPaths", () => {
       "b/scripts/factory/publish-implement-patch.mts",
     ]);
     expect(forbidden).toEqual(["scripts/factory/publish-implement-patch.mts"]);
+  });
+
+  it("flags the spec-grounded-review skill even though it lives outside .github/** and scripts/factory/ (F1-S9 issue #12, PR #81 review completion: unconditionally PR-head-reapplied by claude-code-review.yml's restore step, so an implementing agent's patch must never be able to tamper with it)", () => {
+    const forbidden = findForbiddenPatchPaths([
+      "a/.claude/skills/spec-grounded-review/SKILL.md",
+      "b/.claude/skills/spec-grounded-review/SKILL.md",
+    ]);
+    expect(forbidden).toEqual([".claude/skills/spec-grounded-review/SKILL.md"]);
   });
 
   it("flags a rename INTO a protected path even if the source path was safe", () => {
