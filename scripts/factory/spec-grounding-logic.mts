@@ -731,7 +731,14 @@ function stripUnprotectedHtmlComments(
  *   strongest claimed link kind (see the CLOSING-wins tie-break below),
  *   in FIRST-APPEARANCE order (not sorted by issue number — see the
  *   padding-evasion mitigation in this function's own implementation).
- *   Empty if the body references no issue at all.
+ *   Empty if the body references no issue at all. Excludes a matched
+ *   `#0` or a digit sequence too long to be a real, safe-integer issue
+ *   number (PR #93/F1-S9 slice 90.2 review, Codex, must-fix — see this
+ *   function's own implementation, at the `Number.isSafeInteger` check,
+ *   for the full reasoning): `\d+` places no length bound and permits a
+ *   bare `0`, but neither is ever a real GitHub issue number, so dropping
+ *   the whole reference — rather than passing an invalid number
+ *   downstream — is correct for every consumer of this output.
  */
 export function parseLinkedIssueReferences(
   prBody: string,
@@ -793,11 +800,31 @@ export function parseLinkedIssueReferences(
     }
     const keyword = rawKeyword.toLowerCase().replace(/\s+/g, " ");
     const issueNumber = Number(rawNumber);
-    if (!Number.isFinite(issueNumber)) {
-      // Defensive: every number group matches `\d+` — digits only — so
-      // Number(rawNumber) is always a finite non-negative integer;
-      // unreachable by construction.
-      /* v8 ignore next */
+    // Number.isSafeInteger + a positive check, NOT Number.isFinite alone
+    // (F1-S9 slice 90.2 review, PR #93, Codex cid 3624453783, must-fix --
+    // fixed at the CLASS, in this shared parser, not a local filter on one
+    // downstream consumer): every number group matches `\d+` — digits
+    // only — so `Number(rawNumber)` is always finite, but `\d+` places NO
+    // upper bound and permits a leading `0` alone, so this is reachable
+    // for `#0` (a real GitHub issue number is never 0) and for a digit
+    // sequence long enough that `Number(...)` produces a huge-but-finite,
+    // non-safe-integer value (e.g. `#99999999999999999999` rounds to
+    // `1e20`, which `Number.isFinite` accepts but does not represent the
+    // digit sequence exactly). Before this fix, both slipped through as
+    // "valid" issue numbers to every downstream consumer of this
+    // function's own output -- including, concretely, F1-S9 slice 90.2's
+    // own `computeReviewedClosingIssueNumbers` (`spec-grounding-runner-
+    // logic.mts`), which would then serialize that same invalid value
+    // into `criteria-spine.json`'s own `reviewedClosingIssueNumbers` --
+    // a field that field's OWN parser (`parseCriteriaSpineArtifact`)
+    // correctly requires `Number.isSafeInteger(...) && > 0` for, so the
+    // runner's own artifact would fail ITS OWN parser's validation,
+    // spuriously degrading a run that had nothing genuinely wrong with
+    // it. Dropping the reference here, at the shared source, is correct
+    // for every consumer of this function's output, not just that one --
+    // #0 and a non-safe-integer digit sequence were never valid GitHub
+    // issue numbers to begin with.
+    if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
       continue;
     }
     const kind: IssueLinkKind = CLOSING_KEYWORD_SET.has(keyword) ? "closing" : "non-closing";
