@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
+  deleteObsoleteInlineBlockerComments,
   findExistingInlineCommentId,
   findExistingInlineComments,
   postInlineCommentPlan,
@@ -9,6 +10,7 @@ import {
 import {
   criterionBlockerCommentMarker,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+  inlineBlockerGenerationMarker,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
@@ -431,5 +433,233 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(clearStaleInlineBlockerComments("token", "o", "r", 5)).rejects.toThrow(/403/);
+  });
+});
+
+describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan's own core reconciliation item, #363)", () => {
+  it("deletes a bot-owned blocker comment NOT in the keep set, at the SAME generation as this run (a satisfying verdict makes the whole set obsolete)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(1);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+  });
+
+  it("deletes only the SATISFIED criterion's own comment on a partial-fix verdict, keeping a still-unmet sibling's own comment untouched", async () => {
+    const satisfiedMarker = criterionBlockerCommentMarker("12:0");
+    const stillUnmetMarker = criterionBlockerCommentMarker("12:1");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied\n${satisfiedMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `still unmet\n${stillUnmetMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The keep set carries ONLY the still-unmet criterion's own marker --
+    // the satisfied one is genuinely absent from it.
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [stillUnmetMarker], 1);
+
+    expect(deletedCount).toBe(1);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/2"))).toBe(false);
+  });
+
+  it("never deletes a comment whose own identity marker IS in the keep set", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `still unmet\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [marker], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("never deletes a NEWER-generation comment -- an older run must never delete a newer run's own thread", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            // Posted by a NEWER run (generation 5) for an issue THIS
+            // (older, generation 1) run's own verdict never knew about.
+            body: `newer finding\n${marker}\n${inlineBlockerGenerationMarker("5")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("deletes a comment at EXACTLY this run's own generation (the boundary is inclusive, not exclusive)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("7")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 7);
+
+    expect(deletedCount).toBe(1);
+  });
+
+  it("NEVER deletes a comment with a NULL/unparseable generation -- a pre-90.3 comment, or a corrupted one, fails closed by being left in place", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            // No generation marker line at all -- a pre-90.3 comment.
+            body: `now satisfied\n${marker}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("ignores a non-blocker comment (no blocker marker at all), even if bot-owned", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          { id: 1, body: "an unrelated bot comment", user: { type: "Bot", login: "github-actions[bot]" } },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("ignores a comment carrying a blocker-marker-shaped string but authored by someone else entirely (never mistaken for ours)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `not actually ours\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "User", login: "someone" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("returns 0 and deletes nothing when there are no existing comments at all", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("tolerates a 404 on an individual DELETE as a benign no-op (a human already resolved/deleted that thread) and still deletes the rest", async () => {
+    const markerA = criterionBlockerCommentMarker("12:0");
+    const markerB = criterionBlockerCommentMarker("12:1");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied\n${markerA}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `now satisfied\n${markerB}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(404, "Not Found"),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+
+    expect(deletedCount).toBe(1);
+  });
+
+  it("propagates a genuine (non-404) DELETE failure rather than silently swallowing it", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(403, "Forbidden"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1)).rejects.toThrow(/403/);
   });
 });

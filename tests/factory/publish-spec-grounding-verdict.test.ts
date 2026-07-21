@@ -651,6 +651,10 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      // F1-S9 slice 90.4: reconciliation always runs on the zero-blocker
+      // path -- fetches existing inline comments to find (none here)
+      // anything obsolete to delete.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -662,6 +666,95 @@ describe("main — the happy path", () => {
     const post = calls.find((c) => c.method === "POST");
     expect((post?.body as { body: string }).body).toContain("No blocking findings.");
     expect((post?.body as { body: string }).body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
+  });
+
+  it("posts a visible fallback and exits nonzero when reconciling this run's own obsolete inline blocker comments fails (F1-S9 slice 90.4) -- a genuine (non-404) failure, never silently swallowed", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        new Response("forbidden", { status: 403 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/failed to reconcile this run's own obsolete inline blocker comments/i);
+    expect(body).toMatch(/403/);
+  });
+
+  it("DELETES a prior run's own inline blocker comment for a criterion this run's verdict now finds SATISFIED (F1-S9 slice 90.4, the core reconciliation AC) -- end to end: a fixed blocker actually stops gating", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 201,
+            body: `Was unsatisfied.\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/201": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/pulls/comments/201"))).toBe(true);
+    const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    expect((post?.body as { body: string }).body).toContain("No blocking findings.");
+  });
+
+  it("FAILS CLOSED, loudly, when GITHUB_RUN_NUMBER is not a valid positive integer, rather than silently defeating the generation-safety guard (F1-S9 slice 90.4) -- Number('not-a-number') is NaN, and any comparison against NaN is false, which would otherwise make EVERY comment look safe to delete regardless of its own real generation", async () => {
+    process.env.GITHUB_RUN_NUMBER = "not-a-number";
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    // Never even reaches the reconciliation fetch at all -- fails before
+    // that, so there's no risk of it silently reconciling against an
+    // untrustworthy generation.
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/GITHUB_RUN_NUMBER.*is not a valid positive integer/i);
   });
 
   it("does NOT post a stale all-clear on the ZERO-blocker path when the PR's current head SHA no longer matches the trusted event SHA -- verifies the trusted head on EVERY hasCriteria:true publish, not just when there are blockers to post inline (PR #87 review round 7, Codex, medium, fail-open close)", async () => {
@@ -861,6 +954,75 @@ describe("main — the happy path", () => {
     expect(summaryBody).toContain("3 blocking finding(s)");
   });
 
+  it("KEEPS (never deletes) a de-referenced-but-still-UNMET criterion's own prior inline comment during reconciliation -- the deliberate Fork-2 boundary (F1-S9 slice 90.4, team-lead's ruling): reconciliation's own keep set is the UNFILTERED verdict, so this stays round-4's own 'note stale in the summary, leave the thread in place' behavior, not a new delete", async () => {
+    const stillLiveMarker = criterionBlockerCommentMarker("12:0");
+    const dereferencedButUnmetMarker = criterionBlockerCommentMarker("34:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker." },
+          // #34 is de-referenced from the CURRENT body (below), but the
+          // VERDICT itself never found it satisfied -- it is still,
+          // genuinely, an unmet criterion.
+          { criterionId: "34:0", satisfied: false, rationale: "De-referenced, but never actually fixed." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    const { fetchMock, calls } = mockFetch({
+      // The CURRENT body only references #12 -- #34's own reference was
+      // removed since the review ran (a body-only edit).
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      // Both #12's and #34's own comments already exist, from a PRIOR
+      // (older-generation) run.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 101,
+            body: `Still-live blocker.\n${stillLiveMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 102,
+            body: `De-referenced, but never actually fixed.\n${dereferencedButUnmetMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/101": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // #12's own comment is PATCHed (still referenced, still unmet).
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/pulls/comments/101"))).toBe(true);
+    // #34's own comment is NEITHER patched NOR deleted -- de-referenced
+    // from the current body (round-4's own staleness filter excludes it
+    // from posting), but genuinely still unmet per the verdict, so it's
+    // in reconciliation's own (unfiltered) keep set and must be left
+    // exactly in place.
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/pulls/comments/102"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/pulls/comments/102"))).toBe(false);
+  });
+
   it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [] },
@@ -970,6 +1132,14 @@ describe("main — the happy path", () => {
     // ever attempted.
     expect(body).toMatch(/github itself rejected the deterministic anchor/i);
     expect(body).not.toMatch(/no addable line to anchor them to/i);
+    // F1-S9 slice 90.4, Fork-1 skip: EXACTLY one GET to this endpoint --
+    // from postInlineCommentPlan's own internal fetch, attempting (and
+    // 422-failing) the post. If reconciliation had ALSO incorrectly run
+    // here (blockers exist but didn't post inline), there would be a
+    // SECOND, separate GET from deleteObsoleteInlineBlockerComments's own
+    // fetch -- reconciliation must be skipped entirely in this case,
+    // never delete against an unreliable/absent keep set.
+    expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(1);
   });
 
   it("posts a 'pipeline broke'-style visible fallback and exits nonzero when the PR's current head SHA no longer matches the trusted event SHA", async () => {
@@ -1031,6 +1201,10 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      // F1-S9 slice 90.4: reconciliation always runs on the zero-blocker
+      // path -- fetches existing inline comments to find (none here)
+      // anything obsolete to delete.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -1144,6 +1318,7 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -1174,6 +1349,7 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -1214,6 +1390,7 @@ describe("main — the happy path", () => {
     ];
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse(page1),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=2": () => jsonResponse(page2),
       "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/999": () => jsonResponse({}),
