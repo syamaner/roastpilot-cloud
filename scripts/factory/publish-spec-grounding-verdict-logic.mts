@@ -148,15 +148,65 @@ export function deriveSeverity(entry: JoinedCriterionResult): SpecGroundingSever
 }
 
 /**
+ * Upper bound on a single rationale's rendered length before it's
+ * truncated with a pointer to the full verdict artifact (PR #82 review,
+ * FOLD 3 — LOW: `validateSpecGroundingVerdict`'s own `MAX_RATIONALE_LENGTH`
+ * is 2000 characters PER finding; the full verdict is uploaded as an
+ * artifact regardless, so this display cap loses nothing a human can't
+ * still find there — it only bounds how much of a giant rationale
+ * inflates THIS comment, which also has its own hard cap, see
+ * `buildSpecGroundingSummaryCommentBody`'s own `MAX_FINDINGS_LIST_LENGTH`).
+ */
+const MAX_RATIONALE_DISPLAY_LENGTH = 300;
+
+/**
+ * Neutralizes agent-authored rationale text before it reaches a posted
+ * bot comment (PR #82 review, FOLD 2 — LOW): `validateSpecGroundingVerdict`
+ * validates rationale CONTENT (no raw control characters, no unpaired
+ * surrogates, at least one visible character) but NOT Markdown
+ * STRUCTURE — an agent-influenced rationale (ultimately derived from a
+ * public issue's own text, itself editable by anyone) rendered as raw
+ * Markdown under `github-actions[bot]`'s identity could inject a
+ * `\n<!--` (an unclosed HTML comment hiding everything the bot posts
+ * after it), a spoofed heading, a live autolinked URL, or an `@mention`.
+ *
+ * Mirrors `implement-patch-logic.mts`'s own categorical fix for this
+ * exact injection class (`sanitizeStepSummaryText`, see that function's
+ * docstring for the full 3-round history of why per-metacharacter
+ * escaping loses to GFM autolinking and a code span is the only
+ * categorical defense): wraps the value in a GitHub-Flavored-Markdown
+ * inline code span, which renders its contents as literal text —
+ * no emphasis, no links, no autolinks, no HTML — by construction. The
+ * only two characters that could break OUT of the span (a literal
+ * backtick, or a newline that could end the containing list item/start
+ * a new Markdown block) are stripped first, same as that function.
+ *
+ * @param rationale - The agent's own rationale text.
+ * @returns The rationale wrapped in an inert code span, truncated with a
+ *   pointer to the uploaded verdict artifact if it exceeds
+ *   {@link MAX_RATIONALE_DISPLAY_LENGTH}.
+ */
+function sanitizeAgentRationaleForDisplay(rationale: string): string {
+  const collapsed = rationale.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  if (collapsed.length > MAX_RATIONALE_DISPLAY_LENGTH) {
+    return (
+      `\`${collapsed.slice(0, MAX_RATIONALE_DISPLAY_LENGTH)}…\` ` +
+      "_(truncated — full text in the uploaded verdict artifact)_"
+    );
+  }
+  return `\`${collapsed}\``;
+}
+
+/**
  * Renders a joined result's rationale for display — agent-authored text is
  * DISPLAY-ONLY DATA here, never interpreted or executed as an instruction
- * (team-lead's explicit design note, 3b-iii kickoff). Already
- * content-validated by `validateSpecGroundingVerdict` (no raw control
- * characters, no unpaired surrogates, at least one visible character) by
- * the time it reaches this module, so no further sanitization happens
- * here — this function only supplies the safe placeholder text for the
- * one case that ISN'T agent-authored content at all: a criterion the
- * agent never addressed.
+ * (team-lead's explicit design note, 3b-iii kickoff), and is passed
+ * through {@link sanitizeAgentRationaleForDisplay} before reaching a
+ * posted bot comment (PR #82 review, FOLD 2/3). This function only
+ * supplies the safe placeholder text — untouched by the sanitizer above,
+ * since it is OUR OWN trusted text, not agent-authored — for the one case
+ * that ISN'T agent-authored content at all: a criterion the agent never
+ * addressed.
  *
  * @param entry - One joined criterion result.
  * @returns The rationale to display, or an explanatory placeholder.
@@ -168,7 +218,7 @@ export function formatRationaleForDisplay(entry: JoinedCriterionResult): string 
       "(the safe direction for a criterion the agent's output never mentioned)._"
     );
   }
-  return entry.rationale ?? "";
+  return sanitizeAgentRationaleForDisplay(entry.rationale ?? "");
 }
 
 /**
@@ -260,18 +310,39 @@ export interface SpecGroundingTruncationFlags {
 }
 
 /**
+ * Upper bound on the rendered non-blocking findings LIST's own total
+ * length, in characters (PR #82 review, FOLD 3 — LOW: a fully schema-valid
+ * verdict — up to `MAX_FINDINGS` (1000) findings, each up to
+ * `MAX_RATIONALE_LENGTH` (2000) characters — could otherwise inflate this
+ * list past GitHub's 65,536-character comment-body limit, turning a
+ * genuinely valid verdict into a failed post; the concrete case that
+ * surfaced this: ~34 non-blocking findings at the rationale cap alone
+ * approach ~70,000 characters). Deliberately well under GitHub's own
+ * limit — the caveat, blocker-count paragraph, heading, and trailer
+ * sections are all roughly constant-size regardless of finding count, so
+ * this only needs to bound the part that actually scales. Layered with
+ * {@link MAX_RATIONALE_DISPLAY_LENGTH} (bounds each entry) rather than
+ * relying on either alone: a valid verdict with many long rationales is
+ * stopped by this budget even if no single entry trips its own cap.
+ */
+const MAX_FINDINGS_LIST_LENGTH = 55_000;
+
+/**
  * Builds the single, non-blocking summary comment body.
  *
  * Lists every NON-blocking joined result ({@link deriveSeverity} !==
  * `"blocker"`) — a `non-closing` reference's unmet criteria, any satisfied
  * criterion regardless of kind, and any criterion the agent never
- * addressed that didn't escalate to a blocker. Blocking findings —
- * BOTH per-criterion ones and whole-issue {@link DroppedClosingIssueResult}
- * ones — are DELIBERATELY NOT repeated here in full (only counted, with a
- * pointer to the separate inline comments) — the inline comment IS their
- * canonical, resolvable home; duplicating their content here would let a
- * human "resolve" the issue by treating the summary as sufficient while
- * the actual blocking thread stays open.
+ * addressed that didn't escalate to a blocker — UP TO {@link
+ * MAX_FINDINGS_LIST_LENGTH}; any remainder is reported as an omitted
+ * count, with a pointer to the uploaded verdict artifact, never silently
+ * dropped. Blocking findings — BOTH per-criterion ones and whole-issue
+ * {@link DroppedClosingIssueResult} ones — are DELIBERATELY NOT repeated
+ * here in full (only counted, with a pointer to the separate inline
+ * comments) — the inline comment IS their canonical, resolvable home;
+ * duplicating their content here would let a human "resolve" the issue by
+ * treating the summary as sufficient while the actual blocking thread
+ * stays open.
  *
  * A truncation caveat (F1-S9 slice 1, issue #12), when either
  * {@link SpecGroundingTruncationFlags} field is true, is rendered FIRST —
@@ -343,15 +414,37 @@ export function buildSpecGroundingSummaryCommentBody(
         "or a criterion already satisfied):",
       "",
     );
+    let findingsListLength = 0;
+    let addedCount = 0;
     for (const entry of nonBlocking) {
-      lines.push(
+      const bullet =
         `- Issue #${entry.issueNumber}, criterion \`${entry.criterionId}\` (${entry.kind}): ` +
-          `**${entry.satisfied ? "satisfied" : "unsatisfied"}** — ${formatRationaleForDisplay(entry)}`,
+        `**${entry.satisfied ? "satisfied" : "unsatisfied"}** — ${formatRationaleForDisplay(entry)}`;
+      if (findingsListLength + bullet.length + 1 > MAX_FINDINGS_LIST_LENGTH) {
+        break; // Remaining entries are reported as an omitted count below, not silently dropped.
+      }
+      lines.push(bullet);
+      findingsListLength += bullet.length + 1;
+      addedCount += 1;
+    }
+    const omittedCount = nonBlocking.length - addedCount;
+    if (omittedCount > 0) {
+      lines.push(
+        "",
+        `_${omittedCount} further finding(s) omitted from this summary to stay within GitHub's ` +
+          "comment size limit — see the uploaded verdict artifact for the full list._",
       );
     }
     lines.push("");
   } else if (totalBlockerCount === 0) {
-    lines.push("_No unmet acceptance criteria were found at all._", "");
+    lines.push(
+      truncation.truncated || truncation.diffTruncated
+        ? "_No unmet acceptance criteria were found among what WAS reviewed. This run was " +
+            "truncated (see the caveat above), so unreviewed criteria may still exist — this is " +
+            "NOT a confirmed all-clear._"
+        : "_No unmet acceptance criteria were found at all._",
+      "",
+    );
   }
 
   lines.push(

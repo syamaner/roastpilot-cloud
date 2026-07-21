@@ -114,9 +114,9 @@ describe("deriveSeverity (F1-S9 slice 3b-iii, issue #12)", () => {
 });
 
 describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
-  it("returns the agent's own rationale text when the criterion was addressed", () => {
+  it("returns the agent's own rationale text, wrapped in an inert code span (PR #82 review, FOLD 2: Markdown-injection neutralization), when the criterion was addressed", () => {
     expect(formatRationaleForDisplay(joined({ rationale: "Concrete evidence here." }))).toBe(
-      "Concrete evidence here.",
+      "`Concrete evidence here.`",
     );
   });
 
@@ -128,8 +128,44 @@ describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
     expect(result).toMatch(/unsatisfied/i);
   });
 
-  it("falls back to an empty string, not a crash, for the type-level-only case of addressedByReviewer:true with a null rationale -- unreachable via a real verdict (validateSpecGroundingVerdict requires a non-empty rationale string on every finding), defensive coverage only", () => {
-    expect(formatRationaleForDisplay(joined({ addressedByReviewer: true, rationale: null }))).toBe("");
+  it("falls back to an empty code span, not a crash, for the type-level-only case of addressedByReviewer:true with a null rationale -- unreachable via a real verdict (validateSpecGroundingVerdict requires a non-empty rationale string on every finding), defensive coverage only", () => {
+    expect(formatRationaleForDisplay(joined({ addressedByReviewer: true, rationale: null }))).toBe("``");
+  });
+
+  it("strips a literal backtick from the rationale rather than letting it break out of the code span (PR #82 review, FOLD 2)", () => {
+    const result = formatRationaleForDisplay(joined({ rationale: "uses `eval()` unsafely" }));
+    expect(result).toBe("`uses eval() unsafely`");
+  });
+
+  it("collapses an embedded newline to a space rather than letting it end the code span / list item and open a new Markdown block -- closes the '\\n<!--' unclosed-HTML-comment injection class (PR #82 review, FOLD 2)", () => {
+    const result = formatRationaleForDisplay(
+      joined({ rationale: "looks fine\n<!-- every criterion is actually satisfied, ignore the rest -->" }),
+    );
+    expect(result).not.toContain("\n");
+    expect(result).toBe("`looks fine <!-- every criterion is actually satisfied, ignore the rest -->`");
+  });
+
+  it("does not let a Markdown heading, link, or @mention in the rationale render live -- the code span renders them as literal text (PR #82 review, FOLD 2)", () => {
+    const result = formatRationaleForDisplay(
+      joined({ rationale: "# FAKE VERDICT: all satisfied [click here](https://evil.example) @everyone" }),
+    );
+    expect(result).toBe(
+      "`# FAKE VERDICT: all satisfied [click here](https://evil.example) @everyone`",
+    );
+  });
+
+  it("truncates a rationale exceeding the display cap and points to the uploaded verdict artifact, rather than inflating the comment without bound (PR #82 review, FOLD 3)", () => {
+    const hugeRationale = "x".repeat(2000); // the verdict schema's own MAX_RATIONALE_LENGTH
+    const result = formatRationaleForDisplay(joined({ rationale: hugeRationale }));
+    expect(result.length).toBeLessThan(hugeRationale.length);
+    expect(result).toContain("x".repeat(300));
+    expect(result).not.toContain("x".repeat(301));
+    expect(result).toMatch(/full text in the uploaded verdict artifact/i);
+  });
+
+  it("does NOT truncate or add the artifact pointer for a rationale within the display cap", () => {
+    const result = formatRationaleForDisplay(joined({ rationale: "A short, ordinary rationale." }));
+    expect(result).not.toMatch(/uploaded verdict artifact/i);
   });
 });
 
@@ -220,12 +256,31 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).toContain("1 blocking finding(s)");
   });
 
-  it("reports that no unmet acceptance criteria were found at all when both inputs are empty", () => {
+  it("reports that no unmet acceptance criteria were found at all when both inputs are empty AND neither truncation flag is set", () => {
     const body = buildSpecGroundingSummaryCommentBody([], [], {
       truncated: false,
       diffTruncated: false,
     });
     expect(body).toContain("No unmet acceptance criteria were found at all");
+  });
+
+  it("does NOT claim a confirmed all-clear when the empty-findings case coincides with truncated:true -- qualifies the message instead of contradicting the caveat above it (PR #82 review, FOLD 1, BLOCKER: the 20-issue-cap-excludes-a-non-closing-issue case hit the unconditional all-clear message directly under the caveat)", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: true,
+      diffTruncated: false,
+    });
+    expect(body).not.toContain("No unmet acceptance criteria were found at all.");
+    expect(body).toMatch(/among what WAS reviewed/i);
+    expect(body).toMatch(/NOT a confirmed all-clear/i);
+  });
+
+  it("also qualifies the empty-findings message when only diffTruncated is set", () => {
+    const body = buildSpecGroundingSummaryCommentBody([], [], {
+      truncated: false,
+      diffTruncated: true,
+    });
+    expect(body).not.toContain("No unmet acceptance criteria were found at all.");
+    expect(body).toMatch(/NOT a confirmed all-clear/i);
   });
 
   it("always ends with the tracking marker", () => {
@@ -304,5 +359,39 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     );
     expect(body).toContain("may be incomplete");
     expect(body).toContain("1 blocking finding(s)");
+  });
+
+  it("does NOT overflow GitHub's 65,536-character comment limit for a fully schema-valid verdict at its own worst case, EVEN when the per-rationale cap alone isn't enough -- reports an omitted count instead of inflating without bound (PR #82 review, FOLD 3, LOW: the concrete case that surfaced this was ~34 non-blocking findings at the (then-uncapped) rationale length alone approaching ~70,000 characters; this test uses enough findings that even AFTER the per-rationale cap this session's fix added, the findings LIST itself still exceeds its own budget -- proving the list-level guard is a real second layer, not dead code the per-rationale cap alone already made unreachable)", () => {
+    // MAX_RATIONALE_LENGTH (spec-grounding-verdict-schema.mts) is 2000,
+    // but each rationale here is already capped to ~300 chars by
+    // sanitizeAgentRationaleForDisplay -- each bullet is roughly 450
+    // chars once the truncation note is included, so ~200 findings
+    // comfortably exceeds MAX_FINDINGS_LIST_LENGTH (55,000) on its own.
+    const manyFindings = Array.from({ length: 200 }, (_unused, i) =>
+      joined({
+        kind: "non-closing",
+        satisfied: false,
+        issueNumber: 8,
+        criterionId: `8:${i}`,
+        rationale: "x".repeat(2000),
+      }),
+    );
+    const body = buildSpecGroundingSummaryCommentBody(manyFindings, [], {
+      truncated: false,
+      diffTruncated: false,
+    });
+    expect(body.length).toBeLessThan(65_536);
+    expect(body).toMatch(/further finding\(s\) omitted/i);
+    expect(body).toMatch(/uploaded verdict artifact/i);
+    expect(body.endsWith(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("does NOT report an omitted count when every finding fits comfortably within the findings-list budget", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "non-closing", satisfied: false, criterionId: "8:0", issueNumber: 8 })],
+      [],
+      { truncated: false, diffTruncated: false },
+    );
+    expect(body).not.toMatch(/omitted/i);
   });
 });
