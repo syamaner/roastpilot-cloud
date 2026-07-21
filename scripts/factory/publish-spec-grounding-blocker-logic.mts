@@ -141,6 +141,30 @@ const NEW_FILE_HEADER_PATTERN = /^\+\+\+ (?:b\/(.+)|(\/dev\/null)|"b\/(.+)")$/;
  *   third capture group, not including the `"` marks themselves.
  * @returns The decoded, real path.
  */
+/**
+ * Every single-character C-escape git's own path-quoting can emit,
+ * besides the `\NNN` octal-byte form (handled separately in {@link
+ * unquoteGitPath} itself) — the COMPLETE set (PR #83 review, LOW: an
+ * earlier version only handled `\\`, `\"`, `\t`, `\n`; git also emits
+ * `\a` (bell), `\b` (backspace), `\f` (form feed), `\r` (carriage
+ * return), and `\v` (vertical tab) for the corresponding control bytes
+ * in a filename — the previous fail-safe silently mis-decoded these
+ * into a literal backslash + letter, the wrong path, a 422 on the
+ * resulting API call). Git's own escape set is fixed and enumerable —
+ * this map is exhaustive, not illustrative.
+ */
+const GIT_SINGLE_CHAR_ESCAPES: Readonly<Record<string, number>> = {
+  "\\": 0x5c,
+  '"': 0x22,
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+};
+
 function unquoteGitPath(quoted: string): string {
   const bytes: number[] = [];
   let i = 0;
@@ -158,24 +182,16 @@ function unquoteGitPath(quoted: string): string {
         continue;
       }
       const next = quoted[i + 1];
-      if (next === "\\" || next === '"') {
-        bytes.push(next.charCodeAt(0));
-        i += 2;
-        continue;
-      }
-      if (next === "t") {
-        bytes.push(0x09);
-        i += 2;
-        continue;
-      }
-      if (next === "n") {
-        bytes.push(0x0a);
+      const singleCharByte = next === undefined ? undefined : GIT_SINGLE_CHAR_ESCAPES[next];
+      if (singleCharByte !== undefined) {
+        bytes.push(singleCharByte);
         i += 2;
         continue;
       }
       // Unknown/malformed escape -- not a sequence a real `git diff`
-      // would ever produce, but fail safe by passing the backslash
-      // through literally rather than crashing or silently dropping it.
+      // would ever produce (git's own escape set, above, is exhaustive),
+      // but fail safe by passing the backslash through literally rather
+      // than crashing or silently dropping it.
       bytes.push(0x5c);
       i += 1;
       continue;

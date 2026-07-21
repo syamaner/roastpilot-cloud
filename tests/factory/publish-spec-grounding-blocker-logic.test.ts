@@ -292,6 +292,35 @@ describe("selectDeterministicBlockerAnchor (F1-S9 slice 3b-iii-c, issue #12)", (
     expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("weird\tname\nfile.ts");
   });
 
+  it.each([
+    ["\\a (bell)", "\\a", "\x07"],
+    ["\\b (backspace)", "\\b", "\b"],
+    ["\\f (form feed)", "\\f", "\f"],
+    ["\\r (carriage return)", "\\r", "\r"],
+    ["\\v (vertical tab)", "\\v", "\v"],
+  ])(
+    "decodes the %s escape within a quoted path -- git's own C-escape set is FIXED and now completed here (PR #83 review, LOW): an earlier version's fail-safe silently mis-decoded these five into a literal backslash + letter, the wrong path",
+    (_label, rawEscape, expectedChar) => {
+      const diff = [
+        `+++ "b/weird${rawEscape}name.ts"`,
+        "@@ -1,1 +1,2 @@",
+        " context",
+        "+added",
+      ].join("\n");
+      expect(selectDeterministicBlockerAnchor(diff)?.path).toBe(`weird${expectedChar}name.ts`);
+    },
+  );
+
+  it("fails safe (passes the backslash through literally, does not crash) on a quoted path ending in a bare, unescaped trailing backslash -- a malformed/synthetic input a real git diff would never produce (a real filename's own backslash is always escaped as \\\\), but the parser must degrade gracefully rather than reading past the end of the string", () => {
+    const diff = [
+      '+++ "b/weird\\"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("weird\\");
+  });
+
   it("fails safe (passes the backslash through literally, does not crash) on an unrecognized escape sequence inside a quoted path -- not a sequence a real git diff would ever produce, but the parser must degrade gracefully rather than throw", () => {
     const diff = [
       '+++ "b/weird\\qname.ts"',
