@@ -7,6 +7,7 @@ import {
   buildStaleBlockerSkippedNote,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
+  findUnreviewedNewClosingReferences,
   formatRationaleForDisplay,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
@@ -164,6 +165,72 @@ describe("isDiffTruncationUnverifiableForClosing (F1-S9 slice 3b-iii, issue #12,
         true,
       ),
     ).toBe(false);
+  });
+});
+
+describe("findUnreviewedNewClosingReferences (PR #87 review round 8, Codex, medium, fail-open close)", () => {
+  const spineEntry = (overrides: Partial<CriteriaSpineEntry> = {}): CriteriaSpineEntry => ({
+    issueNumber: 12,
+    kind: "closing",
+    criterionId: "12:0",
+    ...overrides,
+  });
+
+  it("returns empty when the current body has no closing reference at all", () => {
+    expect(findUnreviewedNewClosingReferences("Refs #12", "owner/repo", [spineEntry()], [])).toEqual([]);
+  });
+
+  it("returns empty for a closing reference the spine's own entries already reviewed as closing", () => {
+    expect(findUnreviewedNewClosingReferences("Closes #12", "owner/repo", [spineEntry()], [])).toEqual([]);
+  });
+
+  it("returns empty for a closing reference covered ONLY by unreviewedClosingIssues (no spine entry at all -- fully-dropped or fully-satisfied at review time)", () => {
+    expect(
+      findUnreviewedNewClosingReferences(
+        "Closes #12",
+        "owner/repo",
+        [],
+        [{ issueNumber: 12, truncationKind: "fully-dropped" }],
+      ),
+    ).toEqual([]);
+  });
+
+  it("flags a closing reference to an issue number this run's spine never saw at all -- the ADDED-reference case", () => {
+    expect(findUnreviewedNewClosingReferences("Closes #12 and Closes #99", "owner/repo", [spineEntry()], [])).toEqual(
+      [99],
+    );
+  });
+
+  it("flags a closing reference to an issue this run's spine reviewed as NON-closing -- the UPGRADED-reference case (e.g. Refs -> Closes since the review ran)", () => {
+    expect(
+      findUnreviewedNewClosingReferences(
+        "Closes #12",
+        "owner/repo",
+        [spineEntry({ kind: "non-closing" })],
+        [],
+      ),
+    ).toEqual([12]);
+  });
+
+  it("does NOT flag a NON-closing reference to an issue the spine never reviewed at all -- only closing-kind references are ever escalated", () => {
+    expect(findUnreviewedNewClosingReferences("Refs #99", "owner/repo", [spineEntry()], [])).toEqual([]);
+  });
+
+  it("returns multiple unreviewed closing references, deduplicated and sorted ascending by issue number, regardless of the order they appear in the body", () => {
+    expect(
+      findUnreviewedNewClosingReferences(
+        "Closes #99, Closes #5, and also closes #99 again",
+        "owner/repo",
+        [spineEntry()],
+        [],
+      ),
+    ).toEqual([5, 99]);
+  });
+
+  it("excludes a closing-shaped reference to a DIFFERENT repo -- parseLinkedIssueReferences's own cross-repo check still applies", () => {
+    expect(
+      findUnreviewedNewClosingReferences("Closes other/repo#99", "owner/repo", [spineEntry()], []),
+    ).toEqual([]);
   });
 });
 

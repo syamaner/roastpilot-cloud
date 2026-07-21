@@ -122,6 +122,7 @@ import {
   buildSpecGroundingSummaryCommentBody,
   buildStaleBlockerSkippedNote,
   deriveSeverity,
+  findUnreviewedNewClosingReferences,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   type JoinedCriterionResult,
@@ -913,6 +914,41 @@ async function publishSummary(
     ]);
     process.exitCode = 1;
     return;
+  }
+
+  // Closes the BODY-EDIT sibling of the head-SHA check above (PR #87
+  // review round 8, Codex, medium, fail-open close): the head SHA does
+  // NOT change when a PR's body is edited to ADD a new closing reference,
+  // or upgrade an existing non-closing reference to closing (e.g. "Refs
+  // #N" -> "Closes #N") -- only relevant on the ZERO-blocker/all-clear
+  // path, since a non-zero blocker count already means this run is not
+  // about to post an all-clear at all. See
+  // findUnreviewedNewClosingReferences's own docstring for the one
+  // documented fail-safe-direction residual this check accepts.
+  if (totalBlockerCount === 0) {
+    const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
+      pr.body ?? "",
+      `${owner}/${repo}`,
+      spine.entries,
+      spine.unreviewedClosingIssues,
+    );
+    if (unreviewedNewClosingIssueNumbers.length > 0) {
+      await publishFallback(
+        token,
+        owner,
+        repo,
+        prNumber,
+        unreviewedNewClosingIssueNumbers.map(
+          (issueNumber) =>
+            `this PR's linked-issue references changed since the spec-grounded review ran: a ` +
+            `closing reference to issue #${issueNumber} was not part of that review (added, or ` +
+            `upgraded from a non-closing reference, since this run's head SHA was captured) — a ` +
+            `fresh spec-grounded review will re-evaluate against this PR's current body.`,
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
   }
 
   let blockersPostedInline = false;

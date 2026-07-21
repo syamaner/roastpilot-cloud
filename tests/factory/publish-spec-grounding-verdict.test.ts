@@ -676,6 +676,37 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/does not match the trusted event head SHA/i);
   });
 
+  it("does NOT post a stale all-clear on the ZERO-blocker path when the PR's CURRENT body carries a closing reference this run's own spine never reviewed as closing -- the body-edit sibling of the head-SHA check, unchanged by a body-only edit (PR #87 review round 8, Codex, medium, fail-open close)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // Same trusted head SHA as review time (the head-SHA check alone
+      // would pass) -- only the BODY changed, adding a brand-new closing
+      // reference to issue #99, which this run's own spine (VALID_SPINE,
+      // issue #12 only) never reviewed as closing at all.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and also Closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    // The FALLBACK wording, never the stale "No blocking findings" all-clear.
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/linked-issue references changed since the spec-grounded review ran/i);
+    expect(body).toContain("#99");
+  });
+
   it("posts the sole blocker as a REAL inline comment and exits ZERO when a real anchor exists -- the healthy path, gated by required_conversation_resolution on the thread itself, not this job's own exit code", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
     process.env.OUTCOME_PATH = outcomePath;
