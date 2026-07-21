@@ -837,6 +837,20 @@ export function planBlockerInlineComments(
  * with no anchor available, {@link planBlockerInlineComments} can't post
  * it as an inline comment either, so it belongs here or nowhere.
  *
+ * The criterion-blocker OVERFLOW note (beyond the individual-listing cap)
+ * uses the SAME shared {@link describeAddressedVsUnaddressedArtifactPointer}
+ * clause {@link buildAggregatedCriterionBlockersCommentBody} and
+ * `publish-spec-grounding-verdict-logic.mts`'s own summary omitted-count
+ * note use (PR #83 review, FOLD 3 — the third and final site of the same
+ * mislabeling bug: an EARLIER version unconditionally pointed every
+ * overflow entry at "the uploaded verdict artifact", wrong for one the
+ * reviewer never addressed at all, which has no verdict entry). The
+ * INDIVIDUALLY-listed entries above, in contrast, already render
+ * correctly for both cases — they go through {@link
+ * formatRationaleForDisplay}, the same shared function that already
+ * branches on `addressedByReviewer`.
+ *
+
  * @param criterionBlockers - Joined results already filtered to blockers.
  * @param unreviewedClosingIssues - This run's unreviewed closing issues.
  * @param diffTruncationBlocksClosingClaim - `publish-spec-grounding-
@@ -881,9 +895,9 @@ export function buildAnchorFallbackSummarySupplement(
   }
   if (overflowCriteriaCount > 0) {
     lines.push(
-      `- _(${overflowCriteriaCount} more unmet acceptance criterion(a) also unsatisfied — this run's ` +
-        "own findings named more than can be listed individually here; see the uploaded verdict " +
-        "artifact for the full list.)_",
+      `- _(${overflowCriteriaCount} more unmet acceptance criterion(a) also treated as unsatisfied — ` +
+        "this run's own findings named more than can be listed individually here " +
+        `(${describeAddressedVsUnaddressedArtifactPointer("entry")}).)_`,
     );
   }
   const individualIssues = unreviewedClosingIssues.slice(0, MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS);

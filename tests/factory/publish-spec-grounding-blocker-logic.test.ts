@@ -833,12 +833,21 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     const body = buildAnchorFallbackSummarySupplement(manyCriteria, [], false);
     expect(body).toContain(`\`12:${MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS - 1}\``);
     expect(body).not.toContain(`\`12:${MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS}\``);
-    expect(body).toMatch(/495 more unmet acceptance criterion\(a\) also unsatisfied/);
+    expect(body).toMatch(/495 more unmet acceptance criterion\(a\) also treated as unsatisfied/);
   });
 
   it("does not report an omitted-criterion count when every criterion blocker fits within the individual cap", () => {
     const body = buildAnchorFallbackSummarySupplement([joined()], [], false);
-    expect(body).not.toMatch(/more unmet acceptance criterion\(a\) also unsatisfied/);
+    expect(body).not.toMatch(/more unmet acceptance criterion\(a\) also treated as unsatisfied/);
+  });
+
+  it("the criterion-blocker overflow note points at the RIGHT artifact for an unaddressed entry, not just 'the uploaded verdict artifact' (PR #83 review, FOLD 3 -- the third site of the same mislabeling bug FOLD 2 fixed in the aggregate comment; uses the same shared describeAddressedVsUnaddressedArtifactPointer clause so all three sites can't drift apart)", () => {
+    const manyUnaddressed = Array.from({ length: 500 }, (_unused, i) =>
+      joined({ criterionId: `12:${i}`, addressedByReviewer: false, rationale: null }),
+    );
+    const body = buildAnchorFallbackSummarySupplement(manyUnaddressed, [], false);
+    expect(body).toMatch(/agent addressed has its own rationale in the uploaded verdict artifact/i);
+    expect(body).toMatch(/agent never addressed at all only appears in the criteria-spine artifact/i);
   });
 
   it("returns a non-empty string reporting the diff-truncation blocker even when there are NO criterion blockers and NO unreviewed closing issues at all (PR #82 round 3 review, holistic pass, FOLD 3)", () => {
