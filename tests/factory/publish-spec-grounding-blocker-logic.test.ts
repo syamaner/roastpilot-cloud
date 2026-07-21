@@ -11,6 +11,7 @@ import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
+  extractIssueNumberFromInlineBlockerMarker,
   inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
   MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS,
@@ -614,6 +615,63 @@ describe("inlineBlockerGenerationMarker / extractInlineBlockerGeneration (F1-S9 
 
   it("produces DIFFERENT marker strings for different generations, so a genuinely newer run's own marker never collides with an older one's", () => {
     expect(inlineBlockerGenerationMarker("1")).not.toBe(inlineBlockerGenerationMarker("2"));
+  });
+});
+
+describe("extractIssueNumberFromInlineBlockerMarker (F1-S9 slice 90.4, the redesigned reconcile)", () => {
+  it("decodes the issue number from a CRITERION marker's own issueNumber prefix", () => {
+    expect(extractIssueNumberFromInlineBlockerMarker(criterionBlockerCommentMarker("12:0"))).toBe(12);
+  });
+
+  it("decodes the issue number from a criterion marker with a multi-digit index too (never confuses index for issue number)", () => {
+    expect(extractIssueNumberFromInlineBlockerMarker(criterionBlockerCommentMarker("12:34"))).toBe(12);
+  });
+
+  it("decodes the issue number from an UNREVIEWED-CLOSING-ISSUE marker directly", () => {
+    expect(extractIssueNumberFromInlineBlockerMarker(unreviewedClosingIssueCommentMarker(99))).toBe(99);
+  });
+
+  it.each([
+    ["the criteria-blockers aggregate marker", CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER],
+    ["the unreviewed-issues aggregate marker", UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER],
+    ["the diff-truncated marker", DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER],
+  ])("returns null for %s -- no per-issue number to decode at all, the caller's own conservative gate", (_label, aggregateMarker) => {
+    expect(extractIssueNumberFromInlineBlockerMarker(aggregateMarker)).toBeNull();
+  });
+
+  it("returns null when no blocker marker is present at all", () => {
+    expect(extractIssueNumberFromInlineBlockerMarker("just some ordinary comment text\nwith multiple lines")).toBeNull();
+  });
+
+  it("finds the marker as a standalone line anywhere in a larger body, alongside a separate generation marker line", () => {
+    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }), "7");
+    expect(extractIssueNumberFromInlineBlockerMarker(body)).toBe(12);
+  });
+
+  it("returns null for a line that merely CONTAINS the marker shape as a substring, not as its own standalone (trimmed) line", () => {
+    const body = `some text ${criterionBlockerCommentMarker("12:0")} trailing text on the same line`;
+    expect(extractIssueNumberFromInlineBlockerMarker(body)).toBeNull();
+  });
+
+  it("tolerates leading/trailing whitespace around the marker line", () => {
+    expect(extractIssueNumberFromInlineBlockerMarker(`   ${unreviewedClosingIssueCommentMarker(99)}   `)).toBe(99);
+  });
+
+  it("returns null for an issue-number digit sequence beyond Number.MAX_SAFE_INTEGER -- defensive, since this workflow's own issue numbers are always small genuine positive integers", () => {
+    const corruptedLine = "<!-- roastpilot-factory:spec-grounding-blocker:issue:9007199254740993:do-not-edit -->";
+    expect(extractIssueNumberFromInlineBlockerMarker(corruptedLine)).toBeNull();
+  });
+
+  it("returns null for an issue marker carrying zero", () => {
+    expect(
+      extractIssueNumberFromInlineBlockerMarker("<!-- roastpilot-factory:spec-grounding-blocker:issue:0:do-not-edit -->"),
+    ).toBeNull();
+  });
+
+  it("returns null for a CRITERION marker carrying zero as its own issueNumber prefix -- the criterion branch's own invalid-value path, distinct from the issue-marker branch's identical check just above", () => {
+    expect(
+      extractIssueNumberFromInlineBlockerMarker("<!-- roastpilot-factory:spec-grounding-blocker:criterion:0:0:do-not-edit -->"),
+    ).toBeNull();
   });
 });
 

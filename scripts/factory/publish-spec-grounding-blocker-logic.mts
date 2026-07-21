@@ -528,6 +528,75 @@ export function extractInlineBlockerGeneration(body: string): number | null {
 }
 
 /**
+ * Matches {@link criterionBlockerCommentMarker}'s own COMPLETE line shape,
+ * capturing the `criterionId`'s own `issueNumber` prefix (group 1) — the
+ * `index` suffix (group 2) is captured but deliberately unused here, this
+ * function only ever needs the issue number.
+ */
+const CRITERION_BLOCKER_MARKER_LINE_PATTERN =
+  /^<!-- roastpilot-factory:spec-grounding-blocker:criterion:(\d+):(\d+):do-not-edit -->$/;
+
+/** Matches {@link unreviewedClosingIssueCommentMarker}'s own COMPLETE line shape, capturing the issue number (group 1). */
+const ISSUE_BLOCKER_MARKER_LINE_PATTERN =
+  /^<!-- roastpilot-factory:spec-grounding-blocker:issue:(\d+):do-not-edit -->$/;
+
+/**
+ * Reads the ISSUE NUMBER a blocker comment's own identity marker encodes,
+ * if (and only if) that marker is one of the two INDIVIDUAL, per-issue
+ * shapes — {@link criterionBlockerCommentMarker} or {@link
+ * unreviewedClosingIssueCommentMarker} (F1-S9 slice 90.4, the redesigned
+ * reconcile — the operator's #801 resolution: auto-clear ONLY the
+ * no-obligation/de-referenced case, never a verdict-satisfied one).
+ *
+ * Deliberately returns `null` — never a number — for any of the THREE
+ * fixed AGGREGATE markers ({@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER},
+ * {@link UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}, {@link
+ * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}): none of them has a per-issue
+ * capture group to extract AT ALL — an aggregate comment can speak for
+ * MANY issues (or, for the diff-truncated case, none in particular), so
+ * there is no single "is this issue still closing-referenced" question
+ * this function could even ask of it. This `null` return IS the caller's
+ * own "leave aggregate markers alone, conservatively" gate — no separate
+ * check is needed on top of it.
+ *
+ * Scans EVERY line for an exact, standalone match against either pattern
+ * (never a substring search across the whole body), the SAME per-line-
+ * exact discipline {@link extractInlineBlockerGeneration} and {@link
+ * bodyContainsAnyBlockerMarker} already use for this file's other markers
+ * — a comment also carries a separate {@link inlineBlockerGenerationMarker}
+ * line, so this function must not stop at (or be confused by) the first
+ * `roastpilot-factory:spec-grounding-blocker:` line it happens to see;
+ * only the TWO individual-identity shapes match either pattern at all.
+ *
+ * @param body - A comment's own body text — the caller is responsible for
+ *   having already confirmed this comment is bot-authored under this
+ *   workflow's own identity before trusting anything read back from it
+ *   (matching every other marker-reading function in this pipeline).
+ * @returns The issue number, or `null` if `body` carries no individual
+ *   (criterion- or issue-level) blocker marker at all — including the
+ *   case where it carries only an aggregate marker, or no blocker marker
+ *   whatsoever — or the captured digits do not form a safe positive
+ *   integer (defensive; this workflow's own trusted output never
+ *   legitimately produces one that doesn't).
+ */
+export function extractIssueNumberFromInlineBlockerMarker(body: string): number | null {
+  for (const rawLine of body.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    const criterionMatch = CRITERION_BLOCKER_MARKER_LINE_PATTERN.exec(trimmed);
+    if (criterionMatch !== null) {
+      const parsed = Number(criterionMatch[1]);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+    const issueMatch = ISSUE_BLOCKER_MARKER_LINE_PATTERN.exec(trimmed);
+    if (issueMatch !== null) {
+      const parsed = Number(issueMatch[1]);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+  }
+  return null;
+}
+
+/**
  * Matches ANY of this module's five own marker shapes ({@link
  * criterionBlockerCommentMarker}, {@link unreviewedClosingIssueCommentMarker},
  * {@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}, {@link

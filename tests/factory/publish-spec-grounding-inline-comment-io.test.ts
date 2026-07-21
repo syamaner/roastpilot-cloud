@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
+  deleteDeReferencedInlineBlockerComments,
   findExistingInlineCommentId,
   findExistingInlineComments,
   postInlineCommentPlan,
@@ -8,7 +9,11 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-inline-comment-io.mts";
 import {
   criterionBlockerCommentMarker,
+  CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+  inlineBlockerGenerationMarker,
+  unreviewedClosingIssueCommentMarker,
+  UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
@@ -431,5 +436,365 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(clearStaleInlineBlockerComments("token", "o", "r", 5)).rejects.toThrow(/403/);
+  });
+});
+
+describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned per the operator's #801 resolution)", () => {
+  it("deletes a criterion blocker's own comment for an issue that is NO LONGER closing-referenced at all (de-referenced)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+  });
+
+  it("deletes an unreviewed-closing-issue blocker's own comment for an issue that is NO LONGER closing-referenced (issue-level marker, not just criterion-level)", async () => {
+    const marker = unreviewedClosingIssueCommentMarker(99);
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+  });
+
+  it("deletes a DOWNGRADED issue's own comment (still referenced in the body, but no longer with a closing keyword) -- covered by the SAME 'not in currentlyClosingIssueNumbers' test as an outright de-reference", async () => {
+    const marker = criterionBlockerCommentMarker("34:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "Closes #12" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `downgraded to Refs\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // #34 is not in the current closing set (it's still referenced, just
+    // as a non-closing keyword) -- this function has no visibility into
+    // WHY an issue is absent from the set, only that it is.
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+  });
+
+  it("KEEPS a comment whose own issue IS STILL closing-referenced, even though the underlying criterion is now satisfied -- the operator's #801 anti-gaming ruling: a verdict-satisfied blocker for a live closing obligation is never auto-cleared, a human resolves it", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "Closes #12" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `now satisfied, but #12 is STILL a closing reference\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it.each([
+    ["the criteria-blockers aggregate marker", CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER],
+    ["the unreviewed-issues aggregate marker", UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER],
+    ["the diff-truncated marker", DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER],
+  ])(
+    "NEVER deletes %s, even when none of its own (unencoded) issues remain closing-referenced -- no per-issue number to test membership for at all, conservative by construction",
+    async (_label, aggregateMarker) => {
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+        "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+          jsonResponse([
+            {
+              id: 1,
+              body: `an overflow/whole-run comment\n${aggregateMarker}\n${inlineBlockerGenerationMarker("1")}`,
+              user: { type: "Bot", login: "github-actions[bot]" },
+            },
+          ]),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+      expect(result).toEqual({ ok: true, deletedCount: 0 });
+      expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    },
+  );
+
+  it("never deletes a NEWER-generation comment -- an older run must never delete a newer run's own thread", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            // Posted by a NEWER run (generation 5) for an issue THIS
+            // (older, generation 1) run's own current-body read never knew about.
+            body: `newer finding\n${marker}\n${inlineBlockerGenerationMarker("5")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("deletes a comment at EXACTLY this run's own generation (the boundary is inclusive, not exclusive)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("7")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 7);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
+  });
+
+  it("NEVER deletes a comment with a NULL/unparseable generation -- a pre-90.3 comment, or a corrupted one, fails closed by being left in place", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            // No generation marker line at all -- a pre-90.3 comment.
+            body: `de-referenced\n${marker}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("ignores a non-blocker comment (no blocker marker at all), even if bot-owned", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          { id: 1, body: "an unrelated bot comment", user: { type: "Bot", login: "github-actions[bot]" } },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("ignores a comment carrying a blocker-marker-shaped string but authored by someone else entirely (never mistaken for ours)", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `not actually ours\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "User", login: "someone" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("returns 0 and deletes nothing when there are no existing comments at all", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("tolerates a 404 on an individual DELETE as a benign no-op (a human already resolved/deleted that thread) and still deletes the rest", async () => {
+    const markerA = criterionBlockerCommentMarker("12:0");
+    const markerB = criterionBlockerCommentMarker("12:1");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${markerA}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `de-referenced\n${markerB}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(404, "Not Found"),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
+  });
+
+  it("propagates a genuine (non-404) DELETE failure rather than silently swallowing it", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(403, "Forbidden"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1)).rejects.toThrow(/403/);
+  });
+
+  it("re-verifies the closing-reference set AFTER pagination, IMMEDIATELY before the first DELETE (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635476) -- returns ok:false and deletes NOTHING when the fresh set no longer matches the caller's own snapshot", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      // The caller's own snapshot said #12 was de-referenced (empty set),
+      // but the FRESH re-fetch (this function's own, after pagination)
+      // now shows #12 as closing-referenced again -- a race landed.
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "Closes #12" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `was de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: false, reason: "closing-references-changed" });
+    // The comment fetch (pagination) DID happen -- the mismatch is only
+    // detected AFTER it -- but no DELETE is ever attempted once detected.
+    expect(calls.some((c) => c.method === "GET" && c.url.includes("/pulls/5/comments"))).toBe(true);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("re-verify detects a SAME-SIZE-but-different-element mismatch too, not just a size change", async () => {
+    const marker = criterionBlockerCommentMarker("34:0");
+    const { fetchMock, calls } = mockFetch({
+      // Snapshot said {34} was de-referenced (so #34 is absent from the
+      // caller's own set); the fresh re-fetch shows {99} instead -- same
+      // SIZE (one closing reference) but a genuinely different issue.
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "Closes #99" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `was de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The caller's own snapshot (empty -- #34 was de-referenced) is used
+    // here; the function's own fresh re-fetch finds {99}, a mismatch.
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+    expect(result).toEqual({ ok: false, reason: "closing-references-changed" });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("does NOT spuriously report a mismatch when the fresh MULTI-ELEMENT set matches the snapshot exactly (order-independent set equality, not just a size check)", async () => {
+    const marker = criterionBlockerCommentMarker("99:0");
+    const { fetchMock } = mockFetch({
+      // #12 and #56 are both STILL closing-referenced -- the caller's
+      // own snapshot below is the identical {12, 56} set. #99 is a
+      // SEPARATE, genuinely de-referenced issue this test proves still
+      // gets deleted once the (matching) multi-element re-verify passes.
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "Closes #12 and closes #56" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12, 56]), 1);
+
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
   });
 });

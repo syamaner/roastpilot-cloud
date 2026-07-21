@@ -94,12 +94,14 @@
  *   ever being used, the same discipline `spec-grounding-runner.mts`'s
  *   own identical check applies to its own diff fetch.
  * - `GITHUB_RUN_NUMBER` — from `github.run_number` (F1-S9 slice 90.3);
- *   embedded as this run's own generation key in every inline blocker
- *   comment's body, alongside (never replacing) that comment's own
- *   identity marker — see `publish-spec-grounding-blocker-logic.mts`'s
- *   own `inlineBlockerGenerationMarker` for the full design reasoning.
- *   DATA-ONLY as of this slice: not yet consumed by any delete-
- *   comparison logic (slice 90.4).
+ *   validated and canonicalized ONCE, at the very top of `publishSummary`,
+ *   before any posting or reconciliation (F1-S9 slice 90.4). Embedded as
+ *   this run's own generation key in every inline blocker comment's body,
+ *   alongside (never replacing) that comment's own identity marker — see
+ *   `publish-spec-grounding-blocker-logic.mts`'s own
+ *   `inlineBlockerGenerationMarker` for the full design reasoning — and
+ *   consumed by the de-reference reconcile's own generation guard (F1-S9
+ *   slice 90.4, `deleteDeReferencedInlineBlockerComments`).
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -147,6 +149,7 @@ import {
 } from "./publish-spec-grounding-comment-io.mts";
 import {
   clearStaleInlineBlockerComments,
+  deleteDeReferencedInlineBlockerComments,
   postInlineCommentPlan,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
@@ -800,6 +803,35 @@ interface TryPostBlockersInlineResult {
  * caller (never silently dropped) so the summary can say so, never
  * posted inline.
  *
+ * KIND-AWARE, not merely presence-aware (F1-S9 slice 90.4, PR #95 review
+ * round 2 — Codex AND claude-review independently converged on the
+ * identical finding: this filter and `publishSummary`'s own
+ * `currentClosingIssueNumbers`, computed from the SAME body for the
+ * reconcile call, MUST agree on what "still live" means, or the two
+ * mechanisms disagree on a downgraded issue). Every entry in
+ * `criterionBlockers`/`spine.unreviewedClosingIssues` is `closing`-kind
+ * by construction — `deriveSeverity` never escalates a `non-closing`
+ * entry, and `computeCriteriaSpineTruncation` only ever adds `closing`-kind
+ * issues to `unreviewedClosingIssues`. So the filter below now checks
+ * "referenced as CLOSING right now", not merely "referenced at all": a
+ * body edit that downgrades `Closes #N` to a plain `Refs #N` (still
+ * mentions the issue, no longer claims to close it) is now treated the
+ * SAME way an outright removal is — folded into `staleBlockerIssueNumbers`
+ * (this function makes no attempt to distinguish "removed entirely" from
+ * "downgraded to non-closing" in that one bucket; both get the identical
+ * "not posted inline, no longer a live closing obligation" treatment).
+ * BEFORE this fix, a downgraded issue's own `criterionId`/`issueNumber`
+ * stayed in `currentlyReferencedIssueNumbers` (a presence-only set), so
+ * this function POSTED/PATCHED its inline comment THIS run and reported
+ * `postedInline: true` — only for `publishSummary`'s own
+ * `deleteDeReferencedInlineBlockerComments` call to immediately delete
+ * that SAME comment (since it correctly excludes non-closing references)
+ * — a deterministic body-edit bypass: the summary and exit code both
+ * claimed a healthy, gated state (`blockersPostedInline: true`) for a
+ * finding whose only inline thread had already been deleted in the same
+ * run, with no explanatory note at all (since `staleBlockerIssueNumbers`
+ * never saw it either).
+ *
  * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
  * Codex, medium, fail-open close): {@link publishSummary}'s own caller
  * now fetches and verifies the PR's current SHAs/body ONCE, before
@@ -833,23 +865,25 @@ interface TryPostBlockersInlineResult {
  * findings that should NOT be filtered by this same staleness logic — a
  * real restructuring, not a cheap fold.
  *
- * @param runNumber - `github.run_number`'s own value for this run, as a
- *   plain digit string (F1-S9 slice 90.3) — threaded straight through to
+ * @param runNumber - This run's own VALIDATED, canonicalized
+ *   `github.run_number` (F1-S9 slice 90.4, Codex finding #798 — validated
+ *   ONCE by the caller, `publishSummary`, before this function or any
+ *   other posting is ever attempted; see that function's own top-of-body
+ *   validation), as a plain digit string — threaded straight through to
  *   {@link planBlockerInlineComments}, which embeds it in every planned
  *   comment's own body via `inlineBlockerGenerationMarker`
- *   (`publish-spec-grounding-blocker-logic.mts`). DATA-ONLY as of this
- *   slice: not yet consumed by any delete-comparison logic (that lands in
- *   slice 90.4).
- * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
- *   successfully posted as a real inline comment; `{ postedInline: false,
- *   degradeReason }` if there was no addable anchor at all
- *   (`"no-addable-anchor"`) or the first inline POST was rejected with a
- *   422 (`"anchor-rejected-422"`) — the anchor-fallback case, either
- *   structurally or via the probe-then-degrade, the caller renders the
- *   full (still-referenced) blocker detail in the summary instead either
- *   way. `staleBlockerIssueNumbers` is independent of both — the issue
- *   numbers filtered out because the PR's CURRENT body no longer
- *   references them at all.
+ *   (`publish-spec-grounding-blocker-logic.mts`).
+ * @returns `{ postedInline: true }` if every STILL-CLOSING-REFERENCED
+ *   blocker was successfully posted as a real inline comment; `{
+ *   postedInline: false, degradeReason }` if there was no addable anchor
+ *   at all (`"no-addable-anchor"`) or the first inline POST was rejected
+ *   with a 422 (`"anchor-rejected-422"`) — the anchor-fallback case,
+ *   either structurally or via the probe-then-degrade, the caller
+ *   renders the full (still-closing-referenced) blocker detail in the
+ *   summary instead either way. `staleBlockerIssueNumbers` is
+ *   independent of both — the issue numbers filtered out because the
+ *   PR's CURRENT body no longer references them with a closing keyword
+ *   at all (removed entirely, or downgraded to a plain reference).
  * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
  *   inline-posting failure) — a genuine error, not a case this function
  *   degrades from; the caller converts it into a visible fallback, same
@@ -867,18 +901,24 @@ async function tryPostBlockersInline(
   runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
-  const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
+  // KIND-AWARE (F1-S9 slice 90.4, PR #95 review round 2): closing-kind
+  // only, matching `publishSummary`'s own `currentClosingIssueNumbers` --
+  // see this function's own docstring for the downgraded-reference gate
+  // bypass this filter (previously presence-only) allowed.
+  const currentlyClosingIssueNumbers = new Set(
+    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
+  );
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
-    currentlyReferencedIssueNumbers.has(blocker.issueNumber),
+    currentlyClosingIssueNumbers.has(blocker.issueNumber),
   );
   const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
-    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+    currentlyClosingIssueNumbers.has(entry.issueNumber),
   );
   const staleBlockerIssueNumbers = [
     ...new Set(
       [...criterionBlockers, ...spine.unreviewedClosingIssues]
         .map((entry) => entry.issueNumber)
-        .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber)),
+        .filter((issueNumber) => !currentlyClosingIssueNumbers.has(issueNumber)),
     ),
   ].sort((a, b) => a - b);
 
@@ -910,6 +950,49 @@ async function publishSummary(
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
+  // Validated and canonicalized ONCE, at the very top of this function --
+  // BEFORE any posting, patching, or reconciliation is ever attempted
+  // (F1-S9 slice 90.4, Codex finding #798: an earlier version of this
+  // validation ran only immediately before the reconcile call, AFTER
+  // tryPostBlockersInline had already embedded the RAW, unvalidated
+  // runNumber into every newly-posted/patched comment's own generation
+  // marker -- so a malformed GITHUB_RUN_NUMBER could reach a real write
+  // before ever being checked). Explicitly validated here, NOT the bare
+  // `Number(requireEnv(...))` this entrypoint uses elsewhere (e.g.
+  // `TRUSTED_PR_NUMBER`) without a further check: those callers' own
+  // downstream use (an API path segment) turns a corrupted, non-numeric
+  // value into `NaN`, which naturally 404s or malformed-URLs into a loud,
+  // visible exception -- a safe failure mode this codebase already relies
+  // on. THIS numeric conversion is different in a way that matters: a
+  // corrupted `GITHUB_RUN_NUMBER` becoming `NaN` would make EVERY
+  // `generation > currentGeneration` comparison in
+  // `deleteDeReferencedInlineBlockerComments` evaluate to `false` (any
+  // comparison against `NaN` is `false`), silently defeating the entire
+  // generation-safety guard with NO visible error at all -- the worst
+  // possible failure mode for the one check that exists specifically to
+  // stop an older run from deleting a newer run's own valid thread.
+  // Failing closed here, loudly, before that guard -- or any posting --
+  // could ever be reached with an unvalidated value.
+  const currentGeneration = Number(runNumber);
+  if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `GITHUB_RUN_NUMBER ("${runNumber}") is not a valid positive integer -- refusing to post any ` +
+        `generation-marked inline comment or reconcile this run's own de-referenced ones without a ` +
+        `trustworthy generation to compare against.`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+  // The CANONICAL form (F1-S9 slice 90.4, Codex finding #798's own
+  // "canonicalize" half): used for BOTH posting (embedded in every new
+  // comment's own generation marker, via tryPostBlockersInline) and the
+  // reconcile call below, so the two can never disagree on what "this
+  // run's own generation" means even if the raw env value were somehow
+  // non-canonical (e.g. zero-padded) -- GitHub's own `github.run_number`
+  // never legitimately is, so this is defense-in-depth, not a functional
+  // change in practice.
+  const canonicalRunNumber = String(currentGeneration);
+
   const joined = joinFindingsToSpine(spine.entries, verdict);
   const criterionBlockers: readonly JoinedCriterionResult[] = joined.filter(
     (e) => deriveSeverity(e) === "blocker",
@@ -975,6 +1058,21 @@ async function publishSummary(
     return;
   }
 
+  // This PR's CURRENT closing-kind references, from the SAME
+  // already-verified `pr.body` (F1-S9 slice 90.4, redesigned reconcile):
+  // computed ONCE here, independent of `tryPostBlockersInline`'s own
+  // separate internal re-parse (which needs ALL references, closing or
+  // not, for its own unrelated staleness filter) -- a deliberate, cheap
+  // second parse of the same body per run, traded for keeping
+  // `tryPostBlockersInline` and the reconcile call below fully
+  // independent and independently reviewable, rather than threading a
+  // shared computation between two otherwise-unrelated mechanisms.
+  const currentClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
@@ -989,7 +1087,7 @@ async function publishSummary(
         criterionBlockers,
         spine,
         diffTruncationBlocksClosingClaim,
-        runNumber,
+        canonicalRunNumber,
       );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
@@ -1008,6 +1106,71 @@ async function publishSummary(
       process.exitCode = 1;
       return;
     }
+  }
+
+  // Reconciliation (F1-S9 slice 90.4, redesigned per the operator's #801
+  // resolution): deletes any bot-owned inline blocker comment whose OWN
+  // issue is no longer among `currentClosingIssueNumbers` -- covers both
+  // a de-referenced issue (not mentioned at all anymore) and a
+  // DOWNGRADED one (still mentioned, but no longer with a closing
+  // keyword) -- never a verdict-satisfied one still closing-referenced
+  // (a human resolves that class; see `deleteDeReferencedInlineBlockerComments`'s
+  // own docstring for the full reasoning). Runs UNCONDITIONALLY, on
+  // every `hasCriteria: true` publish (team-lead's Fork-1 ruling, this
+  // slice): unlike the prior, reverted verdict-keep-set design, this
+  // mechanism's own membership test depends ONLY on
+  // `currentClosingIssueNumbers` (the CURRENT, already-verified body) and
+  // each comment's own generation -- NEITHER of which is affected by
+  // whether THIS run's own new blockers happened to post inline
+  // successfully, so there is nothing left to gate on.
+  //
+  // FAIL CLOSED on a snapshot mismatch, not merely a non-destructive skip
+  // (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 --
+  // round 3's own fix only skipped THIS delete and logged, then fell
+  // through to build and post the summary anyway. That summary's own
+  // `blockersPostedInline`/`staleBlockerIssueNumbers` were computed by
+  // `tryPostBlockersInline` against the SAME now-stale
+  // `currentClosingIssueNumbers` snapshot -- so a `Refs #N` upgraded to
+  // `Closes #N` mid-run would have this job exit 0 with a clean-looking
+  // summary while #N's own blocker was never actually posted inline at
+  // all (the posting-time filter still saw it as non-closing). The
+  // mismatch means BOTH this run's own posting decisions AND this
+  // delete are stale, so the caller now treats it as a single fail-closed
+  // signal covering both -- no stale delete AND no stale summary --
+  // rather than trying to partially salvage a summary this run can no
+  // longer vouch for. `deleteDeReferencedInlineBlockerComments`'s own
+  // re-verify (after its own comment pagination, immediately before its
+  // first DELETE call -- see that function's own docstring, cid
+  // 3625635476) is what actually detects the mismatch; this is purely
+  // the caller's own response to that signal.
+  try {
+    const reconcileResult = await deleteDeReferencedInlineBlockerComments(
+      token,
+      owner,
+      repo,
+      prNumber,
+      currentClosingIssueNumbers,
+      currentGeneration,
+    );
+    if (!reconcileResult.ok) {
+      await publishFallback(token, owner, repo, prNumber, [
+        `this PR's linked-issue closing references changed since this run's own earlier snapshot was ` +
+          `taken -- the blocker posting/skip decisions computed against that snapshot may now be ` +
+          `stale; failing closed rather than publishing a summary this run can no longer vouch for. A ` +
+          `fresh spec-grounded review run will re-evaluate against the PR's current state.`,
+      ]);
+      process.exitCode = 1;
+      return;
+    }
+  } catch (err) {
+    // Same "visible fallback, never silent" treatment as every other
+    // artifact/network failure in this entrypoint.
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to reconcile this run's own de-referenced inline blocker comments: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
   }
 
   let body = buildSpecGroundingSummaryCommentBody(

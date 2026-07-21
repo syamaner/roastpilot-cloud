@@ -694,12 +694,14 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
     expect(buildStaleBlockerSkippedNote([])).toBe("");
   });
 
-  it("names every skipped issue number and explains why, without claiming they were cleared/resolved", () => {
+  it("names every skipped issue number, explains why (covering both de-reference and downgrade), and claims removal only where reconciliation could actually confirm it, never unconditionally (F1-S9 slice 90.4, the redesigned reconcile; wording qualified per Codex finding, PR #95 review round 2, P2)", () => {
     const note = buildStaleBlockerSkippedNote([12, 34]);
     expect(note).toContain("#12");
     expect(note).toContain("#34");
     expect(note).toMatch(/were NOT posted inline/i);
-    expect(note).toMatch(/no longer references them/i);
+    expect(note).toMatch(/any prior inline comment[\s\S]*positively confirm was safe to remove has been deleted/i);
+    expect(note).toMatch(/may still be open and needs a human to resolve it directly/i);
+    expect(note).toMatch(/no longer references them with a closing keyword/i);
     expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
   });
 
