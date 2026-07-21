@@ -93,6 +93,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_PR_NUMBER = "83";
   process.env.TRUSTED_HEAD_SHA = TRUSTED_HEAD_SHA;
+  process.env.TRUSTED_BASE_SHA = TRUSTED_BASE_SHA;
   process.env.SPEC_GROUNDED_REVIEW_JOB_RESULT = "success";
   process.exitCode = undefined;
 });
@@ -104,6 +105,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_PR_NUMBER;
   delete process.env.TRUSTED_HEAD_SHA;
+  delete process.env.TRUSTED_BASE_SHA;
   delete process.env.SPEC_GROUNDED_REVIEW_JOB_RESULT;
   delete process.env.OUTCOME_PATH;
   delete process.env.CRITERIA_SPINE_PATH;
@@ -111,25 +113,32 @@ afterEach(async () => {
   process.exitCode = undefined;
 });
 
-/** Standard PR-identity fetch handler, matching the trusted head SHA set in beforeEach. */
+/** Standard PR-identity fetch handler, matching the trusted head/base SHAs set in beforeEach. */
 function prFetchHandler() {
   return jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: TRUSTED_BASE_SHA }, body: null });
 }
 
 /**
  * Sibling of {@link prFetchHandler} with explicit overrides (PR #87
- * review round 3, Codex, P1, TOCTOU fold) so a test can simulate the PR
- * having moved (`headSha`) or gained a new closing reference (`body`)
- * since the read-only runner ran -- both inputs {@link
- * isStillSafeToDeleteInlineBlockerThreads}'s own revalidation re-checks.
- * A separate function (not an optional param on `prFetchHandler` itself)
- * so every existing bare `prFetchHandler` usage (passed directly as a
- * mockFetch handler) keeps its own simple, argument-free signature.
+ * review round 3, Codex, P1, TOCTOU fold; `baseSha` added F1-S9 slice
+ * 90.1) so a test can simulate the PR having moved (`headSha`), its
+ * target branch having advanced (`baseSha`), or it having gained a new
+ * closing reference (`body`) since the read-only runner ran -- all three
+ * inputs {@link isStillSafeToDeleteInlineBlockerThreads}'s own
+ * revalidation re-checks, or {@link fetchAndVerifyPrShas}'s own head/base
+ * verification. A separate function (not an optional param on
+ * `prFetchHandler` itself) so every existing bare `prFetchHandler` usage
+ * (passed directly as a mockFetch handler) keeps its own simple,
+ * argument-free signature.
  */
-function prFetchHandlerWithOverrides(overrides: { headSha?: string; body?: string | null }): Response {
+function prFetchHandlerWithOverrides(overrides: {
+  headSha?: string;
+  baseSha?: string;
+  body?: string | null;
+}): Response {
   return jsonResponse({
     head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
-    base: { sha: TRUSTED_BASE_SHA },
+    base: { sha: overrides.baseSha ?? TRUSTED_BASE_SHA },
     body: overrides.body ?? null,
   });
 }
@@ -672,8 +681,56 @@ describe("main — the happy path", () => {
     // The FALLBACK wording, never the stale "No blocking findings" all-clear.
     expect(body).not.toContain("No blocking findings.");
     expect(body).toMatch(/could not run to completion/i);
-    expect(body).toMatch(/failed to verify this pr's current head sha/i);
+    expect(body).toMatch(/failed to verify this pr's current head\/base sha/i);
     expect(body).toMatch(/does not match the trusted event head SHA/i);
+  });
+
+  it("does NOT post a stale all-clear when the PR's current BASE SHA no longer matches the trusted event base SHA, even though the head SHA is unchanged -- the target branch advanced (e.g. a merge into main) without the PR itself moving at all (F1-S9 slice 90.1, Codex cid 3622287335, PR #91 review)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: "some-other-base-the-target-advanced-to" } }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    // The FALLBACK wording, never the stale "No blocking findings" all-clear.
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/failed to verify this pr's current head\/base sha/i);
+    expect(body).toMatch(/does not match the trusted event base SHA/i);
+  });
+
+  it("publishes normally when the PR's current base SHA still matches the trusted event base SHA (the healthy, same-base path)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("No blocking findings.");
   });
 
   it("posts the sole blocker as a REAL inline comment and exits ZERO when a real anchor exists -- the healthy path, gated by required_conversation_resolution on the thread itself, not this job's own exit code", async () => {

@@ -93,6 +93,11 @@
  *   run's own anchor-selecting diff fetch is verified against it before
  *   ever being used, the same discipline `spec-grounding-runner.mts`'s
  *   own identical check applies to its own diff fetch.
+ * - `TRUSTED_BASE_SHA` — from `github.event.pull_request.base.sha` (F1-S9
+ *   slice 90.1); verified alongside `TRUSTED_HEAD_SHA` for the same
+ *   reason — the target branch can advance between the review trigger
+ *   and this fetch without the PR's own head SHA changing at all, which
+ *   the head-only check cannot catch on its own.
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -157,15 +162,30 @@ interface GitHubPullRequestShas {
 }
 
 /**
- * Fetches the PR's own current head/base SHAs and verifies the head
- * matches the TRUSTED value from the workflow's own event context —
- * mirrors `spec-grounding-runner.mts`'s own identical verification
+ * Fetches the PR's own current head/base SHAs and verifies BOTH match the
+ * TRUSTED values from the workflow's own event context — mirrors
+ * `spec-grounding-runner.mts`'s own identical head-SHA verification
  * exactly (never re-derived independently, F1-S9 slice 3b-iii-d4): the
  * mutable `/pulls/{n}` resource always reflects whatever the branch
- * currently points to, so without this check, a push landing between
+ * currently points to, so without these checks, a push landing between
  * this run's trigger and this fetch could pair a trusted verdict
- * (reviewed against an EARLIER head) with a LATER, unreviewed diff for
- * this run's own anchor selection.
+ * (reviewed against an EARLIER head or base) with a LATER, unreviewed
+ * diff for this run's own anchor selection.
+ *
+ * BASE-SHA check added (F1-S9 slice 90.1, closing Codex cid 3622287335,
+ * PR #91 review — the base-advance analog of the head-SHA check this
+ * function already made): a target branch's own base ref can advance
+ * between the read-only review's own trigger and this publish run — a
+ * merge into `main` landing in that window, for instance — WITHOUT the
+ * PR's head SHA changing at all, so the existing head-only check alone
+ * cannot catch it. The review agent judged this PR's diff against the
+ * OLD base; this run's own `fetchPrDiff` anchor selection (in {@link
+ * tryPostBlockersInline}) computes a compare against whatever base is
+ * CURRENT, which — post-advance — is no longer the diff the verdict was
+ * actually reviewed against. Verified the SAME way the head check is:
+ * fail closed with a thrown error the caller converts to a visible
+ * fallback, never a stale verdict/anchor selected against an unreviewed
+ * base.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -173,8 +193,11 @@ interface GitHubPullRequestShas {
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
  *   event context, never re-derived from this PR's own mutable state.
+ * @param trustedBaseSha - `TRUSTED_BASE_SHA`, from the workflow's own
+ *   event context, never re-derived from this PR's own mutable state.
  * @returns The PR's own head/base SHAs.
- * @throws If the PR's current head SHA does not match `trustedHeadSha`.
+ * @throws If the PR's current head SHA does not match `trustedHeadSha`,
+ *   or its current base SHA does not match `trustedBaseSha`.
  */
 async function fetchAndVerifyPrShas(
   token: string,
@@ -182,6 +205,7 @@ async function fetchAndVerifyPrShas(
   repo: string,
   prNumber: number,
   trustedHeadSha: string,
+  trustedBaseSha: string,
 ): Promise<GitHubPullRequestShas> {
   const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
   if (pr.head.sha !== trustedHeadSha) {
@@ -189,6 +213,13 @@ async function fetchAndVerifyPrShas(
       `PR #${prNumber}'s current head SHA (${pr.head.sha}) does not match the trusted event head SHA ` +
         `(${trustedHeadSha}) — the PR moved between the review trigger and this fetch; failing closed ` +
         `rather than selecting an anchor against a possibly-stale or possibly-newer diff.`,
+    );
+  }
+  if (pr.base.sha !== trustedBaseSha) {
+    throw new Error(
+      `PR #${prNumber}'s current base SHA (${pr.base.sha}) does not match the trusted event base SHA ` +
+        `(${trustedBaseSha}) — the target branch advanced between the review trigger and this fetch; ` +
+        `failing closed rather than selecting an anchor against a diff computed from an unreviewed base.`,
     );
   }
   return pr;
@@ -629,6 +660,7 @@ export async function main(): Promise<void> {
   }
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
   const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
+  const trustedBaseSha = requireEnv("TRUSTED_BASE_SHA");
   const paths = resolvePaths();
 
   const jobResult = requireEnv("SPEC_GROUNDED_REVIEW_JOB_RESULT");
@@ -743,7 +775,16 @@ export async function main(): Promise<void> {
     return;
   }
 
-  await publishSummary(token, owner, repo, prNumber, trustedHeadSha, spineResult.spine, verdictResult.verdict);
+  await publishSummary(
+    token,
+    owner,
+    repo,
+    prNumber,
+    trustedHeadSha,
+    trustedBaseSha,
+    spineResult.spine,
+    verdictResult.verdict,
+  );
 }
 
 /** {@link tryPostBlockersInline}'s own richer result — see its docstring. */
@@ -777,15 +818,16 @@ interface TryPostBlockersInlineResult {
  * caller (never silently dropped) so the summary can say so, never
  * posted inline.
  *
- * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
- * Codex, medium, fail-open close): {@link publishSummary}'s own caller
- * now fetches and verifies the PR's current SHAs/body ONCE, before
- * deciding whether there are any blockers at all — an earlier version had
- * this function do that fetch+verify itself, which meant the
- * zero-blocker "no blocking findings" path NEVER verified the trusted
- * head SHA at all, so a push moving the PR after review could yield a
- * stale all-clear for a head this run never actually reviewed. This
- * function no longer fetches or verifies anything itself; it trusts its
+ * TAKES `pr` ALREADY FETCHED AND HEAD/BASE-VERIFIED (PR #87 review round
+ * 7, Codex, medium, fail-open close; base-SHA verification added F1-S9
+ * slice 90.1): {@link publishSummary}'s own caller now fetches and
+ * verifies the PR's current SHAs/body ONCE, before deciding whether there
+ * are any blockers at all — an earlier version had this function do that
+ * fetch+verify itself, which meant the zero-blocker "no blocking
+ * findings" path NEVER verified the trusted head SHA at all, so a push
+ * moving the PR after review could yield a stale all-clear for a head
+ * this run never actually reviewed. This function no longer fetches or
+ * verifies anything itself, for EITHER SHA; it trusts its
  * caller already did.
  *
  * DELIBERATE DESIGN (team-lead's ruling, PR #87 review round 4b): the
@@ -874,6 +916,7 @@ async function publishSummary(
   repo: string,
   prNumber: number,
   trustedHeadSha: string,
+  trustedBaseSha: string,
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
@@ -899,17 +942,20 @@ async function publishSummary(
   // run never actually reviewed. Fetched ONCE here and passed down to
   // `tryPostBlockersInline` (which no longer fetches/verifies itself) so
   // every `hasCriteria: true` publish -- blockers or not -- verifies the
-  // trusted head before posting anything.
+  // trusted head (AND, as of F1-S9 slice 90.1, the trusted base -- see
+  // fetchAndVerifyPrShas's own docstring for the base-advance analog of
+  // the head-SHA check) before posting anything.
   let pr: GitHubPullRequestShas;
   try {
-    pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+    pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha, trustedBaseSha);
   } catch (err) {
-    // A genuine SHA mismatch (the PR moved) or a fetch failure -- degrade
-    // to the SAME visible fallback every other artifact/network failure
-    // in this entrypoint uses, never a stale all-clear or a blocker post
-    // for a head this run could not actually verify.
+    // A genuine SHA mismatch (the PR moved, or its target base advanced)
+    // or a fetch failure -- degrade to the SAME visible fallback every
+    // other artifact/network failure in this entrypoint uses, never a
+    // stale all-clear or a blocker post for a head/base this run could
+    // not actually verify.
     await publishFallback(token, owner, repo, prNumber, [
-      `failed to verify this PR's current head SHA before publishing: ${err instanceof Error ? err.message : String(err)}`,
+      `failed to verify this PR's current head/base SHA before publishing: ${err instanceof Error ? err.message : String(err)}`,
     ]);
     process.exitCode = 1;
     return;

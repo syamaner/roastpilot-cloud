@@ -963,13 +963,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          # TRUSTED PR identity and head SHA, from the workflow's own
-          # event context -- never re-derived from the PR's own mutable
-          # state. publish-spec-grounding-verdict.mts's own
-          # fetchAndVerifyPrShas re-checks the PR's CURRENT head against
-          # this value before selecting an inline-comment anchor.
+          # TRUSTED PR identity and head/base SHAs, from the workflow's
+          # own event context -- never re-derived from the PR's own
+          # mutable state. publish-spec-grounding-verdict.mts's own
+          # fetchAndVerifyPrShas re-checks the PR's CURRENT head AND base
+          # against these values before selecting an inline-comment
+          # anchor. TRUSTED_BASE_SHA added F1-S9 slice 90.1 (Codex cid
+          # 3622287335, PR #91 review): the target branch can advance
+          # between the review trigger and this fetch without the PR's
+          # own head SHA changing at all, which the head-only check alone
+          # could not catch.
           TRUSTED_PR_NUMBER: ${{ github.event.pull_request.number }}
           TRUSTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TRUSTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # The tri-state gate's own first signal -- see this script's own
           # top-level docstring for the full skipped/cancelled/failure/
           # success handling.
