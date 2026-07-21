@@ -970,6 +970,16 @@ jobs:
           # this value before selecting an inline-comment anchor.
           TRUSTED_PR_NUMBER: ${{ github.event.pull_request.number }}
           TRUSTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # This RUN's own generation key (F1-S9 slice 90.3, #88), never a
+          # PR-controlled value -- embedded in every inline blocker
+          # comment's own body alongside its identity marker, so a future
+          # generation-aware delete comparison (slice 90.4) can tell which
+          # run last touched a given marker. github.run_number, NOT
+          # run_id -- see publish-spec-grounding-blocker-logic.mts's own
+          # inlineBlockerGenerationMarker docstring for why run_number's
+          # documented per-workflow monotonicity is the property that
+          # comparison needs.
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           # The tri-state gate's own first signal -- see this script's own
           # top-level docstring for the full skipped/cancelled/failure/
           # success handling.

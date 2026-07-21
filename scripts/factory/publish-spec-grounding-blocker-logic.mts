@@ -436,6 +436,98 @@ export const DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER =
   "<!-- roastpilot-factory:spec-grounding-blocker:diff-truncated:do-not-edit -->";
 
 /**
+ * Builds the GENERATION marker line every blocker inline comment now
+ * carries ALONGSIDE (never instead of) its own identity marker (F1-S9
+ * slice 90.3, the #90 PR-plan's own foundational item, #88) — a
+ * SEPARATE, additive line, deliberately NOT folded into the identity
+ * marker string itself (team-lead's design ruling, PR #93/90.2-adjacent
+ * discussion, "Option A"): the identity markers above (and their
+ * matcher, `publish-spec-grounding-inline-comment-io.mts`'s own
+ * `findExistingInlineCommentId`) rely on EXACT structural line equality
+ * — deliberately never a pattern match — for the "find our own prior
+ * comment to update in place" idempotency this whole module depends on.
+ * Folding a variable generation number into that SAME matched string
+ * would force replacing exact-line equality with a pattern match that
+ * treats the generation as a wildcard, reopening the "could crafted
+ * content spuriously match" risk class the delimiter-tag guards
+ * (`spec-grounding-logic.mts`/`spec-grounding-runner-logic.mts`) took
+ * multiple review rounds to close — on the PRIVILEGED write/delete
+ * surface, not a read-only one. A second, independent marker line for
+ * the generation preserves the identity marker's own exact-match
+ * property completely unchanged, at the cost of one extra line per
+ * comment.
+ *
+ * DATA-ONLY as of this slice (matches F1-S9 slice 90.2's own precedent
+ * for `reviewedClosingIssueNumbers`): embedded and round-trip-tested
+ * now, but not yet CONSUMED by any delete-comparison logic —
+ * `clearStaleInlineBlockerComments` (`publish-spec-grounding-inline-
+ * comment-io.mts`) is untouched by this slice. The generation-aware
+ * delete comparison ("only delete a marker whose generation is <= this
+ * run's own") lands in slice 90.4.
+ *
+ * @param generation - `github.run_number`'s own value for this run, as
+ *   a plain digit string (never `run_id` — see this constant's own
+ *   caller, `publish-spec-grounding-verdict.mts`'s `main()`, for why
+ *   `run_number`'s documented per-workflow monotonicity is the property
+ *   90.4's own comparison needs, which `run_id` does not guarantee).
+ * @returns The marker line to append to a blocker comment body,
+ *   alongside (never replacing) that comment's own identity marker.
+ */
+export function inlineBlockerGenerationMarker(generation: string): string {
+  return `<!-- roastpilot-factory:spec-grounding-blocker:generation:${generation}:do-not-edit -->`;
+}
+
+/**
+ * Matches {@link inlineBlockerGenerationMarker}'s own COMPLETE line
+ * shape, capturing the generation digits (group 1) — anchored `^...$`
+ * against the WHOLE line, never a substring search, mirroring {@link
+ * import("./publish-spec-grounding-verdict-logic.mts").bodyContainsMarkerAsStandaloneLine}'s
+ * own "exact structural line, never substring" discipline exactly. The
+ * only departure from a fixed constant string, matching every OTHER
+ * marker in this file, is this one captured digit group.
+ */
+const INLINE_BLOCKER_GENERATION_MARKER_LINE_PATTERN =
+  /^<!-- roastpilot-factory:spec-grounding-blocker:generation:(\d+):do-not-edit -->$/;
+
+/**
+ * Reads a blocker comment's own generation back out of its body, if
+ * present — the read-back half of {@link inlineBlockerGenerationMarker}
+ * (F1-S9 slice 90.3). Scans EVERY line for an exact, standalone match
+ * against {@link INLINE_BLOCKER_GENERATION_MARKER_LINE_PATTERN} (never a
+ * substring search across the whole body), the SAME per-line-exact
+ * discipline {@link bodyContainsAnyBlockerMarker} already uses for this
+ * file's other markers.
+ *
+ * UNUSED by any delete-comparison logic as of this slice (see {@link
+ * inlineBlockerGenerationMarker}'s own docstring) — round-trip-tested
+ * here so slice 90.4's own comparison has an already-correct,
+ * already-reviewed primitive to call, rather than writing and reviewing
+ * it under that later slice's own time pressure.
+ *
+ * @param body - A comment's own body text — the caller is responsible
+ *   for having already confirmed this comment is bot-authored under
+ *   this workflow's own identity before trusting anything read back
+ *   from it (matching every other marker-reading function in this
+ *   pipeline).
+ * @returns The generation number, or `null` if no matching line exists,
+ *   or the captured digits do not form a safe integer (defensive —
+ *   this workflow's own `github.run_number` is always a small, genuine
+ *   positive integer, never influenced by PR content, but this function
+ *   never assumes that of content it did not itself just write).
+ */
+export function extractInlineBlockerGeneration(body: string): number | null {
+  for (const rawLine of body.split(/\r?\n/)) {
+    const match = INLINE_BLOCKER_GENERATION_MARKER_LINE_PATTERN.exec(rawLine.trim());
+    if (match === null) {
+      continue;
+    }
+    const parsed = Number(match[1]);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+/**
  * Matches ANY of this module's five own marker shapes ({@link
  * criterionBlockerCommentMarker}, {@link unreviewedClosingIssueCommentMarker},
  * {@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}, {@link
@@ -495,9 +587,13 @@ function anchorCaveat(): string {
  * whether to include it (see {@link planBlockerInlineComments}'s own
  * `diffTruncationBlocksClosingClaim` parameter).
  *
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — see {@link
+ *   inlineBlockerGenerationMarker}'s own docstring for the full design
+ *   reasoning.
  * @returns The Markdown comment body.
  */
-export function buildDiffTruncatedBlockerCommentBody(): string {
+export function buildDiffTruncatedBlockerCommentBody(generation: string): string {
   return [
     "**Blocking: this PR's own diff was truncated**",
     "",
@@ -511,6 +607,7 @@ export function buildDiffTruncatedBlockerCommentBody(): string {
     anchorCaveat(),
     "",
     DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+    inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
 
@@ -532,9 +629,13 @@ export function buildDiffTruncatedBlockerCommentBody(): string {
  * @param entry - A joined result with `deriveSeverity(entry) === "blocker"`
  *   (the caller is responsible for filtering to blockers only —
  *   this function does not re-check severity itself).
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — see {@link
+ *   inlineBlockerGenerationMarker}'s own docstring for the full design
+ *   reasoning.
  * @returns The Markdown comment body.
  */
-export function buildCriterionBlockerCommentBody(entry: JoinedCriterionResult): string {
+export function buildCriterionBlockerCommentBody(entry: JoinedCriterionResult, generation: string): string {
   return [
     `**Blocking: unmet acceptance criterion on issue #${entry.issueNumber}**`,
     "",
@@ -544,6 +645,7 @@ export function buildCriterionBlockerCommentBody(entry: JoinedCriterionResult): 
     anchorCaveat(),
     "",
     criterionBlockerCommentMarker(entry.criterionId),
+    inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
 
@@ -558,9 +660,16 @@ export function buildCriterionBlockerCommentBody(entry: JoinedCriterionResult): 
  * collapsing them into one message would misstate which case applies.
  *
  * @param entry - The unreviewed closing issue.
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — see {@link
+ *   inlineBlockerGenerationMarker}'s own docstring for the full design
+ *   reasoning.
  * @returns The Markdown comment body.
  */
-export function buildDroppedClosingIssueBlockerCommentBody(entry: UnreviewedClosingIssueResult): string {
+export function buildDroppedClosingIssueBlockerCommentBody(
+  entry: UnreviewedClosingIssueResult,
+  generation: string,
+): string {
   const isPartial = entry.truncationKind === "partially-truncated";
   return [
     `**Blocking: issue #${entry.issueNumber} was ${isPartial ? "only partially reviewed" : "never reviewed"}**`,
@@ -577,6 +686,7 @@ export function buildDroppedClosingIssueBlockerCommentBody(entry: UnreviewedClos
     anchorCaveat(),
     "",
     unreviewedClosingIssueCommentMarker(entry.issueNumber),
+    inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
 
@@ -640,10 +750,15 @@ export const MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS = 5;
  * — rather than a second, independently-worded copy that could drift).
  *
  * @param entries - The overflow entries beyond the individual-comment cap.
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — see {@link
+ *   inlineBlockerGenerationMarker}'s own docstring for the full design
+ *   reasoning.
  * @returns The Markdown comment body.
  */
 export function buildAggregatedCriterionBlockersCommentBody(
   entries: readonly JoinedCriterionResult[],
+  generation: string,
 ): string {
   const MAX_AGGREGATE_LISTED_CRITERIA = 20;
   const listed = entries.slice(0, MAX_AGGREGATE_LISTED_CRITERIA);
@@ -670,6 +785,7 @@ export function buildAggregatedCriterionBlockersCommentBody(
     anchorCaveat(),
     "",
     CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
+    inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
 
@@ -683,10 +799,15 @@ export function buildAggregatedCriterionBlockersCommentBody(
  * list even within this one comment).
  *
  * @param entries - The overflow entries beyond the individual-comment cap.
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — see {@link
+ *   inlineBlockerGenerationMarker}'s own docstring for the full design
+ *   reasoning.
  * @returns The Markdown comment body.
  */
 export function buildAggregatedUnreviewedClosingIssuesCommentBody(
   entries: readonly UnreviewedClosingIssueResult[],
+  generation: string,
 ): string {
   const MAX_AGGREGATE_LISTED_ISSUES = 20;
   const listed = entries.slice(0, MAX_AGGREGATE_LISTED_ISSUES);
@@ -709,6 +830,7 @@ export function buildAggregatedUnreviewedClosingIssuesCommentBody(
     anchorCaveat(),
     "",
     UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
+    inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
 
@@ -774,6 +896,10 @@ export type InlinePostingDegradeReason = "no-addable-anchor" | "anchor-rejected-
  *   passed in rather than recomputed here, so the summary comment and
  *   this inline-comment plan can never disagree on whether this
  *   whole-run blocker fires.
+ * @param generation - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3), threaded into every planned
+ *   comment's own body via {@link inlineBlockerGenerationMarker} — see
+ *   that function's own docstring for the full design reasoning.
  * @returns `{ comments: [], anchorFallbackNeeded: false }` when there are
  *   no blockers at all (nothing to do); `{ comments: [], anchorFallbackNeeded:
  *   true }` when there are blockers but the diff has no anchor point;
@@ -789,6 +915,7 @@ export function planBlockerInlineComments(
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   diff: string,
   diffTruncationBlocksClosingClaim: boolean,
+  generation: string,
 ): BlockerCommentPlanResult {
   if (
     criterionBlockers.length === 0 &&
@@ -812,7 +939,7 @@ export function planBlockerInlineComments(
     ...individualCriteria.map((entry) => ({
       path: anchor.path,
       line: anchor.line,
-      body: buildCriterionBlockerCommentBody(entry),
+      body: buildCriterionBlockerCommentBody(entry, generation),
       marker: criterionBlockerCommentMarker(entry.criterionId),
     })),
     ...(overflowCriteria.length > 0
@@ -820,7 +947,7 @@ export function planBlockerInlineComments(
           {
             path: anchor.path,
             line: anchor.line,
-            body: buildAggregatedCriterionBlockersCommentBody(overflowCriteria),
+            body: buildAggregatedCriterionBlockersCommentBody(overflowCriteria, generation),
             marker: CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
           },
         ]
@@ -828,7 +955,7 @@ export function planBlockerInlineComments(
     ...individualIssues.map((entry) => ({
       path: anchor.path,
       line: anchor.line,
-      body: buildDroppedClosingIssueBlockerCommentBody(entry),
+      body: buildDroppedClosingIssueBlockerCommentBody(entry, generation),
       marker: unreviewedClosingIssueCommentMarker(entry.issueNumber),
     })),
     ...(overflowIssues.length > 0
@@ -836,7 +963,7 @@ export function planBlockerInlineComments(
           {
             path: anchor.path,
             line: anchor.line,
-            body: buildAggregatedUnreviewedClosingIssuesCommentBody(overflowIssues),
+            body: buildAggregatedUnreviewedClosingIssuesCommentBody(overflowIssues, generation),
             marker: UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
           },
         ]
@@ -846,7 +973,7 @@ export function planBlockerInlineComments(
           {
             path: anchor.path,
             line: anchor.line,
-            body: buildDiffTruncatedBlockerCommentBody(),
+            body: buildDiffTruncatedBlockerCommentBody(generation),
             marker: DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
           },
         ]

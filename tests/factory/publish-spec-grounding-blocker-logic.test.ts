@@ -10,6 +10,8 @@ import {
   criterionBlockerCommentMarker,
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+  extractInlineBlockerGeneration,
+  inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
   MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS,
   planBlockerInlineComments,
@@ -21,6 +23,13 @@ import type {
   JoinedCriterionResult,
   UnreviewedClosingIssueResult,
 } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+
+// A fixed, deterministic generation value for every test in this file
+// (F1-S9 slice 90.3) -- production always sources this from
+// `github.run_number` (a genuine, ever-increasing integer); tests use one
+// fixed string throughout except where a test is specifically about
+// generation-marker behavior itself.
+const TEST_GENERATION = "1";
 
 function droppedIssue(issueNumber: number): UnreviewedClosingIssueResult {
   return { issueNumber, truncationKind: "fully-dropped" };
@@ -377,6 +386,7 @@ describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", (
   it("includes the issue number, criterionId, and the agent's rationale when addressed", () => {
     const body = buildCriterionBlockerCommentBody(
       joined({ issueNumber: 12, criterionId: "12:0", rationale: "Missing the retry wrapper." }),
+      TEST_GENERATION,
     );
     expect(body).toContain("#12");
     expect(body).toContain("12:0");
@@ -386,13 +396,14 @@ describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", (
   it("includes the safe-default explanation, not a fabricated rationale, when never addressed", () => {
     const body = buildCriterionBlockerCommentBody(
       joined({ addressedByReviewer: false, rationale: null }),
+      TEST_GENERATION,
     );
     expect(body).toMatch(/not addressed/i);
     expect(body).toMatch(/unsatisfied/i);
   });
 
   it("always includes the self-describing anchor caveat", () => {
-    const body = buildCriterionBlockerCommentBody(joined());
+    const body = buildCriterionBlockerCommentBody(joined(), TEST_GENERATION);
     expect(body).toMatch(/deterministic placement/i);
     expect(body).toMatch(/does not necessarily mark/i);
   });
@@ -400,18 +411,21 @@ describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", (
   it("falls back to an empty rationale, not a crash, for the type-level-only case of addressedByReviewer:true with a null rationale -- unreachable via a real verdict (validateSpecGroundingVerdict requires a non-empty rationale string on every finding), defensive coverage only, same as publish-spec-grounding-verdict-logic.mts's own formatRationaleForDisplay", () => {
     const body = buildCriterionBlockerCommentBody(
       joined({ addressedByReviewer: true, rationale: null }),
+      TEST_GENERATION,
     );
     expect(body).toContain("unsatisfied:");
   });
 
-  it("embeds a stable, criterionId-keyed idempotency marker as its last line (PR #82 round 3 review, holistic pass, FOLD 4)", () => {
-    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }));
-    expect(body.endsWith(criterionBlockerCommentMarker("12:0"))).toBe(true);
+  it("embeds a stable, criterionId-keyed idempotency marker, immediately followed by the generation marker as the body's TRUE last line (PR #82 round 3 review, holistic pass, FOLD 4; generation line added F1-S9 slice 90.3)", () => {
+    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }), TEST_GENERATION);
+    expect(body.endsWith(`${criterionBlockerCommentMarker("12:0")}\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`)).toBe(
+      true,
+    );
   });
 
   it("gives two different criteria two DIFFERENT markers -- the marker is criterionId-keyed, not a fixed constant", () => {
-    const bodyA = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }));
-    const bodyB = buildCriterionBlockerCommentBody(joined({ criterionId: "12:1" }));
+    const bodyA = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }), TEST_GENERATION);
+    const bodyB = buildCriterionBlockerCommentBody(joined({ criterionId: "12:1" }), TEST_GENERATION);
     expect(criterionBlockerCommentMarker("12:0")).not.toBe(criterionBlockerCommentMarker("12:1"));
     expect(bodyA).not.toContain(criterionBlockerCommentMarker("12:1"));
     expect(bodyB).not.toContain(criterionBlockerCommentMarker("12:0"));
@@ -420,14 +434,14 @@ describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", (
 
 describe("buildDroppedClosingIssueBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12; distinct messages PR #82 round 2 review, FOLD 1)", () => {
   it("for a FULLY-DROPPED issue, includes the issue number and explains it was never reviewed at all", () => {
-    const body = buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99));
+    const body = buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99), TEST_GENERATION);
     expect(body).toContain("#99");
     expect(body).toMatch(/never reviewed/i);
     expect(body).not.toMatch(/only partially reviewed/i);
   });
 
   it("for a PARTIALLY-TRUNCATED issue, includes the issue number and explains SOME criteria were reviewed and some were truncated -- a DIFFERENT message than the fully-dropped case", () => {
-    const body = buildDroppedClosingIssueBlockerCommentBody(partialIssue(99));
+    const body = buildDroppedClosingIssueBlockerCommentBody(partialIssue(99), TEST_GENERATION);
     expect(body).toContain("#99");
     expect(body).toMatch(/only partially reviewed/i);
     expect(body).toMatch(/only SOME of that issue's acceptance criteria/i);
@@ -435,19 +449,20 @@ describe("buildDroppedClosingIssueBlockerCommentBody (F1-S9 slice 3b-iii-c, issu
   });
 
   it("always includes the self-describing anchor caveat, for both truncation kinds", () => {
-    expect(buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99))).toMatch(/deterministic placement/i);
-    expect(buildDroppedClosingIssueBlockerCommentBody(partialIssue(99))).toMatch(/deterministic placement/i);
+    expect(buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99), TEST_GENERATION)).toMatch(/deterministic placement/i);
+    expect(buildDroppedClosingIssueBlockerCommentBody(partialIssue(99), TEST_GENERATION)).toMatch(/deterministic placement/i);
   });
 
-  it("embeds a stable, issueNumber-keyed idempotency marker as its last line, for both truncation kinds (PR #82 round 3 review, holistic pass, FOLD 4)", () => {
-    expect(buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99)).endsWith(unreviewedClosingIssueCommentMarker(99))).toBe(true);
-    expect(buildDroppedClosingIssueBlockerCommentBody(partialIssue(99)).endsWith(unreviewedClosingIssueCommentMarker(99))).toBe(true);
+  it("embeds a stable, issueNumber-keyed idempotency marker, immediately followed by the generation marker as the body's TRUE last line, for both truncation kinds (PR #82 round 3 review, holistic pass, FOLD 4; generation line added F1-S9 slice 90.3)", () => {
+    const expectedEnding = `${unreviewedClosingIssueCommentMarker(99)}\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`;
+    expect(buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99), TEST_GENERATION).endsWith(expectedEnding)).toBe(true);
+    expect(buildDroppedClosingIssueBlockerCommentBody(partialIssue(99), TEST_GENERATION).endsWith(expectedEnding)).toBe(true);
   });
 });
 
 describe("buildAggregatedUnreviewedClosingIssuesCommentBody (F1-S9 slice 3b-iii-c, issue #12, PR #82 round 2 review, FOLD 2, BLOCKER)", () => {
   it("names each issue with its own truncation kind, up to the listed cap", () => {
-    const body = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1), partialIssue(2)]);
+    const body = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1), partialIssue(2)], TEST_GENERATION);
     expect(body).toContain("#1 (never reviewed)");
     expect(body).toContain("#2 (partially reviewed)");
     expect(body).toContain("2 more issue(s)");
@@ -455,7 +470,7 @@ describe("buildAggregatedUnreviewedClosingIssuesCommentBody (F1-S9 slice 3b-iii-
 
   it("bounds the listed issue count, reporting an 'and N more' note rather than naming every issue -- never lets a crafted PR body inflate this ONE comment's own length without bound", () => {
     const manyIssues = Array.from({ length: 50 }, (_unused, i) => droppedIssue(i + 1));
-    const body = buildAggregatedUnreviewedClosingIssuesCommentBody(manyIssues);
+    const body = buildAggregatedUnreviewedClosingIssuesCommentBody(manyIssues, TEST_GENERATION);
     // Only the first 20 (MAX_AGGREGATE_LISTED_ISSUES) are named individually.
     expect(body).toContain("#1 (never reviewed)");
     expect(body).toContain("#20 (never reviewed)");
@@ -465,19 +480,20 @@ describe("buildAggregatedUnreviewedClosingIssuesCommentBody (F1-S9 slice 3b-iii-
   });
 
   it("does not append an 'and N more' note when every entry fits within the listed cap", () => {
-    const body = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)]);
+    const body = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)], TEST_GENERATION);
     expect(body).not.toMatch(/and \d+ more/);
   });
 
   it("always includes the self-describing anchor caveat", () => {
-    expect(buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)])).toMatch(/deterministic placement/i);
+    expect(buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)], TEST_GENERATION)).toMatch(/deterministic placement/i);
   });
 
-  it("embeds the FIXED aggregate idempotency marker as its last line, regardless of which entries the aggregate lists (PR #82 round 3 review, holistic pass, FOLD 4)", () => {
-    const bodyA = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)]);
-    const bodyB = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(2), partialIssue(3)]);
-    expect(bodyA.endsWith(UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER)).toBe(true);
-    expect(bodyB.endsWith(UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER)).toBe(true);
+  it("embeds the FIXED aggregate idempotency marker, immediately followed by the generation marker as the body's TRUE last line, regardless of which entries the aggregate lists (PR #82 round 3 review, holistic pass, FOLD 4; generation line added F1-S9 slice 90.3)", () => {
+    const bodyA = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(1)], TEST_GENERATION);
+    const bodyB = buildAggregatedUnreviewedClosingIssuesCommentBody([droppedIssue(2), partialIssue(3)], TEST_GENERATION);
+    const expectedEnding = `${UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`;
+    expect(bodyA.endsWith(expectedEnding)).toBe(true);
+    expect(bodyB.endsWith(expectedEnding)).toBe(true);
   });
 });
 
@@ -486,7 +502,7 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
     const body = buildAggregatedCriterionBlockersCommentBody([
       joined({ issueNumber: 12, criterionId: "12:0" }),
       joined({ issueNumber: 34, criterionId: "34:0" }),
-    ]);
+    ], TEST_GENERATION);
     expect(body).toContain("issue #12 criterion `12:0`");
     expect(body).toContain("issue #34 criterion `34:0`");
     expect(body).toContain("2 more unmet acceptance criterion(a)");
@@ -496,7 +512,7 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
     const manyCriteria = Array.from({ length: 50 }, (_unused, i) =>
       joined({ issueNumber: 12, criterionId: `12:${i}` }),
     );
-    const body = buildAggregatedCriterionBlockersCommentBody(manyCriteria);
+    const body = buildAggregatedCriterionBlockersCommentBody(manyCriteria, TEST_GENERATION);
     expect(body).toContain("issue #12 criterion `12:0`");
     expect(body).toContain("issue #12 criterion `12:19`");
     expect(body).not.toContain("issue #12 criterion `12:20`");
@@ -505,14 +521,14 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
   });
 
   it("does not append an 'and N more' note when every entry fits within the listed cap", () => {
-    const body = buildAggregatedCriterionBlockersCommentBody([joined()]);
+    const body = buildAggregatedCriterionBlockersCommentBody([joined()], TEST_GENERATION);
     expect(body).not.toMatch(/and \d+ more/);
   });
 
   it("does NOT include each entry's own rationale -- deliberately lighter-weight than the individual-comment builder, pointing to the uploaded verdict artifact instead", () => {
     const body = buildAggregatedCriterionBlockersCommentBody([
       joined({ rationale: "SECRET_RATIONALE_TEXT" }),
-    ]);
+    ], TEST_GENERATION);
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
     expect(body).toMatch(/uploaded verdict artifact/i);
   });
@@ -521,7 +537,7 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
     const body = buildAggregatedCriterionBlockersCommentBody([
       joined({ issueNumber: 12, criterionId: "12:0", addressedByReviewer: true }),
       joined({ issueNumber: 12, criterionId: "12:1", addressedByReviewer: false }),
-    ]);
+    ], TEST_GENERATION);
     expect(body).toContain("issue #12 criterion `12:0` (found unsatisfied)");
     expect(body).toContain("issue #12 criterion `12:1` (not addressed by the reviewer)");
     expect(body).toMatch(/agent addressed has its own rationale in the uploaded verdict artifact/i);
@@ -529,31 +545,75 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
   });
 
   it("always includes the self-describing anchor caveat", () => {
-    expect(buildAggregatedCriterionBlockersCommentBody([joined()])).toMatch(/deterministic placement/i);
+    expect(buildAggregatedCriterionBlockersCommentBody([joined()], TEST_GENERATION)).toMatch(/deterministic placement/i);
   });
 
-  it("embeds the FIXED aggregate idempotency marker as its last line, regardless of which entries the aggregate lists", () => {
-    const bodyA = buildAggregatedCriterionBlockersCommentBody([joined({ criterionId: "12:0" })]);
-    const bodyB = buildAggregatedCriterionBlockersCommentBody([joined({ criterionId: "34:0" })]);
-    expect(bodyA.endsWith(CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER)).toBe(true);
-    expect(bodyB.endsWith(CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER)).toBe(true);
+  it("embeds the FIXED aggregate idempotency marker, immediately followed by the generation marker as the body's TRUE last line, regardless of which entries the aggregate lists (generation line added F1-S9 slice 90.3)", () => {
+    const bodyA = buildAggregatedCriterionBlockersCommentBody([joined({ criterionId: "12:0" })], TEST_GENERATION);
+    const bodyB = buildAggregatedCriterionBlockersCommentBody([joined({ criterionId: "34:0" })], TEST_GENERATION);
+    const expectedEnding = `${CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`;
+    expect(bodyA.endsWith(expectedEnding)).toBe(true);
+    expect(bodyB.endsWith(expectedEnding)).toBe(true);
   });
 });
 
 describe("buildDiffTruncatedBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12, PR #82 round 3 review, holistic pass, FOLD 3)", () => {
   it("explains the diff was truncated and that even a satisfied criterion is unverifiable as a result", () => {
-    const body = buildDiffTruncatedBlockerCommentBody();
+    const body = buildDiffTruncatedBlockerCommentBody(TEST_GENERATION);
     expect(body).toMatch(/diff was truncated/i);
     expect(body).toMatch(/including any marked satisfied/i);
     expect(body).toMatch(/unverifiable/i);
   });
 
   it("always includes the self-describing anchor caveat", () => {
-    expect(buildDiffTruncatedBlockerCommentBody()).toMatch(/deterministic placement/i);
+    expect(buildDiffTruncatedBlockerCommentBody(TEST_GENERATION)).toMatch(/deterministic placement/i);
   });
 
-  it("embeds the FIXED whole-run idempotency marker as its last line", () => {
-    expect(buildDiffTruncatedBlockerCommentBody().endsWith(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER)).toBe(true);
+  it("embeds the FIXED whole-run idempotency marker, immediately followed by the generation marker as the body's TRUE last line (generation line added F1-S9 slice 90.3)", () => {
+    const expectedEnding = `${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`;
+    expect(buildDiffTruncatedBlockerCommentBody(TEST_GENERATION).endsWith(expectedEnding)).toBe(true);
+  });
+});
+
+describe("inlineBlockerGenerationMarker / extractInlineBlockerGeneration (F1-S9 slice 90.3, the #90 PR-plan's generation-key item, #88)", () => {
+  it("round-trips: extracting a marker built for a given generation returns that SAME generation, as a number", () => {
+    const marker = inlineBlockerGenerationMarker("42");
+    expect(extractInlineBlockerGeneration(marker)).toBe(42);
+  });
+
+  it("finds the generation marker as a standalone line anywhere in a larger body, alongside an identity marker", () => {
+    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }), "7");
+    expect(extractInlineBlockerGeneration(body)).toBe(7);
+  });
+
+  it("returns null when no generation marker line is present at all", () => {
+    expect(extractInlineBlockerGeneration("just some ordinary comment text\nwith multiple lines")).toBeNull();
+  });
+
+  it("returns null for a line that merely CONTAINS the marker shape as a substring, not as its own standalone (trimmed) line -- never a loose substring match", () => {
+    const body = `some text ${inlineBlockerGenerationMarker("42")} trailing text on the same line`;
+    expect(extractInlineBlockerGeneration(body)).toBeNull();
+  });
+
+  it("tolerates leading/trailing whitespace around the marker line (matching bodyContainsMarkerAsStandaloneLine's own trim-then-compare discipline)", () => {
+    expect(extractInlineBlockerGeneration(`   ${inlineBlockerGenerationMarker("42")}   `)).toBe(42);
+  });
+
+  it("returns null for a generation marker carrying a non-safe-integer value that JSON/text corruption could produce (e.g. a value JS could only represent by rounding) -- defensive, since this workflow's own github.run_number is always a genuine small positive integer", () => {
+    // 9007199254740993 exceeds Number.MAX_SAFE_INTEGER; the digit sequence
+    // itself is well-formed for the regex (all digits), but Number(...)
+    // cannot represent it exactly, so this must be rejected rather than
+    // silently returning a rounded, wrong value.
+    const corruptedLine = "<!-- roastpilot-factory:spec-grounding-blocker:generation:9007199254740993:do-not-edit -->";
+    expect(extractInlineBlockerGeneration(corruptedLine)).toBeNull();
+  });
+
+  it("returns null for a generation marker line carrying zero -- the line pattern's own \\d+ matches the digit '0' fine, but the numeric validation requires a POSITIVE integer (github.run_number is never 0), so this is rejected past the pattern match, not by it", () => {
+    expect(extractInlineBlockerGeneration("<!-- roastpilot-factory:spec-grounding-blocker:generation:0:do-not-edit -->")).toBeNull();
+  });
+
+  it("produces DIFFERENT marker strings for different generations, so a genuinely newer run's own marker never collides with an older one's", () => {
+    expect(inlineBlockerGenerationMarker("1")).not.toBe(inlineBlockerGenerationMarker("2"));
   });
 });
 
@@ -567,14 +627,14 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
   ].join("\n");
 
   it("returns no comments and no fallback need when there are no blockers at all", () => {
-    expect(planBlockerInlineComments([], [], anchorableDiff, false)).toEqual({
+    expect(planBlockerInlineComments([], [], anchorableDiff, false, TEST_GENERATION)).toEqual({
       comments: [],
       anchorFallbackNeeded: false,
     });
   });
 
   it("returns no comments and no fallback need for an empty diff when there are ALSO no blockers -- the anchor search never even needs to run", () => {
-    expect(planBlockerInlineComments([], [], "", false)).toEqual({
+    expect(planBlockerInlineComments([], [], "", false, TEST_GENERATION)).toEqual({
       comments: [],
       anchorFallbackNeeded: false,
     });
@@ -586,6 +646,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
       [],
       anchorableDiff,
       false,
+      TEST_GENERATION,
     );
     expect(result.anchorFallbackNeeded).toBe(false);
     expect(result.comments).toHaveLength(2);
@@ -596,7 +657,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
   });
 
   it("plans a comment for an unreviewed-closing-issue blocker too, sharing the same anchor", () => {
-    const result = planBlockerInlineComments([], [droppedIssue(99)], anchorableDiff, false);
+    const result = planBlockerInlineComments([], [droppedIssue(99)], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments).toHaveLength(1);
     expect(result.comments[0]?.body).toContain("#99");
   });
@@ -607,37 +668,63 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
       [droppedIssue(99)],
       anchorableDiff,
       false,
+      TEST_GENERATION,
     );
     expect(result.comments).toHaveLength(2);
   });
 
   it("signals anchorFallbackNeeded:true, with NO comments, when there are blockers but the diff has no anchor point", () => {
-    const result = planBlockerInlineComments([joined()], [], "", false);
+    const result = planBlockerInlineComments([joined()], [], "", false, TEST_GENERATION);
     expect(result).toEqual({ comments: [], anchorFallbackNeeded: true });
   });
 
-  it("exposes each comment's own marker as a dedicated field, matching the SAME value embedded in its own body, for every comment kind (PR #12 d+e PR-plan review -- completes c's own contract so d can find-and-update without re-parsing body text)", () => {
+  it("exposes each comment's own marker as a dedicated field, matching the SAME value embedded in its own body as a standalone line, for every comment kind (PR #12 d+e PR-plan review -- completes c's own contract so d can find-and-update without re-parsing body text)", () => {
     const manyCriteria = Array.from({ length: MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 1 }, (_unused, i) =>
       joined({ criterionId: `12:${i}` }),
     );
     const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1 }, (_unused, i) =>
       droppedIssue(i + 1),
     );
-    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, true);
+    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, true, TEST_GENERATION);
     expect(result.comments.length).toBeGreaterThan(0);
     for (const comment of result.comments) {
       expect(comment.marker.length).toBeGreaterThan(0);
-      expect(comment.body.endsWith(comment.marker)).toBe(true);
+      // The identity marker (comment.marker) is a standalone line SOMEWHERE
+      // in the body -- no longer necessarily the LAST line as of F1-S9
+      // slice 90.3, since the generation marker now follows it. Matching
+      // logic (findExistingInlineCommentId) only ever checks "does this
+      // line, trimmed, equal the marker" -- never its POSITION -- so this
+      // is the real invariant, not "ends with".
+      const lines = comment.body.split("\n").map((line) => line.trim());
+      expect(lines).toContain(comment.marker);
+    }
+  });
+
+  it("appends the generation marker as the body's OWN true last line, AFTER the identity marker, for every comment kind (F1-S9 slice 90.3)", () => {
+    const manyCriteria = Array.from({ length: MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 1 }, (_unused, i) =>
+      joined({ criterionId: `12:${i}` }),
+    );
+    const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1 }, (_unused, i) =>
+      droppedIssue(i + 1),
+    );
+    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, true, TEST_GENERATION);
+    expect(result.comments.length).toBeGreaterThan(0);
+    for (const comment of result.comments) {
+      const lines = comment.body.split("\n");
+      const markerIndex = lines.findIndex((line) => line.trim() === comment.marker);
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(lines[markerIndex + 1]?.trim()).toBe(inlineBlockerGenerationMarker(TEST_GENERATION));
+      expect(comment.body.trimEnd().endsWith(inlineBlockerGenerationMarker(TEST_GENERATION))).toBe(true);
     }
   });
 
   it("gives an individual criterion-blocker comment its own criterionId-keyed marker, matching criterionBlockerCommentMarker directly", () => {
-    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [], anchorableDiff, false);
+    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments[0]?.marker).toBe(criterionBlockerCommentMarker("12:0"));
   });
 
   it("gives an individual unreviewed-closing-issue comment its own issueNumber-keyed marker, matching unreviewedClosingIssueCommentMarker directly", () => {
-    const result = planBlockerInlineComments([], [droppedIssue(99)], anchorableDiff, false);
+    const result = planBlockerInlineComments([], [droppedIssue(99)], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments[0]?.marker).toBe(unreviewedClosingIssueCommentMarker(99));
   });
 
@@ -648,7 +735,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1 }, (_unused, i) =>
       droppedIssue(i + 1),
     );
-    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, false);
+    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, false, TEST_GENERATION);
     const criteriaAggregate = result.comments.find((c) => c.marker === CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER);
     const issuesAggregate = result.comments.find((c) => c.marker === UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER);
     expect(criteriaAggregate).toBeDefined();
@@ -656,13 +743,13 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
   });
 
   it("gives the diff-truncated blocker comment the FIXED whole-run marker", () => {
-    const result = planBlockerInlineComments([], [], anchorableDiff, true);
+    const result = planBlockerInlineComments([], [], anchorableDiff, true, TEST_GENERATION);
     expect(result.comments[0]?.marker).toBe(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER);
   });
 
   it("plans one individual comment per unreviewed-closing-issue up to MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS, with NO aggregated comment, when the count is exactly at the cap (PR #82 round 2 review, FOLD 2)", () => {
     const issues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS }, (_unused, i) => droppedIssue(i + 1));
-    const result = planBlockerInlineComments([], issues, anchorableDiff, false);
+    const result = planBlockerInlineComments([], issues, anchorableDiff, false, TEST_GENERATION);
     expect(result.comments).toHaveLength(MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS);
     expect(result.comments.every((c) => !c.body.includes("more issue(s) not fully reviewed"))).toBe(true);
   });
@@ -671,7 +758,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     // Simulates a crafted PR body naming far more closing issues than
     // MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS.
     const manyIssues = Array.from({ length: 500 }, (_unused, i) => droppedIssue(i + 1));
-    const result = planBlockerInlineComments([], manyIssues, anchorableDiff, false);
+    const result = planBlockerInlineComments([], manyIssues, anchorableDiff, false, TEST_GENERATION);
     // Bounded regardless of how many issues the crafted body named: at
     // most MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS individual comments
     // plus exactly one aggregated comment -- never one comment per issue.
@@ -686,14 +773,14 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     const criteria = Array.from({ length: MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS }, (_unused, i) =>
       joined({ criterionId: `12:${i}` }),
     );
-    const result = planBlockerInlineComments(criteria, [], anchorableDiff, false);
+    const result = planBlockerInlineComments(criteria, [], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments).toHaveLength(MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS);
     expect(result.comments.every((c) => !c.body.includes("more unmet acceptance criterion"))).toBe(true);
   });
 
   it("caps individual criterion-blocker comments and adds exactly ONE aggregated comment for the overflow, never scaling the comment count past the cap plus one (PR #82 round 3 review, holistic pass, BLOCKER 1 -- the docstring's prior 'inherently bounded' claim was false: the ~1000-criterion ceiling is fully attacker-controlled)", () => {
     const manyCriteria = Array.from({ length: 500 }, (_unused, i) => joined({ criterionId: `12:${i}` }));
-    const result = planBlockerInlineComments(manyCriteria, [], anchorableDiff, false);
+    const result = planBlockerInlineComments(manyCriteria, [], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments).toHaveLength(MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 1);
     const aggregated = result.comments[result.comments.length - 1];
     expect(aggregated?.body).toContain("495 more unmet acceptance criterion(a)");
@@ -710,6 +797,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
       manyIssues,
       anchorableDiff,
       false,
+      TEST_GENERATION,
     );
     // 1 criterion blocker + MAX individual issue comments + 1 aggregated overflow comment.
     expect(result.comments).toHaveLength(1 + MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1);
@@ -723,7 +811,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 2 }, (_unused, i) =>
       droppedIssue(i + 1),
     );
-    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, false);
+    const result = planBlockerInlineComments(manyCriteria, manyIssues, anchorableDiff, false, TEST_GENERATION);
     // MAX individual criteria + 1 criteria-aggregate + MAX individual issues + 1 issues-aggregate.
     expect(result.comments).toHaveLength(
       MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 1 + MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1,
@@ -736,12 +824,12 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
   });
 
   it("does NOT add a diff-truncated blocker comment when diffTruncationBlocksClosingClaim is false, even with other blockers present", () => {
-    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [], anchorableDiff, false);
+    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [], anchorableDiff, false, TEST_GENERATION);
     expect(result.comments.some((c) => c.body.includes(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER))).toBe(false);
   });
 
   it("adds exactly ONE diff-truncated blocker comment when diffTruncationBlocksClosingClaim is true, alongside any other blockers, sharing the same anchor (PR #82 round 3 review, holistic pass, FOLD 3)", () => {
-    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [droppedIssue(99)], anchorableDiff, true);
+    const result = planBlockerInlineComments([joined({ criterionId: "12:0" })], [droppedIssue(99)], anchorableDiff, true, TEST_GENERATION);
     const diffTruncatedComments = result.comments.filter((c) => c.body.includes(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER));
     expect(diffTruncatedComments).toHaveLength(1);
     expect(diffTruncatedComments[0]?.path).toBe("lib/x.ts");
@@ -751,13 +839,13 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
   });
 
   it("plans a lone diff-truncated blocker comment even when there are NO criterion blockers and NO unreviewed closing issues at all -- diffTruncationBlocksClosingClaim alone is enough to produce a comment (a run where every closing criterion was marked satisfied, but the diff itself was truncated)", () => {
-    const result = planBlockerInlineComments([], [], anchorableDiff, true);
+    const result = planBlockerInlineComments([], [], anchorableDiff, true, TEST_GENERATION);
     expect(result.comments).toHaveLength(1);
     expect(result.comments[0]?.body).toContain(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER);
   });
 
   it("signals anchorFallbackNeeded:true, with NO comments, when diffTruncationBlocksClosingClaim alone is true but the diff has no anchor point", () => {
-    const result = planBlockerInlineComments([], [], "", true);
+    const result = planBlockerInlineComments([], [], "", true, TEST_GENERATION);
     expect(result).toEqual({ comments: [], anchorFallbackNeeded: true });
   });
 });
@@ -888,12 +976,12 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
 
 describe("bodyContainsAnyBlockerMarker", () => {
   it("matches a per-criterion blocker comment's own marker", () => {
-    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }));
+    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }), TEST_GENERATION);
     expect(bodyContainsAnyBlockerMarker(body)).toBe(true);
   });
 
   it("matches a per-issue (unreviewed closing) blocker comment's own marker", () => {
-    const body = buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99));
+    const body = buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99), TEST_GENERATION);
     expect(bodyContainsAnyBlockerMarker(body)).toBe(true);
   });
 

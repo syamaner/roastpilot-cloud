@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
 import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+import {
+  criterionBlockerCommentMarker,
+  inlineBlockerGenerationMarker,
+} from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 
 /**
  * Integration-style tests for the privileged CLI entrypoint (slice d4 —
@@ -95,6 +99,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_PR_NUMBER = "83";
   process.env.TRUSTED_HEAD_SHA = TRUSTED_HEAD_SHA;
+  process.env.GITHUB_RUN_NUMBER = "1";
   process.env.SPEC_GROUNDED_REVIEW_JOB_RESULT = "success";
   process.exitCode = undefined;
 });
@@ -106,6 +111,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_PR_NUMBER;
   delete process.env.TRUSTED_HEAD_SHA;
+  delete process.env.GITHUB_RUN_NUMBER;
   delete process.env.SPEC_GROUNDED_REVIEW_JOB_RESULT;
   delete process.env.OUTCOME_PATH;
   delete process.env.CRITERIA_SPINE_PATH;
@@ -720,6 +726,77 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
 
+  it("embeds this run's own GITHUB_RUN_NUMBER as the generation marker in a REAL posted inline blocker comment (F1-S9 slice 90.3, end-to-end -- workflow env through to the actual posted body)", async () => {
+    process.env.GITHUB_RUN_NUMBER = "9999";
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const inlinePost = calls.find((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    const inlineBody = (inlinePost?.body as { body: string }).body;
+    expect(inlineBody).toContain("<!-- roastpilot-factory:spec-grounding-blocker:generation:9999:do-not-edit -->");
+  });
+
+  it("PATCHes (never re-posts) a PRIOR run's own inline blocker comment when this run's own GENERATION differs from that comment's -- the generation marker never affects the existing find/upsert-by-identity-marker match (F1-S9 slice 90.3's own core AC)", async () => {
+    process.env.GITHUB_RUN_NUMBER = "2";
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    // Simulates a PRIOR run's own already-posted comment: same identity
+    // marker (criterion 12:0), but generation:1 (an EARLIER run).
+    const priorRunBody = [
+      "**Blocking: unmet acceptance criterion on issue #12**",
+      "",
+      "Some earlier rationale.",
+      "",
+      criterionBlockerCommentMarker("12:0"),
+      inlineBlockerGenerationMarker("1"),
+    ].join("\n");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          { id: 77, body: priorRunBody, user: { type: "Bot", login: "github-actions[bot]" } },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    // No new inline comment POST at all -- the existing one was found (by
+    // its own unchanged identity marker) and PATCHed in place, exactly
+    // the pre-90.3 behavior for a re-run.
+    expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.endsWith("/pulls/comments/77"));
+    expect(patch).toBeDefined();
+    const patchedBody = (patch?.body as { body: string }).body;
+    // The identity marker is unchanged; the generation marker now reads
+    // THIS run's own (newer) value, replacing the prior run's.
+    expect(patchedBody).toContain(criterionBlockerCommentMarker("12:0"));
+    expect(patchedBody).toContain(inlineBlockerGenerationMarker("2"));
+    expect(patchedBody).not.toContain(inlineBlockerGenerationMarker("1"));
+  });
+
   it("skips posting an inline comment for a blocker whose issue is NO LONGER referenced in the PR's CURRENT body (a body-only edit removed it since the review ran), posting the still-referenced blocker normally and noting the skip in the summary, in ascending issue-number order regardless of the runner's own ordering (PR #87 review round 4, Codex, P1 -- symmetric to the delete-path TOCTOU fold)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1018,6 +1095,11 @@ describe("main — the happy path", () => {
   it("throws when TRUSTED_HEAD_SHA is missing entirely (bad workflow wiring)", async () => {
     delete process.env.TRUSTED_HEAD_SHA;
     await expect(main()).rejects.toThrow(/TRUSTED_HEAD_SHA/);
+  });
+
+  it("throws when GITHUB_RUN_NUMBER is missing entirely (bad workflow wiring, F1-S9 slice 90.3)", async () => {
+    delete process.env.GITHUB_RUN_NUMBER;
+    await expect(main()).rejects.toThrow(/GITHUB_RUN_NUMBER/);
   });
 
   it("counts the whole-run diff-truncation blocker when the diff was truncated and this run has a closing-kind reference -- even when every JOINED criterion is satisfied", async () => {
