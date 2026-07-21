@@ -277,6 +277,45 @@ export interface ExistingComment {
 }
 
 /**
+ * Whether `body` carries `marker` as a STRUCTURAL match — an exact,
+ * standalone LINE of its own (after trimming ordinary surrounding
+ * whitespace) — never a loose substring `.includes()` check (PR #82
+ * round 4 review, Codex, FOLD 1 — BLOCKER: cross-feature idempotency
+ * hijack). Every marker this module and `publish-spec-grounding-blocker-
+ * logic.mts` build is ALWAYS appended as its own whole line (preceded by
+ * a blank line, nothing else sharing it) — that is the invariant this
+ * function checks for, not just "the string appears somewhere".
+ *
+ * Why this matters, concretely: `github-actions[bot]` posts MORE than
+ * one kind of comment on this repo — `implement-patch-logic.mts`'s own
+ * `buildGamingFlagAnnotation` (the anti-gaming classifier's flagged-line
+ * annotation) renders attacker-influenced content (e.g. a flagged
+ * suppression comment's own line text) through `sanitizeStepSummaryText`,
+ * which PRESERVES the literal text inside its code span — including, if
+ * an attacker crafts it deliberately, our own PUBLIC (non-secret,
+ * predictable) marker string embedded mid-line inside otherwise-unrelated
+ * content. A `.includes()` check alone would then match THAT comment —
+ * same bot identity, marker substring present — and this job would PATCH
+ * over it, erasing the anti-gaming warning it exists to preserve
+ * (worst case exactly when its own label failed to apply, per that
+ * function's own `labelApplied:false` branch). The holistic pass that
+ * verified the bot-IDENTITY half of this defense (a different bot can't
+ * forge `github-actions[bot]`) missed this: a DIFFERENT LEGITIMATE
+ * feature's OWN comment, posted under the SAME real bot identity, can
+ * still carry the marker as an incidental substring. Requiring the
+ * marker to be an entire line by itself closes this — a marker embedded
+ * mid-line (`- somepath.ts: <marker> more content`) never satisfies this
+ * check, only a line that is EXACTLY the marker does.
+ *
+ * @param body - A comment's own body text.
+ * @param marker - The exact marker string to look for as a standalone line.
+ * @returns `true` only if some line of `body`, trimmed, equals `marker` exactly.
+ */
+export function bodyContainsMarkerAsStandaloneLine(body: string, marker: string): boolean {
+  return body.split(/\r?\n/).some((line) => line.trim() === marker);
+}
+
+/**
  * Finds the previous summary comment this job posted on an earlier run, if
  * any, so a re-run edits it instead of posting a duplicate.
  *
@@ -286,7 +325,13 @@ export interface ExistingComment {
  * documents: a different bot echoing the marker string (deliberately or by
  * innocently reflecting agent-authored rationale text that happens to
  * contain it) must not be mistaken for our own comment and silently
- * overwritten.
+ * overwritten. ALSO matches structurally, via {@link
+ * bodyContainsMarkerAsStandaloneLine} rather than a loose substring check
+ * (PR #82 round 4 review, Codex, FOLD 1, BLOCKER — see that function's own
+ * docstring for the cross-feature hijack this closes: bot identity alone
+ * is not enough, since a DIFFERENT legitimate feature's own comment, under
+ * the SAME real bot identity, can carry the marker as an incidental
+ * substring).
  *
  * @param comments - Comments currently on the PR.
  * @returns The existing comment's id, or `null` if none found.
@@ -298,7 +343,7 @@ export function findExistingSpecGroundingSummaryCommentId(
     (c) =>
       c.authorType === "Bot" &&
       c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN &&
-      c.body.includes(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER),
+      bodyContainsMarkerAsStandaloneLine(c.body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER),
   );
   return match ? match.id : null;
 }
@@ -521,7 +566,10 @@ export function buildSpecGroundingSummaryCommentBody(
       lines.push(
         "",
         `_${omittedCount} further finding(s) omitted from this summary to stay within GitHub's ` +
-          "comment size limit — see the uploaded verdict artifact for the full list._",
+          "comment size limit — see the uploaded criteria-spine and verdict artifacts for the " +
+          "full list (an omitted finding the agent addressed has its own rationale in the " +
+          "verdict artifact; an omitted finding the agent never addressed at all only appears " +
+          "in the criteria-spine artifact, since there is no verdict entry for it to begin with)._",
       );
     }
     lines.push("");

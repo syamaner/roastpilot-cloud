@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bodyContainsMarkerAsStandaloneLine,
   buildSpecGroundingSummaryCommentBody,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
@@ -271,6 +272,40 @@ describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
   });
 });
 
+describe("bodyContainsMarkerAsStandaloneLine (F1-S9 slice 3b-iii, issue #12, PR #82 round 4 review, Codex, FOLD 1, BLOCKER)", () => {
+  it("matches when the marker is its own whole line", () => {
+    expect(bodyContainsMarkerAsStandaloneLine(`some text\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("matches when the marker's line has ordinary surrounding whitespace", () => {
+    expect(
+      bodyContainsMarkerAsStandaloneLine(`some text\n  ${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}  \n`, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER),
+    ).toBe(true);
+  });
+
+  it("does NOT match when the marker is only a SUBSTRING of a longer line -- the cross-feature hijack this closes: implement-patch-logic.mts's buildGamingFlagAnnotation renders attacker-influenced content through a sanitizer that PRESERVES literal marker strings, so a flagged line could embed our marker mid-line without being our own comment", () => {
+    expect(
+      bodyContainsMarkerAsStandaloneLine(
+        `- somepath.ts: line contains ${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} embedded mid-line`,
+        SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match a body that never contains the marker at all", () => {
+    expect(bodyContainsMarkerAsStandaloneLine("unrelated content", SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(false);
+  });
+
+  it("does NOT match when the marker is only a PREFIX or SUFFIX of a longer line", () => {
+    expect(
+      bodyContainsMarkerAsStandaloneLine(`${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} trailing text`, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER),
+    ).toBe(false);
+    expect(
+      bodyContainsMarkerAsStandaloneLine(`leading text ${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER),
+    ).toBe(false);
+  });
+});
+
 describe("findExistingSpecGroundingSummaryCommentId (F1-S9 slice 3b-iii, issue #12)", () => {
   function comment(overrides: Partial<ExistingComment> = {}): ExistingComment {
     return {
@@ -302,6 +337,18 @@ describe("findExistingSpecGroundingSummaryCommentId (F1-S9 slice 3b-iii, issue #
 
   it("returns null for an empty comment list", () => {
     expect(findExistingSpecGroundingSummaryCommentId([])).toBeNull();
+  });
+
+  it("does NOT match a github-actions[bot] comment whose body merely CONTAINS the marker substring embedded mid-line -- the exact cross-feature-hijack scenario PR #82 round 4 review (Codex) found: implement-patch-logic.mts's buildGamingFlagAnnotation, same real bot identity, a flagged line embedding our marker as a substring, must never be mistaken for our own summary and PATCHed over (which would erase the anti-gaming warning it exists to preserve)", () => {
+    const gamingFlagAnnotation = comment({
+      id: 7,
+      body:
+        "> 🚩 **This diff was flagged by the deterministic anti-gaming classifier (F1-S9) — " +
+        "the `no-auto-chain` label FAILED to apply — flagged for manual review anyway.**\n\n" +
+        "**Coverage- or mutation-suppression comment(s) added:**\n" +
+        `- scripts/factory/evil.mts: \`# pragma: no cover ${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} extra text\`\n`,
+    });
+    expect(findExistingSpecGroundingSummaryCommentId([gamingFlagAnnotation])).toBeNull();
   });
 });
 
@@ -475,8 +522,35 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     });
     expect(body.length).toBeLessThan(65_536);
     expect(body).toMatch(/further finding\(s\) omitted/i);
-    expect(body).toMatch(/uploaded verdict artifact/i);
+    // PR #82 round 4 review, Codex, FOLD 2, LOW: points to BOTH artifacts,
+    // not only the verdict -- an omitted UNADDRESSED finding has no entry
+    // in the verdict artifact at all, only in criteria-spine.
+    expect(body).toMatch(/uploaded criteria-spine and verdict artifacts/i);
     expect(body.endsWith(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("explains why an unaddressed finding specifically needs the criteria-spine artifact, not just the verdict, in the omitted-count note (PR #82 round 4 review, Codex, FOLD 2, LOW -- an unaddressed finding has no verdict entry at all)", () => {
+    // Many UNADDRESSED closing... no, non-closing (non-blocking) findings,
+    // each with a long-enough surrounding bullet that the list budget is
+    // exceeded -- addressedByReviewer:false entries have no rationale of
+    // their own at all, so this specifically exercises the omitted-count
+    // note's own claim about unaddressed findings.
+    const manyUnaddressed = Array.from({ length: 2000 }, (_unused, i) =>
+      joined({
+        kind: "non-closing",
+        satisfied: false,
+        issueNumber: 8,
+        criterionId: `8:${i}`,
+        addressedByReviewer: false,
+        rationale: null,
+      }),
+    );
+    const body = buildSpecGroundingSummaryCommentBody(manyUnaddressed, [], {
+      truncated: false,
+      diffTruncated: false,
+    });
+    expect(body).toMatch(/further finding\(s\) omitted/i);
+    expect(body).toMatch(/never addressed at all only appears in the criteria-spine artifact/i);
   });
 
   it("does NOT report an omitted count when every finding fits comfortably within the findings-list budget", () => {
