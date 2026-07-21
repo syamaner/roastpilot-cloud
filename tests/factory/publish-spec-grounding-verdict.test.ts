@@ -289,6 +289,30 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
     expect((post?.body as { body: string }).body).toContain("verdict validation:");
   });
 
+  it("REJECTS a verdict artifact containing a malformed UTF-8 byte via the parser's own isUtf8 check, rather than silently U+FFFD-decoding and accepting it (PR #86 review round 2, Codex -- the read<->parser UTF-8 seam: readArtifactFile must hand the parser a raw Buffer, never a pre-decoded string)", async () => {
+    const { outcomePath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const verdictPath = join(workdir, "verdict.json");
+    // 0xFF is never a valid UTF-8 byte in ANY position -- a JS string
+    // literal can't express this directly (strings are always valid
+    // UTF-16/scalar values), so the raw malformed bytes are written to
+    // disk directly, bypassing writeArtifacts' own JSON.stringify.
+    await writeFile(verdictPath, Buffer.from([0x7b, 0xff, 0x7d]));
+    process.env.VERDICT_PATH = verdictPath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toMatch(/not valid UTF-8/i);
+  });
+
   it("posts a visible fallback when criteria-spine.json is absent", async () => {
     const { outcomePath, verdictPath } = await writeArtifacts(workdir);
     process.env.OUTCOME_PATH = outcomePath;
@@ -325,6 +349,27 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
     expect(process.exitCode).toBe(1);
     const post = calls.find((c) => c.method === "POST");
     expect((post?.body as { body: string }).body).toContain("criteria-spine.json validation:");
+  });
+
+  it("REJECTS a criteria-spine.json artifact containing a malformed UTF-8 byte via the parser's own isUtf8 check, rather than silently U+FFFD-decoding and accepting it (PR #86 review round 2, Codex -- the read<->parser UTF-8 seam)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    // 0xFF is never a valid UTF-8 byte in ANY position -- overwrite the
+    // otherwise-valid spine file with raw malformed bytes directly.
+    await writeFile(spinePath, Buffer.from([0x7b, 0xff, 0x7d]));
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toMatch(/not valid UTF-8/i);
   });
 });
 

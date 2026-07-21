@@ -141,10 +141,28 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 }
 
 /**
- * Reads a file's raw bytes, tolerating a missing file by returning `null`
- * — the shared shape every artifact read in this entrypoint needs (a
- * missing file is not itself a crash; the CALLER decides what a missing
- * artifact means for its own tri-state gate).
+ * Reads a file's raw bytes AS A BUFFER (never decoded to a string here),
+ * tolerating a missing file by returning `null` — the shared shape every
+ * artifact read in this entrypoint needs (a missing file is not itself a
+ * crash; the CALLER decides what a missing artifact means for its own
+ * tri-state gate).
+ *
+ * Returning a `Buffer` rather than a decoded string is itself a fold (PR
+ * #86 review round 2, Codex — a real gap connecting this read to the
+ * parsers' own UTF-8 validation): `parseAndValidateVerdict` and
+ * `parseCriteriaSpineArtifact` both run a FATAL `isUtf8` check, but ONLY
+ * when handed a `Buffer` — a `string` input skips that check entirely
+ * (see either function's own docstring/implementation), on the
+ * assumption that a caller passing a string has already decoded it
+ * safely. The PREVIOUS version of this function called
+ * `handle.readFile("utf8")`, which silently replaces any malformed UTF-8
+ * byte sequence with U+FFFD during decoding — BEFORE either parser ever
+ * saw the artifact — so a corrupted artifact with invalid UTF-8 bytes
+ * would slip through as a U+FFFD-mangled-but-ACCEPTED payload, bypassing
+ * the exact fail-closed UTF-8 validation added to both parsers across
+ * the d1/#74 review rounds. Returning the raw `Buffer` here and handing
+ * it directly to those parsers (never `.toString()`-ing it first) lets
+ * their own `isUtf8` check run on the true, undecoded bytes.
  *
  * Opens the file ONCE and checks its size via the resulting file
  * descriptor's own `stat()`, then reads through that SAME descriptor
@@ -162,11 +180,12 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
  * @param path - The artifact's path on disk.
  * @param maxBytes - The size ceiling to enforce, before ever reading the
  *   file's contents into memory.
- * @returns The file's raw text, or `null` if the file does not exist.
+ * @returns The file's raw bytes as a `Buffer`, or `null` if the file does
+ *   not exist.
  * @throws If the file exists but exceeds `maxBytes`, or could not be
  *   opened/read for some other reason.
  */
-async function readArtifactFile(path: string, maxBytes: number): Promise<string | null> {
+async function readArtifactFile(path: string, maxBytes: number): Promise<Buffer | null> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(path, "r");
@@ -182,7 +201,7 @@ async function readArtifactFile(path: string, maxBytes: number): Promise<string 
       throw new Error(`artifact at ${path} is ${fileStat.size} bytes, exceeds the ${maxBytes}-byte limit`);
     }
     try {
-      return await handle.readFile("utf8");
+      return await handle.readFile();
     } catch (err) {
       // Reachable for a path that opens successfully but cannot actually
       // be READ as a regular file — e.g. a directory (EISDIR): `open`
@@ -222,9 +241,16 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
   if (raw === null) {
     return null;
   }
+  // Unlike the verdict/criteria-spine artifacts (fed straight to parsers
+  // with their own Buffer-only fatal isUtf8 check), outcome.json has no
+  // such parser — it's a trivial, our-own-runner-written `{"hasCriteria":
+  // boolean}` marker with no adversarial-content risk, so a plain UTF-8
+  // decode (Node's usual lenient U+FFFD replacement on malformed bytes)
+  // is unchanged from this function's prior behavior.
+  const rawText = raw.toString("utf8");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(rawText);
   } catch (err) {
     throw new Error(`outcome.json at ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -235,7 +261,7 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
     typeof (parsed as Record<string, unknown>).hasCriteria !== "boolean" ||
     Object.keys(parsed as Record<string, unknown>).length !== 1
   ) {
-    throw new Error(`outcome.json at ${path} must be exactly {"hasCriteria": boolean}, got ${raw}`);
+    throw new Error(`outcome.json at ${path} must be exactly {"hasCriteria": boolean}, got ${rawText}`);
   }
   return (parsed as { hasCriteria: boolean }).hasCriteria;
 }
@@ -292,7 +318,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  let verdictRaw: string | null;
+  let verdictRaw: Buffer | null;
   try {
     verdictRaw = await readArtifactFile(paths.verdictPath, MAX_VERDICT_PAYLOAD_BYTES);
   } catch (err) {
@@ -323,7 +349,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  let spineRaw: string | null;
+  let spineRaw: Buffer | null;
   try {
     spineRaw = await readArtifactFile(paths.criteriaSpinePath, MAX_CRITERIA_SPINE_ARTIFACT_BYTES);
   } catch (err) {
