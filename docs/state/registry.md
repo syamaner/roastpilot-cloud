@@ -23,7 +23,7 @@ factory pipeline/security model/label taxonomy: `factory.md`.
 
 ## F1 story status
 
-Order (operator): S5 → S10 → S8 → **S9 (next)** → S7 → S6 → S11 → C2 draft.
+Order (operator): S5 → S10 → S8 → S9 → **S7 (next)** → S6 → S11 → C2 draft.
 
 | Story | Issue | Status |
 |---|---|---|
@@ -35,7 +35,7 @@ Order (operator): S5 → S10 → S8 → **S9 (next)** → S7 → S6 → S11 → 
 | F1-S6 End-to-end dry run + runbook + metrics baseline | [#9](https://github.com/syamaner/roastpilot-cloud/issues/9) | Not started |
 | F1-S7 Pipeline supply-chain + self-modification hardening | [#10](https://github.com/syamaner/roastpilot-cloud/issues/10) | Not started (folds #41/#42; brings the #47 Claude-lens decision) |
 | F1-S8 DEV-Snowflake-secret CI isolation (human-gated Environment) | [#11](https://github.com/syamaner/roastpilot-cloud/issues/11) | **Implementation merged (#57, 6 Codex rounds)**; kept open pending the **first supervised DEV `workflow_dispatch`** — live connection + audit unverified until then (operator action). Follow-ups: #59, #61, #62, #58. |
-| F1-S9 Anti-gaming quality gates (mutation testing + test-edit rule) | [#12](https://github.com/syamaner/roastpilot-cloud/issues/12) | **Next** |
+| F1-S9 Anti-gaming quality gates (mutation testing + test-edit rule) | [#12](https://github.com/syamaner/roastpilot-cloud/issues/12) | Done — mutation testing (#68), the anti-gaming diff classifier (#64), and the spec-grounded review pipeline (read-only agent #74/#82/#83/#86/#87, privileged publish wiring this PR) all merged. Publish is wired but NOT yet enabled for factory PRs (#47) — reconciliation/revalidation completeness (complete reviewed-closing-set spine contract, all-paths reference check, generation-aware delete ownership, count-semantics) is tracked in #88/#89/#90 as a must-fix-before-#47-enable slice. |
 | F1-S10 Factory operational safety (kill-switch, idempotency guards, provenance trailer) | [#13](https://github.com/syamaner/roastpilot-cloud/issues/13) | Done — 3 slices: kill-switch + runbook merged via #50; 429/Retry-After idempotency backoff merged via #53; full provenance trailer (model ID, prompt/skill version, `Co-Authored-By`/`Signed-off-by`) merged via [#55](https://github.com/syamaner/roastpilot-cloud/pull/55). Aggregate cost caps (factory.md §13 point 7) are **N/A by billing model, not a pending operator task** (D102, 18 Jul 2026 — no metered Anthropic/Actions spend to cap; see `docs/factory-runbook.md`). |
 | F1-S11 Factory regression-eval harness | [#14](https://github.com/syamaner/roastpilot-cloud/issues/14) | Not started |
 
