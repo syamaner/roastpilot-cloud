@@ -4,6 +4,7 @@ import {
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
   formatRationaleForDisplay,
+  isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
   SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
@@ -109,6 +110,56 @@ describe("deriveSeverity (F1-S9 slice 3b-iii, issue #12)", () => {
         joined({ kind: "closing", satisfied: false, rationale: null, addressedByReviewer: false }),
       ),
     ).toBe("blocker");
+  });
+});
+
+describe("isDiffTruncationUnverifiableForClosing (F1-S9 slice 3b-iii, issue #12, PR #82 round 3 review, holistic pass, FOLD 3)", () => {
+  it("returns false when diffTruncated is false, regardless of closing references present", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing([joined({ kind: "closing" })], [], false),
+    ).toBe(false);
+  });
+
+  it("returns false when diffTruncated is true but this run has NO closing-kind reference at all", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing([joined({ kind: "non-closing" })], [], true),
+    ).toBe(false);
+  });
+
+  it("returns true when diffTruncated is true and a joined entry is closing-kind, EVEN when satisfied:true -- a satisfied closing criterion is exactly the case this escalation exists to catch", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing(
+        [joined({ kind: "closing", satisfied: true })],
+        [],
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true when diffTruncated is true and a joined entry is closing-kind and unsatisfied", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing(
+        [joined({ kind: "closing", satisfied: false })],
+        [],
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true when diffTruncated is true and there are NO joined entries at all, but there IS an unreviewed closing issue -- a fully/partially-dropped closing issue still counts as a closing reference", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing([], [{ issueNumber: 99, truncationKind: "fully-dropped" }], true),
+    ).toBe(true);
+  });
+
+  it("returns false when diffTruncated is true but joined has only non-closing entries and unreviewedClosingIssues is empty", () => {
+    expect(
+      isDiffTruncationUnverifiableForClosing(
+        [joined({ kind: "non-closing" }), joined({ kind: "non-closing" })],
+        [],
+        true,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -390,10 +441,14 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
   });
 
   it("a truncation caveat and a real blocker are not mutually exclusive -- both can appear together", () => {
+    // diffTruncated stays false here specifically so this test isolates
+    // its own original intent (caveat + criterion blocker coexisting)
+    // from the diffTruncated-adds-its-own-blocker mechanic, which has
+    // its own dedicated tests below.
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: false })],
       [],
-      { truncated: true, diffTruncated: true },
+      { truncated: true, diffTruncated: false },
     );
     expect(body).toContain("may be incomplete");
     expect(body).toContain("1 blocking finding(s)");
@@ -431,5 +486,42 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       { truncated: false, diffTruncated: false },
     );
     expect(body).not.toMatch(/omitted/i);
+  });
+
+  it("counts the diff-truncation blocker in the total when diffTruncated is true and this run has a closing reference, EVEN when that criterion is satisfied and there are no other blockers at all (PR #82 round 3 review, holistic pass, FOLD 3)", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "closing", satisfied: true })],
+      [],
+      { truncated: false, diffTruncated: true },
+    );
+    expect(body).toContain("1 blocking finding(s)");
+    expect(body).not.toContain("No blocking findings.");
+  });
+
+  it("does NOT count a diff-truncation blocker when diffTruncated is true but this run has no closing reference at all", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "non-closing", satisfied: false })],
+      [],
+      { truncated: false, diffTruncated: true },
+    );
+    expect(body).toContain("No blocking findings.");
+  });
+
+  it("adds the diff-truncation blocker ON TOP of an existing criterion blocker's own count, when both apply", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "closing", satisfied: false })],
+      [],
+      { truncated: false, diffTruncated: true },
+    );
+    expect(body).toContain("2 blocking finding(s)");
+  });
+
+  it("mentions the diff-truncation blocker class in the blocking-findings paragraph", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "closing", satisfied: true })],
+      [],
+      { truncated: false, diffTruncated: true },
+    );
+    expect(body).toMatch(/diff having been itself truncated/i);
   });
 });

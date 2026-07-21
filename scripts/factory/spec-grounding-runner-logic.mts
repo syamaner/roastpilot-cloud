@@ -240,9 +240,12 @@ export interface UnreviewedClosingIssueResult {
    * `"fully-dropped"`: zero spine entries at all (never fetched beyond
    * `MAX_LINKED_ISSUES`, or entirely cut by the rendered block's byte cap
    * before any of its criteria's checkbox lines survived).
-   * `"partially-truncated"`: has at least one spine entry, but
-   * `truncatedCriteriaCount > 0` — some of its OWN criteria were cut by
-   * `MAX_CRITERIA_PER_ISSUE` or the byte cap while others survived.
+   * `"partially-truncated"`: has at least one spine entry, but its actual
+   * spine-entry count falls short of its TRUE total unmet-criteria count
+   * (`computeCriteriaSpineTruncation`'s own docstring covers the full
+   * reasoning) — some of its OWN criteria were cut by
+   * `MAX_CRITERIA_PER_ISSUE`, the rendered block's own byte cap, or both,
+   * while others survived.
    */
   readonly truncationKind: "fully-dropped" | "partially-truncated";
 }
@@ -318,15 +321,28 @@ export interface CriteriaSpineTruncationSummary {
  *    own byte-cap truncation cutting the rendered block short before
  *    reaching any of that issue's checkbox lines.
  * 3. **Fetched, DID make it into the spine, but not ALL of it** — a
- *    `closing`-kind entry in `result.specs` with `truncatedCriteriaCount
- *    > 0` (its own criteria exceeded `MAX_CRITERIA_PER_ISSUE`, or the
- *    rendered block's byte cap cut it short after SOME of its criteria
- *    already made the spine). Without this case, a closing issue with a
- *    few reviewed (and possibly all `satisfied: true`) criteria and more
- *    silently truncated away would pass review clean — the same
- *    false-pass risk as a full drop, just partial. Mutually exclusive
- *    with case 2 by construction: case 2 requires ZERO spine entries for
- *    the issue, this case requires AT LEAST ONE.
+ *    `closing`-kind entry in `result.specs` whose ACTUAL spine-entry
+ *    count is LESS than its TRUE total unmet-criteria count
+ *    (`s.unmetCriteria.length + s.truncatedCriteriaCount` — the
+ *    rendered/capped-at-`MAX_CRITERIA_PER_ISSUE` count plus whatever
+ *    exceeded that cap and never even reached `unmetCriteria`).
+ *    DELIBERATELY NOT `s.truncatedCriteriaCount > 0` alone (PR #82 round
+ *    3 review, holistic pass + Codex, BLOCKER 2 — an earlier version's
+ *    bug): that field only detects the per-issue COUNT cap (>50 unmet
+ *    criteria), NOT the rendered block's own BYTE cap cutting the block
+ *    short mid-issue — a closing issue with ≤50 unmet criteria (so
+ *    `truncatedCriteriaCount` stays 0) whose criteria block was STILL
+ *    byte-cap-truncated mid-issue would keep some spine entries (not
+ *    case 2, which needs ZERO) while genuinely missing others, and the
+ *    count-only proxy would silently miss it. Comparing entry-count-vs-
+ *    true-total catches BOTH the count cap and the byte cap in one
+ *    comparison, since it is short whenever EITHER one trimmed this
+ *    issue's own criteria. Without this case at all, a closing issue
+ *    with a few reviewed (and possibly all `satisfied: true`) criteria
+ *    and more silently truncated away would pass review clean — the
+ *    same false-pass risk as a full drop, just partial. Mutually
+ *    exclusive with case 2 by construction: case 2 requires ZERO spine
+ *    entries for the issue, this case requires AT LEAST ONE.
  *
  * @param references - `parseLinkedIssueReferences`'s full, UNCAPPED
  *   output — the same value this run's `main()` already passed to
@@ -358,9 +374,42 @@ export function computeCriteriaSpineTruncation(
     ...byteCapDroppedClosing.map((s) => s.issueNumber),
   ]);
 
-  const partiallyTruncatedClosing = result.specs.filter(
-    (s) => s.kind === "closing" && spineIssueNumbers.has(s.issueNumber) && s.truncatedCriteriaCount > 0,
-  );
+  // Partial-truncation detection, on the CORRECT axis (PR #82 round 3
+  // review, holistic pass + Codex, BLOCKER 2): comparing this issue's
+  // ACTUAL spine-entry count against its TRUE total unmet-criteria count
+  // (`s.unmetCriteria.length + s.truncatedCriteriaCount` — the rendered/
+  // capped-at-MAX_CRITERIA_PER_ISSUE count plus whatever exceeded that
+  // cap and never even reached `unmetCriteria`). A prior version used
+  // `s.truncatedCriteriaCount > 0` alone as a proxy — that only detects
+  // the per-issue COUNT cap (>50 unmet criteria for one issue), NOT
+  // `renderCriteriaDataBlock`'s own BYTE cap cutting the rendered block
+  // short mid-issue: a closing issue with ≤50 unmet criteria (so
+  // `truncatedCriteriaCount` stays 0) whose criteria block still got
+  // byte-cap-truncated mid-issue would keep SOME spine entries (so it's
+  // not `fully-dropped` either) while genuinely missing others — a false
+  // pass under the old proxy, since `s.unmetCriteria.length` (not the
+  // spine's own entry count) was never actually cross-checked against
+  // what made it into the spine. Comparing entry-count-vs-true-total
+  // catches BOTH cases in one comparison: it's short whenever EITHER the
+  // count cap or the byte cap trimmed this issue's own criteria.
+  const spineEntryCountByIssue = new Map<number, number>();
+  for (const entry of spine) {
+    spineEntryCountByIssue.set(entry.issueNumber, (spineEntryCountByIssue.get(entry.issueNumber) ?? 0) + 1);
+  }
+  const partiallyTruncatedClosing = result.specs.filter((s) => {
+    if (s.kind !== "closing" || !spineIssueNumbers.has(s.issueNumber)) {
+      return false;
+    }
+    const trueTotalUnmetCriteriaCount = s.unmetCriteria.length + s.truncatedCriteriaCount;
+    // Defensive: `spineIssueNumbers.has(s.issueNumber)` already confirmed
+    // (the guard above) that `spine` has at least one entry for this
+    // issueNumber, so `spineEntryCountByIssue` was necessarily populated
+    // for it by the loop above -- the `?? 0` fallback is unreachable by
+    // construction.
+    /* v8 ignore next */
+    const actualSpineEntryCount = spineEntryCountByIssue.get(s.issueNumber) ?? 0;
+    return actualSpineEntryCount < trueTotalUnmetCriteriaCount;
+  });
 
   const unreviewedClosingIssues: UnreviewedClosingIssueResult[] = [
     ...Array.from(fullyDroppedIssueNumbers, (issueNumber) => ({

@@ -355,6 +355,49 @@ describe("computeCriteriaSpineTruncation (F1-S9 slice 3b-iii, issue #12, PR #76 
     ]);
   });
 
+  it("flags a CLOSING issue as partially-truncated via the BYTE CAP alone, with truncatedCriteriaCount:0 -- the case the old truncatedCriteriaCount>0 proxy MISSED (PR #82 round 3 review, holistic pass + Codex, BLOCKER 2: a closing issue with <=MAX_CRITERIA_PER_ISSUE unmet criteria never trips the count cap, but renderCriteriaDataBlock's own byte cap can still cut its criteria block short mid-issue, losing some of its spine entries with truncatedCriteriaCount staying 0 the whole time)", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        {
+          issueNumber: 12,
+          kind: "closing",
+          title: "t",
+          unmetCriteria: ["c1", "c2", "c3"],
+          truncatedCriteriaCount: 0, // stays 0 -- the count cap was never hit
+        },
+      ],
+      truncatedIssueCount: 0,
+    };
+    // Only 1 of the 3 unmet criteria actually made it into the spine --
+    // simulating renderCriteriaDataBlock's own byte cap cutting the
+    // rendered block short after criterion 1, before criteria 2/3's own
+    // checkbox lines were reached.
+    const spine = [{ issueNumber: 12, kind: "closing" as const, criterionId: "12:0" }];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.truncated).toBe(true);
+    expect(summary.unreviewedClosingIssues).toEqual([
+      { issueNumber: 12, truncationKind: "partially-truncated" },
+    ]);
+  });
+
+  it("does NOT flag a CLOSING issue whose spine-entry count exactly matches its true total unmet-criteria count -- no truncation of any kind occurred for this issue", () => {
+    const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
+    const result: LinkedIssueSpecsResult = {
+      specs: [
+        { issueNumber: 12, kind: "closing", title: "t", unmetCriteria: ["c1", "c2"], truncatedCriteriaCount: 0 },
+      ],
+      truncatedIssueCount: 0,
+    };
+    // ALL of the issue's own unmet criteria made it into the spine.
+    const spine = [
+      { issueNumber: 12, kind: "closing" as const, criterionId: "12:0" },
+      { issueNumber: 12, kind: "closing" as const, criterionId: "12:1" },
+    ];
+    const summary = computeCriteriaSpineTruncation(references, result, spine);
+    expect(summary.unreviewedClosingIssues).toEqual([]);
+  });
+
   it("does NOT flag a NON-CLOSING issue's own partial truncation -- only closing issues escalate, partial or full", () => {
     const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "non-closing" }];
     const result: LinkedIssueSpecsResult = {

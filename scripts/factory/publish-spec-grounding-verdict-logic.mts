@@ -337,6 +337,51 @@ export interface SpecGroundingTruncationFlags {
 }
 
 /**
+ * Whether a truncated diff makes this run's closing claim(s) unverifiable
+ * and must escalate to a BLOCKER, not just a caveat (PR #82 round 3
+ * review, holistic pass, FOLD 3 — the holistic pass's own MEDIUM finding,
+ * escalated by team-lead's adjudication): if `diffTruncated` is `true`,
+ * the review agent judged every criterion against an INCOMPLETE diff, so
+ * a `satisfied: true` verdict on a `closing`-kind criterion is itself
+ * unverifiable — the agent may simply never have seen the part of the
+ * diff that would have shown the criterion unmet. This is a WHOLE-RUN
+ * signal, not tied to any one criterion, so it is computed once here and
+ * consumed by both {@link buildSpecGroundingSummaryCommentBody} (counts
+ * it in `totalBlockerCount`) and the privileged publisher's inline-
+ * comment planner (`publish-spec-grounding-blocker-logic.mts`'s
+ * `planBlockerInlineComments`, which the entrypoint must pass this same
+ * computed value to — kept as ONE shared decision, not duplicated logic
+ * in two modules that could drift apart).
+ *
+ * Deliberately checks `joined` for ANY `closing`-kind entry REGARDLESS OF
+ * `satisfied` (not just `deriveSeverity(entry) === "blocker"`) — a
+ * `satisfied: true` closing criterion is EXACTLY the case this escalation
+ * exists to catch, since that is precisely the judgment a truncated diff
+ * cannot be trusted to have gotten right. Also checks
+ * `unreviewedClosingIssues` (already exclusively closing-kind by
+ * construction) so a fully/partially-dropped closing issue still counts
+ * as "this run has a closing reference," even though it produced no
+ * `joined` entry at all.
+ *
+ * @param joined - Every spine criterion's joined result.
+ * @param unreviewedClosingIssues - This run's unreviewed closing issues.
+ * @param diffTruncated - `criteria-spine.json`'s own `diffTruncated` field.
+ * @returns `true` only when the diff was truncated AND this run has at
+ *   least one closing-kind reference of any kind (a spine criterion or an
+ *   unreviewed issue) for that truncation to make unverifiable.
+ */
+export function isDiffTruncationUnverifiableForClosing(
+  joined: readonly JoinedCriterionResult[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+  diffTruncated: boolean,
+): boolean {
+  if (!diffTruncated) {
+    return false;
+  }
+  return joined.some((entry) => entry.kind === "closing") || unreviewedClosingIssues.length > 0;
+}
+
+/**
  * Upper bound on the rendered non-blocking findings LIST's own total
  * length, in characters (PR #82 review, FOLD 3 — LOW: a fully schema-valid
  * verdict — up to `MAX_FINDINGS` (1000) findings, each up to
@@ -380,9 +425,16 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  * {@link UnreviewedClosingIssueResult} blocker escalation above: an
  * unreviewed (fully or partially) CLOSING reference is serious enough to
  * block on its own; this caveat covers the broader, non-blocking-by-
- * default cases (a byte-capped NON-closing reference, a byte-capped or
- * file-count-capped diff) that still deserve a human's attention before
- * merging.
+ * default cases (a byte-capped NON-closing reference) that still deserve
+ * a human's attention before merging.
+ *
+ * `diffTruncated` on its own is now ALSO a blocker, not merely a caveat,
+ * whenever this run has any closing-kind reference at all (PR #82 round
+ * 3 review, holistic pass, FOLD 3 — see {@link
+ * isDiffTruncationUnverifiableForClosing}'s own docstring for the full
+ * reasoning: a truncated diff makes a `satisfied: true` verdict on a
+ * closing criterion itself unverifiable, not just the criteria SET
+ * incomplete).
  *
  * @param joined - Every spine criterion's joined result.
  * @param unreviewedClosingIssues - `criteria-spine.json`'s own
@@ -402,7 +454,13 @@ export function buildSpecGroundingSummaryCommentBody(
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
-  const totalBlockerCount = criterionBlockers.length + unreviewedClosingIssues.length;
+  const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
+    joined,
+    unreviewedClosingIssues,
+    truncation.diffTruncated,
+  );
+  const totalBlockerCount =
+    criterionBlockers.length + unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
   const lines: string[] = ["**Spec-grounded review summary**", ""];
 
@@ -427,10 +485,12 @@ export function buildSpecGroundingSummaryCommentBody(
     lines.push(
       `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
         "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
-        "A blocking finding is either a criterion this PR's own closing keyword references that " +
-        "the reviewer found unsatisfied, or a whole linked issue this PR claims to close that " +
-        "was never fully reviewed at all (truncated away, entirely or partially, by a resource " +
-        "cap — see the inline comment for which issue, which case, and why).",
+        "A blocking finding is a criterion this PR's own closing keyword references that the " +
+        "reviewer found unsatisfied, a whole linked issue this PR claims to close that was never " +
+        "fully reviewed at all (truncated away, entirely or partially, by a resource cap), or — " +
+        "when this run has any closing reference at all — this PR's own diff having been itself " +
+        "truncated, which makes every criterion judged against it (including a 'satisfied' one) " +
+        "unverifiable. See the inline comment for which case applies and why.",
       "",
     );
   } else {
