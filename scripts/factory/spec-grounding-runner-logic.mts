@@ -507,9 +507,12 @@ const MAX_CRITERION_ID_LENGTH = 32;
  * `<issueNumber>:` prefix, never anchoring the end of the string, so a
  * value like `"12:0<megabytes of arbitrary content>"` still passed —
  * this pattern's own `$` anchor closes that: the WHOLE string must be
- * exactly digits, a colon, and digits, nothing else).
+ * exactly digits, a colon, and digits, nothing else). Captures BOTH the
+ * `issueNumber` part (group 1) AND the `index` part (group 2, added PR
+ * #84 review round 3 — {@link validateCrossEntryInvariants}'s own
+ * per-issue index-contiguity check needs it).
  */
-const CRITERION_ID_PATTERN = /^(\d+):\d+$/;
+const CRITERION_ID_PATTERN = /^(\d+):(\d+)$/;
 
 /**
  * Whether `criterionId`'s own leading `<issueNumber>:` prefix matches
@@ -691,6 +694,147 @@ function validateUnreviewedClosingIssue(
 }
 
 /**
+ * Re-validates the WHOLE-SPINE cross-field invariants {@link
+ * buildCriteriaSpine}'s own construction guarantees (PR #84 review round
+ * 3, Codex — the completeness audit closed every PER-FIELD gap; these are
+ * PER-SPINE, cross-entry semantic invariants instead). This artifact is
+ * never agent-authored and never attacker-writable between the read-only
+ * job's upload and this privileged download — this is bounded defense
+ * against a rare CORRUPTED download, not an attack, so only invariants
+ * `buildCriteriaSpine` (and its own truncation-summary sibling,
+ * `computeCriteriaSpineTruncation`) actually GUARANTEE are checked here,
+ * never an invented one:
+ *
+ * 1. Every entry sharing an `issueNumber` shares the SAME `kind` (PR #84
+ *    review round 3, Codex, FOLD 1, BLOCKER — the consequential one:
+ *    `buildCriteriaSpine` assigns exactly one `kind` per issue, from
+ *    ONE `spec.kind` per iteration of its own outer loop; `deriveSeverity`
+ *    trusts each entry's OWN `kind` independently, so a corrupted spine
+ *    pairing a real `closing` entry for issue #12 with a mislabeled
+ *    `non-closing` entry for the SAME issue #12 could let that closing
+ *    blocker hide behind the non-closing one downstream).
+ * 2. Each `issueNumber`'s own `criterionId` INDEX set (the part after the
+ *    `:`) is exactly the contiguous range `0..count-1` — `buildCriteriaSpine`
+ *    always assigns sequential indices in criterion order, and stops the
+ *    WHOLE scan at the first missing checkbox line (never resumes for a
+ *    later criterion of the SAME issue), so a real spine can never have a
+ *    gap or an out-of-range index for one issue.
+ * 3. `unreviewedClosingIssues` never contradicts `entries`: a
+ *    `"fully-dropped"` issue (zero spine entries, by {@link
+ *    UnreviewedClosingIssueResult}'s own docstring) must NOT also appear
+ *    in `entries`; a `"partially-truncated"` issue (at least one spine
+ *    entry, by the SAME docstring) MUST appear in `entries` at least once.
+ * 4. `unreviewedClosingIssues` non-empty implies `truncated: true` — every
+ *    path that can add an entry to `unreviewedClosingIssues`
+ *    (`computeCriteriaSpineTruncation`'s own never-fetched, byte-cap-
+ *    dropped, and partially-truncated cases) is ALSO one of `truncated`'s
+ *    own OR-clauses, so the two can never legitimately disagree.
+ * 5. An EMPTY `entries` array implies `truncated: true` OR
+ *    `unreviewedClosingIssues` non-empty (PR #84 review round 3, Codex,
+ *    FOLD 2): this function is only ever called for a `hasCriteria: true`
+ *    run, which the read-only job's own runner only reaches when the
+ *    rendered criteria block was genuinely non-empty (at least one real
+ *    unmet criterion existed) — so a genuinely EMPTY spine can only be
+ *    reached via `buildCriteriaSpine`'s own truncation branch (the very
+ *    first checkbox line missing), which always makes `spine.length (0) <
+ *    totalUnmetCriteriaCount (>=1)` true, one of `truncated`'s own
+ *    OR-clauses. Zero entries with `truncated: false` and no unreviewed
+ *    closing issues is impossible by construction; accepting it would let
+ *    a corrupted "genuinely nothing to report" spine silently read as a
+ *    confirmed all-clear downstream.
+ *
+ * Deliberately does NOT attempt to re-derive `truncated`'s FULL formula
+ * (it also depends on `result.truncatedIssueCount` /
+ * `s.truncatedCriteriaCount`, upstream fetch-level counts this artifact
+ * never persists) or check anything about `diffTruncated` (an entirely
+ * independent signal, from the diff fetch, with no construction
+ * relationship to `entries`/`unreviewedClosingIssues` at all) — neither is
+ * an invariant `buildCriteriaSpine` actually guarantees from THIS
+ * artifact's own fields alone.
+ *
+ * @param entries - The already-validated, already-deduped spine entries.
+ * @param unreviewedClosingIssues - The already-validated, already-deduped
+ *   unreviewed closing issues.
+ * @param truncated - This artifact's own `truncated` field.
+ * @param errors - Accumulator every violation is pushed onto.
+ */
+function validateCrossEntryInvariants(
+  entries: readonly CriteriaSpineEntry[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+  truncated: boolean,
+  errors: string[],
+): void {
+  const kindByIssue = new Map<number, IssueLinkKind>();
+  const indicesByIssue = new Map<number, number[]>();
+  for (const entry of entries) {
+    const existingKind = kindByIssue.get(entry.issueNumber);
+    if (existingKind === undefined) {
+      kindByIssue.set(entry.issueNumber, entry.kind);
+    } else if (existingKind !== entry.kind) {
+      errors.push(
+        `entries contains inconsistent kind for issue #${entry.issueNumber} (both "${existingKind}" and ` +
+          `"${entry.kind}") -- buildCriteriaSpine assigns exactly one kind per issue; a corrupted spine here ` +
+          `could let a real closing-kind blocker escape via a mislabeled non-closing entry for the same issue`,
+      );
+    }
+
+    // entry.criterionId already passed CRITERION_ID_PATTERN's own check in
+    // validateCriteriaSpineEntry, so this match can never be null here.
+    const match = CRITERION_ID_PATTERN.exec(entry.criterionId);
+    /* v8 ignore next */
+    const index = match ? Number(match[2]) : Number.NaN;
+    const indices = indicesByIssue.get(entry.issueNumber);
+    if (indices) {
+      indices.push(index);
+    } else {
+      indicesByIssue.set(entry.issueNumber, [index]);
+    }
+  }
+
+  for (const [issueNumber, indices] of indicesByIssue) {
+    const sorted = [...indices].sort((a, b) => a - b);
+    const contiguousFromZero = sorted.every((value, i) => value === i);
+    if (!contiguousFromZero) {
+      errors.push(
+        `entries for issue #${issueNumber} have criterionId indices [${sorted.join(", ")}], not the ` +
+          `contiguous 0..${sorted.length - 1} range buildCriteriaSpine always assigns`,
+      );
+    }
+  }
+
+  const issueNumbersWithEntries = new Set(indicesByIssue.keys());
+  for (const unreviewed of unreviewedClosingIssues) {
+    if (unreviewed.truncationKind === "fully-dropped" && issueNumbersWithEntries.has(unreviewed.issueNumber)) {
+      errors.push(
+        `issue #${unreviewed.issueNumber} is "fully-dropped" in unreviewedClosingIssues but also has entries ` +
+          `in the spine -- a fully-dropped issue must have zero entries`,
+      );
+    }
+    if (unreviewed.truncationKind === "partially-truncated" && !issueNumbersWithEntries.has(unreviewed.issueNumber)) {
+      errors.push(
+        `issue #${unreviewed.issueNumber} is "partially-truncated" in unreviewedClosingIssues but has no ` +
+          `entries in the spine -- a partially-truncated issue must have at least one`,
+      );
+    }
+  }
+
+  if (unreviewedClosingIssues.length > 0 && !truncated) {
+    errors.push(
+      "unreviewedClosingIssues is non-empty but truncated is false -- any unreviewed closing issue implies " +
+        "some truncation occurred somewhere in this run's own pipeline",
+    );
+  }
+
+  if (entries.length === 0 && !truncated && unreviewedClosingIssues.length === 0) {
+    errors.push(
+      "entries is empty, truncated is false, and unreviewedClosingIssues is empty -- impossible by " +
+        "construction for a hasCriteria:true run (a genuinely empty spine can only arise from truncation, " +
+        "which always makes truncated true)",
+    );
+  }
+}
+
+/**
  * Reads and shape-validates a `criteria-spine.json` artifact's RAW bytes —
  * THE entry point the privileged publish entrypoint (slice 3b-iii-d, not
  * yet built at the time this function was added) must use to read this
@@ -815,6 +959,15 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     validatedUnreviewed.push(entry);
   });
 
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  // Whole-spine cross-field invariants (PR #84 review round 3, Codex) --
+  // see validateCrossEntryInvariants's own docstring for the full
+  // reasoning; only reachable once every PER-ENTRY check above has
+  // already passed.
+  validateCrossEntryInvariants(validatedEntries, validatedUnreviewed, truncated as boolean, errors);
   if (errors.length > 0) {
     return { ok: false, errors };
   }

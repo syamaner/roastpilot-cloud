@@ -732,9 +732,18 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
   });
 
   it("accepts a non-empty unreviewedClosingIssues array", () => {
+    // Internally consistent per PR #84 review round 3's own cross-entry
+    // invariants: truncated:true (any unreviewed closing issue implies
+    // some truncation), and issue #9 (partially-truncated) has at least
+    // one entry of its own in the spine.
     const result = parseCriteriaSpineArtifact(
       JSON.stringify(
         validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 9, kind: "closing", criterionId: "9:0" },
+          ],
+          truncated: true,
           unreviewedClosingIssues: [
             { issueNumber: 5, truncationKind: "fully-dropped" },
             { issueNumber: 9, truncationKind: "partially-truncated" },
@@ -874,8 +883,31 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     }
   });
 
-  it("accepts an artifact with an empty entries array (hasCriteria could be true with zero surviving spine entries in a pathological edge case)", () => {
+  it("rejects an empty entries array paired with truncated:false and no unreviewedClosingIssues (PR #84 review round 3, Codex, FOLD 2) -- impossible by construction for a hasCriteria:true run: a genuinely empty spine can only arise from truncation, which always makes truncated true", () => {
     const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: [] })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries is empty, truncated is false, and unreviewedClosingIssues is empty/);
+    }
+  });
+
+  it("accepts an empty entries array when truncated is true (the genuine case)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [], truncated: true })),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts an empty entries array alongside a non-empty unreviewedClosingIssues -- note the second OR-branch (unreviewedClosingIssues non-empty) can never be isolated as a PASSING case with truncated:false, since the separate 'unreviewedClosingIssues non-empty implies truncated:true' check already forbids that combination on its own; truncated:true is required here regardless", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [],
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 12, truncationKind: "fully-dropped" }],
+        }),
+      ),
+    );
     expect(result.ok).toBe(true);
   });
 
@@ -1059,6 +1091,11 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     const result = parseCriteriaSpineArtifact(
       JSON.stringify(
         validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 9, kind: "closing", criterionId: "9:0" },
+          ],
+          truncated: true,
           unreviewedClosingIssues: [
             { issueNumber: 5, truncationKind: "fully-dropped" },
             { issueNumber: 9, truncationKind: "partially-truncated" },
@@ -1067,5 +1104,150 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
       ),
     );
     expect(result.ok).toBe(true);
+  });
+
+  it("rejects entries sharing an issueNumber but disagreeing on kind (PR #84 review round 3, Codex, FOLD 1, BLOCKER) -- buildCriteriaSpine assigns exactly one kind per issue; a corrupted spine could otherwise let a real closing-kind blocker escape via a mislabeled non-closing entry for the same issue", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "non-closing", criterionId: "12:1" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/inconsistent kind for issue #12/);
+    }
+  });
+
+  it("accepts multiple entries for the SAME issue that all agree on kind (the normal multi-criterion case)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "closing", criterionId: "12:1" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an issue whose criterionId indices skip a value (PR #84 review round 3, Codex -- buildCriteriaSpine always assigns contiguous 0..count-1 indices per issue, stopping the WHOLE scan at the first missing checkbox line, so a real spine can never have a gap)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "closing", criterionId: "12:2" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/criterionId indices \[0, 2\], not the contiguous 0\.\.1 range/);
+    }
+  });
+
+  it("rejects an issue whose criterionId indices don't start at 0", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:1" }] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/criterionId indices \[1\], not the contiguous 0\.\.0 range/);
+    }
+  });
+
+  it("accepts a well-formed multi-criterion index run 0,1,2 for one issue", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "closing", criterionId: "12:1" },
+            { issueNumber: 12, kind: "closing", criterionId: "12:2" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a 'fully-dropped' issue that also has entries in the spine (PR #84 review round 3, Codex) -- a fully-dropped issue must have zero entries by construction", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [{ issueNumber: 5, kind: "closing", criterionId: "5:0" }],
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 5, truncationKind: "fully-dropped" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/issue #5 is "fully-dropped".*also has entries/);
+    }
+  });
+
+  it("rejects a 'partially-truncated' issue with NO entries at all in the spine (PR #84 review round 3, Codex) -- a partially-truncated issue must have at least one entry by construction", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 9, truncationKind: "partially-truncated" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/issue #9 is "partially-truncated".*has no entries/);
+    }
+  });
+
+  it("rejects unreviewedClosingIssues non-empty with truncated:false (PR #84 review round 3, Codex) -- any unreviewed closing issue implies some truncation occurred somewhere in this run's own pipeline", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [{ issueNumber: 9, kind: "closing", criterionId: "9:0" }],
+          truncated: false,
+          unreviewedClosingIssues: [{ issueNumber: 9, truncationKind: "partially-truncated" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => /unreviewedClosingIssues is non-empty but truncated is false/.test(e))).toBe(
+        true,
+      );
+    }
+  });
+
+  it("collects errors for EVERY cross-entry invariant violation at once, not just the first", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+            { issueNumber: 12, kind: "non-closing", criterionId: "12:1" },
+          ],
+          truncated: false,
+          unreviewedClosingIssues: [{ issueNumber: 9, truncationKind: "fully-dropped" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.length).toBeGreaterThanOrEqual(2);
+      expect(result.errors.some((e) => /inconsistent kind for issue #12/.test(e))).toBe(true);
+      expect(result.errors.some((e) => /unreviewedClosingIssues is non-empty but truncated is false/.test(e))).toBe(
+        true,
+      );
+    }
   });
 });
