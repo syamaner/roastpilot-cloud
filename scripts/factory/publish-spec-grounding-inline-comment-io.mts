@@ -140,6 +140,16 @@ export function findExistingInlineCommentId(
  * ever produce the anchor-invalid 422 {@link postInlineCommentPlan}'s own
  * probe watches for.
  *
+ * ACCEPTED LIMITATION (d4 pre-open pass, LOW-1): a PATCH-in-place also
+ * never re-opens a thread a human has already RESOLVED — if the same
+ * blocker survives a later push, this function still updates that
+ * resolved thread's body rather than reopening it, so that push's run
+ * exits 0 without gating on it, purely because a human already looked.
+ * Inherent to upsert-by-marker (the summary comment's own {@link
+ * import("./publish-spec-grounding-comment-io.mts").upsertSummaryComment}
+ * has the identical property), and adjacent to issue #77's own
+ * stale-marker-under-a-changed-criteria scope — not fixed here.
+ *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
