@@ -93,6 +93,13 @@
  *   run's own anchor-selecting diff fetch is verified against it before
  *   ever being used, the same discipline `spec-grounding-runner.mts`'s
  *   own identical check applies to its own diff fetch.
+ * - `GITHUB_RUN_NUMBER` — from `github.run_number` (F1-S9 slice 90.3);
+ *   embedded as this run's own generation key in every inline blocker
+ *   comment's body, alongside (never replacing) that comment's own
+ *   identity marker — see `publish-spec-grounding-blocker-logic.mts`'s
+ *   own `inlineBlockerGenerationMarker` for the full design reasoning.
+ *   DATA-ONLY as of this slice: not yet consumed by any delete-
+ *   comparison logic (slice 90.4).
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -629,6 +636,13 @@ export async function main(): Promise<void> {
   }
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
   const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
+  // F1-S9 slice 90.3 (the #90 PR-plan's own generation-key item, #88):
+  // `github.run_number`, not `run_id` -- see `publish-spec-grounding-
+  // blocker-logic.mts`'s own `inlineBlockerGenerationMarker` docstring
+  // for why `run_number`'s documented per-workflow monotonicity is the
+  // property a future generation-aware delete comparison (slice 90.4)
+  // needs, which `run_id` does not guarantee.
+  const runNumber = requireEnv("GITHUB_RUN_NUMBER");
   const paths = resolvePaths();
 
   const jobResult = requireEnv("SPEC_GROUNDED_REVIEW_JOB_RESULT");
@@ -743,7 +757,16 @@ export async function main(): Promise<void> {
     return;
   }
 
-  await publishSummary(token, owner, repo, prNumber, trustedHeadSha, spineResult.spine, verdictResult.verdict);
+  await publishSummary(
+    token,
+    owner,
+    repo,
+    prNumber,
+    trustedHeadSha,
+    runNumber,
+    spineResult.spine,
+    verdictResult.verdict,
+  );
 }
 
 /** {@link tryPostBlockersInline}'s own richer result — see its docstring. */
@@ -810,6 +833,13 @@ interface TryPostBlockersInlineResult {
  * findings that should NOT be filtered by this same staleness logic — a
  * real restructuring, not a cheap fold.
  *
+ * @param runNumber - `github.run_number`'s own value for this run, as a
+ *   plain digit string (F1-S9 slice 90.3) — threaded straight through to
+ *   {@link planBlockerInlineComments}, which embeds it in every planned
+ *   comment's own body via `inlineBlockerGenerationMarker`
+ *   (`publish-spec-grounding-blocker-logic.mts`). DATA-ONLY as of this
+ *   slice: not yet consumed by any delete-comparison logic (that lands in
+ *   slice 90.4).
  * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
  *   successfully posted as a real inline comment; `{ postedInline: false,
  *   degradeReason }` if there was no addable anchor at all
@@ -834,6 +864,7 @@ async function tryPostBlockersInline(
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
   diffTruncationBlocksClosingClaim: boolean,
+  runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
@@ -857,6 +888,7 @@ async function tryPostBlockersInline(
     stillReferencedUnreviewedClosingIssues,
     diff,
     diffTruncationBlocksClosingClaim,
+    runNumber,
   );
   if (plan.anchorFallbackNeeded) {
     return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
@@ -874,6 +906,7 @@ async function publishSummary(
   repo: string,
   prNumber: number,
   trustedHeadSha: string,
+  runNumber: string,
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
@@ -956,6 +989,7 @@ async function publishSummary(
         criterionBlockers,
         spine,
         diffTruncationBlocksClosingClaim,
+        runNumber,
       );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
