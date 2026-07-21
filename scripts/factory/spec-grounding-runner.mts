@@ -435,30 +435,40 @@ export async function main(): Promise<void> {
     // consumer in the privileged publisher for why this distinction is
     // load-bearing, not cosmetic.
     writeGithubOutput("no-criteria-reason", "no-unmet-criteria");
-    // Every CLOSING-kind issue THIS run actually considered at review
-    // time (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid
-    // 3626169262, BLOCKER) -- completes Fork A's coverage to this path:
-    // without this, a PR whose linked issue(s) were all self-attested
+    // Every CLOSING-kind issue THIS run actually REVIEWED at review time
+    // (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262,
+    // BLOCKER, refined round 3, cid 3626349857, P1 -- an earlier version
+    // of this line used the FULL, UNCAPPED `references` list here, a real
+    // fail-open: a PR with more than `selectIssuesToFetch`'s own
+    // `MAX_LINKED_ISSUES` (20) references, whose first 20 were all
+    // self-attested complete, could name a `Closes #N` BEYOND that cap --
+    // never fetched, never criteria-evaluated at all -- and that
+    // uncapped filter would still have included #N in the reviewed set,
+    // so Fork A (`findUnreviewedNewClosingReferences`) would treat it as
+    // "already known" and the gate would pass WITHOUT ever checking #N's
+    // own acceptance criteria. Also a availability risk on its own: an
+    // unbounded array here could blow `outcome.json`'s own 4 KiB ceiling).
+    // {@link computeReviewedClosingIssueNumbers} is the SAME fetch-capped
+    // helper the `hasCriteria: true` path below already uses (see its own
+    // call site's comment) -- completes Fork A's coverage to THIS path
+    // too: without it, a PR whose linked issue(s) were all self-attested
     // complete, then had a body edit ADD a brand-new closing reference
     // before the privileged publisher ran, would exit clean with that new
     // reference never reviewed at all. Mirrors `criteria-spine.json`'s own
-    // `reviewedClosingIssueNumbers` field (same name, same semantics) so
-    // the privileged publisher's `findUnreviewedNewClosingReferences` can
-    // run against this path exactly the way it already does against the
-    // `hasCriteria: true` one. Includes every closing-kind reference this
-    // run discovered, REGARDLESS of why it ended up contributing nothing
-    // to `criteriaBlock` (fully satisfied at review time, or its own
-    // fetch 404'd) -- same "known, even with nothing outstanding" set the
-    // spine's own field already establishes for the `hasCriteria: true`
-    // side (see that field's own docstring for the rounds-8-9 regression
-    // this mirrors).
+    // `reviewedClosingIssueNumbers` field (same name, same semantics, same
+    // fetch-capped construction) so the privileged publisher's
+    // `findUnreviewedNewClosingReferences` can run against this path
+    // exactly the way it already does against the `hasCriteria: true`
+    // one. Includes every WITHIN-CAP closing-kind reference, regardless of
+    // why it ended up contributing nothing to `criteriaBlock` (fully
+    // satisfied at review time, or its own fetch 404'd) -- but a closing
+    // reference BEYOND the fetch cap is deliberately EXCLUDED: this run
+    // never actually looked at it, so Fork A correctly fails closed on it
+    // as genuinely unreviewed, rather than treating "never examined" as
+    // "already known".
     writeGithubOutput(
       "reviewed-closing-issue-numbers",
-      JSON.stringify(
-        [...new Set(references.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber))].sort(
-          (a, b) => a - b,
-        ),
-      ),
+      JSON.stringify([...computeReviewedClosingIssueNumbers(references)].sort((a, b) => a - b)),
     );
     return;
   }

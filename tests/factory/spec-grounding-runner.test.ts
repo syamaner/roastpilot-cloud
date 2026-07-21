@@ -218,6 +218,30 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
       "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\n",
     );
   });
+
+  it("REGRESSION GUARD: a PR with MORE than MAX_LINKED_ISSUES(20) linked-issue references, even when every WITHIN-CAP one is self-attested complete, does NOT reach this branch at all -- has-criteria stays TRUE (F1-S9 slice 90.5, PR #96 review round 3, Codex, cid 3626349857, P1 fold). Documents the cross-module invariant the fix's own severity depends on: buildLinkedIssueSpecs's own truncatedIssueCount is unconditional on the FULL reference count (references.length - MAX_LINKED_ISSUES), so renderCriteriaDataBlock can never return '' whenever references.length exceeds the cap, regardless of kind or satisfaction -- if this invariant ever changes, THIS test fails, which is exactly the signal an engineer needs to re-examine whether the beyond-cap-closing-ref scenario has become reachable via the no-unmet-criteria branch after all", async () => {
+    const manyRefs = Array.from({ length: 22 }, (_unused, i) => `Closes #${i + 1}`).join(", ");
+    const handlers: Record<string, () => Response> = {
+      [PULLS_JSON_KEY]: () => prResponse(manyRefs),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
+    };
+    for (let i = 1; i <= 20; i++) {
+      handlers[`GET /repos/syamaner/roastpilot-cloud/issues/${i} accept=${JSON_ACCEPT}`] = () =>
+        jsonResponse({ title: `Issue ${i}`, body: "### Acceptance criteria\n- [x] Already done." });
+    }
+    const { fetchMock } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // has-criteria: true (NOT the no-unmet-criteria branch this describe
+    // block is otherwise about) -- the beyond-cap truncation itself is
+    // reported as criteria-worthy content, per renderCriteriaDataBlock's
+    // own contract, so this run correctly stays hasCriteria:true and its
+    // OWN reviewedClosingIssueNumbers (via computeReviewedClosingIssueNumbers,
+    // the SAME fetch-capped set the fix now reuses) governs Fork A instead.
+    expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
+  });
 });
 
 describe("main — trusted head SHA verification (PR #72 review fold)", () => {
