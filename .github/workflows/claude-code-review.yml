@@ -360,16 +360,22 @@ jobs:
         #    base's own tracked content for every path base has, with no
         #    awareness of what HEAD renamed it to or from.
         # 3. Re-apply the two named exceptions from PR-HEAD, UNCONDITIONALLY
-        #    and identically: `scripts/factory` (covered by the publisher
-        #    guard already, and a human-authored runner bugfix needs to
-        #    take effect when its own PR is reviewed — restoring it from
-        #    base would review a runner-bugfix PR against the OLD, buggy
-        #    runner) and `.claude/skills/spec-grounded-review` (the same
-        #    trust argument applies: it is first-party, human-authored,
-        #    and goes through the same PR review as `scripts/factory`
-        #    before it can ever merge — a prompt-wording fix in this PR
-        #    needs to take effect when THIS PR is reviewed, exactly like a
-        #    runner-code fix does).
+        #    and identically: `scripts/factory` and
+        #    `.claude/skills/spec-grounded-review` — a human-authored
+        #    runner bugfix or prompt-wording fix needs to take effect when
+        #    its own PR is reviewed (restoring either from base would
+        #    review that PR against the OLD, un-fixed content). Both are
+        #    safe to unconditionally reapply from PR-head for the SAME
+        #    reason: both are `PROTECTED_PATH_PREFIXES` entries in
+        #    `scripts/factory/implement-patch-logic.mts` (the guard the
+        #    privileged `publish` job enforces on an implementing agent's
+        #    own patch, factory.md §13 point 3) — an implementing agent's
+        #    patch can never touch either path, so for a factory-generated
+        #    PR, PR-head content under either path is identical to base by
+        #    construction, and this reapply changes nothing. Only a
+        #    HUMAN-authored, normally-reviewed PR can ever make PR-head
+        #    differ from base here, which is exactly the case this
+        #    reapply exists to let through.
         #
         #    PREVIOUSLY this second exception was bootstrap-only (`git
         #    checkout HEAD -- .claude/skills/spec-grounded-review` gated

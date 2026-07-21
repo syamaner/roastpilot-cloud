@@ -19,11 +19,30 @@
  * are conventional, human-reviewed work and go through a normal PR, not
  * through this guard.
  *
+ * `.claude/skills/spec-grounded-review/` (F1-S9 issue #12, PR #81 review,
+ * completing the P1 fix in the same PR): `claude-code-review.yml`'s
+ * restore step re-applies this path UNCONDITIONALLY from PR-head — the
+ * same treatment as `scripts/factory/`, and safe for the identical
+ * reason: it must be guard-protected here too, so an implementing
+ * agent's own patch can never reach it, exactly as it can never reach
+ * `scripts/factory/`. Without this entry, the equivalence the restore
+ * step's PR-head-reapply relies on ("this path only ever changes via
+ * human-reviewed PR, never via an implementing agent's own patch") would
+ * hold for `scripts/factory/` but not for the skill — today harmless
+ * only because the implement/publish pipeline (#47) that would let an
+ * agent's patch reach an unguarded path isn't enabled yet. Add any
+ * future PR-head-reapplied path here in the same commit that adds it to
+ * the workflow's restore step — the two lists must stay in lockstep.
+ *
  * Branch-protection config has no file-level guard here — it's a GitHub
  * API/settings-level control, not a repo path, so a file-diff guard
  * cannot see it either way.
  */
-const PROTECTED_PATH_PREFIXES = [".github/", "scripts/factory/"] as const;
+const PROTECTED_PATH_PREFIXES = [
+  ".github/",
+  "scripts/factory/",
+  ".claude/skills/spec-grounded-review/",
+] as const;
 const PROTECTED_EXACT_PATHS = ["CODEOWNERS", "docs/CODEOWNERS"] as const;
 
 /**
