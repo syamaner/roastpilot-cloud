@@ -40,7 +40,7 @@
  */
 
 import { GithubApiError, githubRequest } from "./github-api.mts";
-import type { BlockerCommentPlan } from "./publish-spec-grounding-blocker-logic.mts";
+import { bodyContainsAnyBlockerMarker, type BlockerCommentPlan } from "./publish-spec-grounding-blocker-logic.mts";
 import {
   bodyContainsMarkerAsStandaloneLine,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
@@ -229,4 +229,59 @@ export async function postInlineCommentPlan(
     }
   }
   return { ok: true };
+}
+
+/**
+ * Deletes every existing inline review comment this workflow previously
+ * posted as a blocker on a PR that no longer has any linked-issue
+ * criteria to review at all (PR #86 review, Codex, P2): a PR's body edit
+ * that removes its last closing-keyword reference makes the runner emit
+ * `hasCriteria: false`, but the earlier run's own inline blocker
+ * comments — each gating `required_conversation_resolution` on its own
+ * thread — would otherwise stay open and gating forever, referring to
+ * criteria that no longer exist. Identifies "ours" generically via
+ * {@link bodyContainsAnyBlockerMarker} (any of this module's sibling
+ * `publish-spec-grounding-blocker-logic.mts`'s five own marker shapes),
+ * never a specific run's own plan — there IS no plan at all once
+ * criteria are gone, so matching against `plan.marker` the way {@link
+ * findExistingInlineCommentId} does is not available here.
+ *
+ * Tolerates a 404 on an individual DELETE (a human already resolved or
+ * deleted that thread themselves, between this run's own fetch and the
+ * delete) as a benign no-op — the SAME best-effort-cleanup tolerance
+ * `publish-implement-patch.mts`'s own `removeNoAutoChainLabelBestEffort`
+ * applies to its own identical "already gone" case. Any OTHER failure
+ * propagates uncaught, so the caller can surface it as a genuine error
+ * rather than silently leaving a stale thread in place.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @returns The number of stale inline comments actually deleted.
+ */
+export async function clearStaleInlineBlockerComments(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<number> {
+  const existing = await findExistingInlineComments(token, owner, repo, prNumber);
+  const stale = existing.filter(
+    (c) =>
+      c.authorType === "Bot" && c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN && bodyContainsAnyBlockerMarker(c.body),
+  );
+  let deletedCount = 0;
+  for (const comment of stale) {
+    try {
+      await githubRequest(token, "DELETE", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`);
+      deletedCount += 1;
+    } catch (err) {
+      if (err instanceof GithubApiError && err.status === 404) {
+        continue; // Already gone -- nothing to do, not a failure.
+      }
+      throw err;
+    }
+  }
+  return deletedCount;
 }

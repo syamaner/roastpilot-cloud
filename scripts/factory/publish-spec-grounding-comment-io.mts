@@ -22,6 +22,7 @@
 
 import { githubRequest } from "./github-api.mts";
 import {
+  buildSpecGroundingClearedSummaryCommentBody,
   buildSpecGroundingFallbackCommentBody,
   findExistingSpecGroundingSummaryCommentId,
   type ExistingComment,
@@ -266,4 +267,32 @@ export async function publishFallback(
 ): Promise<void> {
   logFallbackReasons(prNumber, reasons);
   await upsertSummaryComment(token, owner, repo, prNumber, buildSpecGroundingFallbackCommentBody(reasons));
+}
+
+/**
+ * Clears this workflow's own prior spec-grounded summary/fallback comment
+ * on a PR that no longer has any linked-issue criteria to review at all
+ * (PR #86 review, Codex, P2) — a NO-OP if no such comment exists, since
+ * an ordinary PR that never had criteria in the first place has no
+ * reason to suddenly grow a "cleared" comment it never carried.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @returns `true` if a prior comment was found and cleared in place,
+ *   `false` if there was nothing to clear.
+ */
+export async function clearStaleSpecGroundingSummary(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<boolean> {
+  const existingId = await findExistingSummaryComment(token, owner, repo, prNumber);
+  if (existingId === null) {
+    return false;
+  }
+  await upsertSummaryComment(token, owner, repo, prNumber, buildSpecGroundingClearedSummaryCommentBody());
+  return true;
 }

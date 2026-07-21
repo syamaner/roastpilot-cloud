@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bodyContainsAnyBlockerMarker,
   buildAggregatedCriterionBlockersCommentBody,
   buildAggregatedUnreviewedClosingIssuesCommentBody,
   buildAnchorFallbackSummarySupplement,
@@ -867,5 +868,38 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(body).toContain("#12");
     expect(body).toContain("#99");
     expect(body).toMatch(/diff was truncated/i);
+  });
+});
+
+describe("bodyContainsAnyBlockerMarker", () => {
+  it("matches a per-criterion blocker comment's own marker", () => {
+    const body = buildCriterionBlockerCommentBody(joined({ criterionId: "12:0" }));
+    expect(bodyContainsAnyBlockerMarker(body)).toBe(true);
+  });
+
+  it("matches a per-issue (unreviewed closing) blocker comment's own marker", () => {
+    const body = buildDroppedClosingIssueBlockerCommentBody(droppedIssue(99));
+    expect(bodyContainsAnyBlockerMarker(body)).toBe(true);
+  });
+
+  it("matches each of the three fixed aggregate/whole-run markers", () => {
+    expect(bodyContainsAnyBlockerMarker(`some body\n${CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}`)).toBe(true);
+    expect(bodyContainsAnyBlockerMarker(`some body\n${UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}`)).toBe(true);
+    expect(bodyContainsAnyBlockerMarker(`some body\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}`)).toBe(true);
+  });
+
+  it("returns false for a body with no marker at all", () => {
+    expect(bodyContainsAnyBlockerMarker("just some ordinary comment text")).toBe(false);
+  });
+
+  it("returns false for the marker embedded mid-line (structural, standalone-line match only, mirroring bodyContainsMarkerAsStandaloneLine's own discipline)", () => {
+    const midLine = `- somepath.ts: ${criterionBlockerCommentMarker("12:0")} more content`;
+    expect(bodyContainsAnyBlockerMarker(midLine)).toBe(false);
+  });
+
+  it("does not confuse the SUMMARY comment's own, differently-prefixed marker with a blocker marker", () => {
+    expect(bodyContainsAnyBlockerMarker("some body\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->")).toBe(
+      false,
+    );
   });
 });

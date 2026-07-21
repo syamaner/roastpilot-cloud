@@ -259,17 +259,82 @@ describe("main — the outcome.json tri-state", () => {
     expect((post?.body as { body: string }).body).toContain("could not be opened");
   });
 
-  it("silently no-ops when hasCriteria is false, without any comment call at all", async () => {
+  it("is a genuine no-op when hasCriteria is false and there is no prior spec-grounding state to clear (PATCH/POST/DELETE-free, only the read-only lookups)", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
     process.env.OUTCOME_PATH = outcomePath;
-    const fetchMock = vi.fn();
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(calls.every((c) => c.method === "GET")).toBe(true);
+  });
+
+  it("clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body: `stale blocker\n<!-- roastpilot-factory:spec-grounding-blocker:criterion:12:0:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toMatch(/no linked-issue acceptance criteria remain/i);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
+  });
+
+  it("posts a visible fallback, rather than crashing or silently no-opping, when clearing stale state genuinely fails", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    process.env.OUTCOME_PATH = outcomePath;
+    // The summary-comment lookup 403s exactly ONCE (clearStaleSpecGroundingSummary's
+    // own check) -- publishFallback's own subsequent lookup, in the catch
+    // block, must still succeed so the fallback comment can genuinely post.
+    let summaryLookupCalls = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => {
+        summaryLookupCalls += 1;
+        return summaryLookupCalls === 1
+          ? new Response("rate limited", { status: 403, headers: { "content-type": "text/plain" } })
+          : jsonResponse([]);
+      },
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(fallbackPost).toBeDefined();
+    expect((fallbackPost?.body as { body: string }).body).toMatch(/clearing its prior spec-grounding state failed/i);
   });
 });
 

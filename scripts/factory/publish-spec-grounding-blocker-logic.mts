@@ -436,6 +436,39 @@ export const DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER =
   "<!-- roastpilot-factory:spec-grounding-blocker:diff-truncated:do-not-edit -->";
 
 /**
+ * Matches ANY of this module's five own marker shapes ({@link
+ * criterionBlockerCommentMarker}, {@link unreviewedClosingIssueCommentMarker},
+ * {@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}, {@link
+ * UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}, {@link
+ * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}) as a single pattern — every one
+ * shares the exact `<!-- roastpilot-factory:spec-grounding-blocker:...
+ * :do-not-edit -->` prefix/suffix, varying only the middle segment. Used
+ * by the privileged publish entrypoint (PR #86 review, Codex, P2 —
+ * clearing stale inline blocker comments when a PR's linked criteria
+ * disappear entirely) to find "any inline blocker comment this workflow
+ * ever posted on this PR", generically, without needing THIS run's own
+ * plan (there is no plan at all once criteria are gone) to match a
+ * specific marker against.
+ */
+const ANY_BLOCKER_MARKER_LINE_PATTERN = /^<!-- roastpilot-factory:spec-grounding-blocker:.+:do-not-edit -->$/;
+
+/**
+ * Whether `body` carries any ONE of this module's five marker shapes as a
+ * STRUCTURAL, standalone-line match — the same "exact line, never a loose
+ * substring" discipline {@link
+ * import("./publish-spec-grounding-verdict-logic.mts").bodyContainsMarkerAsStandaloneLine}
+ * applies to the summary comment's own single marker, generalized here to
+ * "any of the five", via {@link ANY_BLOCKER_MARKER_LINE_PATTERN}.
+ *
+ * @param body - A comment's own body text.
+ * @returns `true` only if some line of `body`, trimmed, matches the shared
+ *   blocker-marker pattern exactly.
+ */
+export function bodyContainsAnyBlockerMarker(body: string): boolean {
+  return body.split(/\r?\n/).some((line) => ANY_BLOCKER_MARKER_LINE_PATTERN.test(line.trim()));
+}
+
+/**
  * The self-describing preamble every blocker inline comment carries,
  * explaining that its anchor is a deterministic placement, not the actual
  * defect location (team-lead's hardening — see this module's own

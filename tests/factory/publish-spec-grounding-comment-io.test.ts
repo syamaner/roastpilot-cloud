@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  clearStaleSpecGroundingSummary,
   findExistingSummaryComment,
   neutralizeReasonForLog,
   publishFallback,
@@ -315,5 +316,43 @@ describe("neutralizeReasonForLog", () => {
     expect(neutralized).not.toMatch(/\n::error/);
     expect(neutralized).not.toContain("::");
     expect(neutralized.endsWith("…(truncated)")).toBe(true);
+  });
+});
+
+describe("clearStaleSpecGroundingSummary (PR #86 review, Codex, P2)", () => {
+  it("does nothing and returns false when no prior summary comment exists", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5);
+
+    expect(cleared).toBe(false);
+    expect(calls.some((c) => c.method === "PATCH" || c.method === "POST")).toBe(false);
+  });
+
+  it("PATCHes the prior summary/fallback comment in place with the cleared body when one exists", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `prior blockers\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5);
+
+    expect(cleared).toBe(true);
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch).toBeDefined();
+    const body = (patch?.body as { body: string }).body;
+    expect(body).toMatch(/no linked-issue acceptance criteria remain/i);
+    expect(body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
   });
 });

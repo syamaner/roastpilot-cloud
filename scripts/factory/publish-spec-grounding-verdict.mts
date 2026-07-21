@@ -68,9 +68,15 @@
  *        written marker should not happen, but a corrupted/missing
  *        download must still fail closed, never be silently treated as
  *        "nothing to review").
- *      - Present, `hasCriteria: false` → silent no-op (the runner found
- *        no linked issue, or no unmet criteria — genuinely nothing to
- *        spec-ground, not a failure).
+ *      - Present, `hasCriteria: false` → the runner found no linked issue,
+ *        or no unmet criteria — genuinely nothing to spec-ground, not a
+ *        failure — but NOT necessarily a silent no-op: {@link
+ *        clearStaleSpecGroundingStateOnDisappearedCriteria} clears any
+ *        PRIOR summary/fallback comment and inline blocker threads this
+ *        workflow posted on an earlier run, so criteria disappearing
+ *        (e.g. a body edit removing the last closing-keyword reference)
+ *        does not leave stale, no-longer-applicable state visible and
+ *        gating forever (PR #86 review, Codex, P2).
  *      - Present, `hasCriteria: true` → the verdict and criteria-spine
  *        artifacts MUST both be present and valid; either being
  *        absent/malformed is ALSO a visible fallback (the review agent
@@ -123,11 +129,15 @@ import {
   planBlockerInlineComments,
 } from "./publish-spec-grounding-blocker-logic.mts";
 import {
+  clearStaleSpecGroundingSummary,
   neutralizeReasonForLog,
   publishFallback,
   upsertSummaryComment,
 } from "./publish-spec-grounding-comment-io.mts";
-import { postInlineCommentPlan } from "./publish-spec-grounding-inline-comment-io.mts";
+import {
+  clearStaleInlineBlockerComments,
+  postInlineCommentPlan,
+} from "./publish-spec-grounding-inline-comment-io.mts";
 
 interface GitHubPullRequestShas {
   readonly head: { readonly sha: string };
@@ -324,6 +334,67 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
   return (parsed as { hasCriteria: boolean }).hasCriteria;
 }
 
+/**
+ * Clears any stale spec-grounded review state on a PR whose linked-issue
+ * criteria have disappeared entirely (`hasCriteria: false`) — a P2 fix
+ * (PR #86 review, Codex): a PR that PREVIOUSLY got a summary/fallback
+ * comment or inline blocker threads, then had a later body edit remove
+ * its last closing-keyword reference, used to leave that stale state
+ * (still claiming blockers, or a failed pipeline, for criteria that no
+ * longer exist) visible and gating forever — this entrypoint's own
+ * `hasCriteria: false` path was a pure silent no-op with no upsert or
+ * deletion at all. Clears BOTH channels: the summary comment (via {@link
+ * clearStaleSpecGroundingSummary}, a no-op if none exists) and any prior
+ * inline blocker comments (via {@link clearStaleInlineBlockerComments},
+ * matched generically since there is no run plan at all once criteria
+ * are gone).
+ *
+ * Scoped to `hasCriteria: false` ONLY — deliberately NOT extended to the
+ * `"skipped"`/`"cancelled"` job-result branch above, even though team-
+ * lead's own review raised the question: those two signals mean "this
+ * run never checked", not "this run checked and found nothing" — a
+ * draft-PR skip or a concurrency-superseded cancellation says nothing
+ * about whether a PR's criteria actually disappeared, so clearing on
+ * either would risk erasing a STILL-ACCURATE summary or still-open
+ * blocker thread purely because this particular event didn't trigger a
+ * real run. `hasCriteria: false` is the only signal that has actually
+ * VERIFIED "no criteria remain".
+ *
+ * A genuine failure while clearing (anything other than the benign
+ * "nothing to clear"/"already gone" cases, which never throw) is
+ * surfaced as a visible fallback, the same "never silent" policy every
+ * other network failure in this entrypoint follows.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ */
+async function clearStaleSpecGroundingStateOnDisappearedCriteria(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<void> {
+  try {
+    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber);
+    const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+    console.log(
+      `PR #${prNumber} had nothing to spec-ground (hasCriteria: false) — ` +
+        (summaryCleared || clearedInlineCount > 0
+          ? `cleared stale prior state (summary comment cleared=${summaryCleared}, ` +
+            `${clearedInlineCount} inline comment(s) removed).`
+          : `nothing to clear, silent no-op.`),
+    );
+  } catch (err) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `PR #${prNumber} has no linked-issue criteria left to review, but clearing its prior ` +
+        `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+  }
+}
+
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -373,7 +444,7 @@ export async function main(): Promise<void> {
     return;
   }
   if (!hasCriteria) {
-    console.log(`PR #${prNumber} had nothing to spec-ground (hasCriteria: false) — silent no-op.`);
+    await clearStaleSpecGroundingStateOnDisappearedCriteria(token, owner, repo, prNumber);
     return;
   }
 

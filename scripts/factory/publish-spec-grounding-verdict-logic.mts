@@ -822,3 +822,35 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
   ];
   return lines.join("\n");
 }
+
+/**
+ * Builds the comment body the privileged publish entrypoint upserts when
+ * a PR that previously had a spec-grounded summary or fallback comment no
+ * longer has ANY linked-issue criteria to review at all (`hasCriteria:
+ * false` on a run whose prior comment exists) — a P2 finding (PR #86
+ * review, Codex): without this, editing a PR's body to remove its last
+ * closing-keyword reference left the EARLIER run's comment (still
+ * claiming blockers, or a failed pipeline) visible and unexplained
+ * forever, since the entrypoint's own `hasCriteria: false` path was a
+ * pure silent no-op with no upsert at all.
+ *
+ * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} every
+ * other summary/fallback body uses, for the identical reason {@link
+ * buildSpecGroundingFallbackCommentBody} documents: a LATER run that
+ * finds criteria again must PATCH this exact comment in place, not post
+ * a second one alongside it.
+ *
+ * @returns The Markdown comment body, ending with the tracking marker.
+ */
+export function buildSpecGroundingClearedSummaryCommentBody(): string {
+  return [
+    "**No linked-issue acceptance criteria remain for this PR.** An earlier run of the " +
+      "spec-grounded review posted a summary or fallback comment here, but this PR no longer " +
+      "references any issue this workflow can spec-ground against — the comment below (and any " +
+      "inline blocker threads from that earlier run) no longer apply and have been cleared.",
+    "",
+    "_Posted by the roastpilot-cloud spec-grounded review workflow (factory.md §13 point 3)._",
+    "",
+    SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+  ].join("\n");
+}

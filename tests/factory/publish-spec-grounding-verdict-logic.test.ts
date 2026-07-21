@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bodyContainsMarkerAsStandaloneLine,
+  buildSpecGroundingClearedSummaryCommentBody,
   buildSpecGroundingFallbackCommentBody,
   buildSpecGroundingSummaryCommentBody,
   deriveSeverity,
@@ -735,5 +736,26 @@ describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12
     const body = buildSpecGroundingFallbackCommentBody([`reason with a bidi override \u202e here`]);
     expect(body).not.toContain("\u202e");
     expect(body).toMatch(/\[U\+202E\]/);
+  });
+});
+
+describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2)", () => {
+  it("explains that no linked-issue criteria remain and prior state was cleared", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody();
+    expect(body).toMatch(/no linked-issue acceptance criteria remain/i);
+    expect(body).toMatch(/cleared/i);
+  });
+
+  it("ends with the SAME marker a normal summary/fallback comment uses, so a later run that finds criteria again upserts over this cleared comment", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody();
+    expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("is found by findExistingSpecGroundingSummaryCommentId, exactly like a normal summary comment would be", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody();
+    const comments: ExistingComment[] = [
+      { id: 1, body, authorType: "Bot", authorLogin: SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN },
+    ];
+    expect(findExistingSpecGroundingSummaryCommentId(comments)).toBe(1);
   });
 });

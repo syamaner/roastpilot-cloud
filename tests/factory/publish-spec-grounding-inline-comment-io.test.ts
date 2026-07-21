@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  clearStaleInlineBlockerComments,
   findExistingInlineCommentId,
   findExistingInlineComments,
   postInlineCommentPlan,
   upsertInlineComment,
 } from "../../scripts/factory/publish-spec-grounding-inline-comment-io.mts";
-import { criterionBlockerCommentMarker } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
+import {
+  criterionBlockerCommentMarker,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+} from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
 
@@ -283,5 +287,96 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ]);
 
     expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
+  });
+});
+
+describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
+  it("deletes every prior inline comment carrying any one of the five blocker markers, ignoring non-blocker comments", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `stale criterion blocker\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `stale diff-truncated blocker\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 3,
+            body: "an unrelated human review comment",
+            user: { type: "User", login: "someone" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+
+    expect(deletedCount).toBe(2);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/2"))).toBe(true);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/3"))).toBe(false);
+  });
+
+  it("returns 0 and deletes nothing when there are no prior blocker comments at all", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+
+    expect(deletedCount).toBe(0);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("tolerates a 404 on an individual DELETE as a benign no-op (a human already resolved/deleted that thread) and still deletes the rest", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `stale\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `stale\n${criterionBlockerCommentMarker("12:1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(404, "Not Found"),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+
+    // Only the genuinely-deleted one counts -- the 404'd one was already
+    // gone, tolerated as a no-op, not counted as a delete this run made.
+    expect(deletedCount).toBe(1);
+  });
+
+  it("propagates a genuine (non-404) DELETE failure rather than silently swallowing it", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `stale\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => errorResponse(403, "Forbidden"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(clearStaleInlineBlockerComments("token", "o", "r", 5)).rejects.toThrow(/403/);
   });
 });
