@@ -504,22 +504,36 @@ export const GITHUB_COMPARE_DIFF_FILE_LIMIT = 300;
  *   adds a visible truncation warning to the wrapped block, the same shape
  *   as the byte-cap warning below, so the agent never mistakes a silently-
  *   partial diff for a complete one.
- * @returns The delimited `UNTRUSTED_PR_DIFF` block, always non-empty (an
- *   empty diff still renders the wrapper and its guard text — unlike
- *   `renderCriteriaDataBlock`, there is no "skip the review pass" signal
- *   here; that decision is made earlier, from whether the criteria spine
- *   itself is empty, not from the diff).
+ * @returns `text` — the delimited `UNTRUSTED_PR_DIFF` block, always
+ *   non-empty (an empty diff still renders the wrapper and its guard text —
+ *   unlike `renderCriteriaDataBlock`, there is no "skip the review pass"
+ *   signal here; that decision is made earlier, from whether the criteria
+ *   spine itself is empty, not from the diff) — and `truncated`, `true` if
+ *   EITHER the byte cap or the known file-count cap fired (Codex finding,
+ *   PR #76 review, L733: `pr-diff-block.txt` itself is never uploaded as
+ *   an artifact — only `criteria-spine.json` and `spec-grounding-
+ *   verdict.json` are — so without surfacing this boolean, slice 3b-iii's
+ *   privileged publisher has NO way to know the diff the agent judged was
+ *   ever incomplete; a closing-kind PR whose diff silently omitted the
+ *   file that would have satisfied (or contradicted) a criterion could
+ *   pass review on a partial view with no trace anywhere downstream. The
+ *   VISIBLE in-block warnings above are for the review agent's own
+ *   benefit; this boolean is the machine-readable twin for the privileged
+ *   publisher, the same "trusted metadata alongside the untrusted
+ *   content" pattern {@link computeCriteriaSpineTruncation} already
+ *   establishes for criteria/issue truncation).
  */
 export function wrapUntrustedDiffBlock(
   diff: string,
   nonce: string,
   maxBytes: number = MAX_PR_DIFF_BYTES,
   options?: { readonly knownFileCountTruncated?: boolean },
-): string {
+): { readonly text: string; readonly truncated: boolean } {
   const neutralized = neutralizeDiffDelimiterBreakout(diff);
   const { text, truncated: byteTruncated } = truncateToByteBudget(neutralized, maxBytes);
   const diffBlockOpen = `<UNTRUSTED_PR_DIFF_${nonce}>`;
   const diffBlockClose = `</UNTRUSTED_PR_DIFF_${nonce}>`;
+  const knownFileCountTruncated = options?.knownFileCountTruncated === true;
 
   const lines: string[] = [
     diffBlockOpen,
@@ -539,7 +553,7 @@ export function wrapUntrustedDiffBlock(
         " assume the unseen portion satisfies any criterion.)",
     );
   }
-  if (options?.knownFileCountTruncated === true) {
+  if (knownFileCountTruncated) {
     lines.push(
       "",
       "(TRUNCATED — this PR changes more files than GitHub's compare API returns in " +
@@ -549,5 +563,5 @@ export function wrapUntrustedDiffBlock(
     );
   }
   lines.push(diffBlockClose);
-  return lines.join("\n");
+  return { text: lines.join("\n"), truncated: byteTruncated || knownFileCountTruncated };
 }

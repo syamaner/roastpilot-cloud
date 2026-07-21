@@ -213,6 +213,7 @@ describe("main — real unmet criteria", () => {
       entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
       truncated: false,
       droppedClosingIssueNumbers: [],
+      diffTruncated: false,
     });
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
@@ -290,6 +291,14 @@ describe("main — real unmet criteria", () => {
     expect(diffBlock).toContain("more files than GitHub's compare API");
     expect(diffBlock.startsWith(`<UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
     expect(diffBlock.endsWith(`</UNTRUSTED_PR_DIFF_${TEST_NONCE}>`)).toBe(true);
+
+    // Slice 3b-iii, issue #12, PR #76 review, L733: pr-diff-block.txt
+    // itself is never uploaded as an artifact -- only criteria-spine.json
+    // and the agent's verdict are. So the spine is where this truncation
+    // signal must also surface, alongside (not instead of) criteria
+    // truncation, so 3b-iii can fail-closed on either kind.
+    const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
+    expect(spine).toMatchObject({ diffTruncated: true });
   });
 
   it("does NOT warn when changed_files is exactly at the cap (300), only when it exceeds it", async () => {
@@ -340,6 +349,7 @@ describe("main — real unmet criteria", () => {
       entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
       truncated: false,
       droppedClosingIssueNumbers: [],
+      diffTruncated: false,
     });
   });
 

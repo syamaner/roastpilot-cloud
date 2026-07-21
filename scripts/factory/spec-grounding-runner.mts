@@ -421,8 +421,19 @@ export async function main(): Promise<void> {
   // bare array (Codex finding, PR #76 review, L181): `entries` is the
   // array the review agent's own criterionId correlation matches against
   // (unchanged shape from before); `truncated`/`droppedClosingIssueNumbers`
-  // are new trusted metadata for slice 3b-iii's privileged publisher only
-  // — the read-only review agent never reads or acts on these two fields.
+  // /`diffTruncated` are new trusted metadata for slice 3b-iii's
+  // privileged publisher only — the read-only review agent never reads or
+  // acts on these fields.
+  //
+  // `diffTruncated` (Codex finding, PR #76 review, L733): `pr-diff-
+  // block.txt` itself is never uploaded as an artifact — only this file
+  // and the agent's own verdict are — so without surfacing
+  // `wrapUntrustedDiffBlock`'s own `truncated` result here, 3b-iii would
+  // have NO way to know the diff the agent judged was ever incomplete
+  // (the byte cap or GitHub's own file-count cap silently cutting it
+  // short). Lets the privileged publisher fail-closed on EITHER kind of
+  // truncation this run could have, not just the criteria/issue kind
+  // `truncated`/`droppedClosingIssueNumbers` already cover.
   await writeOutputFile(
     paths.criteriaSpinePath,
     JSON.stringify(
@@ -430,12 +441,13 @@ export async function main(): Promise<void> {
         entries: spine,
         truncated: truncationSummary.truncated,
         droppedClosingIssueNumbers: truncationSummary.droppedClosingIssueNumbers,
+        diffTruncated: diffBlock.truncated,
       },
       null,
       2,
     ),
   );
-  await writeOutputFile(paths.prDiffBlockPath, diffBlock);
+  await writeOutputFile(paths.prDiffBlockPath, diffBlock.text);
 
   console.log(
     `Wrote spec-grounding context for PR #${prNumber}: ${spine.length} unmet criterion(ia) ` +
