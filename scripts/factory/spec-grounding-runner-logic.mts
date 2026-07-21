@@ -221,13 +221,42 @@ export function buildCriteriaSpine(
 }
 
 /**
+ * One CLOSING-kind issue this PR referenced whose review is INCOMPLETE due
+ * to a resource cap — either entirely (zero spine entries at all) or
+ * partially (some of its own criteria made the spine, but at least one
+ * more was truncated away before it could). Both are the same class of
+ * gap for a closing claim — a PR saying "this fully resolves issue #N"
+ * when issue #N's criteria weren't fully reviewed is unverified either
+ * way — but distinguished here so downstream messaging can say which
+ * (PR #82 round 2 review, FOLD 1, BLOCKER: an earlier version only
+ * tracked the fully-dropped case, so a closing issue with SOME criteria
+ * truncated away — the rest still in the spine and potentially all marked
+ * satisfied — silently passed review with the dropped criteria never
+ * checked, the same false-pass risk as a full drop).
+ */
+export interface UnreviewedClosingIssueResult {
+  readonly issueNumber: number;
+  /**
+   * `"fully-dropped"`: zero spine entries at all (never fetched beyond
+   * `MAX_LINKED_ISSUES`, or entirely cut by the rendered block's byte cap
+   * before any of its criteria's checkbox lines survived).
+   * `"partially-truncated"`: has at least one spine entry, but
+   * `truncatedCriteriaCount > 0` — some of its OWN criteria were cut by
+   * `MAX_CRITERIA_PER_ISSUE` or the byte cap while others survived.
+   */
+  readonly truncationKind: "fully-dropped" | "partially-truncated";
+}
+
+/**
  * Whether ANY truncation happened anywhere in this run's criteria
- * pipeline, and which CLOSING-kind issue numbers ended up with ZERO
- * spine entries at all as a result — the trusted metadata slice 3b-iii's
- * privileged publisher uses to escalate an entirely-unreviewed closing
- * reference the same way it escalates an unsatisfied one (Codex finding,
- * PR #76 review, team-lead's disposition: "on a closing-kind PR,
- * unreviewed-due-to-truncation escalates like unsatisfied").
+ * pipeline, and which CLOSING-kind issues ended up with an INCOMPLETE
+ * review as a result (see {@link UnreviewedClosingIssueResult}) — the
+ * trusted metadata slice 3b-iii's privileged publisher uses to escalate
+ * an unreviewed-or-partially-reviewed closing reference the same way it
+ * escalates an unsatisfied one (Codex finding, PR #76 review, team-lead's
+ * disposition: "on a closing-kind PR, unreviewed-due-to-truncation
+ * escalates like unsatisfied"; widened PR #82 round 2 to cover partial
+ * truncation too, not just a full drop).
  */
 export interface CriteriaSpineTruncationSummary {
   /**
@@ -236,26 +265,25 @@ export interface CriteriaSpineTruncationSummary {
    * beyond `MAX_CRITERIA_PER_ISSUE`, OR `renderCriteriaDataBlock`'s own
    * byte cap cutting the rendered block short. A general "this run's
    * context may be incomplete" signal, broader than (and not implying)
-   * {@link droppedClosingIssueNumbers} being non-empty — e.g. a
+   * {@link unreviewedClosingIssues} being non-empty — e.g. a
    * `non-closing` reference's criteria being byte-cap-truncated sets
    * this `true` without adding anything to that list.
    */
   readonly truncated: boolean;
   /**
-   * Every `closing`-kind issue number this PR's own body references that
-   * ends up with ZERO entries in `spine` — either never fetched at all
-   * (beyond `MAX_LINKED_ISSUES`) or entirely cut by the rendered block's
-   * byte cap before any of its criteria's checkbox lines survived into
-   * it. Deliberately EXCLUDES a `closing` reference that legitimately has
-   * NO unmet criteria at all (never truncated — `buildLinkedIssueSpecs`
-   * simply omits an issue with nothing unmet, a normal outcome, not a
-   * gap) and a reference that failed to fetch with a VERIFIED 404
+   * Every `closing`-kind issue this PR's own body references whose
+   * review is incomplete — see {@link UnreviewedClosingIssueResult} for
+   * the fully-dropped/partially-truncated distinction. Deliberately
+   * EXCLUDES a `closing` reference that legitimately has NO unmet
+   * criteria at all (never truncated — `buildLinkedIssueSpecs` simply
+   * omits an issue with nothing unmet, a normal outcome, not a gap) and a
+   * reference that failed to fetch with a VERIFIED 404
    * (`spec-grounding-runner.mts`'s own top-level docstring already
    * documents that as an accepted, deliberate graceful no-op — a
    * genuinely deleted issue has nothing left to escalate about, unlike a
    * resource-capped one that was simply never looked at).
    */
-  readonly droppedClosingIssueNumbers: readonly number[];
+  readonly unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
 }
 
 /**
@@ -271,7 +299,10 @@ export interface CriteriaSpineTruncationSummary {
  * alongside the already-shipped, already-reviewed spine-building logic,
  * rather than a change to it.
  *
- * Two distinct "dropped entirely" cases, both computed by set comparison:
+ * Three distinct "incomplete review" cases, all computed by set
+ * comparison, the first two producing `"fully-dropped"`, the third
+ * `"partially-truncated"` (PR #82 round 2 review, FOLD 1, BLOCKER — this
+ * third case is the widening that round added):
  *
  * 1. **Never even fetched** — a `closing`-kind reference in `references`
  *    (the FULL, uncapped list) that isn't in `selectIssuesToFetch
@@ -286,6 +317,16 @@ export interface CriteriaSpineTruncationSummary {
  *    ONLY way it can produce zero spine entries is `buildCriteriaSpine`'s
  *    own byte-cap truncation cutting the rendered block short before
  *    reaching any of that issue's checkbox lines.
+ * 3. **Fetched, DID make it into the spine, but not ALL of it** — a
+ *    `closing`-kind entry in `result.specs` with `truncatedCriteriaCount
+ *    > 0` (its own criteria exceeded `MAX_CRITERIA_PER_ISSUE`, or the
+ *    rendered block's byte cap cut it short after SOME of its criteria
+ *    already made the spine). Without this case, a closing issue with a
+ *    few reviewed (and possibly all `satisfied: true`) criteria and more
+ *    silently truncated away would pass review clean — the same
+ *    false-pass risk as a full drop, just partial. Mutually exclusive
+ *    with case 2 by construction: case 2 requires ZERO spine entries for
+ *    the issue, this case requires AT LEAST ONE.
  *
  * @param references - `parseLinkedIssueReferences`'s full, UNCAPPED
  *   output — the same value this run's `main()` already passed to
@@ -312,12 +353,25 @@ export function computeCriteriaSpineTruncation(
     (s) => s.kind === "closing" && !spineIssueNumbers.has(s.issueNumber),
   );
 
-  const droppedClosingIssueNumbers = Array.from(
-    new Set<number>([
-      ...neverFetchedClosing.map((r) => r.issueNumber),
-      ...byteCapDroppedClosing.map((s) => s.issueNumber),
-    ]),
+  const fullyDroppedIssueNumbers = new Set<number>([
+    ...neverFetchedClosing.map((r) => r.issueNumber),
+    ...byteCapDroppedClosing.map((s) => s.issueNumber),
+  ]);
+
+  const partiallyTruncatedClosing = result.specs.filter(
+    (s) => s.kind === "closing" && spineIssueNumbers.has(s.issueNumber) && s.truncatedCriteriaCount > 0,
   );
+
+  const unreviewedClosingIssues: UnreviewedClosingIssueResult[] = [
+    ...Array.from(fullyDroppedIssueNumbers, (issueNumber) => ({
+      issueNumber,
+      truncationKind: "fully-dropped" as const,
+    })),
+    ...partiallyTruncatedClosing.map((s) => ({
+      issueNumber: s.issueNumber,
+      truncationKind: "partially-truncated" as const,
+    })),
+  ];
 
   const totalUnmetCriteriaCount = result.specs.reduce(
     (sum, s) => sum + s.unmetCriteria.length,
@@ -328,7 +382,7 @@ export function computeCriteriaSpineTruncation(
     result.specs.some((s) => s.truncatedCriteriaCount > 0) ||
     spine.length < totalUnmetCriteriaCount;
 
-  return { truncated, droppedClosingIssueNumbers };
+  return { truncated, unreviewedClosingIssues };
 }
 
 /**
@@ -402,12 +456,23 @@ const DIFF_DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_PR_DIFF(?:_[0-9a-f]+)?
  * homoglyph-substitution attack. This function does not normalize the
  * diff at all.
  *
- * @param text - Raw diff text.
+ * Exported (PR #82 round 2 review, FOLD 3) so `publish-spec-grounding-
+ * verdict-logic.mts`'s rationale sanitizer can reuse this SAME categorical
+ * primitive for the agent's own rationale text, rather than a second,
+ * independently-maintained enumeration of "invisible/bidi characters to
+ * neutralize" that could drift from this one — `UNTRUSTED_DATA_BREAKOUT_
+ * PATTERN` already includes every Unicode bidi control (U+202A-202E,
+ * U+2066-2069 are all category `Cf`, covered by `\p{C}`), so this function
+ * already neutralizes Trojan-Source-style bidi reordering, not just this
+ * module's own diff-guard use case.
+ *
+ * @param text - Raw text (a diff, or any other untrusted/agent-authored
+ *   string this categorical guard applies to).
  * @returns The same text, byte-for-byte, EXCEPT every invisible/
  *   unprintable character (ordinary ASCII whitespace excluded) is
  *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
  */
-function escapeInvisibleCharactersVisibly(text: string): string {
+export function escapeInvisibleCharactersVisibly(text: string): string {
   return text.replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, (ch) => {
     if (ASCII_WHITESPACE_CHARS.has(ch)) {
       return ch;

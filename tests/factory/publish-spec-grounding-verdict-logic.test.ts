@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildDroppedClosingIssueResults,
   buildSpecGroundingSummaryCommentBody,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
@@ -167,6 +166,58 @@ describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
     const result = formatRationaleForDisplay(joined({ rationale: "A short, ordinary rationale." }));
     expect(result).not.toMatch(/uploaded verdict artifact/i);
   });
+
+  it("neutralizes a bidi override character into a visible [U+XXXX] marker rather than letting it survive inside the code span (PR #82 round 2 review, FOLD 3, BLOCKER -- a code span stops Markdown/HTML interpretation but NOT Unicode bidi visual reordering, a Trojan-Source-style spoof under the bot's own identity)", () => {
+    const result = formatRationaleForDisplay(
+      joined({ rationale: "looks fine \u202eflaw a is siht\u202c really" }),
+    );
+    expect(result).not.toContain("\u202e");
+    expect(result).not.toContain("\u202c");
+    expect(result).toContain("[U+202E]");
+    expect(result).toContain("[U+202C]");
+  });
+
+  it.each([
+    ["LRE (U+202A)", "\u202a"],
+    ["RLE (U+202B)", "\u202b"],
+    ["RLO (U+202E)", "\u202e"],
+    ["LRI (U+2066)", "\u2066"],
+    ["PDI (U+2069)", "\u2069"],
+  ])("neutralizes %s, not just the one bidi character round 2's finding named explicitly -- the shared categorical primitive covers the whole bidi-control range, not an ad-hoc enumeration", (_label, ch) => {
+    const result = formatRationaleForDisplay(joined({ rationale: `before${ch}after` }));
+    expect(result).not.toContain(ch);
+    expect(result).toMatch(/\[U\+[0-9A-F]{4}\]/);
+  });
+
+  it("truncates on a CODE POINT boundary, never splitting a surrogate pair into an unpaired half (PR #82 round 2 review, FOLD 4, LOW)", () => {
+    // 299 ASCII characters, then an astral emoji (U+1F600, a surrogate
+    // pair in UTF-16) straddling the naive .slice(0, 300) cut point --
+    // a plain UTF-16-unit slice would split the emoji's own surrogate
+    // pair in half, leaving a lone unpaired surrogate.
+    const rationale = "x".repeat(299) + "\u{1F600}" + "y".repeat(50);
+    const result = formatRationaleForDisplay(joined({ rationale }));
+    // A lone unpaired surrogate makes JSON.stringify throw when strict,
+    // or round-trips as U+FFFD -- assert the emoji is either wholly
+    // present or wholly absent, never split.
+    const hasWholeEmoji = result.includes("\u{1F600}");
+    const hasLoneHighSurrogate = /\ud83d(?!\ude00)/.test(result);
+    const hasLoneLowSurrogate = /(?<!\ud83d)\ude00/.test(result);
+    expect(hasLoneHighSurrogate).toBe(false);
+    expect(hasLoneLowSurrogate).toBe(false);
+    // With exactly 300 code points allowed and 299 ASCII chars before it,
+    // the emoji IS the 300th code point and should be included whole.
+    expect(hasWholeEmoji).toBe(true);
+  });
+
+  it("counts an astral character as ONE code point toward the display cap, not two UTF-16 units -- confirms the cap is measured in code points consistently (PR #82 round 2 review, FOLD 4)", () => {
+    // 300 astral emoji = 300 code points but 600 UTF-16 code units --
+    // if the cap were still measured in .length (UTF-16 units), this
+    // would incorrectly truncate at 150 emoji, not 300.
+    const rationale = "\u{1F600}".repeat(300);
+    const result = formatRationaleForDisplay(joined({ rationale }));
+    expect(result).not.toMatch(/uploaded verdict artifact/i);
+    expect(result).toBe(`\`${rationale}\``);
+  });
 });
 
 describe("findExistingSpecGroundingSummaryCommentId (F1-S9 slice 3b-iii, issue #12)", () => {
@@ -203,19 +254,6 @@ describe("findExistingSpecGroundingSummaryCommentId (F1-S9 slice 3b-iii, issue #
   });
 });
 
-describe("buildDroppedClosingIssueResults (F1-S9 slice 3b-iii, issue #12, PR #76 review, L181)", () => {
-  it("maps each dropped issue number to its own result", () => {
-    expect(buildDroppedClosingIssueResults([12, 34])).toEqual([
-      { issueNumber: 12 },
-      { issueNumber: 34 },
-    ]);
-  });
-
-  it("returns an empty array for an empty input", () => {
-    expect(buildDroppedClosingIssueResults([])).toEqual([]);
-  });
-});
-
 describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)", () => {
   it("reports 'no blocking findings' and lists non-blocking findings when there are no blockers at all", () => {
     const body = buildSpecGroundingSummaryCommentBody(
@@ -239,17 +277,17 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
   });
 
-  it("adds a dropped-closing-issue result to the SAME total blocker count as criterion-level blockers", () => {
+  it("adds an unreviewed-closing-issue result to the SAME total blocker count as criterion-level blockers", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: false })],
-      [{ issueNumber: 99 }],
+      [{ issueNumber: 99, truncationKind: "fully-dropped" }],
       { truncated: false, diffTruncated: false },
     );
     expect(body).toContain("2 blocking finding(s)");
   });
 
   it("reports a dropped-closing-issue-only blocker count correctly when there are no criterion-level blockers at all", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [{ issueNumber: 99 }], {
+    const body = buildSpecGroundingSummaryCommentBody([], [{ issueNumber: 99, truncationKind: "fully-dropped" }], {
       truncated: false,
       diffTruncated: false,
     });

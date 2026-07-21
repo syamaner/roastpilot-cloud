@@ -22,26 +22,31 @@
  * severity that actually gates a blocker comment is computed HERE, from
  * data the agent never touched.
  *
- * ALSO covers whole-issue escalation for a truncated-away closing
- * reference ({@link DroppedClosingIssueResult},
- * {@link buildDroppedClosingIssueResults}) — a closing-kind issue this
- * PR referenced that never got a single spine entry at all, so there is
- * no per-criterion finding to join against. Team-lead's disposition
- * (Codex finding, PR #76 review, L181): this escalates exactly like an
- * unsatisfied criterion would, at the whole-issue level.
+ * ALSO covers whole-issue escalation for an incompletely-reviewed closing
+ * reference ({@link UnreviewedClosingIssueResult}, `spec-grounding-
+ * runner-logic.mts`'s own `computeCriteriaSpineTruncation`) — a
+ * closing-kind issue this PR referenced whose review is incomplete
+ * (either it never got a single spine entry at all, or it got some but
+ * not all of its own criteria), so there is no full per-criterion finding
+ * set to join against. Team-lead's disposition (Codex finding, PR #76
+ * review, L181, widened PR #82 round 2 review FOLD 1): this escalates
+ * exactly like an unsatisfied criterion would, at the whole-issue level.
  *
  * Deliberately does NOT include the blocker inline-comment builder or the
  * diff-anchor logic (a separate slice, 3b-iii-c — the novel mechanism
  * with its own real design risk, per team-lead's scope split) — this
  * module only produces the DATA those functions will consume
- * ({@link JoinedCriterionResult}s and {@link DroppedClosingIssueResult}s
+ * ({@link JoinedCriterionResult}s and {@link UnreviewedClosingIssueResult}s
  * with {@link deriveSeverity} `"blocker"`), plus the summary comment for
  * everything else.
  */
 
 import type { IssueLinkKind } from "./spec-grounding-logic.mts";
-import type { CriteriaSpineEntry } from "./spec-grounding-runner-logic.mts";
+import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
+import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
+
+export type { UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 
 /**
  * One trusted spine criterion, joined against the agent's own finding for
@@ -148,8 +153,10 @@ export function deriveSeverity(entry: JoinedCriterionResult): SpecGroundingSever
 }
 
 /**
- * Upper bound on a single rationale's rendered length before it's
- * truncated with a pointer to the full verdict artifact (PR #82 review,
+ * Upper bound on a single rationale's rendered length, in CODE POINTS
+ * (not UTF-16 code units — see {@link sanitizeAgentRationaleForDisplay}'s
+ * own docstring, PR #82 round 2 review, FOLD 4), before it's truncated
+ * with a pointer to the full verdict artifact (PR #82 review round 1,
  * FOLD 3 — LOW: `validateSpecGroundingVerdict`'s own `MAX_RATIONALE_LENGTH`
  * is 2000 characters PER finding; the full verdict is uploaded as an
  * artifact regardless, so this display cap loses nothing a human can't
@@ -181,16 +188,35 @@ const MAX_RATIONALE_DISPLAY_LENGTH = 300;
  * backtick, or a newline that could end the containing list item/start
  * a new Markdown block) are stripped first, same as that function.
  *
+ * A code span does NOT, however, stop Unicode BIDI visual reordering
+ * (PR #82 round 2 review, FOLD 3 — BLOCKER: a Trojan-Source-style bidi
+ * override, e.g. U+202E, survives inside a code span and can reorder how
+ * the rendered verdict text VISUALLY reads, under the bot's own
+ * identity, even though the span stops it being interpreted as Markdown
+ * structure) — closed by running the rationale through `spec-grounding-
+ * runner-logic.mts`'s own {@link escapeInvisibleCharactersVisibly} FIRST,
+ * the SAME categorical primitive the diff/criteria guards already use
+ * (bidi controls are Unicode category `Cf`, already covered by that
+ * function's own `UNTRUSTED_DATA_BREAKOUT_PATTERN`), rather than a
+ * second, independently-maintained bidi enumeration that could drift
+ * from it.
+ *
  * @param rationale - The agent's own rationale text.
  * @returns The rationale wrapped in an inert code span, truncated with a
  *   pointer to the uploaded verdict artifact if it exceeds
- *   {@link MAX_RATIONALE_DISPLAY_LENGTH}.
+ *   {@link MAX_RATIONALE_DISPLAY_LENGTH}. Truncation happens on a CODE
+ *   POINT boundary (PR #82 round 2 review, FOLD 4 — LOW: a plain
+ *   `.slice()` can split a surrogate pair in half, e.g. 299 ASCII
+ *   characters then half of an emoji, leaving a lone unpaired surrogate
+ *   that a downstream validator rejects or GitHub mangles).
  */
 function sanitizeAgentRationaleForDisplay(rationale: string): string {
-  const collapsed = rationale.replace(/[\r\n]+/g, " ").replace(/`/g, "");
-  if (collapsed.length > MAX_RATIONALE_DISPLAY_LENGTH) {
+  const markedInvisibles = escapeInvisibleCharactersVisibly(rationale);
+  const collapsed = markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  const codePoints = Array.from(collapsed);
+  if (codePoints.length > MAX_RATIONALE_DISPLAY_LENGTH) {
     return (
-      `\`${collapsed.slice(0, MAX_RATIONALE_DISPLAY_LENGTH)}…\` ` +
+      `\`${codePoints.slice(0, MAX_RATIONALE_DISPLAY_LENGTH).join("")}…\` ` +
       "_(truncated — full text in the uploaded verdict artifact)_"
     );
   }
@@ -289,14 +315,15 @@ export function findExistingSpecGroundingSummaryCommentId(
 export interface SpecGroundingTruncationFlags {
   /**
    * `criteria-spine.json`'s own `truncated` field — broader than
-   * {@link DroppedClosingIssueResult} alone: also true when a NON-closing
-   * reference's own criteria were byte-capped, when a linked issue was
-   * never fetched at all due to the per-PR issue cap, or when the spine
-   * ended up shorter than the total unmet-criteria count for any other
-   * reason. A dropped CLOSING reference already escalates to a blocker on
-   * its own via {@link DroppedClosingIssueResult}; this flag is the
-   * broader "the criteria set itself may be incomplete" signal, covering
-   * cases that don't individually escalate.
+   * {@link UnreviewedClosingIssueResult} alone: also true when a
+   * NON-closing reference's own criteria were byte-capped, when a linked
+   * issue was never fetched at all due to the per-PR issue cap, or when
+   * the spine ended up shorter than the total unmet-criteria count for
+   * any other reason. An unreviewed CLOSING reference (fully or
+   * partially) already escalates to a blocker on its own via {@link
+   * UnreviewedClosingIssueResult}; this flag is the broader "the criteria
+   * set itself may be incomplete" signal, covering cases that don't
+   * individually escalate.
    */
   readonly truncated: boolean;
   /**
@@ -337,8 +364,8 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  * MAX_FINDINGS_LIST_LENGTH}; any remainder is reported as an omitted
  * count, with a pointer to the uploaded verdict artifact, never silently
  * dropped. Blocking findings — BOTH per-criterion ones and whole-issue
- * {@link DroppedClosingIssueResult} ones — are DELIBERATELY NOT repeated
- * here in full (only counted, with a pointer to the separate inline
+ * {@link UnreviewedClosingIssueResult} ones — are DELIBERATELY NOT
+ * repeated here in full (only counted, with a pointer to the separate inline
  * comments) — the inline comment IS their canonical, resolvable home;
  * duplicating their content here would let a human "resolve" the issue by
  * treating the summary as sufficient while the actual blocking thread
@@ -350,30 +377,32 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  * reading only the top of this comment before deciding to merge must see
  * "this review may be incomplete" before "no blocking findings", never
  * after. This is distinct from, and does not replace, the per-issue
- * {@link DroppedClosingIssueResult} blocker escalation above: a dropped
- * CLOSING reference is serious enough to block on its own; this caveat
- * covers the broader, non-blocking-by-default cases (a byte-capped
- * NON-closing reference, a byte-capped or file-count-capped diff) that
- * still deserve a human's attention before merging.
+ * {@link UnreviewedClosingIssueResult} blocker escalation above: an
+ * unreviewed (fully or partially) CLOSING reference is serious enough to
+ * block on its own; this caveat covers the broader, non-blocking-by-
+ * default cases (a byte-capped NON-closing reference, a byte-capped or
+ * file-count-capped diff) that still deserve a human's attention before
+ * merging.
  *
  * @param joined - Every spine criterion's joined result.
- * @param droppedClosingIssues - {@link buildDroppedClosingIssueResults}'s
- *   output for this run — whole closing-kind issues never reviewed at
- *   all due to truncation, escalating the same way an unsatisfied
+ * @param unreviewedClosingIssues - `criteria-spine.json`'s own
+ *   `unreviewedClosingIssues` field for this run — whole closing-kind
+ *   issues not FULLY reviewed due to truncation (fully-dropped or
+ *   partially-truncated), escalating the same way an unsatisfied
  *   criterion does (team-lead's disposition, Codex finding, PR #76
- *   review, L181).
+ *   review, L181, widened PR #82 round 2 review FOLD 1).
  * @param truncation - This run's own `truncated`/`diffTruncated` flags
  *   from `criteria-spine.json`, straight through, unmodified.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
   joined: readonly JoinedCriterionResult[],
-  droppedClosingIssues: readonly DroppedClosingIssueResult[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   truncation: SpecGroundingTruncationFlags,
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
-  const totalBlockerCount = criterionBlockers.length + droppedClosingIssues.length;
+  const totalBlockerCount = criterionBlockers.length + unreviewedClosingIssues.length;
 
   const lines: string[] = ["**Spec-grounded review summary**", ""];
 
@@ -400,8 +429,8 @@ export function buildSpecGroundingSummaryCommentBody(
         "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
         "A blocking finding is either a criterion this PR's own closing keyword references that " +
         "the reviewer found unsatisfied, or a whole linked issue this PR claims to close that " +
-        "was never actually reviewed at all (truncated away by a resource cap — see the " +
-        "inline comment for which issue and why).",
+        "was never fully reviewed at all (truncated away, entirely or partially, by a resource " +
+        "cap — see the inline comment for which issue, which case, and why).",
       "",
     );
   } else {
@@ -458,35 +487,13 @@ export function buildSpecGroundingSummaryCommentBody(
   return lines.join("\n");
 }
 
-/**
- * One CLOSING-kind issue this PR referenced that ends up ENTIRELY
- * unreviewed — zero criteria in the spine at all — due to a resource cap
- * (`computeCriteriaSpineTruncation`'s own `droppedClosingIssueNumbers`,
- * `spec-grounding-runner-logic.mts`), NOT a per-criterion finding at all
- * (there is no `criterionId` to join against — nothing about this issue
- * ever reached the spine). Team-lead's disposition (Codex finding, PR #76
- * review, L181): this escalates exactly like an unsatisfied closing
- * criterion would, since a PR claiming to close an issue that was never
- * actually checked at all is the same class of gap, just at the whole-
- * issue level instead of the per-criterion one.
- */
-export interface DroppedClosingIssueResult {
-  readonly issueNumber: number;
-}
-
-/**
- * Builds the {@link DroppedClosingIssueResult} list for this run, straight
- * from the spine's own trusted truncation metadata — a thin adapter, not
- * new logic: `droppedClosingIssueNumbers` is already exactly the right
- * set (`computeCriteriaSpineTruncation`'s own docstring covers the full
- * reasoning for what is and isn't included).
- *
- * @param droppedClosingIssueNumbers - `criteria-spine.json`'s own
- *   `droppedClosingIssueNumbers` field for this run.
- * @returns One {@link DroppedClosingIssueResult} per dropped issue number.
- */
-export function buildDroppedClosingIssueResults(
-  droppedClosingIssueNumbers: readonly number[],
-): readonly DroppedClosingIssueResult[] {
-  return droppedClosingIssueNumbers.map((issueNumber) => ({ issueNumber }));
-}
+// UnreviewedClosingIssueResult (a CLOSING-kind issue this PR referenced
+// whose review is incomplete, fully or partially — see this module's
+// re-export above) is now computed directly by `spec-grounding-runner-
+// logic.mts`'s own `computeCriteriaSpineTruncation` and read straight
+// from `criteria-spine.json`'s `unreviewedClosingIssues` field — no
+// adapter needed here anymore (PR #82 round 2 review, FOLD 1: an earlier
+// version of this module defined its OWN `DroppedClosingIssueResult`
+// type, fully-dropped only, and a `buildDroppedClosingIssueResults`
+// thin adapter from a bare `readonly number[]`; both are gone now that
+// the runner produces the richer, already-typed result directly).
