@@ -42,7 +42,7 @@
  */
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
-import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
+import type { IssueLinkKind } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
@@ -484,72 +484,6 @@ export function isDiffTruncationUnverifiableForClosing(
     return false;
   }
   return joined.some((entry) => entry.kind === "closing") || unreviewedClosingIssues.length > 0;
-}
-
-/**
- * Every CLOSING-kind issue this PR's CURRENT body references that this
- * run's own spine never reviewed as closing at all — the BODY-EDIT sibling
- * of `publishSummary`'s trusted-head-SHA check (PR #87 review round 8,
- * Codex, medium, fail-open close): a body edit that ADDS a brand-new
- * `Closes #N` line, or upgrades an existing `Refs #N` to `Closes #N`,
- * changes NEITHER the PR's head SHA nor its diff, so the head-SHA check
- * alone cannot catch it — a run that reviewed the PR from BEFORE that edit
- * could otherwise still publish an all-clear ("No blocking findings") for a
- * closing claim it never actually evaluated as closing.
- *
- * The caller uses this ONLY on the zero-blocker/all-clear path — the
- * SAME re-check `tryPostBlockersInline` already applies to the blocker
- * path (via its own `currentlyReferencedIssueNumbers` filter) has nothing
- * to gate here, since there is no blocker list to filter when
- * `totalBlockerCount` is already zero. This function's own reviewed set
- * is deliberately built from `spineEntries` + `unreviewedClosingIssues`
- * ONLY, mirroring exactly what `publishSummary` already has in hand — no
- * new fetch, no new artifact field.
- *
- * A KNOWN, DELIBERATE, DOCUMENTED residual (never silently absorbed): a
- * closing-kind issue with ZERO unmet criteria AT REVIEW TIME (already
- * fully resolved when the runner looked at it) gets no `CriteriaSpineEntry`
- * and no `UnreviewedClosingIssueResult` at all — `buildLinkedIssueSpecs`
- * omits any issue with no unmet criteria outright, so this function cannot
- * tell "never reviewed as closing" apart from "reviewed as closing and
- * found already fully satisfied" for that one case, and reports it as
- * unreviewed either way. This is the FAIL-SAFE direction only (an
- * unwarranted extra re-review nudge, never a missed gap) — the same
- * "never too permissive, only ever too cautious" posture this whole module
- * follows elsewhere — and is deliberately left as-is rather than growing
- * `criteria-spine.json` a new field to close a purely cosmetic
- * false-positive.
- *
- * @param currentBody - The PR's CURRENT body text — already re-fetched and
- *   head-verified by the caller; this function does no fetching of its own.
- * @param thisRepo - This repo's own `owner/repo`, passed straight through
- *   to {@link parseLinkedIssueReferences} for its cross-repo-reference check.
- * @param spineEntries - `criteria-spine.json`'s own `entries` for this run.
- * @param unreviewedClosingIssues - `criteria-spine.json`'s own
- *   `unreviewedClosingIssues` for this run.
- * @returns Every closing-kind issue number `currentBody` references that is
- *   absent from both `spineEntries`'s closing-kind entries and
- *   `unreviewedClosingIssues`, deduplicated and ascending by issue number,
- *   empty if none.
- */
-export function findUnreviewedNewClosingReferences(
-  currentBody: string,
-  thisRepo: string,
-  spineEntries: readonly CriteriaSpineEntry[],
-  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
-): readonly number[] {
-  const reviewedClosingIssueNumbers = new Set<number>([
-    ...spineEntries.filter((entry) => entry.kind === "closing").map((entry) => entry.issueNumber),
-    ...unreviewedClosingIssues.map((issue) => issue.issueNumber),
-  ]);
-  const currentClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(currentBody, thisRepo)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
-  );
-  return [...currentClosingIssueNumbers].filter((issueNumber) => !reviewedClosingIssueNumbers.has(issueNumber)).sort(
-    (a, b) => a - b,
-  );
 }
 
 /**
