@@ -14,21 +14,27 @@
  * under AGENTS.md's 400-logic-line PR-hygiene cap) — this file imports
  * and calls it, never duplicates it.
  *
- * SLICE d3 SCOPE (deliberately incomplete — split per team-lead's "keep
- * d and e separate PRs, split d if it measures over 400 [logic lines]"
- * direction: d1 = pure-logic artifact parsing, d2 = comment I/O, d3 =
- * this entrypoint, d4 = inline blocker posting, not yet built): posts
- * the SUMMARY comment only — the diff fetch + deterministic-anchor
- * selection `publish-spec-grounding-blocker-logic.mts`'s own {@link
- * import("./publish-spec-grounding-blocker-logic.mts").planBlockerInlineComments}
- * needs are not wired up yet. So EVERY run with a blocking finding is,
- * structurally, exactly the anchor-fallback case: `blockersPostedInline`
- * is always `false`, the full blocker detail is always appended to the
- * summary via `buildAnchorFallbackSummarySupplement`, and this
- * entrypoint exits nonzero whenever there is one, per that function's
- * own documented contract. Self-correcting once d4 lands. Not yet wired
- * into any workflow (that is slice e, also separate), so this interim
- * behavior has no live, observable effect.
+ * SLICE d4 (this file's current state — split per team-lead's "keep d
+ * and e separate PRs, split d if it measures over 400 [logic lines]"
+ * direction: d1 = pure-logic artifact parsing, d2 = summary-comment I/O,
+ * d3 = this entrypoint's own gate cascade, d4 = the inline-posting
+ * wiring below): fetches this run's OWN trusted copy of the raw diff
+ * (`spec-grounding-runner.mts`'s own SHA-pinned `fetchPrDiff`, reused —
+ * never the read-only job's already-neutralized `pr-diff-block.txt`),
+ * selects a deterministic anchor, and attempts to post every blocker as
+ * a real, resolvable inline review comment
+ * (`publish-spec-grounding-inline-comment-io.mts`'s own `postInlineCommentPlan`,
+ * with its own 422 probe-then-degrade). `blockersPostedInline` is
+ * `true` only when inline posting genuinely succeeded; it is `false`
+ * for BOTH degrade cases — no addable anchor at all
+ * (`anchorFallbackNeeded`), or the first inline POST rejected with a
+ * 422 — and the full blocker detail is appended to the summary instead
+ * either way. This entrypoint exits nonzero ONLY in that `false` case:
+ * a blocker posted as a real inline thread is already gated by
+ * `required_conversation_resolution` on the thread itself, so a healthy
+ * run does not also need this job to fail red. Not yet wired into any
+ * workflow (that is slice e, still separate), so none of this has a
+ * live, observable effect yet.
  *
  * THE TRI-STATE OUTCOME GATE (team-lead's design, #12 3b-iii-d+e PR-plan
  * sign-off): before this job does anything, it checks TWO independent
@@ -62,9 +68,15 @@
  *        written marker should not happen, but a corrupted/missing
  *        download must still fail closed, never be silently treated as
  *        "nothing to review").
- *      - Present, `hasCriteria: false` → silent no-op (the runner found
- *        no linked issue, or no unmet criteria — genuinely nothing to
- *        spec-ground, not a failure).
+ *      - Present, `hasCriteria: false` → the runner found no linked issue,
+ *        or no unmet criteria — genuinely nothing to spec-ground, not a
+ *        failure — but NOT necessarily a silent no-op: {@link
+ *        clearStaleSpecGroundingStateOnDisappearedCriteria} clears any
+ *        PRIOR summary/fallback comment and inline blocker threads this
+ *        workflow posted on an earlier run, so criteria disappearing
+ *        (e.g. a body edit removing the last closing-keyword reference)
+ *        does not leave stale, no-longer-applicable state visible and
+ *        gating forever (PR #86 review, Codex, P2).
  *      - Present, `hasCriteria: true` → the verdict and criteria-spine
  *        artifacts MUST both be present and valid; either being
  *        absent/malformed is ALSO a visible fallback (the review agent
@@ -77,6 +89,10 @@
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
  * - `TRUSTED_PR_NUMBER` — from `github.event.pull_request.number`, never
  *   from an artifact.
+ * - `TRUSTED_HEAD_SHA` — from `github.event.pull_request.head.sha`; this
+ *   run's own anchor-selecting diff fetch is verified against it before
+ *   ever being used, the same discipline `spec-grounding-runner.mts`'s
+ *   own identical check applies to its own diff fetch.
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -89,12 +105,14 @@
  */
 
 import { open } from "node:fs/promises";
-import { requireEnv } from "./github-api.mts";
+import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   MAX_PAYLOAD_BYTES as MAX_VERDICT_PAYLOAD_BYTES,
   parseAndValidateVerdict,
   type SpecGroundingVerdict,
 } from "./spec-grounding-verdict-schema.mts";
+import { parseLinkedIssueReferences } from "./spec-grounding-logic.mts";
+import { fetchPrDiff } from "./spec-grounding-runner.mts";
 import {
   MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
   parseCriteriaSpineArtifact,
@@ -102,17 +120,169 @@ import {
 } from "./spec-grounding-runner-logic.mts";
 import {
   buildSpecGroundingSummaryCommentBody,
+  buildStaleBlockerSkippedNote,
   deriveSeverity,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   type JoinedCriterionResult,
+  type NoCriteriaReason,
 } from "./publish-spec-grounding-verdict-logic.mts";
-import { buildAnchorFallbackSummarySupplement } from "./publish-spec-grounding-blocker-logic.mts";
 import {
+  buildAnchorFallbackSummarySupplement,
+  planBlockerInlineComments,
+  type InlinePostingDegradeReason,
+} from "./publish-spec-grounding-blocker-logic.mts";
+import {
+  clearStaleSpecGroundingSummary,
   neutralizeReasonForLog,
   publishFallback,
   upsertSummaryComment,
 } from "./publish-spec-grounding-comment-io.mts";
+import {
+  clearStaleInlineBlockerComments,
+  postInlineCommentPlan,
+} from "./publish-spec-grounding-inline-comment-io.mts";
+
+interface GitHubPullRequestShas {
+  readonly head: { readonly sha: string };
+  readonly base: { readonly sha: string };
+  /**
+   * The PR's own current body — added alongside the SHAs (PR #87 review
+   * round 3, Codex, P1, gate-integrity TOCTOU) so {@link
+   * isStillSafeToDeleteInlineBlockerThreads} can re-parse it without a
+   * second GET. Unused by {@link fetchAndVerifyPrShas}'s own existing
+   * caller (`tryPostBlockersInline`), which only ever needed the SHAs.
+   */
+  readonly body: string | null;
+}
+
+/**
+ * Fetches the PR's own current head/base SHAs and verifies the head
+ * matches the TRUSTED value from the workflow's own event context —
+ * mirrors `spec-grounding-runner.mts`'s own identical verification
+ * exactly (never re-derived independently, F1-S9 slice 3b-iii-d4): the
+ * mutable `/pulls/{n}` resource always reflects whatever the branch
+ * currently points to, so without this check, a push landing between
+ * this run's trigger and this fetch could pair a trusted verdict
+ * (reviewed against an EARLIER head) with a LATER, unreviewed diff for
+ * this run's own anchor selection.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context, never re-derived from this PR's own mutable state.
+ * @returns The PR's own head/base SHAs.
+ * @throws If the PR's current head SHA does not match `trustedHeadSha`.
+ */
+async function fetchAndVerifyPrShas(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+): Promise<GitHubPullRequestShas> {
+  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  if (pr.head.sha !== trustedHeadSha) {
+    throw new Error(
+      `PR #${prNumber}'s current head SHA (${pr.head.sha}) does not match the trusted event head SHA ` +
+        `(${trustedHeadSha}) — the PR moved between the review trigger and this fetch; failing closed ` +
+        `rather than selecting an anchor against a possibly-stale or possibly-newer diff.`,
+    );
+  }
+  return pr;
+}
+
+/**
+ * Re-validates, immediately before the DESTRUCTIVE inline-blocker-thread
+ * deletion in {@link clearStaleSpecGroundingStateOnDisappearedCriteria}'s
+ * own `"no-references"` branch, that the "no linked-issue reference at
+ * all" signal `spec-grounding-runner.mts` reported is STILL true right
+ * now — not just at the moment that read-only run happened to check (PR
+ * #87 review round 3, Codex, P1 — a genuine gate-integrity TOCTOU): a
+ * body-only edit does NOT bump the PR's own head SHA, so a PR whose body
+ * is edited to ADD a closing reference (or that gets a superseding run
+ * posting new blockers for that reference) AFTER the read-only runner
+ * finished but BEFORE this publish run reaches the delete would
+ * otherwise have an OLDER publish run delete valid, currently-gating
+ * inline blocker thread(s) for a claim the runner never actually saw —
+ * an anti-gaming hole distinct from (but the same root class as) the
+ * self-attested-criteria one PR #87's own earlier round already closed.
+ *
+ * Re-checks TWO independent things against the PR's CURRENT state,
+ * fetched fresh here (never reused from any earlier call in this same
+ * run):
+ * 1. The PR's current head SHA still matches `trustedHeadSha` — the SAME
+ *    check {@link fetchAndVerifyPrShas} makes, but surfaced as a plain
+ *    boolean here, never a throw: a mismatch is an EXPECTED race outcome
+ *    this function's caller degrades from gracefully, not a genuine
+ *    error worth failing the whole run over.
+ * 2. The PR's CURRENT body, re-parsed with the SAME {@link
+ *    parseLinkedIssueReferences} the runner itself uses, still yields
+ *    ZERO linked-issue references.
+ *
+ * Only when BOTH still hold is it actually safe to delete. A genuine
+ * network/API failure while re-fetching still propagates uncaught (this
+ * function only absorbs the two SPECIFIC, expected-race conditions
+ * above — never a real error, which the caller's own existing "never
+ * silent" fallback handling already covers).
+ *
+ * RESIDUAL, documented honestly rather than understated (PR #87 review
+ * round 4, Codex, P1 — an earlier version of this docstring called this
+ * gap "sub-second", which undersold it): this closes the window between
+ * the READ-ONLY runner's own execution and THIS revalidation, but not
+ * the window from here through the actual destructive work that
+ * follows — which spans the summary comment's own GET+PATCH, the inline
+ * comments' own GET, AND the delete calls themselves (each matched by a
+ * GENERIC marker, not a specific run's own plan), none of which is a
+ * single atomic operation. A run superseding THIS one (e.g. a body edit
+ * landing between this revalidation and the delete) can genuinely land
+ * inside that window; true atomicity across several separate REST calls
+ * isn't achievable via GitHub's API regardless of how tightly this
+ * function's own two checks are drawn.
+ *
+ * What actually closes the remaining risk — an OLDER publish run's own
+ * delete removing inline blocker threads a NEWER, superseding run just
+ * posted for a newly-added reference — is OPERATIONAL, not a property
+ * of this function: slice e's own dedicated per-PR concurrency group
+ * (`cancel-in-progress: false`, serializing every publish run for a
+ * given PR to completion before the next one starts) means two publish
+ * runs for the same PR never execute concurrently at all, so this
+ * window can only ever be crossed by a run that is ALREADY committed to
+ * running before the newer one starts — the same config-dependent-
+ * safety class the checkout's own `base.sha` pin belongs to (correct
+ * given the workflow is configured as designed, not self-enforcing
+ * independent of that configuration). GENERATION-AWARE ownership (each
+ * run stamping and checking a run-identity marker on what it deletes,
+ * self-safe independent of any concurrency configuration) is tracked as
+ * defense-in-depth in issue #88, ahead of the gate-enable decision
+ * (#47) — not fixed here.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context — the value this run's OWN read-only pass was
+ *   reviewed against, never re-derived.
+ * @returns `true` only if the PR's CURRENT head SHA still matches AND
+ *   its CURRENT body still yields zero linked-issue references.
+ */
+async function isStillSafeToDeleteInlineBlockerThreads(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+): Promise<boolean> {
+  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  if (pr.head.sha !== trustedHeadSha) {
+    return false;
+  }
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  return references.length === 0;
+}
 
 interface RunPaths {
   readonly outcomePath: string;
@@ -215,13 +385,25 @@ async function readArtifactFile(path: string, maxBytes: number): Promise<Buffer 
 }
 
 /**
- * Upper bound on `outcome.json`'s own raw size — this file is a single
- * boolean field (`spec-grounding-runner.mts`'s own workflow step writes
- * `{"hasCriteria": true|false}` via `jq`), so a generous-but-tiny ceiling
- * is enough; anything meaningfully larger than this is already a
- * corrupted or unexpected artifact.
+ * Upper bound on `outcome.json`'s own raw size — this file is a tiny,
+ * fixed-shape marker (`spec-grounding-runner.mts`'s own workflow step
+ * writes it via `jq`), so a generous-but-tiny ceiling is enough; anything
+ * meaningfully larger than this is already a corrupted or unexpected
+ * artifact.
  */
 const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
+
+/** The set of `noCriteriaReason` values `spec-grounding-runner.mts` can legitimately emit. */
+const NO_CRITERIA_REASONS: ReadonlySet<string> = new Set<NoCriteriaReason>(["no-references", "no-unmet-criteria"]);
+
+/**
+ * `outcome.json`'s own shape, post-validation — a discriminated union so
+ * `noCriteriaReason` is only ever accessible (and only ever populated)
+ * when `hasCriteria` is `false` (PR #87 review, Codex, P1/medium fold).
+ */
+type OutcomeArtifact =
+  | { readonly hasCriteria: true }
+  | { readonly hasCriteria: false; readonly noCriteriaReason: NoCriteriaReason };
 
 /**
  * Reads and shape-validates `outcome.json` — kept private and inline
@@ -230,23 +412,44 @@ const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
  * file-reading glue with no other consumer (`readVerdictArtifact` there
  * is equally private).
  *
+ * `hasCriteria: false` now carries a `noCriteriaReason` (PR #87 review,
+ * Codex, P1/medium fold — a real gap the original version missed):
+ * `spec-grounding-runner.mts` emits `hasCriteria: false` from TWO
+ * DIFFERENT branches with materially different trust — no closing-
+ * keyword reference at all (`"no-references"`, no obligation ever
+ * existed) versus a linked issue whose acceptance criteria are all
+ * SELF-ATTESTED complete (`"no-unmet-criteria"`, never diff-verified).
+ * Without this field, the privileged publisher's own clear-on-disappear
+ * logic could not tell the two apart, and would delete a
+ * `required_conversation_resolution`-gating inline blocker thread in
+ * BOTH cases — an anti-gaming hole in the self-attested case.
+ *
+ * FAILS CLOSED (never destructively) when `noCriteriaReason` is missing
+ * or not one of the known values on the `hasCriteria: false` path: a
+ * malformed, stale-runner, or tampered artifact is coerced to
+ * `"no-unmet-criteria"` — the NON-destructive treatment — rather than
+ * throwing (which would itself be a visible-fallback case) or defaulting
+ * to `"no-references"` (which would delete inline threads on a signal
+ * this function could not actually confirm). Never too permissive, only
+ * ever too cautious.
+ *
  * @param path - `outcome.json`'s path on disk.
- * @returns `null` if the file is absent; the parsed `hasCriteria` value
- *   if present and valid.
+ * @returns `null` if the file is absent; the parsed, shape-validated
+ *   artifact if present.
  * @throws If the file is present but oversized, unreadable, not valid
- *   JSON, or not shaped exactly `{"hasCriteria": boolean}`.
+ *   JSON, missing `hasCriteria`, or carrying an unexpected extra field.
  */
-async function readOutcomeArtifact(path: string): Promise<boolean | null> {
+async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null> {
   const raw = await readArtifactFile(path, MAX_OUTCOME_ARTIFACT_BYTES);
   if (raw === null) {
     return null;
   }
   // Unlike the verdict/criteria-spine artifacts (fed straight to parsers
   // with their own Buffer-only fatal isUtf8 check), outcome.json has no
-  // such parser — it's a trivial, our-own-runner-written `{"hasCriteria":
-  // boolean}` marker with no adversarial-content risk, so a plain UTF-8
-  // decode (Node's usual lenient U+FFFD replacement on malformed bytes)
-  // is unchanged from this function's prior behavior.
+  // such parser — it's a trivial, our-own-runner-written marker with no
+  // adversarial-content risk, so a plain UTF-8 decode (Node's usual
+  // lenient U+FFFD replacement on malformed bytes) is unchanged from this
+  // function's prior behavior.
   const rawText = raw.toString("utf8");
   let parsed: unknown;
   try {
@@ -258,12 +461,164 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
     typeof parsed !== "object" ||
     parsed === null ||
     Array.isArray(parsed) ||
-    typeof (parsed as Record<string, unknown>).hasCriteria !== "boolean" ||
-    Object.keys(parsed as Record<string, unknown>).length !== 1
+    typeof (parsed as Record<string, unknown>).hasCriteria !== "boolean"
   ) {
-    throw new Error(`outcome.json at ${path} must be exactly {"hasCriteria": boolean}, got ${rawText}`);
+    throw new Error(`outcome.json at ${path} must be shaped {"hasCriteria": boolean, ...}, got ${rawText}`);
   }
-  return (parsed as { hasCriteria: boolean }).hasCriteria;
+  const record = parsed as Record<string, unknown>;
+  const hasCriteria = record.hasCriteria as boolean;
+
+  if (hasCriteria) {
+    if (Object.keys(record).length !== 1) {
+      throw new Error(
+        `outcome.json at ${path} must be exactly {"hasCriteria": true} when hasCriteria is true ` +
+          `(no noCriteriaReason expected), got ${rawText}`,
+      );
+    }
+    return { hasCriteria: true };
+  }
+
+  const extraKeys = Object.keys(record).filter((key) => key !== "hasCriteria" && key !== "noCriteriaReason");
+  if (extraKeys.length > 0) {
+    throw new Error(`outcome.json at ${path} carries unexpected field(s) (${extraKeys.join(", ")}), got ${rawText}`);
+  }
+  const rawReason = record.noCriteriaReason;
+  const noCriteriaReason: NoCriteriaReason =
+    typeof rawReason === "string" && NO_CRITERIA_REASONS.has(rawReason)
+      ? (rawReason as NoCriteriaReason)
+      : "no-unmet-criteria";
+  return { hasCriteria: false, noCriteriaReason };
+}
+
+/**
+ * Clears any stale spec-grounded review state on a PR whose linked-issue
+ * criteria have disappeared or gone unmet (`hasCriteria: false`) — a P2
+ * fix (PR #86 review, Codex): a PR that PREVIOUSLY got a summary/
+ * fallback comment or inline blocker threads, then had a later change
+ * make `hasCriteria: false` true, used to leave that stale state (still
+ * claiming blockers, or a failed pipeline) visible and gating forever —
+ * this entrypoint's own `hasCriteria: false` path was a pure silent
+ * no-op with no upsert or deletion at all.
+ *
+ * BRANCHES ON `reason` (PR #87 review, Codex, P1/medium fold — the
+ * original version of this function treated every `hasCriteria: false`
+ * run identically, an anti-gaming hole):
+ * - `"no-references"` — no closing-keyword reference exists at all, so
+ *   there was never any obligation. RE-VALIDATES this is STILL true right
+ *   now, immediately before deleting, via {@link
+ *   isStillSafeToDeleteInlineBlockerThreads} (PR #87 review round 3,
+ *   Codex, P1 — a genuine gate-integrity TOCTOU: a body-only edit does
+ *   NOT bump the trusted head SHA, so a PR body edited to ADD a closing
+ *   reference AFTER the read-only runner finished but BEFORE this delete
+ *   would otherwise have this run delete a currently-gating thread for a
+ *   claim the runner never saw). If STILL safe: clears BOTH channels —
+ *   the summary comment (via {@link clearStaleSpecGroundingSummary}, a
+ *   no-op if none exists) AND deletes any prior inline blocker comments
+ *   (via {@link clearStaleInlineBlockerComments}, matched generically
+ *   since there is no run plan at all once criteria are gone). If NOT
+ *   still safe (an expected race outcome, never treated as an error):
+ *   degrades to the SAME non-destructive treatment `"no-unmet-criteria"`
+ *   gets below — accurate summary, inline threads left untouched.
+ * - `"no-unmet-criteria"` (or any reason this run could not positively
+ *   confirm as `"no-references"`, per {@link readOutcomeArtifact}'s own
+ *   fail-closed coercion) — a closing claim STILL exists; the linked
+ *   issue's own criteria are merely SELF-ATTESTED complete, never
+ *   diff-verified. Upserts an ACCURATE summary explaining this, but
+ *   deliberately does NOT delete inline blocker threads — deleting a
+ *   `required_conversation_resolution`-gating thread here, on an
+ *   unverified self-attestation, would be exactly the anti-gaming hole
+ *   this branch exists to close. A human still triages and resolves any
+ *   remaining thread.
+ *
+ * Scoped to `hasCriteria: false` ONLY — deliberately NOT extended to the
+ * `"skipped"`/`"cancelled"` job-result branch above, even though team-
+ * lead's own review raised the question: those two signals mean "this
+ * run never checked", not "this run checked and found nothing" — a
+ * draft-PR skip or a concurrency-superseded cancellation says nothing
+ * about whether a PR's criteria actually disappeared, so clearing on
+ * either would risk erasing a STILL-ACCURATE summary or still-open
+ * blocker thread purely because this particular event didn't trigger a
+ * real run. `hasCriteria: false` is the only signal that has actually
+ * VERIFIED "no unmet criteria remain" (with `reason` further narrowing
+ * exactly what was verified).
+ *
+ * A genuine failure while clearing (anything other than the benign
+ * "nothing to clear"/"already gone" cases, or the expected-race
+ * degrade above, none of which throw) is surfaced as a visible
+ * fallback, the same "never silent" policy every other network failure
+ * in this entrypoint follows.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param reason - Why this run found `hasCriteria: false`.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context — needed for the `"no-references"` branch's own
+ *   pre-delete revalidation.
+ */
+async function clearStaleSpecGroundingStateOnDisappearedCriteria(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  reason: NoCriteriaReason,
+  trustedHeadSha: string,
+): Promise<void> {
+  try {
+    if (reason === "no-references") {
+      const stillSafeToDelete = await isStillSafeToDeleteInlineBlockerThreads(
+        token,
+        owner,
+        repo,
+        prNumber,
+        trustedHeadSha,
+      );
+      if (stillSafeToDelete) {
+        const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, "no-references");
+        const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+        console.log(
+          `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
+            `reason=no-references, revalidated) — cleared stale prior state (summary comment cleared=` +
+            `${summaryCleared}, ${clearedInlineCount} inline comment(s) removed).`,
+        );
+        return;
+      }
+      // Expected race, NOT an error: the PR's head moved, or its current
+      // body now yields a closing reference the read-only runner never
+      // saw. Degrade to the non-destructive treatment -- never delete a
+      // thread this run could not actually re-verify is obligation-free.
+      const summaryCleared = await clearStaleSpecGroundingSummary(
+        token,
+        owner,
+        repo,
+        prNumber,
+        "race-detected-before-delete",
+      );
+      console.log(
+        `PR #${prNumber}'s state changed since the spec-grounded review ran (head moved, or a new ` +
+          `closing reference now exists) — degrading to the non-destructive path: summary comment ` +
+          `updated (cleared=${summaryCleared}); any prior inline blocker thread(s) were deliberately ` +
+          `LEFT UNTOUCHED for a fresh run to re-evaluate.`,
+      );
+      return;
+    }
+    // "no-unmet-criteria" (or a coerced-to-safe unknown/missing reason):
+    // a closing claim STILL exists, self-attested only -- inline blocker
+    // threads are deliberately left untouched for a human to triage.
+    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, reason);
+    console.log(
+      `PR #${prNumber}'s linked issue(s) show every acceptance criterion self-attested complete ` +
+        `(hasCriteria: false, reason=${reason}) — summary comment updated (cleared=${summaryCleared}); ` +
+        `any prior inline blocker thread(s) were deliberately LEFT UNTOUCHED, not cleared.`,
+    );
+  } catch (err) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `PR #${prNumber} has no unmet linked-issue criteria left to review, but clearing its prior ` +
+        `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+  }
 }
 
 export async function main(): Promise<void> {
@@ -273,6 +628,7 @@ export async function main(): Promise<void> {
     throw new Error(`GITHUB_REPOSITORY must be "owner/repo", got ${process.env.GITHUB_REPOSITORY}`);
   }
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
+  const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
   const paths = resolvePaths();
 
   const jobResult = requireEnv("SPEC_GROUNDED_REVIEW_JOB_RESULT");
@@ -294,9 +650,9 @@ export async function main(): Promise<void> {
     return;
   }
 
-  let hasCriteria: boolean | null;
+  let outcome: OutcomeArtifact | null;
   try {
-    hasCriteria = await readOutcomeArtifact(paths.outcomePath);
+    outcome = await readOutcomeArtifact(paths.outcomePath);
   } catch (err) {
     await publishFallback(token, owner, repo, prNumber, [
       err instanceof Error ? err.message : String(err),
@@ -304,7 +660,7 @@ export async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (hasCriteria === null) {
+  if (outcome === null) {
     await publishFallback(token, owner, repo, prNumber, [
       `outcome.json not found at ${paths.outcomePath} — the spec-grounded-review job result was ` +
         `"success", but its own self-describing marker artifact is missing; the pipeline may have ` +
@@ -313,8 +669,15 @@ export async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (!hasCriteria) {
-    console.log(`PR #${prNumber} had nothing to spec-ground (hasCriteria: false) — silent no-op.`);
+  if (!outcome.hasCriteria) {
+    await clearStaleSpecGroundingStateOnDisappearedCriteria(
+      token,
+      owner,
+      repo,
+      prNumber,
+      outcome.noCriteriaReason,
+      trustedHeadSha,
+    );
     return;
   }
 
@@ -380,7 +743,129 @@ export async function main(): Promise<void> {
     return;
   }
 
-  await publishSummary(token, owner, repo, prNumber, spineResult.spine, verdictResult.verdict);
+  await publishSummary(token, owner, repo, prNumber, trustedHeadSha, spineResult.spine, verdictResult.verdict);
+}
+
+/** {@link tryPostBlockersInline}'s own richer result — see its docstring. */
+interface TryPostBlockersInlineResult {
+  readonly postedInline: boolean;
+  readonly degradeReason: InlinePostingDegradeReason | null;
+  readonly staleBlockerIssueNumbers: readonly number[];
+}
+
+/**
+ * Attempts to post this run's blockers (if any) as real, resolvable
+ * inline comments — the diff fetch, deterministic-anchor selection, and
+ * the 422 probe-then-degrade, all delegated to already-reviewed pure/
+ * network-wiring code (`publish-spec-grounding-blocker-logic.mts`'s own
+ * `planBlockerInlineComments`, `publish-spec-grounding-inline-comment-io
+ * .mts`'s own `postInlineCommentPlan`).
+ *
+ * RE-CHECKS the CURRENT PR body before planning anything (PR #87 review
+ * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold already
+ * closed for the `hasCriteria: false` path): `criterionBlockers` and
+ * `spine.unreviewedClosingIssues` are both computed from the RUNNER-TIME
+ * body, but a body-only edit never bumps the trusted head SHA — a PR
+ * whose body is edited to REMOVE a reference to some issue #N (between
+ * the read-only run and this publish run) would otherwise have this
+ * function post an inline comment reasserting an obligation for #N that
+ * this PR no longer even claims to reference at all. Re-parses `pr.body`
+ * with the SAME {@link parseLinkedIssueReferences} the runner itself
+ * uses, and filters BOTH `criterionBlockers` and
+ * `spine.unreviewedClosingIssues` down to entries whose own `issueNumber`
+ * is still in that current set — the STALE ones are reported back to the
+ * caller (never silently dropped) so the summary can say so, never
+ * posted inline.
+ *
+ * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
+ * Codex, medium, fail-open close): {@link publishSummary}'s own caller
+ * now fetches and verifies the PR's current SHAs/body ONCE, before
+ * deciding whether there are any blockers at all — an earlier version had
+ * this function do that fetch+verify itself, which meant the
+ * zero-blocker "no blocking findings" path NEVER verified the trusted
+ * head SHA at all, so a push moving the PR after review could yield a
+ * stale all-clear for a head this run never actually reviewed. This
+ * function no longer fetches or verifies anything itself; it trusts its
+ * caller already did.
+ *
+ * DELIBERATE DESIGN (team-lead's ruling, PR #87 review round 4b): the
+ * caller's own {@link buildSpecGroundingSummaryCommentBody} still counts
+ * `criterionBlockers.length + unreviewedClosingIssues.length` from the
+ * UNFILTERED (review-time) sets for its own "N blocking finding(s)"
+ * wording and exit-code decision — it does NOT recompute that count from
+ * the staleness filtering this function does internally. This is
+ * intentionally FAIL-SAFE, not a bug: it can only ever OVER-gate (exit
+ * nonzero, or keep counting a stale finding) never UNDER-gate (erase a
+ * real one), and `buildSpecGroundingSummaryCommentBody` (round 4b, this
+ * same fold) now labels the count explicitly as review-time and
+ * reconciles it against `staleBlockerIssueNumbers` whenever any exist —
+ * so the headline stays ACCURATE, not misleading, without needing to
+ * restructure the count itself. The DEEPER design question — should the
+ * count/exit-code instead reflect only the still-referenced subset, and
+ * should non-blocking findings get the same staleness treatment — is
+ * tracked in issue #89, ahead of the gate-enable decision (#47); not
+ * folded into this one, since it would require passing
+ * `buildSpecGroundingSummaryCommentBody` FILTERED `joined`/
+ * `unreviewedClosingIssues` arrays, which also carry non-blocking
+ * findings that should NOT be filtered by this same staleness logic — a
+ * real restructuring, not a cheap fold.
+ *
+ * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
+ *   successfully posted as a real inline comment; `{ postedInline: false,
+ *   degradeReason }` if there was no addable anchor at all
+ *   (`"no-addable-anchor"`) or the first inline POST was rejected with a
+ *   422 (`"anchor-rejected-422"`) — the anchor-fallback case, either
+ *   structurally or via the probe-then-degrade, the caller renders the
+ *   full (still-referenced) blocker detail in the summary instead either
+ *   way. `staleBlockerIssueNumbers` is independent of both — the issue
+ *   numbers filtered out because the PR's CURRENT body no longer
+ *   references them at all.
+ * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
+ *   inline-posting failure) — a genuine error, not a case this function
+ *   degrades from; the caller converts it into a visible fallback, same
+ *   as every other artifact/network failure in this entrypoint.
+ */
+async function tryPostBlockersInline(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  pr: GitHubPullRequestShas,
+  criterionBlockers: readonly JoinedCriterionResult[],
+  spine: ParsedCriteriaSpine,
+  diffTruncationBlocksClosingClaim: boolean,
+): Promise<TryPostBlockersInlineResult> {
+  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
+  const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
+    currentlyReferencedIssueNumbers.has(blocker.issueNumber),
+  );
+  const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
+    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+  );
+  const staleBlockerIssueNumbers = [
+    ...new Set(
+      [...criterionBlockers, ...spine.unreviewedClosingIssues]
+        .map((entry) => entry.issueNumber)
+        .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber)),
+    ),
+  ].sort((a, b) => a - b);
+
+  const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
+  const plan = planBlockerInlineComments(
+    stillReferencedCriterionBlockers,
+    stillReferencedUnreviewedClosingIssues,
+    diff,
+    diffTruncationBlocksClosingClaim,
+  );
+  if (plan.anchorFallbackNeeded) {
+    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
+  }
+  const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
+  if (!postResult.ok) {
+    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
+  }
+  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
 }
 
 async function publishSummary(
@@ -388,6 +873,7 @@ async function publishSummary(
   owner: string,
   repo: string,
   prNumber: number,
+  trustedHeadSha: string,
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
@@ -403,37 +889,104 @@ async function publishSummary(
   const totalBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
-  // Slice d1 never posts inline blocker comments (see this module's own
-  // top-level docstring) — every blocker-bearing run is therefore,
-  // structurally, the anchor-fallback case: `blockersPostedInline` is
-  // always `false`, and the full blocker detail is always appended to the
-  // summary via `buildAnchorFallbackSummarySupplement`, exactly the
-  // contract that function documents for `anchorFallbackNeeded: true`.
+  // Verified UNCONDITIONALLY, before the blocker-count branch (PR #87
+  // review round 7, Codex, medium, fail-open close): an earlier version
+  // only fetched/verified the PR's current head SHA INSIDE
+  // tryPostBlockersInline, which only ran when totalBlockerCount > 0 --
+  // meaning the zero-blocker "no blocking findings" all-clear path never
+  // verified anything at all, so a push moving the PR after the read-only
+  // review ran could still get a stale all-clear posted for a head this
+  // run never actually reviewed. Fetched ONCE here and passed down to
+  // `tryPostBlockersInline` (which no longer fetches/verifies itself) so
+  // every `hasCriteria: true` publish -- blockers or not -- verifies the
+  // trusted head before posting anything.
+  let pr: GitHubPullRequestShas;
+  try {
+    pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+  } catch (err) {
+    // A genuine SHA mismatch (the PR moved) or a fetch failure -- degrade
+    // to the SAME visible fallback every other artifact/network failure
+    // in this entrypoint uses, never a stale all-clear or a blocker post
+    // for a head this run could not actually verify.
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to verify this PR's current head SHA before publishing: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+
+  let blockersPostedInline = false;
+  let degradeReason: InlinePostingDegradeReason | null = null;
+  let staleBlockerIssueNumbers: readonly number[] = [];
+  if (totalBlockerCount > 0) {
+    try {
+      const result = await tryPostBlockersInline(
+        token,
+        owner,
+        repo,
+        prNumber,
+        pr,
+        criterionBlockers,
+        spine,
+        diffTruncationBlocksClosingClaim,
+      );
+      blockersPostedInline = result.postedInline;
+      degradeReason = result.degradeReason;
+      staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
+    } catch (err) {
+      // A genuine error (a diff-fetch failure, a non-first or non-422
+      // inline-posting failure) — NOT the anchor-fallback or 422-degrade
+      // case, both of which `tryPostBlockersInline` already resolves to a
+      // plain result, never a throw. Same "visible fallback, never a
+      // silent or bare-CI-red failure" treatment as every other
+      // artifact/network failure in this entrypoint.
+      await publishFallback(token, owner, repo, prNumber, [
+        `failed to post this run's blocking findings as inline comments: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      ]);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   let body = buildSpecGroundingSummaryCommentBody(
     joined,
     spine.unreviewedClosingIssues,
     { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
-    false,
+    blockersPostedInline,
+    degradeReason,
+    staleBlockerIssueNumbers,
   );
-  if (totalBlockerCount > 0) {
+  if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
       criterionBlockers,
       spine.unreviewedClosingIssues,
       diffTruncationBlocksClosingClaim,
+      // Always non-null here by tryPostBlockersInline's own contract
+      // (populated on every `postedInline: false` result) -- the
+      // fallback is defensive only, never expected to actually apply.
+      degradeReason ?? "no-addable-anchor",
     );
+  }
+  if (staleBlockerIssueNumbers.length > 0) {
+    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
   }
 
   await upsertSummaryComment(token, owner, repo, prNumber, body);
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
-      `finding(s), ${joined.length} criterion(a) reviewed.`,
+      `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
+      `${staleBlockerIssueNumbers.length} stale blocker(s) skipped.`,
   );
 
-  if (totalBlockerCount > 0) {
-    // Same "the entrypoint is responsible for exiting nonzero" contract
-    // `buildAnchorFallbackSummarySupplement`'s own docstring documents for
-    // the anchor-fallback case — every blocker-bearing run in slice d3 is
-    // exactly that case (see this module's own top-level docstring).
+  if (totalBlockerCount > 0 && !blockersPostedInline) {
+    // A blocker posted as a REAL inline thread is already gated by
+    // `required_conversation_resolution` on the thread itself — this job
+    // does not also need to fail red for that, healthy case. Exiting
+    // nonzero is reserved for the anchor-fallback/422-degrade case, per
+    // `buildAnchorFallbackSummarySupplement`'s own documented contract
+    // (LOW2, #12 3b-iii-d+e PR-plan sign-off: the create-review-comment
+    // 422 maps to this exact degrade path, not an unhandled failure).
     process.exitCode = 1;
   }
 }

@@ -41,6 +41,7 @@
  * everything else.
  */
 
+import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
 import type { IssueLinkKind } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
@@ -572,6 +573,24 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   but always required rather than defaulted — this is exactly the
  *   kind of safety-relevant wording a silent default could get wrong
  *   unnoticed.
+ * @param degradeReason - WHY `blockersPostedInline` is `false` (PR #87
+ *   review round 4, Codex, P1 — an earlier version always assumed the
+ *   anchor-absent case; now distinguishes it from a real anchor GitHub
+ *   itself rejected). `null` when `blockersPostedInline` is `true` (or
+ *   there are no blockers at all) — the wording this governs is never
+ *   reached in that case, but a `null` is still required rather than
+ *   defaulted, matching `blockersPostedInline`'s own discipline.
+ * @param staleBlockerIssueNumbers - The issue numbers `tryPostBlockersInline`
+ *   skipped because the PR's CURRENT body no longer references them at
+ *   all (PR #87 review round 4b, Codex, P1 — a follow-up wording fold:
+ *   `totalBlockerCount` below is still the REVIEW-TIME count, including
+ *   any stale ones, deliberately NOT filtered here — see issue #89 for
+ *   the deeper "should the count/exit-code reflect only the still-
+ *   referenced subset" design question, tracked ahead of the gate-enable
+ *   decision #47. When this array is non-empty, the headline below is
+ *   reworded to state the count is REVIEW-TIME and explicitly reconciles
+ *   it against the posted subset, rather than implying every counted
+ *   finding has its own inline thread when some do not.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -579,6 +598,8 @@ export function buildSpecGroundingSummaryCommentBody(
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   truncation: SpecGroundingTruncationFlags,
   blockersPostedInline: boolean,
+  degradeReason: InlinePostingDegradeReason | null,
+  staleBlockerIssueNumbers: readonly number[],
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
@@ -617,15 +638,44 @@ export function buildSpecGroundingSummaryCommentBody(
       "when this run has any closing reference at all — this PR's own diff having been itself " +
       "truncated, which makes every criterion judged against it (including a 'satisfied' one) " +
       "unverifiable.";
+    const degradeExplanation =
+      degradeReason === "anchor-rejected-422"
+        ? "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
+          "attempt)"
+        : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
+          "only deletes content)";
+    // PR #87 review round 4b, Codex, P1 -- a cheap, honest-wording fold:
+    // when some (not all) blockers were skipped as stale, `totalBlockerCount`
+    // (deliberately still the REVIEW-TIME count, see this function's own
+    // `staleBlockerIssueNumbers` param docs and issue #89) must not be
+    // presented as if every one of them has its own inline thread or
+    // summary listing below -- reword the headline to say the count is
+    // review-time and explicitly reconcile it against the posted/listed
+    // subset, pointing at the separate stale-skip note for the rest.
+    const staleReconciliation =
+      staleBlockerIssueNumbers.length > 0
+        ? ` (${staleBlockerIssueNumbers.length} of these were skipped as no longer referenced by this ` +
+          "PR's current body — see the note below, not repeated here.)"
+        : "";
     lines.push(
       blockersPostedInline
-        ? `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
-            "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
-            `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-            "separate inline comments — this PR's diff had no addable line to anchor them to (an " +
-            "empty diff, or a diff that only deletes content), so there is no inline thread for " +
-            `them. ${blockerKindsExplanation}`,
+        ? staleBlockerIssueNumbers.length > 0
+          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
+              "still applicable to this PR's current linked issues are reported as separate, " +
+              `resolvable inline review comment(s) below — see those threads, not this summary, ` +
+              `to resolve them.${staleReconciliation} ${blockerKindsExplanation} See the inline ` +
+              "comment for which case applies and why."
+          : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
+              "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
+              `${blockerKindsExplanation} See the inline comment for which case applies and why.`
+        : staleBlockerIssueNumbers.length > 0
+          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
+              "still applicable are listed below in THIS summary, not as separate inline comments " +
+              `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
+              blockerKindsExplanation
+          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
+              `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
+              `them. ${blockerKindsExplanation}`,
       "",
     );
   } else {
@@ -681,6 +731,73 @@ export function buildSpecGroundingSummaryCommentBody(
   );
 
   return lines.join("\n");
+}
+
+/**
+ * Upper bound on {@link buildStaleBlockerSkippedNote}'s own displayed
+ * issue-number list, in characters (PR #87 review round 7, Codex,
+ * BLOCKER): `staleBlockerIssueNumbers` is derived from `criterionBlockers`
+ * and `unreviewedClosingIssues`, both themselves influenced by the PR's
+ * own (attacker-controlled) body — a body naming far more issues than
+ * the runner's own fetch cap, or a body edit that removes references to
+ * many of them at once, could otherwise make this note's own joined
+ * issue-number list grow unboundedly, pushing the WHOLE summary comment
+ * past GitHub's 65,536-character limit and failing the only write this
+ * run makes — the worst outcome, since this note (like the fallback and
+ * anchor-fallback ones) is a signal a human needs, never optional.
+ * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the
+ * fallback comment's own reasons list — a budget over the TOTAL joined
+ * string, any remainder reported as an omitted count, never silently
+ * dropped.
+ */
+const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+
+/**
+ * Builds the note appended when one or more planned blocker findings were
+ * skipped from inline posting because the PR's CURRENT body no longer
+ * references their own issue at all (PR #87 review round 4, Codex, P1 —
+ * symmetric to the delete-path TOCTOU fold: `tryPostBlockersInline` in
+ * `publish-spec-grounding-verdict.mts` re-checks each planned blocker's
+ * own `issueNumber` against a fresh re-parse of the PR's CURRENT body, not
+ * the runner-time one the verdict/spine were computed against — a
+ * body-only edit never bumps the trusted head SHA, so this run could
+ * otherwise post an inline comment reasserting an obligation for an issue
+ * the PR no longer claims to reference at all). Skipped, never posted —
+ * this note is the ONLY place a human learns that happened, so it must
+ * never be silently absent.
+ *
+ * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
+ *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced in
+ *   the PR's current body.
+ * @returns The Markdown section to append, or `""` if nothing was
+ *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   regardless of how many issue numbers were skipped.
+ */
+export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
+  if (staleBlockerIssueNumbers.length === 0) {
+    return "";
+  }
+  const issueTokens: string[] = [];
+  let issueListLength = 0;
+  let addedCount = 0;
+  for (const issueNumber of staleBlockerIssueNumbers) {
+    const token = `#${issueNumber}`;
+    if (issueListLength + token.length + 2 > MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
+      break; // The remainder is reported as an omitted count below, not silently dropped.
+    }
+    issueTokens.push(token);
+    issueListLength += token.length + 2; // ", " separator budget.
+    addedCount += 1;
+  }
+  const omittedCount = staleBlockerIssueNumbers.length - addedCount;
+  const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  return (
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body no longer references them at all (removed or edited since the spec-grounded review ran " +
+    "against this PR's head), so those findings no longer reflect a live obligation this run could " +
+    "verify. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+  );
 }
 
 // UnreviewedClosingIssueResult (a CLOSING-kind issue this PR referenced
@@ -821,4 +938,105 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
     SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
   ];
   return lines.join("\n");
+}
+
+/**
+ * Distinguishes WHY `spec-grounding-runner.mts` emitted `hasCriteria:
+ * false` (PR #87 review, Codex, P1/medium fold — the runner's own two
+ * DIFFERENT false-emitting branches carry materially different trust,
+ * and conflating them was an anti-gaming hole):
+ *
+ * - `"no-references"` — the PR carries no closing-keyword reference to
+ *   any issue at all. There was never any obligation, so a prior run's
+ *   summary/fallback comment AND its inline blocker threads are both
+ *   genuinely stale and safe to clear/delete.
+ * - `"no-unmet-criteria"` — the PR DOES reference an issue, but every
+ *   acceptance criterion in it happens to be checked off (or every
+ *   linked issue 404'd). This is SELF-ATTESTED, never diff-verified —
+ *   whoever edited the linked issue's own checklist could have done so
+ *   without the PR's diff actually satisfying anything. Deleting a
+ *   `required_conversation_resolution`-gating inline blocker thread on
+ *   this signal alone would be an anti-gaming hole: a closing claim
+ *   still exists, so the obligation to verify it does too.
+ */
+export type NoCriteriaReason = "no-references" | "no-unmet-criteria";
+
+/**
+ * Every case {@link buildSpecGroundingClearedSummaryCommentBody} can
+ * explain — {@link NoCriteriaReason} (what `outcome.json` itself
+ * reports) plus one PUBLISHER-INTERNAL case that never comes from the
+ * artifact at all: `"race-detected-before-delete"` (PR #87 review round
+ * 3, Codex, P1, gate-integrity TOCTOU) — the `"no-references"` branch's
+ * own pre-delete revalidation found the PR's state has changed (head
+ * moved, or a new closing reference now exists) since the read-only
+ * runner produced this `outcome.json`, so the caller degrades to the
+ * SAME non-destructive treatment `"no-unmet-criteria"` gets, but the
+ * message must say WHY accurately — never implying inline threads were
+ * cleared when a race, not a genuine self-attested-criteria case, is
+ * why they were not.
+ */
+export type ClearedSummaryReason = NoCriteriaReason | "race-detected-before-delete";
+
+/**
+ * Builds the comment body the privileged publish entrypoint upserts when
+ * a PR that previously had a spec-grounded summary or fallback comment no
+ * longer has any UNMET linked-issue criteria to review (`hasCriteria:
+ * false` on a run whose prior comment exists) — a P2 finding (PR #86
+ * review, Codex): without this, editing a PR's body to remove its last
+ * closing-keyword reference (or checking off every acceptance box) left
+ * the EARLIER run's comment (still claiming blockers, or a failed
+ * pipeline) visible and unexplained forever, since the entrypoint's own
+ * `hasCriteria: false` path was a pure silent no-op with no upsert at
+ * all.
+ *
+ * The message differs by {@link ClearedSummaryReason} (PR #87 review,
+ * Codex, P1/medium fold + round 3's own TOCTOU fold): `"no-references"`
+ * states plainly that nothing applies any more (matches the caller ALSO
+ * deleting inline blocker threads); `"no-unmet-criteria"` (or any reason
+ * the caller could not positively confirm as `"no-references"`)
+ * explicitly tells a human the criteria are self-attested, not
+ * diff-verified; `"race-detected-before-delete"` explicitly tells a
+ * human the PR's state changed (head moved, or a new closing reference
+ * appeared) since the review ran, so this run degraded rather than
+ * deleting a thread it could not re-verify. The LAST TWO cases both
+ * explicitly say any remaining inline blocker thread was deliberately
+ * LEFT IN PLACE for a human (or a fresh run) — never implying inline
+ * threads were cleared when they were not.
+ *
+ * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} every
+ * other summary/fallback body uses, for the identical reason {@link
+ * buildSpecGroundingFallbackCommentBody} documents: a LATER run that
+ * finds criteria again must PATCH this exact comment in place, not post
+ * a second one alongside it.
+ *
+ * @param reason - Why this run is clearing/updating this comment.
+ * @returns The Markdown comment body, ending with the tracking marker.
+ */
+export function buildSpecGroundingClearedSummaryCommentBody(reason: ClearedSummaryReason): string {
+  const explanation =
+    reason === "no-references"
+      ? "An earlier run of the spec-grounded review posted a summary or fallback comment here, but " +
+        "this PR no longer references any issue this workflow can spec-ground against — the comment " +
+        "below (and any inline blocker threads from that earlier run) no longer apply and have been " +
+        "cleared."
+      : reason === "no-unmet-criteria"
+        ? "An earlier run of the spec-grounded review posted a summary or fallback comment here. This " +
+          "PR's linked issue(s) now show every acceptance criterion marked complete — but that is " +
+          "SELF-ATTESTED (checked off in the issue), not verified against this PR's own diff, so any " +
+          "inline blocker thread from that earlier run has been deliberately LEFT IN PLACE, not " +
+          "cleared: please verify the linked issue's own criteria genuinely hold and resolve any " +
+          "remaining blocker thread yourself."
+        : "An earlier run of the spec-grounded review posted a summary or fallback comment here. " +
+          "Since then, this PR's own state changed (its head moved, or its body now shows a new " +
+          "closing-issue reference) in a way this run could not safely re-verify against the earlier " +
+          "review, so any inline blocker thread from that earlier run has been deliberately LEFT IN " +
+          "PLACE, not cleared: a fresh spec-grounded review run will re-evaluate them against this " +
+          "PR's current state.";
+  return [
+    `**This PR's linked-issue acceptance criteria are no longer being actively spec-ground.** ${explanation}`,
+    "",
+    "_Posted by the roastpilot-cloud spec-grounded review workflow (factory.md §13 point 3)._",
+    "",
+    SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+  ].join("\n");
 }

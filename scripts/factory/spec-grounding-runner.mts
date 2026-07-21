@@ -298,8 +298,20 @@ async function fetchIssue(
  * uncaught: there is no meaningful "nothing to say" degradation for the
  * PR's OWN diff — without it, there is nothing for slice 3b-ii's review
  * agent to check the criteria against at all.
+ *
+ * EXPORTED (F1-S9 slice 3b-iii-d4, issue #12): the privileged publish
+ * entrypoint's own deterministic-anchor selection
+ * (`publish-spec-grounding-blocker-logic.mts`'s own {@link
+ * import("./publish-spec-grounding-blocker-logic.mts").selectDeterministicBlockerAnchor})
+ * needs the RAW diff too — never the wrapped/neutralized
+ * `pr-diff-block.txt` artifact (see that module's own top-level
+ * docstring for why) — and must fetch its own trusted copy independently
+ * rather than trust a value this module already fetched in a DIFFERENT
+ * job run. Reusing this exact function, rather than a second,
+ * independently-maintained copy, keeps the SHA-pinning fix above in ONE
+ * place.
  */
-async function fetchPrDiff(
+export async function fetchPrDiff(
   token: string,
   owner: string,
   repo: string,
@@ -376,6 +388,16 @@ export async function main(): Promise<void> {
   if (references.length === 0) {
     console.log(`PR #${prNumber} references no issue; nothing to spec-ground.`);
     writeGithubOutput("has-criteria", "false");
+    // PR #87 review, Codex, P1/medium fold: distinguishes THIS branch
+    // (no closing-keyword reference at all -- there was never any
+    // obligation to begin with) from the criteriaBlock==="" branch below
+    // (references exist, but their own acceptance criteria are all
+    // marked complete -- SELF-ATTESTED, never diff-verified). The
+    // privileged publisher's own outcome.json consumer needs this
+    // distinction to decide whether clearing a prior run's inline
+    // blocker threads is safe (see `clearStaleSpecGroundingStateOnDisappearedCriteria`
+    // there).
+    writeGithubOutput("no-criteria-reason", "no-references");
     return;
   }
 
@@ -396,6 +418,15 @@ export async function main(): Promise<void> {
       `PR #${prNumber}'s linked issue(s) have no unmet acceptance criteria; nothing to spec-ground.`,
     );
     writeGithubOutput("has-criteria", "false");
+    // PR #87 review, Codex, P1/medium fold: this branch's own "nothing to
+    // spec-ground" is SELF-ATTESTED (every acceptance checkbox in the
+    // linked issue(s) happens to be checked off, or every linked issue
+    // 404'd), never verified against this PR's own diff -- a materially
+    // WEAKER signal than the `no-references` branch above (no closing
+    // claim was ever made there at all). See `no-criteria-reason`'s own
+    // consumer in the privileged publisher for why this distinction is
+    // load-bearing, not cosmetic.
+    writeGithubOutput("no-criteria-reason", "no-unmet-criteria");
     return;
   }
 

@@ -436,6 +436,39 @@ export const DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER =
   "<!-- roastpilot-factory:spec-grounding-blocker:diff-truncated:do-not-edit -->";
 
 /**
+ * Matches ANY of this module's five own marker shapes ({@link
+ * criterionBlockerCommentMarker}, {@link unreviewedClosingIssueCommentMarker},
+ * {@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}, {@link
+ * UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}, {@link
+ * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}) as a single pattern — every one
+ * shares the exact `<!-- roastpilot-factory:spec-grounding-blocker:...
+ * :do-not-edit -->` prefix/suffix, varying only the middle segment. Used
+ * by the privileged publish entrypoint (PR #86 review, Codex, P2 —
+ * clearing stale inline blocker comments when a PR's linked criteria
+ * disappear entirely) to find "any inline blocker comment this workflow
+ * ever posted on this PR", generically, without needing THIS run's own
+ * plan (there is no plan at all once criteria are gone) to match a
+ * specific marker against.
+ */
+const ANY_BLOCKER_MARKER_LINE_PATTERN = /^<!-- roastpilot-factory:spec-grounding-blocker:.+:do-not-edit -->$/;
+
+/**
+ * Whether `body` carries any ONE of this module's five marker shapes as a
+ * STRUCTURAL, standalone-line match — the same "exact line, never a loose
+ * substring" discipline {@link
+ * import("./publish-spec-grounding-verdict-logic.mts").bodyContainsMarkerAsStandaloneLine}
+ * applies to the summary comment's own single marker, generalized here to
+ * "any of the five", via {@link ANY_BLOCKER_MARKER_LINE_PATTERN}.
+ *
+ * @param body - A comment's own body text.
+ * @returns `true` only if some line of `body`, trimmed, matches the shared
+ *   blocker-marker pattern exactly.
+ */
+export function bodyContainsAnyBlockerMarker(body: string): boolean {
+  return body.split(/\r?\n/).some((line) => ANY_BLOCKER_MARKER_LINE_PATTERN.test(line.trim()));
+}
+
+/**
  * The self-describing preamble every blocker inline comment carries,
  * explaining that its anchor is a deterministic placement, not the actual
  * defect location (team-lead's hardening — see this module's own
@@ -694,6 +727,26 @@ export interface BlockerCommentPlanResult {
 }
 
 /**
+ * Every reason the privileged publish entrypoint can degrade from
+ * "posted inline" to "listed in the summary instead" (PR #87 review
+ * round 4, Codex, P1 — an earlier version collapsed both into the same
+ * `blockersPostedInline: false`, so the rendered summary misdiagnosed
+ * WHICH case actually happened):
+ * - `"no-addable-anchor"` — {@link planBlockerInlineComments}'s own
+ *   `anchorFallbackNeeded: true`: this PR's diff genuinely has no
+ *   addable line to anchor a comment to at all (an empty diff, or a
+ *   diff that only deletes content). No anchor was ever attempted.
+ * - `"anchor-rejected-422"` — a real anchor WAS selected and the FIRST
+ *   genuine create attempt was sent, but GitHub's own create-review-
+ *   comment API rejected it with a 422 (see `publish-spec-grounding-
+ *   inline-comment-io.mts`'s own 422-probe-then-degrade docstring for
+ *   why only the first attempt is diagnostic). A materially different
+ *   situation from the anchor-absent case — an anchor existed and was
+ *   tried, GitHub itself refused it.
+ */
+export type InlinePostingDegradeReason = "no-addable-anchor" | "anchor-rejected-422";
+
+/**
  * Plans this run's blocker inline comments.
  *
  * BOTH `criterionBlockers` beyond {@link
@@ -857,6 +910,12 @@ export function planBlockerInlineComments(
  *   verdict-logic.mts`'s own {@link isDiffTruncationUnverifiableForClosing}
  *   result for this run — same value passed to {@link
  *   planBlockerInlineComments}, so the two never disagree.
+ * @param degradeReason - WHY inline posting was not used (PR #87 review
+ *   round 4, Codex, P1 — the opening explanation line now differs by
+ *   reason instead of always assuming the anchor-absent case): pass
+ *   `"no-addable-anchor"` when {@link planBlockerInlineComments}'s own
+ *   `anchorFallbackNeeded` was `true`, or `"anchor-rejected-422"` when a
+ *   real anchor was selected and tried but GitHub itself rejected it.
  * @returns The Markdown section to append, or `""` if there is nothing to
  *   report (the caller should only call this when `anchorFallbackNeeded`
  *   is `true`, but an empty-input call degrades safely to an empty string
@@ -866,6 +925,7 @@ export function buildAnchorFallbackSummarySupplement(
   criterionBlockers: readonly JoinedCriterionResult[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   diffTruncationBlocksClosingClaim: boolean,
+  degradeReason: InlinePostingDegradeReason,
 ): string {
   if (
     criterionBlockers.length === 0 &&
@@ -875,9 +935,15 @@ export function buildAnchorFallbackSummarySupplement(
     return "";
   }
 
+  const openingExplanation =
+    degradeReason === "no-addable-anchor"
+      ? "this PR's diff has no addable line to anchor them to (an empty diff, or a diff that only " +
+        "deletes content)"
+      : "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
+        "attempt) — our own textual diff parsing and GitHub's own internal diff-position mapping " +
+        "disagreed at the edges";
   const lines: string[] = [
-    "> ⚠️ **Blocking findings could not be posted as inline comments** — this PR's diff has no " +
-      "addable line to anchor them to (an empty diff, or a diff that only deletes content). " +
+    `> ⚠️ **Blocking findings could not be posted as inline comments** — ${openingExplanation}. ` +
       "Listed here in full instead, since there is no inline thread for them:",
     "",
   ];
