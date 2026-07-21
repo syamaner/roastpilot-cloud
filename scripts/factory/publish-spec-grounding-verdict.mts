@@ -94,12 +94,14 @@
  *   ever being used, the same discipline `spec-grounding-runner.mts`'s
  *   own identical check applies to its own diff fetch.
  * - `GITHUB_RUN_NUMBER` — from `github.run_number` (F1-S9 slice 90.3);
- *   embedded as this run's own generation key in every inline blocker
- *   comment's body, alongside (never replacing) that comment's own
- *   identity marker — see `publish-spec-grounding-blocker-logic.mts`'s
- *   own `inlineBlockerGenerationMarker` for the full design reasoning.
- *   DATA-ONLY as of this slice: not yet consumed by any delete-
- *   comparison logic (slice 90.4).
+ *   validated and canonicalized ONCE, at the very top of `publishSummary`,
+ *   before any posting or reconciliation (F1-S9 slice 90.4). Embedded as
+ *   this run's own generation key in every inline blocker comment's body,
+ *   alongside (never replacing) that comment's own identity marker — see
+ *   `publish-spec-grounding-blocker-logic.mts`'s own
+ *   `inlineBlockerGenerationMarker` for the full design reasoning — and
+ *   consumed by the de-reference reconcile's own generation guard (F1-S9
+ *   slice 90.4, `deleteDeReferencedInlineBlockerComments`).
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -147,7 +149,7 @@ import {
 } from "./publish-spec-grounding-comment-io.mts";
 import {
   clearStaleInlineBlockerComments,
-  deleteObsoleteInlineBlockerComments,
+  deleteDeReferencedInlineBlockerComments,
   postInlineCommentPlan,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
@@ -775,19 +777,6 @@ interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
   readonly staleBlockerIssueNumbers: readonly number[];
-  /**
-   * Every identity marker for a blocker THIS run's own VERDICT currently
-   * produces (F1-S9 slice 90.4) — computed BEFORE the current-body
-   * staleness filter this function already applies for POSTING (team-
-   * lead's Fork-2 ruling: reconciliation's own "keep set" is deliberately
-   * the UNFILTERED set, not `plan.comments`, so a de-referenced-but-
-   * still-unmet criterion's prior comment is correctly KEPT, never
-   * swept, by {@link import("./publish-spec-grounding-inline-comment-io.mts").deleteObsoleteInlineBlockerComments}).
-   * Reliable ONLY when `postedInline` is `true` — see that function's
-   * own docstring for why the caller must never reconcile using this
-   * value otherwise.
-   */
-  readonly keepSetMarkers: readonly string[];
 }
 
 /**
@@ -847,8 +836,11 @@ interface TryPostBlockersInlineResult {
  * findings that should NOT be filtered by this same staleness logic — a
  * real restructuring, not a cheap fold.
  *
- * @param runNumber - `github.run_number`'s own value for this run, as a
- *   plain digit string (F1-S9 slice 90.3) — threaded straight through to
+ * @param runNumber - This run's own VALIDATED, canonicalized
+ *   `github.run_number` (F1-S9 slice 90.4, Codex finding #798 — validated
+ *   ONCE by the caller, `publishSummary`, before this function or any
+ *   other posting is ever attempted; see that function's own top-of-body
+ *   validation), as a plain digit string — threaded straight through to
  *   {@link planBlockerInlineComments}, which embeds it in every planned
  *   comment's own body via `inlineBlockerGenerationMarker`
  *   (`publish-spec-grounding-blocker-logic.mts`).
@@ -861,9 +853,7 @@ interface TryPostBlockersInlineResult {
  *   full (still-referenced) blocker detail in the summary instead either
  *   way. `staleBlockerIssueNumbers` is independent of both — the issue
  *   numbers filtered out because the PR's CURRENT body no longer
- *   references them at all. `keepSetMarkers` (F1-S9 slice 90.4) is only
- *   ever reliable when `postedInline` is `true` — see that field's own
- *   docstring on {@link TryPostBlockersInlineResult}.
+ *   references them at all.
  * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
  *   inline-posting failure) — a genuine error, not a case this function
  *   degrades from; the caller converts it into a visible fallback, same
@@ -905,54 +895,13 @@ async function tryPostBlockersInline(
     runNumber,
   );
   if (plan.anchorFallbackNeeded) {
-    return {
-      postedInline: false,
-      degradeReason: "no-addable-anchor",
-      staleBlockerIssueNumbers,
-      keepSetMarkers: [],
-    };
+    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
   }
-  // Reconciliation's own "keep set" (F1-S9 slice 90.4): every marker for
-  // a blocker THIS run's own VERDICT currently produces, from the
-  // UNFILTERED criterionBlockers/spine.unreviewedClosingIssues --
-  // deliberately NOT plan.comments (built from the staleness-FILTERED
-  // stillReferenced sets, just above) -- see TryPostBlockersInlineResult's
-  // own keepSetMarkers field for the full Fork-2 reasoning. Reuses
-  // planBlockerInlineComments itself -- the SAME individual-vs-aggregate
-  // capping/marker-selection logic, against the SAME diff already
-  // fetched above -- rather than reimplementing that selection a second,
-  // divergence-prone way.
-  const keepSetPlan = planBlockerInlineComments(
-    criterionBlockers,
-    spine.unreviewedClosingIssues,
-    diff,
-    diffTruncationBlocksClosingClaim,
-    runNumber,
-  );
-  // Unreachable by construction, not merely unlikely: this function is
-  // only ever called when totalBlockerCount > 0 (the caller's own
-  // guard), which means at least one of criterionBlockers.length > 0,
-  // spine.unreviewedClosingIssues.length > 0, or
-  // diffTruncationBlocksClosingClaim is already true -- planBlockerInlineComments's
-  // own trivial "no blockers at all" short-circuit can therefore never
-  // fire for this UNFILTERED call. And selectDeterministicBlockerAnchor
-  // depends on `diff` alone -- the SAME diff the `plan` call just above
-  // already proved has a real anchor -- so the anchor-null branch can't
-  // fire here either.
-  /* v8 ignore next 3 */
-  const keepSetMarkers = keepSetPlan.anchorFallbackNeeded
-    ? []
-    : keepSetPlan.comments.map((entry) => entry.marker);
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
-    return {
-      postedInline: false,
-      degradeReason: postResult.reason,
-      staleBlockerIssueNumbers,
-      keepSetMarkers: [],
-    };
+    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
   }
-  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers, keepSetMarkers };
+  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
 }
 
 async function publishSummary(
@@ -965,6 +914,49 @@ async function publishSummary(
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
+  // Validated and canonicalized ONCE, at the very top of this function --
+  // BEFORE any posting, patching, or reconciliation is ever attempted
+  // (F1-S9 slice 90.4, Codex finding #798: an earlier version of this
+  // validation ran only immediately before the reconcile call, AFTER
+  // tryPostBlockersInline had already embedded the RAW, unvalidated
+  // runNumber into every newly-posted/patched comment's own generation
+  // marker -- so a malformed GITHUB_RUN_NUMBER could reach a real write
+  // before ever being checked). Explicitly validated here, NOT the bare
+  // `Number(requireEnv(...))` this entrypoint uses elsewhere (e.g.
+  // `TRUSTED_PR_NUMBER`) without a further check: those callers' own
+  // downstream use (an API path segment) turns a corrupted, non-numeric
+  // value into `NaN`, which naturally 404s or malformed-URLs into a loud,
+  // visible exception -- a safe failure mode this codebase already relies
+  // on. THIS numeric conversion is different in a way that matters: a
+  // corrupted `GITHUB_RUN_NUMBER` becoming `NaN` would make EVERY
+  // `generation > currentGeneration` comparison in
+  // `deleteDeReferencedInlineBlockerComments` evaluate to `false` (any
+  // comparison against `NaN` is `false`), silently defeating the entire
+  // generation-safety guard with NO visible error at all -- the worst
+  // possible failure mode for the one check that exists specifically to
+  // stop an older run from deleting a newer run's own valid thread.
+  // Failing closed here, loudly, before that guard -- or any posting --
+  // could ever be reached with an unvalidated value.
+  const currentGeneration = Number(runNumber);
+  if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `GITHUB_RUN_NUMBER ("${runNumber}") is not a valid positive integer -- refusing to post any ` +
+        `generation-marked inline comment or reconcile this run's own de-referenced ones without a ` +
+        `trustworthy generation to compare against.`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+  // The CANONICAL form (F1-S9 slice 90.4, Codex finding #798's own
+  // "canonicalize" half): used for BOTH posting (embedded in every new
+  // comment's own generation marker, via tryPostBlockersInline) and the
+  // reconcile call below, so the two can never disagree on what "this
+  // run's own generation" means even if the raw env value were somehow
+  // non-canonical (e.g. zero-padded) -- GitHub's own `github.run_number`
+  // never legitimately is, so this is defense-in-depth, not a functional
+  // change in practice.
+  const canonicalRunNumber = String(currentGeneration);
+
   const joined = joinFindingsToSpine(spine.entries, verdict);
   const criterionBlockers: readonly JoinedCriterionResult[] = joined.filter(
     (e) => deriveSeverity(e) === "blocker",
@@ -1030,10 +1022,24 @@ async function publishSummary(
     return;
   }
 
+  // This PR's CURRENT closing-kind references, from the SAME
+  // already-verified `pr.body` (F1-S9 slice 90.4, redesigned reconcile):
+  // computed ONCE here, independent of `tryPostBlockersInline`'s own
+  // separate internal re-parse (which needs ALL references, closing or
+  // not, for its own unrelated staleness filter) -- a deliberate, cheap
+  // second parse of the same body per run, traded for keeping
+  // `tryPostBlockersInline` and the reconcile call below fully
+  // independent and independently reviewable, rather than threading a
+  // shared computation between two otherwise-unrelated mechanisms.
+  const currentClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
-  let keepSetMarkers: readonly string[] = [];
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1045,12 +1051,11 @@ async function publishSummary(
         criterionBlockers,
         spine,
         diffTruncationBlocksClosingClaim,
-        runNumber,
+        canonicalRunNumber,
       );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
-      keepSetMarkers = result.keepSetMarkers;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1067,59 +1072,39 @@ async function publishSummary(
     }
   }
 
-  // Reconciliation (F1-S9 slice 90.4, the #90 PR-plan's own core item,
-  // #363): deletes any bot-owned inline blocker comment NOT in this
-  // run's own keep set, so a verdict-satisfied or partial-fix blocker
-  // stops gating forever. ONLY runs when this run's own keep set is
-  // CONFIRMED reliable (team-lead's Fork-1 ruling): either genuinely
-  // empty (`totalBlockerCount === 0` -- every prior blocker is now
-  // obsolete) or backed by a successfully-posted/patched plan
-  // (`blockersPostedInline === true`). Deliberately SKIPPED when this
-  // run found blockers but could not post them inline at all (no
-  // addable anchor, or the 422 anchor-probe degrade) -- an empty or
-  // unreliable keep set in that case could delete a PRIOR run's
-  // still-valid gate for an issue THIS run genuinely still blocks,
-  // purely because this run's own anchor selection failed. Leaving
-  // prior state untouched there is the fail-safe choice, matching this
-  // entrypoint's own "never destroy what we can't confirm is safe to
-  // destroy" posture elsewhere (the TOCTOU revalidation work).
-  if (totalBlockerCount === 0 || blockersPostedInline) {
-    // Explicitly validated here, NOT the bare `Number(requireEnv(...))`
-    // this entrypoint uses elsewhere (e.g. `TRUSTED_PR_NUMBER`) without a
-    // further check: those callers' own downstream use (an API path
-    // segment) turns a corrupted, non-numeric value into `NaN`, which
-    // naturally 404s or malformed-URLs into a loud, visible exception --
-    // a safe failure mode this codebase already relies on. THIS numeric
-    // conversion is different in a way that matters: a corrupted
-    // `GITHUB_RUN_NUMBER` becoming `NaN` would make EVERY `generation >
-    // currentGeneration` comparison in `deleteObsoleteInlineBlockerComments`
-    // evaluate to `false` (any comparison against `NaN` is `false`),
-    // silently defeating the entire generation-safety guard with NO
-    // visible error at all -- the worst possible failure mode for the
-    // one check that exists specifically to stop an older run from
-    // deleting a newer run's own valid thread. Failing closed here,
-    // loudly, before that guard could ever be silently bypassed.
-    const currentGeneration = Number(runNumber);
-    if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
-      await publishFallback(token, owner, repo, prNumber, [
-        `GITHUB_RUN_NUMBER ("${runNumber}") is not a valid positive integer -- refusing to reconcile this ` +
-          `run's own obsolete inline blocker comments without a trustworthy generation to compare against.`,
-      ]);
-      process.exitCode = 1;
-      return;
-    }
-    try {
-      await deleteObsoleteInlineBlockerComments(token, owner, repo, prNumber, keepSetMarkers, currentGeneration);
-    } catch (err) {
-      // Same "visible fallback, never silent" treatment as every other
-      // artifact/network failure in this entrypoint.
-      await publishFallback(token, owner, repo, prNumber, [
-        `failed to reconcile this run's own obsolete inline blocker comments: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      ]);
-      process.exitCode = 1;
-      return;
-    }
+  // Reconciliation (F1-S9 slice 90.4, redesigned per the operator's #801
+  // resolution): deletes any bot-owned inline blocker comment whose OWN
+  // issue is no longer among `currentClosingIssueNumbers` -- covers both
+  // a de-referenced issue (not mentioned at all anymore) and a
+  // DOWNGRADED one (still mentioned, but no longer with a closing
+  // keyword) -- never a verdict-satisfied one still closing-referenced
+  // (a human resolves that class; see `deleteDeReferencedInlineBlockerComments`'s
+  // own docstring for the full reasoning). Runs UNCONDITIONALLY, on
+  // every `hasCriteria: true` publish (team-lead's Fork-1 ruling, this
+  // slice): unlike the prior, reverted verdict-keep-set design, this
+  // mechanism's own membership test depends ONLY on
+  // `currentClosingIssueNumbers` (the CURRENT, already-verified body) and
+  // each comment's own generation -- NEITHER of which is affected by
+  // whether THIS run's own new blockers happened to post inline
+  // successfully, so there is nothing left to gate on.
+  try {
+    await deleteDeReferencedInlineBlockerComments(
+      token,
+      owner,
+      repo,
+      prNumber,
+      currentClosingIssueNumbers,
+      currentGeneration,
+    );
+  } catch (err) {
+    // Same "visible fallback, never silent" treatment as every other
+    // artifact/network failure in this entrypoint.
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to reconcile this run's own de-referenced inline blocker comments: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
   }
 
   let body = buildSpecGroundingSummaryCommentBody(

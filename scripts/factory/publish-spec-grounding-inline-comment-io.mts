@@ -54,6 +54,7 @@ import { GithubApiError, githubRequest } from "./github-api.mts";
 import {
   bodyContainsAnyBlockerMarker,
   extractInlineBlockerGeneration,
+  extractIssueNumberFromInlineBlockerMarker,
   type BlockerCommentPlan,
   type InlinePostingDegradeReason,
 } from "./publish-spec-grounding-blocker-logic.mts";
@@ -321,106 +322,106 @@ export async function clearStaleInlineBlockerComments(
 }
 
 /**
- * Deletes every bot-owned inline blocker comment that is NO LONGER part
- * of THIS run's own "keep set" (F1-S9 slice 90.4, the #90 PR-plan's own
- * core reconciliation item, #363) — the "a satisfying or partial-fix
- * verdict makes a prior blocker obsolete" case, so a FIXED blocker
- * stops gating forever. Distinct from {@link
- * clearStaleInlineBlockerComments}'s own `hasCriteria: false` path (no
- * linked criteria left at all) — this function runs on the
- * `hasCriteria: true` side, alongside posting/patching this run's own
- * plan, never instead of it, and is called only when the CALLER has
- * already confirmed a reliable keep set exists for this run (see the
- * "when NOT to call this" note below).
+ * Deletes every bot-owned inline blocker comment whose OWN issue is no
+ * longer among this PR's CURRENT closing-kind references (F1-S9 slice
+ * 90.4, redesigned — the #90 PR-plan's own core reconciliation item,
+ * #363, per the operator's #801 resolution): a de-referenced or
+ * downgraded-to-non-closing obligation stops gating forever, so a FIXED
+ * blocker for one no longer has a live thread pinning it open.
  *
- * TRIPLE-GATED like {@link clearStaleInlineBlockerComments}'s own scope
- * discipline, PLUS a fourth, generation guard this function alone needs
- * (team-lead's design ruling, PR #94-adjacent 90.4 kickoff):
+ * DELIBERATELY DOES NOT auto-clear a VERDICT-SATISFIED blocker whose own
+ * issue is STILL closing-referenced (#801, the operator's own anti-gaming
+ * ruling): a human resolves that class — this function's own membership
+ * test never looks at the agent's verdict at all, only at whether the
+ * comment's own issue is CURRENTLY closing-referenced, so a satisfied-
+ * but-still-referenced criterion's comment is structurally never a
+ * candidate here regardless of what any run's verdict says about it.
+ * Distinct from {@link clearStaleInlineBlockerComments}'s own
+ * `hasCriteria: false` path (no linked criteria left at all) — this
+ * function runs on the `hasCriteria: true` side, alongside posting/
+ * patching this run's own plan, never instead of it.
+ *
+ * GATED, mirroring {@link clearStaleInlineBlockerComments}'s own scope
+ * discipline, PLUS the generation guard this function alone needs:
  * 1. `authorType === "Bot"` and `authorLogin ===
  *    SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN` — genuinely posted by this
  *    workflow, never mistaken for a look-alike from elsewhere.
- * 2. {@link bodyContainsAnyBlockerMarker} — carries one of this
- *    module's own five identity-marker shapes at all (this is a
- *    blocker comment, not some other kind this workflow also posts).
- * 3. NOT IN `keepMarkers` — its own identity marker does not
- *    structurally-standalone-match ANY marker in the caller's own keep
- *    set, via the SAME exact-line discipline {@link
- *    findExistingInlineCommentId} already uses for plan matching
- *    (identity marker only, never the separate generation line —
- *    membership is an identity question, orthogonal to generation).
+ * 2. {@link extractIssueNumberFromInlineBlockerMarker}`(c.body)` is
+ *    non-null — an INDIVIDUAL, per-issue blocker marker (never one of
+ *    the three fixed AGGREGATE markers, which have no single issue to
+ *    test membership for at all — see that function's own docstring for
+ *    why `null` there IS the "leave aggregates alone" gate).
+ * 3. NOT in `currentlyClosingIssueNumbers` — this comment's own decoded
+ *    issue number is absent from the PR's CURRENT closing-kind
+ *    references. Covers BOTH the de-referenced case (the issue is not
+ *    mentioned at all anymore) and the downgraded case (still mentioned,
+ *    but only as a plain/non-closing reference now, e.g. `Closes #N`
+ *    edited to `Refs #N`) — both are equally "no live closing obligation
+ *    for this issue", the operator's own bright line for what may be
+ *    auto-cleared.
  * 4. GENERATION-SAFE — {@link extractInlineBlockerGeneration}`(c.body)`
  *    is a non-null value `<= currentGeneration`. A NULL/unparseable
- *    generation (a pre-90.3 comment predating this whole mechanism, or
- *    a corrupted one) is NEVER deleted here — this function cannot
- *    confirm it is safe to remove, so it fails closed by leaving it in
- *    place (a documented residual, not a gap: legacy pre-90.3 comments
- *    are near-zero, since the generation-marker mechanism only just
- *    shipped, and a corrupted marker is this workflow's OWN trusted
- *    output, never adversarial content).
+ *    generation (a pre-90.3 comment predating this whole mechanism, or a
+ *    corrupted one) is NEVER deleted here — this function cannot confirm
+ *    it is safe to remove, so it fails closed by leaving it in place (a
+ *    documented residual, not a gap: legacy pre-90.3 comments are
+ *    near-zero, since the generation-marker mechanism only just shipped,
+ *    and a corrupted marker is this workflow's OWN trusted output, never
+ *    adversarial content).
  *
  * WHY THE GENERATION GUARD MATTERS: this workflow's own dedicated,
  * serialized concurrency group (`cancel-in-progress: false`) means two
- * publish runs for the same PR never execute concurrently, but an
- * OLDER run can still be the one QUEUED to run after a NEWER one
- * already posted a comment for a genuinely new closing reference the
- * older run's own keep set never knew about (its own verdict predates
- * that reference). Comparing generations means an older run only ever
- * deletes what it can PROVE is at least as old as itself, never
- * something a newer run already established.
+ * publish runs for the same PR never execute concurrently, but an OLDER
+ * run can still be the one QUEUED to run after a NEWER one already
+ * posted a comment for a genuinely new closing reference. Comparing
+ * generations means an older run only ever deletes what it can PROVE is
+ * at least as old as itself, never something a newer run already
+ * established.
  *
- * WHEN NOT TO CALL THIS (the caller's own responsibility, not enforced
- * here): only when this run's own keep set is CONFIRMED reliable —
- * either genuinely empty (a `hasCriteria: true` run with zero total
- * blockers: every prior blocker is now obsolete) or backed by a
- * successfully-posted/patched plan (this run actually got its own
- * blockers into real inline threads). If this run found blockers but
- * could not post them inline at all (no addable anchor, or the 422
- * anchor-probe degrade), the caller must NOT call this function for
- * that run — an empty or partial keep set in that case could delete a
- * PRIOR run's still-valid gate for an issue THIS run genuinely still
- * blocks, purely because this run's own anchor selection failed. See
- * `publish-spec-grounding-verdict.mts`'s own `publishSummary` for
- * where that caller-side gate lives.
+ * NO CALLER-SIDE RELIABILITY GATE NEEDED (unlike the prior, reverted
+ * verdict-keep-set design): this function's own membership test depends
+ * ONLY on `currentlyClosingIssueNumbers` (the CURRENT, already-verified
+ * PR body — see this function's own caller, `publish-spec-grounding-
+ * verdict.mts`'s `publishSummary`) and each comment's own generation —
+ * NEITHER of which is affected by whether THIS run's own new blockers
+ * happened to post inline successfully. Team-lead's Fork-1 ruling: call
+ * this UNCONDITIONALLY on every `hasCriteria: true` publish, regardless
+ * of this run's own blocker count or posting outcome.
  *
  * Tolerates a 404 on an individual DELETE (a human already resolved or
- * deleted that thread) the SAME way {@link
- * clearStaleInlineBlockerComments} does.
+ * deleted that thread) the SAME way {@link clearStaleInlineBlockerComments}
+ * does.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
- * @param keepMarkers - Every identity marker for a blocker THIS run's
- *   own VERDICT currently produces — computed BEFORE any current-body
- *   staleness filter (team-lead's Fork-2 ruling: a de-referenced-but-
- *   still-unmet criterion's own prior comment must be KEPT here, not
- *   swept — that class stays round-4's own "note stale in the summary,
- *   leave the thread in place" behavior; a de-referenced sweep is a
- *   deliberately separate, deferred scope line, tracked for slice
- *   90.6). Empty when this run's verdict found zero blockers at all.
- * @param currentGeneration - This run's own `github.run_number`, as a
- *   number.
- * @returns The number of obsolete inline comments actually deleted.
+ * @param currentlyClosingIssueNumbers - Every issue number this PR's
+ *   CURRENT (already head/base-verified) body references with a
+ *   `closing`-kind keyword, right now.
+ * @param currentGeneration - This run's own validated, canonicalized
+ *   `github.run_number`, as a number.
+ * @returns The number of de-referenced inline comments actually deleted.
  */
-export async function deleteObsoleteInlineBlockerComments(
+export async function deleteDeReferencedInlineBlockerComments(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
-  keepMarkers: readonly string[],
+  currentlyClosingIssueNumbers: ReadonlySet<number>,
   currentGeneration: number,
 ): Promise<number> {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
-  const obsolete = existing.filter((c) => {
+  const deReferenced = existing.filter((c) => {
     if (c.authorType !== "Bot" || c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) {
       return false;
     }
-    if (!bodyContainsAnyBlockerMarker(c.body)) {
-      return false;
+    const issueNumber = extractIssueNumberFromInlineBlockerMarker(c.body);
+    if (issueNumber === null) {
+      return false; // Not an individual issue/criterion marker (aggregate, generation-only, or not ours) -- conservative, never delete.
     }
-    const stillWanted = keepMarkers.some((marker) => bodyContainsMarkerAsStandaloneLine(c.body, marker));
-    if (stillWanted) {
-      return false;
+    if (currentlyClosingIssueNumbers.has(issueNumber)) {
+      return false; // Still closing-referenced -- verdict-satisfied stays human-resolved (#801).
     }
     const generation = extractInlineBlockerGeneration(c.body);
     if (generation === null || generation > currentGeneration) {
@@ -429,7 +430,7 @@ export async function deleteObsoleteInlineBlockerComments(
     return true;
   });
   let deletedCount = 0;
-  for (const comment of obsolete) {
+  for (const comment of deReferenced) {
     try {
       await githubRequest(token, "DELETE", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`);
       deletedCount += 1;

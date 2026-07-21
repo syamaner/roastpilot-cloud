@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
-  deleteObsoleteInlineBlockerComments,
+  deleteDeReferencedInlineBlockerComments,
   findExistingInlineCommentId,
   findExistingInlineComments,
   postInlineCommentPlan,
@@ -9,8 +9,11 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-inline-comment-io.mts";
 import {
   criterionBlockerCommentMarker,
+  CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   inlineBlockerGenerationMarker,
+  unreviewedClosingIssueCommentMarker,
+  UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
@@ -436,15 +439,15 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
   });
 });
 
-describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan's own core reconciliation item, #363)", () => {
-  it("deletes a bot-owned blocker comment NOT in the keep set, at the SAME generation as this run (a satisfying verdict makes the whole set obsolete)", async () => {
+describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned per the operator's #801 resolution)", () => {
+  it("deletes a criterion blocker's own comment for an issue that is NO LONGER closing-referenced at all (de-referenced)", async () => {
     const marker = criterionBlockerCommentMarker("12:0");
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
             id: 1,
-            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -452,26 +455,20 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(1);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
   });
 
-  it("deletes only the SATISFIED criterion's own comment on a partial-fix verdict, keeping a still-unmet sibling's own comment untouched", async () => {
-    const satisfiedMarker = criterionBlockerCommentMarker("12:0");
-    const stillUnmetMarker = criterionBlockerCommentMarker("12:1");
+  it("deletes an unreviewed-closing-issue blocker's own comment for an issue that is NO LONGER closing-referenced (issue-level marker, not just criterion-level)", async () => {
+    const marker = unreviewedClosingIssueCommentMarker(99);
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
             id: 1,
-            body: `now satisfied\n${satisfiedMarker}\n${inlineBlockerGenerationMarker("1")}`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-          {
-            id: 2,
-            body: `still unmet\n${stillUnmetMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -479,34 +476,81 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    // The keep set carries ONLY the still-unmet criterion's own marker --
-    // the satisfied one is genuinely absent from it.
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [stillUnmetMarker], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(1);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
-    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/2"))).toBe(false);
   });
 
-  it("never deletes a comment whose own identity marker IS in the keep set", async () => {
+  it("deletes a DOWNGRADED issue's own comment (still referenced in the body, but no longer with a closing keyword) -- covered by the SAME 'not in currentlyClosingIssueNumbers' test as an outright de-reference", async () => {
+    const marker = criterionBlockerCommentMarker("34:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `downgraded to Refs\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // #34 is not in the current closing set (it's still referenced, just
+    // as a non-closing keyword) -- this function has no visibility into
+    // WHY an issue is absent from the set, only that it is.
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
+
+    expect(deletedCount).toBe(1);
+    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+  });
+
+  it("KEEPS a comment whose own issue IS STILL closing-referenced, even though the underlying criterion is now satisfied -- the operator's #801 anti-gaming ruling: a verdict-satisfied blocker for a live closing obligation is never auto-cleared, a human resolves it", async () => {
     const marker = criterionBlockerCommentMarker("12:0");
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
             id: 1,
-            body: `still unmet\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `now satisfied, but #12 is STILL a closing reference\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [marker], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
+
+  it.each([
+    ["the criteria-blockers aggregate marker", CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER],
+    ["the unreviewed-issues aggregate marker", UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER],
+    ["the diff-truncated marker", DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER],
+  ])(
+    "NEVER deletes %s, even when none of its own (unencoded) issues remain closing-referenced -- no per-issue number to test membership for at all, conservative by construction",
+    async (_label, aggregateMarker) => {
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+          jsonResponse([
+            {
+              id: 1,
+              body: `an overflow/whole-run comment\n${aggregateMarker}\n${inlineBlockerGenerationMarker("1")}`,
+              user: { type: "Bot", login: "github-actions[bot]" },
+            },
+          ]),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+
+      expect(deletedCount).toBe(0);
+      expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    },
+  );
 
   it("never deletes a NEWER-generation comment -- an older run must never delete a newer run's own thread", async () => {
     const marker = criterionBlockerCommentMarker("12:0");
@@ -516,7 +560,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
           {
             id: 1,
             // Posted by a NEWER run (generation 5) for an issue THIS
-            // (older, generation 1) run's own verdict never knew about.
+            // (older, generation 1) run's own current-body read never knew about.
             body: `newer finding\n${marker}\n${inlineBlockerGenerationMarker("5")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
@@ -524,7 +568,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -537,7 +581,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
         jsonResponse([
           {
             id: 1,
-            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("7")}`,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("7")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -545,7 +589,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 7);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 7);
 
     expect(deletedCount).toBe(1);
   });
@@ -558,14 +602,14 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
           {
             id: 1,
             // No generation marker line at all -- a pre-90.3 comment.
-            body: `now satisfied\n${marker}`,
+            body: `de-referenced\n${marker}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -580,7 +624,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -600,7 +644,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -612,7 +656,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -626,12 +670,12 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
         jsonResponse([
           {
             id: 1,
-            body: `now satisfied\n${markerA}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `de-referenced\n${markerA}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
           {
             id: 2,
-            body: `now satisfied\n${markerB}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `de-referenced\n${markerB}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -640,7 +684,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1);
+    const deletedCount = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
 
     expect(deletedCount).toBe(1);
   });
@@ -652,7 +696,7 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
         jsonResponse([
           {
             id: 1,
-            body: `now satisfied\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -660,6 +704,6 @@ describe("deleteObsoleteInlineBlockerComments (F1-S9 slice 90.4, the #90 PR-plan
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(deleteObsoleteInlineBlockerComments("token", "o", "r", 5, [], 1)).rejects.toThrow(/403/);
+    await expect(deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1)).rejects.toThrow(/403/);
   });
 });

@@ -762,9 +762,20 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  * the runner-time one the verdict/spine were computed against — a
  * body-only edit never bumps the trusted head SHA, so this run could
  * otherwise post an inline comment reasserting an obligation for an issue
- * the PR no longer claims to reference at all). Skipped, never posted —
- * this note is the ONLY place a human learns that happened, so it must
- * never be silently absent.
+ * the PR no longer claims to reference at all).
+ *
+ * WORDING UPDATED (F1-S9 slice 90.4, the redesigned reconcile — team-lead's
+ * explicit instruction): this same run's own `deleteDeReferencedInlineBlockerComments`
+ * (`publish-spec-grounding-inline-comment-io.mts`) now ALSO deletes any
+ * PRIOR run's own inline comment for one of these exact issues, since a
+ * de-referenced issue has no live closing obligation left at all (the
+ * operator's #801 ruling). Before this slice, this note only ever meant
+ * "not posted THIS run" while a prior comment (if any) stayed open,
+ * gating forever — that residual is what this slice's reconcile closes,
+ * so the wording now says so, rather than leaving a human to believe an
+ * old thread might still be sitting open when it has actually been
+ * cleaned up in the same run. This note is the ONLY place a human learns
+ * that happened, so it must never be silently absent.
  *
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
@@ -793,10 +804,11 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
   const omittedCount = staleBlockerIssueNumbers.length - addedCount;
   const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
   return (
-    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
-    "body no longer references them at all (removed or edited since the spec-grounded review ran " +
-    "against this PR's head), so those findings no longer reflect a live obligation this run could " +
-    "verify. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline, and any PRIOR ` +
+    `inline comment for them has been REMOVED.** This PR's own body no longer references them at ` +
+    "all (removed or edited since the spec-grounded review ran against this PR's head), so those " +
+    "findings no longer reflect a live obligation this run could verify. A fresh spec-grounded " +
+    "review run will re-evaluate against the PR's current state."
   );
 }
 
