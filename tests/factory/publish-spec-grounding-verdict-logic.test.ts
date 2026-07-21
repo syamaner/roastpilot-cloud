@@ -17,6 +17,7 @@ import {
   type ExistingComment,
   type JoinedCriterionResult,
 } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+import { buildAnchorFallbackSummarySupplement } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "../../scripts/factory/spec-grounding-verdict-schema.mts";
 
@@ -643,7 +644,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).not.toMatch(/no addable line to anchor them to/i);
   });
 
-  it("for blockersPostedInline=true with SOME stale-skipped blockers, labels the count as review-time and reconciles it against the posted subset, rather than implying every counted finding has its own inline thread (PR #87 review round 4b, Codex, P1)", () => {
+  it("for blockersPostedInline=true with SOME stale-skipped blockers, labels the count as review-time and points at the note(s) below, WITHOUT claiming a specific 'N of these' numeric subset (PR #87 review round 4b, Codex, P1; reworded PR #96 review round 1, Codex, cid 3625908089, F1-S9 slice 90.5 -- an issue-based skip count and a finding-based headline count are different units, so no cross-unit claim is made)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -658,7 +659,8 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     );
     expect(body).toMatch(/were identified at review time/i);
     expect(body).toMatch(/still applicable to this pr's current linked issues/i);
-    expect(body).toMatch(/1 of these were skipped — 1 no longer referenced by this pr.s current body/i);
+    expect(body).toMatch(/some of these are no longer applicable[\s\S]*no longer referenced by this pr's current body/i);
+    expect(body).not.toMatch(/\d+ of these were skipped/i);
     expect(body).toContain("2 blocking finding(s)");
   });
 
@@ -677,7 +679,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).toMatch(/reported as separate, resolvable inline review comment\(s\) on this pr/i);
   });
 
-  it("for blockersPostedInline=false with SOME stale-skipped blockers, ALSO labels the count as review-time in the anchor-fallback wording (PR #87 review round 4b, Codex, P1)", () => {
+  it("for blockersPostedInline=false with SOME stale-skipped blockers, ALSO labels the count as review-time in the anchor-fallback wording, without the 'N of these' claim (PR #87 review round 4b, Codex, P1; reworded slice 90.5)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -691,7 +693,8 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       []
     );
     expect(body).toMatch(/were identified at review time/i);
-    expect(body).toMatch(/1 of these were skipped — 1 no longer referenced by this pr.s current body/i);
+    expect(body).toMatch(/some of these are no longer applicable[\s\S]*no longer referenced by this pr's current body/i);
+    expect(body).not.toMatch(/\d+ of these were skipped/i);
     expect(body).toContain("2 blocking finding(s)");
   });
 
@@ -709,12 +712,12 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [34],
     );
     expect(body).toMatch(/were identified at review time/i);
-    expect(body).toMatch(/1 of these were skipped — 1 no longer referenced as closing/i);
+    expect(body).toMatch(/some of these are no longer applicable[\s\S]*no longer referenced as closing/i);
     expect(body).not.toMatch(/no longer referenced by this pr.s current body/i);
     expect(body).toContain("2 blocking finding(s)");
   });
 
-  it("reconciles BOTH a stale AND a downgraded skip together, in the same clause, each with its own accurate count (F1-S9 slice 90.5)", () => {
+  it("reconciles BOTH a stale AND a downgraded skip together, in the same clause, naming both reasons without a per-count claim (F1-S9 slice 90.5)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -728,10 +731,73 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [34],
       [56],
     );
-    expect(body).toMatch(/2 of these were skipped/i);
-    expect(body).toMatch(/1 no longer referenced by this pr.s current body/i);
-    expect(body).toMatch(/1 no longer referenced as closing/i);
+    expect(body).toMatch(/some of these are no longer applicable/i);
+    expect(body).toMatch(/no longer referenced by this pr.s current body/i);
+    expect(body).toMatch(/no longer referenced as closing/i);
+    expect(body).not.toMatch(/\d+ of these were skipped/i);
     expect(body).toContain("3 blocking finding(s)");
+  });
+});
+
+describe("cross-section comment-size budget (PR #96 review round 1, Codex, cid 3625908085, BLOCKER, F1-S9 slice 90.5)", () => {
+  it("keeps the FULLY-ASSEMBLED comment (findings list + anchor-fallback supplement + stale note + downgraded note) under GitHub's 65,536-character limit, even at every section's own worst case simultaneously", () => {
+    // Every section maxed out AT ONCE -- the exact scenario the prior,
+    // independently-capped-but-never-summed sections could not guarantee
+    // stayed under GitHub's limit. `MAX_FINDINGS_LIST_LENGTH`'s own
+    // docstring records the worst-case budget arithmetic this test proves
+    // empirically; re-verify that docstring if this test's own inputs
+    // ever need to grow to still exercise every cap.
+    const manyNonBlockingFindings = Array.from({ length: 200 }, (_unused, i) =>
+      joined({
+        kind: "non-closing",
+        satisfied: false,
+        issueNumber: 8,
+        criterionId: `8:${i}`,
+        rationale: "x".repeat(2000),
+      }),
+    );
+    const manyCriterionBlockers = Array.from({ length: 50 }, (_unused, i) =>
+      joined({
+        kind: "closing",
+        satisfied: false,
+        issueNumber: 100 + i,
+        criterionId: `${100 + i}:0`,
+        rationale: "y".repeat(2000),
+      }),
+    );
+    const manyUnreviewedClosingIssues: UnreviewedClosingIssueResult[] = Array.from({ length: 50 }, (_unused, i) => ({
+      issueNumber: 200 + i,
+      truncationKind: "fully-dropped",
+    }));
+    const manyStaleIssueNumbers = Array.from({ length: 500 }, (_unused, i) => 1000 + i);
+    const manyDowngradedIssueNumbers = Array.from({ length: 500 }, (_unused, i) => 2000 + i);
+
+    let body = buildSpecGroundingSummaryCommentBody(
+      [...manyNonBlockingFindings, ...manyCriterionBlockers],
+      manyUnreviewedClosingIssues,
+      { truncated: true, diffTruncated: true },
+      false,
+      "no-addable-anchor",
+      manyStaleIssueNumbers,
+      manyDowngradedIssueNumbers,
+    );
+    body += "\n" + buildAnchorFallbackSummarySupplement(manyCriterionBlockers, manyUnreviewedClosingIssues, true, "no-addable-anchor");
+    body += "\n" + buildStaleBlockerSkippedNote(manyStaleIssueNumbers);
+    body += "\n" + buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers);
+
+    expect(body.length).toBeLessThan(65_536);
+    // Sanity: every section actually contributed (an accidental
+    // early-return/empty section would make this test pass for the wrong
+    // reason -- prove each budget was genuinely exercised).
+    expect(body).toMatch(/further finding\(s\) omitted/i); // findings list hit its own cap
+    expect(body).toMatch(/could not be posted as inline comments/i); // supplement rendered
+    expect(body).toMatch(/were NOT posted inline/i); // both notes rendered
+    // The marker isn't necessarily the LAST line once the supplement/notes
+    // are appended after it (matching `publishSummary`'s own real
+    // assembly order) -- `bodyContainsMarkerAsStandaloneLine` is what a
+    // later run actually uses to find this comment, so that's the
+    // relevant check here, not `.endsWith`.
+    expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
   });
 });
 

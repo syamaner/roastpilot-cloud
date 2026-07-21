@@ -137,6 +137,7 @@ import {
   joinFindingsToSpine,
   type JoinedCriterionResult,
   type NoCriteriaReason,
+  type UnreviewedClosingIssueResult,
 } from "./publish-spec-grounding-verdict-logic.mts";
 import {
   buildAnchorFallbackSummarySupplement,
@@ -787,6 +788,25 @@ interface TryPostBlockersInlineResult {
    * `staleBlockerIssueNumbers`.
    */
   readonly downgradedClosingIssueNumbers: readonly number[];
+  /**
+   * The SAME kind-aware-filtered, still-currently-closing-referenced
+   * subsets `tryPostBlockersInline` itself used to decide what's safe to
+   * post/keep gating on (PR #96 review round 1, Codex, cid 3625908090,
+   * F1-S9 slice 90.5) — returned so the caller's own anchor-fallback
+   * summary supplement renders the SAME set this run actually planned to
+   * post, never the raw, unfiltered review-time set. An earlier version
+   * had `publishSummary` pass its own unfiltered `criterionBlockers`/
+   * `spine.unreviewedClosingIssues` straight to {@link
+   * import("./publish-spec-grounding-blocker-logic.mts").buildAnchorFallbackSummarySupplement},
+   * which could list a downgraded or de-referenced finding as an ACTIVE
+   * blocker in the very same comment whose stale/downgraded note, right
+   * below it, says that finding is no longer live — a self-contradictory
+   * summary. `#378`'s own further refinement (excluding an entry that
+   * already has a partial-post's own real inline thread) is a SEPARATE,
+   * later slice (90.6a) — not folded in here.
+   */
+  readonly stillReferencedCriterionBlockers: readonly JoinedCriterionResult[];
+  readonly stillReferencedUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
 }
 
 /**
@@ -973,6 +993,8 @@ async function tryPostBlockersInline(
       degradeReason: "no-addable-anchor",
       staleBlockerIssueNumbers,
       downgradedClosingIssueNumbers,
+      stillReferencedCriterionBlockers,
+      stillReferencedUnreviewedClosingIssues,
     };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
@@ -982,9 +1004,18 @@ async function tryPostBlockersInline(
       degradeReason: postResult.reason,
       staleBlockerIssueNumbers,
       downgradedClosingIssueNumbers,
+      stillReferencedCriterionBlockers,
+      stillReferencedUnreviewedClosingIssues,
     };
   }
-  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers, downgradedClosingIssueNumbers };
+  return {
+    postedInline: true,
+    degradeReason: null,
+    staleBlockerIssueNumbers,
+    downgradedClosingIssueNumbers,
+    stillReferencedCriterionBlockers,
+    stillReferencedUnreviewedClosingIssues,
+  };
 }
 
 async function publishSummary(
@@ -1161,6 +1192,12 @@ async function publishSummary(
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
   let downgradedClosingIssueNumbers: readonly number[] = [];
+  // Populated only when `tryPostBlockersInline` actually runs (below) --
+  // otherwise stay empty, matching `criterionBlockers`/
+  // `spine.unreviewedClosingIssues` being empty too whenever
+  // `totalBlockerCount` is 0 (nothing to have filtered in the first place).
+  let stillReferencedCriterionBlockers: readonly JoinedCriterionResult[] = [];
+  let stillReferencedUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1178,6 +1215,8 @@ async function publishSummary(
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
       downgradedClosingIssueNumbers = result.downgradedClosingIssueNumbers;
+      stillReferencedCriterionBlockers = result.stillReferencedCriterionBlockers;
+      stillReferencedUnreviewedClosingIssues = result.stillReferencedUnreviewedClosingIssues;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1269,9 +1308,18 @@ async function publishSummary(
     downgradedClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
+    // Renders the STILL-CURRENTLY-CLOSING-REFERENCED subset (PR #96
+    // review round 1, Codex, cid 3625908090, F1-S9 slice 90.5) -- never
+    // the raw, unfiltered `criterionBlockers`/`spine.unreviewedClosingIssues`.
+    // An earlier version passed those raw arrays here, which could list a
+    // downgraded or de-referenced finding as an ACTIVE blocker in the same
+    // comment whose stale/downgraded note, right below it, says that very
+    // finding is no longer live -- a self-contradictory summary. See
+    // `TryPostBlockersInlineResult`'s own `stillReferencedCriterionBlockers`/
+    // `stillReferencedUnreviewedClosingIssues` docs for the full reasoning.
     body += "\n" + buildAnchorFallbackSummarySupplement(
-      criterionBlockers,
-      spine.unreviewedClosingIssues,
+      stillReferencedCriterionBlockers,
+      stillReferencedUnreviewedClosingIssues,
       diffTruncationBlocksClosingClaim,
       // Always non-null here by tryPostBlockersInline's own contract
       // (populated on every `postedInline: false` result) -- the

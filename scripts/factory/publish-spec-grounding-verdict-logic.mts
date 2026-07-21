@@ -581,15 +581,48 @@ export function findUnreviewedNewClosingReferences(
  * list past GitHub's 65,536-character comment-body limit, turning a
  * genuinely valid verdict into a failed post; the concrete case that
  * surfaced this: ~34 non-blocking findings at the rationale cap alone
- * approach ~70,000 characters). Deliberately well under GitHub's own
- * limit — the caveat, blocker-count paragraph, heading, and trailer
- * sections are all roughly constant-size regardless of finding count, so
- * this only needs to bound the part that actually scales. Layered with
- * {@link MAX_RATIONALE_DISPLAY_LENGTH} (bounds each entry) rather than
- * relying on either alone: a valid verdict with many long rationales is
- * stopped by this budget even if no single entry trips its own cap.
+ * approach ~70,000 characters).
+ *
+ * SIZED AS PART OF A CROSS-SECTION BUDGET, not in isolation (PR #96
+ * review round 1, Codex, cid 3625908085, BLOCKER, F1-S9 slice 90.5): this
+ * function's own findings list is only ONE of several sections
+ * `publishSummary` appends into the SAME comment — {@link
+ * import("./publish-spec-grounding-blocker-logic.mts").buildAnchorFallbackSummarySupplement}'s
+ * own anchor-fallback detail, {@link buildStaleBlockerSkippedNote}, and
+ * {@link buildDowngradedClosingBlockerSkippedNote} all append AFTER this
+ * function's own output. Each was independently capped in isolation, but
+ * their SUM was never verified to stay under GitHub's limit — a run with
+ * a near-maximal findings list AND a maximal stale note AND a maximal
+ * downgraded note AND a full anchor-fallback supplement could exceed
+ * 65,536 combined, failing the one write this whole pipeline exists to
+ * guarantee. This value (down from 55,000) is chosen so the WORST-CASE
+ * SUM of every section this comment can ever contain stays safely under
+ * the limit:
+ *   - fixed overhead (title, truncation caveat, blocking-findings
+ *     paragraph, footer, marker): ≤ ~3,000
+ *   - this findings list: ≤ 45,000 (this constant)
+ *   - the anchor-fallback supplement: ≤ ~4,000 (naturally bounded by its
+ *     own `MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS`/
+ *     `MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS` item caps and each
+ *     entry's own `MAX_RATIONALE_DISPLAY_LENGTH`, never independently
+ *     length-capped beyond that — the small, fixed item count already
+ *     makes an explicit character cap redundant here)
+ *   - the stale-blocker note: ≤ ~2,600 (its own ~600-character fixed
+ *     wording plus its own `MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH`)
+ *   - the downgraded-closing note: ≤ ~2,600 (same shape as its sibling)
+ * Sum: ≤ ~57,200 — comfortably under 65,536 even in the worst case where
+ * every section is simultaneously maxed. See the cross-section budget
+ * test (`publish-spec-grounding-verdict-logic.test.ts`) that actually
+ * assembles all four sections at their own worst case and asserts the
+ * total. If any of these constants changes, that test — not just this
+ * comment — must be re-verified.
+ *
+ * Layered with {@link MAX_RATIONALE_DISPLAY_LENGTH} (bounds each entry)
+ * rather than relying on either alone: a valid verdict with many long
+ * rationales is stopped by this budget even if no single entry trips its
+ * own cap.
  */
-const MAX_FINDINGS_LIST_LENGTH = 55_000;
+const MAX_FINDINGS_LIST_LENGTH = 45_000;
 
 /**
  * Builds the single, non-blocking summary comment body.
@@ -748,33 +781,47 @@ export function buildSpecGroundingSummaryCommentBody(
     // (deliberately still the REVIEW-TIME count, see this function's own
     // `staleBlockerIssueNumbers` param docs and issue #89) must not be
     // presented as if every one of them has its own inline thread or
-    // summary listing below -- reword the headline to say the count is
-    // review-time and explicitly reconcile it against the posted/listed
-    // subset, pointing at the separate stale-skip note for the rest.
+    // summary listing below -- reword the headline to acknowledge some
+    // may no longer be live, pointing at the separate stale-skip note(s)
+    // for the specifics.
     //
     // F1-S9 slice 90.5: `downgradedClosingIssueNumbers` is a SECOND,
-    // distinct skip reason reconciled into the SAME headline math (both
-    // are "review-time blockers this run chose not to post/keep gating
-    // on"), but each gets its OWN clause below -- "no longer referenced at
-    // all" and "no longer referenced as closing" are different, and
-    // conflating them into one count would say something false about
+    // distinct skip reason reconciled into the SAME clause (both are
+    // "review-time blockers this run chose not to post/keep gating on"),
+    // but each gets its OWN reason phrase below -- "no longer referenced
+    // at all" and "no longer referenced as closing" are different, and
+    // conflating them into one phrase would say something false about
     // whichever case didn't actually apply to a given issue.
-    const skippedCount = staleBlockerIssueNumbers.length + downgradedClosingIssueNumbers.length;
+    //
+    // DELIBERATELY LIST-ONLY, no "N of M" count claim (PR #96 review
+    // round 1, Codex, cid 3625908089, F1-S9 slice 90.5): an earlier
+    // version said "${skippedCount} of these were skipped", tying an
+    // ISSUE-based count (`skippedCount`) to `totalBlockerCount`'s own
+    // FINDING-based unit as if they were directly comparable subsets --
+    // false whenever one issue carries more than one unmet criterion (2
+    // findings for 1 issue, skipping that issue reads as "1 of these"
+    // when 2 findings actually stopped counting). Reconciling the units
+    // correctly is the DEEPER count-accuracy rework tracked in issue #89
+    // (ahead of the gate-enable decision #47, not folded into this
+    // slice); for now this clause makes NO numeric claim relating the two
+    // counts at all -- it only names WHICH reasons apply, deferring the
+    // actual issue numbers and their own accurate counts to the separate
+    // notes below.
     const skippedReasonClauses: string[] = [];
     if (staleBlockerIssueNumbers.length > 0) {
-      skippedReasonClauses.push(`${staleBlockerIssueNumbers.length} no longer referenced by this PR's current body`);
+      skippedReasonClauses.push("no longer referenced by this PR's current body");
     }
     if (downgradedClosingIssueNumbers.length > 0) {
-      skippedReasonClauses.push(`${downgradedClosingIssueNumbers.length} no longer referenced as closing`);
+      skippedReasonClauses.push("no longer referenced as closing");
     }
     const staleReconciliation =
-      skippedCount > 0
-        ? ` (${skippedCount} of these were skipped — ${skippedReasonClauses.join("; ")} — see the note(s) ` +
-          "below, not repeated here.)"
+      skippedReasonClauses.length > 0
+        ? ` Some of these are no longer applicable as of this PR's current body (${skippedReasonClauses.join("; ")}) ` +
+          "— see the note(s) below for exactly which, not repeated here."
         : "";
     lines.push(
       blockersPostedInline
-        ? skippedCount > 0
+        ? skippedReasonClauses.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable to this PR's current linked issues are reported as separate, " +
               `resolvable inline review comment(s) below — see those threads, not this summary, ` +
@@ -783,7 +830,7 @@ export function buildSpecGroundingSummaryCommentBody(
           : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : skippedCount > 0
+        : skippedReasonClauses.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable are listed below in THIS summary, not as separate inline comments " +
               `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
