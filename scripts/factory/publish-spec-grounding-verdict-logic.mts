@@ -734,6 +734,25 @@ export function buildSpecGroundingSummaryCommentBody(
 }
 
 /**
+ * Upper bound on {@link buildStaleBlockerSkippedNote}'s own displayed
+ * issue-number list, in characters (PR #87 review round 7, Codex,
+ * BLOCKER): `staleBlockerIssueNumbers` is derived from `criterionBlockers`
+ * and `unreviewedClosingIssues`, both themselves influenced by the PR's
+ * own (attacker-controlled) body — a body naming far more issues than
+ * the runner's own fetch cap, or a body edit that removes references to
+ * many of them at once, could otherwise make this note's own joined
+ * issue-number list grow unboundedly, pushing the WHOLE summary comment
+ * past GitHub's 65,536-character limit and failing the only write this
+ * run makes — the worst outcome, since this note (like the fallback and
+ * anchor-fallback ones) is a signal a human needs, never optional.
+ * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the
+ * fallback comment's own reasons list — a budget over the TOTAL joined
+ * string, any remainder reported as an omitted count, never silently
+ * dropped.
+ */
+const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+
+/**
  * Builds the note appended when one or more planned blocker findings were
  * skipped from inline posting because the PR's CURRENT body no longer
  * references their own issue at all (PR #87 review round 4, Codex, P1 —
@@ -752,13 +771,27 @@ export function buildSpecGroundingSummaryCommentBody(
  *   `unreviewedClosingIssues` whose own issue is no longer referenced in
  *   the PR's current body.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped.
+ *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   regardless of how many issue numbers were skipped.
  */
 export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
   if (staleBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueList = staleBlockerIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ");
+  const issueTokens: string[] = [];
+  let issueListLength = 0;
+  let addedCount = 0;
+  for (const issueNumber of staleBlockerIssueNumbers) {
+    const token = `#${issueNumber}`;
+    if (issueListLength + token.length + 2 > MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
+      break; // The remainder is reported as an omitted count below, not silently dropped.
+    }
+    issueTokens.push(token);
+    issueListLength += token.length + 2; // ", " separator budget.
+    addedCount += 1;
+  }
+  const omittedCount = staleBlockerIssueNumbers.length - addedCount;
+  const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
     "body no longer references them at all (removed or edited since the spec-grounded review ran " +

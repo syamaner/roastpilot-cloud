@@ -702,6 +702,19 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
     expect(note).toMatch(/no longer references them/i);
     expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
   });
+
+  it("caps the displayed issue-number list, reporting an omitted count rather than growing unboundedly, when a PR body names far more stale issues than fit within the budget (PR #87 review round 7, Codex, BLOCKER -- unreviewedClosingIssues is attacker-influenced, so this list's own size is too)", () => {
+    const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
+    const note = buildStaleBlockerSkippedNote(manyStaleIssueNumbers);
+    expect(note.length).toBeLessThan(3_000);
+    expect(note).toMatch(/and \d+ more/i);
+    expect(note).toContain("#1");
+  });
+
+  it("does not report an omitted count when every stale issue number fits within the budget", () => {
+    const note = buildStaleBlockerSkippedNote([12, 34]);
+    expect(note).not.toMatch(/and \d+ more/i);
+  });
 });
 
 describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12)", () => {

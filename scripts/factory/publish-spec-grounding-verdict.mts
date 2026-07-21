@@ -769,14 +769,24 @@ interface TryPostBlockersInlineResult {
  * whose body is edited to REMOVE a reference to some issue #N (between
  * the read-only run and this publish run) would otherwise have this
  * function post an inline comment reasserting an obligation for #N that
- * this PR no longer even claims to reference at all. `fetchAndVerifyPrShas`
- * already returns the PR's own current `body` (added for the delete-path
- * fold), so this needs no extra fetch: re-parses it with the SAME {@link
- * parseLinkedIssueReferences} the runner itself uses, and filters BOTH
- * `criterionBlockers` and `spine.unreviewedClosingIssues` down to entries
- * whose own `issueNumber` is still in that current set — the STALE ones
- * are reported back to the caller (never silently dropped) so the summary
- * can say so, never posted inline.
+ * this PR no longer even claims to reference at all. Re-parses `pr.body`
+ * with the SAME {@link parseLinkedIssueReferences} the runner itself
+ * uses, and filters BOTH `criterionBlockers` and
+ * `spine.unreviewedClosingIssues` down to entries whose own `issueNumber`
+ * is still in that current set — the STALE ones are reported back to the
+ * caller (never silently dropped) so the summary can say so, never
+ * posted inline.
+ *
+ * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
+ * Codex, medium, fail-open close): {@link publishSummary}'s own caller
+ * now fetches and verifies the PR's current SHAs/body ONCE, before
+ * deciding whether there are any blockers at all — an earlier version had
+ * this function do that fetch+verify itself, which meant the
+ * zero-blocker "no blocking findings" path NEVER verified the trusted
+ * head SHA at all, so a push moving the PR after review could yield a
+ * stale all-clear for a head this run never actually reviewed. This
+ * function no longer fetches or verifies anything itself; it trusts its
+ * caller already did.
  *
  * DELIBERATE DESIGN (team-lead's ruling, PR #87 review round 4b): the
  * caller's own {@link buildSpecGroundingSummaryCommentBody} still counts
@@ -810,24 +820,21 @@ interface TryPostBlockersInlineResult {
  *   way. `staleBlockerIssueNumbers` is independent of both — the issue
  *   numbers filtered out because the PR's CURRENT body no longer
  *   references them at all.
- * @throws Any OTHER failure (a SHA mismatch, a diff-fetch error, a
- *   non-first or non-422 inline-posting failure) — a genuine error, not
- *   a case this function degrades from; the caller converts it into a
- *   visible fallback, same as every other artifact/network failure in
- *   this entrypoint.
+ * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
+ *   inline-posting failure) — a genuine error, not a case this function
+ *   degrades from; the caller converts it into a visible fallback, same
+ *   as every other artifact/network failure in this entrypoint.
  */
 async function tryPostBlockersInline(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
-  trustedHeadSha: string,
+  pr: GitHubPullRequestShas,
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
   diffTruncationBlocksClosingClaim: boolean,
 ): Promise<TryPostBlockersInlineResult> {
-  const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
-
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
@@ -882,6 +889,32 @@ async function publishSummary(
   const totalBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
+  // Verified UNCONDITIONALLY, before the blocker-count branch (PR #87
+  // review round 7, Codex, medium, fail-open close): an earlier version
+  // only fetched/verified the PR's current head SHA INSIDE
+  // tryPostBlockersInline, which only ran when totalBlockerCount > 0 --
+  // meaning the zero-blocker "no blocking findings" all-clear path never
+  // verified anything at all, so a push moving the PR after the read-only
+  // review ran could still get a stale all-clear posted for a head this
+  // run never actually reviewed. Fetched ONCE here and passed down to
+  // `tryPostBlockersInline` (which no longer fetches/verifies itself) so
+  // every `hasCriteria: true` publish -- blockers or not -- verifies the
+  // trusted head before posting anything.
+  let pr: GitHubPullRequestShas;
+  try {
+    pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+  } catch (err) {
+    // A genuine SHA mismatch (the PR moved) or a fetch failure -- degrade
+    // to the SAME visible fallback every other artifact/network failure
+    // in this entrypoint uses, never a stale all-clear or a blocker post
+    // for a head this run could not actually verify.
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to verify this PR's current head SHA before publishing: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
@@ -892,7 +925,7 @@ async function publishSummary(
         owner,
         repo,
         prNumber,
-        trustedHeadSha,
+        pr,
         criterionBlockers,
         spine,
         diffTruncationBlocksClosingClaim,
@@ -901,12 +934,12 @@ async function publishSummary(
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
     } catch (err) {
-      // A genuine error (SHA mismatch, diff-fetch failure, a non-first or
-      // non-422 inline-posting failure) — NOT the anchor-fallback or
-      // 422-degrade case, both of which `tryPostBlockersInline` already
-      // resolves to a plain result, never a throw. Same "visible
-      // fallback, never a silent or bare-CI-red failure" treatment as
-      // every other artifact/network failure in this entrypoint.
+      // A genuine error (a diff-fetch failure, a non-first or non-422
+      // inline-posting failure) — NOT the anchor-fallback or 422-degrade
+      // case, both of which `tryPostBlockersInline` already resolves to a
+      // plain result, never a throw. Same "visible fallback, never a
+      // silent or bare-CI-red failure" treatment as every other
+      // artifact/network failure in this entrypoint.
       await publishFallback(token, owner, repo, prNumber, [
         `failed to post this run's blocking findings as inline comments: ` +
           `${err instanceof Error ? err.message : String(err)}`,
