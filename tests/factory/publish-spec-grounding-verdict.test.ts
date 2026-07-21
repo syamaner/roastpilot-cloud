@@ -260,6 +260,32 @@ describe("main — the outcome.json tri-state", () => {
     expect((post?.body as { body: string }).body).toContain("carries unexpected field(s) (extra)");
   });
 
+  it.each([
+    ["missing entirely", {}],
+    ["not an array", { reviewedClosingIssueNumbers: "12" }],
+    ["contains a negative number", { reviewedClosingIssueNumbers: [-1] }],
+    ["contains a non-integer", { reviewedClosingIssueNumbers: [1.5] }],
+    ["contains a non-number element", { reviewedClosingIssueNumbers: ["12"] }],
+  ])(
+    "posts a visible fallback when outcome.json's reviewedClosingIssueNumbers is %s (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER -- FAILS CLOSED, unlike noCriteriaReason's own safe-default coercion)",
+    async (_label, malformedField) => {
+      const outcomePath = join(workdir, "outcome.json");
+      await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", ...malformedField }));
+      process.env.OUTCOME_PATH = outcomePath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      const post = calls.find((c) => c.method === "POST");
+      expect((post?.body as { body: string }).body).toMatch(/reviewedClosingIssueNumbers.*array of non-negative integers/i);
+    },
+  );
+
   it("posts a visible fallback when outcome.json exists but isn't valid JSON", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(outcomePath, "{ not json");
@@ -321,7 +347,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("is a genuine no-op when hasCriteria is false and there is no prior spec-grounding state to clear (PATCH/POST/DELETE-free, only the read-only lookups)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
@@ -338,7 +367,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("reason=no-references: clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
@@ -372,12 +404,54 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
   });
 
-  it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+  it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: FAILS CLOSED with a visible fallback (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262 -- Fork A's own new head-verify now runs BEFORE either reason-specific branch, uniformly matching publishSummary's own hasCriteria:true behavior, rather than the narrower graceful degrade isStillSafeToDeleteInlineBlockerThreads used to provide for this exact scenario)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ headSha: "differentsha0000000000000000000000000000" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/does not match the trusted event head sha/i);
+    // Fork A's own head-verify fails BEFORE either reason-specific branch
+    // (no summary clear, no inline-comment lookup or delete attempt at all).
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("reason=no-references: STILL degrades to the non-destructive path (via isStillSafeToDeleteInlineBlockerThreads's own re-check) for the NARROWER TOCTOU window that remains AFTER Fork A's own head-verify -- the PR moves a SECOND time, between Fork A's fetch and this function's own separate, later re-fetch (F1-S9 slice 90.5: Fork A's new head-verify does not replace this pre-existing, independent re-check immediately before the destructive delete)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    let pullsCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        // FIRST call (Fork A's own fetchAndVerifyPrShas) sees the TRUSTED
+        // head SHA and an empty body -- passes cleanly. SECOND call
+        // (isStillSafeToDeleteInlineBlockerThreads's own, separate
+        // re-fetch, immediately before the destructive delete) finds the
+        // PR has moved AGAIN in the interim -- the narrow race window
+        // that mechanism still exists specifically to close.
+        return pullsCallCount === 1
+          ? prFetchHandler()
+          : prFetchHandlerWithOverrides({ headSha: "differentsha0000000000000000000000000000" });
+      },
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -393,52 +467,51 @@ describe("main — the outcome.json tri-state", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(2);
     const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
     expect(patch).toBeDefined();
     expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
     expect((patch?.body as { body: string }).body).toMatch(/left in place/i);
-    // The inline blocker comments endpoint is NEVER even fetched, let
-    // alone anything DELETEd -- the revalidation failed BEFORE the
-    // destructive path was ever reached.
     expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
-  it("reason=no-references BUT the PR's CURRENT body now shows a closing reference (added after the review ran, head SHA unchanged): degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+  it("reason=no-references BUT the PR's CURRENT body now shows a closing reference (added after the review ran, head SHA unchanged): Fork A itself now fails this closed with its own specific message, BEFORE either reason-specific branch runs (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262 -- supersedes the narrower, gracefully-degrading treatment isStillSafeToDeleteInlineBlockerThreads used to give this exact scenario)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       // Same head SHA as trusted (a body-only edit never bumps it), but
       // the body NOW carries a real closing reference the runner never saw.
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
-      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 55,
-            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-        ]),
-      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
-    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
-    expect(patch).toBeDefined();
-    expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/closing reference to issue #12 was not part of that review/i);
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
     expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   it("reason=no-unmet-criteria: updates the summary with the self-attested caveat but LEAVES inline blocker threads untouched -- deleting a required_conversation_resolution-gating thread on a self-attested, non-diff-verified signal would be an anti-gaming hole (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -464,13 +537,46 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
+  it("reason=no-unmet-criteria: Fork A ALSO fails closed here when the PR's CURRENT body shows a genuinely new closing reference (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER) -- completes Fork A's coverage to BOTH no-criteria sub-paths, not just no-references", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      // #12 was reviewed as closing (self-attested complete); #99 is a
+      // BRAND-NEW closing reference this run never knew about at all.
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/closing reference to issue #99 was not part of that review/i);
+    // Fork A's own check fails BEFORE the "no-unmet-criteria" branch's own
+    // summary-upsert logic ever runs.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
   it("an unknown/missing noCriteriaReason on a false outcome.json FAILS CLOSED to the non-destructive treatment -- never deletes inline blocker threads on a signal it could not confirm (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
     // Deliberately missing noCriteriaReason -- a malformed/stale-runner
     // artifact this entrypoint cannot positively confirm as no-references.
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    // reviewedClosingIssueNumbers IS present and valid here -- this test
+    // isolates the noCriteriaReason-coercion behavior specifically, not
+    // the separate (and separately tested) reviewedClosingIssueNumbers
+    // validation (F1-S9 slice 90.5).
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, reviewedClosingIssueNumbers: [] }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -484,7 +590,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("posts a visible fallback, rather than crashing or silently no-opping, when clearing stale state genuinely fails", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     // The summary-comment lookup 403s exactly ONCE (clearStaleSpecGroundingSummary's
     // own check) -- publishFallback's own subsequent lookup, in the catch

@@ -502,13 +502,18 @@ jobs:
         # distinction. Always writes review-output/outcome.json, uploaded
         # alongside the verdict/spine below: {"hasCriteria": true} when the
         # runner found real work, {"hasCriteria": false, "noCriteriaReason":
-        # "no-references"|"no-unmet-criteria"} on its early exit (PR #87
-        # review, Codex, P1/medium fold — the runner's own two DIFFERENT
-        # false-emitting branches, "no closing-keyword reference at all" vs
-        # "references exist but every acceptance box is self-attested
-        # complete", carry materially different trust; the privileged
-        # publisher's own clear-on-disappear logic must never treat them the
-        # same way, see its own docstring).
+        # "no-references"|"no-unmet-criteria", "reviewedClosingIssueNumbers":
+        # [...]} on its early exit (PR #87 review, Codex, P1/medium fold —
+        # the runner's own two DIFFERENT false-emitting branches, "no
+        # closing-keyword reference at all" vs "references exist but every
+        # acceptance box is self-attested complete", carry materially
+        # different trust; the privileged publisher's own clear-on-disappear
+        # logic must never treat them the same way, see its own docstring).
+        # `reviewedClosingIssueNumbers` (F1-S9 slice 90.5, PR #96 review
+        # round 2, Codex, cid 3626169262, BLOCKER): completes Fork A's
+        # fail-closed new-closing-reference check to this path too — mirrors
+        # criteria-spine.json's own field of the same name (see the
+        # publisher's own `findUnreviewedNewClosingReferences` docstring).
         # This step only runs if the runner step itself SUCCEEDED (no
         # `if: always()` here, deliberately) — a genuine runner crash (an
         # unverified fetch failure, a thrown error) leaves NO outcome.json
@@ -518,6 +523,7 @@ jobs:
         env:
           HAS_CRITERIA: ${{ steps.runner.outputs.has-criteria }}
           NO_CRITERIA_REASON: ${{ steps.runner.outputs.no-criteria-reason }}
+          REVIEWED_CLOSING_ISSUE_NUMBERS: ${{ steps.runner.outputs.reviewed-closing-issue-numbers }}
         run: |
           set -euo pipefail
           # `rm -rf` THEN `mkdir` (Codex finding, PR #76 review, round 5,
@@ -539,22 +545,30 @@ jobs:
           # the privileged publisher's own fail-closed coercion): if the
           # runner step SUCCEEDED but a future regression makes it return
           # from an early exit WITHOUT setting has-criteria at all (or sets
-          # an unrecognized no-criteria-reason), the naive two-branch
-          # version of this step would silently fall into the `false`
-          # branch with an EMPTY/garbage reason, and the publisher's own
-          # fail-closed coercion (unknown reason -> "no-unmet-criteria")
-          # would then quietly no-op instead of surfacing a fallback --
-          # a runner regression disabling the entire gate with NO visible
-          # signal anywhere. Requiring an EXACT match on both supported
-          # shapes turns that same regression into a hard-failing step
-          # instead, which surfaces as a red CI check.
+          # an unrecognized no-criteria-reason, or omits
+          # reviewed-closing-issue-numbers — F1-S9 slice 90.5, same
+          # defense-in-depth class), the naive two-branch version of this
+          # step would silently fall into the `false` branch with an
+          # EMPTY/garbage reason, and the publisher's own fail-closed
+          # coercion (unknown reason -> "no-unmet-criteria") would then
+          # quietly no-op instead of surfacing a fallback -- a runner
+          # regression disabling the entire gate with NO visible signal
+          # anywhere. Requiring an EXACT match on both supported shapes,
+          # PLUS a non-empty reviewed-closing-issue-numbers output, turns
+          # that same regression into a hard-failing step instead, which
+          # surfaces as a red CI check. `jq --argjson` itself ALSO fails
+          # loud on a malformed (non-JSON, or JSON-but-not-an-array) value
+          # — this bash-side check is defense-in-depth for a clearer,
+          # earlier error message, not the only guard.
           if [ "$HAS_CRITERIA" = "true" ]; then
             jq -n --argjson hasCriteria true '{hasCriteria: $hasCriteria}' > review-output/outcome.json
-          elif [ "$HAS_CRITERIA" = "false" ] && { [ "$NO_CRITERIA_REASON" = "no-references" ] || [ "$NO_CRITERIA_REASON" = "no-unmet-criteria" ]; }; then
+          elif [ "$HAS_CRITERIA" = "false" ] && { [ "$NO_CRITERIA_REASON" = "no-references" ] || [ "$NO_CRITERIA_REASON" = "no-unmet-criteria" ]; } && [ -n "$REVIEWED_CLOSING_ISSUE_NUMBERS" ]; then
             jq -n --argjson hasCriteria false --arg noCriteriaReason "$NO_CRITERIA_REASON" \
-              '{hasCriteria: $hasCriteria, noCriteriaReason: $noCriteriaReason}' > review-output/outcome.json
+              --argjson reviewedClosingIssueNumbers "$REVIEWED_CLOSING_ISSUE_NUMBERS" \
+              '{hasCriteria: $hasCriteria, noCriteriaReason: $noCriteriaReason, reviewedClosingIssueNumbers: $reviewedClosingIssueNumbers}' \
+              > review-output/outcome.json
           else
-            echo "::error::Unexpected runner output: has-criteria=\"$HAS_CRITERIA\" no-criteria-reason=\"$NO_CRITERIA_REASON\" -- refusing to write outcome.json rather than fabricate an ambiguous marker." >&2
+            echo "::error::Unexpected runner output: has-criteria=\"$HAS_CRITERIA\" no-criteria-reason=\"$NO_CRITERIA_REASON\" reviewed-closing-issue-numbers=\"$REVIEWED_CLOSING_ISSUE_NUMBERS\" -- refusing to write outcome.json rather than fabricate an ambiguous marker." >&2
             exit 1
           fi
 
