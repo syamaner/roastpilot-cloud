@@ -72,6 +72,7 @@ const VALID_SPINE = {
   truncated: false,
   unreviewedClosingIssues: [],
   diffTruncated: false,
+  reviewedClosingIssueNumbers: [12],
 };
 
 async function writeArtifacts(
@@ -586,7 +587,13 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
 
   it("posts a visible fallback when criteria-spine.json fails shape validation", async () => {
     const { outcomePath, verdictPath } = await writeArtifacts(workdir, {
-      spine: { entries: "not-an-array", truncated: false, unreviewedClosingIssues: [], diffTruncated: false },
+      spine: {
+        entries: "not-an-array",
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [],
+      },
     });
     process.env.OUTCOME_PATH = outcomePath;
     process.env.VERDICT_PATH = verdictPath;
@@ -731,6 +738,7 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 99, 34],
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -784,6 +792,12 @@ describe("main — the happy path", () => {
           { issueNumber: 56, truncationKind: "fully-dropped" },
         ],
         diffTruncated: false,
+        // Both entries are "fully-dropped" (never even fetched, in this
+        // fixture), so reviewedClosingIssueNumbers correctly has neither
+        // -- "fully-dropped" is deliberately NOT cross-checked against
+        // this field either way (see validateCrossEntryInvariants's own
+        // docstring).
+        reviewedClosingIssueNumbers: [],
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -915,6 +929,7 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: false,
+        reviewedClosingIssueNumbers: [12],
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -959,6 +974,7 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
