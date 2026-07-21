@@ -33,6 +33,7 @@
  *    overrides, homoglyphs) a security-minded review exists to catch).
  */
 
+import { isUtf8 } from "node:buffer";
 import {
   ASCII_WHITESPACE_CHARS,
   buildCriterionIdMarker,
@@ -432,6 +433,694 @@ export function computeCriteriaSpineTruncation(
     spine.length < totalUnmetCriteriaCount;
 
   return { truncated, unreviewedClosingIssues };
+}
+
+/** The fully-parsed, shape-validated contents of a `criteria-spine.json` artifact. */
+export interface ParsedCriteriaSpine {
+  readonly entries: readonly CriteriaSpineEntry[];
+  readonly truncated: boolean;
+  readonly unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
+  readonly diffTruncated: boolean;
+}
+
+export type ParsedCriteriaSpineResult =
+  | { readonly ok: true; readonly spine: ParsedCriteriaSpine }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * Upper bound on a `criteria-spine.json` artifact's own serialized size,
+ * in UTF-8 bytes, before it is even read into memory (F1-S9 slice
+ * 3b-iii-d, issue #12) — the same defensive-bound discipline `spec-
+ * grounding-verdict-schema.mts`'s own `MAX_PAYLOAD_BYTES` applies to the
+ * agent's verdict artifact, applied here to this run's OWN trusted
+ * spine artifact instead. This file is written by `spec-grounding-
+ * runner.mts` itself (never agent- or issue-authored content — see
+ * {@link CriteriaSpineEntry}'s own docstring for why it carries only
+ * trusted metadata, never raw criterion text), so the threat model here
+ * is a CORRUPTED or truncated artifact download between the read-only
+ * job's upload and the privileged publisher's download, not adversarial
+ * content — but a corrupted/oversized download must still fail closed
+ * (a clear validation error) rather than crash unhandled or silently
+ * misparse. Generous relative to the spine's own real-world size (at
+ * most `MAX_LINKED_ISSUES` (20) × `MAX_CRITERIA_PER_ISSUE` (50) entries,
+ * each a handful of short fields).
+ */
+export const MAX_CRITERIA_SPINE_ARTIFACT_BYTES = 4_000_000;
+
+/**
+ * Upper bound on the NUMBER of elements `entries` may contain, checked
+ * BEFORE the array is iterated element-by-element (PR #84 review round 1,
+ * Codex, FOLD 3, LOW): a corrupted spine artifact well under {@link
+ * MAX_CRITERIA_SPINE_ARTIFACT_BYTES} (4MB) can still encode a
+ * densely-packed array of millions of tiny elements — validating each one
+ * individually would produce one error string per element, hundreds of MB
+ * of accumulated error text, risking an OOM before the caller's own
+ * fallback comment (built FROM those errors) ever gets a chance to post.
+ * Rejecting on COUNT alone, with a single error, closes this before any
+ * per-element work begins. Generous relative to `entries`' own real-world
+ * ceiling (at most `MAX_LINKED_ISSUES` (20) × `MAX_CRITERIA_PER_ISSUE`
+ * (50) = 1000 entries for a legitimate run — this IS a hard per-run
+ * ceiling, unlike `unreviewedClosingIssues` below).
+ *
+ * ONLY applies to `entries` (PR #84 review round 4, Codex, FOLD 1 — team-
+ * lead's own miss from round 1: this constant originally ALSO capped
+ * `unreviewedClosingIssues`, but that array has no equivalent legitimate
+ * ceiling — `computeCriteriaSpineTruncation` emits one record per
+ * `closing`-kind reference beyond `MAX_LINKED_ISSUES` (the 20-fetch cap),
+ * UNCAPPED, so a PR body naming thousands of `Closes #N` references
+ * legitimately produces MORE than 5000 such records. Capping it here
+ * FALSE-REJECTED an otherwise-valid spine. Removed as redundant too: the
+ * artifact's own {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} byte ceiling
+ * already bounds this array's total size, and `publish-spec-grounding-
+ * blocker-logic.mts`'s own `planBlockerInlineComments` already caps the
+ * downstream inline-comment fan-out this array can ever produce (5
+ * individual + 1 aggregated) regardless of how many entries survive here).
+ */
+const MAX_CRITERIA_SPINE_ENTRIES = 5000;
+
+/**
+ * Upper bound on how many PER-ELEMENT validation errors either the
+ * `entries` or `unreviewedClosingIssues` validation loop may accumulate
+ * before this module stops validating that array's remaining elements
+ * entirely (PR #84 review, independent pass + Codex, FOLD 1): removing
+ * the flat cardinality cap on `unreviewedClosingIssues` (round 4, FOLD 1
+ * — a genuinely LEGITIMATE array can exceed {@link
+ * MAX_CRITERIA_SPINE_ENTRIES}) reopened the per-element-error
+ * accumulation THAT cap also happened to bound. A corrupted array well
+ * under the artifact's own {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} (4MB)
+ * byte cap can still encode millions of tiny malformed elements (e.g.
+ * `[0, 0, 0, ...]`), each producing its own error string — unbounded
+ * validation work and unbounded accumulated error text, the SAME OOM
+ * class {@link MAX_CRITERIA_SPINE_ENTRIES} bounds for `entries`, but
+ * which no longer bounds `unreviewedClosingIssues` now that its own
+ * cardinality cap is gone. Stops calling the per-element validator
+ * ENTIRELY (not merely truncating how many errors are kept) once this
+ * many errors have already accumulated for that array, appending ONE
+ * summary line reporting how many elements were never validated —
+ * applied to BOTH loops, each with its OWN independent budget, so a
+ * problem in one array can never starve the other's own reporting.
+ */
+const MAX_VALIDATION_ERRORS_PER_ARRAY = 200;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Upper bound on `criterionId`'s own length, in characters (PR #84
+ * review round 2, Codex, FOLD 2 — mirrors `spec-grounding-verdict-
+ * schema.mts`'s own identical `MAX_CRITERION_ID_LENGTH` (32) constant and
+ * reasoning exactly: the runner's own `criterionId` shape
+ * (`${issueNumber}:${index}`) is always short, so this is a generous
+ * ceiling against a corrupted or runaway value, not a tight fit to the
+ * expected shape).
+ */
+const MAX_CRITERION_ID_LENGTH = 32;
+
+/**
+ * Matches a `criterionId`'s COMPLETE shape (`spec-grounding-runner-
+ * logic.mts`'s own `buildCriteriaSpine` produces exactly
+ * `${issueNumber}:${index}`) — mirrors `spec-grounding-verdict-
+ * schema.mts`'s own identical `CRITERION_ID_PATTERN` exactly (PR #84
+ * review round 2, Codex, FOLD 2 — the PRIOR round's own {@link
+ * validateCriteriaSpineEntry} check only matched the LEADING
+ * `<issueNumber>:` prefix, never anchoring the end of the string, so a
+ * value like `"12:0<megabytes of arbitrary content>"` still passed —
+ * this pattern's own `$` anchor closes that: the WHOLE string must be
+ * exactly digits, a colon, and digits, nothing else). Captures BOTH the
+ * `issueNumber` part (group 1) AND the `index` part (group 2, added PR
+ * #84 review round 3 — {@link validateCrossEntryInvariants}'s own
+ * per-issue index-contiguity check needs it).
+ */
+const CRITERION_ID_PATTERN = /^(\d+):(\d+)$/;
+
+/**
+ * Whether `criterionId`'s own leading `<issueNumber>:` prefix matches
+ * `issueNumber` — the two are independently-encoded copies of the SAME
+ * fact in a well-formed spine (`buildCriteriaSpine` always derives both
+ * from the same source), so a well-formed artifact always agrees; a
+ * corrupted one might not (PR #84 review, Codex, FOLD 1, the consequential
+ * one — see {@link validateCriteriaSpineEntry}'s own docstring for the
+ * downstream join-collision this closes). Only ever called once the
+ * caller has ALREADY confirmed `criterionId` matches {@link
+ * CRITERION_ID_PATTERN}'s own complete shape.
+ *
+ * Compares as STRINGS, never `Number(match[1]) === issueNumber` (PR #84
+ * review round 4, Codex, FOLD 4): `issueNumber` beyond
+ * `Number.MAX_SAFE_INTEGER` loses precision the moment `JSON.parse`
+ * produces it as a JS `number` — two DIFFERENT digit sequences (one from
+ * `criterionId`'s own string prefix, one from `issueNumber`'s own field)
+ * can round to the IDENTICAL floating-point value once both sides of a
+ * numeric comparison coerce through `Number(...)`, spuriously reporting a
+ * match this function exists to catch a MISMATCH for. `String(issueNumber)`
+ * reproduces the exact digit sequence the (already-validated,
+ * positive-integer) field actually holds; comparing that directly against
+ * `criterionId`'s own raw string prefix never round-trips through a
+ * float on either side.
+ *
+ * @param criterionId - The candidate `criterionId`, already shape-valid.
+ * @param issueNumber - The same entry's own `issueNumber` field.
+ * @returns Whether the two agree.
+ */
+function criterionIdIssueNumberMatches(criterionId: string, issueNumber: number): boolean {
+  const match = CRITERION_ID_PATTERN.exec(criterionId);
+  return match !== null && match[1] === String(issueNumber);
+}
+
+/**
+ * Safely `JSON.stringify`s an untrusted value for embedding in a
+ * diagnostic error message — NEVER throws (PR #84 review round 2, Codex,
+ * FOLD 3): a corrupted `kind`/`truncationKind` value that is itself a
+ * deeply or recursively nested array/object makes `JSON.stringify` throw
+ * a `RangeError` ("Maximum call stack size exceeded") — an UNCAUGHT
+ * exception here would crash this entire parser instead of returning
+ * `ok: false`, breaking the categorical fail-closed guarantee this
+ * module exists to provide. Falls back to a fixed, safe placeholder
+ * string on ANY stringify failure, never a raw value that might itself
+ * be unsafe to embed.
+ *
+ * @param value - The untrusted value to describe.
+ * @returns The JSON-stringified value, or a safe placeholder if
+ *   stringifying itself failed.
+ */
+function safeStringifyForDiagnostic(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "<unstringifiable value>";
+  }
+}
+
+/**
+ * Validates one raw `entries[]` element against {@link CriteriaSpineEntry}'s
+ * own shape.
+ *
+ * `criterionId` is validated against its COMPLETE shape (length AND the
+ * full `^\d+:\d+$` pattern, PR #84 review round 2, Codex, FOLD 2 — see
+ * {@link CRITERION_ID_PATTERN}'s own docstring for what the prior
+ * round's prefix-only check missed), THEN cross-checked against this
+ * SAME entry's `issueNumber` field (PR #84 review round 1, Codex, FOLD 1,
+ * BLOCKER-class — the consequential one: `publish-spec-grounding-verdict-
+ * logic.mts`'s own `joinFindingsToSpine` indexes the agent's verdict
+ * findings by `criterionId` alone. A corrupted spine with a MISMATCHED
+ * pair — e.g. `issueNumber: 12` paired with `criterionId: "13:0"` — would
+ * silently join issue #12's spine entry against whatever finding the
+ * agent submitted for criterion `13:0`, misattributing a verdict across
+ * criteria. Rejecting the whole artifact here, rather than trusting either
+ * field alone, closes it at the SOURCE rather than downstream in the join).
+ * Duplicate-`criterionId` rejection (the sibling half of the SAME
+ * join-collision class — see {@link parseCriteriaSpineArtifact}'s own
+ * body) is cross-entry state and lives there instead, mirroring `spec-
+ * grounding-verdict-schema.mts`'s own identical `seenCriterionIds`
+ * precedent for the agent's verdict.
+ *
+ * `criterionId` is only ever echoed VERBATIM into an error message AFTER
+ * its own length has already been confirmed within {@link
+ * MAX_CRITERION_ID_LENGTH} (PR #84 review round 2 completeness audit) —
+ * an oversized value is described by its LENGTH alone, never echoed raw.
+ *
+ * @param raw - The candidate entry value.
+ * @param index - This entry's position, used only to make error messages
+ *   locatable.
+ * @param errors - Accumulator every violation is pushed onto.
+ * @returns The validated entry, or `null` if `raw` failed validation.
+ */
+function validateCriteriaSpineEntry(
+  raw: unknown,
+  index: number,
+  errors: string[],
+): CriteriaSpineEntry | null {
+  if (!isPlainRecord(raw)) {
+    errors.push(`entries[${index}] must be a JSON object`);
+    return null;
+  }
+  const { issueNumber, kind, criterionId } = raw;
+  let ok = true;
+  // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
+  // pass + Codex, FOLD 2): JSON.parse itself rounds a value beyond
+  // Number.MAX_SAFE_INTEGER (e.g. 9007199254740993) to the nearest
+  // representable float BEFORE this check ever runs -- Number.isInteger
+  // still returns true for that rounded value, silently accepting a
+  // corrupted issueNumber that no longer represents the digit sequence
+  // the artifact's own bytes actually encoded. GitHub issue numbers are
+  // never remotely close to this range, so this rejects exactly the
+  // rounding-prone values with no legitimate false-reject.
+  const validIssueNumber = typeof issueNumber === "number" && Number.isSafeInteger(issueNumber) && issueNumber > 0;
+  if (!validIssueNumber) {
+    errors.push(`entries[${index}].issueNumber must be a positive integer`);
+    ok = false;
+  }
+  if (kind !== "closing" && kind !== "non-closing") {
+    errors.push(
+      `entries[${index}].kind must be "closing" or "non-closing", got ${safeStringifyForDiagnostic(kind)}`,
+    );
+    ok = false;
+  }
+  if (typeof criterionId !== "string" || criterionId.length === 0) {
+    errors.push(`entries[${index}].criterionId must be a non-empty string`);
+    ok = false;
+  } else if (criterionId.length > MAX_CRITERION_ID_LENGTH) {
+    errors.push(
+      `entries[${index}].criterionId exceeds ${MAX_CRITERION_ID_LENGTH} characters (${criterionId.length})`,
+    );
+    ok = false;
+  } else if (!CRITERION_ID_PATTERN.test(criterionId)) {
+    errors.push(
+      `entries[${index}].criterionId must match the shape "<issueNumber>:<index>", got ` +
+        safeStringifyForDiagnostic(criterionId),
+    );
+    ok = false;
+  } else if (validIssueNumber && !criterionIdIssueNumberMatches(criterionId, issueNumber as number)) {
+    errors.push(
+      `entries[${index}].criterionId "${criterionId}" does not match entries[${index}].issueNumber ` +
+        `(${issueNumber}) -- a corrupted spine could otherwise let a verdict finding for one ` +
+        `criterion be silently misattributed to a different one`,
+    );
+    ok = false;
+  }
+  if (!ok) {
+    return null;
+  }
+  return {
+    issueNumber: issueNumber as number,
+    kind: kind as IssueLinkKind,
+    criterionId: criterionId as string,
+  };
+}
+
+/**
+ * Validates one raw `unreviewedClosingIssues[]` element against {@link
+ * UnreviewedClosingIssueResult}'s own shape. Duplicate-`issueNumber`
+ * rejection (PR #84 review round 2, Codex, FOLD 4) is cross-entry state
+ * and lives in {@link parseCriteriaSpineArtifact}'s own body instead,
+ * mirroring {@link validateCriteriaSpineEntry}'s own identical
+ * duplicate-`criterionId` precedent (a duplicate here would let
+ * `publish-spec-grounding-blocker-logic.mts`'s own `planBlockerInlineComments`
+ * build multiple identical inline-comment plans for the SAME issue).
+ *
+ * @param raw - The candidate entry value.
+ * @param index - This entry's position, used only to make error messages
+ *   locatable.
+ * @param errors - Accumulator every violation is pushed onto.
+ * @returns The validated entry, or `null` if `raw` failed validation.
+ */
+function validateUnreviewedClosingIssue(
+  raw: unknown,
+  index: number,
+  errors: string[],
+): UnreviewedClosingIssueResult | null {
+  if (!isPlainRecord(raw)) {
+    errors.push(`unreviewedClosingIssues[${index}] must be a JSON object`);
+    return null;
+  }
+  const { issueNumber, truncationKind } = raw;
+  let ok = true;
+  // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
+  // pass + Codex, FOLD 2 -- see validateCriteriaSpineEntry's own identical
+  // fix for the full reasoning): a "fully-dropped" entry here has NO
+  // criterionId to cross-check against at all, so an issueNumber rounded
+  // by JSON.parse past Number.MAX_SAFE_INTEGER would otherwise be
+  // silently accepted as a DIFFERENT (wrong) issue with no other check to
+  // catch it.
+  if (typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+    errors.push(`unreviewedClosingIssues[${index}].issueNumber must be a positive integer`);
+    ok = false;
+  }
+  if (truncationKind !== "fully-dropped" && truncationKind !== "partially-truncated") {
+    errors.push(
+      `unreviewedClosingIssues[${index}].truncationKind must be "fully-dropped" or ` +
+        `"partially-truncated", got ${safeStringifyForDiagnostic(truncationKind)}`,
+    );
+    ok = false;
+  }
+  if (!ok) {
+    return null;
+  }
+  return {
+    issueNumber: issueNumber as number,
+    truncationKind: truncationKind as "fully-dropped" | "partially-truncated",
+  };
+}
+
+/**
+ * Re-validates the WHOLE-SPINE cross-field invariants {@link
+ * buildCriteriaSpine}'s own construction guarantees (PR #84 review round
+ * 3, Codex — the completeness audit closed every PER-FIELD gap; these are
+ * PER-SPINE, cross-entry semantic invariants instead). This artifact is
+ * never agent-authored and never attacker-writable between the read-only
+ * job's upload and this privileged download — this is bounded defense
+ * against a rare CORRUPTED download, not an attack, so only invariants
+ * `buildCriteriaSpine` (and its own truncation-summary sibling,
+ * `computeCriteriaSpineTruncation`) actually GUARANTEE are checked here,
+ * never an invented one:
+ *
+ * 1. Every entry sharing an `issueNumber` shares the SAME `kind` (PR #84
+ *    review round 3, Codex, FOLD 1, BLOCKER — the consequential one:
+ *    `buildCriteriaSpine` assigns exactly one `kind` per issue, from
+ *    ONE `spec.kind` per iteration of its own outer loop; `deriveSeverity`
+ *    trusts each entry's OWN `kind` independently, so a corrupted spine
+ *    pairing a real `closing` entry for issue #12 with a mislabeled
+ *    `non-closing` entry for the SAME issue #12 could let that closing
+ *    blocker hide behind the non-closing one downstream).
+ * 2. Each `issueNumber`'s own `criterionId` INDEX set (the part after the
+ *    `:`) is exactly the contiguous range `0..count-1` — `buildCriteriaSpine`
+ *    always assigns sequential indices in criterion order, and stops the
+ *    WHOLE scan at the first missing checkbox line (never resumes for a
+ *    later criterion of the SAME issue), so a real spine can never have a
+ *    gap or an out-of-range index for one issue.
+ * 3. `unreviewedClosingIssues` never contradicts `entries`: a
+ *    `"fully-dropped"` issue (zero spine entries, by {@link
+ *    UnreviewedClosingIssueResult}'s own docstring) must NOT also appear
+ *    in `entries`; a `"partially-truncated"` issue (at least one spine
+ *    entry, by the SAME docstring) MUST appear in `entries` at least
+ *    once, AND those entries' own (invariant-1-guaranteed-uniform) `kind`
+ *    must be `"closing"` (PR #84 review round 4, Codex, FOLD 2, BLOCKER —
+ *    `computeCriteriaSpineTruncation`'s own docstring: `unreviewedClosingIssues`
+ *    ONLY EVER tracks closing-kind issues; round 3's own check confirmed
+ *    a `"partially-truncated"` issue's entries EXIST, but never that they
+ *    were the closing kind `unreviewedClosingIssues` itself claims).
+ * 4. `unreviewedClosingIssues` non-empty implies `truncated: true` — every
+ *    path that can add an entry to `unreviewedClosingIssues`
+ *    (`computeCriteriaSpineTruncation`'s own never-fetched, byte-cap-
+ *    dropped, and partially-truncated cases) is ALSO one of `truncated`'s
+ *    own OR-clauses, so the two can never legitimately disagree.
+ * 5. An EMPTY `entries` array implies `truncated: true` OR
+ *    `unreviewedClosingIssues` non-empty (PR #84 review round 3, Codex,
+ *    FOLD 2): this function is only ever called for a `hasCriteria: true`
+ *    run, which the read-only job's own runner only reaches when the
+ *    rendered criteria block was genuinely non-empty (at least one real
+ *    unmet criterion existed) — so a genuinely EMPTY spine can only be
+ *    reached via `buildCriteriaSpine`'s own truncation branch (the very
+ *    first checkbox line missing), which always makes `spine.length (0) <
+ *    totalUnmetCriteriaCount (>=1)` true, one of `truncated`'s own
+ *    OR-clauses. Zero entries with `truncated: false` and no unreviewed
+ *    closing issues is impossible by construction; accepting it would let
+ *    a corrupted "genuinely nothing to report" spine silently read as a
+ *    confirmed all-clear downstream.
+ *
+ * Deliberately does NOT attempt to re-derive `truncated`'s FULL formula
+ * (it also depends on `result.truncatedIssueCount` /
+ * `s.truncatedCriteriaCount`, upstream fetch-level counts this artifact
+ * never persists) or check anything about `diffTruncated` (an entirely
+ * independent signal, from the diff fetch, with no construction
+ * relationship to `entries`/`unreviewedClosingIssues` at all) — neither is
+ * an invariant `buildCriteriaSpine` actually guarantees from THIS
+ * artifact's own fields alone.
+ *
+ * @param entries - The already-validated, already-deduped spine entries.
+ * @param unreviewedClosingIssues - The already-validated, already-deduped
+ *   unreviewed closing issues.
+ * @param truncated - This artifact's own `truncated` field.
+ * @param errors - Accumulator every violation is pushed onto.
+ */
+function validateCrossEntryInvariants(
+  entries: readonly CriteriaSpineEntry[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+  truncated: boolean,
+  errors: string[],
+): void {
+  const kindByIssue = new Map<number, IssueLinkKind>();
+  const indicesByIssue = new Map<number, number[]>();
+  for (const entry of entries) {
+    const existingKind = kindByIssue.get(entry.issueNumber);
+    if (existingKind === undefined) {
+      kindByIssue.set(entry.issueNumber, entry.kind);
+    } else if (existingKind !== entry.kind) {
+      errors.push(
+        `entries contains inconsistent kind for issue #${entry.issueNumber} (both "${existingKind}" and ` +
+          `"${entry.kind}") -- buildCriteriaSpine assigns exactly one kind per issue; a corrupted spine here ` +
+          `could let a real closing-kind blocker escape via a mislabeled non-closing entry for the same issue`,
+      );
+    }
+
+    // entry.criterionId already passed CRITERION_ID_PATTERN's own check in
+    // validateCriteriaSpineEntry, so this match can never be null here.
+    const match = CRITERION_ID_PATTERN.exec(entry.criterionId);
+    /* v8 ignore next */
+    const index = match ? Number(match[2]) : Number.NaN;
+    const indices = indicesByIssue.get(entry.issueNumber);
+    if (indices) {
+      indices.push(index);
+    } else {
+      indicesByIssue.set(entry.issueNumber, [index]);
+    }
+  }
+
+  for (const [issueNumber, indices] of indicesByIssue) {
+    const sorted = [...indices].sort((a, b) => a - b);
+    const contiguousFromZero = sorted.every((value, i) => value === i);
+    if (!contiguousFromZero) {
+      errors.push(
+        `entries for issue #${issueNumber} have criterionId indices [${sorted.join(", ")}], not the ` +
+          `contiguous 0..${sorted.length - 1} range buildCriteriaSpine always assigns`,
+      );
+    }
+  }
+
+  const issueNumbersWithEntries = new Set(indicesByIssue.keys());
+  for (const unreviewed of unreviewedClosingIssues) {
+    if (unreviewed.truncationKind === "fully-dropped" && issueNumbersWithEntries.has(unreviewed.issueNumber)) {
+      errors.push(
+        `issue #${unreviewed.issueNumber} is "fully-dropped" in unreviewedClosingIssues but also has entries ` +
+          `in the spine -- a fully-dropped issue must have zero entries`,
+      );
+    }
+    if (unreviewed.truncationKind === "partially-truncated") {
+      if (!issueNumbersWithEntries.has(unreviewed.issueNumber)) {
+        errors.push(
+          `issue #${unreviewed.issueNumber} is "partially-truncated" in unreviewedClosingIssues but has no ` +
+            `entries in the spine -- a partially-truncated issue must have at least one`,
+        );
+      } else {
+        // unreviewedClosingIssues ONLY EVER tracks closing-kind issues
+        // (computeCriteriaSpineTruncation's own docstring), and this
+        // issue's own entries all share ONE kind by construction (see the
+        // kindByIssue loop above) -- so a partially-truncated issue whose
+        // OWN entries are kind "non-closing" is a direct contradiction
+        // between the two fields (PR #84 review round 4, Codex, FOLD 2,
+        // BLOCKER: round 3's own check confirmed entries EXIST, but never
+        // that they were closing-kind).
+        const kind = kindByIssue.get(unreviewed.issueNumber);
+        if (kind !== "closing") {
+          errors.push(
+            `issue #${unreviewed.issueNumber} is "partially-truncated" in unreviewedClosingIssues (which ` +
+              `only ever tracks closing-kind issues) but its own entries in the spine are kind "${kind}" -- ` +
+              `unreviewedClosingIssues and entries disagree on whether this issue is a closing reference`,
+          );
+        }
+      }
+    }
+  }
+
+  if (unreviewedClosingIssues.length > 0 && !truncated) {
+    errors.push(
+      "unreviewedClosingIssues is non-empty but truncated is false -- any unreviewed closing issue implies " +
+        "some truncation occurred somewhere in this run's own pipeline",
+    );
+  }
+
+  if (entries.length === 0 && !truncated && unreviewedClosingIssues.length === 0) {
+    errors.push(
+      "entries is empty, truncated is false, and unreviewedClosingIssues is empty -- impossible by " +
+        "construction for a hasCriteria:true run (a genuinely empty spine can only arise from truncation, " +
+        "which always makes truncated true)",
+    );
+  }
+}
+
+/**
+ * Reads and shape-validates a `criteria-spine.json` artifact's RAW bytes —
+ * THE entry point the privileged publish entrypoint (slice 3b-iii-d, not
+ * yet built at the time this function was added) must use to read this
+ * artifact, mirroring `spec-grounding-verdict-schema.mts`'s own
+ * `parseAndValidateVerdict` precedent: checks the RAW byte length against
+ * {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} BEFORE ever calling
+ * `JSON.parse`, so an oversized or corrupted artifact is rejected without
+ * paying the cost of parsing it.
+ *
+ * Also validates a `Buffer` argument is well-formed UTF-8 BEFORE decoding
+ * it (PR #84 review round 4, Codex, FOLD 3 — mirrors `parseAndValidateVerdict`'s
+ * own identical `isUtf8` check exactly): `Buffer.prototype.toString("utf8")`
+ * silently REPLACES any malformed byte sequence with U+FFFD (the Unicode
+ * replacement character) rather than failing — without this check, a
+ * corrupted or truncated artifact (e.g. a byte sequence cut off mid-multi-
+ * byte-character) would decode into a DIFFERENT, silently-mutated string,
+ * which could then go on to parse and validate successfully, directly
+ * violating this function's own fail-closed promise for a corrupted
+ * artifact. `node:buffer`'s `isUtf8` runs against the RAW bytes, before
+ * any decoding, so this is caught as its own distinct failure rather than
+ * silently becoming (or masking) some other validation outcome. Not
+ * applicable to a `string` argument — by this function's own contract, a
+ * `string` is already UTF-8-decoded text, so there is no raw-byte-validity
+ * question left to ask of it.
+ *
+ * Unlike the verdict schema, this is NOT adversarial-input validation —
+ * this artifact is the runner's OWN trusted output (see this module's own
+ * top-level docstring), so there is no unknown-key rejection or
+ * content-level scrutiny here, only STRUCTURAL validation: a corrupted or
+ * truncated download must fail closed with a clear error, never crash
+ * unhandled or silently produce a wrong-shaped value the caller then
+ * trusts.
+ *
+ * @param raw - The artifact's raw bytes, exactly as read from disk — a
+ *   `string` (already UTF-8-decoded text) or a `Buffer` (not yet decoded;
+ *   this function validates its UTF-8 well-formedness directly on the
+ *   bytes, so a malformed one is never even decoded, let alone parsed).
+ * @returns `{ ok: true, spine }` with every field validated, or
+ *   `{ ok: false, errors }` listing every problem found.
+ */
+export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteriaSpineResult {
+  const rawBytes = Buffer.byteLength(raw, "utf8");
+  if (rawBytes > MAX_CRITERIA_SPINE_ARTIFACT_BYTES) {
+    return {
+      ok: false,
+      errors: [`payload too large: ${rawBytes} bytes exceeds ${MAX_CRITERIA_SPINE_ARTIFACT_BYTES}`],
+    };
+  }
+
+  if (typeof raw !== "string" && !isUtf8(raw)) {
+    return { ok: false, errors: ["payload is not valid UTF-8"] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+  } catch (err) {
+    return {
+      ok: false,
+      errors: [`payload is not valid JSON: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+
+  if (!isPlainRecord(parsed)) {
+    return { ok: false, errors: ["criteria-spine.json must be a JSON object"] };
+  }
+
+  const errors: string[] = [];
+  const { entries, truncated, unreviewedClosingIssues, diffTruncated } = parsed;
+
+  if (!Array.isArray(entries)) {
+    errors.push('"entries" must be an array');
+  }
+  if (typeof truncated !== "boolean") {
+    errors.push('"truncated" must be a boolean');
+  }
+  if (!Array.isArray(unreviewedClosingIssues)) {
+    errors.push('"unreviewedClosingIssues" must be an array');
+  }
+  if (typeof diffTruncated !== "boolean") {
+    errors.push('"diffTruncated" must be a boolean');
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  // Cardinality cap on entries ONLY, checked BEFORE the array is iterated
+  // element-by-element (PR #84 review round 1, Codex, FOLD 3, LOW; scope
+  // narrowed to entries alone in round 4, FOLD 1 -- see {@link
+  // MAX_CRITERIA_SPINE_ENTRIES}'s own docstring for why
+  // unreviewedClosingIssues has no equivalent cap). A single error, never
+  // one per element.
+  if ((entries as unknown[]).length > MAX_CRITERIA_SPINE_ENTRIES) {
+    errors.push(`"entries" has ${(entries as unknown[]).length} elements, exceeds ${MAX_CRITERIA_SPINE_ENTRIES}`);
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  const validatedEntries: CriteriaSpineEntry[] = [];
+  // Duplicate-criterionId rejection (PR #84 review, Codex, FOLD 1 --
+  // the sibling half of validateCriteriaSpineEntry's own issueNumber-
+  // prefix cross-check, see that function's own docstring for the full
+  // join-collision reasoning): a duplicate criterionId would let
+  // publish-spec-grounding-verdict-logic.mts's own joinFindingsToSpine
+  // (which indexes findings by criterionId via a plain Map) silently let
+  // ONE verdict finding satisfy TWO different spine entries. Mirrors
+  // spec-grounding-verdict-schema.mts's own identical seenCriterionIds
+  // precedent for the agent's own verdict.
+  //
+  // A plain `for` loop, not `.forEach` (PR #84 review, independent pass +
+  // Codex, FOLD 1): bounds how many PER-ELEMENT errors this loop
+  // accumulates -- see MAX_VALIDATION_ERRORS_PER_ARRAY's own docstring.
+  // `.forEach` cannot be broken out of; a `for` loop can stop entirely,
+  // never even validating the remaining elements once the budget is hit.
+  const seenCriterionIds = new Set<string>();
+  const entriesArray = entries as unknown[];
+  const entriesErrorsStart = errors.length;
+  for (let i = 0; i < entriesArray.length; i++) {
+    if (errors.length - entriesErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"entries": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation error(s) -- ` +
+          `${entriesArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const entry = validateCriteriaSpineEntry(entriesArray[i], i, errors);
+    if (entry === null) {
+      continue;
+    }
+    if (seenCriterionIds.has(entry.criterionId)) {
+      errors.push(`entries[${i}].criterionId "${entry.criterionId}" is a duplicate`);
+      continue;
+    }
+    seenCriterionIds.add(entry.criterionId);
+    validatedEntries.push(entry);
+  }
+  // Duplicate-issueNumber rejection (PR #84 review round 2, Codex, FOLD 4)
+  // -- a duplicate would let publish-spec-grounding-blocker-logic.mts's
+  // own planBlockerInlineComments build multiple identical inline-comment
+  // plans for the SAME issue, posting duplicate blocker comments.
+  // Mirrors the entries[] duplicate-criterionId rejection above exactly,
+  // including the SAME bounded-error-loop discipline (this array has no
+  // cardinality cap of its own -- see MAX_CRITERIA_SPINE_ENTRIES's own
+  // docstring for why -- so bounding the ERROR list here is this array's
+  // only OOM defense).
+  const validatedUnreviewed: UnreviewedClosingIssueResult[] = [];
+  const seenUnreviewedIssueNumbers = new Set<number>();
+  const unreviewedArray = unreviewedClosingIssues as unknown[];
+  const unreviewedErrorsStart = errors.length;
+  for (let i = 0; i < unreviewedArray.length; i++) {
+    if (errors.length - unreviewedErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"unreviewedClosingIssues": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation error(s) -- ` +
+          `${unreviewedArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const entry = validateUnreviewedClosingIssue(unreviewedArray[i], i, errors);
+    if (entry === null) {
+      continue;
+    }
+    if (seenUnreviewedIssueNumbers.has(entry.issueNumber)) {
+      errors.push(`unreviewedClosingIssues[${i}].issueNumber ${entry.issueNumber} is a duplicate`);
+      continue;
+    }
+    seenUnreviewedIssueNumbers.add(entry.issueNumber);
+    validatedUnreviewed.push(entry);
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  // Whole-spine cross-field invariants (PR #84 review round 3, Codex) --
+  // see validateCrossEntryInvariants's own docstring for the full
+  // reasoning; only reachable once every PER-ENTRY check above has
+  // already passed.
+  validateCrossEntryInvariants(validatedEntries, validatedUnreviewed, truncated as boolean, errors);
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    spine: {
+      entries: validatedEntries,
+      truncated: truncated as boolean,
+      unreviewedClosingIssues: validatedUnreviewed,
+      diffTruncated: diffTruncated as boolean,
+    },
+  };
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bodyContainsMarkerAsStandaloneLine,
+  buildSpecGroundingFallbackCommentBody,
   buildSpecGroundingSummaryCommentBody,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
@@ -624,5 +625,115 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
     );
     expect(body).toMatch(/diff having been itself truncated/i);
+  });
+});
+
+describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12)", () => {
+  it("lists every reason given, not just the first", () => {
+    const body = buildSpecGroundingFallbackCommentBody([
+      "the review pipeline did not complete",
+      "the verdict artifact was malformed",
+    ]);
+    expect(body).toContain("the review pipeline did not complete");
+    expect(body).toContain("the verdict artifact was malformed");
+  });
+
+  it("explains this PR is NOT reviewed and needs a manual check", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/NOT yet reviewed/i);
+  });
+
+  it("ends with the SAME marker a normal summary uses, so a later successful rerun upserts over this fallback rather than leaving both comments behind", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("is found by findExistingSpecGroundingSummaryCommentId, exactly like a normal summary comment would be", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    const comments: ExistingComment[] = [
+      { id: 42, body, authorType: "Bot", authorLogin: SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN },
+    ];
+    expect(findExistingSpecGroundingSummaryCommentId(comments)).toBe(42);
+  });
+
+  it("truncates a single reason exceeding the per-reason display cap, rather than echoing an untrusted-sized value verbatim (PR #84 review, Codex, FOLD 2)", () => {
+    const hugeReason = "x".repeat(10_000);
+    const body = buildSpecGroundingFallbackCommentBody([hugeReason]);
+    expect(body.length).toBeLessThan(2000);
+    expect(body).toContain("…");
+    expect(body).not.toContain(hugeReason);
+  });
+
+  it("caps a single reason on a CODE POINT boundary, never splitting a surrogate pair (same discipline as sanitizeAgentRationaleForDisplay)", () => {
+    // An astral emoji (2 UTF-16 units, 1 code point) placed exactly at the
+    // 500-code-point cap boundary -- a naive UTF-16 .slice() would split it.
+    const reason = "a".repeat(499) + "\u{1F600}" + "b".repeat(50);
+    const body = buildSpecGroundingFallbackCommentBody([reason]);
+    // No lone surrogate anywhere in the body.
+    for (let i = 0; i < body.length; i++) {
+      const code = body.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = body.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xdc00);
+        expect(next).toBeLessThanOrEqual(0xdfff);
+      }
+    }
+  });
+
+  it("does NOT truncate a reason within the per-reason display cap", () => {
+    const reason = "a short, ordinary reason";
+    const body = buildSpecGroundingFallbackCommentBody([reason]);
+    expect(body).toContain(reason);
+    expect(body).not.toContain(`${reason}…`);
+  });
+
+  it("bounds the TOTAL reasons list length even when every individual reason is within its own per-reason cap, reporting an omitted count rather than growing unboundedly (PR #84 review, Codex, FOLD 2, MEDIUM)", () => {
+    // 500 reasons at ~490 chars each (within the 500-char per-reason cap,
+    // so each survives individually) totals ~245,000 chars -- well past
+    // the 50,000-char list budget, so this specifically exercises the
+    // LIST-level cap, not the per-reason one.
+    const manyReasons = Array.from({ length: 500 }, (_unused, i) => `entries[${i}] ` + "x".repeat(480));
+    const body = buildSpecGroundingFallbackCommentBody(manyReasons);
+    expect(body.length).toBeLessThan(65_536);
+    expect(body).toMatch(/further reason\(s\) omitted/i);
+  });
+
+  it("never exceeds GitHub's 65,536-character comment limit even at the worst case (many reasons, each at the per-reason cap)", () => {
+    const worstCaseReasons = Array.from({ length: 2000 }, () => "x".repeat(600));
+    const body = buildSpecGroundingFallbackCommentBody(worstCaseReasons);
+    expect(body.length).toBeLessThan(65_536);
+  });
+
+  it("does not report an omitted-reason count when every reason fits comfortably within the list budget", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["one reason", "another reason"]);
+    expect(body).not.toMatch(/omitted/i);
+  });
+
+  it("wraps each reason in an inert Markdown code span, neutralizing an injection attempt (PR #84 review round 2, Codex, FOLD 1) -- validation errors can embed agent/issue-controlled content verbatim (an unknown-key name, an invalid field value), exactly as untrusted as a rationale once posted", () => {
+    const body = buildSpecGroundingFallbackCommentBody([
+      'unexpected key(s): "\nhidden instruction after a raw newline"',
+    ]);
+    // The reason's own embedded raw newline never reaches the body as a
+    // real newline (it stays inside a single-line code span) -- the
+    // injected text and the reason's own leading text stay on the SAME
+    // line, collapsed by a space rather than a real line break that
+    // could have ended the containing list item / opened a new block.
+    expect(body).toContain('`unexpected key(s): " hidden instruction after a raw newline"`');
+  });
+
+  it("strips a literal backtick from a reason so it cannot break OUT of the code span it gets wrapped in", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["a reason with a `backtick` in it"]);
+    // Exactly one code span (2 backtick pairs = 4 backticks) wraps the
+    // WHOLE sanitized reason -- the embedded backticks were stripped, not
+    // left to prematurely close the span.
+    const backtickCount = (body.match(/`/g) ?? []).length;
+    expect(backtickCount).toBe(2);
+  });
+
+  it("escapes an invisible/bidi-override character in a reason, the same categorical defense sanitizeAgentRationaleForDisplay already applies to rationale text", () => {
+    const body = buildSpecGroundingFallbackCommentBody([`reason with a bidi override \u202e here`]);
+    expect(body).not.toContain("\u202e");
+    expect(body).toMatch(/\[U\+202E\]/);
   });
 });

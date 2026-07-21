@@ -210,9 +210,37 @@ const MAX_RATIONALE_DISPLAY_LENGTH = 300;
  *   characters then half of an emoji, leaving a lone unpaired surrogate
  *   that a downstream validator rejects or GitHub mangles).
  */
+/**
+ * The categorical injection-neutralization core {@link
+ * sanitizeAgentRationaleForDisplay}'s own docstring documents in full —
+ * factored out (PR #84 review round 2, Codex, FOLD 1) so `criteria-
+ * spine.json`'s validation-error reasons (`buildSpecGroundingFallbackCommentBody`'s
+ * own `truncateReasonForDisplay`, below) get the IDENTICAL defense, not a
+ * second, independently-maintained copy: those reasons can embed
+ * AGENT/ISSUE-CONTROLLED content VERBATIM too (an unknown-key name from a
+ * malformed verdict, or an invalid `kind`/`truncationKind` value quoted
+ * via `JSON.stringify`), so they are exactly as untrusted as a rationale
+ * once they reach a posted bot comment.
+ *
+ * Escapes invisible/bidi-override characters FIRST (`spec-grounding-
+ * runner-logic.mts`'s own {@link escapeInvisibleCharactersVisibly}),
+ * then strips the two characters that could break OUT of the code span
+ * this function's own callers wrap the result in (a literal backtick, or
+ * a newline that could end the containing list item/start a new
+ * Markdown block) — never truncates itself; each caller applies its own
+ * length budget on the CODE POINT boundary this returns intact.
+ *
+ * @param text - The untrusted text to neutralize.
+ * @returns The neutralized text, NOT yet wrapped in a code span or
+ *   truncated — the caller's own responsibility.
+ */
+function neutralizeUntrustedTextForBotComment(text: string): string {
+  const markedInvisibles = escapeInvisibleCharactersVisibly(text);
+  return markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+}
+
 function sanitizeAgentRationaleForDisplay(rationale: string): string {
-  const markedInvisibles = escapeInvisibleCharactersVisibly(rationale);
-  const collapsed = markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  const collapsed = neutralizeUntrustedTextForBotComment(rationale);
   const codePoints = Array.from(collapsed);
   if (codePoints.length > MAX_RATIONALE_DISPLAY_LENGTH) {
     return (
@@ -665,3 +693,132 @@ export function buildSpecGroundingSummaryCommentBody(
 // type, fully-dropped only, and a `buildDroppedClosingIssueResults`
 // thin adapter from a bare `readonly number[]`; both are gone now that
 // the runner produces the richer, already-typed result directly).
+
+/**
+ * Upper bound on ONE reason string's own displayed length, in CODE POINTS
+ * (PR #84 review, Codex, FOLD 2 — same code-point-boundary-safe
+ * truncation discipline {@link MAX_RATIONALE_DISPLAY_LENGTH}'s own
+ * docstring documents, applied here instead to a validation-error
+ * reason). A malformed `criteria-spine.json`'s own invalid `kind` or
+ * `truncationKind` value is echoed VERBATIM (via `JSON.stringify`) into
+ * the validation error text — and the artifact itself can be up to
+ * {@link import("./spec-grounding-runner-logic.mts").MAX_CRITERIA_SPINE_ARTIFACT_BYTES}
+ * (4MB), so a single reason could otherwise be enormous.
+ */
+const MAX_REASON_DISPLAY_LENGTH = 500;
+
+/**
+ * Upper bound on the fallback comment's own reasons LIST length, in
+ * characters, after each reason is already capped by {@link
+ * MAX_REASON_DISPLAY_LENGTH} (PR #84 review, Codex, FOLD 2, MEDIUM —
+ * layered the same way {@link MAX_FINDINGS_LIST_LENGTH} layers with
+ * {@link MAX_RATIONALE_DISPLAY_LENGTH} for the summary comment: a
+ * malformed spine can produce ONE error per element, and even after each
+ * is individually capped, thousands of them together could still push
+ * this comment past GitHub's 65,536-character limit — which would make
+ * the FALLBACK comment itself fail to post, the worst outcome this
+ * function exists to prevent: no gating signal would reach the human
+ * reviewer for this run at all). Deliberately well under GitHub's own
+ * limit, matching `MAX_FINDINGS_LIST_LENGTH`'s own precedent and value.
+ */
+const MAX_REASONS_LIST_LENGTH = 50_000;
+
+/**
+ * Neutralizes AND truncates one reason string for display in the
+ * fallback comment (PR #84 review round 2, Codex, FOLD 1 — a REAL
+ * injection, not just a size concern: `parseAndValidateVerdict`'s own
+ * errors embed agent-controlled content verbatim — an unknown-key name
+ * like `\n<!--`, or an invalid field value — and `parseCriteriaSpineArtifact`'s
+ * own errors can similarly quote a corrupted field's value; both reach
+ * this function as plain `reasons` strings with no upstream sanitization
+ * at all, since neither validator's job is comment-rendering safety).
+ * Runs {@link neutralizeUntrustedTextForBotComment} (the SAME
+ * categorical defense {@link sanitizeAgentRationaleForDisplay} uses —
+ * never a second, independently-maintained copy) FIRST, then truncates
+ * to {@link MAX_REASON_DISPLAY_LENGTH} code points (never a UTF-16-unit
+ * `.slice()`, which can split a surrogate pair in half), then wraps the
+ * result in an inert Markdown code span — the categorical defense
+ * against Markdown-structure injection, not per-metacharacter escaping.
+ *
+ * @param reason - The raw reason string.
+ * @returns The reason, neutralized and wrapped in a code span, truncated
+ *   with a trailing ellipsis (still inside the span) if it exceeds
+ *   {@link MAX_REASON_DISPLAY_LENGTH}.
+ */
+function sanitizeReasonForDisplay(reason: string): string {
+  const collapsed = neutralizeUntrustedTextForBotComment(reason);
+  const codePoints = Array.from(collapsed);
+  if (codePoints.length > MAX_REASON_DISPLAY_LENGTH) {
+    return `\`${codePoints.slice(0, MAX_REASON_DISPLAY_LENGTH).join("")}…\``;
+  }
+  return `\`${collapsed}\``;
+}
+
+/**
+ * Builds the comment body posted when the privileged publish entrypoint
+ * (`publish-spec-grounding-verdict.mts`, slice 3b-iii-d, issue #12) could
+ * not produce a real summary at all — the review pipeline's own job
+ * result was not `"success"`, or a required artifact (`outcome.json`, the
+ * verdict, or `criteria-spine.json`) was absent or failed validation.
+ * Mirrors `apply-triage-verdict-logic.mts`'s own `buildFallbackCommentBody`
+ * precedent: same "explain what's wrong, list every reason" shape, same
+ * principle that a broken pipeline must be VISIBLE to a human, never
+ * silently absent.
+ *
+ * Bounds the reasons list in TWO layers (PR #84 review, Codex, FOLD 2 —
+ * see {@link MAX_REASON_DISPLAY_LENGTH} and {@link
+ * MAX_REASONS_LIST_LENGTH}'s own docstrings): a malformed artifact's own
+ * validation errors are UNTRUSTED-SIZED text (they can echo raw field
+ * values from an artifact up to several MB), so without a cap here, the
+ * one comment this function exists to GUARANTEE always posts could
+ * itself exceed GitHub's comment-size limit and fail to post — the worst
+ * outcome, since this is the LAST-RESORT signal a human has for a broken
+ * run. Any reason beyond the length budget is reported as an omitted
+ * count, never silently dropped.
+ *
+ * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} a
+ * normal run's summary uses — deliberately, not a distinct marker: a
+ * later, SUCCESSFUL rerun's real summary then finds and PATCHes this
+ * exact fallback comment in place (via {@link
+ * findExistingSpecGroundingSummaryCommentId}) rather than leaving a
+ * stale "pipeline broken" comment sitting alongside a new, valid one
+ * forever.
+ *
+ * @param reasons - One or more human-readable explanations for why this
+ *   run could not produce a real summary.
+ * @returns The Markdown comment body, ending with the tracking marker,
+ *   ALWAYS within GitHub's comment-size limit regardless of `reasons`'
+ *   own size.
+ */
+export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]): string {
+  const reasonLines: string[] = [];
+  let reasonsListLength = 0;
+  let addedCount = 0;
+  for (const reason of reasons) {
+    const bullet = `- ${sanitizeReasonForDisplay(reason)}`;
+    if (reasonsListLength + bullet.length + 1 > MAX_REASONS_LIST_LENGTH) {
+      break; // Remaining reasons are reported as an omitted count below, not silently dropped.
+    }
+    reasonLines.push(bullet);
+    reasonsListLength += bullet.length + 1;
+    addedCount += 1;
+  }
+  const omittedCount = reasons.length - addedCount;
+  if (omittedCount > 0) {
+    reasonLines.push(`- _(${omittedCount} further reason(s) omitted to stay within GitHub's comment size limit.)_`);
+  }
+
+  const lines: string[] = [
+    "**Spec-grounded review could not run to completion.** Treat this PR as " +
+      "NOT yet reviewed against its linked issues' acceptance criteria — a human should check it " +
+      "manually before relying on a clean spec-grounded result.",
+    "",
+    "Reason(s):",
+    ...reasonLines,
+    "",
+    "_Posted by the roastpilot-cloud spec-grounded review workflow (factory.md §13 point 3)._",
+    "",
+    SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+  ];
+  return lines.join("\n");
+}
