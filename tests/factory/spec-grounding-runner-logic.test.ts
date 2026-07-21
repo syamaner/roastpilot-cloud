@@ -962,4 +962,110 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: exactlyMax })));
     expect(result.ok).toBe(true);
   });
+
+  it("rejects a criterionId with a valid prefix but trailing garbage after it (PR #84 review round 2, Codex, FOLD 2) -- the round-1 prefix-only check missed this, the full-shape pattern's own end anchor closes it", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({ entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0\nsome injected content" }] }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\]\.criterionId must match the shape/);
+    }
+  });
+
+  it("rejects a short but shape-invalid criterionId that a prefix-only check would have accepted", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0`" }] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\]\.criterionId must match the shape/);
+    }
+  });
+
+  it("rejects a criterionId exceeding MAX_CRITERION_ID_LENGTH without echoing the raw (potentially huge) value into the error message", () => {
+    const hugeCriterionId = "1:" + "0".repeat(10_000);
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: 1, kind: "closing", criterionId: hugeCriterionId }] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\]\.criterionId exceeds 32 characters \(10002\)/);
+      expect(result.errors[0]).not.toContain(hugeCriterionId);
+    }
+  });
+
+  // Constructs the deeply-nested value's own RAW JSON TEXT via plain
+  // string repetition, deliberately NEVER via JSON.stringify on an
+  // already-parsed deeply-nested JS value -- JSON.parse and
+  // JSON.stringify have a real, empirically-verified asymmetry in V8:
+  // JSON.parse comfortably handles a 50,000-deep nested array, but
+  // JSON.stringify on the SAME already-parsed structure throws a
+  // RangeError ("Maximum call stack size exceeded") -- exactly the crash
+  // this fold closes. Using JSON.stringify to build the TEST's own input
+  // would hit that same limit before parseCriteriaSpineArtifact is ever
+  // invoked, testing the wrong thing.
+  function deeplyNestedArrayJsonText(depth: number): string {
+    return "[".repeat(depth) + '"leaf"' + "]".repeat(depth);
+  }
+
+  it("does not crash (returns ok:false) when kind is a deeply/recursively-nested value that would make a raw JSON.stringify throw a RangeError (PR #84 review round 2, Codex, FOLD 3)", () => {
+    const artifactText =
+      '{"entries":[{"issueNumber":1,"kind":' +
+      deeplyNestedArrayJsonText(50_000) +
+      ',"criterionId":"1:0"}],"truncated":false,"unreviewedClosingIssues":[],"diffTruncated":false}';
+    expect(() => parseCriteriaSpineArtifact(artifactText)).not.toThrow();
+    const result = parseCriteriaSpineArtifact(artifactText);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\]\.kind must be "closing" or "non-closing"/);
+      expect(result.errors[0]).toContain("<unstringifiable value>");
+    }
+  });
+
+  it("does not crash (returns ok:false) when truncationKind is a deeply-nested value", () => {
+    const artifactText =
+      '{"entries":[],"truncated":false,"unreviewedClosingIssues":[{"issueNumber":1,"truncationKind":' +
+      deeplyNestedArrayJsonText(50_000) +
+      '}],"diffTruncated":false}';
+    expect(() => parseCriteriaSpineArtifact(artifactText)).not.toThrow();
+    const result = parseCriteriaSpineArtifact(artifactText);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toContain("<unstringifiable value>");
+    }
+  });
+
+  it("rejects a duplicate issueNumber across unreviewedClosingIssues entries (PR #84 review round 2, Codex, FOLD 4) -- planBlockerInlineComments could otherwise build duplicate inline-comment plans for the same issue", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          unreviewedClosingIssues: [
+            { issueNumber: 5, truncationKind: "fully-dropped" },
+            { issueNumber: 5, truncationKind: "partially-truncated" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/unreviewedClosingIssues\[1\]\.issueNumber 5 is a duplicate/);
+    }
+  });
+
+  it("accepts distinct issueNumbers across unreviewedClosingIssues entries (the normal case)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          unreviewedClosingIssues: [
+            { issueNumber: 5, truncationKind: "fully-dropped" },
+            { issueNumber: 9, truncationKind: "partially-truncated" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(true);
+  });
 });

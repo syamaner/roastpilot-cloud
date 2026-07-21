@@ -709,4 +709,31 @@ describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12
     const body = buildSpecGroundingFallbackCommentBody(["one reason", "another reason"]);
     expect(body).not.toMatch(/omitted/i);
   });
+
+  it("wraps each reason in an inert Markdown code span, neutralizing an injection attempt (PR #84 review round 2, Codex, FOLD 1) -- validation errors can embed agent/issue-controlled content verbatim (an unknown-key name, an invalid field value), exactly as untrusted as a rationale once posted", () => {
+    const body = buildSpecGroundingFallbackCommentBody([
+      'unexpected key(s): "\nhidden instruction after a raw newline"',
+    ]);
+    // The reason's own embedded raw newline never reaches the body as a
+    // real newline (it stays inside a single-line code span) -- the
+    // injected text and the reason's own leading text stay on the SAME
+    // line, collapsed by a space rather than a real line break that
+    // could have ended the containing list item / opened a new block.
+    expect(body).toContain('`unexpected key(s): " hidden instruction after a raw newline"`');
+  });
+
+  it("strips a literal backtick from a reason so it cannot break OUT of the code span it gets wrapped in", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["a reason with a `backtick` in it"]);
+    // Exactly one code span (2 backtick pairs = 4 backticks) wraps the
+    // WHOLE sanitized reason -- the embedded backticks were stripped, not
+    // left to prematurely close the span.
+    const backtickCount = (body.match(/`/g) ?? []).length;
+    expect(backtickCount).toBe(2);
+  });
+
+  it("escapes an invisible/bidi-override character in a reason, the same categorical defense sanitizeAgentRationaleForDisplay already applies to rationale text", () => {
+    const body = buildSpecGroundingFallbackCommentBody([`reason with a bidi override \u202e here`]);
+    expect(body).not.toContain("\u202e");
+    expect(body).toMatch(/\[U\+202E\]/);
+  });
 });

@@ -210,9 +210,37 @@ const MAX_RATIONALE_DISPLAY_LENGTH = 300;
  *   characters then half of an emoji, leaving a lone unpaired surrogate
  *   that a downstream validator rejects or GitHub mangles).
  */
+/**
+ * The categorical injection-neutralization core {@link
+ * sanitizeAgentRationaleForDisplay}'s own docstring documents in full —
+ * factored out (PR #84 review round 2, Codex, FOLD 1) so `criteria-
+ * spine.json`'s validation-error reasons (`buildSpecGroundingFallbackCommentBody`'s
+ * own `truncateReasonForDisplay`, below) get the IDENTICAL defense, not a
+ * second, independently-maintained copy: those reasons can embed
+ * AGENT/ISSUE-CONTROLLED content VERBATIM too (an unknown-key name from a
+ * malformed verdict, or an invalid `kind`/`truncationKind` value quoted
+ * via `JSON.stringify`), so they are exactly as untrusted as a rationale
+ * once they reach a posted bot comment.
+ *
+ * Escapes invisible/bidi-override characters FIRST (`spec-grounding-
+ * runner-logic.mts`'s own {@link escapeInvisibleCharactersVisibly}),
+ * then strips the two characters that could break OUT of the code span
+ * this function's own callers wrap the result in (a literal backtick, or
+ * a newline that could end the containing list item/start a new
+ * Markdown block) — never truncates itself; each caller applies its own
+ * length budget on the CODE POINT boundary this returns intact.
+ *
+ * @param text - The untrusted text to neutralize.
+ * @returns The neutralized text, NOT yet wrapped in a code span or
+ *   truncated — the caller's own responsibility.
+ */
+function neutralizeUntrustedTextForBotComment(text: string): string {
+  const markedInvisibles = escapeInvisibleCharactersVisibly(text);
+  return markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+}
+
 function sanitizeAgentRationaleForDisplay(rationale: string): string {
-  const markedInvisibles = escapeInvisibleCharactersVisibly(rationale);
-  const collapsed = markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  const collapsed = neutralizeUntrustedTextForBotComment(rationale);
   const codePoints = Array.from(collapsed);
   if (codePoints.length > MAX_RATIONALE_DISPLAY_LENGTH) {
     return (
@@ -696,21 +724,34 @@ const MAX_REASON_DISPLAY_LENGTH = 500;
 const MAX_REASONS_LIST_LENGTH = 50_000;
 
 /**
- * Truncates one reason string to {@link MAX_REASON_DISPLAY_LENGTH} code
- * points (never a UTF-16-unit `.slice()`, which can split a surrogate
- * pair in half — same discipline {@link sanitizeAgentRationaleForDisplay}
- * already establishes).
+ * Neutralizes AND truncates one reason string for display in the
+ * fallback comment (PR #84 review round 2, Codex, FOLD 1 — a REAL
+ * injection, not just a size concern: `parseAndValidateVerdict`'s own
+ * errors embed agent-controlled content verbatim — an unknown-key name
+ * like `\n<!--`, or an invalid field value — and `parseCriteriaSpineArtifact`'s
+ * own errors can similarly quote a corrupted field's value; both reach
+ * this function as plain `reasons` strings with no upstream sanitization
+ * at all, since neither validator's job is comment-rendering safety).
+ * Runs {@link neutralizeUntrustedTextForBotComment} (the SAME
+ * categorical defense {@link sanitizeAgentRationaleForDisplay} uses —
+ * never a second, independently-maintained copy) FIRST, then truncates
+ * to {@link MAX_REASON_DISPLAY_LENGTH} code points (never a UTF-16-unit
+ * `.slice()`, which can split a surrogate pair in half), then wraps the
+ * result in an inert Markdown code span — the categorical defense
+ * against Markdown-structure injection, not per-metacharacter escaping.
  *
  * @param reason - The raw reason string.
- * @returns `reason` unchanged if within budget, otherwise truncated with
- *   a trailing ellipsis.
+ * @returns The reason, neutralized and wrapped in a code span, truncated
+ *   with a trailing ellipsis (still inside the span) if it exceeds
+ *   {@link MAX_REASON_DISPLAY_LENGTH}.
  */
-function truncateReasonForDisplay(reason: string): string {
-  const codePoints = Array.from(reason);
-  if (codePoints.length <= MAX_REASON_DISPLAY_LENGTH) {
-    return reason;
+function sanitizeReasonForDisplay(reason: string): string {
+  const collapsed = neutralizeUntrustedTextForBotComment(reason);
+  const codePoints = Array.from(collapsed);
+  if (codePoints.length > MAX_REASON_DISPLAY_LENGTH) {
+    return `\`${codePoints.slice(0, MAX_REASON_DISPLAY_LENGTH).join("")}…\``;
   }
-  return `${codePoints.slice(0, MAX_REASON_DISPLAY_LENGTH).join("")}…`;
+  return `\`${collapsed}\``;
 }
 
 /**
@@ -754,7 +795,7 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
   let reasonsListLength = 0;
   let addedCount = 0;
   for (const reason of reasons) {
-    const bullet = `- ${truncateReasonForDisplay(reason)}`;
+    const bullet = `- ${sanitizeReasonForDisplay(reason)}`;
     if (reasonsListLength + bullet.length + 1 > MAX_REASONS_LIST_LENGTH) {
       break; // Remaining reasons are reported as an omitted count below, not silently dropped.
     }

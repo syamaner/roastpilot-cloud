@@ -487,14 +487,29 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Matches a `criterionId`'s own leading `<issueNumber>:` prefix (`spec-
- * grounding-runner-logic.mts`'s own `buildCriteriaSpine` produces the
- * shape `${issueNumber}:${index}`) — used only to cross-check that prefix
- * against the SAME entry's own separate `issueNumber` field (PR #84
- * review, Codex, FOLD 1); never used to derive `issueNumber` itself, which
- * always comes from the entry's own dedicated field.
+ * Upper bound on `criterionId`'s own length, in characters (PR #84
+ * review round 2, Codex, FOLD 2 — mirrors `spec-grounding-verdict-
+ * schema.mts`'s own identical `MAX_CRITERION_ID_LENGTH` (32) constant and
+ * reasoning exactly: the runner's own `criterionId` shape
+ * (`${issueNumber}:${index}`) is always short, so this is a generous
+ * ceiling against a corrupted or runaway value, not a tight fit to the
+ * expected shape).
  */
-const CRITERION_ID_ISSUE_PREFIX_PATTERN = /^(\d+):/;
+const MAX_CRITERION_ID_LENGTH = 32;
+
+/**
+ * Matches a `criterionId`'s COMPLETE shape (`spec-grounding-runner-
+ * logic.mts`'s own `buildCriteriaSpine` produces exactly
+ * `${issueNumber}:${index}`) — mirrors `spec-grounding-verdict-
+ * schema.mts`'s own identical `CRITERION_ID_PATTERN` exactly (PR #84
+ * review round 2, Codex, FOLD 2 — the PRIOR round's own {@link
+ * validateCriteriaSpineEntry} check only matched the LEADING
+ * `<issueNumber>:` prefix, never anchoring the end of the string, so a
+ * value like `"12:0<megabytes of arbitrary content>"` still passed —
+ * this pattern's own `$` anchor closes that: the WHOLE string must be
+ * exactly digits, a colon, and digits, nothing else).
+ */
+const CRITERION_ID_PATTERN = /^(\d+):\d+$/;
 
 /**
  * Whether `criterionId`'s own leading `<issueNumber>:` prefix matches
@@ -503,23 +518,52 @@ const CRITERION_ID_ISSUE_PREFIX_PATTERN = /^(\d+):/;
  * from the same source), so a well-formed artifact always agrees; a
  * corrupted one might not (PR #84 review, Codex, FOLD 1, the consequential
  * one — see {@link validateCriteriaSpineEntry}'s own docstring for the
- * downstream join-collision this closes).
+ * downstream join-collision this closes). Only ever called once the
+ * caller has ALREADY confirmed `criterionId` matches {@link
+ * CRITERION_ID_PATTERN}'s own complete shape.
  *
- * @param criterionId - The candidate `criterionId`.
+ * @param criterionId - The candidate `criterionId`, already shape-valid.
  * @param issueNumber - The same entry's own `issueNumber` field.
  * @returns Whether the two agree.
  */
 function criterionIdIssueNumberMatches(criterionId: string, issueNumber: number): boolean {
-  const match = CRITERION_ID_ISSUE_PREFIX_PATTERN.exec(criterionId);
+  const match = CRITERION_ID_PATTERN.exec(criterionId);
   return match !== null && Number(match[1]) === issueNumber;
+}
+
+/**
+ * Safely `JSON.stringify`s an untrusted value for embedding in a
+ * diagnostic error message — NEVER throws (PR #84 review round 2, Codex,
+ * FOLD 3): a corrupted `kind`/`truncationKind` value that is itself a
+ * deeply or recursively nested array/object makes `JSON.stringify` throw
+ * a `RangeError` ("Maximum call stack size exceeded") — an UNCAUGHT
+ * exception here would crash this entire parser instead of returning
+ * `ok: false`, breaking the categorical fail-closed guarantee this
+ * module exists to provide. Falls back to a fixed, safe placeholder
+ * string on ANY stringify failure, never a raw value that might itself
+ * be unsafe to embed.
+ *
+ * @param value - The untrusted value to describe.
+ * @returns The JSON-stringified value, or a safe placeholder if
+ *   stringifying itself failed.
+ */
+function safeStringifyForDiagnostic(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "<unstringifiable value>";
+  }
 }
 
 /**
  * Validates one raw `entries[]` element against {@link CriteriaSpineEntry}'s
  * own shape.
  *
- * ALSO cross-checks `criterionId`'s own `<issueNumber>:` prefix against
- * this SAME entry's `issueNumber` field (PR #84 review, Codex, FOLD 1,
+ * `criterionId` is validated against its COMPLETE shape (length AND the
+ * full `^\d+:\d+$` pattern, PR #84 review round 2, Codex, FOLD 2 — see
+ * {@link CRITERION_ID_PATTERN}'s own docstring for what the prior
+ * round's prefix-only check missed), THEN cross-checked against this
+ * SAME entry's `issueNumber` field (PR #84 review round 1, Codex, FOLD 1,
  * BLOCKER-class — the consequential one: `publish-spec-grounding-verdict-
  * logic.mts`'s own `joinFindingsToSpine` indexes the agent's verdict
  * findings by `criterionId` alone. A corrupted spine with a MISMATCHED
@@ -533,6 +577,11 @@ function criterionIdIssueNumberMatches(criterionId: string, issueNumber: number)
  * body) is cross-entry state and lives there instead, mirroring `spec-
  * grounding-verdict-schema.mts`'s own identical `seenCriterionIds`
  * precedent for the agent's verdict.
+ *
+ * `criterionId` is only ever echoed VERBATIM into an error message AFTER
+ * its own length has already been confirmed within {@link
+ * MAX_CRITERION_ID_LENGTH} (PR #84 review round 2 completeness audit) —
+ * an oversized value is described by its LENGTH alone, never echoed raw.
  *
  * @param raw - The candidate entry value.
  * @param index - This entry's position, used only to make error messages
@@ -557,11 +606,24 @@ function validateCriteriaSpineEntry(
     ok = false;
   }
   if (kind !== "closing" && kind !== "non-closing") {
-    errors.push(`entries[${index}].kind must be "closing" or "non-closing", got ${JSON.stringify(kind)}`);
+    errors.push(
+      `entries[${index}].kind must be "closing" or "non-closing", got ${safeStringifyForDiagnostic(kind)}`,
+    );
     ok = false;
   }
   if (typeof criterionId !== "string" || criterionId.length === 0) {
     errors.push(`entries[${index}].criterionId must be a non-empty string`);
+    ok = false;
+  } else if (criterionId.length > MAX_CRITERION_ID_LENGTH) {
+    errors.push(
+      `entries[${index}].criterionId exceeds ${MAX_CRITERION_ID_LENGTH} characters (${criterionId.length})`,
+    );
+    ok = false;
+  } else if (!CRITERION_ID_PATTERN.test(criterionId)) {
+    errors.push(
+      `entries[${index}].criterionId must match the shape "<issueNumber>:<index>", got ` +
+        safeStringifyForDiagnostic(criterionId),
+    );
     ok = false;
   } else if (validIssueNumber && !criterionIdIssueNumberMatches(criterionId, issueNumber as number)) {
     errors.push(
@@ -583,7 +645,13 @@ function validateCriteriaSpineEntry(
 
 /**
  * Validates one raw `unreviewedClosingIssues[]` element against {@link
- * UnreviewedClosingIssueResult}'s own shape.
+ * UnreviewedClosingIssueResult}'s own shape. Duplicate-`issueNumber`
+ * rejection (PR #84 review round 2, Codex, FOLD 4) is cross-entry state
+ * and lives in {@link parseCriteriaSpineArtifact}'s own body instead,
+ * mirroring {@link validateCriteriaSpineEntry}'s own identical
+ * duplicate-`criterionId` precedent (a duplicate here would let
+ * `publish-spec-grounding-blocker-logic.mts`'s own `planBlockerInlineComments`
+ * build multiple identical inline-comment plans for the SAME issue).
  *
  * @param raw - The candidate entry value.
  * @param index - This entry's position, used only to make error messages
@@ -609,7 +677,7 @@ function validateUnreviewedClosingIssue(
   if (truncationKind !== "fully-dropped" && truncationKind !== "partially-truncated") {
     errors.push(
       `unreviewedClosingIssues[${index}].truncationKind must be "fully-dropped" or ` +
-        `"partially-truncated", got ${JSON.stringify(truncationKind)}`,
+        `"partially-truncated", got ${safeStringifyForDiagnostic(truncationKind)}`,
     );
     ok = false;
   }
@@ -727,12 +795,24 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     seenCriterionIds.add(entry.criterionId);
     validatedEntries.push(entry);
   });
+  // Duplicate-issueNumber rejection (PR #84 review round 2, Codex, FOLD 4)
+  // -- a duplicate would let publish-spec-grounding-blocker-logic.mts's
+  // own planBlockerInlineComments build multiple identical inline-comment
+  // plans for the SAME issue, posting duplicate blocker comments.
+  // Mirrors the entries[] duplicate-criterionId rejection above exactly.
   const validatedUnreviewed: UnreviewedClosingIssueResult[] = [];
+  const seenUnreviewedIssueNumbers = new Set<number>();
   (unreviewedClosingIssues as unknown[]).forEach((e, i) => {
     const entry = validateUnreviewedClosingIssue(e, i, errors);
-    if (entry !== null) {
-      validatedUnreviewed.push(entry);
+    if (entry === null) {
+      return;
     }
+    if (seenUnreviewedIssueNumbers.has(entry.issueNumber)) {
+      errors.push(`unreviewedClosingIssues[${i}].issueNumber ${entry.issueNumber} is a duplicate`);
+      return;
+    }
+    seenUnreviewedIssueNumbers.add(entry.issueNumber);
+    validatedUnreviewed.push(entry);
   });
 
   if (errors.length > 0) {
