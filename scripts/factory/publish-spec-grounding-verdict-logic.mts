@@ -248,6 +248,37 @@ export function formatRationaleForDisplay(entry: JoinedCriterionResult): string 
 }
 
 /**
+ * The shared clause distinguishing where a reader can find more detail for
+ * an ADDRESSED vs. an UNADDRESSED criterion (PR #83 review, FOLD 2):
+ * `publish-spec-grounding-blocker-logic.mts`'s own criterion-blocker
+ * overflow aggregate had the SAME mislabeling bug this module's own
+ * omitted-findings note (below, in {@link buildSpecGroundingSummaryCommentBody})
+ * already exists to avoid — pointing an UNADDRESSED entry (one with
+ * `addressedByReviewer: false`, per {@link JoinedCriterionResult}'s own
+ * docstring) at "the uploaded verdict artifact" is simply wrong, since
+ * there is no verdict entry for it at all; only `criteria-spine.json` has
+ * it. Exported and reused VERBATIM by both call sites — this module's own
+ * summary comment, and the aggregate blocker comment in the sibling module
+ * — so the two descriptions can never drift apart again the way they did
+ * before this fold (the aggregate had its own, independently-worded and
+ * incorrect, "See the uploaded verdict artifact for each one's own
+ * rationale" line).
+ *
+ * @param subject - What the clause is describing, singular (e.g.
+ *   `"finding"`, `"entry"`) — the caller supplies the noun that fits its
+ *   own surrounding sentence.
+ * @returns The clause text, lowercase, without a leading article or
+ *   trailing punctuation, ready to drop into a surrounding sentence.
+ */
+export function describeAddressedVsUnaddressedArtifactPointer(subject: string): string {
+  return (
+    `an ${subject} the agent addressed has its own rationale in the uploaded verdict artifact; ` +
+    `an ${subject} the agent never addressed at all only appears in the criteria-spine artifact, ` +
+    "since there is no verdict entry for it to begin with"
+  );
+}
+
+/**
  * Hidden marker embedded in the one summary comment this job upserts.
  * Used to find "our" comment on a re-run (idempotency, factory.md §13
  * point 8) without duplicate-posting — the same fixed-string-marker
@@ -598,9 +629,7 @@ export function buildSpecGroundingSummaryCommentBody(
         "",
         `_${omittedCount} further finding(s) omitted from this summary to stay within GitHub's ` +
           "comment size limit — see the uploaded criteria-spine and verdict artifacts for the " +
-          "full list (an omitted finding the agent addressed has its own rationale in the " +
-          "verdict artifact; an omitted finding the agent never addressed at all only appears " +
-          "in the criteria-spine artifact, since there is no verdict entry for it to begin with)._",
+          `full list (${describeAddressedVsUnaddressedArtifactPointer("omitted finding")})._`,
       );
     }
     lines.push("");

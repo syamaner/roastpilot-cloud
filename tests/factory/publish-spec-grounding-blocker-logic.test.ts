@@ -345,6 +345,31 @@ describe("selectDeterministicBlockerAnchor (F1-S9 slice 3b-iii-c, issue #12)", (
     ].join("\n");
     expect(selectDeterministicBlockerAnchor(diff)).toEqual({ path: "café.ts", line: 2 });
   });
+
+  it("strips git's own trailing TAB delimiter from an unquoted path containing a space (PR #83 review, FOLD 1): git doesn't quote a plain space, it tab-delimits instead -- `+++ b/space file.ts\\t`", () => {
+    const diff = ["+++ b/space file.ts\t", "@@ -1,1 +1,2 @@", " context", "+added"].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("space file.ts");
+  });
+
+  it("strips a tab-delimited TIMESTAMP suffix (not just a bare trailing tab) from an unquoted path", () => {
+    const diff = [
+      "+++ b/space file.ts\t2024-01-01 12:00:00.000000000 +0000",
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("space file.ts");
+  });
+
+  it("strips a trailing tab-delimited suffix from a QUOTED path too (PR #83 review, FOLD 1 -- both branches), without disturbing the closing-quote detection", () => {
+    const diff = [
+      '+++ "b/caf\\303\\251.ts"\t2024-01-01 12:00:00.000000000 +0000',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("café.ts");
+  });
 });
 
 describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", () => {
@@ -489,6 +514,17 @@ describe("buildAggregatedCriterionBlockersCommentBody (F1-S9 slice 3b-iii-c, iss
     ]);
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
     expect(body).toMatch(/uploaded verdict artifact/i);
+  });
+
+  it("labels an addressed entry 'found unsatisfied' and an unaddressed entry 'not addressed by the reviewer', and points each at the artifact that actually has it (PR #83 review, FOLD 2 -- an earlier version labeled every listed entry 'found unsatisfied' and pointed all of them at the verdict artifact regardless, which is wrong for an unaddressed one: there is no verdict entry for it at all)", () => {
+    const body = buildAggregatedCriterionBlockersCommentBody([
+      joined({ issueNumber: 12, criterionId: "12:0", addressedByReviewer: true }),
+      joined({ issueNumber: 12, criterionId: "12:1", addressedByReviewer: false }),
+    ]);
+    expect(body).toContain("issue #12 criterion `12:0` (found unsatisfied)");
+    expect(body).toContain("issue #12 criterion `12:1` (not addressed by the reviewer)");
+    expect(body).toMatch(/agent addressed has its own rationale in the uploaded verdict artifact/i);
+    expect(body).toMatch(/agent never addressed at all only appears in the criteria-spine artifact/i);
   });
 
   it("always includes the self-describing anchor caveat", () => {

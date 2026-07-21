@@ -86,7 +86,10 @@
  * fetches its own trusted copy of the diff independently (3b-iii-d+e).
  */
 
-import { formatRationaleForDisplay } from "./publish-spec-grounding-verdict-logic.mts";
+import {
+  describeAddressedVsUnaddressedArtifactPointer,
+  formatRationaleForDisplay,
+} from "./publish-spec-grounding-verdict-logic.mts";
 import type { JoinedCriterionResult, UnreviewedClosingIssueResult } from "./publish-spec-grounding-verdict-logic.mts";
 
 /** A single deterministic anchor point in a PR's diff: a file path and a line number on the file's NEW (post-PR) side. */
@@ -121,8 +124,31 @@ const HUNK_HEADER_PATTERN = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * Only ever matched in "structural line expected" state (see the
  * function body) — this is what makes it safe against a content line
  * that merely LOOKS like a file header.
+ *
+ * ALSO tolerates a trailing TAB-delimited suffix (PR #83 review, FOLD 1 —
+ * a real-diff-format edge, same class as the quoted-path/CRLF fixes
+ * above): git doesn't QUOTE a path for a plain SPACE alone (quoting is
+ * for control/non-ASCII bytes, per this docstring's own quoted-path
+ * paragraph — a space is ordinary and printable), so a path containing a
+ * space would otherwise be genuinely ambiguous about where it ends. Git
+ * resolves this by TAB-delimiting instead: `+++ b/space file.ts` becomes
+ * `+++ b/space file.ts\t` (optionally followed by a timestamp, in diff
+ * modes that emit one, e.g. `--no-index`). Group 1 (the unquoted branch)
+ * excludes a literal tab from its own captured content (`[^\t]+`, not
+ * `.+`) — a raw, unescaped tab byte can never legitimately appear inside
+ * an unquoted path in the first place (git would have quoted it, being a
+ * control byte), so any tab reached there is unambiguously the
+ * delimiter, never filename content. Group 3 (the quoted branch) keeps
+ * its own existing greedy-then-backtrack semantics unchanged (still finds
+ * the real closing `"` correctly, including for a malformed trailing-
+ * backslash input — see {@link unquoteGitPath}'s own fail-safe test) and
+ * additionally tolerates an optional trailing `\t...` suffix AFTER that
+ * closing quote via the shared trailing group below, rather than by
+ * touching the DECODED path (a decoded tab there could be a genuine `\t`-
+ * escaped filename character, not a delimiter — stripping post-decode
+ * would risk truncating a real filename).
  */
-const NEW_FILE_HEADER_PATTERN = /^\+\+\+ (?:b\/(.+)|(\/dev\/null)|"b\/(.+)")$/;
+const NEW_FILE_HEADER_PATTERN = /^\+\+\+ (?:b\/([^\t]+)|(\/dev\/null)|"b\/(.+)")(?:\t.*)?$/;
 
 /**
  * Decodes git's own C-style path-quoting escapes (`core.quotePath`'s
@@ -353,6 +379,29 @@ export interface BlockerCommentPlan {
  * get their own FIXED marker instead, since there is at most one such
  * comment per PR per kind regardless of which entries it currently lists.
  *
+ * CAVEAT — `criterionId`'s stability is RUN-RELATIVE, not cross-run
+ * absolute (PR #83 review, L364, team-lead's disposition — documented
+ * here rather than fixed, see below): `criterionId` has the shape
+ * `<issueNumber>:<index>`, where `index` is this criterion's POSITION in
+ * the linked issue's own checkbox list at spine-build time. If that
+ * issue's criteria are inserted, removed, or reordered BETWEEN two runs
+ * of this workflow on the same PR, the `index` component shifts — a
+ * cross-run find-and-update by marker (the not-yet-built publish
+ * entrypoint, 3b-iii-d) could then match the marker of a DIFFERENT
+ * criterion than the one it originally identified, updating the wrong
+ * comment in place. Not fixed here because: (a) the actual trigger is an
+ * issue edited between two review runs, which is issue #77's own scope
+ * (issue-edit invalidation), not this module's; (b) a content-hash
+ * marker isn't feasible as a replacement — the criterion's own TEXT is
+ * deliberately kept OUT of the trusted spine (`criteria-spine.json` is
+ * metadata-only: issue number, kind, index — never the checkbox text
+ * itself, a deliberate security property, see `spec-grounding-runner-
+ * logic.mts`), so this module has no criterion text available to hash
+ * even if it wanted to. This marker is stable across re-runs ONLY while
+ * the linked issue's own criteria are unchanged; cross-run identity
+ * under a criteria-changing edit is tracked as part of #77, not solved
+ * here.
+ *
  * @param criterionId - The spine-trusted `criterionId` this inline
  *   comment is about.
  * @returns The marker string to append as the LAST line of the comment
@@ -544,6 +593,19 @@ export const MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS = 5;
  * {@link buildAggregatedUnreviewedClosingIssuesCommentBody} already
  * established.
  *
+ * Distinguishes an entry the reviewer actually ADDRESSED (found
+ * unsatisfied — has a rationale) from one it never addressed at all
+ * (`addressedByReviewer: false`, defaulting to unsatisfied — see {@link
+ * JoinedCriterionResult}'s own docstring), both per listed entry and in
+ * the closing artifact pointer (PR #83 review, FOLD 2 — an earlier
+ * version labeled every listed entry "found unsatisfied" and pointed all
+ * of them at "the uploaded verdict artifact" regardless, which is simply
+ * wrong for an unaddressed one: there is no verdict entry for it at all,
+ * only a criteria-spine one. Uses {@link
+ * describeAddressedVsUnaddressedArtifactPointer} — the SAME shared clause
+ * `buildSpecGroundingSummaryCommentBody`'s own omitted-findings note uses
+ * — rather than a second, independently-worded copy that could drift).
+ *
  * @param entries - The overflow entries beyond the individual-comment cap.
  * @returns The Markdown comment body.
  */
@@ -554,19 +616,23 @@ export function buildAggregatedCriterionBlockersCommentBody(
   const listed = entries.slice(0, MAX_AGGREGATE_LISTED_CRITERIA);
   const remainder = entries.length - listed.length;
   const describedCriteria = listed
-    .map((e) => `issue #${e.issueNumber} criterion \`${e.criterionId}\``)
+    .map(
+      (e) =>
+        `issue #${e.issueNumber} criterion \`${e.criterionId}\` (${
+          e.addressedByReviewer ? "found unsatisfied" : "not addressed by the reviewer"
+        })`,
+    )
     .join(", ");
   const remainderNote = remainder > 0 ? `, and ${remainder} more` : "";
   return [
     `**Blocking: ${entries.length} more unmet acceptance criterion(a)**`,
     "",
     `This PR's own closing keyword(s) claim to fully resolve the relevant issue(s), but ` +
-      `${describedCriteria}${remainderNote} were all found unsatisfied — aggregated into one ` +
+      `${describedCriteria}${remainderNote} are all treated as unsatisfied — aggregated into one ` +
       "comment (PR #82 round 3 review, BLOCKER 1) rather than one inline comment per criterion, " +
       "since this run's own findings named more unsatisfied criteria than individual comments are " +
       "posted for. Treat every one of these the same as any other unsatisfied criterion: the claim " +
-      "to close the relevant issue(s) is unverified. See the uploaded verdict artifact for each " +
-      "one's own rationale.",
+      `to close the relevant issue(s) is unverified (${describeAddressedVsUnaddressedArtifactPointer("entry")}).`,
     "",
     anchorCaveat(),
     "",
