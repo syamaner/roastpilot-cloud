@@ -824,15 +824,46 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
 }
 
 /**
+ * Distinguishes WHY `spec-grounding-runner.mts` emitted `hasCriteria:
+ * false` (PR #87 review, Codex, P1/medium fold — the runner's own two
+ * DIFFERENT false-emitting branches carry materially different trust,
+ * and conflating them was an anti-gaming hole):
+ *
+ * - `"no-references"` — the PR carries no closing-keyword reference to
+ *   any issue at all. There was never any obligation, so a prior run's
+ *   summary/fallback comment AND its inline blocker threads are both
+ *   genuinely stale and safe to clear/delete.
+ * - `"no-unmet-criteria"` — the PR DOES reference an issue, but every
+ *   acceptance criterion in it happens to be checked off (or every
+ *   linked issue 404'd). This is SELF-ATTESTED, never diff-verified —
+ *   whoever edited the linked issue's own checklist could have done so
+ *   without the PR's diff actually satisfying anything. Deleting a
+ *   `required_conversation_resolution`-gating inline blocker thread on
+ *   this signal alone would be an anti-gaming hole: a closing claim
+ *   still exists, so the obligation to verify it does too.
+ */
+export type NoCriteriaReason = "no-references" | "no-unmet-criteria";
+
+/**
  * Builds the comment body the privileged publish entrypoint upserts when
  * a PR that previously had a spec-grounded summary or fallback comment no
- * longer has ANY linked-issue criteria to review at all (`hasCriteria:
+ * longer has any UNMET linked-issue criteria to review (`hasCriteria:
  * false` on a run whose prior comment exists) — a P2 finding (PR #86
  * review, Codex): without this, editing a PR's body to remove its last
- * closing-keyword reference left the EARLIER run's comment (still
- * claiming blockers, or a failed pipeline) visible and unexplained
- * forever, since the entrypoint's own `hasCriteria: false` path was a
- * pure silent no-op with no upsert at all.
+ * closing-keyword reference (or checking off every acceptance box) left
+ * the EARLIER run's comment (still claiming blockers, or a failed
+ * pipeline) visible and unexplained forever, since the entrypoint's own
+ * `hasCriteria: false` path was a pure silent no-op with no upsert at
+ * all.
+ *
+ * The message differs by {@link NoCriteriaReason} (PR #87 review, Codex,
+ * P1/medium fold): `"no-references"` states plainly that nothing applies
+ * any more (matches the caller ALSO deleting inline blocker threads);
+ * `"no-unmet-criteria"` (or any reason the caller could not positively
+ * confirm as `"no-references"`) explicitly tells a human the criteria are
+ * self-attested, not diff-verified, and that any remaining inline blocker
+ * threads were deliberately LEFT IN PLACE for them to triage — never
+ * implying inline threads were cleared when they were not.
  *
  * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} every
  * other summary/fallback body uses, for the identical reason {@link
@@ -840,14 +871,24 @@ export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]
  * finds criteria again must PATCH this exact comment in place, not post
  * a second one alongside it.
  *
+ * @param reason - Why this run found `hasCriteria: false`.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildSpecGroundingClearedSummaryCommentBody(): string {
+export function buildSpecGroundingClearedSummaryCommentBody(reason: NoCriteriaReason): string {
+  const explanation =
+    reason === "no-references"
+      ? "An earlier run of the spec-grounded review posted a summary or fallback comment here, but " +
+        "this PR no longer references any issue this workflow can spec-ground against — the comment " +
+        "below (and any inline blocker threads from that earlier run) no longer apply and have been " +
+        "cleared."
+      : "An earlier run of the spec-grounded review posted a summary or fallback comment here. This " +
+        "PR's linked issue(s) now show every acceptance criterion marked complete — but that is " +
+        "SELF-ATTESTED (checked off in the issue), not verified against this PR's own diff, so any " +
+        "inline blocker thread from that earlier run has been deliberately LEFT IN PLACE, not " +
+        "cleared: please verify the linked issue's own criteria genuinely hold and resolve any " +
+        "remaining blocker thread yourself.";
   return [
-    "**No linked-issue acceptance criteria remain for this PR.** An earlier run of the " +
-      "spec-grounded review posted a summary or fallback comment here, but this PR no longer " +
-      "references any issue this workflow can spec-ground against — the comment below (and any " +
-      "inline blocker threads from that earlier run) no longer apply and have been cleared.",
+    `**This PR's linked-issue acceptance criteria are no longer being actively spec-ground.** ${explanation}`,
     "",
     "_Posted by the roastpilot-cloud spec-grounded review workflow (factory.md §13 point 3)._",
     "",

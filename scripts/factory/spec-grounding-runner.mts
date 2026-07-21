@@ -388,6 +388,16 @@ export async function main(): Promise<void> {
   if (references.length === 0) {
     console.log(`PR #${prNumber} references no issue; nothing to spec-ground.`);
     writeGithubOutput("has-criteria", "false");
+    // PR #87 review, Codex, P1/medium fold: distinguishes THIS branch
+    // (no closing-keyword reference at all -- there was never any
+    // obligation to begin with) from the criteriaBlock==="" branch below
+    // (references exist, but their own acceptance criteria are all
+    // marked complete -- SELF-ATTESTED, never diff-verified). The
+    // privileged publisher's own outcome.json consumer needs this
+    // distinction to decide whether clearing a prior run's inline
+    // blocker threads is safe (see `clearStaleSpecGroundingStateOnDisappearedCriteria`
+    // there).
+    writeGithubOutput("no-criteria-reason", "no-references");
     return;
   }
 
@@ -408,6 +418,15 @@ export async function main(): Promise<void> {
       `PR #${prNumber}'s linked issue(s) have no unmet acceptance criteria; nothing to spec-ground.`,
     );
     writeGithubOutput("has-criteria", "false");
+    // PR #87 review, Codex, P1/medium fold: this branch's own "nothing to
+    // spec-ground" is SELF-ATTESTED (every acceptance checkbox in the
+    // linked issue(s) happens to be checked off, or every linked issue
+    // 404'd), never verified against this PR's own diff -- a materially
+    // WEAKER signal than the `no-references` branch above (no closing
+    // claim was ever made there at all). See `no-criteria-reason`'s own
+    // consumer in the privileged publisher for why this distinction is
+    // load-bearing, not cosmetic.
+    writeGithubOutput("no-criteria-reason", "no-unmet-criteria");
     return;
   }
 

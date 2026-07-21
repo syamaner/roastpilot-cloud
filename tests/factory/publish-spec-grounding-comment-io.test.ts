@@ -319,20 +319,20 @@ describe("neutralizeReasonForLog", () => {
   });
 });
 
-describe("clearStaleSpecGroundingSummary (PR #86 review, Codex, P2)", () => {
+describe("clearStaleSpecGroundingSummary (PR #86 review, Codex, P2; reason-parameterized PR #87 review, Codex, P1/medium fold)", () => {
   it("does nothing and returns false when no prior summary comment exists", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5);
+    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5, "no-references");
 
     expect(cleared).toBe(false);
     expect(calls.some((c) => c.method === "PATCH" || c.method === "POST")).toBe(false);
   });
 
-  it("PATCHes the prior summary/fallback comment in place with the cleared body when one exists", async () => {
+  it("PATCHes the prior summary/fallback comment in place with the cleared body (reason=no-references) when one exists", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
         jsonResponse([
@@ -346,13 +346,36 @@ describe("clearStaleSpecGroundingSummary (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5);
+    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5, "no-references");
 
     expect(cleared).toBe(true);
     const patch = calls.find((c) => c.method === "PATCH");
     expect(patch).toBeDefined();
     const body = (patch?.body as { body: string }).body;
-    expect(body).toMatch(/no linked-issue acceptance criteria remain/i);
+    expect(body).toMatch(/no longer references any issue/i);
     expect(body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
+  });
+
+  it("PATCHes with the SELF-ATTESTED-caveat body (reason=no-unmet-criteria), never claiming inline threads were cleared", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `prior blockers\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const cleared = await clearStaleSpecGroundingSummary("token", "o", "r", 5, "no-unmet-criteria");
+
+    expect(cleared).toBe(true);
+    const patch = calls.find((c) => c.method === "PATCH");
+    const body = (patch?.body as { body: string }).body;
+    expect(body).toMatch(/self-attested/i);
+    expect(body).toMatch(/left in place/i);
   });
 });

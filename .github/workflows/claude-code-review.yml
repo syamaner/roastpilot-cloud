@@ -501,7 +501,14 @@ jobs:
         # fallback) — and an empty artifact alone can't carry that
         # distinction. Always writes review-output/outcome.json, uploaded
         # alongside the verdict/spine below: {"hasCriteria": true} when the
-        # runner found real work, {"hasCriteria": false} on its early exit.
+        # runner found real work, {"hasCriteria": false, "noCriteriaReason":
+        # "no-references"|"no-unmet-criteria"} on its early exit (PR #87
+        # review, Codex, P1/medium fold — the runner's own two DIFFERENT
+        # false-emitting branches, "no closing-keyword reference at all" vs
+        # "references exist but every acceptance box is self-attested
+        # complete", carry materially different trust; the privileged
+        # publisher's own clear-on-disappear logic must never treat them the
+        # same way, see its own docstring).
         # This step only runs if the runner step itself SUCCEEDED (no
         # `if: always()` here, deliberately) — a genuine runner crash (an
         # unverified fetch failure, a thrown error) leaves NO outcome.json
@@ -510,6 +517,7 @@ jobs:
         # never its absence, is what signals a genuine no-op.
         env:
           HAS_CRITERIA: ${{ steps.runner.outputs.has-criteria }}
+          NO_CRITERIA_REASON: ${{ steps.runner.outputs.no-criteria-reason }}
         run: |
           set -euo pipefail
           # `rm -rf` THEN `mkdir` (Codex finding, PR #76 review, round 5,
@@ -526,7 +534,12 @@ jobs:
           # top of that, not the primary control.
           rm -rf review-output
           mkdir review-output
-          jq -n --argjson hasCriteria "$HAS_CRITERIA" '{hasCriteria: $hasCriteria}' > review-output/outcome.json
+          if [ "$HAS_CRITERIA" = "true" ]; then
+            jq -n --argjson hasCriteria true '{hasCriteria: $hasCriteria}' > review-output/outcome.json
+          else
+            jq -n --argjson hasCriteria false --arg noCriteriaReason "$NO_CRITERIA_REASON" \
+              '{hasCriteria: $hasCriteria, noCriteriaReason: $noCriteriaReason}' > review-output/outcome.json
+          fi
 
       - name: Strip any symlinks before the agent runs (defense-in-depth)
         # Codex finding, PR #76 review, round 5, MEDIUM: with only

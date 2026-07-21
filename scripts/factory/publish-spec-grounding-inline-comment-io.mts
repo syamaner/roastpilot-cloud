@@ -16,14 +16,25 @@
  * still reject that anchor with a 422 (an out-of-range or otherwise
  * invalid diff position — our own textual diff parsing and GitHub's own
  * internal diff-position mapping can disagree at the edges) even though
- * our own parsing accepted it. Since every planned comment shares the
- * identical anchor, a 422 on the FIRST one is diagnostic for the WHOLE
- * plan — {@link postInlineCommentPlan} posts only that one first, and if
- * it 422s, abandons the rest entirely rather than repeating the same
- * failure for every remaining comment. Only the FIRST comment's own 422
- * is treated this way (LOW2, #12 3b-iii-d+e PR-plan sign-off): a
- * NON-first failure, or a first failure for any OTHER status (403, 429,
- * a 5xx), is a genuine error and propagates uncaught — this module makes
+ * our own parsing accepted it.
+ *
+ * The probe targets the FIRST CREATE (POST) attempt, NOT literal plan
+ * index 0 (PR #87 review, Codex, P2 — a real gap the original version
+ * missed): {@link upsertInlineComment}'s own docstring already
+ * establishes that a PATCH never re-sends `path`/`line`/`commit_id`, so
+ * it can NEVER produce the anchor-invalid 422 this probe watches for —
+ * meaning if plan entry 0 happens to match an EXISTING comment (a
+ * re-run), it PATCHes, and the anchor is never probed at all that
+ * iteration; the probe must instead fire on whichever entry is the
+ * first genuine POST, wherever it falls in the plan. Since every
+ * planned comment shares the identical anchor, a 422 on that FIRST POST
+ * is diagnostic for the WHOLE plan — {@link postInlineCommentPlan}
+ * abandons the rest entirely rather than repeating the same failure for
+ * every remaining comment. Only that FIRST POST's own 422 is treated
+ * this way (LOW2, #12 3b-iii-d+e PR-plan sign-off): a PATCH's own 422
+ * (never anchor-related), a LATER post-anchor-already-proven-valid
+ * POST's 422, or a first-POST failure for any OTHER status (403, 429, a
+ * 5xx), is a genuine error and propagates uncaught — this module makes
  * no attempt to guess whether a later, unexpected failure is anchor-
  * related.
  *
@@ -188,13 +199,16 @@ export async function upsertInlineComment(
 /**
  * Posts (or updates) this run's entire planned set of inline blocker
  * comments, applying the 422 probe-then-degrade this module's own
- * top-level docstring describes: the FIRST comment in `plan` is posted
- * first, alone; if GitHub rejects it with a 422 (an invalid anchor), the
- * rest are never attempted at all, and this function returns `{ ok:
- * false }` so the caller can degrade to the anchor-fallback summary
- * path. Any OTHER failure — a non-first comment, or the first comment
- * failing with anything other than a 422 — propagates uncaught; this is
- * a genuine error, not a signal to degrade.
+ * top-level docstring describes: the FIRST entry that is a genuine
+ * CREATE (POST, never a PATCH — see this module's own top-level
+ * docstring, PR #87 review, Codex, P2 fold) is the probe; if GitHub
+ * rejects THAT one with a 422 (an invalid anchor), the rest are never
+ * attempted at all, and this function returns `{ ok: false }` so the
+ * caller can degrade to the anchor-fallback summary path. Any OTHER
+ * failure — a PATCH's own 422 (never anchor-related), a later POST's
+ * 422 once the anchor is already proven valid, or a first-POST failure
+ * for any status other than 422 — propagates uncaught; this is a
+ * genuine error, not a signal to degrade.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -204,7 +218,7 @@ export async function upsertInlineComment(
  * @param plan - This run's planned inline comments, in the order to post them.
  * @returns `{ ok: true }` once every comment posted/updated successfully
  *   (including the trivial case of an empty plan); `{ ok: false }` if
- *   the FIRST comment was rejected with a 422.
+ *   the first genuine CREATE attempt was rejected with a 422.
  */
 export async function postInlineCommentPlan(
   token: string,
@@ -218,11 +232,20 @@ export async function postInlineCommentPlan(
     return { ok: true };
   }
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
-  for (const [i, entry] of plan.entries()) {
+  let firstCreateSucceeded = false;
+  for (const entry of plan) {
+    // Determined BEFORE the call, independent of success or failure -- a
+    // PATCH (an existing match) never re-validates the anchor at all
+    // (see upsertInlineComment's own docstring), so only a CREATE
+    // attempt is ever diagnostic for the whole plan's shared anchor.
+    const isCreateAttempt = findExistingInlineCommentId(existing, entry) === null;
     try {
       await upsertInlineComment(token, owner, repo, prNumber, headSha, existing, entry);
+      if (isCreateAttempt) {
+        firstCreateSucceeded = true;
+      }
     } catch (err) {
-      if (i === 0 && err instanceof GithubApiError && err.status === 422) {
+      if (isCreateAttempt && !firstCreateSucceeded && err instanceof GithubApiError && err.status === 422) {
         return { ok: false };
       }
       throw err;

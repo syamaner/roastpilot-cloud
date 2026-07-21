@@ -273,6 +273,55 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ).rejects.toThrow(/422/);
   });
 
+  it("probes the FIRST actual CREATE (POST), not literal plan index 0 -- when entry 0 matches an existing comment and PATCHes, entry 1's own POST is the diagnostic one (PR #87 review, Codex, P2)", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 88,
+            body: `prior\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/pulls/comments/88": () => jsonResponse({}),
+      "POST /repos/o/r/pulls/5/comments": () => errorResponse(422, "Unprocessable Entity"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", [
+      plan({ marker: criterionBlockerCommentMarker("12:0"), body: "update" }),
+      plan({ marker: criterionBlockerCommentMarker("12:1"), body: "create" }),
+      plan({ marker: criterionBlockerCommentMarker("12:2"), body: "never attempted" }),
+    ]);
+
+    expect(result.ok).toBe(false);
+    // Entry 0's own PATCH succeeded (it's not a degrade signal at all --
+    // never even reaches the probe check); entry 1's own POST is the
+    // first genuine create attempt, and its 422 correctly degrades the
+    // whole plan; entry 2 is never attempted.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(true);
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("propagates a PATCH's own 422 as a genuine error, never as a degrade signal -- a PATCH never re-validates the anchor at all", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 88,
+            body: `prior\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/pulls/comments/88": () => errorResponse(422, "unexpected"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      postInlineCommentPlan("token", "o", "r", 5, "abc123", [plan({ marker: criterionBlockerCommentMarker("12:0") })]),
+    ).rejects.toThrow(/422/);
+  });
+
   it("fetches the existing-comments list only ONCE per run, reused for every planned comment's own match", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),

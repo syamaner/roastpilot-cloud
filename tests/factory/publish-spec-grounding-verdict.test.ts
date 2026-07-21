@@ -197,7 +197,41 @@ describe("main — the outcome.json tri-state", () => {
 
     expect(process.exitCode).toBe(1);
     const post = calls.find((c) => c.method === "POST");
-    expect((post?.body as { body: string }).body).toContain('must be exactly {"hasCriteria": boolean}');
+    expect((post?.body as { body: string }).body).toContain('must be shaped {"hasCriteria": boolean, ...}');
+  });
+
+  it("posts a visible fallback when outcome.json has hasCriteria:true but ALSO carries a noCriteriaReason field (never expected there, PR #87 review, Codex, P1/medium fold)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: true, noCriteriaReason: "no-references" }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain('must be exactly {"hasCriteria": true}');
+  });
+
+  it("posts a visible fallback when outcome.json has hasCriteria:false but carries an unexpected extra field beyond noCriteriaReason (PR #87 review, Codex, P1/medium fold)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", extra: "hack" }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("carries unexpected field(s) (extra)");
   });
 
   it("posts a visible fallback when outcome.json exists but isn't valid JSON", async () => {
@@ -261,7 +295,7 @@ describe("main — the outcome.json tri-state", () => {
 
   it("is a genuine no-op when hasCriteria is false and there is no prior spec-grounding state to clear (PATCH/POST/DELETE-free, only the read-only lookups)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -275,9 +309,9 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.every((c) => c.method === "GET")).toBe(true);
   });
 
-  it("clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
+  it("reason=no-references: clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
@@ -304,15 +338,63 @@ describe("main — the outcome.json tri-state", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    const patch = calls.find((c) => c.method === "PATCH");
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
     expect(patch).toBeDefined();
-    expect((patch?.body as { body: string }).body).toMatch(/no linked-issue acceptance criteria remain/i);
+    expect((patch?.body as { body: string }).body).toMatch(/no longer references any issue/i);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
+  });
+
+  it("reason=no-unmet-criteria: updates the summary with the self-attested caveat but LEAVES inline blocker threads untouched -- deleting a required_conversation_resolution-gating thread on a self-attested, non-diff-verified signal would be an anti-gaming hole (PR #87 review, Codex, P1/medium fold)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria" }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
+    expect(patch).toBeDefined();
+    expect((patch?.body as { body: string }).body).toMatch(/self-attested/i);
+    expect((patch?.body as { body: string }).body).toMatch(/left in place/i);
+    // The inline blocker comments endpoint is NEVER even fetched -- this
+    // reason never attempts to clear that channel at all.
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("an unknown/missing noCriteriaReason on a false outcome.json FAILS CLOSED to the non-destructive treatment -- never deletes inline blocker threads on a signal it could not confirm (PR #87 review, Codex, P1/medium fold)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    // Deliberately missing noCriteriaReason -- a malformed/stale-runner
+    // artifact this entrypoint cannot positively confirm as no-references.
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   it("posts a visible fallback, rather than crashing or silently no-opping, when clearing stale state genuinely fails", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
     process.env.OUTCOME_PATH = outcomePath;
     // The summary-comment lookup 403s exactly ONCE (clearStaleSpecGroundingSummary's
     // own check) -- publishFallback's own subsequent lookup, in the catch

@@ -140,7 +140,10 @@ describe("main — no linked issue (first early exit)", () => {
 
     await main();
 
-    expect(await readOutput()).toBe("has-criteria=false\n");
+    // no-criteria-reason=no-references (PR #87 review, Codex, P1/medium
+    // fold): no closing-keyword reference at all -- there was never any
+    // obligation, distinct from the "self-attested complete" branch below.
+    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-references\n");
     await expect(readFile(criteriaBlockPath, "utf-8")).rejects.toThrow();
     // Exactly one fetch (the PR body) -- no issue or diff fetch at all.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -161,7 +164,11 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
 
     await main();
 
-    expect(await readOutput()).toBe("has-criteria=false\n");
+    // no-criteria-reason=no-unmet-criteria (PR #87 review, Codex, P1/medium
+    // fold): the linked issue's own acceptance criteria are SELF-ATTESTED
+    // complete (checked off), never diff-verified -- a materially weaker
+    // signal than the no-references branch above.
+    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-unmet-criteria\n");
     await expect(readFile(prDiffBlockPath, "utf-8")).rejects.toThrow();
     // Exactly two fetches (PR body + the one linked issue) -- no diff fetch.
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -445,7 +452,9 @@ describe("main — a PR with no body at all", () => {
 
     await main();
 
-    expect(await readOutput()).toBe("has-criteria=false\n");
+    // A null body -> parsed as empty text -> zero references -> the
+    // no-references branch (never any obligation to begin with).
+    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-references\n");
   });
 });
 

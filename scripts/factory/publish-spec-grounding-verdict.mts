@@ -123,6 +123,7 @@ import {
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   type JoinedCriterionResult,
+  type NoCriteriaReason,
 } from "./publish-spec-grounding-verdict-logic.mts";
 import {
   buildAnchorFallbackSummarySupplement,
@@ -283,13 +284,25 @@ async function readArtifactFile(path: string, maxBytes: number): Promise<Buffer 
 }
 
 /**
- * Upper bound on `outcome.json`'s own raw size — this file is a single
- * boolean field (`spec-grounding-runner.mts`'s own workflow step writes
- * `{"hasCriteria": true|false}` via `jq`), so a generous-but-tiny ceiling
- * is enough; anything meaningfully larger than this is already a
- * corrupted or unexpected artifact.
+ * Upper bound on `outcome.json`'s own raw size — this file is a tiny,
+ * fixed-shape marker (`spec-grounding-runner.mts`'s own workflow step
+ * writes it via `jq`), so a generous-but-tiny ceiling is enough; anything
+ * meaningfully larger than this is already a corrupted or unexpected
+ * artifact.
  */
 const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
+
+/** The set of `noCriteriaReason` values `spec-grounding-runner.mts` can legitimately emit. */
+const NO_CRITERIA_REASONS: ReadonlySet<string> = new Set<NoCriteriaReason>(["no-references", "no-unmet-criteria"]);
+
+/**
+ * `outcome.json`'s own shape, post-validation — a discriminated union so
+ * `noCriteriaReason` is only ever accessible (and only ever populated)
+ * when `hasCriteria` is `false` (PR #87 review, Codex, P1/medium fold).
+ */
+type OutcomeArtifact =
+  | { readonly hasCriteria: true }
+  | { readonly hasCriteria: false; readonly noCriteriaReason: NoCriteriaReason };
 
 /**
  * Reads and shape-validates `outcome.json` — kept private and inline
@@ -298,23 +311,44 @@ const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
  * file-reading glue with no other consumer (`readVerdictArtifact` there
  * is equally private).
  *
+ * `hasCriteria: false` now carries a `noCriteriaReason` (PR #87 review,
+ * Codex, P1/medium fold — a real gap the original version missed):
+ * `spec-grounding-runner.mts` emits `hasCriteria: false` from TWO
+ * DIFFERENT branches with materially different trust — no closing-
+ * keyword reference at all (`"no-references"`, no obligation ever
+ * existed) versus a linked issue whose acceptance criteria are all
+ * SELF-ATTESTED complete (`"no-unmet-criteria"`, never diff-verified).
+ * Without this field, the privileged publisher's own clear-on-disappear
+ * logic could not tell the two apart, and would delete a
+ * `required_conversation_resolution`-gating inline blocker thread in
+ * BOTH cases — an anti-gaming hole in the self-attested case.
+ *
+ * FAILS CLOSED (never destructively) when `noCriteriaReason` is missing
+ * or not one of the known values on the `hasCriteria: false` path: a
+ * malformed, stale-runner, or tampered artifact is coerced to
+ * `"no-unmet-criteria"` — the NON-destructive treatment — rather than
+ * throwing (which would itself be a visible-fallback case) or defaulting
+ * to `"no-references"` (which would delete inline threads on a signal
+ * this function could not actually confirm). Never too permissive, only
+ * ever too cautious.
+ *
  * @param path - `outcome.json`'s path on disk.
- * @returns `null` if the file is absent; the parsed `hasCriteria` value
- *   if present and valid.
+ * @returns `null` if the file is absent; the parsed, shape-validated
+ *   artifact if present.
  * @throws If the file is present but oversized, unreadable, not valid
- *   JSON, or not shaped exactly `{"hasCriteria": boolean}`.
+ *   JSON, missing `hasCriteria`, or carrying an unexpected extra field.
  */
-async function readOutcomeArtifact(path: string): Promise<boolean | null> {
+async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null> {
   const raw = await readArtifactFile(path, MAX_OUTCOME_ARTIFACT_BYTES);
   if (raw === null) {
     return null;
   }
   // Unlike the verdict/criteria-spine artifacts (fed straight to parsers
   // with their own Buffer-only fatal isUtf8 check), outcome.json has no
-  // such parser — it's a trivial, our-own-runner-written `{"hasCriteria":
-  // boolean}` marker with no adversarial-content risk, so a plain UTF-8
-  // decode (Node's usual lenient U+FFFD replacement on malformed bytes)
-  // is unchanged from this function's prior behavior.
+  // such parser — it's a trivial, our-own-runner-written marker with no
+  // adversarial-content risk, so a plain UTF-8 decode (Node's usual
+  // lenient U+FFFD replacement on malformed bytes) is unchanged from this
+  // function's prior behavior.
   const rawText = raw.toString("utf8");
   let parsed: unknown;
   try {
@@ -326,28 +360,65 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
     typeof parsed !== "object" ||
     parsed === null ||
     Array.isArray(parsed) ||
-    typeof (parsed as Record<string, unknown>).hasCriteria !== "boolean" ||
-    Object.keys(parsed as Record<string, unknown>).length !== 1
+    typeof (parsed as Record<string, unknown>).hasCriteria !== "boolean"
   ) {
-    throw new Error(`outcome.json at ${path} must be exactly {"hasCriteria": boolean}, got ${rawText}`);
+    throw new Error(`outcome.json at ${path} must be shaped {"hasCriteria": boolean, ...}, got ${rawText}`);
   }
-  return (parsed as { hasCriteria: boolean }).hasCriteria;
+  const record = parsed as Record<string, unknown>;
+  const hasCriteria = record.hasCriteria as boolean;
+
+  if (hasCriteria) {
+    if (Object.keys(record).length !== 1) {
+      throw new Error(
+        `outcome.json at ${path} must be exactly {"hasCriteria": true} when hasCriteria is true ` +
+          `(no noCriteriaReason expected), got ${rawText}`,
+      );
+    }
+    return { hasCriteria: true };
+  }
+
+  const extraKeys = Object.keys(record).filter((key) => key !== "hasCriteria" && key !== "noCriteriaReason");
+  if (extraKeys.length > 0) {
+    throw new Error(`outcome.json at ${path} carries unexpected field(s) (${extraKeys.join(", ")}), got ${rawText}`);
+  }
+  const rawReason = record.noCriteriaReason;
+  const noCriteriaReason: NoCriteriaReason =
+    typeof rawReason === "string" && NO_CRITERIA_REASONS.has(rawReason)
+      ? (rawReason as NoCriteriaReason)
+      : "no-unmet-criteria";
+  return { hasCriteria: false, noCriteriaReason };
 }
 
 /**
  * Clears any stale spec-grounded review state on a PR whose linked-issue
- * criteria have disappeared entirely (`hasCriteria: false`) — a P2 fix
- * (PR #86 review, Codex): a PR that PREVIOUSLY got a summary/fallback
- * comment or inline blocker threads, then had a later body edit remove
- * its last closing-keyword reference, used to leave that stale state
- * (still claiming blockers, or a failed pipeline, for criteria that no
- * longer exist) visible and gating forever — this entrypoint's own
- * `hasCriteria: false` path was a pure silent no-op with no upsert or
- * deletion at all. Clears BOTH channels: the summary comment (via {@link
- * clearStaleSpecGroundingSummary}, a no-op if none exists) and any prior
- * inline blocker comments (via {@link clearStaleInlineBlockerComments},
- * matched generically since there is no run plan at all once criteria
- * are gone).
+ * criteria have disappeared or gone unmet (`hasCriteria: false`) — a P2
+ * fix (PR #86 review, Codex): a PR that PREVIOUSLY got a summary/
+ * fallback comment or inline blocker threads, then had a later change
+ * make `hasCriteria: false` true, used to leave that stale state (still
+ * claiming blockers, or a failed pipeline) visible and gating forever —
+ * this entrypoint's own `hasCriteria: false` path was a pure silent
+ * no-op with no upsert or deletion at all.
+ *
+ * BRANCHES ON `reason` (PR #87 review, Codex, P1/medium fold — the
+ * original version of this function treated every `hasCriteria: false`
+ * run identically, an anti-gaming hole):
+ * - `"no-references"` — no closing-keyword reference exists at all, so
+ *   there was never any obligation. Clears BOTH channels: the summary
+ *   comment (via {@link clearStaleSpecGroundingSummary}, a no-op if none
+ *   exists) AND deletes any prior inline blocker comments (via {@link
+ *   clearStaleInlineBlockerComments}, matched generically since there is
+ *   no run plan at all once criteria are gone) — correct, since no
+ *   closing claim means no obligation to verify.
+ * - `"no-unmet-criteria"` (or any reason this run could not positively
+ *   confirm as `"no-references"`, per {@link readOutcomeArtifact}'s own
+ *   fail-closed coercion) — a closing claim STILL exists; the linked
+ *   issue's own criteria are merely SELF-ATTESTED complete, never
+ *   diff-verified. Upserts an ACCURATE summary explaining this, but
+ *   deliberately does NOT delete inline blocker threads — deleting a
+ *   `required_conversation_resolution`-gating thread here, on an
+ *   unverified self-attestation, would be exactly the anti-gaming hole
+ *   this branch exists to close. A human still triages and resolves any
+ *   remaining thread.
  *
  * Scoped to `hasCriteria: false` ONLY — deliberately NOT extended to the
  * `"skipped"`/`"cancelled"` job-result branch above, even though team-
@@ -358,7 +429,8 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
  * either would risk erasing a STILL-ACCURATE summary or still-open
  * blocker thread purely because this particular event didn't trigger a
  * real run. `hasCriteria: false` is the only signal that has actually
- * VERIFIED "no criteria remain".
+ * VERIFIED "no unmet criteria remain" (with `reason` further narrowing
+ * exactly what was verified).
  *
  * A genuine failure while clearing (anything other than the benign
  * "nothing to clear"/"already gone" cases, which never throw) is
@@ -369,26 +441,37 @@ async function readOutcomeArtifact(path: string): Promise<boolean | null> {
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
+ * @param reason - Why this run found `hasCriteria: false`.
  */
 async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
+  reason: NoCriteriaReason,
 ): Promise<void> {
   try {
-    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber);
-    const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+    const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, reason);
+    if (reason === "no-references") {
+      const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+      console.log(
+        `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
+          `reason=no-references) — cleared stale prior state (summary comment cleared=` +
+          `${summaryCleared}, ${clearedInlineCount} inline comment(s) removed).`,
+      );
+      return;
+    }
+    // "no-unmet-criteria" (or a coerced-to-safe unknown/missing reason):
+    // a closing claim STILL exists, self-attested only -- inline blocker
+    // threads are deliberately left untouched for a human to triage.
     console.log(
-      `PR #${prNumber} had nothing to spec-ground (hasCriteria: false) — ` +
-        (summaryCleared || clearedInlineCount > 0
-          ? `cleared stale prior state (summary comment cleared=${summaryCleared}, ` +
-            `${clearedInlineCount} inline comment(s) removed).`
-          : `nothing to clear, silent no-op.`),
+      `PR #${prNumber}'s linked issue(s) show every acceptance criterion self-attested complete ` +
+        `(hasCriteria: false, reason=${reason}) — summary comment updated (cleared=${summaryCleared}); ` +
+        `any prior inline blocker thread(s) were deliberately LEFT UNTOUCHED, not cleared.`,
     );
   } catch (err) {
     await publishFallback(token, owner, repo, prNumber, [
-      `PR #${prNumber} has no linked-issue criteria left to review, but clearing its prior ` +
+      `PR #${prNumber} has no unmet linked-issue criteria left to review, but clearing its prior ` +
         `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}`,
     ]);
     process.exitCode = 1;
@@ -424,9 +507,9 @@ export async function main(): Promise<void> {
     return;
   }
 
-  let hasCriteria: boolean | null;
+  let outcome: OutcomeArtifact | null;
   try {
-    hasCriteria = await readOutcomeArtifact(paths.outcomePath);
+    outcome = await readOutcomeArtifact(paths.outcomePath);
   } catch (err) {
     await publishFallback(token, owner, repo, prNumber, [
       err instanceof Error ? err.message : String(err),
@@ -434,7 +517,7 @@ export async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (hasCriteria === null) {
+  if (outcome === null) {
     await publishFallback(token, owner, repo, prNumber, [
       `outcome.json not found at ${paths.outcomePath} — the spec-grounded-review job result was ` +
         `"success", but its own self-describing marker artifact is missing; the pipeline may have ` +
@@ -443,8 +526,8 @@ export async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (!hasCriteria) {
-    await clearStaleSpecGroundingStateOnDisappearedCriteria(token, owner, repo, prNumber);
+  if (!outcome.hasCriteria) {
+    await clearStaleSpecGroundingStateOnDisappearedCriteria(token, owner, repo, prNumber, outcome.noCriteriaReason);
     return;
   }
 

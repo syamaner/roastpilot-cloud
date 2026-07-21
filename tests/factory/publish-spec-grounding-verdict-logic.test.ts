@@ -739,20 +739,28 @@ describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12
   });
 });
 
-describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2)", () => {
-  it("explains that no linked-issue criteria remain and prior state was cleared", () => {
-    const body = buildSpecGroundingClearedSummaryCommentBody();
-    expect(body).toMatch(/no linked-issue acceptance criteria remain/i);
+describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2; reason-parameterized PR #87 review, Codex, P1/medium fold)", () => {
+  it("for reason=no-references, explains that no linked-issue criteria remain and BOTH channels were cleared", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody("no-references");
+    expect(body).toMatch(/no longer references any issue/i);
     expect(body).toMatch(/cleared/i);
   });
 
+  it("for reason=no-unmet-criteria, explains the self-attested/not-diff-verified caveat and that inline threads were LEFT IN PLACE, never claiming they were cleared", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody("no-unmet-criteria");
+    expect(body).toMatch(/self-attested/i);
+    expect(body).toMatch(/not verified against this pr's own diff/i);
+    expect(body).toMatch(/left in place/i);
+    expect(body).not.toMatch(/have been\s+cleared/i);
+  });
+
   it("ends with the SAME marker a normal summary/fallback comment uses, so a later run that finds criteria again upserts over this cleared comment", () => {
-    const body = buildSpecGroundingClearedSummaryCommentBody();
+    const body = buildSpecGroundingClearedSummaryCommentBody("no-references");
     expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
   });
 
   it("is found by findExistingSpecGroundingSummaryCommentId, exactly like a normal summary comment would be", () => {
-    const body = buildSpecGroundingClearedSummaryCommentBody();
+    const body = buildSpecGroundingClearedSummaryCommentBody("no-references");
     const comments: ExistingComment[] = [
       { id: 1, body, authorType: "Bot", authorLogin: SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN },
     ];
