@@ -14,21 +14,27 @@
  * under AGENTS.md's 400-logic-line PR-hygiene cap) — this file imports
  * and calls it, never duplicates it.
  *
- * SLICE d3 SCOPE (deliberately incomplete — split per team-lead's "keep
- * d and e separate PRs, split d if it measures over 400 [logic lines]"
- * direction: d1 = pure-logic artifact parsing, d2 = comment I/O, d3 =
- * this entrypoint, d4 = inline blocker posting, not yet built): posts
- * the SUMMARY comment only — the diff fetch + deterministic-anchor
- * selection `publish-spec-grounding-blocker-logic.mts`'s own {@link
- * import("./publish-spec-grounding-blocker-logic.mts").planBlockerInlineComments}
- * needs are not wired up yet. So EVERY run with a blocking finding is,
- * structurally, exactly the anchor-fallback case: `blockersPostedInline`
- * is always `false`, the full blocker detail is always appended to the
- * summary via `buildAnchorFallbackSummarySupplement`, and this
- * entrypoint exits nonzero whenever there is one, per that function's
- * own documented contract. Self-correcting once d4 lands. Not yet wired
- * into any workflow (that is slice e, also separate), so this interim
- * behavior has no live, observable effect.
+ * SLICE d4 (this file's current state — split per team-lead's "keep d
+ * and e separate PRs, split d if it measures over 400 [logic lines]"
+ * direction: d1 = pure-logic artifact parsing, d2 = summary-comment I/O,
+ * d3 = this entrypoint's own gate cascade, d4 = the inline-posting
+ * wiring below): fetches this run's OWN trusted copy of the raw diff
+ * (`spec-grounding-runner.mts`'s own SHA-pinned `fetchPrDiff`, reused —
+ * never the read-only job's already-neutralized `pr-diff-block.txt`),
+ * selects a deterministic anchor, and attempts to post every blocker as
+ * a real, resolvable inline review comment
+ * (`publish-spec-grounding-inline-comment-io.mts`'s own `postInlineCommentPlan`,
+ * with its own 422 probe-then-degrade). `blockersPostedInline` is
+ * `true` only when inline posting genuinely succeeded; it is `false`
+ * for BOTH degrade cases — no addable anchor at all
+ * (`anchorFallbackNeeded`), or the first inline POST rejected with a
+ * 422 — and the full blocker detail is appended to the summary instead
+ * either way. This entrypoint exits nonzero ONLY in that `false` case:
+ * a blocker posted as a real inline thread is already gated by
+ * `required_conversation_resolution` on the thread itself, so a healthy
+ * run does not also need this job to fail red. Not yet wired into any
+ * workflow (that is slice e, still separate), so none of this has a
+ * live, observable effect yet.
  *
  * THE TRI-STATE OUTCOME GATE (team-lead's design, #12 3b-iii-d+e PR-plan
  * sign-off): before this job does anything, it checks TWO independent
@@ -77,6 +83,10 @@
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
  * - `TRUSTED_PR_NUMBER` — from `github.event.pull_request.number`, never
  *   from an artifact.
+ * - `TRUSTED_HEAD_SHA` — from `github.event.pull_request.head.sha`; this
+ *   run's own anchor-selecting diff fetch is verified against it before
+ *   ever being used, the same discipline `spec-grounding-runner.mts`'s
+ *   own identical check applies to its own diff fetch.
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -89,12 +99,13 @@
  */
 
 import { open } from "node:fs/promises";
-import { requireEnv } from "./github-api.mts";
+import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   MAX_PAYLOAD_BYTES as MAX_VERDICT_PAYLOAD_BYTES,
   parseAndValidateVerdict,
   type SpecGroundingVerdict,
 } from "./spec-grounding-verdict-schema.mts";
+import { fetchPrDiff } from "./spec-grounding-runner.mts";
 import {
   MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
   parseCriteriaSpineArtifact,
@@ -107,12 +118,59 @@ import {
   joinFindingsToSpine,
   type JoinedCriterionResult,
 } from "./publish-spec-grounding-verdict-logic.mts";
-import { buildAnchorFallbackSummarySupplement } from "./publish-spec-grounding-blocker-logic.mts";
+import {
+  buildAnchorFallbackSummarySupplement,
+  planBlockerInlineComments,
+} from "./publish-spec-grounding-blocker-logic.mts";
 import {
   neutralizeReasonForLog,
   publishFallback,
   upsertSummaryComment,
 } from "./publish-spec-grounding-comment-io.mts";
+import { postInlineCommentPlan } from "./publish-spec-grounding-inline-comment-io.mts";
+
+interface GitHubPullRequestShas {
+  readonly head: { readonly sha: string };
+  readonly base: { readonly sha: string };
+}
+
+/**
+ * Fetches the PR's own current head/base SHAs and verifies the head
+ * matches the TRUSTED value from the workflow's own event context —
+ * mirrors `spec-grounding-runner.mts`'s own identical verification
+ * exactly (never re-derived independently, F1-S9 slice 3b-iii-d4): the
+ * mutable `/pulls/{n}` resource always reflects whatever the branch
+ * currently points to, so without this check, a push landing between
+ * this run's trigger and this fetch could pair a trusted verdict
+ * (reviewed against an EARLIER head) with a LATER, unreviewed diff for
+ * this run's own anchor selection.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
+ *   event context, never re-derived from this PR's own mutable state.
+ * @returns The PR's own head/base SHAs.
+ * @throws If the PR's current head SHA does not match `trustedHeadSha`.
+ */
+async function fetchAndVerifyPrShas(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+): Promise<GitHubPullRequestShas> {
+  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  if (pr.head.sha !== trustedHeadSha) {
+    throw new Error(
+      `PR #${prNumber}'s current head SHA (${pr.head.sha}) does not match the trusted event head SHA ` +
+        `(${trustedHeadSha}) — the PR moved between the review trigger and this fetch; failing closed ` +
+        `rather than selecting an anchor against a possibly-stale or possibly-newer diff.`,
+    );
+  }
+  return pr;
+}
 
 interface RunPaths {
   readonly outcomePath: string;
@@ -273,6 +331,7 @@ export async function main(): Promise<void> {
     throw new Error(`GITHUB_REPOSITORY must be "owner/repo", got ${process.env.GITHUB_REPOSITORY}`);
   }
   const prNumber = Number(requireEnv("TRUSTED_PR_NUMBER"));
+  const trustedHeadSha = requireEnv("TRUSTED_HEAD_SHA");
   const paths = resolvePaths();
 
   const jobResult = requireEnv("SPEC_GROUNDED_REVIEW_JOB_RESULT");
@@ -380,7 +439,52 @@ export async function main(): Promise<void> {
     return;
   }
 
-  await publishSummary(token, owner, repo, prNumber, spineResult.spine, verdictResult.verdict);
+  await publishSummary(token, owner, repo, prNumber, trustedHeadSha, spineResult.spine, verdictResult.verdict);
+}
+
+/**
+ * Attempts to post this run's blockers (if any) as real, resolvable
+ * inline comments — the diff fetch, deterministic-anchor selection, and
+ * the 422 probe-then-degrade, all delegated to already-reviewed pure/
+ * network-wiring code (`publish-spec-grounding-blocker-logic.mts`'s own
+ * `planBlockerInlineComments`, `publish-spec-grounding-inline-comment-io
+ * .mts`'s own `postInlineCommentPlan`).
+ *
+ * @returns `true` if every blocker was successfully posted as a real
+ *   inline comment (`blockersPostedInline`); `false` if there was no
+ *   addable anchor at all, or the first inline POST was rejected with a
+ *   422 (the anchor-fallback case, either structurally or via the
+ *   probe-then-degrade — the caller renders the full blocker detail in
+ *   the summary instead either way).
+ * @throws Any OTHER failure (a SHA mismatch, a diff-fetch error, a
+ *   non-first or non-422 inline-posting failure) — a genuine error, not
+ *   a case this function degrades from; the caller converts it into a
+ *   visible fallback, same as every other artifact/network failure in
+ *   this entrypoint.
+ */
+async function tryPostBlockersInline(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+  criterionBlockers: readonly JoinedCriterionResult[],
+  spine: ParsedCriteriaSpine,
+  diffTruncationBlocksClosingClaim: boolean,
+): Promise<boolean> {
+  const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+  const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
+  const plan = planBlockerInlineComments(
+    criterionBlockers,
+    spine.unreviewedClosingIssues,
+    diff,
+    diffTruncationBlocksClosingClaim,
+  );
+  if (plan.anchorFallbackNeeded) {
+    return false;
+  }
+  const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
+  return postResult.ok;
 }
 
 async function publishSummary(
@@ -388,6 +492,7 @@ async function publishSummary(
   owner: string,
   repo: string,
   prNumber: number,
+  trustedHeadSha: string,
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
 ): Promise<void> {
@@ -403,19 +508,42 @@ async function publishSummary(
   const totalBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
-  // Slice d1 never posts inline blocker comments (see this module's own
-  // top-level docstring) — every blocker-bearing run is therefore,
-  // structurally, the anchor-fallback case: `blockersPostedInline` is
-  // always `false`, and the full blocker detail is always appended to the
-  // summary via `buildAnchorFallbackSummarySupplement`, exactly the
-  // contract that function documents for `anchorFallbackNeeded: true`.
+  let blockersPostedInline = false;
+  if (totalBlockerCount > 0) {
+    try {
+      blockersPostedInline = await tryPostBlockersInline(
+        token,
+        owner,
+        repo,
+        prNumber,
+        trustedHeadSha,
+        criterionBlockers,
+        spine,
+        diffTruncationBlocksClosingClaim,
+      );
+    } catch (err) {
+      // A genuine error (SHA mismatch, diff-fetch failure, a non-first or
+      // non-422 inline-posting failure) — NOT the anchor-fallback or
+      // 422-degrade case, both of which `tryPostBlockersInline` already
+      // resolves to a plain `false` return, never a throw. Same "visible
+      // fallback, never a silent or bare-CI-red failure" treatment as
+      // every other artifact/network failure in this entrypoint.
+      await publishFallback(token, owner, repo, prNumber, [
+        `failed to post this run's blocking findings as inline comments: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      ]);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   let body = buildSpecGroundingSummaryCommentBody(
     joined,
     spine.unreviewedClosingIssues,
     { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
-    false,
+    blockersPostedInline,
   );
-  if (totalBlockerCount > 0) {
+  if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
       criterionBlockers,
       spine.unreviewedClosingIssues,
@@ -426,14 +554,17 @@ async function publishSummary(
   await upsertSummaryComment(token, owner, repo, prNumber, body);
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
-      `finding(s), ${joined.length} criterion(a) reviewed.`,
+      `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed.`,
   );
 
-  if (totalBlockerCount > 0) {
-    // Same "the entrypoint is responsible for exiting nonzero" contract
-    // `buildAnchorFallbackSummarySupplement`'s own docstring documents for
-    // the anchor-fallback case — every blocker-bearing run in slice d3 is
-    // exactly that case (see this module's own top-level docstring).
+  if (totalBlockerCount > 0 && !blockersPostedInline) {
+    // A blocker posted as a REAL inline thread is already gated by
+    // `required_conversation_resolution` on the thread itself — this job
+    // does not also need to fail red for that, healthy case. Exiting
+    // nonzero is reserved for the anchor-fallback/422-degrade case, per
+    // `buildAnchorFallbackSummarySupplement`'s own documented contract
+    // (LOW2, #12 3b-iii-d+e PR-plan sign-off: the create-review-comment
+    // 422 maps to this exact degrade path, not an unhandled failure).
     process.exitCode = 1;
   }
 }
