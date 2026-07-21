@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findExistingSummaryComment,
+  neutralizeReasonForLog,
   publishFallback,
   upsertSummaryComment,
 } from "../../scripts/factory/publish-spec-grounding-comment-io.mts";
@@ -221,5 +222,29 @@ describe("publishFallback", () => {
     expect(loggedText).not.toMatch(/\n::error/);
     expect(loggedText).not.toContain("::");
     errorSpy.mockRestore();
+  });
+});
+
+describe("neutralizeReasonForLog", () => {
+  it("passes an already-inert single-line string through unchanged", () => {
+    expect(neutralizeReasonForLog("plain reason text")).toBe("plain reason text");
+  });
+
+  it("collapses embedded newlines (and CRLF) so injected text can never start its own log line", () => {
+    expect(neutralizeReasonForLog("first line\nsecond line")).toBe("first line second line");
+    expect(neutralizeReasonForLog("first line\r\nsecond line")).toBe("first line second line");
+  });
+
+  it("strips the literal :: marker as defense-in-depth, even mid-line", () => {
+    expect(neutralizeReasonForLog("unexpected key(s): ::add-mask::secret")).toBe(
+      "unexpected key(s):  add-mask secret",
+    );
+  });
+
+  it("neutralizes a full workflow-command injection attempt exported for reuse outside publishFallback -- this is the same primitive slice 3b-iii-d3 reuses on the entrypoint's own top-level catch-all, not just fallback reasons", () => {
+    const attempt = 'stack trace: something failed\n::error title=spoofed::message\n::add-mask::secret';
+    const neutralized = neutralizeReasonForLog(attempt);
+    expect(neutralized).not.toMatch(/\n::error/);
+    expect(neutralized).not.toContain("::");
   });
 });

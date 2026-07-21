@@ -109,31 +109,41 @@ export async function upsertSummaryComment(
 }
 
 /**
- * Neutralizes a reason string before it reaches a WORKFLOW LOG line
- * (`console.error`) — a DIFFERENT untrusted-output channel than the
- * posted bot comment (PR #85 review, Codex, MEDIUM): GitHub Actions
- * parses `::command::` lines anywhere in a step's own stdout, so a
- * malformed verdict's own unknown-key name or invalid field value —
- * echoed VERBATIM into a validation-error reason, the SAME untrusted
- * content `publish-spec-grounding-verdict-logic.mts`'s own
- * `sanitizeReasonForDisplay` already neutralizes for the posted comment —
- * reaching a raw `console.error` call could inject a workflow command on
- * its own line: `"\n::error title=spoofed::message"` (or, on older
- * runners, `"\n::set-env::"` / `"\n::add-mask::"`) spoofs an annotation
- * at minimum. The comment's own neutralization does NOT cover this: the
- * log is a separate channel entirely.
+ * Neutralizes a reason (or any other untrusted-derived string) before it
+ * reaches a WORKFLOW LOG line (`console.error`/`console.log`) — a
+ * DIFFERENT untrusted-output channel than the posted bot comment (PR #85
+ * review, Codex, MEDIUM): GitHub Actions parses `::command::` lines
+ * anywhere in a step's own stdout, so a malformed verdict's own
+ * unknown-key name or invalid field value — echoed VERBATIM into a
+ * validation-error reason, the SAME untrusted content `publish-spec-
+ * grounding-verdict-logic.mts`'s own `sanitizeReasonForDisplay` already
+ * neutralizes for the posted comment — reaching a raw `console.error`
+ * call could inject a workflow command on its own line: `"\n::error
+ * title=spoofed::message"` (or, on older runners, `"\n::set-env::"` /
+ * `"\n::add-mask::"`) spoofs an annotation at minimum. The comment's own
+ * neutralization does NOT cover this: the log is a separate channel
+ * entirely.
  *
  * The LOAD-BEARING defense is collapsing newlines: a workflow command
- * must START a line, so a reason with no newline in it can never inject
+ * must START a line, so a value with no newline in it can never inject
  * one regardless of what text follows. Also strips the literal `::`
  * marker itself as defense-in-depth, in case some other log consumer
  * ever parses it without requiring a true line start.
  *
- * @param reason - The untrusted reason string.
- * @returns The reason, safe to interpolate into a `console.error`/log call.
+ * EXPORTED (PR #85 review follow-up, ahead of slice 3b-iii-d3's own
+ * proactive fold — team-lead's disposition on the same finding
+ * generalized to the entrypoint's own top-level catch-all): `publish-
+ * spec-grounding-verdict.mts`'s own `main().catch(...)` handler stringifies
+ * whatever error reaches it (which can transitively carry untrusted text
+ * — a `GithubApiError` echoing a response body, or a wrapped validation
+ * error) into the SAME log channel this function protects. Reused there
+ * rather than a second, independently-maintained copy.
+ *
+ * @param value - The untrusted (or untrusted-derived) string.
+ * @returns The value, safe to interpolate into a `console.error`/log call.
  */
-function neutralizeReasonForLog(reason: string): string {
-  return reason.replace(/[\r\n]+/g, " ").replace(/::/g, " ");
+export function neutralizeReasonForLog(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").replace(/::/g, " ");
 }
 
 /**
