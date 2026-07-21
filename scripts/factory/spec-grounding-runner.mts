@@ -298,8 +298,20 @@ async function fetchIssue(
  * uncaught: there is no meaningful "nothing to say" degradation for the
  * PR's OWN diff — without it, there is nothing for slice 3b-ii's review
  * agent to check the criteria against at all.
+ *
+ * EXPORTED (F1-S9 slice 3b-iii-d4, issue #12): the privileged publish
+ * entrypoint's own deterministic-anchor selection
+ * (`publish-spec-grounding-blocker-logic.mts`'s own {@link
+ * import("./publish-spec-grounding-blocker-logic.mts").selectDeterministicBlockerAnchor})
+ * needs the RAW diff too — never the wrapped/neutralized
+ * `pr-diff-block.txt` artifact (see that module's own top-level
+ * docstring for why) — and must fetch its own trusted copy independently
+ * rather than trust a value this module already fetched in a DIFFERENT
+ * job run. Reusing this exact function, rather than a second,
+ * independently-maintained copy, keeps the SHA-pinning fix above in ONE
+ * place.
  */
-async function fetchPrDiff(
+export async function fetchPrDiff(
   token: string,
   owner: string,
   repo: string,
