@@ -435,12 +435,87 @@ export function computeCriteriaSpineTruncation(
   return { truncated, unreviewedClosingIssues };
 }
 
+/**
+ * Every CLOSING-kind issue number this run actually attempted to review —
+ * every closing-kind reference within {@link selectIssuesToFetch}'s own
+ * cap, regardless of whether the fetch succeeded, whether the issue had
+ * any unmet criteria at all, or whether `buildCriteriaSpine`'s own
+ * byte-cap truncation later dropped its entries from the spine (F1-S9
+ * slice 90.2, the #90 PR-plan's own "complete reviewed-closing-set"
+ * item — closes a real gap: {@link buildLinkedIssueSpecs} in
+ * `spec-grounding-logic.mts` silently OMITS an issue with zero unmet
+ * criteria from `result.specs` entirely, so a closing-kind issue that
+ * was ALREADY fully satisfied when this run looked at it has never had
+ * ANY trace anywhere in the spine artifact — indistinguishable, to a
+ * privileged consumer, from a closing reference this run never examined
+ * in any way at all. A downstream reference-revalidation check (F1-S9
+ * slice 90.5) needs this complete set to correctly tell those two cases
+ * apart, closing the exact fail-open/false-positive tension a prior,
+ * reverted attempt at this same fix ran into (PR #87 rounds 8-9,
+ * tracked in issue #90).
+ *
+ * Deliberately built from {@link selectIssuesToFetch}`(references)` —
+ * the SAME cap {@link computeCriteriaSpineTruncation}'s own "never even
+ * fetched" case already uses — NOT the full, uncapped `references` list:
+ * a closing reference BEYOND `MAX_LINKED_ISSUES` was never actually
+ * looked at in any way, so including it here would be the WRONG
+ * direction — it would let a downstream consumer treat a reference this
+ * run genuinely never examined as already-reviewed, suppressing a
+ * re-review escalation that should fire. That would be a NEW fail-open,
+ * not the fail-safe this field exists to establish.
+ *
+ * Whether the fetch itself SUCCEEDED for a within-cap reference does
+ * NOT matter for this set: a verified-404/deleted issue is the SAME
+ * "attempted, nothing further to say" outcome {@link
+ * UnreviewedClosingIssueResult}'s own docstring already treats as an
+ * accepted, deliberate graceful no-op, not a gap — consistent with
+ * treating it as "reviewed" here too, rather than inventing a THIRD
+ * category this field's own consumers would then also need to handle.
+ *
+ * @param references - `parseLinkedIssueReferences`'s full, UNCAPPED
+ *   output — the same value this run's `main()` already passed to
+ *   `buildLinkedIssueSpecs`.
+ * @returns Every DISTINCT closing-kind issue number within the fetch
+ *   cap, in the SAME first-appearance order `references`/{@link
+ *   selectIssuesToFetch} already establish (never re-sorted — matches
+ *   this module's other ordering conventions). Already deduplicated —
+ *   `parseLinkedIssueReferences` itself never returns two entries for
+ *   the same issue number.
+ */
+export function computeReviewedClosingIssueNumbers(
+  references: readonly LinkedIssueReference[],
+): readonly number[] {
+  return selectIssuesToFetch(references)
+    .filter((reference) => reference.kind === "closing")
+    .map((reference) => reference.issueNumber);
+}
+
 /** The fully-parsed, shape-validated contents of a `criteria-spine.json` artifact. */
 export interface ParsedCriteriaSpine {
   readonly entries: readonly CriteriaSpineEntry[];
   readonly truncated: boolean;
   readonly unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
   readonly diffTruncated: boolean;
+  /**
+   * {@link computeReviewedClosingIssueNumbers}'s own output for this run
+   * (F1-S9 slice 90.2) — DATA-ONLY as of this slice: no consumer reads
+   * it yet (that lands in slice 90.5, the reference-revalidation work
+   * this field exists to unblock).
+   */
+  readonly reviewedClosingIssueNumbers: readonly number[];
+  /**
+   * The EXACT `pr.base.sha` this run's own diff fetch (`fetchPrDiff` in
+   * `spec-grounding-runner.mts`) diffed against — review PROVENANCE
+   * (F1-S9 slice 90.2, reordered per the #90 PR-plan revision): the
+   * privileged publisher verifies the PR's CURRENT base against THIS
+   * value, never a workflow-event-derived proxy for it (an earlier
+   * design, #92/90.1, compared against `github.event.pull_request
+   * .base.sha` instead — WRONG, since the runner's own diff fetch always
+   * uses whatever base was current at RUNNER-FETCH time, which can
+   * differ from the event's own base if the target branch advanced in
+   * the event-to-runner-fetch window).
+   */
+  readonly reviewedBaseSha: string;
 }
 
 export type ParsedCriteriaSpineResult =
@@ -521,6 +596,40 @@ const MAX_CRITERIA_SPINE_ENTRIES = 5000;
  * problem in one array can never starve the other's own reporting.
  */
 const MAX_VALIDATION_ERRORS_PER_ARRAY = 200;
+
+/**
+ * Upper bound on the NUMBER of elements `reviewedClosingIssueNumbers` may
+ * contain, checked BEFORE the array is iterated element-by-element (F1-S9
+ * slice 90.2 — mirrors {@link MAX_CRITERIA_SPINE_ENTRIES}'s own identical
+ * discipline for `entries`). UNLIKE `unreviewedClosingIssues` (see that
+ * constant's own docstring for why it has NO cap), this field has a TRUE
+ * hard per-run ceiling by construction: {@link
+ * computeReviewedClosingIssueNumbers} builds it from `selectIssuesToFetch
+ * (references)` — the SAME `MAX_LINKED_ISSUES` (20) fetch cap — so a
+ * legitimate writer can never produce more than 20 distinct values here,
+ * regardless of how many issues a PR body names. This constant is
+ * generous relative to that true ceiling, not equal to it (matching this
+ * module's own "generous ceiling against corruption, not a tight fit to
+ * the expected shape" convention elsewhere) — it exists only to bound a
+ * CORRUPTED artifact's own worst case, not to re-enforce the 20-issue
+ * business rule (that rule is `selectIssuesToFetch`'s own job, not this
+ * parser's).
+ */
+const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
+
+/**
+ * Upper bound on `reviewedBaseSha`'s own length, in characters (F1-S9
+ * slice 90.2) — a real git SHA is always exactly 40 hex characters, so
+ * this is a generous ceiling against a corrupted or runaway value, not a
+ * tight fit to the expected shape (matching {@link
+ * MAX_CRITERION_ID_LENGTH}'s own identical "generous, not tight"
+ * reasoning). No format/hex-shape regex is enforced beyond the length
+ * cap — `reviewedBaseSha` is compared for plain equality against the
+ * publisher's own freshly-fetched `pr.base.sha`, the same opaque-string
+ * treatment `pr.head.sha`/`trustedHeadSha` already get everywhere else in
+ * this pipeline (never format-validated, only ever compared).
+ */
+const MAX_REVIEWED_BASE_SHA_LENGTH = 200;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -817,6 +926,36 @@ function validateUnreviewedClosingIssue(
  *    closing issues is impossible by construction; accepting it would let
  *    a corrupted "genuinely nothing to report" spine silently read as a
  *    confirmed all-clear downstream.
+ * 6. Every CLOSING-kind `issueNumber` in `entries` must appear in
+ *    `reviewedClosingIssueNumbers` (F1-S9 slice 90.2): a closing-kind
+ *    entry can only exist at all because `buildLinkedIssueSpecs` found it
+ *    in `issuesMap`, which is only ever populated for a reference within
+ *    `selectIssuesToFetch`'s own cap — the SAME cap {@link
+ *    computeReviewedClosingIssueNumbers} builds its own set from — so a
+ *    real spine can never have a closing entry for an issue this set
+ *    omits.
+ * 7. Every `"partially-truncated"` entry in `unreviewedClosingIssues` must
+ *    have its own `issueNumber` in `reviewedClosingIssueNumbers` too
+ *    (F1-S9 slice 90.2): by {@link UnreviewedClosingIssueResult}'s own
+ *    docstring, `"partially-truncated"` requires at least one spine entry
+ *    to already exist for that issue, which (invariant 6, just above)
+ *    already implies it must be in `reviewedClosingIssueNumbers`.
+ *
+ * Deliberately does NOT cross-check a `"fully-dropped"` `unreviewedClosingIssues`
+ * entry against `reviewedClosingIssueNumbers` EITHER WAY (F1-S9 slice
+ * 90.2 — an intentional NON-invariant, not a gap): `"fully-dropped"`
+ * covers TWO distinct construction paths that produce the IDENTICAL
+ * output shape — "never even fetched" (genuinely beyond the cap, correctly
+ * ABSENT from `reviewedClosingIssueNumbers`) and "fetched, had unmet
+ * criteria, but byte-cap-dropped from the rendered block before any
+ * survived" (WITHIN the cap, correctly PRESENT in
+ * `reviewedClosingIssueNumbers`) — see {@link
+ * computeCriteriaSpineTruncation}'s own docstring for both cases. A
+ * `"fully-dropped"` entry may legitimately appear in
+ * `reviewedClosingIssueNumbers` OR legitimately be absent from it,
+ * depending on which of those two paths produced it, with no way to tell
+ * which from the artifact's own persisted fields — asserting EITHER
+ * direction here would reject a genuinely well-formed spine.
  *
  * Deliberately does NOT attempt to re-derive `truncated`'s FULL formula
  * (it also depends on `result.truncatedIssueCount` /
@@ -830,12 +969,15 @@ function validateUnreviewedClosingIssue(
  * @param entries - The already-validated, already-deduped spine entries.
  * @param unreviewedClosingIssues - The already-validated, already-deduped
  *   unreviewed closing issues.
+ * @param reviewedClosingIssueNumbers - The already-validated, already-
+ *   deduped reviewed-closing-issue-number set (F1-S9 slice 90.2).
  * @param truncated - This artifact's own `truncated` field.
  * @param errors - Accumulator every violation is pushed onto.
  */
 function validateCrossEntryInvariants(
   entries: readonly CriteriaSpineEntry[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+  reviewedClosingIssueNumbers: readonly number[],
   truncated: boolean,
   errors: string[],
 ): void {
@@ -926,6 +1068,30 @@ function validateCrossEntryInvariants(
         "which always makes truncated true)",
     );
   }
+
+  // Invariants 6 and 7 (F1-S9 slice 90.2) -- see this function's own
+  // docstring for the full reasoning, including why a "fully-dropped"
+  // unreviewedClosingIssues entry is deliberately NOT cross-checked here
+  // either way.
+  const reviewedClosingIssueNumberSet = new Set(reviewedClosingIssueNumbers);
+  for (const [issueNumber, kind] of kindByIssue) {
+    if (kind === "closing" && !reviewedClosingIssueNumberSet.has(issueNumber)) {
+      errors.push(
+        `entries has a closing-kind entry for issue #${issueNumber}, but reviewedClosingIssueNumbers does ` +
+          "not include it -- a closing entry can only exist because this issue was fetched within " +
+          "selectIssuesToFetch's own cap, the SAME cap reviewedClosingIssueNumbers is built from",
+      );
+    }
+  }
+  for (const unreviewed of unreviewedClosingIssues) {
+    if (unreviewed.truncationKind === "partially-truncated" && !reviewedClosingIssueNumberSet.has(unreviewed.issueNumber)) {
+      errors.push(
+        `issue #${unreviewed.issueNumber} is "partially-truncated" in unreviewedClosingIssues, but ` +
+          "reviewedClosingIssueNumbers does not include it -- partially-truncated requires at least one " +
+          "spine entry to already exist for this issue, which already implies it was fetched within cap",
+      );
+    }
+  }
 }
 
 /**
@@ -997,7 +1163,8 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   }
 
   const errors: string[] = [];
-  const { entries, truncated, unreviewedClosingIssues, diffTruncated } = parsed;
+  const { entries, truncated, unreviewedClosingIssues, diffTruncated, reviewedClosingIssueNumbers, reviewedBaseSha } =
+    parsed;
 
   if (!Array.isArray(entries)) {
     errors.push('"entries" must be an array');
@@ -1011,18 +1178,49 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   if (typeof diffTruncated !== "boolean") {
     errors.push('"diffTruncated" must be a boolean');
   }
+  // F1-S9 slice 90.2: required, like every other field here (fail closed
+  // on absence, matching this artifact's own "corrupted download must
+  // reject cleanly" contract) -- never optional/defaulted, since a
+  // missing value is indistinguishable from a stale runner build that
+  // predates this field, which this trusted artifact's own contract does
+  // not need to tolerate (runner and publisher always deploy together).
+  if (!Array.isArray(reviewedClosingIssueNumbers)) {
+    errors.push('"reviewedClosingIssueNumbers" must be an array');
+  }
+  // reviewedBaseSha (F1-S9 slice 90.2, reordered per the #90 PR-plan
+  // revision): required non-empty string, length-capped -- see {@link
+  // MAX_REVIEWED_BASE_SHA_LENGTH}'s own docstring for why no hex-shape
+  // regex is enforced beyond the length bound.
+  if (
+    typeof reviewedBaseSha !== "string" ||
+    reviewedBaseSha.length === 0 ||
+    reviewedBaseSha.length > MAX_REVIEWED_BASE_SHA_LENGTH
+  ) {
+    errors.push(
+      `"reviewedBaseSha" must be a non-empty string of at most ${MAX_REVIEWED_BASE_SHA_LENGTH} characters`,
+    );
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
 
-  // Cardinality cap on entries ONLY, checked BEFORE the array is iterated
+  // Cardinality caps, checked BEFORE either array is iterated
   // element-by-element (PR #84 review round 1, Codex, FOLD 3, LOW; scope
   // narrowed to entries alone in round 4, FOLD 1 -- see {@link
   // MAX_CRITERIA_SPINE_ENTRIES}'s own docstring for why
-  // unreviewedClosingIssues has no equivalent cap). A single error, never
-  // one per element.
+  // unreviewedClosingIssues has no equivalent cap). reviewedClosingIssueNumbers
+  // DOES get one (F1-S9 slice 90.2 -- see {@link
+  // MAX_REVIEWED_CLOSING_ISSUE_NUMBERS}'s own docstring for why this
+  // field, unlike unreviewedClosingIssues, has a true hard per-run
+  // ceiling). A single error each, never one per element.
   if ((entries as unknown[]).length > MAX_CRITERIA_SPINE_ENTRIES) {
     errors.push(`"entries" has ${(entries as unknown[]).length} elements, exceeds ${MAX_CRITERIA_SPINE_ENTRIES}`);
+  }
+  if ((reviewedClosingIssueNumbers as unknown[]).length > MAX_REVIEWED_CLOSING_ISSUE_NUMBERS) {
+    errors.push(
+      `"reviewedClosingIssueNumbers" has ${(reviewedClosingIssueNumbers as unknown[]).length} elements, ` +
+        `exceeds ${MAX_REVIEWED_CLOSING_ISSUE_NUMBERS}`,
+    );
   }
   if (errors.length > 0) {
     return { ok: false, errors };
@@ -1099,15 +1297,60 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     validatedUnreviewed.push(entry);
   }
 
+  // reviewedClosingIssueNumbers (F1-S9 slice 90.2): a plain array of
+  // positive-safe-integers, not objects -- simpler per-element shape than
+  // entries/unreviewedClosingIssues, but the SAME bounded-error-loop +
+  // duplicate-rejection discipline (a legitimate writer's own {@link
+  // computeReviewedClosingIssueNumbers} never emits a duplicate, since
+  // `selectIssuesToFetch`'s own output is already deduped by
+  // construction -- a duplicate here is corruption, rejected the same
+  // "never accept what a legitimate writer could not have produced" way
+  // this module treats every other field).
+  const validatedReviewedClosingIssueNumbers: number[] = [];
+  const seenReviewedClosingIssueNumbers = new Set<number>();
+  const reviewedClosingIssueNumbersArray = reviewedClosingIssueNumbers as unknown[];
+  const reviewedClosingIssueNumbersErrorsStart = errors.length;
+  for (let i = 0; i < reviewedClosingIssueNumbersArray.length; i++) {
+    if (errors.length - reviewedClosingIssueNumbersErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"reviewedClosingIssueNumbers": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation ` +
+          `error(s) -- ${reviewedClosingIssueNumbersArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const candidate = reviewedClosingIssueNumbersArray[i];
+    // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
+    // pass + Codex, FOLD 2 -- see validateCriteriaSpineEntry's own identical
+    // fix for the full reasoning): JSON.parse itself rounds a value beyond
+    // Number.MAX_SAFE_INTEGER to a DIFFERENT, also-unsafe float before this
+    // check ever runs.
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate <= 0) {
+      errors.push(`reviewedClosingIssueNumbers[${i}] must be a positive integer`);
+      continue;
+    }
+    if (seenReviewedClosingIssueNumbers.has(candidate)) {
+      errors.push(`reviewedClosingIssueNumbers[${i}] (${candidate}) is a duplicate`);
+      continue;
+    }
+    seenReviewedClosingIssueNumbers.add(candidate);
+    validatedReviewedClosingIssueNumbers.push(candidate);
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
 
-  // Whole-spine cross-field invariants (PR #84 review round 3, Codex) --
-  // see validateCrossEntryInvariants's own docstring for the full
-  // reasoning; only reachable once every PER-ENTRY check above has
-  // already passed.
-  validateCrossEntryInvariants(validatedEntries, validatedUnreviewed, truncated as boolean, errors);
+  // Whole-spine cross-field invariants (PR #84 review round 3, Codex;
+  // extended F1-S9 slice 90.2) -- see validateCrossEntryInvariants's own
+  // docstring for the full reasoning; only reachable once every
+  // PER-ENTRY check above has already passed.
+  validateCrossEntryInvariants(
+    validatedEntries,
+    validatedUnreviewed,
+    validatedReviewedClosingIssueNumbers,
+    truncated as boolean,
+    errors,
+  );
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -1119,6 +1362,8 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
       truncated: truncated as boolean,
       unreviewedClosingIssues: validatedUnreviewed,
       diffTruncated: diffTruncated as boolean,
+      reviewedClosingIssueNumbers: validatedReviewedClosingIssueNumbers,
+      reviewedBaseSha: reviewedBaseSha as string,
     },
   };
 }

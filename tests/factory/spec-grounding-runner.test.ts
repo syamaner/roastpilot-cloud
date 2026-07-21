@@ -216,11 +216,17 @@ describe("main — real unmet criteria", () => {
     // the agent's own criterionId correlation matches against; `truncated`
     // / `unreviewedClosingIssues` are new trusted metadata for slice
     // 3b-iii only -- both false/empty here, nothing was truncated.
+    // `reviewedClosingIssueNumbers` (F1-S9 slice 90.2) includes #12 --
+    // it's the sole closing-kind reference, fetched within cap.
+    // `reviewedBaseSha` (F1-S9 slice 90.2) is the EXACT base this run's
+    // own diff fetch used, matching the base handed to prResponse.
     expect(spine).toEqual({
       entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
+      reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
     });
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
@@ -352,11 +358,59 @@ describe("main — real unmet criteria", () => {
     // gone), NOT a truncation gap, so unreviewedClosingIssues must stay
     // empty here (Codex finding, PR #76 review, L181's own scope: only a
     // resource-capped drop escalates, never a confirmed-deleted issue).
+    // reviewedClosingIssueNumbers (F1-S9 slice 90.2) still includes #12,
+    // even though it has no spine entry and never landed in
+    // unreviewedClosingIssues either: #12 was a closing reference WITHIN
+    // the fetch cap, and the 404 is the SAME "attempted, nothing further
+    // to say" outcome this field's own docstring treats as reviewed --
+    // exactly the case this field exists to make distinguishable from a
+    // reference genuinely never looked at.
     expect(spine).toEqual({
       entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
+      reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
+    });
+  });
+
+  it("includes a FULLY-SATISFIED closing issue in reviewedClosingIssueNumbers even though it has NO spine entry at all and never appears in unreviewedClosingIssues either (F1-S9 slice 90.2 -- the exact gap this field closes: buildLinkedIssueSpecs silently omits an issue with zero unmet criteria from result.specs entirely, so without this field there was no trace anywhere that this closing reference was ever reviewed)", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12\nRefs #8"),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "An issue",
+          // Every acceptance criterion already checked off -- ZERO unmet
+          // criteria, so buildLinkedIssueSpecs omits issue #12 from
+          // result.specs entirely, same as if it had never been fetched
+          // at all from that function's own perspective.
+          body: "### Acceptance criteria\n- [x] Already done.",
+        }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/8 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "Another issue",
+          body: "### Acceptance criteria\n- [ ] Still open.",
+        }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as unknown;
+    // #12 has NO entry (zero unmet criteria) and is absent from
+    // unreviewedClosingIssues (fully satisfied is not a truncation gap --
+    // computeCriteriaSpineTruncation's own docstring). Only
+    // reviewedClosingIssueNumbers carries any trace that #12 was ever
+    // looked at as a closing reference.
+    expect(spine).toEqual({
+      entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
+      truncated: false,
+      unreviewedClosingIssues: [],
+      diffTruncated: false,
+      reviewedClosingIssueNumbers: [12],
+      reviewedBaseSha: BASE_SHA,
     });
   });
 

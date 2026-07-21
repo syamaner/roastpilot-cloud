@@ -90,6 +90,7 @@ import {
 import {
   buildCriteriaSpine,
   computeCriteriaSpineTruncation,
+  computeReviewedClosingIssueNumbers,
   GITHUB_COMPARE_DIFF_FILE_LIMIT,
   wrapUntrustedDiffBlock,
 } from "./spec-grounding-runner-logic.mts";
@@ -437,6 +438,12 @@ export async function main(): Promise<void> {
   // internal truncation tracking — see computeCriteriaSpineTruncation's
   // own docstring for the full reasoning.
   const truncationSummary = computeCriteriaSpineTruncation(references, result, spine);
+  // F1-S9 slice 90.2 (the #90 PR-plan's "complete reviewed-closing-set"
+  // item): computed the SAME additive way as truncationSummary, just
+  // above -- from `references` alone, never a change to
+  // buildCriteriaSpine's own signature. See computeReviewedClosingIssueNumbers's
+  // own docstring for the full reasoning this field exists for.
+  const reviewedClosingIssueNumbers = computeReviewedClosingIssueNumbers(references);
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   // Detects GitHub's compare-endpoint 300-changed-file cap (Codex finding,
   // PR #72 review round 2, MEDIUM): the diff media type is plain text with
@@ -468,6 +475,28 @@ export async function main(): Promise<void> {
   // short). Lets the privileged publisher fail-closed on EITHER kind of
   // truncation this run could have, not just the criteria/issue kind
   // `truncated`/`unreviewedClosingIssues` already cover.
+  //
+  // `reviewedClosingIssueNumbers` (F1-S9 slice 90.2): DATA-ONLY as of
+  // this slice — no consumer reads it yet (slice 90.5 does). Included
+  // now so the artifact contract is complete and stable before the
+  // reference-revalidation work that consumes it lands.
+  //
+  // `reviewedBaseSha` (F1-S9 slice 90.2, reordered per the #90 PR-plan
+  // revision, Codex cid 3624140965 on the original standalone 90.1): the
+  // EXACT `pr.base.sha` this run's own `fetchPrDiff` call, just above,
+  // diffed against — review PROVENANCE, not a re-derivation. An earlier
+  // design (90.1) had the privileged publisher verify the PR's current
+  // base against `github.event.pull_request.base.sha` (the WORKFLOW
+  // EVENT's own base at trigger time) instead of this value — WRONG,
+  // because this runner's own diff fetch always uses whatever base was
+  // CURRENT at RUNNER-FETCH time, which can differ from the event's own
+  // base if the target branch advanced in the event-to-runner-fetch
+  // window; comparing against the event's base would spuriously
+  // degrade a verdict that was validly produced against a base the
+  // event never captured. Persisting the runner's own OBSERVED base
+  // here — the same value already in hand for `fetchPrDiff`, no new
+  // fetch — lets the publisher verify against what was ACTUALLY
+  // reviewed, not a proxy for it.
   await writeOutputFile(
     paths.criteriaSpinePath,
     JSON.stringify(
@@ -476,6 +505,8 @@ export async function main(): Promise<void> {
         truncated: truncationSummary.truncated,
         unreviewedClosingIssues: truncationSummary.unreviewedClosingIssues,
         diffTruncated: diffBlock.truncated,
+        reviewedClosingIssueNumbers,
+        reviewedBaseSha: pr.base.sha,
       },
       null,
       2,

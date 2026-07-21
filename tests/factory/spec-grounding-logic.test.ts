@@ -379,6 +379,28 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
   it("still matches the plain bare #N form exactly as before — regression check after the named-group rewrite", () => {
     expect(parseLinkedIssueReferences("Closes #12")).toEqual([{ issueNumber: 12, kind: "closing" }]);
   });
+
+  it("drops a matched #0 reference (never a real GitHub issue number), while a valid reference alongside it still survives (PR #93/F1-S9 slice 90.2 review, Codex cid 3624453783, must-fix)", () => {
+    expect(parseLinkedIssueReferences("Closes #0\nRefs #12")).toEqual([{ issueNumber: 12, kind: "non-closing" }]);
+  });
+
+  it("returns EMPTY for a body whose only reference is #0 -- a correctness bonus, not a regression: #0 was never a real issue to begin with", () => {
+    expect(parseLinkedIssueReferences("Closes #0")).toEqual([]);
+  });
+
+  it("drops a matched reference whose digit sequence is too long to be a safe integer, while a valid reference alongside it still survives", () => {
+    // \d+ places no length bound at all -- 20 nines is comfortably beyond
+    // Number.MAX_SAFE_INTEGER (16 digits), so Number(...) produces a
+    // huge-but-finite, non-safe-integer value that does not represent
+    // this exact digit sequence.
+    expect(parseLinkedIssueReferences("Closes #99999999999999999999\nRefs #8")).toEqual([
+      { issueNumber: 8, kind: "non-closing" },
+    ]);
+  });
+
+  it("returns EMPTY for a body whose only reference is an oversized digit sequence", () => {
+    expect(parseLinkedIssueReferences("Closes #99999999999999999999")).toEqual([]);
+  });
 });
 
 describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {

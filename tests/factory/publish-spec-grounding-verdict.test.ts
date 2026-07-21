@@ -72,6 +72,8 @@ const VALID_SPINE = {
   truncated: false,
   unreviewedClosingIssues: [],
   diffTruncated: false,
+  reviewedClosingIssueNumbers: [12],
+  reviewedBaseSha: TRUSTED_BASE_SHA,
 };
 
 async function writeArtifacts(
@@ -586,7 +588,14 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
 
   it("posts a visible fallback when criteria-spine.json fails shape validation", async () => {
     const { outcomePath, verdictPath } = await writeArtifacts(workdir, {
-      spine: { entries: "not-an-array", truncated: false, unreviewedClosingIssues: [], diffTruncated: false },
+      spine: {
+        entries: "not-an-array",
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
     });
     process.env.OUTCOME_PATH = outcomePath;
     process.env.VERDICT_PATH = verdictPath;
@@ -731,6 +740,8 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 99, 34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -784,6 +795,13 @@ describe("main — the happy path", () => {
           { issueNumber: 56, truncationKind: "fully-dropped" },
         ],
         diffTruncated: false,
+        // Both entries are "fully-dropped" (never even fetched, in this
+        // fixture), so reviewedClosingIssueNumbers correctly has neither
+        // -- "fully-dropped" is deliberately NOT cross-checked against
+        // this field either way (see validateCrossEntryInvariants's own
+        // docstring).
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -899,6 +917,55 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/does not match the trusted event head SHA/i);
   });
 
+  it("posts a visible fallback and exits nonzero when the PR's current base SHA no longer matches the base recorded in the spine (F1-S9 slice 90.2, reordered per the #90 PR-plan revision) -- the target branch advanced since the review ran, even though the head SHA is unchanged", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // Head unchanged (matches TRUSTED_HEAD_SHA), but base has advanced
+      // past what VALID_SPINE's own reviewedBaseSha (TRUSTED_BASE_SHA)
+      // recorded -- e.g. a merge into main landed between the review run
+      // and this publish run.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: "some-other-base-the-target-advanced-to" } }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    // The FALLBACK wording, never the stale "No blocking findings" all-clear.
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/does not match the base this run's own review actually diffed against/i);
+  });
+
+  it("publishes normally when the PR's current base SHA still matches the base recorded in the spine (the healthy, same-base path)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("No blocking findings.");
+  });
+
   it("propagates a NON-first inline-posting failure as a genuine error -- visible fallback, not a silent degrade", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -915,6 +982,8 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: false,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
@@ -959,6 +1028,8 @@ describe("main — the happy path", () => {
         truncated: false,
         unreviewedClosingIssues: [],
         diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
       },
     });
     process.env.OUTCOME_PATH = outcomePath;
