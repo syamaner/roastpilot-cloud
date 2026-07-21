@@ -88,7 +88,7 @@
  * - `VERDICT_PATH` (default `review-output/spec-grounding-verdict.json`)
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { requireEnv } from "./github-api.mts";
 import {
   MAX_PAYLOAD_BYTES as MAX_VERDICT_PAYLOAD_BYTES,
@@ -129,45 +129,69 @@ function resolvePaths(): RunPaths {
 }
 
 /**
+ * Narrows an unknown catch value to Node's own `ErrnoException` shape,
+ * just enough to read its `code` field safely.
+ *
+ * @param err - The caught value.
+ * @returns Whether `err` carries a `code` field the way Node's own
+ *   filesystem errors do.
+ */
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+/**
  * Reads a file's raw bytes, tolerating a missing file by returning `null`
  * — the shared shape every artifact read in this entrypoint needs (a
  * missing file is not itself a crash; the CALLER decides what a missing
  * artifact means for its own tri-state gate).
  *
- * Checks the file's size via `stat` BEFORE reading its contents into
- * memory, same discipline as `apply-triage-verdict.mts`'s own
- * `readVerdictArtifact` — a runaway or adversarial multi-GB artifact must
- * be rejected without ever being fully buffered.
+ * Opens the file ONCE and checks its size via the resulting file
+ * descriptor's own `stat()`, then reads through that SAME descriptor
+ * (CodeQL `js/file-system-race`, alert #14 — a `stat` by PATH followed by
+ * a separate `readFile` by PATH re-resolves the path twice, leaving a
+ * real check-then-use gap the path could be swapped within; anchoring
+ * both operations to one open file descriptor instead closes that gap by
+ * construction, rather than arguing the race is unreachable in this
+ * isolated CI job the way `apply-triage-verdict.mts`'s own still-open,
+ * structurally-identical alert does today). Preserves the exact same
+ * discipline `readVerdictArtifact` there documents — a runaway or
+ * adversarial multi-GB artifact must be rejected without ever being fully
+ * buffered — just anchored to a descriptor instead of a path.
  *
  * @param path - The artifact's path on disk.
- * @param maxBytes - The size ceiling to enforce via `stat`, before ever
- *   calling `readFile`.
+ * @param maxBytes - The size ceiling to enforce, before ever reading the
+ *   file's contents into memory.
  * @returns The file's raw text, or `null` if the file does not exist.
- * @throws If the file exists but exceeds `maxBytes`, or exists but could
- *   not be read for some other reason (a narrow TOCTOU race).
+ * @throws If the file exists but exceeds `maxBytes`, or could not be
+ *   opened/read for some other reason.
  */
 async function readArtifactFile(path: string, maxBytes: number): Promise<string | null> {
-  let fileStat: Awaited<ReturnType<typeof stat>>;
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    fileStat = await stat(path);
-  } catch {
-    return null;
-  }
-  if (fileStat.size > maxBytes) {
-    throw new Error(`artifact at ${path} is ${fileStat.size} bytes, exceeds the ${maxBytes}-byte limit`);
-  }
-  try {
-    return await readFile(path, "utf8");
+    handle = await open(path, "r");
   } catch (err) {
-    // Narrow TOCTOU race (stat succeeds, the file vanishes/becomes
-    // unreadable before readFile runs) — not meaningfully triggerable in
-    // this single-shot CI job; kept as a defensive branch so a real
-    // occurrence still fails closed with a clear error rather than an
-    // unhandled rejection.
-    /* v8 ignore next 3 */
-    throw new Error(
-      `artifact at ${path} could not be read after a successful stat (possible race): ${err instanceof Error ? err.message : String(err)}`,
-    );
+    if (isErrnoException(err) && err.code === "ENOENT") {
+      return null;
+    }
+    throw new Error(`artifact at ${path} could not be opened: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    const fileStat = await handle.stat();
+    if (fileStat.size > maxBytes) {
+      throw new Error(`artifact at ${path} is ${fileStat.size} bytes, exceeds the ${maxBytes}-byte limit`);
+    }
+    try {
+      return await handle.readFile("utf8");
+    } catch (err) {
+      // Reachable for a path that opens successfully but cannot actually
+      // be READ as a regular file — e.g. a directory (EISDIR): `open`
+      // alone does not fail for a directory, only the subsequent read
+      // does.
+      throw new Error(`artifact at ${path} could not be read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } finally {
+    await handle.close();
   }
 }
 

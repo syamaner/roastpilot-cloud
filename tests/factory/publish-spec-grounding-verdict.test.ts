@@ -195,6 +195,47 @@ describe("main — the outcome.json tri-state", () => {
     expect((post?.body as { body: string }).body).toContain("not valid JSON");
   });
 
+  it("posts a visible fallback when the outcome.json path exists but cannot actually be read as a file (CodeQL js/file-system-race fold: readArtifactFile now opens by file descriptor, not by stat-then-read-by-path -- a directory at that path opens successfully but fails on the subsequent read, EISDIR)", async () => {
+    // OUTCOME_PATH points at a DIRECTORY, not a file -- `open` alone does
+    // NOT fail for a directory, only the subsequent `readFile` does
+    // (EISDIR), exercising the read-time wrapped-error branch.
+    process.env.OUTCOME_PATH = workdir;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    // Opening a directory with the "r" flag does not itself fail on
+    // Linux/macOS -- only the subsequent read does (EISDIR), exercising
+    // the read-time wrapped-error branch rather than the open-time one.
+    expect((post?.body as { body: string }).body).toContain("could not be read");
+  });
+
+  it("posts a visible fallback when the outcome.json path cannot be OPENED for a reason other than not existing (a non-directory component in the path, ENOTDIR)", async () => {
+    // A REGULAR FILE sits where a directory component is expected, so
+    // `open` itself fails with ENOTDIR -- distinct from the EISDIR case
+    // above, which fails on the READ, not the open.
+    const regularFilePath = join(workdir, "not-a-directory");
+    await writeFile(regularFilePath, "x");
+    process.env.OUTCOME_PATH = join(regularFilePath, "outcome.json");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("could not be opened");
+  });
+
   it("silently no-ops when hasCriteria is false, without any comment call at all", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
