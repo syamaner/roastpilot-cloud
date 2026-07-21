@@ -654,7 +654,7 @@ describe("main — the happy path", () => {
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(DIFF_WITH_ANCHOR),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -683,13 +683,117 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
 
+  it("skips posting an inline comment for a blocker whose issue is NO LONGER referenced in the PR's CURRENT body (a body-only edit removed it since the review ran), posting the still-referenced blocker normally and noting the skip in the summary, in ascending issue-number order regardless of the runner's own ordering (PR #87 review round 4, Codex, P1 -- symmetric to the delete-path TOCTOU fold)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker." },
+          // Deliberately out of ascending order (99 before 34) -- exercises
+          // the stale-issue-number sort, not just a single-element no-op.
+          { criterionId: "99:0", satisfied: false, rationale: "Stale blocker, higher number." },
+          { criterionId: "34:0", satisfied: false, rationale: "Stale blocker, lower number." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 99, kind: "closing", criterionId: "99:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // The CURRENT body only references #12 -- #34 and #99's own
+      // references were removed since the read-only review ran (a
+      // body-only edit, so the head SHA is unchanged).
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Exactly ONE inline comment posted -- for #12, never for the stale ones.
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    expect((inlinePosts[0]?.body as { body: string }).body).toContain("Still-live blocker.");
+    expect((inlinePosts[0]?.body as { body: string }).body).not.toContain("Stale blocker");
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    // Ascending order (#34 before #99), NOT the runner's own findings
+    // order (99 was listed before 34 in the verdict above).
+    expect(summaryBody).toMatch(/#34, #99[\s\S]*were NOT posted inline/i);
+    expect(summaryBody).toMatch(/no longer references them/i);
+    expect(summaryBody).not.toMatch(/#12[\s\S]*were NOT posted inline/i);
+    // KNOWN RESIDUAL, documented not hidden (see tryPostBlockersInline's
+    // own docstring): the "N blocking finding(s)" count still comes from
+    // the UNFILTERED runner-time set (3), even though only 1 was actually
+    // posted inline -- the stale-note above is what reconciles the
+    // difference for a human reading this summary.
+    expect(summaryBody).toContain("3 blocking finding(s)");
+  });
+
+  it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [] },
+      spine: {
+        entries: [],
+        truncated: true,
+        unreviewedClosingIssues: [
+          { issueNumber: 12, truncationKind: "fully-dropped" },
+          { issueNumber: 56, truncationKind: "fully-dropped" },
+        ],
+        diffTruncated: false,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // The CURRENT body only references #12 -- #56's own reference was
+      // removed since the review ran.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    expect((inlinePosts[0]?.body as { body: string }).body).toContain("#12");
+    expect((inlinePosts[0]?.body as { body: string }).body).not.toContain("#56");
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toMatch(/#56[\s\S]*were NOT posted inline/i);
+    expect(summaryBody).not.toMatch(/#12[\s\S]*were NOT posted inline/i);
+  });
+
   it("degrades to the fallback summary and exits nonzero when the diff has NO addable line at all (anchorFallbackNeeded, structural)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
     process.env.OUTCOME_PATH = outcomePath;
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(""),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -715,7 +819,7 @@ describe("main — the happy path", () => {
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(DIFF_WITH_ANCHOR),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -737,6 +841,12 @@ describe("main — the happy path", () => {
     // A graceful degrade, NOT the "pipeline broke" fallback wording --
     // the summary itself was still built and posted successfully.
     expect(body).not.toMatch(/could not run to completion/i);
+    // The DISCRIMINATED reason (PR #87 review round 4, Codex, P1): a real
+    // anchor was selected and tried, GitHub itself rejected it -- distinct
+    // wording from the anchor-absent case, never implying no anchor was
+    // ever attempted.
+    expect(body).toMatch(/github itself rejected the deterministic anchor/i);
+    expect(body).not.toMatch(/no addable line to anchor them to/i);
   });
 
   it("posts a 'pipeline broke'-style visible fallback and exits nonzero when the PR's current head SHA no longer matches the trusted event SHA", async () => {
@@ -784,7 +894,7 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     let postCount = 0;
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(DIFF_WITH_ANCHOR),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),

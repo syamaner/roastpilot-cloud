@@ -727,6 +727,26 @@ export interface BlockerCommentPlanResult {
 }
 
 /**
+ * Every reason the privileged publish entrypoint can degrade from
+ * "posted inline" to "listed in the summary instead" (PR #87 review
+ * round 4, Codex, P1 — an earlier version collapsed both into the same
+ * `blockersPostedInline: false`, so the rendered summary misdiagnosed
+ * WHICH case actually happened):
+ * - `"no-addable-anchor"` — {@link planBlockerInlineComments}'s own
+ *   `anchorFallbackNeeded: true`: this PR's diff genuinely has no
+ *   addable line to anchor a comment to at all (an empty diff, or a
+ *   diff that only deletes content). No anchor was ever attempted.
+ * - `"anchor-rejected-422"` — a real anchor WAS selected and the FIRST
+ *   genuine create attempt was sent, but GitHub's own create-review-
+ *   comment API rejected it with a 422 (see `publish-spec-grounding-
+ *   inline-comment-io.mts`'s own 422-probe-then-degrade docstring for
+ *   why only the first attempt is diagnostic). A materially different
+ *   situation from the anchor-absent case — an anchor existed and was
+ *   tried, GitHub itself refused it.
+ */
+export type InlinePostingDegradeReason = "no-addable-anchor" | "anchor-rejected-422";
+
+/**
  * Plans this run's blocker inline comments.
  *
  * BOTH `criterionBlockers` beyond {@link
@@ -890,6 +910,12 @@ export function planBlockerInlineComments(
  *   verdict-logic.mts`'s own {@link isDiffTruncationUnverifiableForClosing}
  *   result for this run — same value passed to {@link
  *   planBlockerInlineComments}, so the two never disagree.
+ * @param degradeReason - WHY inline posting was not used (PR #87 review
+ *   round 4, Codex, P1 — the opening explanation line now differs by
+ *   reason instead of always assuming the anchor-absent case): pass
+ *   `"no-addable-anchor"` when {@link planBlockerInlineComments}'s own
+ *   `anchorFallbackNeeded` was `true`, or `"anchor-rejected-422"` when a
+ *   real anchor was selected and tried but GitHub itself rejected it.
  * @returns The Markdown section to append, or `""` if there is nothing to
  *   report (the caller should only call this when `anchorFallbackNeeded`
  *   is `true`, but an empty-input call degrades safely to an empty string
@@ -899,6 +925,7 @@ export function buildAnchorFallbackSummarySupplement(
   criterionBlockers: readonly JoinedCriterionResult[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   diffTruncationBlocksClosingClaim: boolean,
+  degradeReason: InlinePostingDegradeReason,
 ): string {
   if (
     criterionBlockers.length === 0 &&
@@ -908,9 +935,15 @@ export function buildAnchorFallbackSummarySupplement(
     return "";
   }
 
+  const openingExplanation =
+    degradeReason === "no-addable-anchor"
+      ? "this PR's diff has no addable line to anchor them to (an empty diff, or a diff that only " +
+        "deletes content)"
+      : "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
+        "attempt) — our own textual diff parsing and GitHub's own internal diff-position mapping " +
+        "disagreed at the edges";
   const lines: string[] = [
-    "> ⚠️ **Blocking findings could not be posted as inline comments** — this PR's diff has no " +
-      "addable line to anchor them to (an empty diff, or a diff that only deletes content). " +
+    `> ⚠️ **Blocking findings could not be posted as inline comments** — ${openingExplanation}. ` +
       "Listed here in full instead, since there is no inline thread for them:",
     "",
   ];

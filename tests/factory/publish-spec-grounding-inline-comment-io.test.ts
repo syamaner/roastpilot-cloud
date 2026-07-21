@@ -239,6 +239,9 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ]);
 
     expect(result.ok).toBe(false);
+    // The discriminated reason (PR #87 review round 4, Codex, P1), not
+    // just a bare boolean -- the caller's own summary wording branches on it.
+    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422" });
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
   });
 
@@ -295,6 +298,7 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ]);
 
     expect(result.ok).toBe(false);
+    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422" });
     // Entry 0's own PATCH succeeded (it's not a degrade signal at all --
     // never even reaches the probe check); entry 1's own POST is the
     // first genuine create attempt, and its 422 correctly degrades the

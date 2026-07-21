@@ -120,6 +120,7 @@ import {
 } from "./spec-grounding-runner-logic.mts";
 import {
   buildSpecGroundingSummaryCommentBody,
+  buildStaleBlockerSkippedNote,
   deriveSeverity,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
@@ -129,6 +130,7 @@ import {
 import {
   buildAnchorFallbackSummarySupplement,
   planBlockerInlineComments,
+  type InlinePostingDegradeReason,
 } from "./publish-spec-grounding-blocker-logic.mts";
 import {
   clearStaleSpecGroundingSummary,
@@ -226,13 +228,36 @@ async function fetchAndVerifyPrShas(
  * above — never a real error, which the caller's own existing "never
  * silent" fallback handling already covers).
  *
- * IRREDUCIBLE RESIDUAL, documented rather than hidden: this closes the
- * window between the READ-ONLY runner's own execution and this
- * revalidation, but cannot close the window between THIS revalidation
- * and the delete call immediately following it — true atomicity across
- * two separate REST calls isn't achievable via GitHub's API. That final
- * sub-second gap is accepted; a human's own merge action (never this
- * job) is the actual backstop for anything landing in it.
+ * RESIDUAL, documented honestly rather than understated (PR #87 review
+ * round 4, Codex, P1 — an earlier version of this docstring called this
+ * gap "sub-second", which undersold it): this closes the window between
+ * the READ-ONLY runner's own execution and THIS revalidation, but not
+ * the window from here through the actual destructive work that
+ * follows — which spans the summary comment's own GET+PATCH, the inline
+ * comments' own GET, AND the delete calls themselves (each matched by a
+ * GENERIC marker, not a specific run's own plan), none of which is a
+ * single atomic operation. A run superseding THIS one (e.g. a body edit
+ * landing between this revalidation and the delete) can genuinely land
+ * inside that window; true atomicity across several separate REST calls
+ * isn't achievable via GitHub's API regardless of how tightly this
+ * function's own two checks are drawn.
+ *
+ * What actually closes the remaining risk — an OLDER publish run's own
+ * delete removing inline blocker threads a NEWER, superseding run just
+ * posted for a newly-added reference — is OPERATIONAL, not a property
+ * of this function: slice e's own dedicated per-PR concurrency group
+ * (`cancel-in-progress: false`, serializing every publish run for a
+ * given PR to completion before the next one starts) means two publish
+ * runs for the same PR never execute concurrently at all, so this
+ * window can only ever be crossed by a run that is ALREADY committed to
+ * running before the newer one starts — the same config-dependent-
+ * safety class the checkout's own `base.sha` pin belongs to (correct
+ * given the workflow is configured as designed, not self-enforcing
+ * independent of that configuration). GENERATION-AWARE ownership (each
+ * run stamping and checking a run-identity marker on what it deletes,
+ * self-safe independent of any concurrency configuration) is tracked as
+ * defense-in-depth in issue #88, ahead of the gate-enable decision
+ * (#47) — not fixed here.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -721,6 +746,13 @@ export async function main(): Promise<void> {
   await publishSummary(token, owner, repo, prNumber, trustedHeadSha, spineResult.spine, verdictResult.verdict);
 }
 
+/** {@link tryPostBlockersInline}'s own richer result — see its docstring. */
+interface TryPostBlockersInlineResult {
+  readonly postedInline: boolean;
+  readonly degradeReason: InlinePostingDegradeReason | null;
+  readonly staleBlockerIssueNumbers: readonly number[];
+}
+
 /**
  * Attempts to post this run's blockers (if any) as real, resolvable
  * inline comments — the diff fetch, deterministic-anchor selection, and
@@ -729,12 +761,51 @@ export async function main(): Promise<void> {
  * `planBlockerInlineComments`, `publish-spec-grounding-inline-comment-io
  * .mts`'s own `postInlineCommentPlan`).
  *
- * @returns `true` if every blocker was successfully posted as a real
- *   inline comment (`blockersPostedInline`); `false` if there was no
- *   addable anchor at all, or the first inline POST was rejected with a
- *   422 (the anchor-fallback case, either structurally or via the
- *   probe-then-degrade — the caller renders the full blocker detail in
- *   the summary instead either way).
+ * RE-CHECKS the CURRENT PR body before planning anything (PR #87 review
+ * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold already
+ * closed for the `hasCriteria: false` path): `criterionBlockers` and
+ * `spine.unreviewedClosingIssues` are both computed from the RUNNER-TIME
+ * body, but a body-only edit never bumps the trusted head SHA — a PR
+ * whose body is edited to REMOVE a reference to some issue #N (between
+ * the read-only run and this publish run) would otherwise have this
+ * function post an inline comment reasserting an obligation for #N that
+ * this PR no longer even claims to reference at all. `fetchAndVerifyPrShas`
+ * already returns the PR's own current `body` (added for the delete-path
+ * fold), so this needs no extra fetch: re-parses it with the SAME {@link
+ * parseLinkedIssueReferences} the runner itself uses, and filters BOTH
+ * `criterionBlockers` and `spine.unreviewedClosingIssues` down to entries
+ * whose own `issueNumber` is still in that current set — the STALE ones
+ * are reported back to the caller (never silently dropped) so the summary
+ * can say so, never posted inline.
+ *
+ * KNOWN RESIDUAL, NOT fixed here (flagged, not silently shipped): the
+ * caller's own {@link buildSpecGroundingSummaryCommentBody} still counts
+ * `criterionBlockers.length + unreviewedClosingIssues.length` from the
+ * UNFILTERED (runner-time) sets for its own "N blocking finding(s)"
+ * wording and exit-code decision — it does not know about the staleness
+ * filtering this function does internally. When some (not all) blockers
+ * are stale-skipped and `postedInline` is still `true` for the rest, the
+ * summary's own "N blocking finding(s) reported as separate, resolvable
+ * inline review comment(s)" sentence can overclaim the count relative to
+ * how many inline threads actually exist — {@link
+ * buildStaleBlockerSkippedNote}'s own separate note is the only place
+ * that reconciles the difference. Recomputing `buildSpecGroundingSummaryCommentBody`'s
+ * own internal count to reflect the filtered set would require passing
+ * it FILTERED `joined`/`unreviewedClosingIssues` arrays, which also
+ * carry non-blocking findings that should NOT be filtered by this same
+ * staleness logic — a real restructuring, not a cheap fold, deliberately
+ * left for a follow-up decision rather than expanded into this one.
+ *
+ * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
+ *   successfully posted as a real inline comment; `{ postedInline: false,
+ *   degradeReason }` if there was no addable anchor at all
+ *   (`"no-addable-anchor"`) or the first inline POST was rejected with a
+ *   422 (`"anchor-rejected-422"`) — the anchor-fallback case, either
+ *   structurally or via the probe-then-degrade, the caller renders the
+ *   full (still-referenced) blocker detail in the summary instead either
+ *   way. `staleBlockerIssueNumbers` is independent of both — the issue
+ *   numbers filtered out because the PR's CURRENT body no longer
+ *   references them at all.
  * @throws Any OTHER failure (a SHA mismatch, a diff-fetch error, a
  *   non-first or non-422 inline-posting failure) — a genuine error, not
  *   a case this function degrades from; the caller converts it into a
@@ -750,20 +821,40 @@ async function tryPostBlockersInline(
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
   diffTruncationBlocksClosingClaim: boolean,
-): Promise<boolean> {
+): Promise<TryPostBlockersInlineResult> {
   const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+
+  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
+  const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
+    currentlyReferencedIssueNumbers.has(blocker.issueNumber),
+  );
+  const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
+    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+  );
+  const staleBlockerIssueNumbers = [
+    ...new Set(
+      [...criterionBlockers, ...spine.unreviewedClosingIssues]
+        .map((entry) => entry.issueNumber)
+        .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber)),
+    ),
+  ].sort((a, b) => a - b);
+
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   const plan = planBlockerInlineComments(
-    criterionBlockers,
-    spine.unreviewedClosingIssues,
+    stillReferencedCriterionBlockers,
+    stillReferencedUnreviewedClosingIssues,
     diff,
     diffTruncationBlocksClosingClaim,
   );
   if (plan.anchorFallbackNeeded) {
-    return false;
+    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
-  return postResult.ok;
+  if (!postResult.ok) {
+    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
+  }
+  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
 }
 
 async function publishSummary(
@@ -788,9 +879,11 @@ async function publishSummary(
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
   let blockersPostedInline = false;
+  let degradeReason: InlinePostingDegradeReason | null = null;
+  let staleBlockerIssueNumbers: readonly number[] = [];
   if (totalBlockerCount > 0) {
     try {
-      blockersPostedInline = await tryPostBlockersInline(
+      const result = await tryPostBlockersInline(
         token,
         owner,
         repo,
@@ -800,11 +893,14 @@ async function publishSummary(
         spine,
         diffTruncationBlocksClosingClaim,
       );
+      blockersPostedInline = result.postedInline;
+      degradeReason = result.degradeReason;
+      staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
     } catch (err) {
       // A genuine error (SHA mismatch, diff-fetch failure, a non-first or
       // non-422 inline-posting failure) — NOT the anchor-fallback or
       // 422-degrade case, both of which `tryPostBlockersInline` already
-      // resolves to a plain `false` return, never a throw. Same "visible
+      // resolves to a plain result, never a throw. Same "visible
       // fallback, never a silent or bare-CI-red failure" treatment as
       // every other artifact/network failure in this entrypoint.
       await publishFallback(token, owner, repo, prNumber, [
@@ -821,19 +917,28 @@ async function publishSummary(
     spine.unreviewedClosingIssues,
     { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
     blockersPostedInline,
+    degradeReason,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
       criterionBlockers,
       spine.unreviewedClosingIssues,
       diffTruncationBlocksClosingClaim,
+      // Always non-null here by tryPostBlockersInline's own contract
+      // (populated on every `postedInline: false` result) -- the
+      // fallback is defensive only, never expected to actually apply.
+      degradeReason ?? "no-addable-anchor",
     );
+  }
+  if (staleBlockerIssueNumbers.length > 0) {
+    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
   }
 
   await upsertSummaryComment(token, owner, repo, prNumber, body);
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
-      `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed.`,
+      `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
+      `${staleBlockerIssueNumbers.length} stale blocker(s) skipped.`,
   );
 
   if (totalBlockerCount > 0 && !blockersPostedInline) {

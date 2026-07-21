@@ -41,6 +41,7 @@
  * everything else.
  */
 
+import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
 import type { IssueLinkKind } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
@@ -572,6 +573,13 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   but always required rather than defaulted — this is exactly the
  *   kind of safety-relevant wording a silent default could get wrong
  *   unnoticed.
+ * @param degradeReason - WHY `blockersPostedInline` is `false` (PR #87
+ *   review round 4, Codex, P1 — an earlier version always assumed the
+ *   anchor-absent case; now distinguishes it from a real anchor GitHub
+ *   itself rejected). `null` when `blockersPostedInline` is `true` (or
+ *   there are no blockers at all) — the wording this governs is never
+ *   reached in that case, but a `null` is still required rather than
+ *   defaulted, matching `blockersPostedInline`'s own discipline.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -579,6 +587,7 @@ export function buildSpecGroundingSummaryCommentBody(
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   truncation: SpecGroundingTruncationFlags,
   blockersPostedInline: boolean,
+  degradeReason: InlinePostingDegradeReason | null,
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
@@ -617,14 +626,19 @@ export function buildSpecGroundingSummaryCommentBody(
       "when this run has any closing reference at all — this PR's own diff having been itself " +
       "truncated, which makes every criterion judged against it (including a 'satisfied' one) " +
       "unverifiable.";
+    const degradeExplanation =
+      degradeReason === "anchor-rejected-422"
+        ? "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
+          "attempt)"
+        : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
+          "only deletes content)";
     lines.push(
       blockersPostedInline
         ? `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
             "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
             `${blockerKindsExplanation} See the inline comment for which case applies and why.`
         : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-            "separate inline comments — this PR's diff had no addable line to anchor them to (an " +
-            "empty diff, or a diff that only deletes content), so there is no inline thread for " +
+            `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
             `them. ${blockerKindsExplanation}`,
       "",
     );
@@ -681,6 +695,40 @@ export function buildSpecGroundingSummaryCommentBody(
   );
 
   return lines.join("\n");
+}
+
+/**
+ * Builds the note appended when one or more planned blocker findings were
+ * skipped from inline posting because the PR's CURRENT body no longer
+ * references their own issue at all (PR #87 review round 4, Codex, P1 —
+ * symmetric to the delete-path TOCTOU fold: `tryPostBlockersInline` in
+ * `publish-spec-grounding-verdict.mts` re-checks each planned blocker's
+ * own `issueNumber` against a fresh re-parse of the PR's CURRENT body, not
+ * the runner-time one the verdict/spine were computed against — a
+ * body-only edit never bumps the trusted head SHA, so this run could
+ * otherwise post an inline comment reasserting an obligation for an issue
+ * the PR no longer claims to reference at all). Skipped, never posted —
+ * this note is the ONLY place a human learns that happened, so it must
+ * never be silently absent.
+ *
+ * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
+ *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced in
+ *   the PR's current body.
+ * @returns The Markdown section to append, or `""` if nothing was
+ *   skipped.
+ */
+export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
+  if (staleBlockerIssueNumbers.length === 0) {
+    return "";
+  }
+  const issueList = staleBlockerIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ");
+  return (
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body no longer references them at all (removed or edited since the spec-grounded review ran " +
+    "against this PR's head), so those findings no longer reflect a live obligation this run could " +
+    "verify. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+  );
 }
 
 // UnreviewedClosingIssueResult (a CLOSING-kind issue this PR referenced

@@ -764,7 +764,7 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
 
 describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)", () => {
   it("returns an empty string for no blockers at all", () => {
-    expect(buildAnchorFallbackSummarySupplement([], [], false)).toBe("");
+    expect(buildAnchorFallbackSummarySupplement([], [], false, "no-addable-anchor")).toBe("");
   });
 
   it("lists a criterion blocker's full detail, since there is no inline thread for it in this fallback path", () => {
@@ -772,6 +772,7 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
       [joined({ issueNumber: 12, criterionId: "12:0", rationale: "Missing the retry wrapper." })],
       [],
       false,
+      "no-addable-anchor",
     );
     expect(body).toContain("#12");
     expect(body).toContain("12:0");
@@ -784,6 +785,7 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
       [joined({ addressedByReviewer: false, rationale: null })],
       [],
       false,
+      "no-addable-anchor",
     );
     expect(body).toMatch(/not addressed by the reviewer's verdict/i);
   });
@@ -793,52 +795,53 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
       [joined({ issueNumber: 12, criterionId: "12:0", addressedByReviewer: true, rationale: null })],
       [],
       false,
+      "no-addable-anchor",
     );
     expect(body).toContain("unsatisfied");
   });
 
   it("lists a fully-dropped unreviewed-closing-issue blocker", () => {
-    const body = buildAnchorFallbackSummarySupplement([], [droppedIssue(99)], false);
+    const body = buildAnchorFallbackSummarySupplement([], [droppedIssue(99)], false, "no-addable-anchor");
     expect(body).toContain("#99");
     expect(body).toMatch(/never reviewed at all/i);
   });
 
   it("lists a partially-truncated unreviewed-closing-issue blocker with a DIFFERENT message than the fully-dropped case (PR #82 round 2 review, FOLD 1)", () => {
-    const body = buildAnchorFallbackSummarySupplement([], [partialIssue(99)], false);
+    const body = buildAnchorFallbackSummarySupplement([], [partialIssue(99)], false, "no-addable-anchor");
     expect(body).toContain("#99");
     expect(body).toMatch(/only partially reviewed/i);
     expect(body).not.toMatch(/never reviewed at all/i);
   });
 
   it("lists both kinds together", () => {
-    const body = buildAnchorFallbackSummarySupplement([joined({ issueNumber: 12 })], [droppedIssue(99)], false);
+    const body = buildAnchorFallbackSummarySupplement([joined({ issueNumber: 12 })], [droppedIssue(99)], false, "no-addable-anchor");
     expect(body).toContain("#12");
     expect(body).toContain("#99");
   });
 
   it("caps individually-listed unreviewed-closing-issues at MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS, reporting an omitted count rather than listing every issue without bound (proactive extension of PR #82 round 2 review's FOLD 2 to this fallback path)", () => {
     const manyIssues = Array.from({ length: 500 }, (_unused, i) => droppedIssue(i + 1));
-    const body = buildAnchorFallbackSummarySupplement([], manyIssues, false);
+    const body = buildAnchorFallbackSummarySupplement([], manyIssues, false, "no-addable-anchor");
     expect(body).toContain(`#${MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS}:`);
     expect(body).not.toContain(`#${MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 1}:`);
     expect(body).toMatch(/495 more issue\(s\) also not fully reviewed/);
   });
 
   it("does not report an omitted-issue count when every unreviewed-closing-issue fits within the individual cap", () => {
-    const body = buildAnchorFallbackSummarySupplement([], [droppedIssue(1)], false);
+    const body = buildAnchorFallbackSummarySupplement([], [droppedIssue(1)], false, "no-addable-anchor");
     expect(body).not.toMatch(/more issue\(s\) also not fully reviewed/);
   });
 
   it("caps individually-listed criterion blockers at MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS, reporting an omitted count rather than listing every one without bound (PR #82 round 3 review, holistic pass, BLOCKER 1's twin fix -- an EARLIER version left this loop entirely unbounded even after planBlockerInlineComments was capped)", () => {
     const manyCriteria = Array.from({ length: 500 }, (_unused, i) => joined({ criterionId: `12:${i}` }));
-    const body = buildAnchorFallbackSummarySupplement(manyCriteria, [], false);
+    const body = buildAnchorFallbackSummarySupplement(manyCriteria, [], false, "no-addable-anchor");
     expect(body).toContain(`\`12:${MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS - 1}\``);
     expect(body).not.toContain(`\`12:${MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS}\``);
     expect(body).toMatch(/495 more unmet acceptance criterion\(a\) also treated as unsatisfied/);
   });
 
   it("does not report an omitted-criterion count when every criterion blocker fits within the individual cap", () => {
-    const body = buildAnchorFallbackSummarySupplement([joined()], [], false);
+    const body = buildAnchorFallbackSummarySupplement([joined()], [], false, "no-addable-anchor");
     expect(body).not.toMatch(/more unmet acceptance criterion\(a\) also treated as unsatisfied/);
   });
 
@@ -846,28 +849,40 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     const manyUnaddressed = Array.from({ length: 500 }, (_unused, i) =>
       joined({ criterionId: `12:${i}`, addressedByReviewer: false, rationale: null }),
     );
-    const body = buildAnchorFallbackSummarySupplement(manyUnaddressed, [], false);
+    const body = buildAnchorFallbackSummarySupplement(manyUnaddressed, [], false, "no-addable-anchor");
     expect(body).toMatch(/agent addressed has its own rationale in the uploaded verdict artifact/i);
     expect(body).toMatch(/agent never addressed at all only appears in the criteria-spine artifact/i);
   });
 
   it("returns a non-empty string reporting the diff-truncation blocker even when there are NO criterion blockers and NO unreviewed closing issues at all (PR #82 round 3 review, holistic pass, FOLD 3)", () => {
-    const body = buildAnchorFallbackSummarySupplement([], [], true);
+    const body = buildAnchorFallbackSummarySupplement([], [], true, "no-addable-anchor");
     expect(body).not.toBe("");
     expect(body).toMatch(/diff was truncated/i);
     expect(body).toMatch(/at least one closing-kind reference/i);
   });
 
   it("does NOT report the diff-truncation blocker when diffTruncationBlocksClosingClaim is false", () => {
-    const body = buildAnchorFallbackSummarySupplement([joined()], [], false);
+    const body = buildAnchorFallbackSummarySupplement([joined()], [], false, "no-addable-anchor");
     expect(body).not.toMatch(/diff was truncated/i);
   });
 
   it("reports the diff-truncation blocker ALONGSIDE other blocker detail when all three are present", () => {
-    const body = buildAnchorFallbackSummarySupplement([joined({ issueNumber: 12 })], [droppedIssue(99)], true);
+    const body = buildAnchorFallbackSummarySupplement([joined({ issueNumber: 12 })], [droppedIssue(99)], true, "no-addable-anchor");
     expect(body).toContain("#12");
     expect(body).toContain("#99");
     expect(body).toMatch(/diff was truncated/i);
+  });
+
+  it("for degradeReason=no-addable-anchor, explains the diff had no addable line (PR #87 review round 4, Codex, P1)", () => {
+    const body = buildAnchorFallbackSummarySupplement([joined()], [], false, "no-addable-anchor");
+    expect(body).toMatch(/no addable line to anchor them to/i);
+    expect(body).not.toMatch(/github itself rejected/i);
+  });
+
+  it("for degradeReason=anchor-rejected-422, explains GitHub itself rejected the anchor -- distinct wording from the anchor-absent case, never implying no anchor was ever attempted (PR #87 review round 4, Codex, P1)", () => {
+    const body = buildAnchorFallbackSummarySupplement([joined()], [], false, "anchor-rejected-422");
+    expect(body).toMatch(/github itself rejected the deterministic anchor/i);
+    expect(body).not.toMatch(/no addable line to anchor them to/i);
   });
 });
 

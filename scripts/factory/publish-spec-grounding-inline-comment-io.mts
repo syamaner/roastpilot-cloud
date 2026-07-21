@@ -51,7 +51,11 @@
  */
 
 import { GithubApiError, githubRequest } from "./github-api.mts";
-import { bodyContainsAnyBlockerMarker, type BlockerCommentPlan } from "./publish-spec-grounding-blocker-logic.mts";
+import {
+  bodyContainsAnyBlockerMarker,
+  type BlockerCommentPlan,
+  type InlinePostingDegradeReason,
+} from "./publish-spec-grounding-blocker-logic.mts";
 import {
   bodyContainsMarkerAsStandaloneLine,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
@@ -203,12 +207,17 @@ export async function upsertInlineComment(
  * CREATE (POST, never a PATCH — see this module's own top-level
  * docstring, PR #87 review, Codex, P2 fold) is the probe; if GitHub
  * rejects THAT one with a 422 (an invalid anchor), the rest are never
- * attempted at all, and this function returns `{ ok: false }` so the
- * caller can degrade to the anchor-fallback summary path. Any OTHER
- * failure — a PATCH's own 422 (never anchor-related), a later POST's
- * 422 once the anchor is already proven valid, or a first-POST failure
- * for any status other than 422 — propagates uncaught; this is a
- * genuine error, not a signal to degrade.
+ * attempted at all, and this function returns `{ ok: false, reason:
+ * "anchor-rejected-422" }` (PR #87 review round 4, Codex, P1 — the
+ * discriminated reason, not a bare boolean, so the caller's own summary
+ * wording can distinguish this from the DIFFERENT anchor-absent case
+ * {@link import("./publish-spec-grounding-blocker-logic.mts").planBlockerInlineComments}'s
+ * own `anchorFallbackNeeded` already signals) so the caller can degrade
+ * to the anchor-fallback summary path. Any OTHER failure — a PATCH's own
+ * 422 (never anchor-related), a later POST's 422 once the anchor is
+ * already proven valid, or a first-POST failure for any status other
+ * than 422 — propagates uncaught; this is a genuine error, not a signal
+ * to degrade.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -217,8 +226,9 @@ export async function upsertInlineComment(
  * @param headSha - The trusted head SHA this run's diff was fetched against.
  * @param plan - This run's planned inline comments, in the order to post them.
  * @returns `{ ok: true }` once every comment posted/updated successfully
- *   (including the trivial case of an empty plan); `{ ok: false }` if
- *   the first genuine CREATE attempt was rejected with a 422.
+ *   (including the trivial case of an empty plan); `{ ok: false, reason:
+ *   "anchor-rejected-422" }` if the first genuine CREATE attempt was
+ *   rejected with a 422.
  */
 export async function postInlineCommentPlan(
   token: string,
@@ -227,7 +237,7 @@ export async function postInlineCommentPlan(
   prNumber: number,
   headSha: string,
   plan: readonly BlockerCommentPlan[],
-): Promise<{ readonly ok: boolean }> {
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: InlinePostingDegradeReason }> {
   if (plan.length === 0) {
     return { ok: true };
   }
@@ -246,7 +256,7 @@ export async function postInlineCommentPlan(
       }
     } catch (err) {
       if (isCreateAttempt && !firstCreateSucceeded && err instanceof GithubApiError && err.status === 422) {
-        return { ok: false };
+        return { ok: false, reason: "anchor-rejected-422" };
       }
       throw err;
     }
