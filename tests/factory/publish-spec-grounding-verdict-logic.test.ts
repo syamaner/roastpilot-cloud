@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bodyContainsMarkerAsStandaloneLine,
+  buildSpecGroundingFallbackCommentBody,
   buildSpecGroundingSummaryCommentBody,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
@@ -624,5 +625,35 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
     );
     expect(body).toMatch(/diff having been itself truncated/i);
+  });
+});
+
+describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12)", () => {
+  it("lists every reason given, not just the first", () => {
+    const body = buildSpecGroundingFallbackCommentBody([
+      "the review pipeline did not complete",
+      "the verdict artifact was malformed",
+    ]);
+    expect(body).toContain("the review pipeline did not complete");
+    expect(body).toContain("the verdict artifact was malformed");
+  });
+
+  it("explains this PR is NOT reviewed and needs a manual check", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/NOT yet reviewed/i);
+  });
+
+  it("ends with the SAME marker a normal summary uses, so a later successful rerun upserts over this fallback rather than leaving both comments behind", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
+  });
+
+  it("is found by findExistingSpecGroundingSummaryCommentId, exactly like a normal summary comment would be", () => {
+    const body = buildSpecGroundingFallbackCommentBody(["some reason"]);
+    const comments: ExistingComment[] = [
+      { id: 42, body, authorType: "Bot", authorLogin: SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN },
+    ];
+    expect(findExistingSpecGroundingSummaryCommentId(comments)).toBe(42);
   });
 });

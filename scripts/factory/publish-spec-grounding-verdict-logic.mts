@@ -665,3 +665,42 @@ export function buildSpecGroundingSummaryCommentBody(
 // type, fully-dropped only, and a `buildDroppedClosingIssueResults`
 // thin adapter from a bare `readonly number[]`; both are gone now that
 // the runner produces the richer, already-typed result directly).
+
+/**
+ * Builds the comment body posted when the privileged publish entrypoint
+ * (`publish-spec-grounding-verdict.mts`, slice 3b-iii-d, issue #12) could
+ * not produce a real summary at all — the review pipeline's own job
+ * result was not `"success"`, or a required artifact (`outcome.json`, the
+ * verdict, or `criteria-spine.json`) was absent or failed validation.
+ * Mirrors `apply-triage-verdict-logic.mts`'s own `buildFallbackCommentBody`
+ * precedent: same "explain what's wrong, list every reason" shape, same
+ * principle that a broken pipeline must be VISIBLE to a human, never
+ * silently absent.
+ *
+ * Ends with the SAME {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER} a
+ * normal run's summary uses — deliberately, not a distinct marker: a
+ * later, SUCCESSFUL rerun's real summary then finds and PATCHes this
+ * exact fallback comment in place (via {@link
+ * findExistingSpecGroundingSummaryCommentId}) rather than leaving a
+ * stale "pipeline broken" comment sitting alongside a new, valid one
+ * forever.
+ *
+ * @param reasons - One or more human-readable explanations for why this
+ *   run could not produce a real summary.
+ * @returns The Markdown comment body, ending with the tracking marker.
+ */
+export function buildSpecGroundingFallbackCommentBody(reasons: readonly string[]): string {
+  const lines: string[] = [
+    "**Spec-grounded review could not run to completion.** Treat this PR as " +
+      "NOT yet reviewed against its linked issues' acceptance criteria — a human should check it " +
+      "manually before relying on a clean spec-grounded result.",
+    "",
+    "Reason(s):",
+    ...reasons.map((r) => `- ${r}`),
+    "",
+    "_Posted by the roastpilot-cloud spec-grounded review workflow (factory.md §13 point 3)._",
+    "",
+    SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+  ];
+  return lines.join("\n");
+}

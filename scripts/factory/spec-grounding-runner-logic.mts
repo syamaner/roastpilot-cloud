@@ -434,6 +434,221 @@ export function computeCriteriaSpineTruncation(
   return { truncated, unreviewedClosingIssues };
 }
 
+/** The fully-parsed, shape-validated contents of a `criteria-spine.json` artifact. */
+export interface ParsedCriteriaSpine {
+  readonly entries: readonly CriteriaSpineEntry[];
+  readonly truncated: boolean;
+  readonly unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
+  readonly diffTruncated: boolean;
+}
+
+export type ParsedCriteriaSpineResult =
+  | { readonly ok: true; readonly spine: ParsedCriteriaSpine }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * Upper bound on a `criteria-spine.json` artifact's own serialized size,
+ * in UTF-8 bytes, before it is even read into memory (F1-S9 slice
+ * 3b-iii-d, issue #12) — the same defensive-bound discipline `spec-
+ * grounding-verdict-schema.mts`'s own `MAX_PAYLOAD_BYTES` applies to the
+ * agent's verdict artifact, applied here to this run's OWN trusted
+ * spine artifact instead. This file is written by `spec-grounding-
+ * runner.mts` itself (never agent- or issue-authored content — see
+ * {@link CriteriaSpineEntry}'s own docstring for why it carries only
+ * trusted metadata, never raw criterion text), so the threat model here
+ * is a CORRUPTED or truncated artifact download between the read-only
+ * job's upload and the privileged publisher's download, not adversarial
+ * content — but a corrupted/oversized download must still fail closed
+ * (a clear validation error) rather than crash unhandled or silently
+ * misparse. Generous relative to the spine's own real-world size (at
+ * most `MAX_LINKED_ISSUES` (20) × `MAX_CRITERIA_PER_ISSUE` (50) entries,
+ * each a handful of short fields).
+ */
+export const MAX_CRITERIA_SPINE_ARTIFACT_BYTES = 4_000_000;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validates one raw `entries[]` element against {@link CriteriaSpineEntry}'s
+ * own shape.
+ *
+ * @param raw - The candidate entry value.
+ * @param index - This entry's position, used only to make error messages
+ *   locatable.
+ * @param errors - Accumulator every violation is pushed onto.
+ * @returns The validated entry, or `null` if `raw` failed validation.
+ */
+function validateCriteriaSpineEntry(
+  raw: unknown,
+  index: number,
+  errors: string[],
+): CriteriaSpineEntry | null {
+  if (!isPlainRecord(raw)) {
+    errors.push(`entries[${index}] must be a JSON object`);
+    return null;
+  }
+  const { issueNumber, kind, criterionId } = raw;
+  let ok = true;
+  if (typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+    errors.push(`entries[${index}].issueNumber must be a positive integer`);
+    ok = false;
+  }
+  if (kind !== "closing" && kind !== "non-closing") {
+    errors.push(`entries[${index}].kind must be "closing" or "non-closing", got ${JSON.stringify(kind)}`);
+    ok = false;
+  }
+  if (typeof criterionId !== "string" || criterionId.length === 0) {
+    errors.push(`entries[${index}].criterionId must be a non-empty string`);
+    ok = false;
+  }
+  if (!ok) {
+    return null;
+  }
+  return {
+    issueNumber: issueNumber as number,
+    kind: kind as IssueLinkKind,
+    criterionId: criterionId as string,
+  };
+}
+
+/**
+ * Validates one raw `unreviewedClosingIssues[]` element against {@link
+ * UnreviewedClosingIssueResult}'s own shape.
+ *
+ * @param raw - The candidate entry value.
+ * @param index - This entry's position, used only to make error messages
+ *   locatable.
+ * @param errors - Accumulator every violation is pushed onto.
+ * @returns The validated entry, or `null` if `raw` failed validation.
+ */
+function validateUnreviewedClosingIssue(
+  raw: unknown,
+  index: number,
+  errors: string[],
+): UnreviewedClosingIssueResult | null {
+  if (!isPlainRecord(raw)) {
+    errors.push(`unreviewedClosingIssues[${index}] must be a JSON object`);
+    return null;
+  }
+  const { issueNumber, truncationKind } = raw;
+  let ok = true;
+  if (typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+    errors.push(`unreviewedClosingIssues[${index}].issueNumber must be a positive integer`);
+    ok = false;
+  }
+  if (truncationKind !== "fully-dropped" && truncationKind !== "partially-truncated") {
+    errors.push(
+      `unreviewedClosingIssues[${index}].truncationKind must be "fully-dropped" or ` +
+        `"partially-truncated", got ${JSON.stringify(truncationKind)}`,
+    );
+    ok = false;
+  }
+  if (!ok) {
+    return null;
+  }
+  return {
+    issueNumber: issueNumber as number,
+    truncationKind: truncationKind as "fully-dropped" | "partially-truncated",
+  };
+}
+
+/**
+ * Reads and shape-validates a `criteria-spine.json` artifact's RAW bytes —
+ * THE entry point the privileged publish entrypoint (slice 3b-iii-d, not
+ * yet built at the time this function was added) must use to read this
+ * artifact, mirroring `spec-grounding-verdict-schema.mts`'s own
+ * `parseAndValidateVerdict` precedent: checks the RAW byte length against
+ * {@link MAX_CRITERIA_SPINE_ARTIFACT_BYTES} BEFORE ever calling
+ * `JSON.parse`, so an oversized or corrupted artifact is rejected without
+ * paying the cost of parsing it.
+ *
+ * Unlike the verdict schema, this is NOT adversarial-input validation —
+ * this artifact is the runner's OWN trusted output (see this module's own
+ * top-level docstring), so there is no unknown-key rejection or
+ * content-level scrutiny here, only STRUCTURAL validation: a corrupted or
+ * truncated download must fail closed with a clear error, never crash
+ * unhandled or silently produce a wrong-shaped value the caller then
+ * trusts.
+ *
+ * @param raw - The artifact's raw bytes, exactly as read from disk — a
+ *   `string` or a `Buffer`.
+ * @returns `{ ok: true, spine }` with every field validated, or
+ *   `{ ok: false, errors }` listing every problem found.
+ */
+export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteriaSpineResult {
+  const rawBytes = Buffer.byteLength(raw, "utf8");
+  if (rawBytes > MAX_CRITERIA_SPINE_ARTIFACT_BYTES) {
+    return {
+      ok: false,
+      errors: [`payload too large: ${rawBytes} bytes exceeds ${MAX_CRITERIA_SPINE_ARTIFACT_BYTES}`],
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+  } catch (err) {
+    return {
+      ok: false,
+      errors: [`payload is not valid JSON: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+
+  if (!isPlainRecord(parsed)) {
+    return { ok: false, errors: ["criteria-spine.json must be a JSON object"] };
+  }
+
+  const errors: string[] = [];
+  const { entries, truncated, unreviewedClosingIssues, diffTruncated } = parsed;
+
+  if (!Array.isArray(entries)) {
+    errors.push('"entries" must be an array');
+  }
+  if (typeof truncated !== "boolean") {
+    errors.push('"truncated" must be a boolean');
+  }
+  if (!Array.isArray(unreviewedClosingIssues)) {
+    errors.push('"unreviewedClosingIssues" must be an array');
+  }
+  if (typeof diffTruncated !== "boolean") {
+    errors.push('"diffTruncated" must be a boolean');
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  const validatedEntries: CriteriaSpineEntry[] = [];
+  (entries as unknown[]).forEach((e, i) => {
+    const entry = validateCriteriaSpineEntry(e, i, errors);
+    if (entry !== null) {
+      validatedEntries.push(entry);
+    }
+  });
+  const validatedUnreviewed: UnreviewedClosingIssueResult[] = [];
+  (unreviewedClosingIssues as unknown[]).forEach((e, i) => {
+    const entry = validateUnreviewedClosingIssue(e, i, errors);
+    if (entry !== null) {
+      validatedUnreviewed.push(entry);
+    }
+  });
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    spine: {
+      entries: validatedEntries,
+      truncated: truncated as boolean,
+      unreviewedClosingIssues: validatedUnreviewed,
+      diffTruncated: diffTruncated as boolean,
+    },
+  };
+}
+
 /**
  * Whitespace-tolerant, case-insensitive match for the diff's OWN delimiter
  * tag — the sibling of `spec-grounding-logic.mts`'s `DELIMITER_TAG_PATTERN`,

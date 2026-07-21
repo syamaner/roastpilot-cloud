@@ -3,8 +3,10 @@ import {
   buildCriteriaSpine,
   computeCriteriaSpineTruncation,
   GITHUB_COMPARE_DIFF_FILE_LIMIT,
+  MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
   MAX_PR_DIFF_BYTES,
   neutralizeDiffDelimiterBreakout,
+  parseCriteriaSpineArtifact,
   wrapUntrustedDiffBlock,
 } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type {
@@ -697,5 +699,183 @@ describe("wrapUntrustedDiffBlock (F1-S9 slice 3b-i, issue #12)", () => {
     expect(block.endsWith("</UNTRUSTED_PR_DIFF_deadbeefcafef00d>")).toBe(true);
     expect(block.match(/<\/UNTRUSTED_PR_DIFF_deadbeefcafef00d>/g)).toHaveLength(1);
     expect(truncated).toBe(true);
+  });
+});
+
+describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
+  function validArtifact(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+      truncated: false,
+      unreviewedClosingIssues: [],
+      diffTruncated: false,
+      ...overrides,
+    };
+  }
+
+  it("accepts a well-formed artifact and returns the exact typed shape", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact()));
+    expect(result).toEqual({
+      ok: true,
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+      },
+    });
+  });
+
+  it("accepts a Buffer, identically to a string", () => {
+    const result = parseCriteriaSpineArtifact(Buffer.from(JSON.stringify(validArtifact()), "utf8"));
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a non-empty unreviewedClosingIssues array", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          unreviewedClosingIssues: [
+            { issueNumber: 5, truncationKind: "fully-dropped" },
+            { issueNumber: 9, truncationKind: "partially-truncated" },
+          ],
+        }),
+      ),
+    );
+    expect(result).toEqual({
+      ok: true,
+      spine: expect.objectContaining({
+        unreviewedClosingIssues: [
+          { issueNumber: 5, truncationKind: "fully-dropped" },
+          { issueNumber: 9, truncationKind: "partially-truncated" },
+        ],
+      }),
+    });
+  });
+
+  it("rejects an oversized payload before ever calling JSON.parse", () => {
+    const oversized = "x".repeat(MAX_CRITERIA_SPINE_ARTIFACT_BYTES + 1);
+    const result = parseCriteriaSpineArtifact(oversized);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/payload too large/);
+    }
+  });
+
+  it("rejects invalid JSON", () => {
+    const result = parseCriteriaSpineArtifact("{ not json");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/not valid JSON/);
+    }
+  });
+
+  it("rejects a top-level value that isn't a JSON object", () => {
+    const result = parseCriteriaSpineArtifact("[]");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/must be a JSON object/);
+    }
+  });
+
+  it.each(["entries", "truncated", "unreviewedClosingIssues", "diffTruncated"])(
+    "rejects a payload missing the required top-level field %s",
+    (field) => {
+      const artifact = validArtifact();
+      delete artifact[field];
+      const result = parseCriteriaSpineArtifact(JSON.stringify(artifact));
+      expect(result.ok).toBe(false);
+    },
+  );
+
+  it("collects an error for EVERY malformed entries[] element, not just the first", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: "not-a-number", kind: "closing", criterionId: "1:0" },
+            { issueNumber: 2, kind: "sideways", criterionId: "2:0" },
+            { issueNumber: 3, kind: "closing", criterionId: "" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(3);
+      expect(result.errors[0]).toMatch(/entries\[0\]\.issueNumber/);
+      expect(result.errors[1]).toMatch(/entries\[1\]\.kind/);
+      expect(result.errors[2]).toMatch(/entries\[2\]\.criterionId/);
+    }
+  });
+
+  it("rejects a non-positive or non-integer issueNumber", () => {
+    const negative = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: -1, kind: "closing", criterionId: "1:0" }] })),
+    );
+    expect(negative.ok).toBe(false);
+    const fractional = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ entries: [{ issueNumber: 1.5, kind: "closing", criterionId: "1:0" }] })),
+    );
+    expect(fractional.ok).toBe(false);
+  });
+
+  it("rejects a malformed unreviewedClosingIssues[] element", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          unreviewedClosingIssues: [{ issueNumber: 5, truncationKind: "not-a-real-kind" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/unreviewedClosingIssues\[0\]\.truncationKind/);
+    }
+  });
+
+  it("rejects an unreviewedClosingIssues[] element with an invalid issueNumber", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          unreviewedClosingIssues: [{ issueNumber: -1, truncationKind: "fully-dropped" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/unreviewedClosingIssues\[0\]\.issueNumber/);
+    }
+  });
+
+  it("rejects a non-object entries[] element", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: ["not-an-object"] })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/entries\[0\] must be a JSON object/);
+    }
+  });
+
+  it("rejects a non-object unreviewedClosingIssues[] element", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ unreviewedClosingIssues: [42] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/unreviewedClosingIssues\[0\] must be a JSON object/);
+    }
+  });
+
+  it("rejects when entries is present but not an array (does not crash attempting to .forEach it)", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: "not-an-array" })));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/"entries" must be an array/);
+    }
+  });
+
+  it("accepts an artifact with an empty entries array (hasCriteria could be true with zero surviving spine entries in a pathological edge case)", () => {
+    const result = parseCriteriaSpineArtifact(JSON.stringify(validArtifact({ entries: [] })));
+    expect(result.ok).toBe(true);
   });
 });
