@@ -731,6 +731,26 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("REJECTS a Buffer containing malformed UTF-8 (a truncated multi-byte sequence), WITHOUT decoding it into a silently-mutated string that could then parse and validate successfully (PR #84 review round 4, Codex, FOLD 3 -- mirrors parseAndValidateVerdict's own identical isUtf8 check exactly: Buffer.prototype.toString('utf8') silently replaces an invalid byte sequence with U+FFFD rather than failing)", () => {
+    // A lone 0xC3 (the start of a valid 2-byte UTF-8 sequence) immediately
+    // followed by a `"` (0x22) -- not a valid continuation byte (those are
+    // 0x80-0xBF) -- inside an otherwise well-formed spine's criterionId.
+    const prefix = Buffer.from(
+      '{"entries":[{"issueNumber":12,"kind":"closing","criterionId":"12:0',
+      "utf8",
+    );
+    const suffix = Buffer.from(
+      '"}],"truncated":false,"unreviewedClosingIssues":[],"diffTruncated":false}',
+      "utf8",
+    );
+    const raw = Buffer.concat([prefix, Buffer.from([0xc3]), suffix]);
+    const result = parseCriteriaSpineArtifact(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([expect.stringMatching(/not valid UTF-8/)]);
+    }
+  });
+
   it("accepts a non-empty unreviewedClosingIssues array", () => {
     // Internally consistent per PR #84 review round 3's own cross-entry
     // invariants: truncated:true (any unreviewed closing issue implies
@@ -956,6 +976,22 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("rejects a criterionId prefix that DISAGREES with issueNumber even when a NUMERIC comparison would spuriously agree due to float64 precision loss beyond Number.MAX_SAFE_INTEGER (PR #84 review round 4, Codex, FOLD 4) -- empirically verified: Number(\"9007199254740993\") === 9007199254740992 is true (both round to the same float), but the two digit strings are genuinely different", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [
+            { issueNumber: 9_007_199_254_740_992, kind: "closing", criterionId: "9007199254740993:0" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/criterionId "9007199254740993:0" does not match entries\[0\]\.issueNumber \(9007199254740992\)/);
+    }
+  });
+
   it("rejects when entries has more than MAX_CRITERIA_SPINE_ENTRIES elements, with a SINGLE error rather than one per element (PR #84 review, Codex, FOLD 3, LOW)", () => {
     const manyEntries = Array.from({ length: 5001 }, (_unused, i) => ({
       issueNumber: 1,
@@ -970,18 +1006,17 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     }
   });
 
-  it("rejects when unreviewedClosingIssues has more than MAX_CRITERIA_SPINE_ENTRIES elements, with a SINGLE error rather than one per element", () => {
+  it("accepts an unreviewedClosingIssues array with MORE than 5000 elements -- NOT capped (PR #84 review round 4, Codex, FOLD 1, team-lead's own miss from round 1): computeCriteriaSpineTruncation emits one record per closing reference beyond the 20-fetch cap, UNCAPPED, so a PR body naming thousands of Closes #N references legitimately produces this many", () => {
     const manyIssues = Array.from({ length: 5001 }, (_unused, i) => ({
       issueNumber: i + 1,
       truncationKind: "fully-dropped",
     }));
     const result = parseCriteriaSpineArtifact(
-      JSON.stringify(validArtifact({ unreviewedClosingIssues: manyIssues })),
+      JSON.stringify(validArtifact({ entries: [], truncated: true, unreviewedClosingIssues: manyIssues })),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors).toHaveLength(1);
-      expect(result.errors[0]).toMatch(/"unreviewedClosingIssues" has 5001 elements, exceeds 5000/);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spine.unreviewedClosingIssues).toHaveLength(5001);
     }
   });
 
@@ -1208,6 +1243,35 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     if (!result.ok) {
       expect(result.errors[0]).toMatch(/issue #9 is "partially-truncated".*has no entries/);
     }
+  });
+
+  it("rejects a 'partially-truncated' issue whose own entries in the spine are non-closing kind (PR #84 review round 4, Codex, FOLD 2, BLOCKER) -- unreviewedClosingIssues ONLY EVER tracks closing-kind issues, so a non-closing entry for the same issue number is a direct contradiction round 3's own check missed", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [{ issueNumber: 9, kind: "non-closing", criterionId: "9:0" }],
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 9, truncationKind: "partially-truncated" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]).toMatch(/issue #9 is "partially-truncated".*entries in the spine are kind "non-closing"/);
+    }
+  });
+
+  it("accepts a 'partially-truncated' issue whose own entries in the spine are closing kind (the consistent case)", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          entries: [{ issueNumber: 9, kind: "closing", criterionId: "9:0" }],
+          truncated: true,
+          unreviewedClosingIssues: [{ issueNumber: 9, truncationKind: "partially-truncated" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(true);
   });
 
   it("rejects unreviewedClosingIssues non-empty with truncated:false (PR #84 review round 3, Codex) -- any unreviewed closing issue implies some truncation occurred somewhere in this run's own pipeline", () => {
