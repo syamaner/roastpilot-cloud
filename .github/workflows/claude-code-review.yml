@@ -626,7 +626,7 @@ jobs:
           # shell out).
           #
           # `Read(review-context/**)` / `Read(.claude/skills/spec-grounded-
-          # review/**)` ATTEMPT POSITIVE SCOPING (Codex finding, PR #76
+          # review/**)` POSITIVELY SCOPES `Read` (Codex finding, PR #76
           # review, round 5, MEDIUM — team-lead's preferred fix over
           # deny-listing alone): a deny-only `Read(.git/**)` blocks a
           # LITERAL path string, but a PR-added symlink (`envdump ->
@@ -635,37 +635,36 @@ jobs:
           # DIFFERENT path string the deny pattern never matches at all —
           # positive scoping to exactly the two locations this skill
           # legitimately reads (the three `review-context/*` files
-          # SKILL.md itself describes, and SKILL.md's own path) would close
+          # SKILL.md itself describes, and SKILL.md's own path) closes
           # `/proc`, home-directory credentials, and any surviving symlink
           # in ONE move, categorically, rather than deny-listing each newly
           # discovered vector.
           #
-          # NOT CONFIRMED CLOSED (Codex finding, PR #76 review, round 6 —
-          # correcting an earlier version of this comment's own overclaim):
-          # whether this positive-scoping attempt actually restricts
-          # `Read` to these two locations, or is merely an ADDITIVE
-          # allowance layered on top of some broader default the SDK
-          # already grants, is enforced entirely inside `@anthropic-ai/
-          # claude-agent-sdk`'s own closed internals — traced
-          # `--allowedTools`/`--disallowedTools` through the pinned
-          # action's own source (`base-action/src/parse-sdk-options.ts`)
-          # and confirmed BOTH are parsed into plain string arrays and
-          # passed straight through with NO enforcement logic in the
-          # action's own code at all, so reading that source settles
-          # nothing about the SDK's own semantics. An earlier version of
-          # this comment claimed the symlink-strip step + the restore fix
-          # above were "the CONFIRMED defenses this posture rests on
-          # regardless" — that claim is FALSE for the vector that matters
-          # most here: `Read('/proc/self/environ')` is a plain, absolute
-          # path with NO symlink involved at all, so `find -type l -delete`
-          # does nothing against it, and `CLAUDE_CODE_OAUTH_TOKEN` genuinely
-          # is present in this step's own process environment (this action
-          # runs the SDK as a subprocess of THIS job) — a verdict-artifact
-          # exfiltration of that token is a live, undetermined risk unless
-          # this positive-scoping attempt turns out to be exclusive.
-          # Closing the direct-absolute-read vector depends ENTIRELY on
-          # that being true, which — as of this commit — is UNVERIFIED, not
-          # merely "attempted, but we have other layers regardless".
+          # CONFIRMED CLOSED, empirically (round 6 — this is no longer an
+          # attempt): an earlier version of this comment correctly flagged
+          # that reading the pinned action's own source
+          # (`base-action/src/parse-sdk-options.ts`) settles nothing here —
+          # `--allowedTools`/`--disallowedTools` are parsed into plain
+          # string arrays and passed straight through with NO enforcement
+          # logic in the action's own code; whether a `Read(<pattern>)`
+          # entry is an EXCLUSIVE restriction or a merely ADDITIVE
+          # allowance is enforced entirely inside `@anthropic-ai/claude-
+          # agent-sdk`'s own closed internals. Settled with a live
+          # `workflow_dispatch` probe instead of a guess (PR #78, the same
+          # precedent as this repo's #20/#22 verdict-write-permission
+          # probe): granted ONLY `Read(review-context/**)` (no `Read(/**)`
+          # deny at all) and asked the agent to (1) read an in-pattern
+          # `review-context/test.txt` and (2) attempt to read the harmless,
+          # non-secret absolute path `/etc/hostname`. Result: the in-pattern
+          # read succeeded, and the absolute-path read was REJECTED —
+          # corroborated independently by the SDK's own structured
+          # execution summary reporting `"permission_denials_count": 1`
+          # (not just the agent's own self-reported text). `Read(<pattern>)`
+          # IS an exclusive restriction: the direct-absolute-read
+          # exfiltration vector (`Read('/proc/self/environ')`, no symlink
+          # needed at all — the gap an earlier version of this comment
+          # correctly refused to claim was closed) is genuinely closed by
+          # this allow-list, not merely attempted.
           #
           # `mcp__github_file_ops__commit_files`/`__delete_files` denied
           # explicitly (round 4): `use_commit_signing: true` above installs
