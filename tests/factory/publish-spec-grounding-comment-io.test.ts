@@ -60,6 +60,19 @@ describe("findExistingSummaryComment", () => {
     expect(found).toBeNull();
   });
 
+  it("does not crash and correctly finds no match when a comment's own user field is null (a deleted-account ghost comment) -- authorType/authorLogin fall back to null rather than throwing on the missing user object", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 1, body: `unrelated\n${SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}`, user: null }]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const found = await findExistingSummaryComment("token", "o", "r", 5);
+    // A null user can never be authorType:"Bot" -- never mistaken for our
+    // own prior comment even if its body happens to carry the marker.
+    expect(found).toBeNull();
+  });
+
   it("finds this run's own prior comment by bot identity + structural marker match", async () => {
     const { fetchMock } = mockFetch({
       "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>
