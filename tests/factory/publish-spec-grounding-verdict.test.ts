@@ -261,14 +261,21 @@ describe("main — the outcome.json tri-state", () => {
   });
 
   it.each([
-    ["missing entirely", {}],
-    ["not an array", { reviewedClosingIssueNumbers: "12" }],
-    ["contains a negative number", { reviewedClosingIssueNumbers: [-1] }],
-    ["contains a non-integer", { reviewedClosingIssueNumbers: [1.5] }],
-    ["contains a non-number element", { reviewedClosingIssueNumbers: ["12"] }],
+    ["missing entirely", {}, /must carry a "reviewedClosingIssueNumbers" array/i],
+    ["not an array", { reviewedClosingIssueNumbers: "12" }, /must carry a "reviewedClosingIssueNumbers" array/i],
+    ["contains ZERO -- issue #0 does not exist (team-lead's own refinement, positive not merely non-negative)", { reviewedClosingIssueNumbers: [0] }, /must contain only positive integers/i],
+    ["contains a negative number", { reviewedClosingIssueNumbers: [-1] }, /must contain only positive integers/i],
+    ["contains a non-integer", { reviewedClosingIssueNumbers: [1.5] }, /must contain only positive integers/i],
+    ["contains a non-number element", { reviewedClosingIssueNumbers: ["12"] }, /must contain only positive integers/i],
+    ["contains a DUPLICATE (a legitimate writer's own Set-based construction can never produce one)", { reviewedClosingIssueNumbers: [12, 12] }, /contains a duplicate \(12\)/i],
+    [
+      "exceeds MAX_REVIEWED_CLOSING_ISSUE_NUMBERS (team-lead's own refinement -- mirrors criteria-spine.json's own identical cap)",
+      { reviewedClosingIssueNumbers: Array.from({ length: 1001 }, (_unused, i) => i + 1) },
+      /has 1001 elements, exceeds 1000/i,
+    ],
   ])(
-    "posts a visible fallback when outcome.json's reviewedClosingIssueNumbers is %s (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER -- FAILS CLOSED, unlike noCriteriaReason's own safe-default coercion)",
-    async (_label, malformedField) => {
+    "posts a visible fallback when outcome.json's reviewedClosingIssueNumbers %s (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER -- FAILS CLOSED, unlike noCriteriaReason's own safe-default coercion)",
+    async (_label, malformedField, expectedMessage) => {
       const outcomePath = join(workdir, "outcome.json");
       await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", ...malformedField }));
       process.env.OUTCOME_PATH = outcomePath;
@@ -282,7 +289,7 @@ describe("main — the outcome.json tri-state", () => {
 
       expect(process.exitCode).toBe(1);
       const post = calls.find((c) => c.method === "POST");
-      expect((post?.body as { body: string }).body).toMatch(/reviewedClosingIssueNumbers.*array of non-negative integers/i);
+      expect((post?.body as { body: string }).body).toMatch(expectedMessage);
     },
   );
 

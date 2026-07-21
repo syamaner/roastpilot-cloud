@@ -408,6 +408,21 @@ const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
 const NO_CRITERIA_REASONS: ReadonlySet<string> = new Set<NoCriteriaReason>(["no-references", "no-unmet-criteria"]);
 
 /**
+ * Upper bound on the NUMBER of elements `reviewedClosingIssueNumbers` may
+ * contain (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262,
+ * BLOCKER — team-lead's own refinement) — the SAME value as
+ * `criteria-spine.json`'s own identically-named field's own
+ * `MAX_REVIEWED_CLOSING_ISSUE_NUMBERS` (`spec-grounding-runner-logic.mts`):
+ * same field, same shape, same threat. A legitimate writer can never
+ * produce more than `MAX_LINKED_ISSUES` (20) distinct values here (the
+ * runner's own `selectIssuesToFetch` cap), so this is generous
+ * defense-in-depth against a corrupted/oversized artifact — an
+ * availability vector at this trust boundary, not a tight fit to the
+ * expected shape — checked BEFORE the array is iterated element-by-element.
+ */
+const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
+
+/**
  * `outcome.json`'s own shape, post-validation — a discriminated union so
  * `noCriteriaReason`/`reviewedClosingIssueNumbers` are only ever accessible
  * (and only ever populated) when `hasCriteria` is `false` (PR #87 review,
@@ -542,14 +557,45 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
   // visible fallback every other malformed/missing artifact in this
   // entrypoint gets — never a silent coercion.
   const rawReviewedClosingIssueNumbers = record.reviewedClosingIssueNumbers;
-  if (
-    !Array.isArray(rawReviewedClosingIssueNumbers) ||
-    !rawReviewedClosingIssueNumbers.every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
-  ) {
+  if (!Array.isArray(rawReviewedClosingIssueNumbers)) {
     throw new Error(
-      `outcome.json at ${path} must carry a "reviewedClosingIssueNumbers" array of non-negative integers when ` +
-        `hasCriteria is false, got ${rawText}`,
+      `outcome.json at ${path} must carry a "reviewedClosingIssueNumbers" array when hasCriteria is false, ` +
+        `got ${rawText}`,
     );
+  }
+  // Cardinality cap, checked BEFORE the array is iterated (team-lead's own
+  // refinement, PR #96 review round 2 follow-up) — mirrors
+  // `criteria-spine.json`'s own identically-named field's own
+  // `MAX_REVIEWED_CLOSING_ISSUE_NUMBERS`: same field, same shape, same
+  // threat, same defensive bound against an oversized/corrupted artifact.
+  if (rawReviewedClosingIssueNumbers.length > MAX_REVIEWED_CLOSING_ISSUE_NUMBERS) {
+    throw new Error(
+      `outcome.json at ${path}'s "reviewedClosingIssueNumbers" has ${rawReviewedClosingIssueNumbers.length} ` +
+        `elements, exceeds ${MAX_REVIEWED_CLOSING_ISSUE_NUMBERS}`,
+    );
+  }
+  // POSITIVE, not merely non-negative (team-lead's own refinement): issue
+  // #0 does not exist on GitHub — matches `parseLinkedIssueReferences`'s
+  // own `issueNumber <= 0` drop, so a bogus 0 can never silently pass a
+  // membership check downstream. Also rejects a DUPLICATE outright (never
+  // silently deduped) — the SAME "never accept what a legitimate writer
+  // could not have produced" discipline `criteria-spine.json`'s own
+  // parser applies to this identically-named field: the runner's own
+  // `Set`-based construction can never emit a duplicate, so one here is
+  // corruption, not a benign redundancy to tolerate.
+  const seenReviewedClosingIssueNumbers = new Set<number>();
+  for (const value of rawReviewedClosingIssueNumbers) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(
+        `outcome.json at ${path}'s "reviewedClosingIssueNumbers" must contain only positive integers, got ${rawText}`,
+      );
+    }
+    if (seenReviewedClosingIssueNumbers.has(value)) {
+      throw new Error(
+        `outcome.json at ${path}'s "reviewedClosingIssueNumbers" contains a duplicate (${value}), got ${rawText}`,
+      );
+    }
+    seenReviewedClosingIssueNumbers.add(value);
   }
   return {
     hasCriteria: false,
