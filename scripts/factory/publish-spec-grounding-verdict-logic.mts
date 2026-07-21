@@ -248,6 +248,37 @@ export function formatRationaleForDisplay(entry: JoinedCriterionResult): string 
 }
 
 /**
+ * The shared clause distinguishing where a reader can find more detail for
+ * an ADDRESSED vs. an UNADDRESSED criterion (PR #83 review, FOLD 2):
+ * `publish-spec-grounding-blocker-logic.mts`'s own criterion-blocker
+ * overflow aggregate had the SAME mislabeling bug this module's own
+ * omitted-findings note (below, in {@link buildSpecGroundingSummaryCommentBody})
+ * already exists to avoid — pointing an UNADDRESSED entry (one with
+ * `addressedByReviewer: false`, per {@link JoinedCriterionResult}'s own
+ * docstring) at "the uploaded verdict artifact" is simply wrong, since
+ * there is no verdict entry for it at all; only `criteria-spine.json` has
+ * it. Exported and reused VERBATIM by both call sites — this module's own
+ * summary comment, and the aggregate blocker comment in the sibling module
+ * — so the two descriptions can never drift apart again the way they did
+ * before this fold (the aggregate had its own, independently-worded and
+ * incorrect, "See the uploaded verdict artifact for each one's own
+ * rationale" line).
+ *
+ * @param subject - What the clause is describing, singular (e.g.
+ *   `"finding"`, `"entry"`) — the caller supplies the noun that fits its
+ *   own surrounding sentence.
+ * @returns The clause text, lowercase, without a leading article or
+ *   trailing punctuation, ready to drop into a surrounding sentence.
+ */
+export function describeAddressedVsUnaddressedArtifactPointer(subject: string): string {
+  return (
+    `an ${subject} the agent addressed has its own rationale in the uploaded verdict artifact; ` +
+    `an ${subject} the agent never addressed at all only appears in the criteria-spine artifact, ` +
+    "since there is no verdict entry for it to begin with"
+  );
+}
+
+/**
  * Hidden marker embedded in the one summary comment this job upserts.
  * Used to find "our" comment on a re-run (idempotency, factory.md §13
  * point 8) without duplicate-posting — the same fixed-string-marker
@@ -481,6 +512,21 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  * closing criterion itself unverifiable, not just the criteria SET
  * incomplete).
  *
+ * The "where to find the blockers" wording is CONDITIONAL on
+ * `blockersPostedInline` (PR #83 review, MEDIUM — a genuine bug spanning
+ * both this module and `publish-spec-grounding-blocker-logic.mts`'s
+ * anchor-fallback path, folded here since the fix is coherent only
+ * across both): an EARLIER version unconditionally told the reader
+ * blockers were "reported as separate, resolvable inline review
+ * comment(s)... see those threads, not this summary" — true when
+ * `planBlockerInlineComments` found a real anchor, but FALSE in its own
+ * `anchorFallbackNeeded` case, where there is no inline thread at all
+ * and the full blocker detail is instead appended to THIS summary via
+ * `buildAnchorFallbackSummarySupplement`. Directing a human to
+ * nonexistent inline threads while the real blocker detail sits in the
+ * very summary they're told to skip is exactly the failure mode this
+ * flag closes.
+ *
  * @param joined - Every spine criterion's joined result.
  * @param unreviewedClosingIssues - `criteria-spine.json`'s own
  *   `unreviewedClosingIssues` field for this run — whole closing-kind
@@ -490,12 +536,21 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   review, L181, widened PR #82 round 2 review FOLD 1).
  * @param truncation - This run's own `truncated`/`diffTruncated` flags
  *   from `criteria-spine.json`, straight through, unmodified.
+ * @param blockersPostedInline - Whether this run's blockers (if any)
+ *   were actually posted as separate inline comments — the entrypoint
+ *   passes `!planBlockerInlineComments(...).anchorFallbackNeeded`
+ *   (`publish-spec-grounding-blocker-logic.mts`). Irrelevant when there
+ *   are no blockers at all (the branch this governs is never reached),
+ *   but always required rather than defaulted — this is exactly the
+ *   kind of safety-relevant wording a silent default could get wrong
+ *   unnoticed.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
   joined: readonly JoinedCriterionResult[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   truncation: SpecGroundingTruncationFlags,
+  blockersPostedInline: boolean,
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
@@ -527,15 +582,22 @@ export function buildSpecGroundingSummaryCommentBody(
   }
 
   if (totalBlockerCount > 0) {
+    const blockerKindsExplanation =
+      "A blocking finding is a criterion this PR's own closing keyword references that the " +
+      "reviewer found unsatisfied, a whole linked issue this PR claims to close that was never " +
+      "fully reviewed at all (truncated away, entirely or partially, by a resource cap), or — " +
+      "when this run has any closing reference at all — this PR's own diff having been itself " +
+      "truncated, which makes every criterion judged against it (including a 'satisfied' one) " +
+      "unverifiable.";
     lines.push(
-      `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
-        "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
-        "A blocking finding is a criterion this PR's own closing keyword references that the " +
-        "reviewer found unsatisfied, a whole linked issue this PR claims to close that was never " +
-        "fully reviewed at all (truncated away, entirely or partially, by a resource cap), or — " +
-        "when this run has any closing reference at all — this PR's own diff having been itself " +
-        "truncated, which makes every criterion judged against it (including a 'satisfied' one) " +
-        "unverifiable. See the inline comment for which case applies and why.",
+      blockersPostedInline
+        ? `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
+            "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
+            `${blockerKindsExplanation} See the inline comment for which case applies and why.`
+        : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
+            "separate inline comments — this PR's diff had no addable line to anchor them to (an " +
+            "empty diff, or a diff that only deletes content), so there is no inline thread for " +
+            `them. ${blockerKindsExplanation}`,
       "",
     );
   } else {
@@ -567,9 +629,7 @@ export function buildSpecGroundingSummaryCommentBody(
         "",
         `_${omittedCount} further finding(s) omitted from this summary to stay within GitHub's ` +
           "comment size limit — see the uploaded criteria-spine and verdict artifacts for the " +
-          "full list (an omitted finding the agent addressed has its own rationale in the " +
-          "verdict artifact; an omitted finding the agent never addressed at all only appears " +
-          "in the criteria-spine artifact, since there is no verdict entry for it to begin with)._",
+          `full list (${describeAddressedVsUnaddressedArtifactPointer("omitted finding")})._`,
       );
     }
     lines.push("");
