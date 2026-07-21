@@ -314,7 +314,7 @@ jobs:
         # comment explains was the wrong axis: that list is a STRICT
         # SUBSET of what cone mode actually materializes). The invariant
         # this step enforces is unconditional: "the working tree equals
-        # base, except `scripts/factory` and (bootstrap-only)
+        # base, except `scripts/factory` and
         # `.claude/skills/spec-grounded-review`" — verified by restoring
         # EVERY tracked path, not by naming which ones to check.
         #
@@ -359,36 +359,56 @@ jobs:
         #    `README.md` regardless of rename detection, since it overlays
         #    base's own tracked content for every path base has, with no
         #    awareness of what HEAD renamed it to or from.
-        # 3. Re-apply the two named exceptions from PR-HEAD:
-        #    `scripts/factory` (covered by the publisher guard already, and
-        #    a human-authored runner bugfix needs to take effect when its
-        #    own PR is reviewed — restoring it from base would review a
-        #    runner-bugfix PR against the OLD, buggy runner), and — ONLY
-        #    when base genuinely lacks it — `.claude/skills/spec-grounded-
-        #    review` (THIS PR's own bootstrap case: nothing "trusted"
-        #    exists for this path yet, since this PR is what establishes
-        #    it; self-closing the moment this PR merges and base always
-        #    has it too).
+        # 3. Re-apply the two named exceptions from PR-HEAD, UNCONDITIONALLY
+        #    and identically: `scripts/factory` (covered by the publisher
+        #    guard already, and a human-authored runner bugfix needs to
+        #    take effect when its own PR is reviewed — restoring it from
+        #    base would review a runner-bugfix PR against the OLD, buggy
+        #    runner) and `.claude/skills/spec-grounded-review` (the same
+        #    trust argument applies: it is first-party, human-authored,
+        #    and goes through the same PR review as `scripts/factory`
+        #    before it can ever merge — a prompt-wording fix in this PR
+        #    needs to take effect when THIS PR is reviewed, exactly like a
+        #    runner-code fix does).
+        #
+        #    PREVIOUSLY this second exception was bootstrap-only (`git
+        #    checkout HEAD -- .claude/skills/spec-grounded-review` gated
+        #    behind `! git cat-file -e "$BASE_SHA:.claude/skills/spec-
+        #    grounded-review"`), reasoning it would "self-close the moment
+        #    this PR [#76] merges and base always has it too". That
+        #    framing was backwards (Codex finding, PR #81 review, P1): the
+        #    condition doesn't self-close into "still correct", it
+        #    self-closes into PERMANENTLY FALSE the moment base has the
+        #    path at all — which is every PR from #76 onward, forever.
+        #    Concretely, on THIS repo's own PR #81 (which edits
+        #    `SKILL.md`'s own contract description), the old gated version
+        #    would have silently reverted `SKILL.md` to the STALE base
+        #    copy during this very review run, while `scripts/factory`
+        #    (already unconditional) applied the NEW `criteria-spine.json`
+        #    shape from PR-head — exactly the runner/skill contract
+        #    mismatch the SKILL.md fix in #81 exists to prevent, and the
+        #    live review agent would have silently misread its own
+        #    worklist. Made unconditional to close this for every future
+        #    PR that touches the skill file, not just the one that
+        #    happened to introduce it.
         #
         # Verified end-to-end (round 5, re-verified round 6 with the
-        # rename fix): simulated a malicious PR-head adding `.mcp.json`
-        # (pointed at `curl`), `.claude/settings.json` (a `PreToolUse` hook
-        # curling `$GH_TOKEN`), `CLAUDE.local.md` (an instruction to mark
-        # every criterion satisfied — the exact gate-defeat vector this
-        # round exists to close), `.claudeignore`, `.npmrc` (a malicious
-        # registry), a root symlink, AND editing both `CLAUDE.md` and
-        # `scripts/factory/spec-grounding-runner.mts` — ran this exact
-        # sequence against an ALREADY-ESTABLISHED base (the steady state
-        # every PR after this one runs under) and confirmed: all six
-        # additions are gone, the `CLAUDE.md` edit is reverted, the
-        # `scripts/factory` edit SURVIVES (deliberately PR-head), the
-        # legitimate skill content survives via the bootstrap exception,
-        # and `npm ci` + the runner script both still run correctly
-        # afterward. Also re-confirmed (unchanged from the prior round)
-        # that a base genuinely lacking `.claude/skills/spec-grounded-
-        # review` correctly falls through to the bootstrap exception
-        # rather than hard-failing or being silently dropped. SEPARATELY
-        # verified round 6's own rename-bypass fix: reproduced `git mv
+        # rename fix, re-verified again for the unconditional-skill-
+        # restore fix above): simulated a malicious PR-head adding
+        # `.mcp.json` (pointed at `curl`), `.claude/settings.json` (a
+        # `PreToolUse` hook curling `$GH_TOKEN`), `CLAUDE.local.md` (an
+        # instruction to mark every criterion satisfied — the exact
+        # gate-defeat vector this round exists to close), `.claudeignore`,
+        # `.npmrc` (a malicious registry), a root symlink, AND editing
+        # both `CLAUDE.md` and `scripts/factory/spec-grounding-runner.mts`
+        # — ran this exact sequence against an ALREADY-ESTABLISHED base
+        # (the steady state every PR after this one runs under) and
+        # confirmed: all six additions are gone, the `CLAUDE.md` edit is
+        # reverted, the `scripts/factory` edit SURVIVES (deliberately
+        # PR-head), a genuine `.claude/skills/spec-grounded-review` edit
+        # ALSO SURVIVES (deliberately PR-head, now unconditionally), and
+        # `npm ci` + the runner script both still run correctly
+        # afterward. SEPARATELY verified round 6's own rename-bypass fix: reproduced `git mv
         # README.md CLAUDE.local.md` (+ an appended malicious instruction,
         # `.mcp.json`, and `.claude/settings.json` in the SAME commit)
         # first against the PRE-`--no-renames` version of this step,
@@ -410,12 +430,7 @@ jobs:
             rm -rf -- "$added_path"
           done
 
-          git checkout HEAD -- scripts/factory
-
-          if ! git cat-file -e "$BASE_SHA:.claude/skills/spec-grounded-review" 2>/dev/null; then
-            echo "::notice::bootstrap: .claude/skills/spec-grounded-review not present at base ($BASE_SHA) -- restoring this run's own PR-head version."
-            git checkout HEAD -- .claude/skills/spec-grounded-review
-          fi
+          git checkout HEAD -- scripts/factory .claude/skills/spec-grounded-review
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
