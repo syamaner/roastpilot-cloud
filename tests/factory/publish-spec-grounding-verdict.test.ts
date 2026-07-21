@@ -1070,7 +1070,109 @@ describe("main — the happy path", () => {
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toMatch(/#34[\s\S]*were NOT posted inline, and any PRIOR[\s\S]*has been REMOVED/i);
+    expect(summaryBody).toMatch(
+      /#34[\s\S]*were NOT posted inline[\s\S]*positively confirm was safe to remove has been deleted/i,
+    );
+  });
+
+  it("SKIPS the de-reference reconciliation non-destructively (never deletes) when the PR's closing-reference SET SIZE changed between this run's own earlier snapshot and the re-verify immediately before the delete (F1-S9 slice 90.4, PR #95 review round 2, Codex, P1 -- the TOCTOU re-verify)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "34:0", satisfied: false, rationale: "Still genuinely unmet." }] },
+      spine: {
+        entries: [{ issueNumber: 34, kind: "closing", criterionId: "34:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCount += 1;
+        // FIRST call (fetchAndVerifyPrShas, the early snapshot): body has
+        // no closing reference at all -- #34 is de-referenced, snapshot
+        // set is EMPTY. SECOND call (the re-verify, immediately before
+        // the delete): a race landed -- the body now ALSO references
+        // #99 as closing, growing the set from size 0 to size 1 (a size
+        // MISMATCH, not just a different single element).
+        return prFetchHandlerWithOverrides({ body: prFetchCount === 1 ? "" : "Closes #99" });
+      },
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(""),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // The reconciliation's own comment-fetch never even runs -- the
+    // re-verify's own OWN fetch to /pulls/83 (the second GET) happens,
+    // but no DELETE at all follows, since the snapshot no longer matches.
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(prFetchCount).toBe(2);
+  });
+
+  it("SKIPS the de-reference reconciliation non-destructively when the closing-reference set is the SAME SIZE but a DIFFERENT issue number between the snapshot and the re-verify (F1-S9 slice 90.4, PR #95 review round 2, Codex, P1 -- the element-mismatch branch, distinct from the size-mismatch one)", async () => {
+    const marker = criterionBlockerCommentMarker("34:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "34:0", satisfied: false, rationale: "Still genuinely unmet." }] },
+      spine: {
+        entries: [{ issueNumber: 34, kind: "closing", criterionId: "34:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCount += 1;
+        // FIRST call: closing set is {34}. SECOND call (re-verify): SAME
+        // SIZE (one closing reference) but a DIFFERENT issue number (#99,
+        // not #34) -- #34 was de-referenced AND #99 was newly closed in
+        // the same edit, landing between the snapshot and the re-verify.
+        return prFetchHandlerWithOverrides({ body: prFetchCount === 1 ? "Closes #34" : "Closes #99" });
+      },
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 201,
+            body: `Was still live.\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      // #34 already has a matching existing comment (id 201) at the
+      // snapshot body ("Closes #34"), so tryPostBlockersInline PATCHes it
+      // in place rather than creating a new one.
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/201": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // #34's own PRIOR comment (id 201) is left untouched -- the re-verify
+    // detected the set changed (even though the SIZE matched) and skipped
+    // the delete non-destructively.
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(prFetchCount).toBe(2);
   });
 
   it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {

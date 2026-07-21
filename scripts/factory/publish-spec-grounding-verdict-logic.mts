@@ -755,32 +755,48 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
 /**
  * Builds the note appended when one or more planned blocker findings were
  * skipped from inline posting because the PR's CURRENT body no longer
- * references their own issue at all (PR #87 review round 4, Codex, P1 —
- * symmetric to the delete-path TOCTOU fold: `tryPostBlockersInline` in
- * `publish-spec-grounding-verdict.mts` re-checks each planned blocker's
- * own `issueNumber` against a fresh re-parse of the PR's CURRENT body, not
- * the runner-time one the verdict/spine were computed against — a
- * body-only edit never bumps the trusted head SHA, so this run could
- * otherwise post an inline comment reasserting an obligation for an issue
- * the PR no longer claims to reference at all).
+ * references their own issue with a closing keyword at all (PR #87 review
+ * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
+ * `tryPostBlockersInline` in `publish-spec-grounding-verdict.mts` re-checks
+ * each planned blocker's own `issueNumber` against a fresh re-parse of the
+ * PR's CURRENT body, not the runner-time one the verdict/spine were
+ * computed against — a body-only edit never bumps the trusted head SHA, so
+ * this run could otherwise post an inline comment reasserting an
+ * obligation the PR no longer claims to have at all).
  *
- * WORDING UPDATED (F1-S9 slice 90.4, the redesigned reconcile — team-lead's
- * explicit instruction): this same run's own `deleteDeReferencedInlineBlockerComments`
- * (`publish-spec-grounding-inline-comment-io.mts`) now ALSO deletes any
- * PRIOR run's own inline comment for one of these exact issues, since a
- * de-referenced issue has no live closing obligation left at all (the
- * operator's #801 ruling). Before this slice, this note only ever meant
- * "not posted THIS run" while a prior comment (if any) stayed open,
- * gating forever — that residual is what this slice's reconcile closes,
- * so the wording now says so, rather than leaving a human to believe an
- * old thread might still be sitting open when it has actually been
- * cleaned up in the same run. This note is the ONLY place a human learns
- * that happened, so it must never be silently absent.
+ * COVERS TWO CASES, DELIBERATELY NOT DISTINGUISHED (F1-S9 slice 90.4, PR
+ * #95 review round 2 — Codex and claude-review, independently, on the
+ * same root cause): the issue may be entirely REMOVED from the body, or
+ * merely DOWNGRADED (still mentioned, but a `Closes #N` edited to a plain
+ * `Refs #N`) — `tryPostBlockersInline`'s own filter treats both the same
+ * way (closing-kind reference gone), since both mean "no live closing
+ * obligation this run can verify" regardless of which one actually
+ * happened. The wording below says "no longer ... with a closing
+ * keyword", not "no longer references ... at all" (the round-1 wording),
+ * specifically so it stays accurate for the downgrade case too.
+ *
+ * DOES NOT UNCONDITIONALLY CLAIM REMOVAL (Codex finding, PR #95 review
+ * round 2, P2 — a real overclaim in an earlier version): this same run's
+ * own `deleteDeReferencedInlineBlockerComments`
+ * (`publish-spec-grounding-inline-comment-io.mts`) deletes a PRIOR run's
+ * own inline comment for one of these exact issues only when it can
+ * positively confirm it is safe to (an INDIVIDUAL marker, a non-null
+ * generation no newer than this run's own) — an AGGREGATE-marker comment
+ * covering this issue alongside others, or one with a null/unparseable
+ * generation, is deliberately left untouched by that same function. An
+ * earlier version of this note claimed unconditionally that "any prior
+ * inline comment ... has been REMOVED", which was false in exactly those
+ * cases. The wording now says removal happened only where reconciliation
+ * could actually confirm it was safe, and names the residual explicitly
+ * rather than implying a clean state that may not exist. This note is the
+ * ONLY place a human learns any of this, so it must never be silently
+ * absent.
  *
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
- *   `unreviewedClosingIssues` whose own issue is no longer referenced in
- *   the PR's current body.
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced
+ *   with a closing keyword in the PR's current body (removed entirely, or
+ *   downgraded to a plain reference).
  * @returns The Markdown section to append, or `""` if nothing was
  *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
  *   regardless of how many issue numbers were skipped.
@@ -804,11 +820,14 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
   const omittedCount = staleBlockerIssueNumbers.length - addedCount;
   const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
   return (
-    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline, and any PRIOR ` +
-    `inline comment for them has been REMOVED.** This PR's own body no longer references them at ` +
-    "all (removed or edited since the spec-grounded review ran against this PR's head), so those " +
-    "findings no longer reflect a live obligation this run could verify. A fresh spec-grounded " +
-    "review run will re-evaluate against the PR's current state."
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body no longer references them with a closing keyword (removed, or downgraded to a plain " +
+    "reference, since the spec-grounded review ran against this PR's head), so those findings no " +
+    "longer reflect a live closing obligation this run could verify. Any prior inline comment for " +
+    "them that this run's own reconciliation could positively confirm was safe to remove has been " +
+    "deleted; a comment covering multiple issues together, or one this run could not confirm " +
+    "predates it, may still be open and needs a human to resolve it directly. A fresh " +
+    "spec-grounded review run will re-evaluate against the PR's current state."
   );
 }
 

@@ -294,6 +294,68 @@ async function isStillSafeToDeleteInlineBlockerThreads(
   return references.length === 0;
 }
 
+/**
+ * Re-verifies, immediately before the DESTRUCTIVE de-reference delete in
+ * `publishSummary`, that this PR's CURRENT closing-kind reference set is
+ * UNCHANGED from the earlier snapshot (`currentClosingIssueNumbers`) that
+ * delete's own membership test was built from (F1-S9 slice 90.4, PR #95
+ * review round 2, Codex, P1 — a genuine gate-integrity TOCTOU, the
+ * de-reference-delete sibling of {@link isStillSafeToDeleteInlineBlockerThreads}'s
+ * own identical concern for the no-references path): that snapshot is
+ * taken ONCE, early in `publishSummary` — before the diff fetch, inline-
+ * comment posting, and the delete's OWN comment-pagination fetch, none of
+ * which is instantaneous. A body-only edit landing in that window (most
+ * concerning: UPGRADING a plain `Refs #N` to a genuine `Closes #N`) never
+ * bumps the trusted head SHA, so an unrevalidated snapshot could have
+ * this run delete #N's prior blocker comment using now-stale membership
+ * while a brand-new closing obligation for #N is actually live — a gap
+ * that would persist until a LATER `edited`-event run re-establishes it.
+ *
+ * Mirrors {@link isStillSafeToDeleteInlineBlockerThreads}'s own "re-fetch
+ * fresh, compare, never throw for an expected mismatch" shape, but
+ * compares a SET (the closing-kind issue numbers), not a boolean — an
+ * expected-race SET CHANGE (in either direction: an addition OR a
+ * removal) means the earlier snapshot can no longer be trusted for this
+ * delete, so this function reports `false` rather than partially
+ * reconciling against a mix of old and new information. A genuine
+ * network/API failure while re-fetching still propagates uncaught (the
+ * caller's own existing "never silent" fallback handling covers that
+ * case, same as every other artifact/network failure in this
+ * entrypoint).
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param snapshotClosingIssueNumbers - The closing-kind issue-number set
+ *   `publishSummary` computed earlier in this same run.
+ * @returns `true` only if a FRESH re-fetch of the PR's current body
+ *   yields the IDENTICAL closing-kind issue-number set as `snapshotClosingIssueNumbers`.
+ */
+async function isSnapshotClosingIssueNumbersStillCurrent(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  snapshotClosingIssueNumbers: ReadonlySet<number>,
+): Promise<boolean> {
+  const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  const freshClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+  if (freshClosingIssueNumbers.size !== snapshotClosingIssueNumbers.size) {
+    return false;
+  }
+  for (const issueNumber of freshClosingIssueNumbers) {
+    if (!snapshotClosingIssueNumbers.has(issueNumber)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 interface RunPaths {
   readonly outcomePath: string;
   readonly criteriaSpinePath: string;
@@ -803,6 +865,35 @@ interface TryPostBlockersInlineResult {
  * caller (never silently dropped) so the summary can say so, never
  * posted inline.
  *
+ * KIND-AWARE, not merely presence-aware (F1-S9 slice 90.4, PR #95 review
+ * round 2 — Codex AND claude-review independently converged on the
+ * identical finding: this filter and `publishSummary`'s own
+ * `currentClosingIssueNumbers`, computed from the SAME body for the
+ * reconcile call, MUST agree on what "still live" means, or the two
+ * mechanisms disagree on a downgraded issue). Every entry in
+ * `criterionBlockers`/`spine.unreviewedClosingIssues` is `closing`-kind
+ * by construction — `deriveSeverity` never escalates a `non-closing`
+ * entry, and `computeCriteriaSpineTruncation` only ever adds `closing`-kind
+ * issues to `unreviewedClosingIssues`. So the filter below now checks
+ * "referenced as CLOSING right now", not merely "referenced at all": a
+ * body edit that downgrades `Closes #N` to a plain `Refs #N` (still
+ * mentions the issue, no longer claims to close it) is now treated the
+ * SAME way an outright removal is — folded into `staleBlockerIssueNumbers`
+ * (this function makes no attempt to distinguish "removed entirely" from
+ * "downgraded to non-closing" in that one bucket; both get the identical
+ * "not posted inline, no longer a live closing obligation" treatment).
+ * BEFORE this fix, a downgraded issue's own `criterionId`/`issueNumber`
+ * stayed in `currentlyReferencedIssueNumbers` (a presence-only set), so
+ * this function POSTED/PATCHED its inline comment THIS run and reported
+ * `postedInline: true` — only for `publishSummary`'s own
+ * `deleteDeReferencedInlineBlockerComments` call to immediately delete
+ * that SAME comment (since it correctly excludes non-closing references)
+ * — a deterministic body-edit bypass: the summary and exit code both
+ * claimed a healthy, gated state (`blockersPostedInline: true`) for a
+ * finding whose only inline thread had already been deleted in the same
+ * run, with no explanatory note at all (since `staleBlockerIssueNumbers`
+ * never saw it either).
+ *
  * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
  * Codex, medium, fail-open close): {@link publishSummary}'s own caller
  * now fetches and verifies the PR's current SHAs/body ONCE, before
@@ -844,16 +935,17 @@ interface TryPostBlockersInlineResult {
  *   {@link planBlockerInlineComments}, which embeds it in every planned
  *   comment's own body via `inlineBlockerGenerationMarker`
  *   (`publish-spec-grounding-blocker-logic.mts`).
- * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
- *   successfully posted as a real inline comment; `{ postedInline: false,
- *   degradeReason }` if there was no addable anchor at all
- *   (`"no-addable-anchor"`) or the first inline POST was rejected with a
- *   422 (`"anchor-rejected-422"`) — the anchor-fallback case, either
- *   structurally or via the probe-then-degrade, the caller renders the
- *   full (still-referenced) blocker detail in the summary instead either
- *   way. `staleBlockerIssueNumbers` is independent of both — the issue
- *   numbers filtered out because the PR's CURRENT body no longer
- *   references them at all.
+ * @returns `{ postedInline: true }` if every STILL-CLOSING-REFERENCED
+ *   blocker was successfully posted as a real inline comment; `{
+ *   postedInline: false, degradeReason }` if there was no addable anchor
+ *   at all (`"no-addable-anchor"`) or the first inline POST was rejected
+ *   with a 422 (`"anchor-rejected-422"`) — the anchor-fallback case,
+ *   either structurally or via the probe-then-degrade, the caller
+ *   renders the full (still-closing-referenced) blocker detail in the
+ *   summary instead either way. `staleBlockerIssueNumbers` is
+ *   independent of both — the issue numbers filtered out because the
+ *   PR's CURRENT body no longer references them with a closing keyword
+ *   at all (removed entirely, or downgraded to a plain reference).
  * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
  *   inline-posting failure) — a genuine error, not a case this function
  *   degrades from; the caller converts it into a visible fallback, same
@@ -871,18 +963,24 @@ async function tryPostBlockersInline(
   runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
-  const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
+  // KIND-AWARE (F1-S9 slice 90.4, PR #95 review round 2): closing-kind
+  // only, matching `publishSummary`'s own `currentClosingIssueNumbers` --
+  // see this function's own docstring for the downgraded-reference gate
+  // bypass this filter (previously presence-only) allowed.
+  const currentlyClosingIssueNumbers = new Set(
+    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
+  );
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
-    currentlyReferencedIssueNumbers.has(blocker.issueNumber),
+    currentlyClosingIssueNumbers.has(blocker.issueNumber),
   );
   const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
-    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+    currentlyClosingIssueNumbers.has(entry.issueNumber),
   );
   const staleBlockerIssueNumbers = [
     ...new Set(
       [...criterionBlockers, ...spine.unreviewedClosingIssues]
         .map((entry) => entry.issueNumber)
-        .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber)),
+        .filter((issueNumber) => !currentlyClosingIssueNumbers.has(issueNumber)),
     ),
   ].sort((a, b) => a - b);
 
@@ -1087,15 +1185,44 @@ async function publishSummary(
   // each comment's own generation -- NEITHER of which is affected by
   // whether THIS run's own new blockers happened to post inline
   // successfully, so there is nothing left to gate on.
+  //
+  // RE-VERIFIED immediately before the delete (F1-S9 slice 90.4, PR #95
+  // review round 2, Codex, P1 -- the TOCTOU sibling of
+  // isStillSafeToDeleteInlineBlockerThreads's own identical concern for
+  // the no-references path): `currentClosingIssueNumbers` was snapshotted
+  // EARLY, before the diff fetch, inline posting, and this delete's own
+  // comment-pagination fetch -- a body-only edit landing in that window
+  // (e.g. upgrading a plain `Refs #N` to a genuine `Closes #N`) never
+  // bumps the trusted head SHA, so an unrevalidated snapshot could
+  // delete #N's prior blocker using now-stale membership while a
+  // brand-new closing obligation for #N is actually live. An expected
+  // race (the set changed) degrades to a NON-DESTRUCTIVE skip, logged but
+  // not treated as an error -- a fresh run will reconcile against
+  // whatever the PR's body says by then.
   try {
-    await deleteDeReferencedInlineBlockerComments(
+    const snapshotStillCurrent = await isSnapshotClosingIssueNumbersStillCurrent(
       token,
       owner,
       repo,
       prNumber,
       currentClosingIssueNumbers,
-      currentGeneration,
     );
+    if (snapshotStillCurrent) {
+      await deleteDeReferencedInlineBlockerComments(
+        token,
+        owner,
+        repo,
+        prNumber,
+        currentClosingIssueNumbers,
+        currentGeneration,
+      );
+    } else {
+      console.log(
+        `PR #${prNumber}'s linked-issue closing references changed since this run's own earlier ` +
+          `snapshot was taken -- skipping this run's own de-reference reconciliation non-destructively; ` +
+          `a fresh spec-grounded review run will reconcile against the PR's current state.`,
+      );
+    }
   } catch (err) {
     // Same "visible fallback, never silent" treatment as every other
     // artifact/network failure in this entrypoint.
