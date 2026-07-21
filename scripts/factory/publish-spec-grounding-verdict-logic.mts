@@ -42,7 +42,7 @@
  */
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
-import type { IssueLinkKind } from "./spec-grounding-logic.mts";
+import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
@@ -484,6 +484,93 @@ export function isDiffTruncationUnverifiableForClosing(
     return false;
   }
   return joined.some((entry) => entry.kind === "closing") || unreviewedClosingIssues.length > 0;
+}
+
+/**
+ * Every CLOSING-kind issue this PR's CURRENT body references that this
+ * run's own review never knew about as closing at all (F1-S9 slice 90.5,
+ * issue #12 — the re-landed, CORRECTED version of a fix reverted twice in
+ * PR #87 rounds 8-9, tracked in issue #90): the body-edit sibling of
+ * `publishSummary`'s trusted-head-SHA check. A body edit that ADDS a
+ * brand-new `Closes #N` line, or upgrades an existing `Refs #N` to
+ * `Closes #N`, changes NEITHER the PR's head SHA nor its diff, so the
+ * head-SHA check alone cannot catch it — a run reviewed from before that
+ * edit could otherwise publish (or keep gating on) a verdict for a closing
+ * claim it never actually evaluated as closing.
+ *
+ * THE "KNOWN AS CLOSING" SET IS A UNION, DELIBERATELY — of TWO fields,
+ * neither alone is correct (team-lead's confirmed design, this slice):
+ *
+ * - `reviewedClosingIssueNumbers` (F1-S9 slice 90.2) — every closing-kind
+ *   reference within the runner's own fetch cap, REGARDLESS of whether it
+ *   ended up with any spine entries at all. This is what closes rounds
+ *   8-9's own real bug: a closing-kind issue with ZERO unmet criteria AT
+ *   REVIEW TIME (already fully satisfied when the runner looked at it)
+ *   gets no `CriteriaSpineEntry` and no `UnreviewedClosingIssueResult`
+ *   either — `buildLinkedIssueSpecs` omits any issue with nothing unmet
+ *   outright — so round 8's OWN "known" set (spine entries ∪
+ *   unreviewedClosingIssues alone) could never see it, and reported it as
+ *   an unreviewed-new closing reference on EVERY subsequent run, forever
+ *   (PR #87 round 9's own revert rationale, cid 3621866011).
+ * - `unreviewedClosingIssues` — a closing-kind reference BEYOND the
+ *   runner's own fetch cap (`MAX_LINKED_ISSUES`) is, by construction, ALSO
+ *   absent from `reviewedClosingIssueNumbers` (`selectIssuesToFetch`
+ *   applies the identical cap to both) — correctly, since it was never
+ *   actually looked at. But that same beyond-cap reference already
+ *   produces its OWN live blocker via `spine.unreviewedClosingIssues`
+ *   (the `"fully-dropped"`/"never even fetched" case). Using
+ *   `reviewedClosingIssueNumbers` ALONE would make THIS function ALSO
+ *   flag that same issue as "unreviewed new" — a double-flag that, on the
+ *   blocker-bearing path, would divert an already-correctly-escalating
+ *   case away from its own specific, resolvable blocker treatment into a
+ *   generic top-level fallback instead. Unioning with
+ *   `unreviewedClosingIssues` closes that regression: an issue already
+ *   accounted for by EITHER signal is never "new".
+ *
+ * Called UNCONDITIONALLY by `publishSummary`, on EVERY `hasCriteria: true`
+ * run — BOTH the zero-blocker and blocker-bearing paths (F1-S9 slice 90.5;
+ * round 8's own version only ever guarded the zero-blocker path, since a
+ * blocker-bearing run's OWN posting-path staleness filter was — at the
+ * time — considered a sufficient, separate safeguard; team-lead's #90
+ * kickoff spec widens this to run on both, since a NEW/upgraded closing
+ * reference makes the ENTIRE run's verdict suspect for that issue, not
+ * just its own already-joined criteria). Placed BEFORE the
+ * `totalBlockerCount` branch in `publishSummary`, so a non-empty result
+ * fails the WHOLE run closed before any posting or reconciliation is
+ * attempted (F1-S9 slice 90.4's own reconcile-delete included) — a stale
+ * verdict must never delete a prior run's still-valid gate.
+ *
+ * @param currentBody - The PR's CURRENT body text — already re-fetched and
+ *   head-verified by the caller; this function does no fetching of its own.
+ * @param thisRepo - This repo's own `owner/repo`, passed straight through
+ *   to {@link parseLinkedIssueReferences} for its cross-repo-reference check.
+ * @param reviewedClosingIssueNumbers - `criteria-spine.json`'s own
+ *   `reviewedClosingIssueNumbers` field for this run (F1-S9 slice 90.2).
+ * @param unreviewedClosingIssues - `criteria-spine.json`'s own
+ *   `unreviewedClosingIssues` for this run.
+ * @returns Every closing-kind issue number `currentBody` references that is
+ *   absent from the union of `reviewedClosingIssueNumbers` and
+ *   `unreviewedClosingIssues`, deduplicated and ascending by issue number,
+ *   empty if none.
+ */
+export function findUnreviewedNewClosingReferences(
+  currentBody: string,
+  thisRepo: string,
+  reviewedClosingIssueNumbers: readonly number[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+): readonly number[] {
+  const knownClosingIssueNumbers = new Set<number>([
+    ...reviewedClosingIssueNumbers,
+    ...unreviewedClosingIssues.map((issue) => issue.issueNumber),
+  ]);
+  const currentClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(currentBody, thisRepo)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+  return [...currentClosingIssueNumbers]
+    .filter((issueNumber) => !knownClosingIssueNumbers.has(issueNumber))
+    .sort((a, b) => a - b);
 }
 
 /**

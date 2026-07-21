@@ -131,6 +131,7 @@ import {
   buildSpecGroundingSummaryCommentBody,
   buildStaleBlockerSkippedNote,
   deriveSeverity,
+  findUnreviewedNewClosingReferences,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   type JoinedCriterionResult,
@@ -407,13 +408,47 @@ const MAX_OUTCOME_ARTIFACT_BYTES = 4096;
 const NO_CRITERIA_REASONS: ReadonlySet<string> = new Set<NoCriteriaReason>(["no-references", "no-unmet-criteria"]);
 
 /**
+ * Upper bound on the NUMBER of elements `reviewedClosingIssueNumbers` may
+ * contain (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262,
+ * BLOCKER — team-lead's own refinement) — the SAME value as
+ * `criteria-spine.json`'s own identically-named field's own
+ * `MAX_REVIEWED_CLOSING_ISSUE_NUMBERS` (`spec-grounding-runner-logic.mts`):
+ * same field, same shape, same threat. A legitimate writer can never
+ * produce more than `MAX_LINKED_ISSUES` (20) distinct values here (the
+ * runner's own `selectIssuesToFetch` cap), so this is generous
+ * defense-in-depth against a corrupted/oversized artifact — an
+ * availability vector at this trust boundary, not a tight fit to the
+ * expected shape — checked BEFORE the array is iterated element-by-element.
+ */
+const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
+
+/**
  * `outcome.json`'s own shape, post-validation — a discriminated union so
- * `noCriteriaReason` is only ever accessible (and only ever populated)
- * when `hasCriteria` is `false` (PR #87 review, Codex, P1/medium fold).
+ * `noCriteriaReason`/`reviewedClosingIssueNumbers` are only ever accessible
+ * (and only ever populated) when `hasCriteria` is `false` (PR #87 review,
+ * Codex, P1/medium fold).
  */
 type OutcomeArtifact =
   | { readonly hasCriteria: true }
-  | { readonly hasCriteria: false; readonly noCriteriaReason: NoCriteriaReason };
+  | {
+      readonly hasCriteria: false;
+      readonly noCriteriaReason: NoCriteriaReason;
+      /**
+       * Every closing-kind issue number `spec-grounding-runner.mts`
+       * discovered at review time, on THIS `hasCriteria: false` run — the
+       * `hasCriteria: false` sibling of `criteria-spine.json`'s own
+       * `reviewedClosingIssueNumbers` field, same name, same semantics
+       * (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262,
+       * BLOCKER). Without this, `findUnreviewedNewClosingReferences`
+       * (Fork A) could only ever run on the `hasCriteria: true` side — a
+       * PR whose linked issue(s) were all self-attested complete, or that
+       * referenced no issue at all, could have a body edit ADD a
+       * brand-new closing reference before the privileged publisher ran,
+       * and that new claim would never be reviewed at all while the job
+       * still exits clean.
+       */
+      readonly reviewedClosingIssueNumbers: readonly number[];
+    };
 
 /**
  * Reads and shape-validates `outcome.json` — kept private and inline
@@ -443,11 +478,19 @@ type OutcomeArtifact =
  * this function could not actually confirm). Never too permissive, only
  * ever too cautious.
  *
+ * `reviewedClosingIssueNumbers` (F1-S9 slice 90.5, PR #96 review round 2,
+ * Codex, cid 3626169262, BLOCKER) gets the OPPOSITE treatment on
+ * malformation — it THROWS, never coerces — see this function's own
+ * validation site for why a full-array field warrants a stronger signal
+ * than a two-valued enum does.
+ *
  * @param path - `outcome.json`'s path on disk.
  * @returns `null` if the file is absent; the parsed, shape-validated
  *   artifact if present.
  * @throws If the file is present but oversized, unreadable, not valid
- *   JSON, missing `hasCriteria`, or carrying an unexpected extra field.
+ *   JSON, missing `hasCriteria`, carrying an unexpected extra field, or
+ *   (on the `hasCriteria: false` path) missing or malformed
+ *   `reviewedClosingIssueNumbers`.
  */
 async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null> {
   const raw = await readArtifactFile(path, MAX_OUTCOME_ARTIFACT_BYTES);
@@ -488,7 +531,9 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
     return { hasCriteria: true };
   }
 
-  const extraKeys = Object.keys(record).filter((key) => key !== "hasCriteria" && key !== "noCriteriaReason");
+  const extraKeys = Object.keys(record).filter(
+    (key) => key !== "hasCriteria" && key !== "noCriteriaReason" && key !== "reviewedClosingIssueNumbers",
+  );
   if (extraKeys.length > 0) {
     throw new Error(`outcome.json at ${path} carries unexpected field(s) (${extraKeys.join(", ")}), got ${rawText}`);
   }
@@ -497,7 +542,66 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
     typeof rawReason === "string" && NO_CRITERIA_REASONS.has(rawReason)
       ? (rawReason as NoCriteriaReason)
       : "no-unmet-criteria";
-  return { hasCriteria: false, noCriteriaReason };
+  // FAILS CLOSED, unlike `noCriteriaReason` just above (F1-S9 slice 90.5,
+  // PR #96 review round 2, Codex, cid 3626169262, BLOCKER — team-lead's
+  // own "fail-closed-validated contract addition" ruling): a malformed
+  // `reviewedClosingIssueNumbers` is a much stronger signal of a genuinely
+  // broken/tampered artifact than an unrecognized `noCriteriaReason`
+  // string (which has exactly two legitimate values, so coercing an
+  // unknown one to the more conservative of the two is a narrow,
+  // well-understood substitution) — this field can be malformed in
+  // unboundedly many ways, and Fork A's own correctness (below, in
+  // `clearStaleSpecGroundingStateOnDisappearedCriteria`) depends on it
+  // being the TRUE reviewed-closing set, not a silently-substituted one.
+  // THROWS here, converted by this function's own caller into the SAME
+  // visible fallback every other malformed/missing artifact in this
+  // entrypoint gets — never a silent coercion.
+  const rawReviewedClosingIssueNumbers = record.reviewedClosingIssueNumbers;
+  if (!Array.isArray(rawReviewedClosingIssueNumbers)) {
+    throw new Error(
+      `outcome.json at ${path} must carry a "reviewedClosingIssueNumbers" array when hasCriteria is false, ` +
+        `got ${rawText}`,
+    );
+  }
+  // Cardinality cap, checked BEFORE the array is iterated (team-lead's own
+  // refinement, PR #96 review round 2 follow-up) — mirrors
+  // `criteria-spine.json`'s own identically-named field's own
+  // `MAX_REVIEWED_CLOSING_ISSUE_NUMBERS`: same field, same shape, same
+  // threat, same defensive bound against an oversized/corrupted artifact.
+  if (rawReviewedClosingIssueNumbers.length > MAX_REVIEWED_CLOSING_ISSUE_NUMBERS) {
+    throw new Error(
+      `outcome.json at ${path}'s "reviewedClosingIssueNumbers" has ${rawReviewedClosingIssueNumbers.length} ` +
+        `elements, exceeds ${MAX_REVIEWED_CLOSING_ISSUE_NUMBERS}`,
+    );
+  }
+  // POSITIVE, not merely non-negative (team-lead's own refinement): issue
+  // #0 does not exist on GitHub — matches `parseLinkedIssueReferences`'s
+  // own `issueNumber <= 0` drop, so a bogus 0 can never silently pass a
+  // membership check downstream. Also rejects a DUPLICATE outright (never
+  // silently deduped) — the SAME "never accept what a legitimate writer
+  // could not have produced" discipline `criteria-spine.json`'s own
+  // parser applies to this identically-named field: the runner's own
+  // `Set`-based construction can never emit a duplicate, so one here is
+  // corruption, not a benign redundancy to tolerate.
+  const seenReviewedClosingIssueNumbers = new Set<number>();
+  for (const value of rawReviewedClosingIssueNumbers) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(
+        `outcome.json at ${path}'s "reviewedClosingIssueNumbers" must contain only positive integers, got ${rawText}`,
+      );
+    }
+    if (seenReviewedClosingIssueNumbers.has(value)) {
+      throw new Error(
+        `outcome.json at ${path}'s "reviewedClosingIssueNumbers" contains a duplicate (${value}), got ${rawText}`,
+      );
+    }
+    seenReviewedClosingIssueNumbers.add(value);
+  }
+  return {
+    hasCriteria: false,
+    noCriteriaReason,
+    reviewedClosingIssueNumbers: rawReviewedClosingIssueNumbers,
+  };
 }
 
 /**
@@ -558,6 +662,23 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  * fallback, the same "never silent" policy every other network failure
  * in this entrypoint follows.
  *
+ * COMPLETES FORK A'S COVERAGE TO THIS PATH TOO (F1-S9 slice 90.5, PR #96
+ * review round 2, Codex, cid 3626169262, BLOCKER): before EITHER
+ * reason-specific branch below runs, this function now fetches and
+ * head-verifies the PR (via {@link fetchAndVerifyPrShas}, the SAME
+ * function `publishSummary` uses for the `hasCriteria: true` side) and
+ * runs {@link findUnreviewedNewClosingReferences} against
+ * `reviewedClosingIssueNumbers`. Without this, Fork A's whole job — fail
+ * closed on a closing reference this run never actually reviewed — only
+ * ever covered the `hasCriteria: true` path: a PR whose linked issue(s)
+ * were all self-attested complete (or that referenced no issue at all),
+ * then had a body edit ADD a brand-new closing reference before this
+ * privileged publish ran, would otherwise exit clean with that new claim
+ * never reviewed at all. A non-empty result fails the WHOLE run closed —
+ * same treatment as `publishSummary`'s own identical check — before any
+ * delete, summary upsert, or the reason-specific branches below are ever
+ * reached.
+ *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
@@ -565,7 +686,12 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  * @param reason - Why this run found `hasCriteria: false`.
  * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
  *   event context — needed for the `"no-references"` branch's own
- *   pre-delete revalidation.
+ *   pre-delete revalidation, and for this function's own new Fork A
+ *   head-verify above.
+ * @param reviewedClosingIssueNumbers - `outcome.json`'s own field of the
+ *   same name for this run (F1-S9 slice 90.5) — every closing-kind issue
+ *   `spec-grounding-runner.mts` discovered at review time, on this
+ *   `hasCriteria: false` run.
  */
 async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   token: string,
@@ -574,8 +700,34 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   prNumber: number,
   reason: NoCriteriaReason,
   trustedHeadSha: string,
+  reviewedClosingIssueNumbers: readonly number[],
 ): Promise<void> {
   try {
+    const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+    const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
+      pr.body ?? "",
+      `${owner}/${repo}`,
+      reviewedClosingIssueNumbers,
+      [],
+    );
+    if (unreviewedNewClosingIssueNumbers.length > 0) {
+      await publishFallback(
+        token,
+        owner,
+        repo,
+        prNumber,
+        unreviewedNewClosingIssueNumbers.map(
+          (issueNumber) =>
+            `this PR's linked-issue references changed since the spec-grounded review ran: a closing ` +
+            `reference to issue #${issueNumber} was not part of that review (added, or upgraded from a ` +
+            `non-closing reference, since this run's head SHA was captured) -- a fresh spec-grounded ` +
+            `review will re-evaluate against this PR's current body.`,
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     if (reason === "no-references") {
       const stillSafeToDelete = await isStillSafeToDeleteInlineBlockerThreads(
         token,
@@ -694,6 +846,7 @@ export async function main(): Promise<void> {
       prNumber,
       outcome.noCriteriaReason,
       trustedHeadSha,
+      outcome.reviewedClosingIssueNumbers,
     );
     return;
   }
@@ -1054,6 +1207,43 @@ async function publishSummary(
         `diffed against (${spine.reviewedBaseSha}) -- the target branch advanced since the review ran; ` +
         `failing closed rather than publishing a verdict produced against a different base.`,
     ]);
+    process.exitCode = 1;
+    return;
+  }
+
+  // The body-edit sibling of the head/base-SHA checks above (F1-S9 slice
+  // 90.5, the CORRECTED re-land of a fix reverted twice in PR #87 rounds
+  // 8-9 -- see findUnreviewedNewClosingReferences's own docstring for the
+  // full reasoning): a body-only edit that ADDS a brand-new `Closes #N`
+  // line, or upgrades an existing `Refs #N` to `Closes #N`, changes
+  // NEITHER the head SHA nor the diff, so neither check above can catch
+  // it. Runs UNCONDITIONALLY, on EVERY hasCriteria: true publish -- BOTH
+  // the zero-blocker and blocker-bearing paths (team-lead's #90 kickoff
+  // spec) -- and, on a nonzero result, fails closed BEFORE the
+  // totalBlockerCount branch below, so a run with an unreviewed new
+  // closing reference touches NOTHING further: no all-clear, no blocker
+  // posting, and no reconcile-delete either (F1-S9 slice 90.4) -- a stale
+  // verdict must never delete a prior run's still-valid gate.
+  const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
+    pr.body ?? "",
+    `${owner}/${repo}`,
+    spine.reviewedClosingIssueNumbers,
+    spine.unreviewedClosingIssues,
+  );
+  if (unreviewedNewClosingIssueNumbers.length > 0) {
+    await publishFallback(
+      token,
+      owner,
+      repo,
+      prNumber,
+      unreviewedNewClosingIssueNumbers.map(
+        (issueNumber) =>
+          `this PR's linked-issue references changed since the spec-grounded review ran: a closing ` +
+          `reference to issue #${issueNumber} was not part of that review (added, or upgraded from a ` +
+          `non-closing reference, since this run's head SHA was captured) -- a fresh spec-grounded ` +
+          `review will re-evaluate against this PR's current body.`,
+      ),
+    );
     process.exitCode = 1;
     return;
   }

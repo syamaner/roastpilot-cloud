@@ -143,7 +143,11 @@ describe("main — no linked issue (first early exit)", () => {
     // no-criteria-reason=no-references (PR #87 review, Codex, P1/medium
     // fold): no closing-keyword reference at all -- there was never any
     // obligation, distinct from the "self-attested complete" branch below.
-    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-references\n");
+    // reviewed-closing-issue-numbers=[] (F1-S9 slice 90.5, PR #96 review
+    // round 2, Codex, cid 3626169262): trivially empty here.
+    expect(await readOutput()).toBe(
+      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+    );
     await expect(readFile(criteriaBlockPath, "utf-8")).rejects.toThrow();
     // Exactly one fetch (the PR body) -- no issue or diff fetch at all.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -168,10 +172,75 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     // fold): the linked issue's own acceptance criteria are SELF-ATTESTED
     // complete (checked off), never diff-verified -- a materially weaker
     // signal than the no-references branch above.
-    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-unmet-criteria\n");
+    // reviewed-closing-issue-numbers=[12] (F1-S9 slice 90.5, PR #96 review
+    // round 2, Codex, cid 3626169262): #12 WAS reviewed as closing, even
+    // though it contributed nothing to criteriaBlock (fully satisfied).
+    expect(await readOutput()).toBe(
+      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+    );
     await expect(readFile(prDiffBlockPath, "utf-8")).rejects.toThrow();
     // Exactly two fetches (PR body + the one linked issue) -- no diff fetch.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("excludes a NON-closing reference from reviewed-closing-issue-numbers, even when it's the reason criteriaBlock ended up empty (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262)", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #12, refs #34"),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({ title: "An issue", body: "### Acceptance criteria\n- [x] Already done." }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/34 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({ title: "Another issue", body: "### Acceptance criteria\n- [x] Also done." }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Only #12 (closing-kind) is reviewed-as-closing -- #34 (non-closing)
+    // is excluded, even though it too contributed nothing unmet.
+    expect(await readOutput()).toBe(
+      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+    );
+  });
+
+  it("deduplicates and sorts ascending when the PR body names the same or multiple closing issues more than once", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("Closes #34, closes #12, and closes #34 again"),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({ title: "An issue", body: "### Acceptance criteria\n- [x] Already done." }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/34 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({ title: "Another issue", body: "### Acceptance criteria\n- [x] Also done." }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(await readOutput()).toBe(
+      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\n",
+    );
+  });
+
+  it("REGRESSION GUARD: a PR with MORE than MAX_LINKED_ISSUES(20) linked-issue references, even when every WITHIN-CAP one is self-attested complete, does NOT reach this branch at all -- has-criteria stays TRUE (F1-S9 slice 90.5, PR #96 review round 3, Codex, cid 3626349857, P1 fold). Documents the cross-module invariant the fix's own severity depends on: buildLinkedIssueSpecs's own truncatedIssueCount is unconditional on the FULL reference count (references.length - MAX_LINKED_ISSUES), so renderCriteriaDataBlock can never return '' whenever references.length exceeds the cap, regardless of kind or satisfaction -- if this invariant ever changes, THIS test fails, which is exactly the signal an engineer needs to re-examine whether the beyond-cap-closing-ref scenario has become reachable via the no-unmet-criteria branch after all", async () => {
+    const manyRefs = Array.from({ length: 22 }, (_unused, i) => `Closes #${i + 1}`).join(", ");
+    const handlers: Record<string, () => Response> = {
+      [PULLS_JSON_KEY]: () => prResponse(manyRefs),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
+    };
+    for (let i = 1; i <= 20; i++) {
+      handlers[`GET /repos/syamaner/roastpilot-cloud/issues/${i} accept=${JSON_ACCEPT}`] = () =>
+        jsonResponse({ title: `Issue ${i}`, body: "### Acceptance criteria\n- [x] Already done." });
+    }
+    const { fetchMock } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // has-criteria: true (NOT the no-unmet-criteria branch this describe
+    // block is otherwise about) -- the beyond-cap truncation itself is
+    // reported as criteria-worthy content, per renderCriteriaDataBlock's
+    // own contract, so this run correctly stays hasCriteria:true and its
+    // OWN reviewedClosingIssueNumbers (via computeReviewedClosingIssueNumbers,
+    // the SAME fetch-capped set the fix now reuses) governs Fork A instead.
+    expect(await readOutput()).toBe(`has-criteria=true\ndelimiter-nonce=${TEST_NONCE}\n`);
   });
 });
 
@@ -508,7 +577,9 @@ describe("main — a PR with no body at all", () => {
 
     // A null body -> parsed as empty text -> zero references -> the
     // no-references branch (never any obligation to begin with).
-    expect(await readOutput()).toBe("has-criteria=false\nno-criteria-reason=no-references\n");
+    expect(await readOutput()).toBe(
+      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+    );
   });
 });
 

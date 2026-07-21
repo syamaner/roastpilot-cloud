@@ -260,6 +260,39 @@ describe("main — the outcome.json tri-state", () => {
     expect((post?.body as { body: string }).body).toContain("carries unexpected field(s) (extra)");
   });
 
+  it.each([
+    ["missing entirely", {}, /must carry a "reviewedClosingIssueNumbers" array/i],
+    ["not an array", { reviewedClosingIssueNumbers: "12" }, /must carry a "reviewedClosingIssueNumbers" array/i],
+    ["contains ZERO -- issue #0 does not exist (team-lead's own refinement, positive not merely non-negative)", { reviewedClosingIssueNumbers: [0] }, /must contain only positive integers/i],
+    ["contains a negative number", { reviewedClosingIssueNumbers: [-1] }, /must contain only positive integers/i],
+    ["contains a non-integer", { reviewedClosingIssueNumbers: [1.5] }, /must contain only positive integers/i],
+    ["contains a non-number element", { reviewedClosingIssueNumbers: ["12"] }, /must contain only positive integers/i],
+    ["contains a DUPLICATE (a legitimate writer's own Set-based construction can never produce one)", { reviewedClosingIssueNumbers: [12, 12] }, /contains a duplicate \(12\)/i],
+    [
+      "exceeds MAX_REVIEWED_CLOSING_ISSUE_NUMBERS (team-lead's own refinement -- mirrors criteria-spine.json's own identical cap)",
+      { reviewedClosingIssueNumbers: Array.from({ length: 1001 }, (_unused, i) => i + 1) },
+      /has 1001 elements, exceeds 1000/i,
+    ],
+  ])(
+    "posts a visible fallback when outcome.json's reviewedClosingIssueNumbers %s (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER -- FAILS CLOSED, unlike noCriteriaReason's own safe-default coercion)",
+    async (_label, malformedField, expectedMessage) => {
+      const outcomePath = join(workdir, "outcome.json");
+      await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", ...malformedField }));
+      process.env.OUTCOME_PATH = outcomePath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      const post = calls.find((c) => c.method === "POST");
+      expect((post?.body as { body: string }).body).toMatch(expectedMessage);
+    },
+  );
+
   it("posts a visible fallback when outcome.json exists but isn't valid JSON", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(outcomePath, "{ not json");
@@ -321,7 +354,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("is a genuine no-op when hasCriteria is false and there is no prior spec-grounding state to clear (PATCH/POST/DELETE-free, only the read-only lookups)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
@@ -338,7 +374,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("reason=no-references: clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
@@ -372,12 +411,54 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
   });
 
-  it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+  it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: FAILS CLOSED with a visible fallback (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262 -- Fork A's own new head-verify now runs BEFORE either reason-specific branch, uniformly matching publishSummary's own hasCriteria:true behavior, rather than the narrower graceful degrade isStillSafeToDeleteInlineBlockerThreads used to provide for this exact scenario)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ headSha: "differentsha0000000000000000000000000000" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/does not match the trusted event head sha/i);
+    // Fork A's own head-verify fails BEFORE either reason-specific branch
+    // (no summary clear, no inline-comment lookup or delete attempt at all).
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("reason=no-references: STILL degrades to the non-destructive path (via isStillSafeToDeleteInlineBlockerThreads's own re-check) for the NARROWER TOCTOU window that remains AFTER Fork A's own head-verify -- the PR moves a SECOND time, between Fork A's fetch and this function's own separate, later re-fetch (F1-S9 slice 90.5: Fork A's new head-verify does not replace this pre-existing, independent re-check immediately before the destructive delete)", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    let pullsCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        // FIRST call (Fork A's own fetchAndVerifyPrShas) sees the TRUSTED
+        // head SHA and an empty body -- passes cleanly. SECOND call
+        // (isStillSafeToDeleteInlineBlockerThreads's own, separate
+        // re-fetch, immediately before the destructive delete) finds the
+        // PR has moved AGAIN in the interim -- the narrow race window
+        // that mechanism still exists specifically to close.
+        return pullsCallCount === 1
+          ? prFetchHandler()
+          : prFetchHandlerWithOverrides({ headSha: "differentsha0000000000000000000000000000" });
+      },
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -393,52 +474,51 @@ describe("main — the outcome.json tri-state", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(2);
     const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
     expect(patch).toBeDefined();
     expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
     expect((patch?.body as { body: string }).body).toMatch(/left in place/i);
-    // The inline blocker comments endpoint is NEVER even fetched, let
-    // alone anything DELETEd -- the revalidation failed BEFORE the
-    // destructive path was ever reached.
     expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
-  it("reason=no-references BUT the PR's CURRENT body now shows a closing reference (added after the review ran, head SHA unchanged): degrades to the non-destructive path, never deletes (PR #87 review round 3, Codex, P1, gate-integrity TOCTOU)", async () => {
+  it("reason=no-references BUT the PR's CURRENT body now shows a closing reference (added after the review ran, head SHA unchanged): Fork A itself now fails this closed with its own specific message, BEFORE either reason-specific branch runs (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262 -- supersedes the narrower, gracefully-degrading treatment isStillSafeToDeleteInlineBlockerThreads used to give this exact scenario)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       // Same head SHA as trusted (a body-only edit never bumps it), but
       // the body NOW carries a real closing reference the runner never saw.
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
-      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 55,
-            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-        ]),
-      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
-    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/"));
-    expect(patch).toBeDefined();
-    expect((patch?.body as { body: string }).body).toMatch(/own state changed/i);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/closing reference to issue #12 was not part of that review/i);
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
     expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   it("reason=no-unmet-criteria: updates the summary with the self-attested caveat but LEAVES inline blocker threads untouched -- deleting a required_conversation_resolution-gating thread on a self-attested, non-diff-verified signal would be an anti-gaming hole (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
         jsonResponse([
           {
@@ -464,13 +544,46 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
+  it("reason=no-unmet-criteria: Fork A ALSO fails closed here when the PR's CURRENT body shows a genuinely new closing reference (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER) -- completes Fork A's coverage to BOTH no-criteria sub-paths, not just no-references", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      // #12 was reviewed as closing (self-attested complete); #99 is a
+      // BRAND-NEW closing reference this run never knew about at all.
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    expect((post?.body as { body: string }).body).toMatch(/closing reference to issue #99 was not part of that review/i);
+    // Fork A's own check fails BEFORE the "no-unmet-criteria" branch's own
+    // summary-upsert logic ever runs.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
   it("an unknown/missing noCriteriaReason on a false outcome.json FAILS CLOSED to the non-destructive treatment -- never deletes inline blocker threads on a signal it could not confirm (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
     // Deliberately missing noCriteriaReason -- a malformed/stale-runner
     // artifact this entrypoint cannot positively confirm as no-references.
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false }));
+    // reviewedClosingIssueNumbers IS present and valid here -- this test
+    // isolates the noCriteriaReason-coercion behavior specifically, not
+    // the separate (and separately tested) reviewedClosingIssueNumbers
+    // validation (F1-S9 slice 90.5).
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, reviewedClosingIssueNumbers: [] }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -484,7 +597,10 @@ describe("main — the outcome.json tri-state", () => {
 
   it("posts a visible fallback, rather than crashing or silently no-opping, when clearing stale state genuinely fails", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     // The summary-comment lookup 403s exactly ONCE (clearStaleSpecGroundingSummary's
     // own check) -- publishFallback's own subsequent lookup, in the catch
@@ -1571,6 +1687,235 @@ describe("main — the happy path", () => {
     expect(process.exitCode).toBeUndefined();
     const patch = calls.find((c) => c.method === "PATCH");
     expect(patch).toBeDefined();
+  });
+});
+
+describe("main — all-paths new-closing-reference check (F1-S9 slice 90.5, issue #12)", () => {
+  it("fails closed on the ZERO-blocker path when the PR's CURRENT body references a brand-new closing issue the review never knew about in any way", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 is a known, already-reviewed closing reference (satisfied) --
+      // but the CURRENT body ALSO now closes #99, which appears in
+      // NEITHER reviewedClosingIssueNumbers NOR unreviewedClosingIssues.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/closing reference to issue #99 was not part of that review/i);
+  });
+
+  it("fails closed on the BLOCKER-BEARING path when the PR's CURRENT body references a brand-new closing issue -- touches NOTHING else (no inline post attempted at all)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: false, rationale: "Missing the retry wrapper." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    // The whole run diverts to the new-closing fallback BEFORE
+    // tryPostBlockersInline (or the reconcile) is ever reached -- no diff
+    // fetch, no inline comment lookup or post, no reconcile fetch at all.
+    // (The one /pulls/83 call itself is fetchAndVerifyPrShas's own,
+    // unavoidable and legitimate -- Fork A needs THAT fetch's own pr.body.)
+    expect(calls.some((c) => c.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.filter((c) => c.url === "https://api.github.com/repos/syamaner/roastpilot-cloud/pulls/83")).toHaveLength(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/closing reference to issue #99 was not part of that review/i);
+  });
+
+  it("fails closed on an UPGRADED reference (Refs -> Closes since the review ran): the issue was never reviewed AS CLOSING, so its criteria were never escalated at closing severity, and the current closing claim is unverified", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." },
+          { criterionId: "50:0", satisfied: false, rationale: "Non-closing at review time, unmet." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 50, kind: "non-closing", criterionId: "50:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        // #50 was reviewed only as a NON-closing reference -- absent from
+        // reviewedClosingIssueNumbers, which only ever tracks closing-kind
+        // fetched references.
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // The CURRENT body upgrades #50 from a plain reference to a closing one.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #50" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/closing reference to issue #50 was not part of that review/i);
+  });
+
+  it("does NOT false-positive on a closing issue that was FULLY SATISFIED at review time (zero unmet criteria, no spine trace at all) -- the core 90.2 regression fix for PR #87 rounds 8-9's own permanent-red bug", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      // #12 has NOTHING unmet, so it produces no finding/entry of its own
+      // at all -- #77 (non-closing) keeps the spine/hasCriteria non-empty.
+      verdict: { findings: [{ criterionId: "77:0", satisfied: false, rationale: "Non-closing, unmet." }] },
+      spine: {
+        entries: [{ issueNumber: 77, kind: "non-closing", criterionId: "77:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        // #12 WAS reviewed as closing (found fully satisfied, hence no
+        // entry above) -- only reviewedClosingIssueNumbers can say so.
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and refs #77" }),
+      // The de-reference reconcile runs unconditionally now (F1-S9 slice
+      // 90.4), even on this zero-blocker path -- fetches existing inline
+      // comments to find (none here) anything obsolete to delete.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toMatch(/was not part of that review/i);
+    expect(body).toContain("No blocking findings.");
+  });
+
+  it("does NOT double-flag a beyond-fetch-cap closing reference (absent from reviewedClosingIssueNumbers by construction) that already carries its OWN unreviewedClosingIssues blocker -- posts that blocker normally instead of diverting to the generic new-closing fallback", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [] },
+      spine: {
+        entries: [],
+        truncated: true,
+        unreviewedClosingIssues: [{ issueNumber: 12, truncationKind: "fully-dropped" }],
+        diffTruncated: false,
+        // #12 is beyond the fetch cap -- correctly ABSENT here, but
+        // already accounted for via unreviewedClosingIssues above.
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Posted as a REAL inline comment, the ordinary healthy path -- never
+    // diverted to the generic "was not part of that review" fallback.
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).not.toMatch(/was not part of that review/i);
+  });
+
+  it("happy path: publishes normally on the ZERO-blocker path when the only current closing reference is already known (ordinary case, no new-closing divergence)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      // The de-reference reconcile runs unconditionally now (F1-S9 slice
+      // 90.4), even on this zero-blocker path.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("No blocking findings.");
+  });
+
+  it("happy path: publishes normally on the BLOCKER-BEARING path when the only current closing reference is already known (ordinary case, no new-closing divergence)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
   });
 });
 
