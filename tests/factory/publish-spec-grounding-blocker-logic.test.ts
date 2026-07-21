@@ -259,6 +259,63 @@ describe("selectDeterministicBlockerAnchor (F1-S9 slice 3b-iii-c, issue #12)", (
     ].join("\n");
     expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("lib/a.ts");
   });
+
+  it("recognizes git's own QUOTED new-file header form (core.quotePath's default rendering for a non-ASCII path) and decodes it to the real path, rather than leaving currentPath null (PR #83 review, Codex, LOW -- a real-diff-format edge: a diff whose only added lines live in a non-ASCII-filename file previously false-reported anchorFallbackNeeded)", () => {
+    const diff = [
+      'diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"',
+      '+++ "b/caf\\303\\251.ts"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added to the non-ASCII-named file",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)).toEqual({ path: "café.ts", line: 2 });
+  });
+
+  it("decodes a quoted path containing an escaped backslash, an escaped double quote, and an octal byte together, in the same path", () => {
+    // Represents the real filename: back\slash"quote-é.ts
+    const diff = [
+      '+++ "b/back\\\\slash\\"quote-caf\\303\\251.ts"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe('back\\slash"quote-café.ts');
+  });
+
+  it("decodes \\t and \\n escapes within a quoted path", () => {
+    const diff = [
+      '+++ "b/weird\\tname\\nfile.ts"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("weird\tname\nfile.ts");
+  });
+
+  it("fails safe (passes the backslash through literally, does not crash) on an unrecognized escape sequence inside a quoted path -- not a sequence a real git diff would ever produce, but the parser must degrade gracefully rather than throw", () => {
+    const diff = [
+      '+++ "b/weird\\qname.ts"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+added",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)?.path).toBe("weird\\qname.ts");
+  });
+
+  it("still resolves /dev/null to a null (unanchorable) path when it appears alongside a quoted path elsewhere in the same diff -- /dev/null is never quoted by git", () => {
+    const diff = [
+      "diff --git a/lib/deleted.ts b/lib/deleted.ts",
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "-gone",
+      'diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"',
+      '+++ "b/caf\\303\\251.ts"',
+      "@@ -1,1 +1,2 @@",
+      " context",
+      "+kept",
+    ].join("\n");
+    expect(selectDeterministicBlockerAnchor(diff)).toEqual({ path: "café.ts", line: 2 });
+  });
 });
 
 describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", () => {

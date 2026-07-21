@@ -98,8 +98,93 @@ export interface DiffAnchor {
 /** Matches a unified diff hunk header, e.g. `@@ -12,3 +14,5 @@ optional section heading`. Captures the old-side count, the new-side start line, and the new-side count (all but the new start are optional, defaulting to 1 per the unified diff spec when a line has just one line and omits the count). Anchored to the line's start (no backtracking risk — single bounded match per line, never applied across multiple lines at once). Only ever matched when NOT already consuming a prior hunk's own declared content (see the function body) — this is what makes it safe against a content line that merely LOOKS like a hunk header. */
 const HUNK_HEADER_PATTERN = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-/** Matches a unified diff's new-file header, e.g. `+++ b/scripts/factory/foo.mts` or `+++ /dev/null` for a deleted file. Only ever matched in "structural line expected" state (see the function body) — this is what makes it safe against a content line that merely LOOKS like a file header. */
-const NEW_FILE_HEADER_PATTERN = /^\+\+\+ (?:b\/(.+)|(\/dev\/null))$/;
+/**
+ * Matches a unified diff's new-file header, e.g. `+++ b/scripts/factory/foo.mts`,
+ * `+++ /dev/null` for a deleted file, or git's own QUOTED form for a path
+ * containing a non-ASCII or otherwise "unusual" byte (PR #83 review,
+ * Codex, LOW — a real-diff-format edge, not attacker-crafted): with
+ * `core.quotePath` (git's own default) on, such a path is rendered
+ * double-quoted with C-style escapes, e.g. `+++ "b/caf\303\251.ts"` for
+ * `café.ts` (é is 0xC3 0xA9 in UTF-8, each byte its own `\NNN` octal
+ * escape). Without recognizing this third form, a diff whose only added
+ * lines live in a non-ASCII-filename file previously left `currentPath`
+ * null for the WHOLE diff — a false `anchorFallbackNeeded` despite a
+ * real anchor existing, degrading every such PR to the fallback summary
+ * and failing the job (fails SAFE — the blocker still reaches the human
+ * via that fallback — but an unnecessary red-X and degrade on an
+ * otherwise-clean run). `/dev/null` is never quoted by git (it's a fixed
+ * ASCII literal, never a real path), so only the `b/...` form needs a
+ * quoted variant. Three mutually-exclusive capture groups, structurally
+ * unambiguous by their own distinct starting characters (`b/`, the
+ * literal `/dev/null`, or `"b/`) — group 3, when present, is the RAW
+ * (still-escaped) quoted path content, decoded by {@link unquoteGitPath}.
+ * Only ever matched in "structural line expected" state (see the
+ * function body) — this is what makes it safe against a content line
+ * that merely LOOKS like a file header.
+ */
+const NEW_FILE_HEADER_PATTERN = /^\+\+\+ (?:b\/(.+)|(\/dev\/null)|"b\/(.+)")$/;
+
+/**
+ * Decodes git's own C-style path-quoting escapes (`core.quotePath`'s
+ * default rendering) back to the real path — see {@link
+ * NEW_FILE_HEADER_PATTERN}'s own docstring for why this exists. Handles
+ * `\\`, `\"`, `\t`, `\n`, and `\NNN` (a single raw BYTE in octal — git
+ * escapes a multi-byte UTF-8 character one byte at a time, never per
+ * codepoint), building a raw byte sequence and decoding it as UTF-8 at
+ * the end (an ordinary ASCII character appearing unescaped in the input
+ * is already single-byte-identical to its own UTF-8 encoding, so it
+ * passes through unchanged in the same byte sequence — git's own
+ * quoting escapes every non-ASCII byte, never leaves one literal).
+ *
+ * @param quoted - The RAW (still-escaped) path content between the
+ *   header's own quote marks — {@link NEW_FILE_HEADER_PATTERN}'s own
+ *   third capture group, not including the `"` marks themselves.
+ * @returns The decoded, real path.
+ */
+function unquoteGitPath(quoted: string): string {
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < quoted.length) {
+    // Defensive: `i < quoted.length` already guarantees `quoted[i]` is
+    // defined; the `?? ""` only satisfies TypeScript's
+    // noUncheckedIndexedAccess narrowing and is unreachable in practice.
+    /* v8 ignore next */
+    const ch = quoted[i] ?? "";
+    if (ch === "\\") {
+      const octalMatch = /^[0-7]{3}/.exec(quoted.slice(i + 1));
+      if (octalMatch) {
+        bytes.push(Number.parseInt(octalMatch[0], 8));
+        i += 1 + octalMatch[0].length;
+        continue;
+      }
+      const next = quoted[i + 1];
+      if (next === "\\" || next === '"') {
+        bytes.push(next.charCodeAt(0));
+        i += 2;
+        continue;
+      }
+      if (next === "t") {
+        bytes.push(0x09);
+        i += 2;
+        continue;
+      }
+      if (next === "n") {
+        bytes.push(0x0a);
+        i += 2;
+        continue;
+      }
+      // Unknown/malformed escape -- not a sequence a real `git diff`
+      // would ever produce, but fail safe by passing the backslash
+      // through literally rather than crashing or silently dropping it.
+      bytes.push(0x5c);
+      i += 1;
+      continue;
+    }
+    bytes.push(ch.charCodeAt(0));
+    i += 1;
+  }
+  return Buffer.from(bytes).toString("utf-8");
+}
 
 /**
  * Selects the single deterministic anchor point for every blocker inline
@@ -142,7 +227,11 @@ export function selectDeterministicBlockerAnchor(diff: string): DiffAnchor | nul
     // lookalike content line can never reach this branch at all.
     const fileHeaderMatch = NEW_FILE_HEADER_PATTERN.exec(line);
     if (fileHeaderMatch) {
-      currentPath = fileHeaderMatch[1] ?? null; // null for `+++ /dev/null` (a deleted file: nothing addable there)
+      if (fileHeaderMatch[3] !== undefined) {
+        currentPath = unquoteGitPath(fileHeaderMatch[3]); // git's own quoted-path form, e.g. `+++ "b/café.ts"` (see NEW_FILE_HEADER_PATTERN's own docstring)
+      } else {
+        currentPath = fileHeaderMatch[1] ?? null; // null for `+++ /dev/null` (a deleted file: nothing addable there)
+      }
       i += 1;
       continue;
     }
