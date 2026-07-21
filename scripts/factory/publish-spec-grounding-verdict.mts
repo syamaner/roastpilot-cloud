@@ -126,9 +126,11 @@ import {
   type ParsedCriteriaSpine,
 } from "./spec-grounding-runner-logic.mts";
 import {
+  buildDowngradedClosingBlockerSkippedNote,
   buildSpecGroundingSummaryCommentBody,
   buildStaleBlockerSkippedNote,
   deriveSeverity,
+  findUnreviewedNewClosingReferences,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
   type JoinedCriterionResult,
@@ -774,6 +776,14 @@ interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
   readonly staleBlockerIssueNumbers: readonly number[];
+  /**
+   * The issue numbers filtered out because the PR's CURRENT body still
+   * references them, but no longer with `kind: "closing"` (F1-S9 slice
+   * 90.5, kind-aware revalidation) — see {@link tryPostBlockersInline}'s
+   * own docstring for the full reasoning distinguishing this from
+   * `staleBlockerIssueNumbers`.
+   */
+  readonly downgradedClosingIssueNumbers: readonly number[];
 }
 
 /**
@@ -799,6 +809,27 @@ interface TryPostBlockersInlineResult {
  * is still in that current set — the STALE ones are reported back to the
  * caller (never silently dropped) so the summary can say so, never
  * posted inline.
+ *
+ * KIND-AWARE, not just presence-aware (F1-S9 slice 90.5, team-lead's
+ * confirmed design): every entry in `criterionBlockers`/`spine
+ * .unreviewedClosingIssues` became a blocker SOLELY because it was a
+ * `closing`-kind reference AT REVIEW TIME (`deriveSeverity` never
+ * escalates a `non-closing` entry). So the filter that decides what is
+ * still SAFE to post is "is this issueNumber referenced as CLOSING right
+ * now" (`currentlyClosingIssueNumbers`), not merely "is it referenced at
+ * all" — a Closes→Refs downgrade (the PR still names the issue, just no
+ * longer claims to close it) leaves the issue in
+ * `currentlyReferencedIssueNumbers` but NOT in
+ * `currentlyClosingIssueNumbers`, and must be dropped from posting the
+ * same way an outright removal is. The two cases are reported to the
+ * caller SEPARATELY (`staleBlockerIssueNumbers` for "no longer referenced
+ * at all", `downgradedClosingIssueNumbers` for "still referenced, no
+ * longer closing") — mutually exclusive by construction (the downgraded
+ * set is drawn from issues still in `currentlyReferencedIssueNumbers`,
+ * the stale set from issues that are not) — because conflating them under
+ * one wording would make a false claim about whichever case didn't
+ * actually apply (see {@link buildDowngradedClosingBlockerSkippedNote}'s
+ * own docstring for the full reasoning).
  *
  * TAKES `pr` ALREADY FETCHED AND HEAD-VERIFIED (PR #87 review round 7,
  * Codex, medium, fail-open close): {@link publishSummary}'s own caller
@@ -840,16 +871,20 @@ interface TryPostBlockersInlineResult {
  *   (`publish-spec-grounding-blocker-logic.mts`). DATA-ONLY as of this
  *   slice: not yet consumed by any delete-comparison logic (that lands in
  *   slice 90.4).
- * @returns `{ postedInline: true }` if every STILL-REFERENCED blocker was
+ * @returns `{ postedInline: true }` if every STILL-CLOSING blocker was
  *   successfully posted as a real inline comment; `{ postedInline: false,
  *   degradeReason }` if there was no addable anchor at all
  *   (`"no-addable-anchor"`) or the first inline POST was rejected with a
  *   422 (`"anchor-rejected-422"`) — the anchor-fallback case, either
  *   structurally or via the probe-then-degrade, the caller renders the
- *   full (still-referenced) blocker detail in the summary instead either
- *   way. `staleBlockerIssueNumbers` is independent of both — the issue
+ *   full REVIEW-TIME blocker detail in the summary instead either way
+ *   (still unfiltered by either staleness or kind-downgrade — see issue
+ *   #89/#376, tracked ahead of slice 90.6, not this one). `staleBlockerIssueNumbers`
+ *   and `downgradedClosingIssueNumbers`
+ *   are each independent of `postedInline`/`degradeReason` — the issue
  *   numbers filtered out because the PR's CURRENT body no longer
- *   references them at all.
+ *   references them at all, and because it references them but no longer
+ *   as closing, respectively.
  * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
  *   inline-posting failure) — a genuine error, not a case this function
  *   degrades from; the caller converts it into a visible fallback, same
@@ -868,19 +903,32 @@ async function tryPostBlockersInline(
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentlyReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
+  const currentlyClosingIssueNumbers = new Set(
+    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
+  );
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
-    currentlyReferencedIssueNumbers.has(blocker.issueNumber),
+    currentlyClosingIssueNumbers.has(blocker.issueNumber),
   );
   const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
-    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+    currentlyClosingIssueNumbers.has(entry.issueNumber),
   );
-  const staleBlockerIssueNumbers = [
-    ...new Set(
-      [...criterionBlockers, ...spine.unreviewedClosingIssues]
-        .map((entry) => entry.issueNumber)
-        .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber)),
-    ),
-  ].sort((a, b) => a - b);
+  const allReviewTimeBlockerIssueNumbers = [
+    ...new Set([...criterionBlockers, ...spine.unreviewedClosingIssues].map((entry) => entry.issueNumber)),
+  ];
+  // Mutually exclusive by construction: an issue number missing from
+  // `currentlyReferencedIssueNumbers` entirely is "stale" (removed
+  // outright); one still present there but missing from
+  // `currentlyClosingIssueNumbers` is "downgraded" (still referenced, no
+  // longer as closing) — see this function's own docstring for why these
+  // are reported and worded separately, never conflated.
+  const staleBlockerIssueNumbers = allReviewTimeBlockerIssueNumbers
+    .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber))
+    .sort((a, b) => a - b);
+  const downgradedClosingIssueNumbers = allReviewTimeBlockerIssueNumbers
+    .filter(
+      (issueNumber) => currentlyReferencedIssueNumbers.has(issueNumber) && !currentlyClosingIssueNumbers.has(issueNumber),
+    )
+    .sort((a, b) => a - b);
 
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   const plan = planBlockerInlineComments(
@@ -891,13 +939,23 @@ async function tryPostBlockersInline(
     runNumber,
   );
   if (plan.anchorFallbackNeeded) {
-    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: "no-addable-anchor",
+      staleBlockerIssueNumbers,
+      downgradedClosingIssueNumbers,
+    };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
-    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: postResult.reason,
+      staleBlockerIssueNumbers,
+      downgradedClosingIssueNumbers,
+    };
   }
-  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
+  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers, downgradedClosingIssueNumbers };
 }
 
 async function publishSummary(
@@ -975,9 +1033,47 @@ async function publishSummary(
     return;
   }
 
+  // The body-edit sibling of the head/base-SHA checks above (F1-S9 slice
+  // 90.5, the CORRECTED re-land of a fix reverted twice in PR #87 rounds
+  // 8-9 -- see findUnreviewedNewClosingReferences's own docstring for the
+  // full reasoning): a body-only edit that ADDS a brand-new `Closes #N`
+  // line, or upgrades an existing `Refs #N` to `Closes #N`, changes
+  // NEITHER the head SHA nor the diff, so neither check above can catch
+  // it. Runs UNCONDITIONALLY, on EVERY hasCriteria: true publish -- BOTH
+  // the zero-blocker and blocker-bearing paths (team-lead's #90 kickoff
+  // spec) -- and, on a nonzero result, fails closed BEFORE the
+  // totalBlockerCount branch below, so a run with an unreviewed new
+  // closing reference touches NOTHING further: no all-clear, no blocker
+  // posting, and (from slice 90.4 onward) no reconcile-delete either --
+  // a stale verdict must never delete a prior run's still-valid gate.
+  const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
+    pr.body ?? "",
+    `${owner}/${repo}`,
+    spine.reviewedClosingIssueNumbers,
+    spine.unreviewedClosingIssues,
+  );
+  if (unreviewedNewClosingIssueNumbers.length > 0) {
+    await publishFallback(
+      token,
+      owner,
+      repo,
+      prNumber,
+      unreviewedNewClosingIssueNumbers.map(
+        (issueNumber) =>
+          `this PR's linked-issue references changed since the spec-grounded review ran: a closing ` +
+          `reference to issue #${issueNumber} was not part of that review (added, or upgraded from a ` +
+          `non-closing reference, since this run's head SHA was captured) -- a fresh spec-grounded ` +
+          `review will re-evaluate against this PR's current body.`,
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
+  let downgradedClosingIssueNumbers: readonly number[] = [];
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -994,6 +1090,7 @@ async function publishSummary(
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
+      downgradedClosingIssueNumbers = result.downgradedClosingIssueNumbers;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1017,6 +1114,7 @@ async function publishSummary(
     blockersPostedInline,
     degradeReason,
     staleBlockerIssueNumbers,
+    downgradedClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
@@ -1032,12 +1130,16 @@ async function publishSummary(
   if (staleBlockerIssueNumbers.length > 0) {
     body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
   }
+  if (downgradedClosingIssueNumbers.length > 0) {
+    body += "\n" + buildDowngradedClosingBlockerSkippedNote(downgradedClosingIssueNumbers);
+  }
 
   await upsertSummaryComment(token, owner, repo, prNumber, body);
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
       `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
-      `${staleBlockerIssueNumbers.length} stale blocker(s) skipped.`,
+      `${staleBlockerIssueNumbers.length} stale blocker(s) skipped, ` +
+      `${downgradedClosingIssueNumbers.length} downgraded-closing blocker(s) skipped.`,
   );
 
   if (totalBlockerCount > 0 && !blockersPostedInline) {

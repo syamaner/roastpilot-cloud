@@ -498,9 +498,12 @@ export interface ParsedCriteriaSpine {
   readonly diffTruncated: boolean;
   /**
    * {@link computeReviewedClosingIssueNumbers}'s own output for this run
-   * (F1-S9 slice 90.2) — DATA-ONLY as of this slice: no consumer reads
-   * it yet (that lands in slice 90.5, the reference-revalidation work
-   * this field exists to unblock).
+   * (F1-S9 slice 90.2). Consumed starting in slice 90.5
+   * (`findUnreviewedNewClosingReferences`, `publish-spec-grounding-
+   * verdict-logic.mts`) — unioned with `unreviewedClosingIssues` to
+   * determine which CURRENT closing-kind references this run's own
+   * review already knew about, the reference-revalidation work this
+   * field exists to unblock.
    */
   readonly reviewedClosingIssueNumbers: readonly number[];
   /**
