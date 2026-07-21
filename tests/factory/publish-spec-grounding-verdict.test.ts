@@ -1574,6 +1574,294 @@ describe("main — the happy path", () => {
   });
 });
 
+describe("main — kind-aware revalidation + all-paths new-closing-reference check (F1-S9 slice 90.5, issue #12)", () => {
+  it("fails closed on the ZERO-blocker path when the PR's CURRENT body references a brand-new closing issue the review never knew about in any way", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 is a known, already-reviewed closing reference (satisfied) --
+      // but the CURRENT body ALSO now closes #99, which appears in
+      // NEITHER reviewedClosingIssueNumbers NOR unreviewedClosingIssues.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/closing reference to issue #99 was not part of that review/i);
+  });
+
+  it("fails closed on the BLOCKER-BEARING path when the PR's CURRENT body references a brand-new closing issue -- touches NOTHING else (no inline post attempted at all)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: false, rationale: "Missing the retry wrapper." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #99" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    // The whole run diverts to the new-closing fallback BEFORE
+    // tryPostBlockersInline (or the reconcile) is ever reached -- no diff
+    // fetch, no inline comment lookup or post, no reconcile fetch at all.
+    // (The one /pulls/83 call itself is fetchAndVerifyPrShas's own,
+    // unavoidable and legitimate -- Fork A needs THAT fetch's own pr.body.)
+    expect(calls.some((c) => c.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.filter((c) => c.url === "https://api.github.com/repos/syamaner/roastpilot-cloud/pulls/83")).toHaveLength(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/closing reference to issue #99 was not part of that review/i);
+  });
+
+  it("fails closed on an UPGRADED reference (Refs -> Closes since the review ran): the issue was never reviewed AS CLOSING, so its criteria were never escalated at closing severity, and the current closing claim is unverified", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." },
+          { criterionId: "50:0", satisfied: false, rationale: "Non-closing at review time, unmet." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 50, kind: "non-closing", criterionId: "50:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        // #50 was reviewed only as a NON-closing reference -- absent from
+        // reviewedClosingIssueNumbers, which only ever tracks closing-kind
+        // fetched references.
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // The CURRENT body upgrades #50 from a plain reference to a closing one.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and closes #50" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/closing reference to issue #50 was not part of that review/i);
+  });
+
+  it("does NOT false-positive on a closing issue that was FULLY SATISFIED at review time (zero unmet criteria, no spine trace at all) -- the core 90.2 regression fix for PR #87 rounds 8-9's own permanent-red bug", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      // #12 has NOTHING unmet, so it produces no finding/entry of its own
+      // at all -- #77 (non-closing) keeps the spine/hasCriteria non-empty.
+      verdict: { findings: [{ criterionId: "77:0", satisfied: false, rationale: "Non-closing, unmet." }] },
+      spine: {
+        entries: [{ issueNumber: 77, kind: "non-closing", criterionId: "77:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        // #12 WAS reviewed as closing (found fully satisfied, hence no
+        // entry above) -- only reviewedClosingIssueNumbers can say so.
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12 and refs #77" }),
+      // The de-reference reconcile runs unconditionally now (F1-S9 slice
+      // 90.4), even on this zero-blocker path -- fetches existing inline
+      // comments to find (none here) anything obsolete to delete.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toMatch(/was not part of that review/i);
+    expect(body).toContain("No blocking findings.");
+  });
+
+  it("does NOT double-flag a beyond-fetch-cap closing reference (absent from reviewedClosingIssueNumbers by construction) that already carries its OWN unreviewedClosingIssues blocker -- posts that blocker normally instead of diverting to the generic new-closing fallback", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [] },
+      spine: {
+        entries: [],
+        truncated: true,
+        unreviewedClosingIssues: [{ issueNumber: 12, truncationKind: "fully-dropped" }],
+        diffTruncated: false,
+        // #12 is beyond the fetch cap -- correctly ABSENT here, but
+        // already accounted for via unreviewedClosingIssues above.
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Posted as a REAL inline comment, the ordinary healthy path -- never
+    // diverted to the generic "was not part of that review" fallback.
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).not.toMatch(/was not part of that review/i);
+  });
+
+  it("drops DOWNGRADED closing blockers (Closes -> Refs since the review ran) from posting, reporting them via their OWN accurate note in ascending order -- distinct from the stale-at-all-referenced-not case", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker." },
+          // Deliberately out of ascending order (99 before 34) -- exercises
+          // the downgraded-issue-number sort, not just a single-element no-op
+          // (mirrors the stale-blocker sort test's own precedent above).
+          { criterionId: "99:0", satisfied: false, rationale: "Downgraded blocker, higher number." },
+          { criterionId: "34:0", satisfied: false, rationale: "Downgraded blocker, lower number." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 99, kind: "closing", criterionId: "99:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 99, 34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #34 and #99 are STILL referenced, just downgraded from Closes to
+      // Refs -- NOT removed outright, so this is NOT the stale-at-all case.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12, refs #99, refs #34" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    expect((inlinePosts[0]?.body as { body: string }).body).toContain("Still-live blocker.");
+    expect((inlinePosts[0]?.body as { body: string }).body).not.toContain("Downgraded blocker");
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    // Ascending order (#34 before #99), NOT the verdict's own findings
+    // order (99 was listed before 34 above).
+    expect(summaryBody).toMatch(/#34, #99[\s\S]*were NOT posted inline/i);
+    expect(summaryBody).toMatch(/no longer as a CLOSING reference/i);
+    // NOT the "no longer references at all" wording -- #34/#99 ARE still referenced.
+    expect(summaryBody).not.toMatch(/#34, #99[\s\S]*no longer references them at all/i);
+  });
+
+  it("happy path: publishes normally on the ZERO-blocker path when the only current closing reference is already known (ordinary case, no new-closing divergence)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      // The de-reference reconcile runs unconditionally now (F1-S9 slice
+      // 90.4), even on this zero-blocker path.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    expect((post?.body as { body: string }).body).toContain("No blocking findings.");
+  });
+
+  it("happy path: publishes normally on the BLOCKER-BEARING path when the only current closing reference is already known (ordinary case, no new-closing divergence)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+  });
+});
+
 describe("main — input validation and transport edge cases", () => {
   it("throws when a required environment variable is missing", async () => {
     delete process.env.GH_TOKEN;

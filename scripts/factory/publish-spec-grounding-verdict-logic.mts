@@ -42,7 +42,7 @@
  */
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
-import type { IssueLinkKind } from "./spec-grounding-logic.mts";
+import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
@@ -487,6 +487,93 @@ export function isDiffTruncationUnverifiableForClosing(
 }
 
 /**
+ * Every CLOSING-kind issue this PR's CURRENT body references that this
+ * run's own review never knew about as closing at all (F1-S9 slice 90.5,
+ * issue #12 — the re-landed, CORRECTED version of a fix reverted twice in
+ * PR #87 rounds 8-9, tracked in issue #90): the body-edit sibling of
+ * `publishSummary`'s trusted-head-SHA check. A body edit that ADDS a
+ * brand-new `Closes #N` line, or upgrades an existing `Refs #N` to
+ * `Closes #N`, changes NEITHER the PR's head SHA nor its diff, so the
+ * head-SHA check alone cannot catch it — a run reviewed from before that
+ * edit could otherwise publish (or keep gating on) a verdict for a closing
+ * claim it never actually evaluated as closing.
+ *
+ * THE "KNOWN AS CLOSING" SET IS A UNION, DELIBERATELY — of TWO fields,
+ * neither alone is correct (team-lead's confirmed design, this slice):
+ *
+ * - `reviewedClosingIssueNumbers` (F1-S9 slice 90.2) — every closing-kind
+ *   reference within the runner's own fetch cap, REGARDLESS of whether it
+ *   ended up with any spine entries at all. This is what closes rounds
+ *   8-9's own real bug: a closing-kind issue with ZERO unmet criteria AT
+ *   REVIEW TIME (already fully satisfied when the runner looked at it)
+ *   gets no `CriteriaSpineEntry` and no `UnreviewedClosingIssueResult`
+ *   either — `buildLinkedIssueSpecs` omits any issue with nothing unmet
+ *   outright — so round 8's OWN "known" set (spine entries ∪
+ *   unreviewedClosingIssues alone) could never see it, and reported it as
+ *   an unreviewed-new closing reference on EVERY subsequent run, forever
+ *   (PR #87 round 9's own revert rationale, cid 3621866011).
+ * - `unreviewedClosingIssues` — a closing-kind reference BEYOND the
+ *   runner's own fetch cap (`MAX_LINKED_ISSUES`) is, by construction, ALSO
+ *   absent from `reviewedClosingIssueNumbers` (`selectIssuesToFetch`
+ *   applies the identical cap to both) — correctly, since it was never
+ *   actually looked at. But that same beyond-cap reference already
+ *   produces its OWN live blocker via `spine.unreviewedClosingIssues`
+ *   (the `"fully-dropped"`/"never even fetched" case). Using
+ *   `reviewedClosingIssueNumbers` ALONE would make THIS function ALSO
+ *   flag that same issue as "unreviewed new" — a double-flag that, on the
+ *   blocker-bearing path, would divert an already-correctly-escalating
+ *   case away from its own specific, resolvable blocker treatment into a
+ *   generic top-level fallback instead. Unioning with
+ *   `unreviewedClosingIssues` closes that regression: an issue already
+ *   accounted for by EITHER signal is never "new".
+ *
+ * Called UNCONDITIONALLY by `publishSummary`, on EVERY `hasCriteria: true`
+ * run — BOTH the zero-blocker and blocker-bearing paths (F1-S9 slice 90.5;
+ * round 8's own version only ever guarded the zero-blocker path, since a
+ * blocker-bearing run's OWN posting-path staleness filter was — at the
+ * time — considered a sufficient, separate safeguard; team-lead's #90
+ * kickoff spec widens this to run on both, since a NEW/upgraded closing
+ * reference makes the ENTIRE run's verdict suspect for that issue, not
+ * just its own already-joined criteria). Placed BEFORE the
+ * `totalBlockerCount` branch in `publishSummary`, so a non-empty result
+ * fails the WHOLE run closed before any posting or reconciliation is
+ * attempted (F1-S9 slice 90.4's own reconcile-delete included) — a stale
+ * verdict must never delete a prior run's still-valid gate.
+ *
+ * @param currentBody - The PR's CURRENT body text — already re-fetched and
+ *   head-verified by the caller; this function does no fetching of its own.
+ * @param thisRepo - This repo's own `owner/repo`, passed straight through
+ *   to {@link parseLinkedIssueReferences} for its cross-repo-reference check.
+ * @param reviewedClosingIssueNumbers - `criteria-spine.json`'s own
+ *   `reviewedClosingIssueNumbers` field for this run (F1-S9 slice 90.2).
+ * @param unreviewedClosingIssues - `criteria-spine.json`'s own
+ *   `unreviewedClosingIssues` for this run.
+ * @returns Every closing-kind issue number `currentBody` references that is
+ *   absent from the union of `reviewedClosingIssueNumbers` and
+ *   `unreviewedClosingIssues`, deduplicated and ascending by issue number,
+ *   empty if none.
+ */
+export function findUnreviewedNewClosingReferences(
+  currentBody: string,
+  thisRepo: string,
+  reviewedClosingIssueNumbers: readonly number[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+): readonly number[] {
+  const knownClosingIssueNumbers = new Set<number>([
+    ...reviewedClosingIssueNumbers,
+    ...unreviewedClosingIssues.map((issue) => issue.issueNumber),
+  ]);
+  const currentClosingIssueNumbers = new Set(
+    parseLinkedIssueReferences(currentBody, thisRepo)
+      .filter((reference) => reference.kind === "closing")
+      .map((reference) => reference.issueNumber),
+  );
+  return [...currentClosingIssueNumbers]
+    .filter((issueNumber) => !knownClosingIssueNumbers.has(issueNumber))
+    .sort((a, b) => a - b);
+}
+
+/**
  * Upper bound on the rendered non-blocking findings LIST's own total
  * length, in characters (PR #82 review, FOLD 3 — LOW: a fully schema-valid
  * verdict — up to `MAX_FINDINGS` (1000) findings, each up to
@@ -591,6 +678,17 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   reworded to state the count is REVIEW-TIME and explicitly reconciles
  *   it against the posted subset, rather than implying every counted
  *   finding has its own inline thread when some do not.
+ * @param downgradedClosingIssueNumbers - The issue numbers
+ *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
+ *   references them, but no longer as a CLOSING reference (F1-S9 slice
+ *   90.5, kind-aware revalidation — a distinct, separately-worded case
+ *   from `staleBlockerIssueNumbers`: "no longer references this issue at
+ *   all" would be a FALSE claim for a Closes→Refs downgrade, since the PR
+ *   still references the issue, just no longer as an obligation to close
+ *   it). Reconciled into the SAME headline math as `staleBlockerIssueNumbers`
+ *   (both are "review-time blockers this run chose not to post/keep
+ *   gating on"), but reported in its own separate note ({@link
+ *   buildDowngradedClosingBlockerSkippedNote}).
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -600,6 +698,7 @@ export function buildSpecGroundingSummaryCommentBody(
   blockersPostedInline: boolean,
   degradeReason: InlinePostingDegradeReason | null,
   staleBlockerIssueNumbers: readonly number[],
+  downgradedClosingIssueNumbers: readonly number[],
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
@@ -652,14 +751,30 @@ export function buildSpecGroundingSummaryCommentBody(
     // summary listing below -- reword the headline to say the count is
     // review-time and explicitly reconcile it against the posted/listed
     // subset, pointing at the separate stale-skip note for the rest.
+    //
+    // F1-S9 slice 90.5: `downgradedClosingIssueNumbers` is a SECOND,
+    // distinct skip reason reconciled into the SAME headline math (both
+    // are "review-time blockers this run chose not to post/keep gating
+    // on"), but each gets its OWN clause below -- "no longer referenced at
+    // all" and "no longer referenced as closing" are different, and
+    // conflating them into one count would say something false about
+    // whichever case didn't actually apply to a given issue.
+    const skippedCount = staleBlockerIssueNumbers.length + downgradedClosingIssueNumbers.length;
+    const skippedReasonClauses: string[] = [];
+    if (staleBlockerIssueNumbers.length > 0) {
+      skippedReasonClauses.push(`${staleBlockerIssueNumbers.length} no longer referenced by this PR's current body`);
+    }
+    if (downgradedClosingIssueNumbers.length > 0) {
+      skippedReasonClauses.push(`${downgradedClosingIssueNumbers.length} no longer referenced as closing`);
+    }
     const staleReconciliation =
-      staleBlockerIssueNumbers.length > 0
-        ? ` (${staleBlockerIssueNumbers.length} of these were skipped as no longer referenced by this ` +
-          "PR's current body — see the note below, not repeated here.)"
+      skippedCount > 0
+        ? ` (${skippedCount} of these were skipped — ${skippedReasonClauses.join("; ")} — see the note(s) ` +
+          "below, not repeated here.)"
         : "";
     lines.push(
       blockersPostedInline
-        ? staleBlockerIssueNumbers.length > 0
+        ? skippedCount > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable to this PR's current linked issues are reported as separate, " +
               `resolvable inline review comment(s) below — see those threads, not this summary, ` +
@@ -668,7 +783,7 @@ export function buildSpecGroundingSummaryCommentBody(
           : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : staleBlockerIssueNumbers.length > 0
+        : skippedCount > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable are listed below in THIS summary, not as separate inline comments " +
               `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
@@ -753,27 +868,76 @@ export function buildSpecGroundingSummaryCommentBody(
 const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
 
 /**
+ * Upper bound on {@link buildDowngradedClosingBlockerSkippedNote}'s own
+ * displayed issue-number list, in characters (F1-S9 slice 90.5) — mirrors
+ * {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}'s own identical
+ * reasoning exactly: `downgradedClosingIssueNumbers` is, like its sibling,
+ * derived from the PR's own (attacker-controlled) body, so it needs the
+ * same defensive cap. A separate named constant (same value) rather than
+ * reusing the stale one — an independent, reviewable budget per note,
+ * matching this module's own convention of a dedicated cap per bounded
+ * list rather than one shared budget two different notes could silently
+ * contend over.
+ */
+const MAX_DOWNGRADED_CLOSING_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+
+/**
+ * Renders a capped, comma-separated `#N` issue-number list, reporting any
+ * remainder as an omitted count rather than silently dropping it (F1-S9
+ * slice 90.5 — factored out of {@link buildStaleBlockerSkippedNote} so its
+ * sibling, {@link buildDowngradedClosingBlockerSkippedNote}, gets the
+ * IDENTICAL capping discipline from ONE shared implementation, never a
+ * second, independently-maintained copy that could drift the way this
+ * module's other guards once did before being unified).
+ *
+ * @param issueNumbers - The (already deduplicated, ascending) issue numbers
+ *   to render.
+ * @param maxLength - The caller's own budget for the rendered list, in
+ *   characters — deliberately a parameter, not a shared constant, so each
+ *   caller keeps its own independently-reviewable cap.
+ * @returns The rendered `#N, #M (and K more)`-shaped list, always within
+ *   `maxLength` regardless of how many issue numbers were passed in.
+ */
+function renderCappedIssueNumberList(issueNumbers: readonly number[], maxLength: number): string {
+  const issueTokens: string[] = [];
+  let issueListLength = 0;
+  let addedCount = 0;
+  for (const issueNumber of issueNumbers) {
+    const token = `#${issueNumber}`;
+    if (issueListLength + token.length + 2 > maxLength) {
+      break; // The remainder is reported as an omitted count below, not silently dropped.
+    }
+    issueTokens.push(token);
+    issueListLength += token.length + 2; // ", " separator budget.
+    addedCount += 1;
+  }
+  const omittedCount = issueNumbers.length - addedCount;
+  return issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+}
+
+/**
  * Builds the note appended when one or more planned blocker findings were
  * skipped from inline posting because the PR's CURRENT body no longer
- * references their own issue with a closing keyword at all (PR #87 review
- * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
- * `tryPostBlockersInline` in `publish-spec-grounding-verdict.mts` re-checks
- * each planned blocker's own `issueNumber` against a fresh re-parse of the
- * PR's CURRENT body, not the runner-time one the verdict/spine were
- * computed against — a body-only edit never bumps the trusted head SHA, so
- * this run could otherwise post an inline comment reasserting an
- * obligation the PR no longer claims to have at all).
+ * references their own issue AT ALL (PR #87 review round 4, Codex, P1 —
+ * symmetric to the delete-path TOCTOU fold: `tryPostBlockersInline` in
+ * `publish-spec-grounding-verdict.mts` re-checks each planned blocker's
+ * own `issueNumber` against a fresh re-parse of the PR's CURRENT body, not
+ * the runner-time one the verdict/spine were computed against — a
+ * body-only edit never bumps the trusted head SHA, so this run could
+ * otherwise post an inline comment reasserting an obligation the PR no
+ * longer claims to have at all).
  *
- * COVERS TWO CASES, DELIBERATELY NOT DISTINGUISHED (F1-S9 slice 90.4, PR
- * #95 review round 2 — Codex and claude-review, independently, on the
- * same root cause): the issue may be entirely REMOVED from the body, or
- * merely DOWNGRADED (still mentioned, but a `Closes #N` edited to a plain
- * `Refs #N`) — `tryPostBlockersInline`'s own filter treats both the same
- * way (closing-kind reference gone), since both mean "no live closing
- * obligation this run can verify" regardless of which one actually
- * happened. The wording below says "no longer ... with a closing
- * keyword", not "no longer references ... at all" (the round-1 wording),
- * specifically so it stays accurate for the downgrade case too.
+ * SCOPED TO OUTRIGHT REMOVAL ONLY (F1-S9 slice 90.5 — narrower than an
+ * intermediate F1-S9 slice 90.4 version, which folded a DOWNGRADED
+ * reference — still mentioned, but `Closes #N` edited to a plain `Refs
+ * #N` — into this SAME bucket/wording): now that
+ * `tryPostBlockersInline`'s own staleness filter distinguishes the two
+ * (`staleBlockerIssueNumbers` here is issues missing from the CURRENT
+ * body ENTIRELY; a separate `downgradedClosingIssueNumbers` bucket, see
+ * {@link buildDowngradedClosingBlockerSkippedNote}, covers the downgrade
+ * case), this note's own wording goes back to the more precise "no longer
+ * references them at all" — accurate again now that a downgrade gets its
+ * own, differently-worded note instead of being described the same way.
  *
  * DOES NOT UNCONDITIONALLY CLAIM REMOVAL (Codex finding, PR #95 review
  * round 2, P2 — a real overclaim in an earlier version): this same run's
@@ -783,20 +947,16 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  * positively confirm it is safe to (an INDIVIDUAL marker, a non-null
  * generation no newer than this run's own) — an AGGREGATE-marker comment
  * covering this issue alongside others, or one with a null/unparseable
- * generation, is deliberately left untouched by that same function. An
- * earlier version of this note claimed unconditionally that "any prior
- * inline comment ... has been REMOVED", which was false in exactly those
- * cases. The wording now says removal happened only where reconciliation
- * could actually confirm it was safe, and names the residual explicitly
- * rather than implying a clean state that may not exist. This note is the
- * ONLY place a human learns any of this, so it must never be silently
- * absent.
+ * generation, is deliberately left untouched by that same function. The
+ * wording says removal happened only where reconciliation could actually
+ * confirm it was safe, and names the residual explicitly rather than
+ * implying a clean state that may not exist. This note is the ONLY place
+ * a human learns any of this, so it must never be silently absent.
  *
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
- *   `unreviewedClosingIssues` whose own issue is no longer referenced
- *   with a closing keyword in the PR's current body (removed entirely, or
- *   downgraded to a plain reference).
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced in
+ *   the PR's current body AT ALL.
  * @returns The Markdown section to append, or `""` if nothing was
  *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
  *   regardless of how many issue numbers were skipped.
@@ -805,29 +965,68 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
   if (staleBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueTokens: string[] = [];
-  let issueListLength = 0;
-  let addedCount = 0;
-  for (const issueNumber of staleBlockerIssueNumbers) {
-    const token = `#${issueNumber}`;
-    if (issueListLength + token.length + 2 > MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
-      break; // The remainder is reported as an omitted count below, not silently dropped.
-    }
-    issueTokens.push(token);
-    issueListLength += token.length + 2; // ", " separator budget.
-    addedCount += 1;
-  }
-  const omittedCount = staleBlockerIssueNumbers.length - addedCount;
-  const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  const issueList = renderCappedIssueNumberList(staleBlockerIssueNumbers, MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH);
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
-    "body no longer references them with a closing keyword (removed, or downgraded to a plain " +
-    "reference, since the spec-grounded review ran against this PR's head), so those findings no " +
-    "longer reflect a live closing obligation this run could verify. Any prior inline comment for " +
-    "them that this run's own reconciliation could positively confirm was safe to remove has been " +
-    "deleted; a comment covering multiple issues together, or one this run could not confirm " +
-    "predates it, may still be open and needs a human to resolve it directly. A fresh " +
-    "spec-grounded review run will re-evaluate against the PR's current state."
+    "body no longer references them at all (removed or edited since the spec-grounded review ran " +
+    "against this PR's head), so those findings no longer reflect a live obligation this run could " +
+    "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
+    "confirm was safe to remove has been deleted; a comment covering multiple issues together, or " +
+    "one this run could not confirm predates it, may still be open and needs a human to resolve it " +
+    "directly. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+  );
+}
+
+/**
+ * Builds the note appended when one or more planned blocker findings were
+ * skipped from inline posting because the PR's CURRENT body still
+ * references their own issue, but no longer as a CLOSING reference (F1-S9
+ * slice 90.5, kind-aware revalidation — the sibling of {@link
+ * buildStaleBlockerSkippedNote} for a Closes→Refs downgrade rather than an
+ * outright removal): `deriveSeverity` only ever escalates a `closing`-kind,
+ * unsatisfied criterion to `blocker` in the first place, so every entry
+ * `tryPostBlockersInline` is filtering here became a blocker SOLELY
+ * because this issue was a closing reference AT REVIEW TIME. If the PR's
+ * CURRENT body still names the issue but has downgraded it to a plain,
+ * non-closing reference (e.g. edited `Closes #N` to `Refs #N`, or `See
+ * #N`), that blocker's own justification no longer holds — but it must
+ * NOT be folded into {@link buildStaleBlockerSkippedNote}'s own wording
+ * ("no longer references them at all"), which would be a FALSE claim
+ * here: the PR still references the issue, just not as an obligation to
+ * close it. This function exists so the two genuinely different reasons
+ * get two genuinely accurate notes, never one dishonest one.
+ *
+ * Same "does not unconditionally claim removal" honesty {@link
+ * buildStaleBlockerSkippedNote} documents: `deleteDeReferencedInlineBlockerComments`
+ * covers a downgraded issue's own prior comment via the exact SAME
+ * `currentlyClosingIssueNumbers`-based membership test as an outright
+ * removal, so it is equally subject to the aggregate/null-generation/
+ * newer-generation exclusions — this note's own wording says so too.
+ *
+ * @param downgradedClosingIssueNumbers - The (deduplicated, ascending)
+ *   issue numbers `tryPostBlockersInline` skipped because the PR's CURRENT
+ *   body still references them, but no longer with `kind: "closing"`.
+ * @returns The Markdown section to append, or `""` if nothing was
+ *   skipped, ALWAYS within {@link MAX_DOWNGRADED_CLOSING_ISSUE_NUMBERS_LIST_LENGTH}
+ *   regardless of how many issue numbers were skipped.
+ */
+export function buildDowngradedClosingBlockerSkippedNote(downgradedClosingIssueNumbers: readonly number[]): string {
+  if (downgradedClosingIssueNumbers.length === 0) {
+    return "";
+  }
+  const issueList = renderCappedIssueNumberList(
+    downgradedClosingIssueNumbers,
+    MAX_DOWNGRADED_CLOSING_ISSUE_NUMBERS_LIST_LENGTH,
+  );
+  return (
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body still references them, but no longer as a CLOSING reference (downgraded, e.g. from " +
+    "`Closes #N` to `Refs #N`, since the spec-grounded review ran against this PR's head), so " +
+    "those findings no longer reflect a live closing obligation this run could verify. Any prior " +
+    "inline comment for them that this run's own reconciliation could positively confirm was safe " +
+    "to remove has been deleted; a comment covering multiple issues together, or one this run " +
+    "could not confirm predates it, may still be open and needs a human to resolve it directly. A " +
+    "fresh spec-grounded review run will re-evaluate against the PR's current state."
   );
 }
 
