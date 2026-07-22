@@ -420,7 +420,12 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).not.toMatch(/see those threads, not this summary/i);
     expect(body).toMatch(/listed below in THIS summary/i);
     expect(body).toMatch(/no addable line to anchor them to/i);
-    expect(body).toMatch(/no inline thread for/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- see
+    // publish-spec-grounding-verdict.test.ts's own entrypoint tests for
+    // the scenario where a listed entry DOES already have a real thread.
+    expect(body).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(body).not.toMatch(/no inline thread for/i);
   });
 
   it("still explains what counts as a blocking finding regardless of blockersPostedInline's value", () => {
@@ -746,6 +751,20 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).toMatch(/1 of these are no longer closing obligations this pr's current body makes/i);
     expect(body).toContain("2 blocking finding(s)");
   });
+
+  // The "partial-posting" headline wording (postedInlineCount > 0, "X
+  // findings already covered... Y listed below instead") that used to be
+  // tested here was REMOVED (F1-S9 slice 90.6a, PR #99 review, Codex, cid
+  // 3627145120 added it, cid 3627282617 removed it again) -- see
+  // buildSpecGroundingSummaryCommentBody's own top-level docstring for the
+  // full reasoning: fixing cid 3627282617's real fail-open (excluding a
+  // PATCHed-but-possibly-ALREADY-RESOLVED blocker from the fallback could
+  // make it vanish entirely) requires keying the fallback exclusion off
+  // fresh CREATEs only, and a fresh CREATE can never have succeeded before
+  // a mid-plan degrade (postInlineCommentPlan's own "only the first
+  // create is diagnostic" rule proves this) -- so the wording this
+  // described could never actually render. The all-or-nothing wording
+  // tested above (blockersPostedInline=false) is what ALWAYS applies now.
 });
 
 describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5)", () => {

@@ -688,6 +688,8 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     expect(planBlockerInlineComments([], [], anchorableDiff, false, TEST_GENERATION)).toEqual({
       comments: [],
       anchorFallbackNeeded: false,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
     });
   });
 
@@ -695,6 +697,8 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     expect(planBlockerInlineComments([], [], "", false, TEST_GENERATION)).toEqual({
       comments: [],
       anchorFallbackNeeded: false,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
     });
   });
 
@@ -733,7 +737,12 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
 
   it("signals anchorFallbackNeeded:true, with NO comments, when there are blockers but the diff has no anchor point", () => {
     const result = planBlockerInlineComments([joined()], [], "", false, TEST_GENERATION);
-    expect(result).toEqual({ comments: [], anchorFallbackNeeded: true });
+    expect(result).toEqual({
+      comments: [],
+      anchorFallbackNeeded: true,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
+    });
   });
 
   it("exposes each comment's own marker as a dedicated field, matching the SAME value embedded in its own body as a standalone line, for every comment kind (PR #12 d+e PR-plan review -- completes c's own contract so d can find-and-update without re-parsing body text)", () => {
@@ -846,6 +855,34 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
     expect(aggregated?.line).toBe(2);
   });
 
+  it("criterionCoveringMarkers maps each individual entry to ITS OWN marker, and each overflow entry to the SHARED aggregate marker (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, qa lens): the exact mapping tryPostBlockersInline's own fallback filter relies on to know which marker actually covers a given criterion", () => {
+    const criteria = Array.from({ length: MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 2 }, (_unused, i) =>
+      joined({ criterionId: `12:${i}` }),
+    );
+    const result = planBlockerInlineComments(criteria, [], anchorableDiff, false, TEST_GENERATION);
+    for (let i = 0; i < MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS; i++) {
+      expect(result.criterionCoveringMarkers.get(`12:${i}`)).toBe(criterionBlockerCommentMarker(`12:${i}`));
+    }
+    // The two OVERFLOW entries (beyond the cap) are both covered by the
+    // SAME shared aggregate marker, not their own individual ones.
+    for (let i = MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS; i < MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS + 2; i++) {
+      expect(result.criterionCoveringMarkers.get(`12:${i}`)).toBe(CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER);
+    }
+  });
+
+  it("issueCoveringMarkers is the SAME kind of mapping for unreviewed closing issues -- individual marker for each entry up to the cap, the shared aggregate marker for any overflow", () => {
+    const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 2 }, (_unused, i) =>
+      droppedIssue(i + 1),
+    );
+    const result = planBlockerInlineComments([], manyIssues, anchorableDiff, false, TEST_GENERATION);
+    for (let i = 0; i < MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS; i++) {
+      expect(result.issueCoveringMarkers.get(i + 1)).toBe(unreviewedClosingIssueCommentMarker(i + 1));
+    }
+    for (let i = MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS; i < MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 2; i++) {
+      expect(result.issueCoveringMarkers.get(i + 1)).toBe(UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER);
+    }
+  });
+
   it("mixes criterion blockers, individual unreviewed-closing-issue comments, and the aggregated overflow comment together, all sharing the same anchor", () => {
     const manyIssues = Array.from({ length: MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS + 3 }, (_unused, i) =>
       droppedIssue(i + 1),
@@ -904,7 +941,12 @@ describe("planBlockerInlineComments (F1-S9 slice 3b-iii-c, issue #12)", () => {
 
   it("signals anchorFallbackNeeded:true, with NO comments, when diffTruncationBlocksClosingClaim alone is true but the diff has no anchor point", () => {
     const result = planBlockerInlineComments([], [], "", true, TEST_GENERATION);
-    expect(result).toEqual({ comments: [], anchorFallbackNeeded: true });
+    expect(result).toEqual({
+      comments: [],
+      anchorFallbackNeeded: true,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
+    });
   });
 });
 
@@ -913,7 +955,7 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(buildAnchorFallbackSummarySupplement([], [], false, "no-addable-anchor")).toBe("");
   });
 
-  it("lists a criterion blocker's full detail, since there is no inline thread for it in this fallback path", () => {
+  it("lists a criterion blocker's full detail in this fallback path, WITHOUT categorically claiming no inline thread exists for it (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627450889, P2 -- an entry can be listed here while ALSO already having a real inline thread, e.g. a PATCHed-but-possibly-resolved one retained by the create-vs-patch fail-safe)", () => {
     const body = buildAnchorFallbackSummarySupplement(
       [joined({ issueNumber: 12, criterionId: "12:0", rationale: "Missing the retry wrapper." })],
       [],
@@ -923,7 +965,9 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(body).toContain("#12");
     expect(body).toContain("12:0");
     expect(body).toContain("Missing the retry wrapper.");
-    expect(body).toMatch(/could not be posted as inline comments/i);
+    expect(body).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(body).not.toMatch(/could not be posted as inline comments/i);
+    expect(body).not.toMatch(/no inline thread for them/i);
   });
 
   it("uses the safe-default explanation for an unaddressed criterion blocker, not a fabricated rationale", () => {

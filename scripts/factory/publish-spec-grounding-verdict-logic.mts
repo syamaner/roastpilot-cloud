@@ -717,6 +717,25 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   `null`), this specific blocker could never be cleared by anything
  *   short of a human resolving the thread, only for the NEXT run to
  *   recompute the same permanently-true flag and re-post it forever.
+ * NO LONGER TAKES a posted-vs-fallback-listed COUNT SPLIT (F1-S9 slice
+ * 90.6a, PR #99 review — round 3, cid 3627145120, added `postedInlineCount`/
+ * `fallbackListedCount` and a "X findings already posted, Y listed below"
+ * partial-headline wording; round 4, cid 3627210751, folded the
+ * diff-truncation blocker into that same split; round 5, cid 3627282617,
+ * REMOVED both — see `tryPostBlockersInline`'s own docstring for the full
+ * reasoning: fixing cid 3627282617's real fail-open (a PATCH can silently
+ * update an ALREADY-RESOLVED thread, so excluding it from the fallback
+ * could make a re-detected blocker vanish) requires keying the fallback
+ * exclusion off `createdMarkers` (fresh CREATEs only, never PATCHes) —
+ * and `createdMarkers` is PROVABLY ALWAYS EMPTY whenever a mid-plan 422
+ * actually degrades a run (the degrade condition itself requires no
+ * earlier CREATE to have succeeded; only PATCHes can occupy that
+ * position). So `postedInlineCount` would always be `0` on the one branch
+ * that ever consulted it — the partial-headline wording could never
+ * actually render. Removed rather than kept as dead/`v8-ignore`d code;
+ * the degrade headline reverts to the simple, pre-round-3
+ * `blockersPostedInline`-based wording below, which is what actually
+ * renders in every reachable case anyway).
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -818,6 +837,14 @@ export function buildSpecGroundingSummaryCommentBody(
           "current body makes — removed entirely, or downgraded to a non-closing reference — see the " +
           "note(s) below, not repeated here.)"
         : "";
+    // NO partial-posting wording (F1-S9 slice 90.6a, PR #99 review, Codex,
+    // cid 3627145120 added one, cid 3627282617 removed it again -- see
+    // this function's own top-level docstring for the full reasoning: a
+    // mid-plan degrade can never leave anything meaningfully "already
+    // posted" once the fallback exclusion is correctly keyed off
+    // `createdMarkers` alone, so the all-or-nothing wording below is what
+    // ALWAYS actually applies on this branch, not a simplification that
+    // loses real information).
     lines.push(
       blockersPostedInline
         ? skippedBlockerIssueNumbers.length > 0
@@ -831,12 +858,13 @@ export function buildSpecGroundingSummaryCommentBody(
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
         : skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
-              "still applicable are listed below in THIS summary, not as separate inline comments " +
-              `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
+              "still applicable are listed below in THIS summary — " +
+              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
+              `these first; address any remaining ones below.${skippedReconciliation} ` +
               blockerKindsExplanation
-          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-              `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
-              `them. ${blockerKindsExplanation}`,
+          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary — ` +
+              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
+              `these first; address any remaining ones below. ${blockerKindsExplanation}`,
       "",
     );
   } else {
