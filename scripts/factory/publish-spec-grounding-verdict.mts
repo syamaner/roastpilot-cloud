@@ -143,6 +143,7 @@ import {
 import {
   buildAnchorFallbackSummarySupplement,
   criterionBlockerCommentMarker,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   planBlockerInlineComments,
   unreviewedClosingIssueCommentMarker,
   type InlinePostingDegradeReason,
@@ -986,20 +987,46 @@ interface TryPostBlockersInlineResult {
    */
   readonly fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
   /**
-   * Of the still-closing blockers, how many ALREADY exist as real,
-   * resolvable inline comments — the complement of {@link
-   * fallbackCriterionBlockers}/{@link fallbackUnreviewedClosingIssues}
-   * within `stillReferencedCriterionBlockers`/
-   * `stillReferencedUnreviewedClosingIssues` (F1-S9 slice 90.6a, issue
-   * #90's own #378, PR #99 review, Codex, cid 3627145120, P2 — the
-   * headline's own all-or-nothing `postedInline` boolean cannot represent
-   * a mid-plan 422's own partial split; the caller's summary headline
-   * uses this count to say so accurately instead of contradicting the
-   * now-filtered fallback). Always `0` when `postedInline` is `true`
-   * (irrelevant — nothing was excluded from anything) or when nothing was
-   * ever attempted at all (`degradeReason === "no-addable-anchor"`).
+   * Of EVERY still-applicable blocker this run is tracking — criterion
+   * blockers, unreviewed closing issues, AND the whole-run diff-truncation
+   * blocker when {@link currentDiffTruncationBlocksClosingClaim} is `true`
+   * — how many ALREADY exist as real, resolvable inline comments (F1-S9
+   * slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid
+   * 3627145120 / cid 3627210751, P2 — the headline's own all-or-nothing
+   * `postedInline` boolean cannot represent a mid-plan 422's own partial
+   * split; the caller's summary headline uses this count to say so
+   * accurately instead of contradicting the now-filtered fallback).
+   * ALWAYS satisfies `postedInlineCount + fallbackListedCount ===
+   * stillReferencedCriterionBlockers.length +
+   * stillReferencedUnreviewedClosingIssues.length +
+   * (diffTruncationBlocksClosingClaim ? 1 : 0)` — every still-applicable
+   * blocker this function tracks ends up counted in EXACTLY one of the
+   * two counts, never both, never neither (the invariant this codebase's
+   * own test suite pins directly, so a future blocker TYPE can't silently
+   * slip past this split the way the diff-truncation blocker's own first
+   * version of this fix did — cid 3627145120 only counted criterion +
+   * unreviewed-issue entries, missing the diff-truncation blocker
+   * entirely). `0` when `postedInline` is `true` and nothing was ever
+   * attempted at all (`degradeReason === "no-addable-anchor"`); populated
+   * correctly (not just defensively) on EVERY OTHER path, including full
+   * success, so the invariant holds everywhere, not only in the partial
+   * case it was built to fix.
    */
   readonly postedInlineCount: number;
+  /**
+   * The complement of {@link postedInlineCount} within the SAME total —
+   * every still-applicable blocker (criterion, unreviewed-issue, AND the
+   * diff-truncation blocker) that does NOT already have a real inline
+   * thread, exactly what {@link fallbackCriterionBlockers}/{@link
+   * fallbackUnreviewedClosingIssues}/`currentDiffTruncationBlocksClosingClaim`
+   * TOGETHER render in `buildAnchorFallbackSummarySupplement`. Computed
+   * HERE (not left to the caller to reconstruct from
+   * `fallbackCriterionBlockers.length + fallbackUnreviewedClosingIssues
+   * .length`, which would silently omit the diff-truncation dimension
+   * again) so this is the ONE place both counts are derived, guaranteeing
+   * the invariant above by construction.
+   */
+  readonly fallbackListedCount: number;
 }
 
 /**
@@ -1259,11 +1286,12 @@ async function tryPostBlockersInline(
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
       // Never rendered by the caller when postedInline is true -- but
-      // populated (empty) rather than left implicit, matching this
+      // populated (empty/zero) rather than left implicit, matching this
       // result's own established discipline for every other field.
       fallbackCriterionBlockers: [],
       fallbackUnreviewedClosingIssues: [],
       postedInlineCount: 0,
+      fallbackListedCount: 0,
     };
   }
 
@@ -1293,8 +1321,14 @@ async function tryPostBlockersInline(
       fallbackCriterionBlockers: stillReferencedCriterionBlockers,
       fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues,
       // NOTHING was ever attempted -- nothing could have posted before a
-      // degrade that never even reached the network call.
+      // degrade that never even reached the network call, so EVERY
+      // still-applicable blocker (including the diff-truncation one, if
+      // applicable) belongs in the fallback count.
       postedInlineCount: 0,
+      fallbackListedCount:
+        stillReferencedCriterionBlockers.length +
+        stillReferencedUnreviewedClosingIssues.length +
+        (diffTruncationBlocksClosingClaim ? 1 : 0),
     };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
@@ -1331,6 +1365,19 @@ async function tryPostBlockersInline(
         plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
       return !postedMarkerSet.has(coveringMarker);
     });
+    // The WHOLE-RUN diff-truncation blocker (F1-S9 slice 90.6a, PR #99
+    // review, Codex, cid 3627210751, P2 -- a REAL gap in this fix's own
+    // first version: it counted only criterion + unreviewed-issue
+    // entries, silently omitting this one, even though
+    // `buildAnchorFallbackSummarySupplement` renders it too whenever
+    // `diffTruncationBlocksClosingClaim` is true). It has its own FIXED
+    // marker, `DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER`, checked directly
+    // against `postedMarkerSet` -- unlike the criterion/issue entries, it
+    // has no individual-vs-aggregate split (always exactly one comment,
+    // if it exists at all), so no covering-marker lookup is needed.
+    const diffTruncationBlockerPostedInline =
+      diffTruncationBlocksClosingClaim && postedMarkerSet.has(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER);
+    const diffTruncationBlockerFallbackListed = diffTruncationBlocksClosingClaim && !diffTruncationBlockerPostedInline;
     return {
       postedInline: false,
       degradeReason: postResult.reason,
@@ -1339,15 +1386,19 @@ async function tryPostBlockersInline(
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
       fallbackCriterionBlockers,
       fallbackUnreviewedClosingIssues,
-      // The complement of the two fallback arrays above, within the
-      // still-closing subsets they were filtered FROM (F1-S9 slice 90.6a,
-      // issue #90's own #378, PR #99 review, Codex, cid 3627145120, P2 --
-      // see this field's own docstring on TryPostBlockersInlineResult for
-      // the headline contradiction this closes).
+      // See TryPostBlockersInlineResult's own field docs for the
+      // postedInlineCount + fallbackListedCount === (every still-
+      // applicable blocker) invariant this pair maintains -- INCLUDING
+      // the diff-truncation blocker now, not just criteria/issues.
       postedInlineCount:
         stillReferencedCriterionBlockers.length -
         fallbackCriterionBlockers.length +
-        (stillReferencedUnreviewedClosingIssues.length - fallbackUnreviewedClosingIssues.length),
+        (stillReferencedUnreviewedClosingIssues.length - fallbackUnreviewedClosingIssues.length) +
+        (diffTruncationBlockerPostedInline ? 1 : 0),
+      fallbackListedCount:
+        fallbackCriterionBlockers.length +
+        fallbackUnreviewedClosingIssues.length +
+        (diffTruncationBlockerFallbackListed ? 1 : 0),
     };
   }
   return {
@@ -1359,9 +1410,15 @@ async function tryPostBlockersInline(
     fallbackCriterionBlockers: [],
     fallbackUnreviewedClosingIssues: [],
     // Fully posted -- nothing was excluded from anything, so this count
-    // is not consulted by the caller's headline, but populated for type
-    // consistency rather than left implicit.
-    postedInlineCount: stillReferencedCriterionBlockers.length + stillReferencedUnreviewedClosingIssues.length,
+    // is not consulted by the caller's headline, but populated correctly
+    // (including the diff-truncation blocker, if applicable) so the
+    // postedInlineCount + fallbackListedCount invariant holds on EVERY
+    // path, not only the partial-degrade one it was built to fix.
+    postedInlineCount:
+      stillReferencedCriterionBlockers.length +
+      stillReferencedUnreviewedClosingIssues.length +
+      (diffTruncationBlocksClosingClaim ? 1 : 0),
+    fallbackListedCount: 0,
   };
 }
 
@@ -1587,11 +1644,18 @@ async function publishSummary(
   // simply `criterionBlockers`/`spine.unreviewedClosingIssues`.
   let fallbackCriterionBlockers: readonly JoinedCriterionResult[] = [];
   let fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
-  // Of the still-closing blockers, how many already have a real inline
-  // thread (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review,
-  // Codex, cid 3627145120) — see `TryPostBlockersInlineResult`'s own
-  // `postedInlineCount` docs for the headline contradiction this closes.
+  // Of EVERY still-applicable blocker (criteria, unreviewed issues, AND
+  // the diff-truncation blocker), how many already have a real inline
+  // thread vs. are listed in the fallback (F1-S9 slice 90.6a, issue #90's
+  // own #378, PR #99 review, Codex, cid 3627145120 / cid 3627210751) —
+  // BOTH sourced directly from `tryPostBlockersInline`'s own result
+  // (never re-derived from `fallbackCriterionBlockers.length +
+  // fallbackUnreviewedClosingIssues.length` here, which would silently
+  // drop the diff-truncation dimension again) — see
+  // `TryPostBlockersInlineResult`'s own docs for the invariant this pair
+  // maintains.
   let postedInlineCount = 0;
+  let fallbackListedCount = 0;
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1613,6 +1677,7 @@ async function publishSummary(
       fallbackCriterionBlockers = result.fallbackCriterionBlockers;
       fallbackUnreviewedClosingIssues = result.fallbackUnreviewedClosingIssues;
       postedInlineCount = result.postedInlineCount;
+      fallbackListedCount = result.fallbackListedCount;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1706,13 +1771,15 @@ async function publishSummary(
     downgradedClosingBlockerIssueNumbers,
     currentClosingIssueNumbers,
     postedInlineCount,
-    // The SAME count the anchor-fallback supplement below is about to
-    // render, computed here from the SAME two arrays rather than
-    // re-derived from unrelated-granularity totals (F1-S9 slice 90.6a,
-    // issue #90's own #378, PR #99 review, Codex, cid 3627145120) --
-    // see buildSpecGroundingSummaryCommentBody's own `fallbackListedCount`
+    // The SAME count `tryPostBlockersInline` itself already computed,
+    // INCLUDING the diff-truncation blocker (F1-S9 slice 90.6a, issue
+    // #90's own #378, PR #99 review, Codex, cid 3627145120 / cid
+    // 3627210751) — NOT re-derived from `fallbackCriterionBlockers.length
+    // + fallbackUnreviewedClosingIssues.length` here, which would
+    // silently omit the diff-truncation dimension again. See
+    // `buildSpecGroundingSummaryCommentBody`'s own `fallbackListedCount`
     // param docs for why.
-    fallbackCriterionBlockers.length + fallbackUnreviewedClosingIssues.length,
+    fallbackListedCount,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(

@@ -1415,6 +1415,67 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/those\s+still applicable are listed below in this summary/i);
   });
 
+  it("includes the WHOLE-RUN diff-truncation blocker in the posted/fallback split -- the invariant postedInlineCount + fallbackListedCount === totalBlockerCount holds even when the DIFF-TRUNCATION comment itself is the one that 422s (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627210751, P2 -- this fix's own PRIOR version counted only criterion + unreviewed-issue entries, silently omitting the diff-truncation blocker even though buildAnchorFallbackSummarySupplement renders it too): #12 already has an inline comment and PATCHes successfully; the diff-truncation aggregate has none and is the first genuine CREATE, which 422s, degrading the whole plan", async () => {
+    const marker12 = criterionBlockerCommentMarker("12:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [{ criterionId: "12:0", satisfied: false, rationale: "Still-live blocker rationale." }],
+      },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    // #12 stays closing -- no drift, isolating this test to the
+    // diff-truncation dimension of the split alone (no stale/downgraded
+    // blockers, so totalBlockerCount exactly equals the still-applicable
+    // total the invariant is checked against).
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      // #12 already has a prior comment -- PATCHes successfully. The
+      // diff-truncation aggregate has none -- the first genuine CREATE in
+      // the whole plan, and its own 422 degrades it.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 301,
+            body: `prior\n${marker12}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/301": () => jsonResponse({}),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    // Review-time total: 1 criterion blocker + 1 diff-truncation term = 2.
+    expect(summaryBody).toContain("2 blocking finding(s)");
+    // #12 already posted (1); the diff-truncation blocker did NOT (1) --
+    // 1 + 1 === 2, the invariant this test pins directly.
+    expect(summaryBody).toMatch(/\*\*1\*\* already exist as separate, resolvable inline review comment\(s\)/i);
+    expect(summaryBody).toMatch(/\*\*1\*\* are listed below in this summary instead/i);
+    // #12's own rationale must NOT be re-listed (already posted).
+    expect(summaryBody).not.toContain("Still-live blocker rationale.");
+    // The diff-truncation blocker's own detail IS in the fallback --
+    // exactly what the headline's "1 listed below" now correctly claims.
+    expect(summaryBody).toMatch(/this pr's own diff was truncated/i);
+  });
+
   it("applies the SAME already-posted exclusion to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully; #90 is the first genuine CREATE and 422s, degrading the whole plan", async () => {
     const marker78 = unreviewedClosingIssueCommentMarker(78);
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
