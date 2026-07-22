@@ -668,16 +668,38 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   reached in that case, but a `null` is still required rather than
  *   defaulted, matching `blockersPostedInline`'s own discipline.
  * @param staleBlockerIssueNumbers - The issue numbers `tryPostBlockersInline`
- *   skipped because the PR's CURRENT body no longer references them at
- *   all (PR #87 review round 4b, Codex, P1 — a follow-up wording fold:
- *   `totalBlockerCount` below is still the REVIEW-TIME count, including
- *   any stale ones, deliberately NOT filtered here — see issue #89 for
- *   the deeper "should the count/exit-code reflect only the still-
- *   referenced subset" design question, tracked ahead of the gate-enable
- *   decision #47. When this array is non-empty, the headline below is
- *   reworded to state the count is REVIEW-TIME and explicitly reconciles
- *   it against the posted subset, rather than implying every counted
- *   finding has its own inline thread when some do not.
+ *   skipped because the PR's CURRENT body no longer references them AT
+ *   ALL — de-referenced entirely, as distinct from
+ *   `downgradedClosingBlockerIssueNumbers` (PR #87 review round 4b, Codex,
+ *   P1 — a follow-up wording fold, generalized F1-S9 slice 90.6a for the
+ *   bucket-split: `totalBlockerCount` below is still the REVIEW-TIME
+ *   count, including every skipped one, deliberately NOT filtered here —
+ *   see issue #89 for the deeper "should the count/exit-code reflect only
+ *   the still-referenced subset" design question, tracked ahead of the
+ *   gate-enable decision #47. The HEADLINE's own "N of these were
+ *   skipped" reconciliation below uses the UNION of this array and
+ *   `downgradedClosingBlockerIssueNumbers` — see that param's own docs
+ *   for why the union, not just this one bucket, is required there).
+ * @param downgradedClosingBlockerIssueNumbers - The issue numbers
+ *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
+ *   references them, but no longer with a closing keyword — DOWNGRADED,
+ *   as distinct from `staleBlockerIssueNumbers` (F1-S9 slice 90.6a, the
+ *   stale-vs-downgraded bucket-split). Combined with
+ *   `staleBlockerIssueNumbers` via union for the headline's own "N of
+ *   these were skipped" reconciliation (PR #98 review, Codex, cid
+ *   3626878151, P2 — a real regression the bucket-split itself
+ *   introduced: before the split, `staleBlockerIssueNumbers` was the
+ *   LUMPED no-longer-closing set, and this headline reconciled against
+ *   ALL of it; narrowing the array passed in to de-referenced-only
+ *   without ALSO widening the headline's own reconciliation would have
+ *   silently stopped subtracting downgraded blockers from the "posted
+ *   inline" count — overstating gate state for a downgrade-only or mixed
+ *   run, on the exact repo where an inline thread IS the merge gate).
+ *   Kept SEPARATE from `staleBlockerIssueNumbers` as a parameter (rather
+ *   than pre-unioned by the caller) so this function's own signature
+ *   documents both buckets explicitly, matching how the two skip-notes
+ *   themselves stay separate — only the headline's internal count needs
+ *   the union, not the two buckets' own identities.
  * @param currentlyClosingIssueNumbers - This PR's CURRENT closing-kind
  *   references (PR #96 review round 2, Codex, cid 3626169268, BLOCKER —
  *   used ONLY to re-derive the diff-truncation blocker's own applicability
@@ -704,8 +726,22 @@ export function buildSpecGroundingSummaryCommentBody(
   blockersPostedInline: boolean,
   degradeReason: InlinePostingDegradeReason | null,
   staleBlockerIssueNumbers: readonly number[],
+  downgradedClosingBlockerIssueNumbers: readonly number[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
 ): string {
+  // The UNION of both buckets -- exactly what the single, pre-90.6a
+  // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
+  // slice 90.6a, PR #98 review, Codex, cid 3626878151, P2 fold): the
+  // headline's own "N of these were skipped" reconciliation must count
+  // EVERY review-time blocker no longer posted inline, regardless of
+  // WHICH bucket it fell into, or a downgrade-only (or mixed) run would
+  // understate/overstate the skipped subset and misreport "posted inline"
+  // gate state. De-duplicated via `Set` even though the two buckets are
+  // disjoint by construction at their only current call site -- cheap
+  // defense against a future caller passing overlapping arrays.
+  const skippedBlockerIssueNumbers = [
+    ...new Set([...staleBlockerIssueNumbers, ...downgradedClosingBlockerIssueNumbers]),
+  ].sort((a, b) => a - b);
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
   // KIND-AWARE, against CURRENT state (PR #96 review round 2, Codex, cid
@@ -761,33 +797,42 @@ export function buildSpecGroundingSummaryCommentBody(
         : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
           "only deletes content)";
     // PR #87 review round 4b, Codex, P1 -- a cheap, honest-wording fold:
-    // when some (not all) blockers were skipped as stale, `totalBlockerCount`
-    // (deliberately still the REVIEW-TIME count, see this function's own
-    // `staleBlockerIssueNumbers` param docs and issue #89) must not be
-    // presented as if every one of them has its own inline thread or
-    // summary listing below -- reword the headline to say the count is
-    // review-time and explicitly reconcile it against the posted/listed
-    // subset, pointing at the separate stale-skip note for the rest.
-    const staleReconciliation =
-      staleBlockerIssueNumbers.length > 0
-        ? ` (${staleBlockerIssueNumbers.length} of these were skipped as no longer referenced by this ` +
-          "PR's current body — see the note below, not repeated here.)"
+    // when some (not all) blockers were skipped (de-referenced OR
+    // downgraded -- F1-S9 slice 90.6a, PR #98 review, Codex, cid
+    // 3626878151: reconciled against the UNION of both buckets, exactly
+    // what the pre-90.6a lumped set meant, never just one bucket alone),
+    // `totalBlockerCount` (deliberately still the REVIEW-TIME count, see
+    // this function's own `staleBlockerIssueNumbers`/
+    // `downgradedClosingBlockerIssueNumbers` param docs and issue #89)
+    // must not be presented as if every one of them has its own inline
+    // thread or summary listing below -- reword the headline to say the
+    // count is review-time and explicitly reconcile it against the
+    // posted/listed subset, pointing at the separate skip-note(s) for the
+    // rest. Wording says "no longer CLOSING" (the honest common
+    // denominator for BOTH buckets), not "no longer referenced" (true
+    // only for the de-referenced bucket, false for the downgraded one,
+    // which IS still referenced).
+    const skippedReconciliation =
+      skippedBlockerIssueNumbers.length > 0
+        ? ` (${skippedBlockerIssueNumbers.length} of these are no longer CLOSING obligations this PR's ` +
+          "current body makes — removed entirely, or downgraded to a non-closing reference — see the " +
+          "note(s) below, not repeated here.)"
         : "";
     lines.push(
       blockersPostedInline
-        ? staleBlockerIssueNumbers.length > 0
+        ? skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable to this PR's current linked issues are reported as separate, " +
               `resolvable inline review comment(s) below — see those threads, not this summary, ` +
-              `to resolve them.${staleReconciliation} ${blockerKindsExplanation} See the inline ` +
+              `to resolve them.${skippedReconciliation} ${blockerKindsExplanation} See the inline ` +
               "comment for which case applies and why."
           : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : staleBlockerIssueNumbers.length > 0
+        : skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable are listed below in THIS summary, not as separate inline comments " +
-              `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
+              `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
               blockerKindsExplanation
           : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
               `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +

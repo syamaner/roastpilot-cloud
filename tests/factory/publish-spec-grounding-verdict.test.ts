@@ -1185,6 +1185,16 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/#99[\s\S]{0,80}still references them, but no longer with a closing keyword/i);
     // #12 never appears in either skip-note.
     expect(summaryBody).not.toMatch(/#12[\s\S]{0,40}were NOT posted inline/i);
+    // The HEADLINE's own reconciliation count (F1-S9 slice 90.6a, PR #98
+    // review, Codex, cid 3626878151, P2 -- proves the fix end-to-end, not
+    // just at the unit level): 4 blockers identified at review time
+    // (#12, #34, #78, #99); 3 of those (the UNION of both buckets -- #99
+    // de-referenced, #34+#78 downgraded) are no longer live closing
+    // obligations. Before this fix, the headline only subtracted the
+    // de-referenced bucket (1), claiming 3 blockers were posted inline as
+    // resolvable threads when only #12 actually was.
+    expect(summaryBody).toContain("4 blocking finding(s)");
+    expect(summaryBody).toMatch(/3 of these are no longer closing obligations this pr's current body makes/i);
   });
 
   it("PATCHes a still-closing-referenced criterion's own comment (still unmet) while DELETING a de-referenced sibling's own comment via reconciliation, in the SAME run (F1-S9 slice 90.4, redesigned -- de-reference is now a real delete, not a 'leave in place, note it as stale' no-op)", async () => {

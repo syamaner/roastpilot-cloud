@@ -1584,6 +1584,7 @@ async function publishSummary(
     blockersPostedInline,
     degradeReason,
     staleBlockerIssueNumbers,
+    downgradedClosingBlockerIssueNumbers,
     currentClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
