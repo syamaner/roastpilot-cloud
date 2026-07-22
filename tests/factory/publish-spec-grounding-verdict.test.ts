@@ -1746,6 +1746,90 @@ describe("main — the happy path", () => {
     expect(body).toContain("No blocking findings.");
   });
 
+  it("FAILS CLOSED, rather than publishing a narrowed all-clear, when the PR body changes AGAIN between the reconcile's own re-verify and the publish itself (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid 3626639088, P1 BLOCKER -- a genuine TOCTOU fail-open the #2 narrowing introduced): body=Refs #12 at this run's own first fetch (the diff-truncation term narrows to false, planning a clean all-clear) AND still at the reconcile's own re-verify (so that re-verify sees no drift and proceeds) -- but body=Closes #12 by the time this fix's own pre-publish re-verify runs, a THIRD, independent fetch. Without this fix, nothing would ever re-check the body a third time, and this run would publish 'No blocking findings' + exit 0 for a closing claim it never verified against this run's own truncated diff", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Call 1 (fetchAndVerifyPrShas, this run's own initial snapshot)
+        // and call 2 (the reconcile's own pre-delete re-verify, inside
+        // deleteDeReferencedInlineBlockerComments) both still see the
+        // downgraded body -- an attacker's edit restoring the closing
+        // keyword lands strictly AFTER call 2 but BEFORE call 3, this
+        // fix's own pre-publish re-verify, which is the only thing that
+        // catches it.
+        const body = prFetchCallCount >= 3 ? "Closes #12" : "Refs #12";
+        return prFetchHandlerWithOverrides({ body });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/changed again since this run's own earlier snapshot/i);
+    // Never got as far as a real inline-comment attempt on this failed run.
+    expect(calls.some((c) => c.method === "POST" && c.url.includes("/pulls/83/comments"))).toBe(false);
+  });
+
+  it("posts a visible fallback and exits nonzero when this run's own pre-publish reference re-verify genuinely fails (F1-S9 slice 90.5b, PR #97 draft round 4) -- a genuine (non-drift) network failure on the THIRD `/pulls/83` fetch, never silently swallowed or treated as a clean all-clear", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Call 1 (fetchAndVerifyPrShas) and call 2 (the reconcile's own
+        // pre-delete re-verify) both succeed; call 3 -- this fix's own
+        // pre-publish re-verify -- hits a transient GitHub outage.
+        if (prFetchCallCount >= 3) {
+          return new Response("service unavailable", { status: 500 });
+        }
+        return prFetchHandler();
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/failed to re-verify this pr's linked-issue references immediately before publishing/i);
+    expect(body).toMatch(/500/);
+  });
+
   it("edits the existing summary comment instead of posting a duplicate on re-run", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Fixed." }] },

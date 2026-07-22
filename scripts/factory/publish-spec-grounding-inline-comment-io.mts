@@ -440,6 +440,66 @@ export async function clearStaleInlineBlockerComments(
  *   not merely skip this one function's own work (see
  *   `publish-spec-grounding-verdict.mts`'s own `publishSummary`).
  */
+/**
+ * Re-fetches this PR's CURRENT body fresh (an independent network call, not
+ * shared state with whatever snapshot the caller already has) and confirms
+ * both its closing-kind and any-kind linked-issue reference sets still
+ * exactly match the snapshot the caller took earlier — the shared "re-verify
+ * immediately before a privileged action" primitive originally built for
+ * {@link deleteDeReferencedInlineBlockerComments}'s own pre-delete re-verify
+ * (F1-S9 slice 90.4/90.5b, Codex, cid 3625635476 / cid 3626169271), and now
+ * ALSO used immediately before the summary publish itself (F1-S9 slice
+ * 90.5b, PR #97 draft round 4, Codex, cid 3626639088, P1 BLOCKER — see
+ * `publish-spec-grounding-verdict.mts`'s own `publishSummary` call site for
+ * the TOCTOU window this closes there).
+ *
+ * Factored out rather than left as two independently-maintained inline
+ * copies of the same fetch+parse+compare, per this codebase's own recurring
+ * "shared primitive, not parallel reimplementation" discipline — a future
+ * change to the comparison semantics (e.g. a bucket-split re-verify) only
+ * needs to change in one place.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is acting on.
+ * @param snapshotClosingIssueNumbers - Every issue number the caller's own
+ *   snapshot considered closing-referenced.
+ * @param snapshotReferencedIssueNumbers - Every issue number the caller's
+ *   own snapshot considered referenced, of ANY kind.
+ * @returns `true` only if a FRESH fetch of this PR's body yields exactly
+ *   the same closing-kind AND any-kind reference sets as the snapshot
+ *   passed in; `false` on ANY drift in either set (an addition, a removal,
+ *   or a kind change) — the caller must fail closed on `false`, never
+ *   partially trust the stale snapshot for the privileged action it was
+ *   about to take.
+ */
+export async function verifyLinkedReferenceSnapshotUnchanged(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  snapshotClosingIssueNumbers: ReadonlySet<number>,
+  snapshotReferencedIssueNumbers: ReadonlySet<number>,
+): Promise<boolean> {
+  const pr = await githubRequest<{ readonly body: string | null }>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+  );
+  const freshReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  const freshClosingIssueNumbers = new Set(
+    freshReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
+  );
+  const freshReferencedIssueNumbers = new Set(freshReferences.map((reference) => reference.issueNumber));
+  const setsMatch = (fresh: ReadonlySet<number>, snapshot: ReadonlySet<number>): boolean =>
+    fresh.size === snapshot.size && [...fresh].every((issueNumber) => snapshot.has(issueNumber));
+  return (
+    setsMatch(freshClosingIssueNumbers, snapshotClosingIssueNumbers) &&
+    setsMatch(freshReferencedIssueNumbers, snapshotReferencedIssueNumbers)
+  );
+}
+
 export async function deleteDeReferencedInlineBlockerComments(
   token: string,
   owner: string,
@@ -453,21 +513,14 @@ export async function deleteDeReferencedInlineBlockerComments(
 > {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
 
-  const pr = await githubRequest<{ readonly body: string | null }>(
+  const unchanged = await verifyLinkedReferenceSnapshotUnchanged(
     token,
-    "GET",
-    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+    owner,
+    repo,
+    prNumber,
+    currentlyClosingIssueNumbers,
+    currentlyReferencedIssueNumbers,
   );
-  const freshReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
-  const freshClosingIssueNumbers = new Set(
-    freshReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
-  );
-  const freshReferencedIssueNumbers = new Set(freshReferences.map((reference) => reference.issueNumber));
-  const setsMatch = (fresh: ReadonlySet<number>, snapshot: ReadonlySet<number>): boolean =>
-    fresh.size === snapshot.size && [...fresh].every((issueNumber) => snapshot.has(issueNumber));
-  const unchanged =
-    setsMatch(freshClosingIssueNumbers, currentlyClosingIssueNumbers) &&
-    setsMatch(freshReferencedIssueNumbers, currentlyReferencedIssueNumbers);
   if (!unchanged) {
     return { ok: false, reason: "linked-references-changed" };
   }

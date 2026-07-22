@@ -152,6 +152,7 @@ import {
   clearStaleInlineBlockerComments,
   deleteDeReferencedInlineBlockerComments,
   postInlineCommentPlan,
+  verifyLinkedReferenceSnapshotUnchanged,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
 interface GitHubPullRequestShas {
@@ -1529,6 +1530,62 @@ async function publishSummary(
   }
   if (staleBlockerIssueNumbers.length > 0) {
     body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
+  }
+
+  // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THIS
+  // PUBLISH (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid
+  // 3626639088, P1 BLOCKER, a genuine fail-open on the anti-gaming gate --
+  // the #2/#3 re-verifies above do NOT cover this window): the reconcile
+  // call above already re-verifies the reference snapshot immediately
+  // before ITS OWN delete, but that re-verify completes BEFORE `body`
+  // (built just above) is ever published -- a window remains between the
+  // reconcile's own re-fetch and this call in which the PR's body can be
+  // edited YET AGAIN. Concretely: a closing reference downgraded before
+  // this run's very first fetch (narrowing `diffTruncationBlocksClosingClaim`
+  // to `false` and planning a clean "No blocking findings" summary),
+  // restored again after the reconcile's re-fetch but before this line --
+  // nothing re-checks the body a THIRD time, so this run would publish a
+  // narrowed all-clear for a closing claim it never actually verified
+  // against a (possibly truncated) diff, and exit 0. Combined with this
+  // workflow's own `cancel-in-progress: false` (deliberate, so privileged
+  // publishers serialize rather than race each other), a body-edit-
+  // triggered replacement run does not cancel this one either -- so the
+  // stale all-clear would stand uncorrected.
+  //
+  // Fails closed on ANY drift in either the closing-kind or any-kind
+  // reference set (the generic form, not narrowly tied to the
+  // diff-truncation trigger Codex found) -- the same shared
+  // `verifyLinkedReferenceSnapshotUnchanged` primitive
+  // `deleteDeReferencedInlineBlockerComments` already uses for its own
+  // pre-delete re-verify, called here with an INDEPENDENT fetch (not
+  // shared state) immediately before the one action it protects.
+  let referencesStillMatchAtPublish: boolean;
+  try {
+    referencesStillMatchAtPublish = await verifyLinkedReferenceSnapshotUnchanged(
+      token,
+      owner,
+      repo,
+      prNumber,
+      currentClosingIssueNumbers,
+      currentReferencedIssueNumbers,
+    );
+  } catch (err) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to re-verify this PR's linked-issue references immediately before publishing: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
+  if (!referencesStillMatchAtPublish) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `this PR's linked-issue references changed again since this run's own earlier snapshot, in the ` +
+        `window between reconciling this run's inline comments and publishing this summary -- refusing ` +
+        `to publish a summary built against a body this run can no longer vouch for; a fresh ` +
+        `spec-grounded review will re-evaluate against this PR's current body.`,
+    ]);
+    process.exitCode = 1;
+    return;
   }
 
   await upsertSummaryComment(token, owner, repo, prNumber, body);
