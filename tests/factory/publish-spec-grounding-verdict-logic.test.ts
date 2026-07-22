@@ -420,7 +420,12 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).not.toMatch(/see those threads, not this summary/i);
     expect(body).toMatch(/listed below in THIS summary/i);
     expect(body).toMatch(/no addable line to anchor them to/i);
-    expect(body).toMatch(/no inline thread for/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- see
+    // publish-spec-grounding-verdict.test.ts's own entrypoint tests for
+    // the scenario where a listed entry DOES already have a real thread.
+    expect(body).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(body).not.toMatch(/no inline thread for/i);
   });
 
   it("still explains what counts as a blocking finding regardless of blockersPostedInline's value", () => {

@@ -858,12 +858,13 @@ export function buildSpecGroundingSummaryCommentBody(
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
         : skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
-              "still applicable are listed below in THIS summary, not as separate inline comments " +
-              `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
+              "still applicable are listed below in THIS summary — " +
+              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
+              `these first; address any remaining ones below.${skippedReconciliation} ` +
               blockerKindsExplanation
-          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-              `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
-              `them. ${blockerKindsExplanation}`,
+          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary — ` +
+              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
+              `these first; address any remaining ones below. ${blockerKindsExplanation}`,
       "",
     );
   } else {

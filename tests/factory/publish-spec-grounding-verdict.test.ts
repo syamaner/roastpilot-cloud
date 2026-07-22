@@ -1324,7 +1324,14 @@ describe("main — the happy path", () => {
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- some listed
+    // entries below CAN already have a real (possibly-resolved) inline
+    // thread from a retained PATCH; the wording tells a human to resolve
+    // any existing thread first, then address whatever remains here.
+    expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
+    expect(summaryBody).not.toMatch(/no inline thread for them/i);
     // #12's own full detail belongs in the fallback -- it's still a live
     // obligation with no inline thread.
     expect(summaryBody).toContain("Still-live blocker rationale.");
@@ -1394,7 +1401,14 @@ describe("main — the happy path", () => {
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- some listed
+    // entries below CAN already have a real (possibly-resolved) inline
+    // thread from a retained PATCH; the wording tells a human to resolve
+    // any existing thread first, then address whatever remains here.
+    expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
+    expect(summaryBody).not.toMatch(/no inline thread for them/i);
     // #12's own PATCH succeeded, but that alone does NOT prove its thread
     // is still gating -- it might already be RESOLVED. Conservatively
     // STAYS visible here too, so a re-detected-but-resolved blocker can
@@ -1408,7 +1422,7 @@ describe("main — the happy path", () => {
     // no partial split (createdMarkers is empty here: #12's success was a
     // PATCH, not a CREATE, so nothing was excluded from anything).
     expect(summaryBody).toContain("3 blocking finding(s)");
-    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary, not as/i);
+    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary —/i);
     expect(summaryBody).not.toMatch(/finding\(s\) are already covered by inline review comment/i);
   });
 
@@ -1465,7 +1479,7 @@ describe("main — the happy path", () => {
     // The simple all-listed headline wording -- createdMarkers is empty
     // (the diff-truncation comment's own CREATE failed; #12's own success
     // was a PATCH, not a create), so nothing was excluded from anything.
-    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary, not as/i);
+    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary —/i);
     // #12's own rationale STAYS listed (conservatively kept -- its PATCH
     // succeeded, but that thread could already be resolved).
     expect(summaryBody).toContain("Still-live blocker rationale.");
@@ -1520,7 +1534,14 @@ describe("main — the happy path", () => {
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- some listed
+    // entries below CAN already have a real (possibly-resolved) inline
+    // thread from a retained PATCH; the wording tells a human to resolve
+    // any existing thread first, then address whatever remains here.
+    expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
+    expect(summaryBody).not.toMatch(/no inline thread for them/i);
     // #78's own PATCH succeeded, but that thread might already be
     // RESOLVED -- conservatively STAYS listed here too, so it can never
     // silently vanish.
@@ -1597,7 +1618,14 @@ describe("main — the happy path", () => {
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- some listed
+    // entries below CAN already have a real (possibly-resolved) inline
+    // thread from a retained PATCH; the wording tells a human to resolve
+    // any existing thread first, then address whatever remains here.
+    expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
+    expect(summaryBody).not.toMatch(/no inline thread for them/i);
     // ALL SEVEN findings (6 criteria + issue #90) count as still applicable
     // -- none of the six criteria were ever a fresh CREATE (every one
     // already PATCHed an existing comment, individual or aggregate), so
@@ -1955,7 +1983,10 @@ describe("main — the happy path", () => {
     expect(body).toContain("1 blocking finding(s)");
     expect(body).toMatch(/listed below in THIS summary/i);
     expect(body).toContain("Missing the retry wrapper.");
-    expect(body).toMatch(/could not be posted as inline comments/i);
+    // NOT a categorical "no inline thread for them" claim (F1-S9 slice
+    // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- see the sibling
+    // assertions above in this file for the full reasoning.
+    expect(body).toMatch(/resolve any inline thread that already exists for one of these first/i);
   });
 
   it("degrades to the fallback summary and exits nonzero when the FIRST inline POST is rejected with a 422 (the probe-then-degrade, not a genuine error) -- reconciliation STILL runs (F1-S9 slice 90.4, redesigned, Fork-1: unconditional)", async () => {

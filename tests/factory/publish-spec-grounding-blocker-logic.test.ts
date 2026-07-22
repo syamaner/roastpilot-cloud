@@ -955,7 +955,7 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(buildAnchorFallbackSummarySupplement([], [], false, "no-addable-anchor")).toBe("");
   });
 
-  it("lists a criterion blocker's full detail, since there is no inline thread for it in this fallback path", () => {
+  it("lists a criterion blocker's full detail in this fallback path, WITHOUT categorically claiming no inline thread exists for it (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627450889, P2 -- an entry can be listed here while ALSO already having a real inline thread, e.g. a PATCHed-but-possibly-resolved one retained by the create-vs-patch fail-safe)", () => {
     const body = buildAnchorFallbackSummarySupplement(
       [joined({ issueNumber: 12, criterionId: "12:0", rationale: "Missing the retry wrapper." })],
       [],
@@ -965,7 +965,9 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(body).toContain("#12");
     expect(body).toContain("12:0");
     expect(body).toContain("Missing the retry wrapper.");
-    expect(body).toMatch(/could not be posted as inline comments/i);
+    expect(body).toMatch(/resolve any inline thread that already exists for one of these first/i);
+    expect(body).not.toMatch(/could not be posted as inline comments/i);
+    expect(body).not.toMatch(/no inline thread for them/i);
   });
 
   it("uses the safe-default explanation for an unaddressed criterion blocker, not a fabricated rationale", () => {

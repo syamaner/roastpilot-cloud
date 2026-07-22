@@ -1180,9 +1180,21 @@ export function buildAnchorFallbackSummarySupplement(
       : "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
         "attempt) — our own textual diff parsing and GitHub's own internal diff-position mapping " +
         "disagreed at the edges";
+  // NOT a categorical "no inline thread exists for these" claim (F1-S9
+  // slice 90.6a, PR #99 review, Codex, cid 3627450889, P2): on the
+  // `"anchor-rejected-422"` branch specifically, an entry retained here
+  // by the create-vs-patch fail-safe (cid 3627282617) CAN already have a
+  // real inline thread — its own earlier CREATE succeeded in a prior run,
+  // this run only PATCHed it, and that PATCH may not have reopened an
+  // already-RESOLVED thread. Wording generalized to be honest in BOTH
+  // cases (a genuinely thread-less entry on `"no-addable-anchor"`, and a
+  // possibly-already-threaded one retained here on `"anchor-rejected-422"`)
+  // without needing per-entry patched-vs-never-posted state threaded
+  // through this function.
   const lines: string[] = [
-    `> ⚠️ **Blocking findings could not be posted as inline comments** — ${openingExplanation}. ` +
-      "Listed here in full instead, since there is no inline thread for them:",
+    `> ⚠️ **Blocking findings are listed here** — ${openingExplanation}. ` +
+      "Resolve any inline thread that already exists for one of these first; address any " +
+      "remaining ones below:",
     "",
   ];
 
