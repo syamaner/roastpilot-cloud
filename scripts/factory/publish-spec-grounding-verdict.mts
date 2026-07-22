@@ -151,8 +151,9 @@ import {
 import {
   clearStaleInlineBlockerComments,
   deleteDeReferencedInlineBlockerComments,
+  deriveLinkedReferenceIssueNumberSets,
+  linkedReferenceSnapshotsMatch,
   postInlineCommentPlan,
-  verifyLinkedReferenceSnapshotUnchanged,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
 interface GitHubPullRequestShas {
@@ -1206,6 +1207,21 @@ async function tryPostBlockersInline(
   };
 }
 
+/**
+ * Thrown by `publishSummary`'s own `preWriteCheck` (see that function's own
+ * pre-publish re-verify) to distinguish "the reference/head-SHA re-verify
+ * found real drift" from any OTHER error the same check can throw (a
+ * genuine network failure, propagated as an ordinary `Error`) — the two
+ * cases get differently-worded fallback messages (F1-S9 slice 90.5b, PR
+ * #97 draft round 5, Codex, cid 3626686028).
+ */
+class LinkedReferenceDriftError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LinkedReferenceDriftError";
+  }
+}
+
 async function publishSummary(
   token: string,
   owner: string,
@@ -1532,63 +1548,77 @@ async function publishSummary(
     body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
   }
 
-  // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THIS
-  // PUBLISH (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid
-  // 3626639088, P1 BLOCKER, a genuine fail-open on the anti-gaming gate --
-  // the #2/#3 re-verifies above do NOT cover this window): the reconcile
-  // call above already re-verifies the reference snapshot immediately
-  // before ITS OWN delete, but that re-verify completes BEFORE `body`
-  // (built just above) is ever published -- a window remains between the
-  // reconcile's own re-fetch and this call in which the PR's body can be
-  // edited YET AGAIN. Concretely: a closing reference downgraded before
-  // this run's very first fetch (narrowing `diffTruncationBlocksClosingClaim`
-  // to `false` and planning a clean "No blocking findings" summary),
-  // restored again after the reconcile's re-fetch but before this line --
-  // nothing re-checks the body a THIRD time, so this run would publish a
-  // narrowed all-clear for a closing claim it never actually verified
-  // against a (possibly truncated) diff, and exit 0. Combined with this
-  // workflow's own `cancel-in-progress: false` (deliberate, so privileged
-  // publishers serialize rather than race each other), a body-edit-
-  // triggered replacement run does not cancel this one either -- so the
-  // stale all-clear would stand uncorrected.
+  // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE
+  // ACTUAL WRITE -- not merely before the `upsertSummaryComment` CALL
+  // (F1-S9 slice 90.5b, PR #97 draft round 5, Codex, cid 3626686028, P1
+  // BLOCKER, a RESIDUAL of cid 3626639088's own fix): round 4's re-verify
+  // ran immediately before this function CALLED `upsertSummaryComment`,
+  // but that function's own `findExistingSummaryComment` paginates
+  // (up to `MAX_COMMENT_PAGES` sequential GETs) BEFORE its actual
+  // PATCH/POST -- so a multi-request window still separated the
+  // round-4 re-verify from the write itself, wide enough for the SAME
+  // downgrade-then-restore body edit described below to land in between
+  // and still get a narrowed all-clear published. Threaded in as
+  // `upsertSummaryComment`'s own `preWriteCheck` callback (see that
+  // function's own docstring) instead, so this re-verify now runs AFTER
+  // pagination completes and IMMEDIATELY before the write -- narrowing
+  // the window to the single write call's own latency, the irreducible
+  // floor for two separate REST calls with no cross-call atomicity.
+  //
+  // Concretely, the scenario this closes: a closing reference downgraded
+  // before this run's very first fetch (narrowing
+  // `diffTruncationBlocksClosingClaim` to `false` and planning a clean
+  // "No blocking findings" summary), restored again after
+  // `findExistingSummaryComment`'s own pagination but before the write --
+  // nothing re-checked the body a third time, so this run would have
+  // published a narrowed all-clear for a closing claim it never actually
+  // verified against a (possibly truncated) diff, and exited 0. Combined
+  // with this workflow's own `cancel-in-progress: false` (deliberate, so
+  // privileged publishers serialize rather than race each other), a
+  // body-edit-triggered replacement run does not cancel this one either --
+  // so the stale all-clear would stand uncorrected.
   //
   // Fails closed on ANY drift in either the closing-kind or any-kind
   // reference set (the generic form, not narrowly tied to the
-  // diff-truncation trigger Codex found) -- the same shared
-  // `verifyLinkedReferenceSnapshotUnchanged` primitive
-  // `deleteDeReferencedInlineBlockerComments` already uses for its own
-  // pre-delete re-verify, called here with an INDEPENDENT fetch (not
-  // shared state) immediately before the one action it protects.
-  let referencesStillMatchAtPublish: boolean;
+  // diff-truncation trigger Codex found), AND on a head-SHA drift (a push
+  // landing after this run's own T0 but before the write, security-reviewer
+  // MEDIUM finding on this same window -- a different dimension of the
+  // identical TOCTOU shape). Reuses `fetchAndVerifyPrShas` UNCHANGED (the
+  // same function this run's own EARLIER snapshot used, so the head-SHA
+  // check is byte-for-byte the same check, not a second implementation)
+  // for ONE fetch that covers BOTH dimensions: its own head-SHA throw
+  // covers the second, and its returned `pr.body` is fed to
+  // `deriveLinkedReferenceIssueNumberSets`/`linkedReferenceSnapshotsMatch`
+  // (the same shared primitives `verifyLinkedReferenceSnapshotUnchanged`
+  // itself is built from) for the first -- deliberately NOT baking
+  // head-SHA into that shared primitive itself, since
+  // `deleteDeReferencedInlineBlockerComments`'s own re-verify has no head-
+  // SHA concept and must not gain one just because this caller needs it.
   try {
-    referencesStillMatchAtPublish = await verifyLinkedReferenceSnapshotUnchanged(
-      token,
-      owner,
-      repo,
-      prNumber,
-      currentClosingIssueNumbers,
-      currentReferencedIssueNumbers,
-    );
+    await upsertSummaryComment(token, owner, repo, prNumber, body, {
+      preWriteCheck: async () => {
+        const prAtPublish = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+        const freshReferenceSets = deriveLinkedReferenceIssueNumberSets(prAtPublish.body, `${owner}/${repo}`);
+        if (!linkedReferenceSnapshotsMatch(freshReferenceSets, currentClosingIssueNumbers, currentReferencedIssueNumbers)) {
+          throw new LinkedReferenceDriftError(
+            `this PR's linked-issue references changed again since this run's own earlier snapshot, in ` +
+              `the window between this run's comment lookup completing and the write -- refusing to ` +
+              `publish a summary built against a body this run can no longer vouch for; a fresh ` +
+              `spec-grounded review will re-evaluate against this PR's current body.`,
+          );
+        }
+      },
+    });
   } catch (err) {
-    await publishFallback(token, owner, repo, prNumber, [
-      `failed to re-verify this PR's linked-issue references immediately before publishing: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    ]);
+    const reason =
+      err instanceof LinkedReferenceDriftError
+        ? err.message
+        : `failed to re-verify this PR's identity and linked-issue references immediately before ` +
+          `publishing: ${err instanceof Error ? err.message : String(err)}`;
+    await publishFallback(token, owner, repo, prNumber, [reason]);
     process.exitCode = 1;
     return;
   }
-  if (!referencesStillMatchAtPublish) {
-    await publishFallback(token, owner, repo, prNumber, [
-      `this PR's linked-issue references changed again since this run's own earlier snapshot, in the ` +
-        `window between reconciling this run's inline comments and publishing this summary -- refusing ` +
-        `to publish a summary built against a body this run can no longer vouch for; a fresh ` +
-        `spec-grounded review will re-evaluate against this PR's current body.`,
-    ]);
-    process.exitCode = 1;
-    return;
-  }
-
-  await upsertSummaryComment(token, owner, repo, prNumber, body);
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
       `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
