@@ -71,6 +71,18 @@ describe("findUnpinnedActionReferences (F1-S7, issue #10)", () => {
     expect(findUnpinnedActionReferences(content)).toEqual([]);
   });
 
+  it("flags a QUOTED uses: line with a floating tag -- previously-BLOCKER-class bypass, factory-security fresh authoritative run, Refs #10 (a `uses:\\s*anthropics/...` -anchored pattern with no quote-handling would miss both quote forms entirely, reintroducing the exact RyotaK bot-allowlist-bypass class this whole pin discipline exists to stop; closed as a side effect of dropping the uses: anchor for MEDIUM 2, but pinned here explicitly rather than left only implicitly proven)", () => {
+    expect(findUnpinnedActionReferences('      uses: "anthropics/claude-code-action@main"\n')).toHaveLength(1);
+    expect(findUnpinnedActionReferences("      uses: 'anthropics/claude-code-action@main'\n")).toHaveLength(1);
+  });
+
+  it("does NOT flag a QUOTED uses: line that correctly pins to the expected SHA", () => {
+    const doubleQuoted = `      uses: "anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}"\n`;
+    const singleQuoted = `      uses: 'anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}'\n`;
+    expect(findUnpinnedActionReferences(doubleQuoted)).toEqual([]);
+    expect(findUnpinnedActionReferences(singleQuoted)).toEqual([]);
+  });
+
   it("catches two references on the SAME line -- doesn't assume one-match-per-line", () => {
     const driftedSha = "3333333333333333333333333333333333333333";
     const content = `anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA} anthropics/claude-code-action@${driftedSha}\n`;
