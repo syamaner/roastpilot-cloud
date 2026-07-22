@@ -895,46 +895,72 @@ export function buildSpecGroundingSummaryCommentBody(
 }
 
 /**
- * Upper bound on {@link buildStaleBlockerSkippedNote}'s AND {@link
- * buildDowngradedClosingBlockerSkippedNote}'s own displayed issue-number
- * lists, in characters (PR #87 review round 7, Codex, BLOCKER):
- * `staleBlockerIssueNumbers`/`downgradedClosingBlockerIssueNumbers` are
- * both derived from `criterionBlockers`/`unreviewedClosingIssues`, in turn
- * influenced by the PR's own (attacker-controlled) body — a body naming
- * far more issues than the runner's own fetch cap, or a body edit that
- * removes/downgrades references to many of them at once, could otherwise
- * make either note's own joined issue-number list grow unboundedly,
- * pushing the WHOLE summary comment past GitHub's 65,536-character limit
- * and failing the only write this run makes — the worst outcome, since
- * these notes (like the fallback and anchor-fallback ones) are a signal a
- * human needs, never optional. Capped the SAME way {@link
- * MAX_REASONS_LIST_LENGTH} bounds the fallback comment's own reasons list
- * — a budget over the TOTAL joined string, any remainder reported as an
- * omitted count, never silently dropped. ONE constant, ONE budget, shared
- * by both notes (F1-S9 slice 90.6a's own bucket-split) rather than two
- * independently-tunable caps that could quietly drift apart.
+ * Upper bound on the COMBINED total of {@link buildStaleBlockerSkippedNote}'s
+ * AND {@link buildDowngradedClosingBlockerSkippedNote}'s own displayed
+ * issue-number lists, in characters (PR #87 review round 7, Codex,
+ * BLOCKER; re-scoped from a PER-NOTE cap to a SHARED total, F1-S9 slice
+ * 90.6a, PR #98 review, Codex, cid 3626932819, P2): `staleBlockerIssueNumbers`/
+ * `downgradedClosingBlockerIssueNumbers` are both derived from
+ * `criterionBlockers`/`unreviewedClosingIssues`, in turn influenced by the
+ * PR's own (attacker-controlled) body — a body naming far more issues than
+ * the runner's own fetch cap, or a body edit that removes/downgrades
+ * references to many of them at once, could otherwise make either note's
+ * own joined issue-number list grow unboundedly, pushing the WHOLE summary
+ * comment past GitHub's 65,536-character limit and failing the only write
+ * this run makes — the worst outcome, since these notes (like the fallback
+ * and anchor-fallback ones) are a signal a human needs, never optional.
+ * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the fallback
+ * comment's own reasons list — a budget over the TOTAL joined string, any
+ * remainder reported as an omitted count, never silently dropped. ONE
+ * constant, ONE budget, SPLIT between the two notes by {@link
+ * splitSkippedBlockerNoteBudget} rather than applied to EACH independently
+ * — the bucket-split's own first version of this constant let two
+ * independently-capped notes each reach the full budget, doubling the
+ * combined bound the single pre-split note respected; this constant now
+ * governs the SUM, never either note alone.
  */
 const MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
 
+/** {@link renderCappedIssueNumberList}'s own result — see that function's docstring. */
+interface CappedIssueNumberListResult {
+  readonly list: string;
+  /** The ACTUAL rendered length of `list` (not the budget it was given) — what a caller threading a SHARED budget across multiple renders needs to decrement by. */
+  readonly usedLength: number;
+}
+
 /**
  * Renders a deduplicated, ascending issue-number list as `#N, #M, ...`,
- * capped at {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
- * characters with any remainder reported as an "(and N more)" omitted
- * count rather than silently dropped — the shared DoS-safe rendering
- * primitive both {@link buildStaleBlockerSkippedNote} and {@link
+ * capped at the caller-supplied `maxLength` characters with any remainder
+ * reported as an "(and N more)" omitted count rather than silently
+ * dropped — the shared DoS-safe rendering primitive both {@link
+ * buildStaleBlockerSkippedNote} and {@link
  * buildDowngradedClosingBlockerSkippedNote} build on (F1-S9 slice 90.6a),
  * so the availability guard is maintained in exactly one place.
  *
+ * TAKES `maxLength` AS A PARAMETER, not the shared constant directly (PR
+ * #98 review, Codex, cid 3626932819, P2 — the bucket-split's own 2nd
+ * regression: with two INDEPENDENTLY-capped notes, each capable of using
+ * the FULL {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH} budget,
+ * their COMBINED length could reach 2x what the single pre-split note
+ * ever could — enough, with other content in the assembled comment, to
+ * push the WHOLE summary past GitHub's 65,536-character limit and fail
+ * the only write this run makes, losing the actionable blocker details
+ * to the generic failure fallback). Taking an explicit `maxLength` (and
+ * returning `usedLength`) lets {@link splitSkippedBlockerNoteBudget}
+ * allocate ONE shared budget across both notes' own list renders,
+ * restoring the single-budget bound the pre-split note respected.
+ *
  * @param issueNumbers - The (deduplicated, ascending) issue numbers to render.
- * @returns The capped, comma-joined issue-number list.
+ * @param maxLength - The character budget this render must not exceed.
+ * @returns The capped, comma-joined issue-number list, and its own actual rendered length.
  */
-function renderCappedIssueNumberList(issueNumbers: readonly number[]): string {
+function renderCappedIssueNumberList(issueNumbers: readonly number[], maxLength: number): CappedIssueNumberListResult {
   const issueTokens: string[] = [];
   let issueListLength = 0;
   let addedCount = 0;
   for (const issueNumber of issueNumbers) {
     const token = `#${issueNumber}`;
-    if (issueListLength + token.length + 2 > MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
+    if (issueListLength + token.length + 2 > maxLength) {
       break; // The remainder is reported as an omitted count below, not silently dropped.
     }
     issueTokens.push(token);
@@ -942,7 +968,52 @@ function renderCappedIssueNumberList(issueNumbers: readonly number[]): string {
     addedCount += 1;
   }
   const omittedCount = issueNumbers.length - addedCount;
-  return issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  const list = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  return { list, usedLength: list.length };
+}
+
+/**
+ * Splits the SHARED {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ * budget between the two skip notes' own issue-number-list renders (F1-S9
+ * slice 90.6a, PR #98 review, Codex, cid 3626932819, P2 — see {@link
+ * renderCappedIssueNumberList}'s own docstring for the regression this
+ * closes). Allocates GREEDILY, in a fixed order: the de-referenced (stale)
+ * list renders first against the FULL shared budget; whatever budget it
+ * does NOT use is what the downgraded list gets — so the two lists'
+ * COMBINED rendered length can never exceed the shared budget, restoring
+ * exactly the bound the single pre-split note respected. No principled
+ * reason favors one bucket over the other for priority (both get the
+ * SAME reconciliation treatment); greedy-first-then-remainder is simply
+ * the simplest deterministic split, easy to reason about and test.
+ *
+ * Called ONCE, by the caller building BOTH notes (`publish-spec-grounding-
+ * verdict.mts`'s own `publishSummary`), so the two note-append calls each
+ * pass the SAME, already-decided budgets rather than either one computing
+ * its own independently — the ONLY way to guarantee the two renders never
+ * exceed their shared total.
+ *
+ * TAKES ONLY the stale bucket, not both (a deliberate asymmetry, not an
+ * oversight): under this greedy-first-then-remainder scheme, the
+ * downgraded bucket's own ALLOCATED budget is simply "whatever the stale
+ * bucket did not use" — a function of the stale bucket's rendered length
+ * alone. The downgraded bucket's own SIZE never factors into deciding
+ * that allocation (only into how much of it that allocation ends up
+ * covering, which is {@link buildDowngradedClosingBlockerSkippedNote}'s
+ * own concern when it actually renders against the budget it's given).
+ *
+ * @param staleBlockerIssueNumbers - The de-referenced-entirely bucket —
+ *   the ONLY bucket this split decision needs to inspect.
+ * @returns The character budget each note's own list render should use.
+ */
+export function splitSkippedBlockerNoteBudget(
+  staleBlockerIssueNumbers: readonly number[],
+): { readonly staleMaxListLength: number; readonly downgradedMaxListLength: number } {
+  const staleUsedLength = renderCappedIssueNumberList(
+    staleBlockerIssueNumbers,
+    MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH,
+  ).usedLength;
+  const downgradedMaxListLength = Math.max(0, MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH - staleUsedLength);
+  return { staleMaxListLength: MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH, downgradedMaxListLength };
 }
 
 /**
@@ -985,15 +1056,24 @@ function renderCappedIssueNumberList(issueNumbers: readonly number[]): string {
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
  *   `unreviewedClosingIssues` whose own issue is no longer referenced by
  *   the PR's current body AT ALL, of any kind.
+ * @param maxListLength - This note's OWN share of the character budget for
+ *   its issue-number list — see {@link splitSkippedBlockerNoteBudget},
+ *   which the caller uses to compute this alongside {@link
+ *   buildDowngradedClosingBlockerSkippedNote}'s own share, so the two
+ *   notes' combined list length can never exceed the shared total
+ *   (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2).
+ *   Required, not defaulted — the caller must always make this an
+ *   explicit, deliberate choice rather than risk an un-audited default
+ *   silently reintroducing an unbounded (or double-budgeted) list.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   skipped, ALWAYS within `maxListLength`
  *   regardless of how many issue numbers were skipped.
  */
-export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
+export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[], maxListLength: number): string {
   if (staleBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueList = renderCappedIssueNumberList(staleBlockerIssueNumbers);
+  const { list: issueList } = renderCappedIssueNumberList(staleBlockerIssueNumbers, maxListLength);
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
     "body no longer references them at all (removed since the spec-grounded review ran against " +
@@ -1027,15 +1107,21 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
  *   ascending) issue numbers `tryPostBlockersInline` skipped, still
  *   referenced by the PR's current body but no longer with a closing
  *   keyword.
+ * @param maxListLength - This note's OWN share of the character budget for
+ *   its issue-number list — see {@link buildStaleBlockerSkippedNote}'s
+ *   own identical param docs and {@link splitSkippedBlockerNoteBudget}.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   skipped, ALWAYS within `maxListLength`
  *   regardless of how many issue numbers were skipped.
  */
-export function buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers: readonly number[]): string {
+export function buildDowngradedClosingBlockerSkippedNote(
+  downgradedClosingBlockerIssueNumbers: readonly number[],
+  maxListLength: number,
+): string {
   if (downgradedClosingBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueList = renderCappedIssueNumberList(downgradedClosingBlockerIssueNumbers);
+  const { list: issueList } = renderCappedIssueNumberList(downgradedClosingBlockerIssueNumbers, maxListLength);
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
     "body still references them, but no longer with a closing keyword (downgraded from a `Closes " +

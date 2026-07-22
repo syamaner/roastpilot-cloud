@@ -12,6 +12,7 @@ import {
   formatRationaleForDisplay,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
+  splitSkippedBlockerNoteBudget,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
   SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
   type ExistingComment,
@@ -794,13 +795,25 @@ describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness
   });
 });
 
+// Matches the module's own shared MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH
+// (not exported) -- used here to exercise each note builder with its full
+// theoretical allotment, isolated from the OTHER note's own share (see the
+// dedicated "splitSkippedBlockerNoteBudget" describe block below for the
+// SHARED-budget behavior across both notes together).
+const FULL_SKIPPED_BLOCKER_LIST_BUDGET = 2_000;
+
+/** Extracts just the rendered issue-number-list PORTION of a skip note, excluding the fixed surrounding prose -- what the shared budget actually governs. */
+function extractSkippedBlockerListPortion(note: string): string {
+  return /issue\(s\) (.+?) were NOT posted inline/.exec(note)?.[1] ?? "";
+}
+
 describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symmetric to the delete-path TOCTOU fold)", () => {
   it("returns an empty string when nothing was skipped", () => {
-    expect(buildStaleBlockerSkippedNote([])).toBe("");
+    expect(buildStaleBlockerSkippedNote([], FULL_SKIPPED_BLOCKER_LIST_BUDGET)).toBe("");
   });
 
   it("names every skipped issue number, explains why (de-referenced ENTIRELY -- see the sibling buildDowngradedClosingBlockerSkippedNote describe block below for the downgraded case, F1-S9 slice 90.6a's own bucket-split), and claims removal only where reconciliation could actually confirm it, never unconditionally (F1-S9 slice 90.4, the redesigned reconcile; wording qualified per Codex finding, PR #95 review round 2, P2)", () => {
-    const note = buildStaleBlockerSkippedNote([12, 34]);
+    const note = buildStaleBlockerSkippedNote([12, 34], FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note).toContain("#12");
     expect(note).toContain("#34");
     expect(note).toMatch(/were NOT posted inline/i);
@@ -811,27 +824,41 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
     expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
   });
 
-  it("caps the displayed issue-number list, reporting an omitted count rather than growing unboundedly, when a PR body names far more stale issues than fit within the budget (PR #87 review round 7, Codex, BLOCKER -- unreviewedClosingIssues is attacker-influenced, so this list's own size is too)", () => {
+  it("caps the displayed issue-number list at the CALLER-SUPPLIED budget, reporting an omitted count rather than growing unboundedly, when a PR body names far more stale issues than fit (PR #87 review round 7, Codex, BLOCKER -- unreviewedClosingIssues is attacker-influenced, so this list's own size is too)", () => {
     const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
-    const note = buildStaleBlockerSkippedNote(manyStaleIssueNumbers);
+    const note = buildStaleBlockerSkippedNote(manyStaleIssueNumbers, FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note.length).toBeLessThan(3_000);
     expect(note).toMatch(/and \d+ more/i);
     expect(note).toContain("#1");
   });
 
+  it("respects a SMALLER caller-supplied budget too, not just the full one (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819 -- proves this function actually HONORS the shared-budget allocation, not just accepts the parameter)", () => {
+    // A 10-char budget fits #12 and #34 (5 chars each, including the ", "
+    // separator budget) but not #56 -- forces a real, non-trivial omission.
+    const note = buildStaleBlockerSkippedNote([12, 34, 56], 10);
+    expect(extractSkippedBlockerListPortion(note).length).toBeLessThan(40); // the list portion itself, capped near the 10-char budget; the surrounding prose is fixed and outside this budget's own scope.
+    expect(note).toMatch(/and \d+ more/i);
+  });
+
+  it("renders NOTHING of the list (an all-omitted note) when the budget is 0 -- never throws or renders unbounded", () => {
+    const note = buildStaleBlockerSkippedNote([12, 34], 0);
+    expect(note).toMatch(/and 2 more/i);
+    expect(note).not.toContain("#12");
+  });
+
   it("does not report an omitted count when every stale issue number fits within the budget", () => {
-    const note = buildStaleBlockerSkippedNote([12, 34]);
+    const note = buildStaleBlockerSkippedNote([12, 34], FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note).not.toMatch(/and \d+ more/i);
   });
 });
 
 describe("buildDowngradedClosingBlockerSkippedNote (F1-S9 slice 90.6a -- the stale-vs-downgraded bucket-split sibling of buildStaleBlockerSkippedNote)", () => {
   it("returns an empty string when nothing was downgraded", () => {
-    expect(buildDowngradedClosingBlockerSkippedNote([])).toBe("");
+    expect(buildDowngradedClosingBlockerSkippedNote([], FULL_SKIPPED_BLOCKER_LIST_BUDGET)).toBe("");
   });
 
   it("names every downgraded issue number, explains why (still referenced, no longer closing -- as distinct from de-referenced entirely), and claims removal only where reconciliation could actually confirm it, never unconditionally (mirrors buildStaleBlockerSkippedNote's own caveat)", () => {
-    const note = buildDowngradedClosingBlockerSkippedNote([12, 34]);
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34], FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note).toContain("#12");
     expect(note).toContain("#34");
     expect(note).toMatch(/were NOT posted inline/i);
@@ -843,17 +870,74 @@ describe("buildDowngradedClosingBlockerSkippedNote (F1-S9 slice 90.6a -- the sta
     expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
   });
 
-  it("caps the displayed issue-number list, reporting an omitted count rather than growing unboundedly, when a PR body names far more downgraded issues than fit within the budget (mirrors buildStaleBlockerSkippedNote's own DoS-cap coverage -- same shared MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH budget)", () => {
+  it("caps the displayed issue-number list at the CALLER-SUPPLIED budget, reporting an omitted count rather than growing unboundedly, when a PR body names far more downgraded issues than fit (mirrors buildStaleBlockerSkippedNote's own DoS-cap coverage)", () => {
     const manyDowngradedIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
-    const note = buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers);
+    const note = buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers, FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note.length).toBeLessThan(3_000);
     expect(note).toMatch(/and \d+ more/i);
     expect(note).toContain("#1");
   });
 
+  it("respects a SMALLER caller-supplied budget too (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819 -- the case that actually matters: this is the note that receives whatever budget is LEFT after the stale note's own share)", () => {
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34, 56], 10);
+    expect(extractSkippedBlockerListPortion(note).length).toBeLessThan(40);
+    expect(note).toMatch(/and \d+ more/i);
+  });
+
   it("does not report an omitted count when every downgraded issue number fits within the budget", () => {
-    const note = buildDowngradedClosingBlockerSkippedNote([12, 34]);
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34], FULL_SKIPPED_BLOCKER_LIST_BUDGET);
     expect(note).not.toMatch(/and \d+ more/i);
+  });
+});
+
+describe("splitSkippedBlockerNoteBudget (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2 -- closes the bucket-split's OWN regression: two independently-capped notes could together reach 2x the single pre-split note's own bound)", () => {
+  it("gives the stale bucket's list render the FULL shared budget, and leaves the downgraded bucket nearly all of it back (its own leftover budget must still be a large, well-defined, non-negative number, never 2,000 exactly once the stale bucket has ACTUALLY used a few characters)", () => {
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget([12, 34]);
+    expect(staleMaxListLength).toBe(2_000);
+    expect(downgradedMaxListLength).toBeGreaterThan(1_900);
+    expect(downgradedMaxListLength).toBeLessThanOrEqual(2_000);
+  });
+
+  it("gives the downgraded bucket's list render whatever the stale bucket's ACTUAL usage left over, not the full budget again -- the combined worst case Codex flagged: the stale bucket large enough to consume nearly the whole shared budget on its own", () => {
+    // A stale list large enough to consume roughly the whole shared
+    // budget on its own (each token is "#N, " -- ~2,000 issue numbers
+    // comfortably exceeds the 2,000-character budget).
+    const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(manyStaleIssueNumbers);
+    expect(staleMaxListLength).toBe(2_000);
+    // The stale render used (nearly) the entire 2,000-char budget, so the
+    // downgraded bucket is left with little to nothing -- NEVER the full
+    // 2,000 again (the pre-fix bug), and never negative.
+    expect(downgradedMaxListLength).toBeLessThan(200);
+    expect(downgradedMaxListLength).toBeGreaterThanOrEqual(0);
+  });
+
+  it("PROVES THE FIX end-to-end (Codex's own combined worst case -- BOTH buckets large enough that either alone could reach the full shared budget): the two notes' COMBINED rendered list length stays close to the single shared budget, never anywhere near the 2x a pair of independently-capped notes could reach pre-fix", () => {
+    const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
+    const manyDowngradedIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 10_000);
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(manyStaleIssueNumbers);
+    const staleNote = buildStaleBlockerSkippedNote(manyStaleIssueNumbers, staleMaxListLength);
+    const downgradedNote = buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers, downgradedMaxListLength);
+    const staleListLength = extractSkippedBlockerListPortion(staleNote).length;
+    const downgradedListLength = extractSkippedBlockerListPortion(downgradedNote).length;
+    // A small, BOUNDED margin above the 2,000-char shared budget is
+    // expected and pre-existing (unchanged by this fix): each list's own
+    // break-loop bounds only the TOKEN portion; the "(and N more)"
+    // omitted-count suffix is appended AFTERWARD, unbudgeted -- the exact
+    // same characteristic the single pre-split note always had (PR #87
+    // round 7). With TWO notes, at most TWO such suffixes (each at most
+    // ~20 characters) can overshoot -- nowhere near the ~2,000-character
+    // overshoot a pair of independently-2,000-capped notes could reach
+    // pre-fix (this test's whole point). Tightening this to a byte-exact
+    // guarantee is 90.6b's own whole-comment budget scope, not this fix's.
+    expect(staleListLength + downgradedListLength).toBeLessThan(2_100);
+  });
+
+  it("does not shrink the downgraded budget when the stale bucket is small or absent -- the split reflects the stale bucket's ACTUAL rendered usage, never a blind 50/50", () => {
+    const { downgradedMaxListLength } = splitSkippedBlockerNoteBudget([12]);
+    // #12's own rendered list is a handful of characters -- the
+    // downgraded bucket keeps nearly the entire 2,000-char budget.
+    expect(downgradedMaxListLength).toBeGreaterThan(1_900);
   });
 });
 

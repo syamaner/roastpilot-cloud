@@ -135,6 +135,7 @@ import {
   findUnreviewedNewClosingReferences,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
+  splitSkippedBlockerNoteBudget,
   type JoinedCriterionResult,
   type NoCriteriaReason,
 } from "./publish-spec-grounding-verdict-logic.mts";
@@ -1604,11 +1605,18 @@ async function publishSummary(
       degradeReason ?? "no-addable-anchor",
     );
   }
+  // The two skip-notes' issue-number lists SHARE one character budget,
+  // computed ONCE here and passed to both (F1-S9 slice 90.6a, PR #98
+  // review, Codex, cid 3626932819, P2 -- two independently-capped notes
+  // could together reach 2x the single pre-split note's own bound; see
+  // `splitSkippedBlockerNoteBudget`'s own docstring for the full
+  // regression this closes).
+  const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(staleBlockerIssueNumbers);
   if (staleBlockerIssueNumbers.length > 0) {
-    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
+    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers, staleMaxListLength);
   }
   if (downgradedClosingBlockerIssueNumbers.length > 0) {
-    body += "\n" + buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers);
+    body += "\n" + buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers, downgradedMaxListLength);
   }
 
   // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE
