@@ -717,30 +717,25 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   `null`), this specific blocker could never be cleared by anything
  *   short of a human resolving the thread, only for the NEXT run to
  *   recompute the same permanently-true flag and re-post it forever.
- * @param postedInlineCount - Of the still-closing blockers, how many
- *   ALREADY exist as real, resolvable inline comments (F1-S9 slice 90.6a,
- *   PR #99 review, Codex, cid 3627145120, P2 — closing the contradiction
- *   #376 exposed: a mid-plan 422 leaves `blockersPostedInline` FALSE
- *   all-or-nothing, but some entries can have already posted/patched
- *   successfully BEFORE the entry that 422'd, and #376's own fix now
- *   correctly EXCLUDES those from the anchor-fallback rendering — so the
- *   old all-or-nothing headline wording, claiming every still-applicable
- *   blocker is "listed below, no inline thread," directly contradicted a
- *   fallback that (correctly) omits the ones that DO have a thread).
- *   Always `0` when `blockersPostedInline` is `true` (unused in that
- *   branch) or when nothing was ever attempted (`degradeReason ===
- *   "no-addable-anchor"`, where nothing could have posted before the
- *   degrade).
- * @param fallbackListedCount - Of the still-closing blockers, how many
- *   are actually rendered in the anchor-fallback supplement below (the
- *   SAME count the caller's own `fallbackCriterionBlockers.length +
- *   fallbackUnreviewedClosingIssues.length` yields) — passed explicitly
- *   rather than re-derived here from `totalBlockerCount` arithmetic,
- *   since `totalBlockerCount` and `skippedBlockerIssueNumbers` are
- *   counted at DIFFERENT granularities (blockers/criteria vs. unique
- *   issue numbers — one issue can have several unmet criteria that all
- *   skip together), so subtracting one from the other would not reliably
- *   yield this count.
+ * NO LONGER TAKES a posted-vs-fallback-listed COUNT SPLIT (F1-S9 slice
+ * 90.6a, PR #99 review — round 3, cid 3627145120, added `postedInlineCount`/
+ * `fallbackListedCount` and a "X findings already posted, Y listed below"
+ * partial-headline wording; round 4, cid 3627210751, folded the
+ * diff-truncation blocker into that same split; round 5, cid 3627282617,
+ * REMOVED both — see `tryPostBlockersInline`'s own docstring for the full
+ * reasoning: fixing cid 3627282617's real fail-open (a PATCH can silently
+ * update an ALREADY-RESOLVED thread, so excluding it from the fallback
+ * could make a re-detected blocker vanish) requires keying the fallback
+ * exclusion off `createdMarkers` (fresh CREATEs only, never PATCHes) —
+ * and `createdMarkers` is PROVABLY ALWAYS EMPTY whenever a mid-plan 422
+ * actually degrades a run (the degrade condition itself requires no
+ * earlier CREATE to have succeeded; only PATCHes can occupy that
+ * position). So `postedInlineCount` would always be `0` on the one branch
+ * that ever consulted it — the partial-headline wording could never
+ * actually render. Removed rather than kept as dead/`v8-ignore`d code;
+ * the degrade headline reverts to the simple, pre-round-3
+ * `blockersPostedInline`-based wording below, which is what actually
+ * renders in every reachable case anyway).
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -752,8 +747,6 @@ export function buildSpecGroundingSummaryCommentBody(
   staleBlockerIssueNumbers: readonly number[],
   downgradedClosingBlockerIssueNumbers: readonly number[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
-  postedInlineCount: number,
-  fallbackListedCount: number,
 ): string {
   // The UNION of both buckets -- exactly what the single, pre-90.6a
   // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
@@ -844,14 +837,14 @@ export function buildSpecGroundingSummaryCommentBody(
           "current body makes — removed entirely, or downgraded to a non-closing reference — see the " +
           "note(s) below, not repeated here.)"
         : "";
-    // PARTIALLY posted (F1-S9 slice 90.6a, PR #99 review, Codex, cid
-    // 3627145120, P2 -- see `postedInlineCount`'s own param docs): a
-    // mid-plan 422 can leave SOME still-closing blockers already posted
-    // as real inline threads while the rest end up in the anchor-fallback
-    // below -- the all-or-nothing `blockersPostedInline` boolean alone
-    // cannot represent this split, so it gets its own wording rather than
-    // folding into either the fully-posted or fully-fallback branches.
-    const partiallyPostedInline = !blockersPostedInline && postedInlineCount > 0;
+    // NO partial-posting wording (F1-S9 slice 90.6a, PR #99 review, Codex,
+    // cid 3627145120 added one, cid 3627282617 removed it again -- see
+    // this function's own top-level docstring for the full reasoning: a
+    // mid-plan degrade can never leave anything meaningfully "already
+    // posted" once the fallback exclusion is correctly keyed off
+    // `createdMarkers` alone, so the all-or-nothing wording below is what
+    // ALWAYS actually applies on this branch, not a simplification that
+    // loses real information).
     lines.push(
       blockersPostedInline
         ? skippedBlockerIssueNumbers.length > 0
@@ -863,31 +856,14 @@ export function buildSpecGroundingSummaryCommentBody(
           : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : partiallyPostedInline
-          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; of those ` +
-              "still applicable to this PR's current linked issues, " +
-              // FINDINGS, not "comments" (PR #99 review, Codex, cid
-              // 3627282621, P3): postedInlineCount counts still-applicable
-              // BLOCKERS, not the inline COMMENTS covering them -- when
-              // more than MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS (or
-              // the unreviewed-issue sibling cap) already posted, several
-              // findings share ONE aggregate comment, so "N already exist
-              // as separate... comment(s)" would overstate how many
-              // distinct threads actually exist. "Covered by" is honest
-              // regardless of the individual-vs-aggregate split.
-              `**${postedInlineCount}** finding(s) are already covered by inline review comment(s) ` +
-              "— see those threads, not this summary, to resolve them — and " +
-              `**${fallbackListedCount}** are listed below in THIS summary instead, since ` +
-              `${degradeExplanation} left them with no inline thread.${skippedReconciliation} ` +
+        : skippedBlockerIssueNumbers.length > 0
+          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
+              "still applicable are listed below in THIS summary, not as separate inline comments " +
+              `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
               blockerKindsExplanation
-          : skippedBlockerIssueNumbers.length > 0
-            ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
-                "still applicable are listed below in THIS summary, not as separate inline comments " +
-                `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
-                blockerKindsExplanation
-            : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
-                `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
-                `them. ${blockerKindsExplanation}`,
+          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
+              `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
+              `them. ${blockerKindsExplanation}`,
       "",
     );
   } else {

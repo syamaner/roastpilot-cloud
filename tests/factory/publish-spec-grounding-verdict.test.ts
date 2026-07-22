@@ -1338,7 +1338,7 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/#34 were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i);
   });
 
-  it("does NOT list an ALREADY-POSTED blocker's own full detail in the ANCHOR-FALLBACK supplement after a MID-PLAN 422, AND the headline correctly reflects the PARTIAL split (F1-S9 slice 90.6a, issue #90's own #378 -- postInlineCommentPlan's return used to carry no record of what posted before the rejection, so the fallback claimed 'no inline thread exists' for one that already does; the headline fix is PR #99 review, Codex, cid 3627145120 -- before it, the headline claimed all 3 blockers were 'listed below, no inline thread,' directly contradicting the now-filtered fallback showing only 2): #12 PATCHes an existing comment successfully; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted", async () => {
+  it("KEEPS a PATCHED-but-possibly-RESOLVED blocker's own full detail VISIBLE in the ANCHOR-FALLBACK supplement after a MID-PLAN 422 -- the fail-safe fix (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2): an earlier version of this fix excluded #12 here because its own PATCH succeeded, but a PATCH can silently update an ALREADY-RESOLVED thread without reopening it (upsertInlineComment's own documented limitation) -- so excluding it could make a re-detected-but-resolved blocker vanish entirely (neither gating, nor listed). Keying the exclusion off fresh CREATEs only (never PATCHes) fixes that: #12 PATCHes an existing comment successfully and STAYS listed; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted. The headline uses the simple all-listed wording -- the partial-split headline this fix's own PRIOR version added (cid 3627145120) was removed again, since createdMarkers is provably always empty on this branch (see buildSpecGroundingSummaryCommentBody's own docstring)", async () => {
     const stillLiveMarker = criterionBlockerCommentMarker("12:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1395,27 +1395,24 @@ describe("main — the happy path", () => {
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
     expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
-    // #12 already has a REAL inline thread (the PATCH succeeded) -- its
-    // own full detail must NOT be re-listed in the fallback, which would
-    // falsely claim no inline thread exists for it.
-    expect(summaryBody).not.toContain("First rationale, already posted.");
-    // #34 and #56 genuinely have no inline thread -- both belong in the fallback.
+    // #12's own PATCH succeeded, but that alone does NOT prove its thread
+    // is still gating -- it might already be RESOLVED. Conservatively
+    // STAYS visible here too, so a re-detected-but-resolved blocker can
+    // never silently vanish (the fail-safe fix this test pins).
+    expect(summaryBody).toContain("First rationale, already posted.");
+    // #34 and #56 genuinely have no inline thread -- both belong in the fallback too.
     expect(summaryBody).toContain("Second rationale, 422 on create.");
     expect(summaryBody).toContain("Third rationale, never attempted.");
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
-    // The HEADLINE (F1-S9 slice 90.6a, PR #99 review, Codex, cid
-    // 3627145120): 3 blocking finding(s) identified at review time, of
-    // which 1 (#12) already has a real inline thread and 2 (#34, #56) are
-    // listed below -- NEVER the old all-or-nothing "3 listed below, no
-    // inline thread" claim, which would have directly contradicted the
-    // fallback's own (correct) omission of #12 above.
+    // The HEADLINE uses the SIMPLE all-listed wording -- ALL 3 findings,
+    // no partial split (createdMarkers is empty here: #12's success was a
+    // PATCH, not a CREATE, so nothing was excluded from anything).
     expect(summaryBody).toContain("3 blocking finding(s)");
-    expect(summaryBody).toMatch(/\*\*1\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
-    expect(summaryBody).toMatch(/\*\*2\*\* are listed below in this summary instead/i);
-    expect(summaryBody).not.toMatch(/those\s+still applicable are listed below in this summary/i);
+    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary, not as/i);
+    expect(summaryBody).not.toMatch(/finding\(s\) are already covered by inline review comment/i);
   });
 
-  it("includes the WHOLE-RUN diff-truncation blocker in the posted/fallback split -- the invariant postedInlineCount + fallbackListedCount === totalBlockerCount holds even when the DIFF-TRUNCATION comment itself is the one that 422s (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627210751, P2 -- this fix's own PRIOR version counted only criterion + unreviewed-issue entries, silently omitting the diff-truncation blocker even though buildAnchorFallbackSummarySupplement renders it too): #12 already has an inline comment and PATCHes successfully; the diff-truncation aggregate has none and is the first genuine CREATE, which 422s, degrading the whole plan", async () => {
+  it("keeps BOTH a PATCHED criterion blocker AND the WHOLE-RUN diff-truncation blocker visible in the fallback when the diff-truncation comment itself is the one that 422s (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2 -- the fail-safe fix): #12 already has an inline comment and PATCHes successfully -- STAYS listed (possibly-resolved, conservatively kept); the diff-truncation aggregate has none and is the first genuine CREATE, which 422s, degrading the whole plan -- also listed, since it genuinely never posted", async () => {
     const marker12 = criterionBlockerCommentMarker("12:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1465,18 +1462,19 @@ describe("main — the happy path", () => {
     const summaryBody = (summaryPost?.body as { body: string }).body;
     // Review-time total: 1 criterion blocker + 1 diff-truncation term = 2.
     expect(summaryBody).toContain("2 blocking finding(s)");
-    // #12 already posted (1); the diff-truncation blocker did NOT (1) --
-    // 1 + 1 === 2, the invariant this test pins directly.
-    expect(summaryBody).toMatch(/\*\*1\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
-    expect(summaryBody).toMatch(/\*\*1\*\* are listed below in this summary instead/i);
-    // #12's own rationale must NOT be re-listed (already posted).
-    expect(summaryBody).not.toContain("Still-live blocker rationale.");
-    // The diff-truncation blocker's own detail IS in the fallback --
-    // exactly what the headline's "1 listed below" now correctly claims.
+    // The simple all-listed headline wording -- createdMarkers is empty
+    // (the diff-truncation comment's own CREATE failed; #12's own success
+    // was a PATCH, not a create), so nothing was excluded from anything.
+    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary, not as/i);
+    // #12's own rationale STAYS listed (conservatively kept -- its PATCH
+    // succeeded, but that thread could already be resolved).
+    expect(summaryBody).toContain("Still-live blocker rationale.");
+    // The diff-truncation blocker's own detail is ALSO in the fallback --
+    // it genuinely never posted at all.
     expect(summaryBody).toMatch(/this pr's own diff was truncated/i);
   });
 
-  it("applies the SAME already-posted exclusion to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully; #90 is the first genuine CREATE and 422s, degrading the whole plan", async () => {
+  it("applies the SAME fail-safe (keep-visible) treatment to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully -- STAYS listed; #90 is the first genuine CREATE and 422s, degrading the whole plan -- also listed, since it genuinely never posted", async () => {
     const marker78 = unreviewedClosingIssueCommentMarker(78);
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [] },
@@ -1523,14 +1521,16 @@ describe("main — the happy path", () => {
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
     expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
-    // #78 already has a REAL inline thread -- must NOT be re-listed.
-    expect(summaryBody).not.toMatch(/Issue #78: \*\*never reviewed at all\*\*/);
-    // #90 genuinely has no inline thread -- belongs in the fallback.
+    // #78's own PATCH succeeded, but that thread might already be
+    // RESOLVED -- conservatively STAYS listed here too, so it can never
+    // silently vanish.
+    expect(summaryBody).toMatch(/Issue #78: \*\*never reviewed at all\*\*/);
+    // #90 genuinely has no inline thread -- belongs in the fallback too.
     expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
   });
 
-  it("does NOT re-list an OVERFLOW criterion blocker in the anchor-fallback when the AGGREGATE comment covering it already PATCHed successfully -- the aggregate/overflow boundary (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, qa lens -- a REAL incomplete fix: checking an overflow entry's own INDIVIDUAL marker against postedMarkers can never match, since it was never used in the plan at all; only the shared AGGREGATE marker was): 5 individual criterion blockers (12:0-12:4) all already PATCH successfully; the 6th (12:5) overflows into ONE aggregate comment, which ALSO already exists and PATCHes successfully; a separate unreviewed-closing issue (#90) is the first genuine CREATE in the whole plan and 422s, degrading it", async () => {
+  it("KEEPS an OVERFLOW criterion blocker VISIBLE in the anchor-fallback even when the AGGREGATE comment covering it already PATCHed successfully -- the aggregate/overflow boundary, conservative-by-construction under the create-vs-patch fail-safe (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review round 5, cid 3627282617: a PATCH -- individual or aggregate -- never proves its thread isn't already RESOLVED, so `createdMarkers` stays empty for every entry here and NONE of the 6 criteria are excluded; this scenario still exercises the overflow/aggregate marker plumbing itself -- see `criterionCoveringMarkers`/`issueCoveringMarkers` -- but now proves the conservative KEEP outcome, the opposite of what an earlier, reverted round of this test asserted before that exclusion policy was found fail-open): 5 individual criterion blockers (12:0-12:4) all already PATCH successfully; the 6th (12:5) overflows into ONE aggregate comment, which ALSO already exists and PATCHes successfully; a separate unreviewed-closing issue (#90) is the first genuine CREATE in the whole plan and 422s, degrading it", async () => {
     const individualMarkers = Array.from({ length: 5 }, (_unused, i) => criterionBlockerCommentMarker(`12:${i}`));
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1598,15 +1598,32 @@ describe("main — the happy path", () => {
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
     expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
-    // NONE of the six criteria's own rationale appears -- all covered,
-    // either individually (12:0-12:4) or via the aggregate (12:5). THE
-    // KEY ASSERTION: 12:5 specifically -- the overflow entry whose own
-    // INDIVIDUAL marker was never used in the plan at all, so a
-    // positional/individual-marker-only reimplementation of this filter
-    // would have wrongly re-listed it.
-    for (let i = 0; i < 6; i++) {
-      expect(summaryBody).not.toContain(`Rationale for 12:${i}.`);
+    // ALL SEVEN findings (6 criteria + issue #90) count as still applicable
+    // -- none of the six criteria were ever a fresh CREATE (every one
+    // already PATCHed an existing comment, individual or aggregate), so
+    // `createdMarkers` is empty and the create-vs-patch fail-safe excludes
+    // nothing: a PATCH alone never proves the thread isn't already
+    // RESOLVED, so every one of the six stays in the conservatively-kept
+    // set (contrast the old, reverted policy, under which all six would
+    // have been excluded and the headline would have said "1 blocking
+    // finding(s)").
+    expect(summaryBody).toContain("7 blocking finding(s)");
+    // `buildAnchorFallbackSummarySupplement` has its own, SEPARATE display
+    // cap (MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS, unrelated to
+    // createdMarkers) on how many criteria it lists individually before
+    // folding the remainder into a "N more" aggregate note -- so 12:0-12:4
+    // render individually and 12:5 (the overflow entry whose own
+    // INDIVIDUAL marker was never used in the plan, only the shared
+    // AGGREGATE marker) folds into that note instead. THE KEY ASSERTION:
+    // that fold is purely a DISPLAY-density choice, not an exclusion --
+    // 12:5 is still counted in "7 blocking finding(s)" above, proving
+    // `criterionCoveringMarkers`/`issueCoveringMarkers` still correctly
+    // resolves the aggregate-covered entry to "not a fresh CREATE" (kept),
+    // rather than wrongly treating it as excluded.
+    for (let i = 0; i < 5; i++) {
+      expect(summaryBody).toContain(`Rationale for 12:${i}.`);
     }
+    expect(summaryBody).toMatch(/1 more unmet acceptance criterion\(a\) also treated as unsatisfied/i);
     // #90 genuinely has no inline thread -- belongs in the fallback.
     expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
     expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(6);

@@ -226,10 +226,14 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
 
     expect(result.ok).toBe(true);
     // F1-S9 slice 90.6a, issue #90's own #378: every marker this call
-    // actually posted, in plan order.
+    // actually posted, in plan order. Both entries here are fresh
+    // CREATEs, so createdMarkers equals postedMarkers exactly (PR #99
+    // review, Codex, cid 3627282617 -- see the sibling PATCH-based tests
+    // below for the case where they diverge).
     expect(result).toEqual({
       ok: true,
       postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+      createdMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
     });
     const posts = calls.filter((c) => c.method === "POST");
     expect(posts).toHaveLength(2);
@@ -237,12 +241,12 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     expect((posts[1]?.body as { body: string }).body).toBe("second");
   });
 
-  it("returns an EMPTY postedMarkers for the trivial empty-plan case (F1-S9 slice 90.6a, issue #90's own #378)", async () => {
+  it("returns EMPTY postedMarkers and createdMarkers for the trivial empty-plan case (F1-S9 slice 90.6a, issue #90's own #378)", async () => {
     const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", []);
-    expect(result).toEqual({ ok: true, postedMarkers: [] });
+    expect(result).toEqual({ ok: true, postedMarkers: [], createdMarkers: [] });
   });
 
-  it("abandons the whole plan (never attempts comment 2+) when the FIRST comment 422s -- postedMarkers is EMPTY, since nothing succeeded before the rejection", async () => {
+  it("abandons the whole plan (never attempts comment 2+) when the FIRST comment 422s -- postedMarkers and createdMarkers are BOTH EMPTY, since nothing succeeded before the rejection", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/o/r/pulls/5/comments": () => errorResponse(422, "Unprocessable Entity"),
@@ -257,9 +261,10 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     expect(result.ok).toBe(false);
     // The discriminated reason (PR #87 review round 4, Codex, P1), not
     // just a bare boolean -- the caller's own summary wording branches on
-    // it. postedMarkers (F1-S9 slice 90.6a, #378) is empty here -- the
-    // very first entry is the one that 422'd, so nothing posted before it.
-    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422", postedMarkers: [] });
+    // it. postedMarkers/createdMarkers (F1-S9 slice 90.6a, #378) are both
+    // empty here -- the very first entry is the one that 422'd, so
+    // nothing posted before it.
+    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422", postedMarkers: [], createdMarkers: [] });
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
   });
 
@@ -295,7 +300,7 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ).rejects.toThrow(/422/);
   });
 
-  it("probes the FIRST actual CREATE (POST), not literal plan index 0 -- when entries 0 and 1 both match existing comments and PATCH, entry 2's own POST is the diagnostic one, and postedMarkers accumulates BOTH successful PATCHes before the degrade (PR #87 review, Codex, P2; postedMarkers F1-S9 slice 90.6a, issue #90's own #378)", async () => {
+  it("probes the FIRST actual CREATE (POST), not literal plan index 0 -- when entries 0 and 1 both match existing comments and PATCH, entry 2's own POST is the diagnostic one, and postedMarkers accumulates BOTH successful PATCHes before the degrade, but createdMarkers stays EMPTY (F1-S9 slice 90.6a, issue #90's own #378; postedMarkers/createdMarkers distinction PR #99 review, Codex, cid 3627282617, P2 -- proves createdMarkers is PROVABLY EMPTY whenever this function degrades: a PATCH never touches firstCreateSucceeded, so nothing here counts as a fresh create)", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([
@@ -336,9 +341,39 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
       ok: false,
       reason: "anchor-rejected-422",
       postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+      // Both successes were PATCHes, never a fresh CREATE -- createdMarkers
+      // is EMPTY, not the two PATCHed markers.
+      createdMarkers: [],
     });
     expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(2);
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("on a FULLY successful mixed plan, createdMarkers is the SUBSET of postedMarkers that were fresh CREATEs -- PATCHes stay out of createdMarkers even when everything succeeds (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2)", async () => {
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 88,
+            body: `prior\n${criterionBlockerCommentMarker("12:0")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/pulls/comments/88": () => jsonResponse({}),
+      "POST /repos/o/r/pulls/5/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", [
+      plan({ marker: criterionBlockerCommentMarker("12:0"), body: "update" }),
+      plan({ marker: criterionBlockerCommentMarker("12:1"), body: "create" }),
+    ]);
+
+    expect(result).toEqual({
+      ok: true,
+      postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+      createdMarkers: [criterionBlockerCommentMarker("12:1")],
+    });
   });
 
   it("propagates a PATCH's own 422 as a genuine error, never as a degrade signal -- a PATCH never re-validates the anchor at all", async () => {
