@@ -1338,7 +1338,7 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/#34 were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i);
   });
 
-  it("does NOT list an ALREADY-POSTED blocker's own full detail in the ANCHOR-FALLBACK supplement after a MID-PLAN 422 (F1-S9 slice 90.6a, issue #90's own #378 -- postInlineCommentPlan's return used to carry no record of what posted before the rejection, so the fallback claimed 'no inline thread exists' for one that already does): #12 PATCHes an existing comment successfully; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted", async () => {
+  it("does NOT list an ALREADY-POSTED blocker's own full detail in the ANCHOR-FALLBACK supplement after a MID-PLAN 422, AND the headline correctly reflects the PARTIAL split (F1-S9 slice 90.6a, issue #90's own #378 -- postInlineCommentPlan's return used to carry no record of what posted before the rejection, so the fallback claimed 'no inline thread exists' for one that already does; the headline fix is PR #99 review, Codex, cid 3627145120 -- before it, the headline claimed all 3 blockers were 'listed below, no inline thread,' directly contradicting the now-filtered fallback showing only 2): #12 PATCHes an existing comment successfully; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted", async () => {
     const stillLiveMarker = criterionBlockerCommentMarker("12:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1403,6 +1403,16 @@ describe("main — the happy path", () => {
     expect(summaryBody).toContain("Second rationale, 422 on create.");
     expect(summaryBody).toContain("Third rationale, never attempted.");
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
+    // The HEADLINE (F1-S9 slice 90.6a, PR #99 review, Codex, cid
+    // 3627145120): 3 blocking finding(s) identified at review time, of
+    // which 1 (#12) already has a real inline thread and 2 (#34, #56) are
+    // listed below -- NEVER the old all-or-nothing "3 listed below, no
+    // inline thread" claim, which would have directly contradicted the
+    // fallback's own (correct) omission of #12 above.
+    expect(summaryBody).toContain("3 blocking finding(s)");
+    expect(summaryBody).toMatch(/\*\*1\*\* already exist as separate, resolvable inline review comment\(s\)/i);
+    expect(summaryBody).toMatch(/\*\*2\*\* are listed below in this summary instead/i);
+    expect(summaryBody).not.toMatch(/those\s+still applicable are listed below in this summary/i);
   });
 
   it("applies the SAME already-posted exclusion to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully; #90 is the first genuine CREATE and 422s, degrading the whole plan", async () => {

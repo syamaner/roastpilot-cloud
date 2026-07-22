@@ -985,6 +985,21 @@ interface TryPostBlockersInlineResult {
    * issues — same filtering, same rationale.
    */
   readonly fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
+  /**
+   * Of the still-closing blockers, how many ALREADY exist as real,
+   * resolvable inline comments — the complement of {@link
+   * fallbackCriterionBlockers}/{@link fallbackUnreviewedClosingIssues}
+   * within `stillReferencedCriterionBlockers`/
+   * `stillReferencedUnreviewedClosingIssues` (F1-S9 slice 90.6a, issue
+   * #90's own #378, PR #99 review, Codex, cid 3627145120, P2 — the
+   * headline's own all-or-nothing `postedInline` boolean cannot represent
+   * a mid-plan 422's own partial split; the caller's summary headline
+   * uses this count to say so accurately instead of contradicting the
+   * now-filtered fallback). Always `0` when `postedInline` is `true`
+   * (irrelevant — nothing was excluded from anything) or when nothing was
+   * ever attempted at all (`degradeReason === "no-addable-anchor"`).
+   */
+  readonly postedInlineCount: number;
 }
 
 /**
@@ -1248,6 +1263,7 @@ async function tryPostBlockersInline(
       // result's own established discipline for every other field.
       fallbackCriterionBlockers: [],
       fallbackUnreviewedClosingIssues: [],
+      postedInlineCount: 0,
     };
   }
 
@@ -1276,6 +1292,9 @@ async function tryPostBlockersInline(
       // same run appends right below it).
       fallbackCriterionBlockers: stillReferencedCriterionBlockers,
       fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues,
+      // NOTHING was ever attempted -- nothing could have posted before a
+      // degrade that never even reached the network call.
+      postedInlineCount: 0,
     };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
@@ -1303,21 +1322,32 @@ async function tryPostBlockersInline(
     // this filter and the plan can never disagree about which marker
     // covers which entry.
     const postedMarkerSet = new Set(postResult.postedMarkers);
+    const fallbackCriterionBlockers = stillReferencedCriterionBlockers.filter((entry) => {
+      const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
+      return !postedMarkerSet.has(coveringMarker);
+    });
+    const fallbackUnreviewedClosingIssues = stillReferencedUnreviewedClosingIssues.filter((entry) => {
+      const coveringMarker =
+        plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
+      return !postedMarkerSet.has(coveringMarker);
+    });
     return {
       postedInline: false,
       degradeReason: postResult.reason,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
-      fallbackCriterionBlockers: stillReferencedCriterionBlockers.filter((entry) => {
-        const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
-        return !postedMarkerSet.has(coveringMarker);
-      }),
-      fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues.filter((entry) => {
-        const coveringMarker =
-          plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
-        return !postedMarkerSet.has(coveringMarker);
-      }),
+      fallbackCriterionBlockers,
+      fallbackUnreviewedClosingIssues,
+      // The complement of the two fallback arrays above, within the
+      // still-closing subsets they were filtered FROM (F1-S9 slice 90.6a,
+      // issue #90's own #378, PR #99 review, Codex, cid 3627145120, P2 --
+      // see this field's own docstring on TryPostBlockersInlineResult for
+      // the headline contradiction this closes).
+      postedInlineCount:
+        stillReferencedCriterionBlockers.length -
+        fallbackCriterionBlockers.length +
+        (stillReferencedUnreviewedClosingIssues.length - fallbackUnreviewedClosingIssues.length),
     };
   }
   return {
@@ -1328,6 +1358,10 @@ async function tryPostBlockersInline(
     currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
     fallbackCriterionBlockers: [],
     fallbackUnreviewedClosingIssues: [],
+    // Fully posted -- nothing was excluded from anything, so this count
+    // is not consulted by the caller's headline, but populated for type
+    // consistency rather than left implicit.
+    postedInlineCount: stillReferencedCriterionBlockers.length + stillReferencedUnreviewedClosingIssues.length,
   };
 }
 
@@ -1553,6 +1587,11 @@ async function publishSummary(
   // simply `criterionBlockers`/`spine.unreviewedClosingIssues`.
   let fallbackCriterionBlockers: readonly JoinedCriterionResult[] = [];
   let fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
+  // Of the still-closing blockers, how many already have a real inline
+  // thread (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review,
+  // Codex, cid 3627145120) — see `TryPostBlockersInlineResult`'s own
+  // `postedInlineCount` docs for the headline contradiction this closes.
+  let postedInlineCount = 0;
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1573,6 +1612,7 @@ async function publishSummary(
       currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
       fallbackCriterionBlockers = result.fallbackCriterionBlockers;
       fallbackUnreviewedClosingIssues = result.fallbackUnreviewedClosingIssues;
+      postedInlineCount = result.postedInlineCount;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1665,6 +1705,14 @@ async function publishSummary(
     staleBlockerIssueNumbers,
     downgradedClosingBlockerIssueNumbers,
     currentClosingIssueNumbers,
+    postedInlineCount,
+    // The SAME count the anchor-fallback supplement below is about to
+    // render, computed here from the SAME two arrays rather than
+    // re-derived from unrelated-granularity totals (F1-S9 slice 90.6a,
+    // issue #90's own #378, PR #99 review, Codex, cid 3627145120) --
+    // see buildSpecGroundingSummaryCommentBody's own `fallbackListedCount`
+    // param docs for why.
+    fallbackCriterionBlockers.length + fallbackUnreviewedClosingIssues.length,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
