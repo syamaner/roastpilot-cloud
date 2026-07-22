@@ -1620,11 +1620,12 @@ describe("main — the happy path", () => {
       // #12 downgraded from Closes to Refs since the review ran -- no
       // longer a live closing claim for the truncated diff to protect.
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Refs #12" }),
-      // tryPostBlockersInline's own gate is still the RAW, review-time
-      // totalBlockerCount (1, from the diff-truncation term computed at
-      // review time) -- it still runs and fetches the diff, even though
-      // its OWN internal kind-aware recompute then correctly plans
-      // nothing at all.
+      // NOT actually called (F1-S9 slice 90.5b, PR #97 draft round 3, Codex,
+      // cid 3626596213): `tryPostBlockersInline`'s own current-state
+      // recompute finds nothing left to plan or post, so it early-returns
+      // BEFORE ever fetching the diff -- this handler is registered
+      // defensively only, in case a future regression reintroduces the
+      // unconditional fetch this fix removed.
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(""),
       // The de-reference reconcile runs unconditionally now, even on this
@@ -1697,6 +1698,52 @@ describe("main — the happy path", () => {
       (c) => c.method === "POST" && c.url.includes("/pulls/83/comments"),
     );
     expect(inlinePost).toBeUndefined();
+  });
+
+  it("never calls the diff-compare API at all -- and so survives it being down -- once the current-state recompute finds nothing left to plan or post (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2): the caller only reaches tryPostBlockersInline on a nonzero REVIEW-TIME blocker count (here, the diff-truncation term alone), but the only closing reference it was protecting can still have been downgraded since -- leaving nothing for the network round-trip to be worth. A transient compare-API failure must not over-gate a run with no real blocking obligation left", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 downgraded from Closes to Refs since the review ran -- no
+      // longer a live closing claim for the truncated diff to protect;
+      // `criterionBlockers` was already empty (satisfied: true), so
+      // there is truly nothing left for tryPostBlockersInline to plan or
+      // post once its own current-state recompute runs.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Refs #12" }),
+      // Stubbed as a TRANSIENT failure, deliberately -- proves the early
+      // return happens BEFORE this call, not merely that this call happens
+      // to succeed. If a future regression reintroduces the unconditional
+      // fetch this fix removed, this test fails loudly (a thrown
+      // GithubApiError surfacing as a visible fallback + exitCode 1)
+      // instead of silently passing.
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse("service unavailable", 500),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const compareCall = calls.find((c) => c.url.includes("/compare/"));
+    expect(compareCall).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("No blocking findings.");
   });
 
   it("edits the existing summary comment instead of posting a duplicate on re-run", async () => {

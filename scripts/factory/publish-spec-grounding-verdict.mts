@@ -1140,6 +1140,38 @@ async function tryPostBlockersInline(
     ),
   ].sort((a, b) => a - b);
 
+  // Gated on CURRENT-state applicability, before ever touching the network
+  // (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2):
+  // the caller only reaches this function when the REVIEW-TIME
+  // `totalBlockerCount` was nonzero, but every relevant reference can still
+  // have been removed or downgraded since -- exactly the case the three
+  // "still referenced" values above already detect. Without this early
+  // return, `fetchPrDiff` ran UNCONDITIONALLY even when there is nothing
+  // left to plan or post (`planBlockerInlineComments` would itself return
+  // `{ comments: [], anchorFallbackNeeded: false }` for these same empty
+  // inputs, see that function's own guard) -- so a transient GitHub compare-
+  // API failure on an otherwise CLEAN run (nothing to post) would throw,
+  // and the caller's own catch converts that into a visible fallback +
+  // nonzero exit code: over-gating a run that had no blocking obligation
+  // left at all. Returning the same "nothing posted, nothing stale to
+  // report beyond `staleBlockerIssueNumbers`" success this function already
+  // returns from its own tail (below) skips the fetch entirely for this
+  // case, matching `planBlockerInlineComments`'s own no-op contract instead
+  // of paying for (and being fragile to) a network call whose result was
+  // already knowable from purely local state.
+  if (
+    stillReferencedCriterionBlockers.length === 0 &&
+    stillReferencedUnreviewedClosingIssues.length === 0 &&
+    !diffTruncationBlocksClosingClaim
+  ) {
+    return {
+      postedInline: true,
+      degradeReason: null,
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
+  }
+
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   const plan = planBlockerInlineComments(
     stillReferencedCriterionBlockers,
