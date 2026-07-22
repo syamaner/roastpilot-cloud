@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bodyContainsMarkerAsStandaloneLine,
+  buildDowngradedClosingBlockerSkippedNote,
   buildSpecGroundingClearedSummaryCommentBody,
   buildSpecGroundingFallbackCommentBody,
   buildSpecGroundingSummaryCommentBody,
@@ -764,14 +765,15 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
     expect(buildStaleBlockerSkippedNote([])).toBe("");
   });
 
-  it("names every skipped issue number, explains why (covering both de-reference and downgrade), and claims removal only where reconciliation could actually confirm it, never unconditionally (F1-S9 slice 90.4, the redesigned reconcile; wording qualified per Codex finding, PR #95 review round 2, P2)", () => {
+  it("names every skipped issue number, explains why (de-referenced ENTIRELY -- see the sibling buildDowngradedClosingBlockerSkippedNote describe block below for the downgraded case, F1-S9 slice 90.6a's own bucket-split), and claims removal only where reconciliation could actually confirm it, never unconditionally (F1-S9 slice 90.4, the redesigned reconcile; wording qualified per Codex finding, PR #95 review round 2, P2)", () => {
     const note = buildStaleBlockerSkippedNote([12, 34]);
     expect(note).toContain("#12");
     expect(note).toContain("#34");
     expect(note).toMatch(/were NOT posted inline/i);
     expect(note).toMatch(/any prior inline comment[\s\S]*positively confirm was safe to remove has been deleted/i);
     expect(note).toMatch(/may still be open and needs a human to resolve it directly/i);
-    expect(note).toMatch(/no longer references them with a closing keyword/i);
+    expect(note).toMatch(/no longer references them at all/i);
+    expect(note).not.toMatch(/downgraded/i);
     expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
   });
 
@@ -785,6 +787,38 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
 
   it("does not report an omitted count when every stale issue number fits within the budget", () => {
     const note = buildStaleBlockerSkippedNote([12, 34]);
+    expect(note).not.toMatch(/and \d+ more/i);
+  });
+});
+
+describe("buildDowngradedClosingBlockerSkippedNote (F1-S9 slice 90.6a -- the stale-vs-downgraded bucket-split sibling of buildStaleBlockerSkippedNote)", () => {
+  it("returns an empty string when nothing was downgraded", () => {
+    expect(buildDowngradedClosingBlockerSkippedNote([])).toBe("");
+  });
+
+  it("names every downgraded issue number, explains why (still referenced, no longer closing -- as distinct from de-referenced entirely), and claims removal only where reconciliation could actually confirm it, never unconditionally (mirrors buildStaleBlockerSkippedNote's own caveat)", () => {
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34]);
+    expect(note).toContain("#12");
+    expect(note).toContain("#34");
+    expect(note).toMatch(/were NOT posted inline/i);
+    expect(note).toMatch(/any prior inline comment[\s\S]*positively confirm was safe to remove has been deleted/i);
+    expect(note).toMatch(/may still be open and needs a human to resolve it directly/i);
+    expect(note).toMatch(/still references them, but no longer with a closing keyword/i);
+    expect(note).toMatch(/downgraded/i);
+    expect(note).not.toMatch(/no longer references them at all/i);
+    expect(note).toMatch(/fresh spec-grounded review run will re-evaluate/i);
+  });
+
+  it("caps the displayed issue-number list, reporting an omitted count rather than growing unboundedly, when a PR body names far more downgraded issues than fit within the budget (mirrors buildStaleBlockerSkippedNote's own DoS-cap coverage -- same shared MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH budget)", () => {
+    const manyDowngradedIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
+    const note = buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers);
+    expect(note.length).toBeLessThan(3_000);
+    expect(note).toMatch(/and \d+ more/i);
+    expect(note).toContain("#1");
+  });
+
+  it("does not report an omitted count when every downgraded issue number fits within the budget", () => {
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34]);
     expect(note).not.toMatch(/and \d+ more/i);
   });
 });

@@ -1120,6 +1120,73 @@ describe("main — the happy path", () => {
     expect(summaryBody).toContain("3 blocking finding(s)");
   });
 
+  it("distinguishes a DOWNGRADED closing blocker from a fully DE-REFERENCED one, in the SAME run, with two separate accurate notes (F1-S9 slice 90.6a -- the stale-vs-downgraded bucket-split): #12 still closing (posted inline normally), #34 and #78 both downgraded Closes->Refs (still referenced, but no longer closing -- two, deliberately out of ascending order, to exercise the downgraded bucket's own sort, not just a single-element no-op), #99 removed from the body entirely (not referenced at all)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker." },
+          // Deliberately out of ascending order (78 before 34).
+          { criterionId: "78:0", satisfied: false, rationale: "Downgraded blocker, higher number." },
+          { criterionId: "34:0", satisfied: false, rationale: "Downgraded blocker, lower number." },
+          { criterionId: "99:0", satisfied: false, rationale: "De-referenced blocker." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 78, kind: "closing", criterionId: "78:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+          { issueNumber: 99, kind: "closing", criterionId: "99:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 78, 34, 99],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 stays a live Closes; #34 and #78 both downgraded to a plain
+      // Refs (still referenced); #99 is not mentioned at all anymore.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12, refs #34, refs #78" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Exactly ONE inline comment posted -- for #12, never for #34, #78, or #99.
+    const inlinePosts = calls.filter((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"));
+    expect(inlinePosts).toHaveLength(1);
+    expect((inlinePosts[0]?.body as { body: string }).body).toContain("Still-live blocker.");
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    // #99's own note: de-referenced entirely.
+    expect(summaryBody).toMatch(/#99 were NOT posted inline[\s\S]*no longer references them at all/i);
+    // #34 and #78's own note: downgraded, still referenced -- ascending
+    // order (#34 before #78), NOT the verdict's own findings order (78
+    // was listed before 34 above).
+    expect(summaryBody).toMatch(
+      /#34, #78 were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i,
+    );
+    expect(summaryBody).toMatch(/downgraded/i);
+    // Neither note wrongly claims the other bucket's own case.
+    expect(summaryBody).not.toMatch(/#34[\s\S]{0,80}no longer references them at all/i);
+    expect(summaryBody).not.toMatch(/#99[\s\S]{0,80}still references them, but no longer with a closing keyword/i);
+    // #12 never appears in either skip-note.
+    expect(summaryBody).not.toMatch(/#12[\s\S]{0,40}were NOT posted inline/i);
+  });
+
   it("PATCHes a still-closing-referenced criterion's own comment (still unmet) while DELETING a de-referenced sibling's own comment via reconciliation, in the SAME run (F1-S9 slice 90.4, redesigned -- de-reference is now a real delete, not a 'leave in place, note it as stale' no-op)", async () => {
     const stillLiveMarker = criterionBlockerCommentMarker("12:0");
     const dereferencedMarker = criterionBlockerCommentMarker("34:0");

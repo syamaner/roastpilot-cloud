@@ -850,29 +850,61 @@ export function buildSpecGroundingSummaryCommentBody(
 }
 
 /**
- * Upper bound on {@link buildStaleBlockerSkippedNote}'s own displayed
- * issue-number list, in characters (PR #87 review round 7, Codex,
- * BLOCKER): `staleBlockerIssueNumbers` is derived from `criterionBlockers`
- * and `unreviewedClosingIssues`, both themselves influenced by the PR's
- * own (attacker-controlled) body — a body naming far more issues than
- * the runner's own fetch cap, or a body edit that removes references to
- * many of them at once, could otherwise make this note's own joined
- * issue-number list grow unboundedly, pushing the WHOLE summary comment
- * past GitHub's 65,536-character limit and failing the only write this
- * run makes — the worst outcome, since this note (like the fallback and
- * anchor-fallback ones) is a signal a human needs, never optional.
- * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the
- * fallback comment's own reasons list — a budget over the TOTAL joined
- * string, any remainder reported as an omitted count, never silently
- * dropped.
+ * Upper bound on {@link buildStaleBlockerSkippedNote}'s AND {@link
+ * buildDowngradedClosingBlockerSkippedNote}'s own displayed issue-number
+ * lists, in characters (PR #87 review round 7, Codex, BLOCKER):
+ * `staleBlockerIssueNumbers`/`downgradedClosingBlockerIssueNumbers` are
+ * both derived from `criterionBlockers`/`unreviewedClosingIssues`, in turn
+ * influenced by the PR's own (attacker-controlled) body — a body naming
+ * far more issues than the runner's own fetch cap, or a body edit that
+ * removes/downgrades references to many of them at once, could otherwise
+ * make either note's own joined issue-number list grow unboundedly,
+ * pushing the WHOLE summary comment past GitHub's 65,536-character limit
+ * and failing the only write this run makes — the worst outcome, since
+ * these notes (like the fallback and anchor-fallback ones) are a signal a
+ * human needs, never optional. Capped the SAME way {@link
+ * MAX_REASONS_LIST_LENGTH} bounds the fallback comment's own reasons list
+ * — a budget over the TOTAL joined string, any remainder reported as an
+ * omitted count, never silently dropped. ONE constant, ONE budget, shared
+ * by both notes (F1-S9 slice 90.6a's own bucket-split) rather than two
+ * independently-tunable caps that could quietly drift apart.
  */
-const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+const MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+
+/**
+ * Renders a deduplicated, ascending issue-number list as `#N, #M, ...`,
+ * capped at {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ * characters with any remainder reported as an "(and N more)" omitted
+ * count rather than silently dropped — the shared DoS-safe rendering
+ * primitive both {@link buildStaleBlockerSkippedNote} and {@link
+ * buildDowngradedClosingBlockerSkippedNote} build on (F1-S9 slice 90.6a),
+ * so the availability guard is maintained in exactly one place.
+ *
+ * @param issueNumbers - The (deduplicated, ascending) issue numbers to render.
+ * @returns The capped, comma-joined issue-number list.
+ */
+function renderCappedIssueNumberList(issueNumbers: readonly number[]): string {
+  const issueTokens: string[] = [];
+  let issueListLength = 0;
+  let addedCount = 0;
+  for (const issueNumber of issueNumbers) {
+    const token = `#${issueNumber}`;
+    if (issueListLength + token.length + 2 > MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
+      break; // The remainder is reported as an omitted count below, not silently dropped.
+    }
+    issueTokens.push(token);
+    issueListLength += token.length + 2; // ", " separator budget.
+    addedCount += 1;
+  }
+  const omittedCount = issueNumbers.length - addedCount;
+  return issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+}
 
 /**
  * Builds the note appended when one or more planned blocker findings were
  * skipped from inline posting because the PR's CURRENT body no longer
- * references their own issue with a closing keyword at all (PR #87 review
- * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
+ * references their own issue AT ALL — de-referenced entirely (PR #87
+ * review round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
  * `tryPostBlockersInline` in `publish-spec-grounding-verdict.mts` re-checks
  * each planned blocker's own `issueNumber` against a fresh re-parse of the
  * PR's CURRENT body, not the runner-time one the verdict/spine were
@@ -880,16 +912,12 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  * this run could otherwise post an inline comment reasserting an
  * obligation the PR no longer claims to have at all).
  *
- * COVERS TWO CASES, DELIBERATELY NOT DISTINGUISHED (F1-S9 slice 90.4, PR
- * #95 review round 2 — Codex and claude-review, independently, on the
- * same root cause): the issue may be entirely REMOVED from the body, or
- * merely DOWNGRADED (still mentioned, but a `Closes #N` edited to a plain
- * `Refs #N`) — `tryPostBlockersInline`'s own filter treats both the same
- * way (closing-kind reference gone), since both mean "no live closing
- * obligation this run can verify" regardless of which one actually
- * happened. The wording below says "no longer ... with a closing
- * keyword", not "no longer references ... at all" (the round-1 wording),
- * specifically so it stays accurate for the downgrade case too.
+ * NARROWED to the de-referenced-entirely case ONLY (F1-S9 slice 90.6a —
+ * the stale-vs-downgraded bucket-split): before this slice, this note
+ * covered BOTH "removed entirely" and "downgraded to a plain reference"
+ * with one wording, deliberately not distinguished (PR #95 review round
+ * 2). {@link buildDowngradedClosingBlockerSkippedNote} now covers the
+ * downgrade case with its own accurate wording — see that function.
  *
  * DOES NOT UNCONDITIONALLY CLAIM REMOVAL (Codex finding, PR #95 review
  * round 2, P2 — a real overclaim in an earlier version): this same run's
@@ -910,40 +938,68 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  *
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
- *   `unreviewedClosingIssues` whose own issue is no longer referenced
- *   with a closing keyword in the PR's current body (removed entirely, or
- *   downgraded to a plain reference).
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced by
+ *   the PR's current body AT ALL, of any kind.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   skipped, ALWAYS within {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
  *   regardless of how many issue numbers were skipped.
  */
 export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
   if (staleBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueTokens: string[] = [];
-  let issueListLength = 0;
-  let addedCount = 0;
-  for (const issueNumber of staleBlockerIssueNumbers) {
-    const token = `#${issueNumber}`;
-    if (issueListLength + token.length + 2 > MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
-      break; // The remainder is reported as an omitted count below, not silently dropped.
-    }
-    issueTokens.push(token);
-    issueListLength += token.length + 2; // ", " separator budget.
-    addedCount += 1;
-  }
-  const omittedCount = staleBlockerIssueNumbers.length - addedCount;
-  const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  const issueList = renderCappedIssueNumberList(staleBlockerIssueNumbers);
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
-    "body no longer references them with a closing keyword (removed, or downgraded to a plain " +
-    "reference, since the spec-grounded review ran against this PR's head), so those findings no " +
-    "longer reflect a live closing obligation this run could verify. Any prior inline comment for " +
-    "them that this run's own reconciliation could positively confirm was safe to remove has been " +
-    "deleted; a comment covering multiple issues together, or one this run could not confirm " +
-    "predates it, may still be open and needs a human to resolve it directly. A fresh " +
-    "spec-grounded review run will re-evaluate against the PR's current state."
+    "body no longer references them at all (removed since the spec-grounded review ran against " +
+    "this PR's head), so those findings no longer reflect a live closing obligation this run could " +
+    "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
+    "confirm was safe to remove has been deleted; a comment covering multiple issues together, or " +
+    "one this run could not confirm predates it, may still be open and needs a human to resolve it " +
+    "directly. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+  );
+}
+
+/**
+ * Builds the note appended when one or more planned blocker findings were
+ * skipped from inline posting because the PR's CURRENT body still
+ * references their own issue, but no longer with a closing keyword —
+ * DOWNGRADED (a `Closes #N` edited to a plain `Refs #N`), as distinct from
+ * {@link buildStaleBlockerSkippedNote}'s de-referenced-entirely case
+ * (F1-S9 slice 90.6a — the stale-vs-downgraded bucket-split; see that
+ * function's own docstring for why the two were originally one note and
+ * why they were split).
+ *
+ * Shares {@link buildStaleBlockerSkippedNote}'s own "does not
+ * unconditionally claim removal" caveat identically: this same run's own
+ * `deleteDeReferencedInlineBlockerComments` only deletes an INDIVIDUAL,
+ * generation-confirmed prior inline comment for one of these issues — an
+ * aggregate-marker comment covering this issue alongside others, or one
+ * with an unparseable generation, is left untouched, and this note is the
+ * only place a human learns that residual exists.
+ *
+ * @param downgradedClosingBlockerIssueNumbers - The (deduplicated,
+ *   ascending) issue numbers `tryPostBlockersInline` skipped, still
+ *   referenced by the PR's current body but no longer with a closing
+ *   keyword.
+ * @returns The Markdown section to append, or `""` if nothing was
+ *   skipped, ALWAYS within {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   regardless of how many issue numbers were skipped.
+ */
+export function buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers: readonly number[]): string {
+  if (downgradedClosingBlockerIssueNumbers.length === 0) {
+    return "";
+  }
+  const issueList = renderCappedIssueNumberList(downgradedClosingBlockerIssueNumbers);
+  return (
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body still references them, but no longer with a closing keyword (downgraded from a `Closes " +
+    "#N`-style reference to a plain one, like `Refs #N`, since the spec-grounded review ran against " +
+    "this PR's head), so those findings no longer reflect a live closing obligation this run could " +
+    "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
+    "confirm was safe to remove has been deleted; a comment covering multiple issues together, or " +
+    "one this run could not confirm predates it, may still be open and needs a human to resolve it " +
+    "directly. A fresh spec-grounded review run will re-evaluate against the PR's current state."
   );
 }
 
