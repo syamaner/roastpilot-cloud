@@ -31,6 +31,24 @@ function joined(overrides: Partial<JoinedCriterionResult> = {}): JoinedCriterion
   };
 }
 
+/**
+ * A REAL `Set<number>` (satisfies `ReadonlySet<number>` structurally, no
+ * cast needed) whose `has()` is overridden to always report `true` (F1-S9
+ * slice 90.5 test helper, PR #96 review round 2, Codex, cid 3626169268).
+ * Used by tests that predate `buildSpecGroundingSummaryCommentBody`'s own
+ * kind-aware `currentlyClosingIssueNumbers` parameter and are not
+ * themselves exercising that behavior -- preserves their original,
+ * review-time-only expectations exactly, without needing to enumerate
+ * each test's own specific issue numbers.
+ */
+class AlwaysClosingSet extends Set<number> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- must match Set<number>'s own `has(value)` signature
+  override has(_value: number): boolean {
+    return true;
+  }
+}
+const ALL_CLOSING: ReadonlySet<number> = new AlwaysClosingSet();
+
 describe("joinFindingsToSpine (F1-S9 slice 3b-iii, issue #12)", () => {
   it("joins a matching finding's satisfied/rationale onto its spine entry, carrying kind from the SPINE", () => {
     const spine: CriteriaSpineEntry[] = [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }];
@@ -362,7 +380,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "non-closing", satisfied: false, criterionId: "8:0", issueNumber: 8 })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("No blocking findings.");
     expect(body).toContain("Issue #8");
     expect(body).toContain("unsatisfied");
@@ -374,7 +392,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false, rationale: "SECRET_RATIONALE_TEXT" })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("1 blocking finding(s)");
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
   });
@@ -384,7 +402,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toMatch(/reported as separate, resolvable inline review comment/i);
     expect(body).toMatch(/see those threads, not this summary/i);
     expect(body).not.toMatch(/listed below in THIS summary/i);
@@ -395,7 +413,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: false },
-      false, "no-addable-anchor", []);
+      false, "no-addable-anchor", [], ALL_CLOSING);
     expect(body).not.toMatch(/reported as separate, resolvable inline review comment/i);
     expect(body).not.toMatch(/see those threads, not this summary/i);
     expect(body).toMatch(/listed below in THIS summary/i);
@@ -408,12 +426,12 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     const fallbackBody = buildSpecGroundingSummaryCommentBody(
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: false },
-      false, "no-addable-anchor", []);
+      false, "no-addable-anchor", [], ALL_CLOSING);
     const explanation = /criterion this PR's own closing keyword references that the reviewer found unsatisfied/i;
     expect(inlineBody).toMatch(explanation);
     expect(fallbackBody).toMatch(explanation);
@@ -424,7 +442,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [{ issueNumber: 99, truncationKind: "fully-dropped" }],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("2 blocking finding(s)");
   });
 
@@ -433,24 +451,24 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [],
       [{ issueNumber: 99, truncationKind: "fully-dropped" }],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("1 blocking finding(s)");
   });
 
   it("reports that no unmet acceptance criteria were found at all when both inputs are empty AND neither truncation flag is set", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body).toContain("No unmet acceptance criteria were found at all");
   });
 
   it("does NOT claim a confirmed all-clear when the empty-findings case coincides with truncated:true -- qualifies the message instead of contradicting the caveat above it (PR #82 review, FOLD 1, BLOCKER: the 20-issue-cap-excludes-a-non-closing-issue case hit the unconditional all-clear message directly under the caveat)", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body).not.toContain("No unmet acceptance criteria were found at all.");
     expect(body).toMatch(/among what WAS reviewed/i);
     expect(body).toMatch(/NOT a confirmed all-clear/i);
   });
 
   it("also qualifies the empty-findings message when only diffTruncated is set", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: true }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: true }, true, null, [], ALL_CLOSING);
     expect(body).not.toContain("No unmet acceptance criteria were found at all.");
     expect(body).toMatch(/NOT a confirmed all-clear/i);
   });
@@ -460,7 +478,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "non-closing", satisfied: true })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body.endsWith(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
   });
 
@@ -469,39 +487,39 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: true, rationale: "Confirmed in file Y." })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("No blocking findings.");
     expect(body).toContain("satisfied");
     expect(body).toContain("Confirmed in file Y.");
   });
 
   it("does NOT render a truncation caveat when neither flag is set", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body).not.toContain("may be incomplete");
   });
 
   it("renders a truncation caveat mentioning the linked issues' criteria when truncated is true", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body).toContain("may be incomplete");
     expect(body).toContain("the linked issues' own acceptance criteria");
     expect(body).not.toContain("this PR's own diff");
   });
 
   it("renders a truncation caveat mentioning the diff when diffTruncated is true", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: true }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: true }, true, null, [], ALL_CLOSING);
     expect(body).toContain("may be incomplete");
     expect(body).toContain("this PR's own diff");
     expect(body).not.toContain("the linked issues' own acceptance criteria");
   });
 
   it("mentions BOTH causes when truncated AND diffTruncated are both true", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: true }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: true }, true, null, [], ALL_CLOSING);
     expect(body).toContain("the linked issues' own acceptance criteria");
     expect(body).toContain("this PR's own diff");
   });
 
   it("renders the truncation caveat BEFORE the blocker/non-blocking sections -- a human must see 'may be incomplete' before 'no blocking findings'", () => {
-    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: true, diffTruncated: false }, true, null, [], ALL_CLOSING);
     const caveatIndex = body.indexOf("may be incomplete");
     const noBlockersIndex = body.indexOf("No blocking findings.");
     expect(caveatIndex).toBeGreaterThanOrEqual(0);
@@ -517,7 +535,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: true, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("may be incomplete");
     expect(body).toContain("1 blocking finding(s)");
   });
@@ -537,7 +555,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
         rationale: "x".repeat(2000),
       }),
     );
-    const body = buildSpecGroundingSummaryCommentBody(manyFindings, [], { truncated: false, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody(manyFindings, [], { truncated: false, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body.length).toBeLessThan(65_536);
     expect(body).toMatch(/further finding\(s\) omitted/i);
     // PR #82 round 4 review, Codex, FOLD 2, LOW: points to BOTH artifacts,
@@ -563,7 +581,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
         rationale: null,
       }),
     );
-    const body = buildSpecGroundingSummaryCommentBody(manyUnaddressed, [], { truncated: false, diffTruncated: false }, true, null, []);
+    const body = buildSpecGroundingSummaryCommentBody(manyUnaddressed, [], { truncated: false, diffTruncated: false }, true, null, [], ALL_CLOSING);
     expect(body).toMatch(/further finding\(s\) omitted/i);
     expect(body).toMatch(/never addressed at all only appears in the criteria-spine artifact/i);
   });
@@ -573,7 +591,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "non-closing", satisfied: false, criterionId: "8:0", issueNumber: 8 })],
       [],
       { truncated: false, diffTruncated: false },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).not.toMatch(/omitted/i);
   });
 
@@ -582,7 +600,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: true })],
       [],
       { truncated: false, diffTruncated: true },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("1 blocking finding(s)");
     expect(body).not.toContain("No blocking findings.");
   });
@@ -592,7 +610,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "non-closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: true },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("No blocking findings.");
   });
 
@@ -601,7 +619,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: false })],
       [],
       { truncated: false, diffTruncated: true },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toContain("2 blocking finding(s)");
   });
 
@@ -610,7 +628,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [joined({ kind: "closing", satisfied: true })],
       [],
       { truncated: false, diffTruncated: true },
-      true, null, []);
+      true, null, [], ALL_CLOSING);
     expect(body).toMatch(/diff having been itself truncated/i);
   });
 
@@ -622,6 +640,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       false,
       "no-addable-anchor",
       [],
+      ALL_CLOSING,
     );
     expect(body).toMatch(/no addable line to anchor them to/i);
     expect(body).not.toMatch(/github itself rejected/i);
@@ -635,6 +654,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       false,
       "anchor-rejected-422",
       [],
+      ALL_CLOSING,
     );
     expect(body).toMatch(/github itself rejected the deterministic anchor/i);
     expect(body).not.toMatch(/no addable line to anchor them to/i);
@@ -651,6 +671,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
       null,
       [34],
+      ALL_CLOSING,
     );
     expect(body).toMatch(/were identified at review time/i);
     expect(body).toMatch(/still applicable to this pr's current linked issues/i);
@@ -666,6 +687,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
       null,
       [],
+      ALL_CLOSING,
     );
     expect(body).not.toMatch(/were identified at review time/i);
     expect(body).not.toMatch(/were skipped as no longer referenced/i);
@@ -683,10 +705,57 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       false,
       "no-addable-anchor",
       [34],
+      ALL_CLOSING,
     );
     expect(body).toMatch(/were identified at review time/i);
     expect(body).toMatch(/1 of these were skipped as no longer referenced/i);
     expect(body).toContain("2 blocking finding(s)");
+  });
+});
+
+describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5)", () => {
+  it("does NOT count the diff-truncation blocker when the only closing reference has since been downgraded or de-referenced -- re-derives it against CURRENT closing state, not the permanently-true review-time snapshot (a PERMANENT over-gate otherwise: the resulting aggregate comment can never be auto-deleted by reconciliation, so a stale flag would re-post it forever)", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ issueNumber: 12, kind: "closing", satisfied: true })],
+      [],
+      { truncated: false, diffTruncated: true },
+      true,
+      null,
+      [],
+      new Set(), // issue 12 no longer currently closing
+    );
+    expect(body).toContain("No blocking findings.");
+  });
+
+  it("STILL counts the diff-truncation blocker when the closing reference remains currently closing", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ issueNumber: 12, kind: "closing", satisfied: true })],
+      [],
+      { truncated: false, diffTruncated: true },
+      true,
+      null,
+      [],
+      new Set([12]),
+    );
+    expect(body).toContain("1 blocking finding(s)");
+  });
+
+  it("does NOT filter criterionBlockers/unreviewedClosingIssues themselves -- only the diff-truncation flag is kind-aware here; the deeper count-accuracy rework stays issue #89's own separate slice", () => {
+    // issue 34 is NOT in currentlyClosingIssueNumbers, yet its own
+    // criterion blocker still counts (review-time, unchanged) -- only the
+    // diff-truncation contribution is re-derived against current state.
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ issueNumber: 34, kind: "closing", satisfied: false })],
+      [],
+      { truncated: false, diffTruncated: true },
+      true,
+      null,
+      [],
+      new Set(), // 34 no longer currently closing -- suppresses the diff-truncation term...
+    );
+    // ... but the criterion blocker itself still counts (review-time-only,
+    // unaffected by this narrow fix) -- 1, not 2.
+    expect(body).toContain("1 blocking finding(s)");
   });
 });
 

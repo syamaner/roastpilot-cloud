@@ -678,6 +678,23 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   reworded to state the count is REVIEW-TIME and explicitly reconciles
  *   it against the posted subset, rather than implying every counted
  *   finding has its own inline thread when some do not.
+ * @param currentlyClosingIssueNumbers - This PR's CURRENT closing-kind
+ *   references (PR #96 review round 2, Codex, cid 3626169268, BLOCKER —
+ *   used ONLY to re-derive the diff-truncation blocker's own applicability
+ *   against CURRENT state, NOT to filter `criterionBlockers`/
+ *   `unreviewedClosingIssues` themselves, which stay REVIEW-TIME here —
+ *   the deeper "should the whole count reflect only the still-referenced
+ *   subset" question is issue #89's own separate rework, tracked for a
+ *   later slice). Without this, a body edit that downgrades or removes
+ *   EVERY closing reference this run's diff-truncation flag was
+ *   protecting would leave `diffTruncationBlocksClosingClaim` PERMANENTLY
+ *   `true` (computed from the review-time `joined`/`unreviewedClosingIssues`
+ *   sets, which never change kind after the fact) — and since the
+ *   resulting AGGREGATE blocker comment can never be auto-deleted by
+ *   reconciliation (an aggregate's own decoded issue number is always
+ *   `null`), this specific blocker could never be cleared by anything
+ *   short of a human resolving the thread, only for the NEXT run to
+ *   recompute the same permanently-true flag and re-post it forever.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -687,12 +704,24 @@ export function buildSpecGroundingSummaryCommentBody(
   blockersPostedInline: boolean,
   degradeReason: InlinePostingDegradeReason | null,
   staleBlockerIssueNumbers: readonly number[],
+  currentlyClosingIssueNumbers: ReadonlySet<number>,
 ): string {
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
+  // KIND-AWARE, against CURRENT state (PR #96 review round 2, Codex, cid
+  // 3626169268, BLOCKER) -- deliberately narrower than filtering
+  // `criterionBlockers`/`unreviewedClosingIssues` themselves (those stay
+  // review-time, issue #89's own separate rework): ONLY the diff-truncation
+  // blocker's own applicability is re-derived here, since it is the one
+  // that can become a PERMANENT, un-clearable over-gate otherwise (see
+  // this function's own `currentlyClosingIssueNumbers` param docs).
+  const currentlyClosingJoined = joined.filter((e) => currentlyClosingIssueNumbers.has(e.issueNumber));
+  const currentlyClosingUnreviewedClosingIssues = unreviewedClosingIssues.filter((e) =>
+    currentlyClosingIssueNumbers.has(e.issueNumber),
+  );
   const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
-    joined,
-    unreviewedClosingIssues,
+    currentlyClosingJoined,
+    currentlyClosingUnreviewedClosingIssues,
     truncation.diffTruncated,
   );
   const totalBlockerCount =

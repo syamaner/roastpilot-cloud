@@ -401,6 +401,17 @@ export async function clearStaleInlineBlockerComments(
  * mechanism can get without true API-level atomicity, which GitHub's
  * REST API does not offer across multiple separate calls.
  *
+ * ALSO RE-VERIFIES `currentlyReferencedIssueNumbers` (ANY kind, PR #96
+ * review round 2, Codex, cid 3626169271) — defense-in-depth alongside the
+ * closing-set re-verify above: even though this function's OWN
+ * delete-eligibility test depends only on the closing set (per #801's own
+ * rule), re-confirming the any-kind set is ALSO unchanged means a future
+ * consumer of this same snapshot (e.g. a note distinguishing "de-referenced
+ * entirely" from "still referenced, merely downgraded" — tracked for a
+ * later slice) can trust it was re-validated at the SAME point the closing
+ * set was, rather than needing its own separate re-verify call bolted on
+ * later. A mismatch on EITHER set fails closed identically.
+ *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
@@ -410,13 +421,19 @@ export async function clearStaleInlineBlockerComments(
  *   `closing`-kind keyword, AT THE TIME the caller took this snapshot —
  *   re-verified fresh by this function itself before it is trusted for
  *   any delete (see above).
+ * @param currentlyReferencedIssueNumbers - Every issue number this PR's
+ *   CURRENT body referenced, of ANY kind, at the SAME snapshot moment —
+ *   re-verified fresh alongside `currentlyClosingIssueNumbers` (see
+ *   above); NOT used by the delete-eligibility test itself (that only
+ *   ever needs the closing set), only to detect drift on this second
+ *   dimension too.
  * @param currentGeneration - This run's own validated, canonicalized
  *   `github.run_number`, as a number.
  * @returns `{ ok: true, deletedCount }` once every eligible de-referenced
  *   comment has been deleted (`deletedCount` may be `0`); `{ ok: false,
- *   reason: "closing-references-changed" }` if the re-verify found the
- *   PR's closing-kind reference set no longer matches
- *   `currentlyClosingIssueNumbers` — NO delete is attempted in that case,
+ *   reason: "linked-references-changed" }` if the re-verify found the
+ *   PR's closing-kind OR any-kind reference set no longer matches the
+ *   snapshot the caller passed in — NO delete is attempted in that case,
  *   for ANY comment, since the caller's own posting decisions (computed
  *   against the SAME now-stale snapshot) are equally suspect; the caller
  *   is expected to treat this as a fail-closed signal for the WHOLE run,
@@ -429,9 +446,10 @@ export async function deleteDeReferencedInlineBlockerComments(
   repo: string,
   prNumber: number,
   currentlyClosingIssueNumbers: ReadonlySet<number>,
+  currentlyReferencedIssueNumbers: ReadonlySet<number>,
   currentGeneration: number,
 ): Promise<
-  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "closing-references-changed" }
+  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "linked-references-changed" }
 > {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
 
@@ -440,16 +458,18 @@ export async function deleteDeReferencedInlineBlockerComments(
     "GET",
     `/repos/${owner}/${repo}/pulls/${prNumber}`,
   );
+  const freshReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const freshClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
+    freshReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
   );
+  const freshReferencedIssueNumbers = new Set(freshReferences.map((reference) => reference.issueNumber));
+  const setsMatch = (fresh: ReadonlySet<number>, snapshot: ReadonlySet<number>): boolean =>
+    fresh.size === snapshot.size && [...fresh].every((issueNumber) => snapshot.has(issueNumber));
   const unchanged =
-    freshClosingIssueNumbers.size === currentlyClosingIssueNumbers.size &&
-    [...freshClosingIssueNumbers].every((issueNumber) => currentlyClosingIssueNumbers.has(issueNumber));
+    setsMatch(freshClosingIssueNumbers, currentlyClosingIssueNumbers) &&
+    setsMatch(freshReferencedIssueNumbers, currentlyReferencedIssueNumbers);
   if (!unchanged) {
-    return { ok: false, reason: "closing-references-changed" };
+    return { ok: false, reason: "linked-references-changed" };
   }
 
   const deReferenced = existing.filter((c) => {

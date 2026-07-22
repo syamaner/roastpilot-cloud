@@ -930,6 +930,17 @@ interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
   readonly staleBlockerIssueNumbers: readonly number[];
+  /**
+   * This function's own KIND-AWARE, CURRENT-state re-derivation of
+   * whether the diff truncation still blocks a closing claim (F1-S9 slice
+   * 90.5b, PR #96 review round 2, Codex, cid 3626169268, BLOCKER — see
+   * this function's own docstring for the permanent-over-gate this
+   * closes). Returned so the caller's own anchor-fallback supplement uses
+   * the SAME current value this function's own posting decision already
+   * used, rather than the caller's separate, review-time-only
+   * computation.
+   */
+  readonly currentDiffTruncationBlocksClosingClaim: boolean;
 }
 
 /**
@@ -1050,7 +1061,6 @@ async function tryPostBlockersInline(
   pr: GitHubPullRequestShas,
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
-  diffTruncationBlocksClosingClaim: boolean,
   runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
@@ -1061,6 +1071,34 @@ async function tryPostBlockersInline(
   const currentlyClosingIssueNumbers = new Set(
     currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
   );
+  // KIND-AWARE, against CURRENT state, not the review-time value the
+  // caller used to compute (F1-S9 slice 90.5b, PR #96 review round 2,
+  // Codex, cid 3626169268, BLOCKER — a PERMANENT over-gate, not merely
+  // stale: this run's own `diffTruncationBlocksClosingClaim` used to be
+  // computed from the REVIEW-TIME `joined`/`spine.unreviewedClosingIssues`
+  // sets, which stay `kind: "closing"` forever regardless of what the PR's
+  // CURRENT body says. A body edit that downgrades or removes EVERY
+  // closing reference this run's diff-truncation flag was protecting
+  // still left this function planning/posting (or re-posting on every
+  // subsequent run) a diff-truncation AGGREGATE blocker comment -- and
+  // `deleteDeReferencedInlineBlockerComments` deliberately never
+  // auto-deletes an aggregate-marked comment (an aggregate's own decoded
+  // issue number is always `null`, the "leave aggregates conservative"
+  // gate), so this specific blocker could NEVER be cleared by anything
+  // other than a human resolving the thread -- and even then, the NEXT
+  // run would recompute the same permanently-true flag and re-post it,
+  // forever. Re-derived from `spine.diffTruncated` (unaffected by any
+  // body edit) and `currentlyClosingIssueNumbers` (just computed, above)
+  // rather than calling `isDiffTruncationUnverifiableForClosing`'s full
+  // `joined`-array form: every member of `currentlyClosingIssueNumbers` is
+  // GUARANTEED, by `publishSummary`'s own earlier
+  // `findUnreviewedNewClosingReferences` fail-closed check, to have been
+  // part of THIS run's actual review (as a spine entry or an
+  // `unreviewedClosingIssues` entry) -- so "at least one currently-closing
+  // reference exists" is equivalent to "at least one REVIEWED closing-kind
+  // reference is still closing now," without needing the full `joined`
+  // array threaded into this function at all.
+  const diffTruncationBlocksClosingClaim = spine.diffTruncated && currentlyClosingIssueNumbers.size > 0;
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
     currentlyClosingIssueNumbers.has(blocker.issueNumber),
   );
@@ -1084,13 +1122,28 @@ async function tryPostBlockersInline(
     runNumber,
   );
   if (plan.anchorFallbackNeeded) {
-    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: "no-addable-anchor",
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
-    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: postResult.reason,
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
   }
-  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
+  return {
+    postedInline: true,
+    degradeReason: null,
+    staleBlockerIssueNumbers,
+    currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+  };
 }
 
 async function publishSummary(
@@ -1155,6 +1208,16 @@ async function publishSummary(
     spine.unreviewedClosingIssues,
     spine.diffTruncated,
   );
+  // The REVIEW-TIME count -- used ONLY to decide whether there is
+  // anything at all worth calling `tryPostBlockersInline` for (below).
+  // Deliberately NOT used for `buildSpecGroundingSummaryCommentBody`'s own
+  // diff-truncation term (F1-S9 slice 90.5b, PR #96 review round 2, Codex,
+  // cid 3626169268) -- that function re-derives its OWN kind-aware value
+  // from `currentClosingIssueNumbers`. Using the review-time count for
+  // THIS gate is still correct and harmless: it can only ever OVER-trigger
+  // the call (attempting to post/reconcile against zero still-applicable
+  // blockers is a safe no-op, see `tryPostBlockersInline`'s own handling
+  // of empty inputs), never under-trigger it.
   const totalBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
@@ -1262,26 +1325,31 @@ async function publishSummary(
       .filter((reference) => reference.kind === "closing")
       .map((reference) => reference.issueNumber),
   );
+  // This PR's CURRENT references of ANY kind, from the SAME
+  // already-verified `pr.body` (F1-S9 slice 90.5b, PR #96 review round 2,
+  // Codex, cid 3626169271) -- another deliberate, independent re-parse
+  // (same reasoning as `currentClosingIssueNumbers` just above), passed to
+  // the reconcile call below so it can detect drift in the any-kind set
+  // too, not just the closing set -- see
+  // `deleteDeReferencedInlineBlockerComments`'s own docstring.
+  const currentReferencedIssueNumbers = new Set(
+    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`).map((reference) => reference.issueNumber),
+  );
 
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
+  // Populated only when `tryPostBlockersInline` actually runs -- `false`
+  // otherwise, matching every other kind-aware-filtered value above (there
+  // is nothing to have recomputed when `totalBlockerCount` is 0).
+  let currentDiffTruncationBlocksClosingClaim = false;
   if (totalBlockerCount > 0) {
     try {
-      const result = await tryPostBlockersInline(
-        token,
-        owner,
-        repo,
-        prNumber,
-        pr,
-        criterionBlockers,
-        spine,
-        diffTruncationBlocksClosingClaim,
-        canonicalRunNumber,
-      );
+      const result = await tryPostBlockersInline(token, owner, repo, prNumber, pr, criterionBlockers, spine, canonicalRunNumber);
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
+      currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1340,14 +1408,16 @@ async function publishSummary(
       repo,
       prNumber,
       currentClosingIssueNumbers,
+      currentReferencedIssueNumbers,
       currentGeneration,
     );
     if (!reconcileResult.ok) {
       await publishFallback(token, owner, repo, prNumber, [
-        `this PR's linked-issue closing references changed since this run's own earlier snapshot was ` +
-          `taken -- the blocker posting/skip decisions computed against that snapshot may now be ` +
-          `stale; failing closed rather than publishing a summary this run can no longer vouch for. A ` +
-          `fresh spec-grounded review run will re-evaluate against the PR's current state.`,
+        `this PR's linked-issue references changed since this run's own earlier snapshot was taken ` +
+          `(a closing-kind reference, or a reference of any other kind) -- the blocker posting/skip ` +
+          `decisions computed against that snapshot may now be stale; failing closed rather than ` +
+          `publishing a summary this run can no longer vouch for. A fresh spec-grounded review run ` +
+          `will re-evaluate against the PR's current state.`,
       ]);
       process.exitCode = 1;
       return;
@@ -1370,12 +1440,19 @@ async function publishSummary(
     blockersPostedInline,
     degradeReason,
     staleBlockerIssueNumbers,
+    currentClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
       criterionBlockers,
       spine.unreviewedClosingIssues,
-      diffTruncationBlocksClosingClaim,
+      // KIND-AWARE, CURRENT value (PR #96 review round 2, Codex, cid
+      // 3626169268, BLOCKER) -- NOT the raw, review-time
+      // `diffTruncationBlocksClosingClaim` computed further up in this
+      // function for the posting-gate decision. See
+      // `TryPostBlockersInlineResult`'s own `currentDiffTruncationBlocksClosingClaim`
+      // docs for the permanent-over-gate this closes.
+      currentDiffTruncationBlocksClosingClaim,
       // Always non-null here by tryPostBlockersInline's own contract
       // (populated on every `postedInline: false` result) -- the
       // fallback is defensive only, never expected to actually apply.
