@@ -53,10 +53,14 @@ export const EXPECTED_CLAUDE_CODE_ACTION_SHA =
  * would pass this check green while a provenance trailer silently cited a
  * stale SHA. The ref itself is captured up to the first whitespace, quote,
  * or `#` — safe for both a bare YAML `uses:` value and a ref embedded
- * inside a quoted string.
+ * inside a quoted string. The ENTIRE ref token is captured and compared, so
+ * a `@<sha>-main` / `@<sha>@v1` style mutable suffix tacked onto an
+ * otherwise-correct SHA is caught rather than a `[0-9a-fA-F]{40}` alternative
+ * stopping at the SHA boundary and silently accepting the suffix (Codex P2,
+ * cid 3628037558).
  */
 const ACTION_REFERENCE_PATTERN =
-  /anthropics\/claude-code-action@([0-9a-fA-F]{40}|[^\s"'#]+)/g;
+  /anthropics\/claude-code-action@([^\s"'#]+)/g;
 
 /**
  * One violation of the pin/wildcard invariant, with enough context to act
@@ -141,18 +145,63 @@ function stripYamlComment(line: string): string {
 }
 
 /**
- * Strips a single layer of matching quotes (`'...'` or `"..."`) from an
- * already-trimmed value, if present.
- *
- * @param value - A trimmed YAML scalar value.
- * @returns The value with its enclosing quotes removed, if any.
+ * Decodes the escape sequences a YAML DOUBLE-quoted scalar processes, enough
+ * to compare the result against a literal wildcard. Every numeric encoding of
+ * a character -- `\xHH`, `\uHHHH`, `\U########` -- is decoded, so `"\x2A"`,
+ * `"*"`, and `"\U0000002A"` all resolve to the `*` they denote (the only
+ * ways to write U+002A in a double-quoted scalar besides the literal). A `\\`
+ * is consumed as one backslash FIRST, so an escaped backslash (`"\\x2A"`,
+ * which YAML reads as the 4-char text `\x2A`, NOT `*`) can't be misread as the
+ * start of a numeric escape. Any other `\<char>` keeps `<char>` verbatim --
+ * none of YAML's named escapes can produce a bare `*`, so that coarse handling
+ * is sufficient for this wildcard check. Single- and plain scalars do NOT
+ * process backslash escapes in YAML, so this is applied ONLY to double-quoted
+ * values (see {@link normalizeScalar}).
  */
-function unquote(value: string): string {
-  if (
-    (value.startsWith("'") && value.endsWith("'") && value.length >= 2) ||
-    (value.startsWith('"') && value.endsWith('"') && value.length >= 2)
-  ) {
-    return value.slice(1, -1);
+function decodeDoubleQuotedScalar(inner: string): string {
+  let out = "";
+  for (let i = 0; i < inner.length; ) {
+    if (inner[i] !== "\\") {
+      out += inner[i];
+      i += 1;
+      continue;
+    }
+    const next = inner[i + 1];
+    if (next === "x" || next === "u" || next === "U") {
+      const len = next === "x" ? 2 : next === "u" ? 4 : 8;
+      const hex = inner.slice(i + 2, i + 2 + len);
+      if (hex.length === len && /^[0-9a-fA-F]+$/.test(hex)) {
+        out += String.fromCodePoint(parseInt(hex, 16));
+        i += 2 + len;
+        continue;
+      }
+    }
+    // `\\` -> one backslash; any other `\<char>` -> keep <char> verbatim.
+    if (next !== undefined) {
+      out += next;
+      i += 2;
+    } else {
+      out += "\\";
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Normalizes a YAML scalar for wildcard comparison: strips one layer of quotes
+ * and, for a DOUBLE-quoted scalar, decodes its escape sequences (so `"\x2A"`
+ * is recognized as the `*` it denotes -- Codex P2, cid 3628037563). A
+ * single-quoted scalar is unquoted with YAML's only in-scalar escape (`''` ->
+ * `'`); a plain scalar is returned as-is. Neither single nor plain scalars
+ * process backslash escapes.
+ */
+function normalizeScalar(value: string): string {
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    return decodeDoubleQuotedScalar(value.slice(1, -1));
+  }
+  if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+    return value.slice(1, -1).replace(/''/g, "'");
   }
   return value;
 }
@@ -180,6 +229,13 @@ function unquote(value: string): string {
  * A YAML flow-sequence value (`allowed_bots: ['*']`) is also checked,
  * covering the third way YAML can express a one-element list on a single
  * line.
+ *
+ * 3. **A double-quoted numeric escape defeated the literal-`*` comparison**
+ *    (`allowed_bots: "\x2A"`) — the previous quote-stripping helper compared
+ *    the raw un-decoded text (`\x2A`), which never equals `*`, so this form
+ *    slipped through even though YAML resolves it to the wildcard. Fixed by
+ *    decoding double-quoted escape sequences before comparison (see
+ *    {@link normalizeScalar}, Codex P2, cid 3628037563).
  *
  * @param fileContent - The raw text of one `.github/workflows/*.yml` file.
  * @returns Every wildcard-allowlist violation found, in file order.
@@ -212,7 +268,7 @@ export function findWildcardAllowlistUsages(
         if (!itemMatch || itemMatch[1].length < keyIndent.length) {
           break; // Dedent or non-list line: this key's list block ended.
         }
-        if (unquote(itemMatch[2].trim()) === "*") {
+        if (normalizeScalar(itemMatch[2].trim()) === "*") {
           violations.push({
             kind: "wildcard-allowlist",
             line: j + 1,
@@ -228,7 +284,7 @@ export function findWildcardAllowlistUsages(
       const entries = value
         .slice(1, -1)
         .split(",")
-        .map((entry) => unquote(entry.trim()));
+        .map((entry) => normalizeScalar(entry.trim()));
       if (entries.includes("*")) {
         violations.push({
           kind: "wildcard-allowlist",
@@ -239,7 +295,7 @@ export function findWildcardAllowlistUsages(
       continue;
     }
 
-    if (unquote(value) === "*") {
+    if (normalizeScalar(value) === "*") {
       violations.push({
         kind: "wildcard-allowlist",
         line: i + 1,

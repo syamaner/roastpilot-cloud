@@ -90,6 +90,18 @@ describe("findUnpinnedActionReferences (F1-S7, issue #10)", () => {
     expect(violations).toHaveLength(1);
     expect(violations[0].detail).toContain(driftedSha);
   });
+
+  it("flags a full SHA carrying a mutable suffix (@<sha>-main) -- Codex P2 cid 3628037558", () => {
+    const content = `      - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}-main\n`;
+    const violations = findUnpinnedActionReferences(content);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].detail).toContain(`${EXPECTED_CLAUDE_CODE_ACTION_SHA}-main`);
+  });
+
+  it("does not flag the hand-duplicated env-var string copy of the pinned SHA", () => {
+    const content = `      IMPLEMENT_AGENT_ACTION_REF: "anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}"\n`;
+    expect(findUnpinnedActionReferences(content)).toEqual([]);
+  });
 });
 
 describe("findWildcardAllowlistUsages (F1-S7, issue #10)", () => {
@@ -178,6 +190,37 @@ describe("findWildcardAllowlistUsages (F1-S7, issue #10)", () => {
 
   it("does NOT flag a flow-sequence with only explicit entries", () => {
     expect(findWildcardAllowlistUsages("          allowed_bots: ['claude', 'claude[bot]']\n")).toEqual([]);
+  });
+
+  it("flags a double-quoted hex-escaped wildcard (\"\\x2A\") -- Codex P2 cid 3628037563", () => {
+    const content = '      allowed_bots: "\\x2A"\n';
+    expect(content).not.toContain("*"); // fixture really is the escape, not a literal *
+    expect(findWildcardAllowlistUsages(content)).toHaveLength(1);
+  });
+
+  it("flags a double-quoted unicode-escaped wildcard (\"\\u002A\")", () => {
+    const content = '      allowed_bots: "\\u002A"\n';
+    expect(findWildcardAllowlistUsages(content)).toHaveLength(1);
+  });
+
+  it("flags an escaped wildcard in the block-list form", () => {
+    const content = '      allowed_bots:\n        - "\\x2A"\n';
+    expect(findWildcardAllowlistUsages(content)).toHaveLength(1);
+  });
+
+  it("flags an escaped wildcard in the flow-sequence form", () => {
+    const content = '      allowed_bots: ["\\x2A"]\n';
+    expect(findWildcardAllowlistUsages(content)).toHaveLength(1);
+  });
+
+  it("does not flag an escaped-backslash literal (\"\\\\x2A\" is the text \\x2A, not *)", () => {
+    const content = '      allowed_bots: "\\\\x2A"\n';
+    expect(findWildcardAllowlistUsages(content)).toEqual([]);
+  });
+
+  it("does not flag a normal double-quoted allowlist entry", () => {
+    const content = '      allowed_bots: "dependabot[bot]"\n';
+    expect(findWildcardAllowlistUsages(content)).toEqual([]);
   });
 });
 
