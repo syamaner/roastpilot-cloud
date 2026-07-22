@@ -8,6 +8,17 @@ coverage:
         # branch) doesn't red-flag an otherwise fully-tested diff — same
         # convention as the agent repo's codecov.yml.
         threshold: 2%
+        # #99 (F1-S9 slice 90.6a-2) hit the #624/#625 deadlock class: a
+        # commit whose diff has no new coverable production code (a
+        # comment-only or string-wording-only change) can leave codecov
+        # with nothing to compare a patch against; `codecov/patch` is a
+        # REQUIRED branch-protection check, so a commit it has nothing to
+        # report on can silently BLOCK merge instead of passing vacuously.
+        # `if_not_found: success` is the documented codecov.yml escape
+        # hatch for exactly that case — treat "no coverable patch found"
+        # as a pass, not a block.
+        if_not_found: success
     project:
       default:
         threshold: 1%
+        if_not_found: success
