@@ -1372,6 +1372,72 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/references changed since this run's own earlier snapshot/i);
   });
 
+  it("FAILS CLOSED (never publishes a MISCLASSIFIED bucket note) when a body edit lands between this run's own T0 snapshot and the reconcile's own re-verify in a way that would flip #34 from DOWNGRADED to fully DE-REFERENCED -- CRITICALLY, the CLOSING-kind set alone is UNCHANGED by this exact edit (still {12} both before and after), so only the ANY-KIND re-verify (Codex cid 3626169271, made load-bearing by the F1-S9 slice 90.6a bucket-split) catches it; a closing-only re-verify would have missed this drift entirely and let a stale, wrongly-worded 'downgraded' note publish for an issue that is actually gone", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker." },
+          { criterionId: "34:0", satisfied: false, rationale: "Would be classified downgraded at T0." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCount += 1;
+        // T0 (fetchAndVerifyPrShas, this run's own snapshot -- ALSO the
+        // exact body tryPostBlockersInline's own bucket-split classifies
+        // #34 against): #12 closing, #34 downgraded but still referenced
+        // -- currentlyClosingIssueNumbers={12}, currentlyReferencedIssueNumbers={12,34}.
+        // Call 2+ (the reconcile's own internal re-verify): #34 is
+        // REMOVED entirely -- currentlyClosingIssueNumbers is STILL {12}
+        // (unchanged!), but currentlyReferencedIssueNumbers shrinks to
+        // {12}. A closing-only re-verify would see NO drift at all here.
+        return prFetchHandlerWithOverrides({ body: prFetchCount === 1 ? "Closes #12, refs #34" : "Closes #12" });
+      },
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // The reconcile's any-kind re-verify caught the drift and the whole
+    // run failed closed -- never reaching a delete, and never reaching
+    // this fix's own T2 preWriteCheck (a 3rd /pulls/83 fetch) either,
+    // since publishSummary returns immediately on the reconcile failure.
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(prFetchCount).toBe(2);
+    const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/could not run to completion/i);
+    expect(body).toMatch(/references changed since this run's own earlier snapshot/i);
+    // Neither bucket-split note was ever built or published -- correct
+    // OR incorrect wording, for #34 or anyone else.
+    expect(body).not.toMatch(/were NOT posted inline/i);
+    expect(body).not.toMatch(/no longer references them at all/i);
+    expect(body).not.toMatch(/still references them, but no longer with a closing keyword/i);
+  });
+
   it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [] },
