@@ -191,6 +191,17 @@ jobs:
           # arbitrary third-party bot still can't trigger a review that
           # holds the repo's read-only secret.
           allowed_bots: 'claude,claude[bot]'
+          # F1-S7 (issue #10) pre-slice audit: this job's own sibling
+          # invocation below (the spec-grounded-review skill job) sets both
+          # of these explicitly; this one didn't, relying on the action's
+          # own defaults instead. Set explicitly for the same reason as
+          # everywhere else in this file — don't rely on an upstream
+          # default staying conservative forever. `allowed_non_write_users`
+          # stays empty (never widen who can trigger a job that holds a
+          # read-only secret); `show_full_output: false` avoids writing the
+          # full transcript/output to a public step summary.
+          allowed_non_write_users: ""
+          show_full_output: false
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # Always post a visible tracking comment, even when the review
