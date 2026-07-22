@@ -1029,6 +1029,14 @@ interface TryPostBlockersInlineResult {
  * findings that should NOT be filtered by this same staleness logic — a
  * real restructuring, not a cheap fold.
  *
+ * @param joined - EVERY spine criterion's joined result (not just
+ *   `criterionBlockers`, the blocker-severity subset) — needed so this
+ *   function's own `diffTruncationBlocksClosingClaim` recompute can call
+ *   {@link isDiffTruncationUnverifiableForClosing} directly, matching that
+ *   function's own "any closing-kind entry, satisfied or not" semantics
+ *   (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230 — see
+ *   the recompute's own inline comment for why a blocker-only view is not
+ *   enough).
  * @param runNumber - This run's own VALIDATED, canonicalized
  *   `github.run_number` (F1-S9 slice 90.4, Codex finding #798 — validated
  *   ONCE by the caller, `publishSummary`, before this function or any
@@ -1059,6 +1067,7 @@ async function tryPostBlockersInline(
   repo: string,
   prNumber: number,
   pr: GitHubPullRequestShas,
+  joined: readonly JoinedCriterionResult[],
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
   runNumber: string,
@@ -1070,6 +1079,12 @@ async function tryPostBlockersInline(
   // bypass this filter (previously presence-only) allowed.
   const currentlyClosingIssueNumbers = new Set(
     currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
+  );
+  const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
+    currentlyClosingIssueNumbers.has(blocker.issueNumber),
+  );
+  const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
+    currentlyClosingIssueNumbers.has(entry.issueNumber),
   );
   // KIND-AWARE, against CURRENT state, not the review-time value the
   // caller used to compute (F1-S9 slice 90.5b, PR #96 review round 2,
@@ -1087,23 +1102,35 @@ async function tryPostBlockersInline(
   // gate), so this specific blocker could NEVER be cleared by anything
   // other than a human resolving the thread -- and even then, the NEXT
   // run would recompute the same permanently-true flag and re-post it,
-  // forever. Re-derived from `spine.diffTruncated` (unaffected by any
-  // body edit) and `currentlyClosingIssueNumbers` (just computed, above)
-  // rather than calling `isDiffTruncationUnverifiableForClosing`'s full
-  // `joined`-array form: every member of `currentlyClosingIssueNumbers` is
-  // GUARANTEED, by `publishSummary`'s own earlier
-  // `findUnreviewedNewClosingReferences` fail-closed check, to have been
-  // part of THIS run's actual review (as a spine entry or an
-  // `unreviewedClosingIssues` entry) -- so "at least one currently-closing
-  // reference exists" is equivalent to "at least one REVIEWED closing-kind
-  // reference is still closing now," without needing the full `joined`
-  // array threaded into this function at all.
-  const diffTruncationBlocksClosingClaim = spine.diffTruncated && currentlyClosingIssueNumbers.size > 0;
-  const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
-    currentlyClosingIssueNumbers.has(blocker.issueNumber),
-  );
-  const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
-    currentlyClosingIssueNumbers.has(entry.issueNumber),
+  // forever.
+  //
+  // FIXED (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid
+  // 3626534230, P1 -- this fix's own FIRST attempt was itself incomplete):
+  // `currentlyClosingIssueNumbers.size > 0` is too broad. A currently-closing
+  // issue that had ZERO unmet criteria at review time produces NEITHER a
+  // `criterionBlockers`/`joined` entry with any escalation NOR an
+  // `unreviewedClosingIssues` entry -- it was reviewed and found fully
+  // satisfied, so nothing was ever judged against the (possibly truncated)
+  // diff on its behalf. Such an issue is still a member of
+  // `currentlyClosingIssueNumbers` (it's still closing-referenced right
+  // now), so the old `size > 0` check could go true from THIS "phantom"
+  // issue alone even when `stillReferencedCriterionBlockers` and
+  // `stillReferencedUnreviewedClosingIssues` are BOTH empty -- reintroducing
+  // the exact same permanent-unclearable-aggregate class this fix exists to
+  // close, just via a different trigger than the original bug.
+  //
+  // Re-derived by calling `isDiffTruncationUnverifiableForClosing` directly
+  // -- the SAME shared primitive `publishSummary`'s own summary-side
+  // recompute uses (see that call site) -- against `joined`/
+  // `stillReferencedUnreviewedClosingIssues` filtered to CURRENT state,
+  // guaranteeing the posting-side and summary-side values can never drift
+  // apart by construction, rather than two independently-maintained
+  // reimplementations of the same predicate.
+  const currentlyClosingJoined = joined.filter((entry) => currentlyClosingIssueNumbers.has(entry.issueNumber));
+  const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
+    currentlyClosingJoined,
+    stillReferencedUnreviewedClosingIssues,
+    spine.diffTruncated,
   );
   const staleBlockerIssueNumbers = [
     ...new Set(
@@ -1344,7 +1371,17 @@ async function publishSummary(
   let currentDiffTruncationBlocksClosingClaim = false;
   if (totalBlockerCount > 0) {
     try {
-      const result = await tryPostBlockersInline(token, owner, repo, prNumber, pr, criterionBlockers, spine, canonicalRunNumber);
+      const result = await tryPostBlockersInline(
+        token,
+        owner,
+        repo,
+        prNumber,
+        pr,
+        joined,
+        criterionBlockers,
+        spine,
+        canonicalRunNumber,
+      );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;

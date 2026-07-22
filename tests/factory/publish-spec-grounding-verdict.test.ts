@@ -1644,6 +1644,61 @@ describe("main — the happy path", () => {
     expect(body).not.toMatch(/this pr's own diff was truncated/i);
   });
 
+  it("does NOT re-create the diff-truncation aggregate blocker via a currently-closing but FULLY-SATISFIED 'phantom' issue once the real review-time blocker has been downgraded (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230, P1 -- the completed fix for the same permanent-over-gate class cid 3626169268 first closed): #12 was a real review-time criterion blocker on a closing keyword, since downgraded to a plain reference; #13 is a SEPARATE issue this run also reviewed and found fully satisfied (zero unmet criteria -- so it has neither a `joined` entry nor an `unreviewedClosingIssues` entry, only a `reviewedClosingIssueNumbers` trace), and is STILL currently closing-referenced. The buggy `currentlyClosingIssueNumbers.size > 0` check would go true from #13 alone and re-create the aggregate; the fix must not", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: false, rationale: "Missing the retry wrapper." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        // Both #12 and #13 were fetched and reviewed this run (#13 simply
+        // had nothing unmet, so it never produced a spine entry at all --
+        // the same "omitted from specs entirely" shape as the 90.2
+        // regression class).
+        reviewedClosingIssueNumbers: [12, 13],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 downgraded from Closes to Refs since the review ran; #13 is a
+      // brand-new closing reference this run already reviewed (fully
+      // satisfied) -- still closing-referenced right now.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Refs #12, closes #13" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(""),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // The review-time criterion blocker (#12) is still counted in the
+    // headline (issue #89's own deliberate fail-safe over-count -- that
+    // count itself is untouched by this fix), but it was skipped as
+    // stale (downgraded) and nothing is left to actually post inline --
+    // NOT the anchor-fallback/permanently-gated case, so the job stays
+    // healthy (exit code unset) and no inline comment is ever attempted.
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("1 blocking finding(s)");
+    // The specific bug this test proves fixed: no aggregate diff-truncation
+    // blocker was fabricated from #13's mere presence in
+    // `currentlyClosingIssueNumbers` alone.
+    expect(body).not.toMatch(/this pr's own diff was truncated/i);
+    const inlinePost = calls.find(
+      (c) => c.method === "POST" && c.url.includes("/pulls/83/comments"),
+    );
+    expect(inlinePost).toBeUndefined();
+  });
+
   it("edits the existing summary comment instead of posting a duplicate on re-run", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Fixed." }] },
