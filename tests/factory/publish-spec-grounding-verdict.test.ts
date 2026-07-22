@@ -126,18 +126,20 @@ function prFetchHandler() {
 
 /**
  * Sibling of {@link prFetchHandler} with explicit overrides (PR #87
- * review round 3, Codex, P1, TOCTOU fold) so a test can simulate the PR
- * having moved (`headSha`) or gained a new closing reference (`body`)
- * since the read-only runner ran -- both inputs {@link
- * isStillSafeToDeleteInlineBlockerThreads}'s own revalidation re-checks.
- * A separate function (not an optional param on `prFetchHandler` itself)
- * so every existing bare `prFetchHandler` usage (passed directly as a
- * mockFetch handler) keeps its own simple, argument-free signature.
+ * review round 3, Codex, P1, TOCTOU fold; `baseSha` added F1-S9 slice
+ * 90.5b, PR #97 draft round 6, Codex, cid 3626754037) so a test can
+ * simulate the PR having moved (`headSha`), advanced its target branch
+ * (`baseSha`), or gained a new closing reference (`body`) since an
+ * earlier snapshot -- every input `publishSummary`'s own T0 and pre-write
+ * (T2) re-verifies both check. A separate function (not an optional param
+ * on `prFetchHandler` itself) so every existing bare `prFetchHandler`
+ * usage (passed directly as a mockFetch handler) keeps its own simple,
+ * argument-free signature.
  */
-function prFetchHandlerWithOverrides(overrides: { headSha?: string; body?: string | null }): Response {
+function prFetchHandlerWithOverrides(overrides: { headSha?: string; baseSha?: string; body?: string | null }): Response {
   return jsonResponse({
     head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
-    base: { sha: TRUSTED_BASE_SHA },
+    base: { sha: overrides.baseSha ?? TRUSTED_BASE_SHA },
     body: overrides.body ?? null,
   });
 }
@@ -1927,6 +1929,46 @@ describe("main — the happy path", () => {
     expect(body).not.toContain("No blocking findings.");
     expect(body).toMatch(/failed to re-verify this pr's identity and linked-issue references immediately before publishing/i);
     expect(body).toMatch(new RegExp(MOVED_HEAD_SHA));
+  });
+
+  it("FAILS CLOSED, rather than publishing a stale verdict, when the PR's BASE SHA changes between this run's own T0 snapshot and the pre-write re-verify (F1-S9 slice 90.5b, PR #97 draft round 6, Codex, cid 3626754037, P1 BLOCKER -- the third dimension of the same TOCTOU shape: unlike a head-SHA move, a base-branch advance fires no replacement run at all, so a stale verdict would stand permanently uncorrected): a target-branch push landing after this run's own T0 base snapshot but before the write, with the PR's head and linked-issue references BOTH unchanged, must still be caught", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const MOVED_BASE_SHA = "movedbasesha00000000000000000000000000000";
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Calls 1 (fetchAndVerifyPrShas, T0) and 2 (the reconcile's own
+        // pre-delete re-verify) both still see this run's own reviewed
+        // base; the target branch advances strictly after those but
+        // before call 3 -- this fix's own preWriteCheck. Head SHA and
+        // body stay unchanged throughout, isolating this test to the
+        // base-SHA dimension alone.
+        const baseSha = prFetchCallCount >= 3 ? MOVED_BASE_SHA : TRUSTED_BASE_SHA;
+        return prFetchHandlerWithOverrides({ baseSha, body: null });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/this pr's current base sha .* no longer matches the base this run's own review actually diffed against/i);
+    expect(body).toMatch(new RegExp(MOVED_BASE_SHA));
+    // Never actually wrote the stale, published verdict.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
   it("edits the existing summary comment instead of posting a duplicate on re-run", async () => {

@@ -1209,16 +1209,18 @@ async function tryPostBlockersInline(
 
 /**
  * Thrown by `publishSummary`'s own `preWriteCheck` (see that function's own
- * pre-publish re-verify) to distinguish "the reference/head-SHA re-verify
- * found real drift" from any OTHER error the same check can throw (a
- * genuine network failure, propagated as an ordinary `Error`) — the two
- * cases get differently-worded fallback messages (F1-S9 slice 90.5b, PR
- * #97 draft round 5, Codex, cid 3626686028).
+ * pre-publish re-verify) to distinguish "the reference or base-SHA
+ * re-verify found real drift" from any OTHER error the same check can
+ * throw (a genuine network failure, or a head-SHA mismatch surfaced by
+ * `fetchAndVerifyPrShas`'s own throw, both propagated as an ordinary
+ * `Error`) — the two cases get differently-worded fallback messages
+ * (F1-S9 slice 90.5b, PR #97 draft round 5, Codex, cid 3626686028; base-SHA
+ * dimension added round 6, Codex, cid 3626754037).
  */
-class LinkedReferenceDriftError extends Error {
+class PreWriteVerificationDriftError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "LinkedReferenceDriftError";
+    this.name = "PreWriteVerificationDriftError";
   }
 }
 
@@ -1580,27 +1582,48 @@ async function publishSummary(
   //
   // Fails closed on ANY drift in either the closing-kind or any-kind
   // reference set (the generic form, not narrowly tied to the
-  // diff-truncation trigger Codex found), AND on a head-SHA drift (a push
+  // diff-truncation trigger Codex found), on a head-SHA drift (a push
   // landing after this run's own T0 but before the write, security-reviewer
-  // MEDIUM finding on this same window -- a different dimension of the
-  // identical TOCTOU shape). Reuses `fetchAndVerifyPrShas` UNCHANGED (the
-  // same function this run's own EARLIER snapshot used, so the head-SHA
-  // check is byte-for-byte the same check, not a second implementation)
-  // for ONE fetch that covers BOTH dimensions: its own head-SHA throw
-  // covers the second, and its returned `pr.body` is fed to
+  // MEDIUM finding on this same window), AND on a base-SHA drift (F1-S9
+  // slice 90.5b, PR #97 draft round 6, Codex, cid 3626754037, P1 BLOCKER --
+  // the THIRD dimension of the identical TOCTOU shape: unlike a head-SHA
+  // move, a base-branch advance is NOT a configured `pull_request` event
+  // for this workflow, so no replacement run ever fires to self-correct a
+  // stale verdict published against the OLD base -- this dimension has no
+  // natural retry, making it the most important of the three to close
+  // here). Reuses `fetchAndVerifyPrShas` UNCHANGED (the same function this
+  // run's own EARLIER T0 snapshot used, so the head-SHA check is
+  // byte-for-byte the same check, not a second implementation) for ONE
+  // fetch that covers ALL THREE dimensions: its own head-SHA throw covers
+  // the second, its returned `pr.body` is fed to
   // `deriveLinkedReferenceIssueNumberSets`/`linkedReferenceSnapshotsMatch`
   // (the same shared primitives `verifyLinkedReferenceSnapshotUnchanged`
-  // itself is built from) for the first -- deliberately NOT baking
-  // head-SHA into that shared primitive itself, since
-  // `deleteDeReferencedInlineBlockerComments`'s own re-verify has no head-
-  // SHA concept and must not gain one just because this caller needs it.
+  // itself is built from) for the first, and its returned `pr.base.sha` is
+  // compared against `spine.reviewedBaseSha` for the third -- the EXACT
+  // same comparison and error wording as this run's own T0 base-SHA check
+  // above, mirrored rather than reimplemented differently. Deliberately
+  // NOT baking head-SHA or base-SHA into `verifyLinkedReferenceSnapshotUnchanged`
+  // itself, since `deleteDeReferencedInlineBlockerComments`'s own re-verify
+  // has no SHA concept and must not gain one just because this caller
+  // needs it. After this, all three T0-validated, verdict-affecting
+  // dimensions (head, base, references) are re-verified again at T2,
+  // immediately before the write.
   try {
     await upsertSummaryComment(token, owner, repo, prNumber, body, {
       preWriteCheck: async () => {
         const prAtPublish = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+        if (prAtPublish.base.sha !== spine.reviewedBaseSha) {
+          throw new PreWriteVerificationDriftError(
+            `this PR's current base SHA (${prAtPublish.base.sha}) no longer matches the base this run's ` +
+              `own review actually diffed against (${spine.reviewedBaseSha}) -- the target branch ` +
+              `advanced again since this run's own earlier snapshot, in the window between this run's ` +
+              `comment lookup completing and the write; refusing to publish a verdict produced against a ` +
+              `different base.`,
+          );
+        }
         const freshReferenceSets = deriveLinkedReferenceIssueNumberSets(prAtPublish.body, `${owner}/${repo}`);
         if (!linkedReferenceSnapshotsMatch(freshReferenceSets, currentClosingIssueNumbers, currentReferencedIssueNumbers)) {
-          throw new LinkedReferenceDriftError(
+          throw new PreWriteVerificationDriftError(
             `this PR's linked-issue references changed again since this run's own earlier snapshot, in ` +
               `the window between this run's comment lookup completing and the write -- refusing to ` +
               `publish a summary built against a body this run can no longer vouch for; a fresh ` +
@@ -1611,7 +1634,7 @@ async function publishSummary(
     });
   } catch (err) {
     const reason =
-      err instanceof LinkedReferenceDriftError
+      err instanceof PreWriteVerificationDriftError
         ? err.message
         : `failed to re-verify this PR's identity and linked-issue references immediately before ` +
           `publishing: ${err instanceof Error ? err.message : String(err)}`;
