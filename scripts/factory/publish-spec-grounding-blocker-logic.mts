@@ -915,6 +915,24 @@ export function buildAggregatedUnreviewedClosingIssuesCommentBody(
 export interface BlockerCommentPlanResult {
   readonly comments: readonly BlockerCommentPlan[];
   readonly anchorFallbackNeeded: boolean;
+  /**
+   * Maps each PLANNED criterion blocker's own `criterionId` to the
+   * `marker` of the comment that ACTUALLY COVERS it — its own individual
+   * marker ({@link criterionBlockerCommentMarker}) for the first {@link
+   * MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS}, or the shared {@link
+   * CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER} for any overflow (F1-S9
+   * slice 90.6a, issue #90's own #378 — qa lens, PR #99 review: the
+   * overflow/aggregate boundary this map exists to close). Built from the
+   * SAME `individualCriteria`/`overflowCriteria` split this function
+   * itself uses to build `comments`, so a caller consulting this map can
+   * never disagree with what was actually planned — the lockstep
+   * principle this codebase applies to every other posting-vs-summary
+   * pair (e.g. `isDiffTruncationUnverifiableForClosing`'s shared use).
+   * Empty when nothing was planned at all (no blockers, or no anchor).
+   */
+  readonly criterionCoveringMarkers: ReadonlyMap<string, string>;
+  /** Sibling of {@link criterionCoveringMarkers} for unreviewed closing issues, keyed by `issueNumber`. */
+  readonly issueCoveringMarkers: ReadonlyMap<number, string>;
 }
 
 /**
@@ -977,7 +995,9 @@ export type InlinePostingDegradeReason = "no-addable-anchor" | "anchor-rejected-
  *   one aggregated comment per category for any overflow, plus (when
  *   `diffTruncationBlocksClosingClaim` is `true`) exactly one whole-run
  *   diff-truncation blocker comment, all sharing the single deterministic
- *   anchor.
+ *   anchor. ALSO returns `criterionCoveringMarkers`/`issueCoveringMarkers`
+ *   (empty maps in both early-return cases above) — see {@link
+ *   BlockerCommentPlanResult}'s own field docs.
  */
 export function planBlockerInlineComments(
   criterionBlockers: readonly JoinedCriterionResult[],
@@ -991,18 +1011,40 @@ export function planBlockerInlineComments(
     unreviewedClosingIssues.length === 0 &&
     !diffTruncationBlocksClosingClaim
   ) {
-    return { comments: [], anchorFallbackNeeded: false };
+    return {
+      comments: [],
+      anchorFallbackNeeded: false,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
+    };
   }
 
   const anchor = selectDeterministicBlockerAnchor(diff);
   if (anchor === null) {
-    return { comments: [], anchorFallbackNeeded: true };
+    return {
+      comments: [],
+      anchorFallbackNeeded: true,
+      criterionCoveringMarkers: new Map(),
+      issueCoveringMarkers: new Map(),
+    };
   }
 
   const individualCriteria = criterionBlockers.slice(0, MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS);
   const overflowCriteria = criterionBlockers.slice(MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS);
   const individualIssues = unreviewedClosingIssues.slice(0, MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS);
   const overflowIssues = unreviewedClosingIssues.slice(MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS);
+
+  // Built from the EXACT same slices used to build `comments` below --
+  // see this interface field's own docstring for why this guarantees
+  // lockstep rather than a caller re-deriving the cap/split independently.
+  const criterionCoveringMarkers = new Map<string, string>([
+    ...individualCriteria.map((entry): [string, string] => [entry.criterionId, criterionBlockerCommentMarker(entry.criterionId)]),
+    ...overflowCriteria.map((entry): [string, string] => [entry.criterionId, CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER]),
+  ]);
+  const issueCoveringMarkers = new Map<number, string>([
+    ...individualIssues.map((entry): [number, string] => [entry.issueNumber, unreviewedClosingIssueCommentMarker(entry.issueNumber)]),
+    ...overflowIssues.map((entry): [number, string] => [entry.issueNumber, UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER]),
+  ]);
 
   const comments: BlockerCommentPlan[] = [
     ...individualCriteria.map((entry) => ({
@@ -1049,7 +1091,7 @@ export function planBlockerInlineComments(
       : []),
   ];
 
-  return { comments, anchorFallbackNeeded: false };
+  return { comments, anchorFallbackNeeded: false, criterionCoveringMarkers, issueCoveringMarkers };
 }
 
 /**

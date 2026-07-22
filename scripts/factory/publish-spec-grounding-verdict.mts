@@ -1286,9 +1286,22 @@ async function tryPostBlockersInline(
     // both fallback subsets so the anchor-fallback supplement never
     // re-describes an already-live inline thread as "no inline thread
     // exists for this" (the exact contradiction #378 names). Matched by
-    // MARKER, the same stable identity `postInlineCommentPlan` itself
-    // used to find/update each entry, not by array position (the plan's
-    // own ordering is not guaranteed to match either input array's).
+    // the marker of the comment that ACTUALLY COVERS each entry --
+    // `plan.criterionCoveringMarkers`/`plan.issueCoveringMarkers`, NOT
+    // this entry's own individual marker recomputed inline (PR #99
+    // review, qa lens, cid pending -- a REAL incomplete fix: an entry
+    // beyond `MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS` is covered by
+    // the shared AGGREGATE marker, never its own individual one, so
+    // checking the individual marker against `postedMarkers` could never
+    // match even when the aggregate covering it DID post successfully --
+    // those overflow entries would then survive this filter and get
+    // wrongly re-listed in the fallback as having no inline thread, when
+    // the aggregate already covers them). `planBlockerInlineComments`
+    // itself decides the individual-vs-aggregate split when building
+    // `plan.comments`; consulting its own returned maps here — rather
+    // than re-deriving the cap/split independently — is the lockstep fix:
+    // this filter and the plan can never disagree about which marker
+    // covers which entry.
     const postedMarkerSet = new Set(postResult.postedMarkers);
     return {
       postedInline: false,
@@ -1296,12 +1309,15 @@ async function tryPostBlockersInline(
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
-      fallbackCriterionBlockers: stillReferencedCriterionBlockers.filter(
-        (entry) => !postedMarkerSet.has(criterionBlockerCommentMarker(entry.criterionId)),
-      ),
-      fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues.filter(
-        (entry) => !postedMarkerSet.has(unreviewedClosingIssueCommentMarker(entry.issueNumber)),
-      ),
+      fallbackCriterionBlockers: stillReferencedCriterionBlockers.filter((entry) => {
+        const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
+        return !postedMarkerSet.has(coveringMarker);
+      }),
+      fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues.filter((entry) => {
+        const coveringMarker =
+          plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
+        return !postedMarkerSet.has(coveringMarker);
+      }),
     };
   }
   return {

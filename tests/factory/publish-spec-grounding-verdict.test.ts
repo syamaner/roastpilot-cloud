@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
 import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
 import {
+  CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   criterionBlockerCommentMarker,
   inlineBlockerGenerationMarker,
   unreviewedClosingIssueCommentMarker,
@@ -1456,6 +1457,88 @@ describe("main — the happy path", () => {
     // #90 genuinely has no inline thread -- belongs in the fallback.
     expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
+  });
+
+  it("does NOT re-list an OVERFLOW criterion blocker in the anchor-fallback when the AGGREGATE comment covering it already PATCHed successfully -- the aggregate/overflow boundary (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, qa lens -- a REAL incomplete fix: checking an overflow entry's own INDIVIDUAL marker against postedMarkers can never match, since it was never used in the plan at all; only the shared AGGREGATE marker was): 5 individual criterion blockers (12:0-12:4) all already PATCH successfully; the 6th (12:5) overflows into ONE aggregate comment, which ALSO already exists and PATCHes successfully; a separate unreviewed-closing issue (#90) is the first genuine CREATE in the whole plan and 422s, degrading it", async () => {
+    const individualMarkers = Array.from({ length: 5 }, (_unused, i) => criterionBlockerCommentMarker(`12:${i}`));
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          ...Array.from({ length: 6 }, (_unused, i) => ({
+            criterionId: `12:${i}`,
+            satisfied: false,
+            rationale: `Rationale for 12:${i}.`,
+          })),
+        ],
+      },
+      spine: {
+        entries: Array.from({ length: 6 }, (_unused, i) => ({
+          issueNumber: 12,
+          kind: "closing" as const,
+          criterionId: `12:${i}`,
+        })),
+        truncated: true,
+        unreviewedClosingIssues: [{ issueNumber: 90, truncationKind: "fully-dropped" }],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 90],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12, closes #90" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      // 5 individual criterion comments (12:0-12:4) AND the ONE aggregate
+      // comment covering the overflow (12:5) already exist -- all 6
+      // PATCH successfully. #90 (an unreviewed closing issue) has no
+      // prior comment -- the first genuine CREATE in the whole plan, and
+      // its own 422 degrades it.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          ...individualMarkers.map((marker, i) => ({
+            id: 100 + i,
+            body: `prior\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+          {
+            id: 200,
+            body: `prior aggregate\n${CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/100": () => jsonResponse({}),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/101": () => jsonResponse({}),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/102": () => jsonResponse({}),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/103": () => jsonResponse({}),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/104": () => jsonResponse({}),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/200": () => jsonResponse({}),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // NONE of the six criteria's own rationale appears -- all covered,
+    // either individually (12:0-12:4) or via the aggregate (12:5). THE
+    // KEY ASSERTION: 12:5 specifically -- the overflow entry whose own
+    // INDIVIDUAL marker was never used in the plan at all, so a
+    // positional/individual-marker-only reimplementation of this filter
+    // would have wrongly re-listed it.
+    for (let i = 0; i < 6; i++) {
+      expect(summaryBody).not.toContain(`Rationale for 12:${i}.`);
+    }
+    // #90 genuinely has no inline thread -- belongs in the fallback.
+    expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(6);
   });
 
   it("PATCHes a still-closing-referenced criterion's own comment (still unmet) while DELETING a de-referenced sibling's own comment via reconciliation, in the SAME run (F1-S9 slice 90.4, redesigned -- de-reference is now a real delete, not a 'leave in place, note it as stale' no-op)", async () => {
