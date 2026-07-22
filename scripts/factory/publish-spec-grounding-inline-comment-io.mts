@@ -401,6 +401,17 @@ export async function clearStaleInlineBlockerComments(
  * mechanism can get without true API-level atomicity, which GitHub's
  * REST API does not offer across multiple separate calls.
  *
+ * ALSO RE-VERIFIES `currentlyReferencedIssueNumbers` (ANY kind, PR #96
+ * review round 2, Codex, cid 3626169271) — defense-in-depth alongside the
+ * closing-set re-verify above: even though this function's OWN
+ * delete-eligibility test depends only on the closing set (per #801's own
+ * rule), re-confirming the any-kind set is ALSO unchanged means a future
+ * consumer of this same snapshot (e.g. a note distinguishing "de-referenced
+ * entirely" from "still referenced, merely downgraded" — tracked for a
+ * later slice) can trust it was re-validated at the SAME point the closing
+ * set was, rather than needing its own separate re-verify call bolted on
+ * later. A mismatch on EITHER set fails closed identically.
+ *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
@@ -410,46 +421,164 @@ export async function clearStaleInlineBlockerComments(
  *   `closing`-kind keyword, AT THE TIME the caller took this snapshot —
  *   re-verified fresh by this function itself before it is trusted for
  *   any delete (see above).
+ * @param currentlyReferencedIssueNumbers - Every issue number this PR's
+ *   CURRENT body referenced, of ANY kind, at the SAME snapshot moment —
+ *   re-verified fresh alongside `currentlyClosingIssueNumbers` (see
+ *   above); NOT used by the delete-eligibility test itself (that only
+ *   ever needs the closing set), only to detect drift on this second
+ *   dimension too.
  * @param currentGeneration - This run's own validated, canonicalized
  *   `github.run_number`, as a number.
  * @returns `{ ok: true, deletedCount }` once every eligible de-referenced
  *   comment has been deleted (`deletedCount` may be `0`); `{ ok: false,
- *   reason: "closing-references-changed" }` if the re-verify found the
- *   PR's closing-kind reference set no longer matches
- *   `currentlyClosingIssueNumbers` — NO delete is attempted in that case,
+ *   reason: "linked-references-changed" }` if the re-verify found the
+ *   PR's closing-kind OR any-kind reference set no longer matches the
+ *   snapshot the caller passed in — NO delete is attempted in that case,
  *   for ANY comment, since the caller's own posting decisions (computed
  *   against the SAME now-stale snapshot) are equally suspect; the caller
  *   is expected to treat this as a fail-closed signal for the WHOLE run,
  *   not merely skip this one function's own work (see
  *   `publish-spec-grounding-verdict.mts`'s own `publishSummary`).
  */
+/** A PR body's own derived closing-kind and any-kind linked-issue-reference sets — see {@link deriveLinkedReferenceIssueNumberSets}. */
+export interface LinkedReferenceIssueNumberSets {
+  readonly closing: ReadonlySet<number>;
+  readonly referenced: ReadonlySet<number>;
+}
+
+/**
+ * The PURE parsing half of the reference re-verify: derives the closing-kind
+ * and any-kind issue-number sets from an already-in-hand PR body string.
+ * Factored out of {@link verifyLinkedReferenceSnapshotUnchanged} so a caller
+ * that already fetched the PR for its OWN reasons (e.g. one that also needed
+ * head-SHA verification from that same fetch, see `publish-spec-grounding-
+ * verdict.mts`'s own `publishSummary`) can derive the identical sets from its
+ * own already-fetched body, without a second, redundant network call — the
+ * shared primitive stays the SET DERIVATION, not the fetch itself, so the two
+ * callers can never compute these sets differently even though they fetch
+ * differently.
+ *
+ * @param body - The PR's body, as returned by the GitHub API (`null` if empty).
+ * @param ownerRepo - `"{owner}/{repo}"`, passed straight through to
+ *   {@link parseLinkedIssueReferences}.
+ * @returns The derived closing-kind and any-kind issue-number sets.
+ */
+export function deriveLinkedReferenceIssueNumberSets(
+  body: string | null,
+  ownerRepo: string,
+): LinkedReferenceIssueNumberSets {
+  const references = parseLinkedIssueReferences(body ?? "", ownerRepo);
+  return {
+    closing: new Set(references.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber)),
+    referenced: new Set(references.map((reference) => reference.issueNumber)),
+  };
+}
+
+/**
+ * Compares a freshly-derived {@link LinkedReferenceIssueNumberSets} against
+ * the snapshot a caller took earlier — the PURE comparison half of the
+ * reference re-verify, shared by every caller of {@link
+ * deriveLinkedReferenceIssueNumberSets} so "what counts as unchanged" can
+ * never drift between them.
+ *
+ * @param fresh - The just-derived, current-state sets.
+ * @param snapshotClosingIssueNumbers - Every issue number the caller's own
+ *   snapshot considered closing-referenced.
+ * @param snapshotReferencedIssueNumbers - Every issue number the caller's
+ *   own snapshot considered referenced, of ANY kind.
+ * @returns `true` only if BOTH sets match the snapshot exactly; `false` on
+ *   ANY drift in either set (an addition, a removal, or a kind change).
+ */
+export function linkedReferenceSnapshotsMatch(
+  fresh: LinkedReferenceIssueNumberSets,
+  snapshotClosingIssueNumbers: ReadonlySet<number>,
+  snapshotReferencedIssueNumbers: ReadonlySet<number>,
+): boolean {
+  const setsMatch = (freshSet: ReadonlySet<number>, snapshot: ReadonlySet<number>): boolean =>
+    freshSet.size === snapshot.size && [...freshSet].every((issueNumber) => snapshot.has(issueNumber));
+  return (
+    setsMatch(fresh.closing, snapshotClosingIssueNumbers) && setsMatch(fresh.referenced, snapshotReferencedIssueNumbers)
+  );
+}
+
+/**
+ * Re-fetches this PR's CURRENT body fresh (an independent network call, not
+ * shared state with whatever snapshot the caller already has) and confirms
+ * both its closing-kind and any-kind linked-issue reference sets still
+ * exactly match the snapshot the caller took earlier — the shared "re-verify
+ * immediately before a privileged action" primitive originally built for
+ * {@link deleteDeReferencedInlineBlockerComments}'s own pre-delete re-verify
+ * (F1-S9 slice 90.4/90.5b, Codex, cid 3625635476 / cid 3626169271), and now
+ * ALSO the reference-derivation basis for the pre-publish-write re-verify
+ * (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid 3626639088 /
+ * cid 3626686028, P1 BLOCKER — see `publish-spec-grounding-verdict.mts`'s own
+ * `publishSummary` call site for the TOCTOU window this closes there; that
+ * caller reuses {@link deriveLinkedReferenceIssueNumberSets} and {@link
+ * linkedReferenceSnapshotsMatch} directly, on a body it already fetched for
+ * its OWN head-SHA check, rather than calling this function and paying for
+ * a second fetch).
+ *
+ * Factored out rather than left as independently-maintained inline copies of
+ * the same fetch+parse+compare, per this codebase's own recurring "shared
+ * primitive, not parallel reimplementation" discipline — a future change to
+ * the comparison semantics (e.g. a bucket-split re-verify) only needs to
+ * change in one place.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is acting on.
+ * @param snapshotClosingIssueNumbers - Every issue number the caller's own
+ *   snapshot considered closing-referenced.
+ * @param snapshotReferencedIssueNumbers - Every issue number the caller's
+ *   own snapshot considered referenced, of ANY kind.
+ * @returns `true` only if a FRESH fetch of this PR's body yields exactly
+ *   the same closing-kind AND any-kind reference sets as the snapshot
+ *   passed in; `false` on ANY drift in either set (an addition, a removal,
+ *   or a kind change) — the caller must fail closed on `false`, never
+ *   partially trust the stale snapshot for the privileged action it was
+ *   about to take.
+ */
+export async function verifyLinkedReferenceSnapshotUnchanged(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  snapshotClosingIssueNumbers: ReadonlySet<number>,
+  snapshotReferencedIssueNumbers: ReadonlySet<number>,
+): Promise<boolean> {
+  const pr = await githubRequest<{ readonly body: string | null }>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+  );
+  const fresh = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`);
+  return linkedReferenceSnapshotsMatch(fresh, snapshotClosingIssueNumbers, snapshotReferencedIssueNumbers);
+}
+
 export async function deleteDeReferencedInlineBlockerComments(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
   currentlyClosingIssueNumbers: ReadonlySet<number>,
+  currentlyReferencedIssueNumbers: ReadonlySet<number>,
   currentGeneration: number,
 ): Promise<
-  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "closing-references-changed" }
+  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "linked-references-changed" }
 > {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
 
-  const pr = await githubRequest<{ readonly body: string | null }>(
+  const unchanged = await verifyLinkedReferenceSnapshotUnchanged(
     token,
-    "GET",
-    `/repos/${owner}/${repo}/pulls/${prNumber}`,
+    owner,
+    repo,
+    prNumber,
+    currentlyClosingIssueNumbers,
+    currentlyReferencedIssueNumbers,
   );
-  const freshClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
-  );
-  const unchanged =
-    freshClosingIssueNumbers.size === currentlyClosingIssueNumbers.size &&
-    [...freshClosingIssueNumbers].every((issueNumber) => currentlyClosingIssueNumbers.has(issueNumber));
   if (!unchanged) {
-    return { ok: false, reason: "closing-references-changed" };
+    return { ok: false, reason: "linked-references-changed" };
   }
 
   const deReferenced = existing.filter((c) => {

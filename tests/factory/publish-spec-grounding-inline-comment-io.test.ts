@@ -456,7 +456,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
@@ -478,7 +478,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
@@ -503,7 +503,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     // #34 is not in the current closing set (it's still referenced, just
     // as a non-closing keyword) -- this function has no visibility into
     // WHY an issue is absent from the set, only that it is.
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), new Set([12]), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
@@ -524,7 +524,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12]), new Set([12]), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -550,7 +550,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+      const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
       expect(result).toEqual({ ok: true, deletedCount: 0 });
       expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -574,7 +574,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -596,7 +596,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 7);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 7);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
   });
@@ -617,7 +617,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -633,7 +633,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -654,7 +654,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -667,7 +667,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -696,7 +696,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
   });
@@ -717,7 +717,7 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1)).rejects.toThrow(/403/);
+    await expect(deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1)).rejects.toThrow(/403/);
   });
 
   it("re-verifies the closing-reference set AFTER pagination, IMMEDIATELY before the first DELETE (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635476) -- returns ok:false and deletes NOTHING when the fresh set no longer matches the caller's own snapshot", async () => {
@@ -738,9 +738,9 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
-    expect(result).toEqual({ ok: false, reason: "closing-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
     // The comment fetch (pagination) DID happen -- the mismatch is only
     // detected AFTER it -- but no DELETE is ever attempted once detected.
     expect(calls.some((c) => c.method === "GET" && c.url.includes("/pulls/5/comments"))).toBe(true);
@@ -767,9 +767,9 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
 
     // The caller's own snapshot (empty -- #34 was de-referenced) is used
     // here; the function's own fresh re-fetch finds {99}, a mismatch.
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set(), new Set(), 1);
 
-    expect(result).toEqual({ ok: false, reason: "closing-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
@@ -793,8 +793,41 @@ describe("deleteDeReferencedInlineBlockerComments (F1-S9 slice 90.4, redesigned 
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12, 56]), 1);
+    const result = await deleteDeReferencedInlineBlockerComments("token", "o", "r", 5, new Set([12, 56]), new Set([12, 56]), 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
+  });
+
+  it("FAILS CLOSED on an ANY-KIND-ONLY mismatch, even when the closing set is UNCHANGED (PR #96 review round 2, Codex, cid 3626169271) -- a plain, non-closing reference removed entirely between the snapshot and this re-verify would otherwise slip past a closing-only re-check", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      // #34's own "Refs #34" reference has been removed entirely since
+      // the snapshot -- the CLOSING set is unchanged (empty in both), but
+      // the ANY-KIND set shrank from {34} to {} -- a real change a
+      // closing-only re-verify would never detect.
+      "GET /repos/o/r/pulls/5": () => jsonResponse({ body: "" }),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `de-referenced\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteDeReferencedInlineBlockerComments(
+      "token",
+      "o",
+      "r",
+      5,
+      new Set(), // closing set: unchanged, empty both times
+      new Set([34]), // any-kind snapshot: #34 was referenced (non-closing) at snapshot time
+      1,
+    );
+
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 });

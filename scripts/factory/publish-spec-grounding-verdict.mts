@@ -151,6 +151,8 @@ import {
 import {
   clearStaleInlineBlockerComments,
   deleteDeReferencedInlineBlockerComments,
+  deriveLinkedReferenceIssueNumberSets,
+  linkedReferenceSnapshotsMatch,
   postInlineCommentPlan,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
@@ -930,6 +932,17 @@ interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
   readonly staleBlockerIssueNumbers: readonly number[];
+  /**
+   * This function's own KIND-AWARE, CURRENT-state re-derivation of
+   * whether the diff truncation still blocks a closing claim (F1-S9 slice
+   * 90.5b, PR #96 review round 2, Codex, cid 3626169268, BLOCKER — see
+   * this function's own docstring for the permanent-over-gate this
+   * closes). Returned so the caller's own anchor-fallback supplement uses
+   * the SAME current value this function's own posting decision already
+   * used, rather than the caller's separate, review-time-only
+   * computation.
+   */
+  readonly currentDiffTruncationBlocksClosingClaim: boolean;
 }
 
 /**
@@ -1018,6 +1031,14 @@ interface TryPostBlockersInlineResult {
  * findings that should NOT be filtered by this same staleness logic — a
  * real restructuring, not a cheap fold.
  *
+ * @param joined - EVERY spine criterion's joined result (not just
+ *   `criterionBlockers`, the blocker-severity subset) — needed so this
+ *   function's own `diffTruncationBlocksClosingClaim` recompute can call
+ *   {@link isDiffTruncationUnverifiableForClosing} directly, matching that
+ *   function's own "any closing-kind entry, satisfied or not" semantics
+ *   (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230 — see
+ *   the recompute's own inline comment for why a blocker-only view is not
+ *   enough).
  * @param runNumber - This run's own VALIDATED, canonicalized
  *   `github.run_number` (F1-S9 slice 90.4, Codex finding #798 — validated
  *   ONCE by the caller, `publishSummary`, before this function or any
@@ -1048,9 +1069,9 @@ async function tryPostBlockersInline(
   repo: string,
   prNumber: number,
   pr: GitHubPullRequestShas,
+  joined: readonly JoinedCriterionResult[],
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
-  diffTruncationBlocksClosingClaim: boolean,
   runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
@@ -1067,6 +1088,52 @@ async function tryPostBlockersInline(
   const stillReferencedUnreviewedClosingIssues = spine.unreviewedClosingIssues.filter((entry) =>
     currentlyClosingIssueNumbers.has(entry.issueNumber),
   );
+  // KIND-AWARE, against CURRENT state, not the review-time value the
+  // caller used to compute (F1-S9 slice 90.5b, PR #96 review round 2,
+  // Codex, cid 3626169268, BLOCKER — a PERMANENT over-gate, not merely
+  // stale: this run's own `diffTruncationBlocksClosingClaim` used to be
+  // computed from the REVIEW-TIME `joined`/`spine.unreviewedClosingIssues`
+  // sets, which stay `kind: "closing"` forever regardless of what the PR's
+  // CURRENT body says. A body edit that downgrades or removes EVERY
+  // closing reference this run's diff-truncation flag was protecting
+  // still left this function planning/posting (or re-posting on every
+  // subsequent run) a diff-truncation AGGREGATE blocker comment -- and
+  // `deleteDeReferencedInlineBlockerComments` deliberately never
+  // auto-deletes an aggregate-marked comment (an aggregate's own decoded
+  // issue number is always `null`, the "leave aggregates conservative"
+  // gate), so this specific blocker could NEVER be cleared by anything
+  // other than a human resolving the thread -- and even then, the NEXT
+  // run would recompute the same permanently-true flag and re-post it,
+  // forever.
+  //
+  // FIXED (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid
+  // 3626534230, P1 -- this fix's own FIRST attempt was itself incomplete):
+  // `currentlyClosingIssueNumbers.size > 0` is too broad. A currently-closing
+  // issue that had ZERO unmet criteria at review time produces NEITHER a
+  // `criterionBlockers`/`joined` entry with any escalation NOR an
+  // `unreviewedClosingIssues` entry -- it was reviewed and found fully
+  // satisfied, so nothing was ever judged against the (possibly truncated)
+  // diff on its behalf. Such an issue is still a member of
+  // `currentlyClosingIssueNumbers` (it's still closing-referenced right
+  // now), so the old `size > 0` check could go true from THIS "phantom"
+  // issue alone even when `stillReferencedCriterionBlockers` and
+  // `stillReferencedUnreviewedClosingIssues` are BOTH empty -- reintroducing
+  // the exact same permanent-unclearable-aggregate class this fix exists to
+  // close, just via a different trigger than the original bug.
+  //
+  // Re-derived by calling `isDiffTruncationUnverifiableForClosing` directly
+  // -- the SAME shared primitive `publishSummary`'s own summary-side
+  // recompute uses (see that call site) -- against `joined`/
+  // `stillReferencedUnreviewedClosingIssues` filtered to CURRENT state,
+  // guaranteeing the posting-side and summary-side values can never drift
+  // apart by construction, rather than two independently-maintained
+  // reimplementations of the same predicate.
+  const currentlyClosingJoined = joined.filter((entry) => currentlyClosingIssueNumbers.has(entry.issueNumber));
+  const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
+    currentlyClosingJoined,
+    stillReferencedUnreviewedClosingIssues,
+    spine.diffTruncated,
+  );
   const staleBlockerIssueNumbers = [
     ...new Set(
       [...criterionBlockers, ...spine.unreviewedClosingIssues]
@@ -1074,6 +1141,38 @@ async function tryPostBlockersInline(
         .filter((issueNumber) => !currentlyClosingIssueNumbers.has(issueNumber)),
     ),
   ].sort((a, b) => a - b);
+
+  // Gated on CURRENT-state applicability, before ever touching the network
+  // (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2):
+  // the caller only reaches this function when the REVIEW-TIME
+  // `totalBlockerCount` was nonzero, but every relevant reference can still
+  // have been removed or downgraded since -- exactly the case the three
+  // "still referenced" values above already detect. Without this early
+  // return, `fetchPrDiff` ran UNCONDITIONALLY even when there is nothing
+  // left to plan or post (`planBlockerInlineComments` would itself return
+  // `{ comments: [], anchorFallbackNeeded: false }` for these same empty
+  // inputs, see that function's own guard) -- so a transient GitHub compare-
+  // API failure on an otherwise CLEAN run (nothing to post) would throw,
+  // and the caller's own catch converts that into a visible fallback +
+  // nonzero exit code: over-gating a run that had no blocking obligation
+  // left at all. Returning the same "nothing posted, nothing stale to
+  // report beyond `staleBlockerIssueNumbers`" success this function already
+  // returns from its own tail (below) skips the fetch entirely for this
+  // case, matching `planBlockerInlineComments`'s own no-op contract instead
+  // of paying for (and being fragile to) a network call whose result was
+  // already knowable from purely local state.
+  if (
+    stillReferencedCriterionBlockers.length === 0 &&
+    stillReferencedUnreviewedClosingIssues.length === 0 &&
+    !diffTruncationBlocksClosingClaim
+  ) {
+    return {
+      postedInline: true,
+      degradeReason: null,
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
+  }
 
   const diff = await fetchPrDiff(token, owner, repo, pr.base.sha, pr.head.sha);
   const plan = planBlockerInlineComments(
@@ -1084,13 +1183,45 @@ async function tryPostBlockersInline(
     runNumber,
   );
   if (plan.anchorFallbackNeeded) {
-    return { postedInline: false, degradeReason: "no-addable-anchor", staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: "no-addable-anchor",
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
-    return { postedInline: false, degradeReason: postResult.reason, staleBlockerIssueNumbers };
+    return {
+      postedInline: false,
+      degradeReason: postResult.reason,
+      staleBlockerIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    };
   }
-  return { postedInline: true, degradeReason: null, staleBlockerIssueNumbers };
+  return {
+    postedInline: true,
+    degradeReason: null,
+    staleBlockerIssueNumbers,
+    currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+  };
+}
+
+/**
+ * Thrown by `publishSummary`'s own `preWriteCheck` (see that function's own
+ * pre-publish re-verify) to distinguish "the reference or base-SHA
+ * re-verify found real drift" from any OTHER error the same check can
+ * throw (a genuine network failure, or a head-SHA mismatch surfaced by
+ * `fetchAndVerifyPrShas`'s own throw, both propagated as an ordinary
+ * `Error`) — the two cases get differently-worded fallback messages
+ * (F1-S9 slice 90.5b, PR #97 draft round 5, Codex, cid 3626686028; base-SHA
+ * dimension added round 6, Codex, cid 3626754037).
+ */
+class PreWriteVerificationDriftError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreWriteVerificationDriftError";
+  }
 }
 
 async function publishSummary(
@@ -1155,6 +1286,16 @@ async function publishSummary(
     spine.unreviewedClosingIssues,
     spine.diffTruncated,
   );
+  // The REVIEW-TIME count -- used ONLY to decide whether there is
+  // anything at all worth calling `tryPostBlockersInline` for (below).
+  // Deliberately NOT used for `buildSpecGroundingSummaryCommentBody`'s own
+  // diff-truncation term (F1-S9 slice 90.5b, PR #96 review round 2, Codex,
+  // cid 3626169268) -- that function re-derives its OWN kind-aware value
+  // from `currentClosingIssueNumbers`. Using the review-time count for
+  // THIS gate is still correct and harmless: it can only ever OVER-trigger
+  // the call (attempting to post/reconcile against zero still-applicable
+  // blockers is a safe no-op, see `tryPostBlockersInline`'s own handling
+  // of empty inputs), never under-trigger it.
   const totalBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
@@ -1248,24 +1389,37 @@ async function publishSummary(
     return;
   }
 
-  // This PR's CURRENT closing-kind references, from the SAME
-  // already-verified `pr.body` (F1-S9 slice 90.4, redesigned reconcile):
-  // computed ONCE here, independent of `tryPostBlockersInline`'s own
-  // separate internal re-parse (which needs ALL references, closing or
-  // not, for its own unrelated staleness filter) -- a deliberate, cheap
-  // second parse of the same body per run, traded for keeping
-  // `tryPostBlockersInline` and the reconcile call below fully
+  // This PR's CURRENT references, from the SAME already-verified `pr.body`
+  // (F1-S9 slice 90.4, redesigned reconcile) — parsed ONCE here (team-lead's
+  // own pre-open fold, F1-S9 slice 90.5b: an earlier version called
+  // `parseLinkedIssueReferences` a second time for `currentReferencedIssueNumbers`
+  // below, a needless re-parse of the exact same, already-in-hand `pr.body`
+  // string — deterministic, so the two calls could never actually
+  // disagree, just redundant work), independent of `tryPostBlockersInline`'s
+  // own SEPARATE internal re-parse (which needs ALL references, closing or
+  // not, for its own unrelated staleness filter) — that one stays a
+  // deliberate, cheap second parse of the same body per run, traded for
+  // keeping `tryPostBlockersInline` and the reconcile call below fully
   // independent and independently reviewable, rather than threading a
   // shared computation between two otherwise-unrelated mechanisms.
+  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
+    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
   );
+  // This PR's CURRENT references of ANY kind (F1-S9 slice 90.5b, PR #96
+  // review round 2, Codex, cid 3626169271) — derived from the SAME parse
+  // just above, passed to the reconcile call below so it can detect drift
+  // in the any-kind set too, not just the closing set — see
+  // `deleteDeReferencedInlineBlockerComments`'s own docstring.
+  const currentReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
 
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
+  // Populated only when `tryPostBlockersInline` actually runs -- `false`
+  // otherwise, matching every other kind-aware-filtered value above (there
+  // is nothing to have recomputed when `totalBlockerCount` is 0).
+  let currentDiffTruncationBlocksClosingClaim = false;
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1274,14 +1428,15 @@ async function publishSummary(
         repo,
         prNumber,
         pr,
+        joined,
         criterionBlockers,
         spine,
-        diffTruncationBlocksClosingClaim,
         canonicalRunNumber,
       );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
+      currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1340,14 +1495,16 @@ async function publishSummary(
       repo,
       prNumber,
       currentClosingIssueNumbers,
+      currentReferencedIssueNumbers,
       currentGeneration,
     );
     if (!reconcileResult.ok) {
       await publishFallback(token, owner, repo, prNumber, [
-        `this PR's linked-issue closing references changed since this run's own earlier snapshot was ` +
-          `taken -- the blocker posting/skip decisions computed against that snapshot may now be ` +
-          `stale; failing closed rather than publishing a summary this run can no longer vouch for. A ` +
-          `fresh spec-grounded review run will re-evaluate against the PR's current state.`,
+        `this PR's linked-issue references changed since this run's own earlier snapshot was taken ` +
+          `(a closing-kind reference, or a reference of any other kind) -- the blocker posting/skip ` +
+          `decisions computed against that snapshot may now be stale; failing closed rather than ` +
+          `publishing a summary this run can no longer vouch for. A fresh spec-grounded review run ` +
+          `will re-evaluate against the PR's current state.`,
       ]);
       process.exitCode = 1;
       return;
@@ -1370,12 +1527,19 @@ async function publishSummary(
     blockersPostedInline,
     degradeReason,
     staleBlockerIssueNumbers,
+    currentClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
       criterionBlockers,
       spine.unreviewedClosingIssues,
-      diffTruncationBlocksClosingClaim,
+      // KIND-AWARE, CURRENT value (PR #96 review round 2, Codex, cid
+      // 3626169268, BLOCKER) -- NOT the raw, review-time
+      // `diffTruncationBlocksClosingClaim` computed further up in this
+      // function for the posting-gate decision. See
+      // `TryPostBlockersInlineResult`'s own `currentDiffTruncationBlocksClosingClaim`
+      // docs for the permanent-over-gate this closes.
+      currentDiffTruncationBlocksClosingClaim,
       // Always non-null here by tryPostBlockersInline's own contract
       // (populated on every `postedInline: false` result) -- the
       // fallback is defensive only, never expected to actually apply.
@@ -1386,7 +1550,98 @@ async function publishSummary(
     body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
   }
 
-  await upsertSummaryComment(token, owner, repo, prNumber, body);
+  // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE
+  // ACTUAL WRITE -- not merely before the `upsertSummaryComment` CALL
+  // (F1-S9 slice 90.5b, PR #97 draft round 5, Codex, cid 3626686028, P1
+  // BLOCKER, a RESIDUAL of cid 3626639088's own fix): round 4's re-verify
+  // ran immediately before this function CALLED `upsertSummaryComment`,
+  // but that function's own `findExistingSummaryComment` paginates
+  // (up to `MAX_COMMENT_PAGES` sequential GETs) BEFORE its actual
+  // PATCH/POST -- so a multi-request window still separated the
+  // round-4 re-verify from the write itself, wide enough for the SAME
+  // downgrade-then-restore body edit described below to land in between
+  // and still get a narrowed all-clear published. Threaded in as
+  // `upsertSummaryComment`'s own `preWriteCheck` callback (see that
+  // function's own docstring) instead, so this re-verify now runs AFTER
+  // pagination completes and IMMEDIATELY before the write -- narrowing
+  // the window to the single write call's own latency, the irreducible
+  // floor for two separate REST calls with no cross-call atomicity.
+  //
+  // Concretely, the scenario this closes: a closing reference downgraded
+  // before this run's very first fetch (narrowing
+  // `diffTruncationBlocksClosingClaim` to `false` and planning a clean
+  // "No blocking findings" summary), restored again after
+  // `findExistingSummaryComment`'s own pagination but before the write --
+  // nothing re-checked the body a third time, so this run would have
+  // published a narrowed all-clear for a closing claim it never actually
+  // verified against a (possibly truncated) diff, and exited 0. Combined
+  // with this workflow's own `cancel-in-progress: false` (deliberate, so
+  // privileged publishers serialize rather than race each other), a
+  // body-edit-triggered replacement run does not cancel this one either --
+  // so the stale all-clear would stand uncorrected.
+  //
+  // Fails closed on ANY drift in either the closing-kind or any-kind
+  // reference set (the generic form, not narrowly tied to the
+  // diff-truncation trigger Codex found), on a head-SHA drift (a push
+  // landing after this run's own T0 but before the write, security-reviewer
+  // MEDIUM finding on this same window), AND on a base-SHA drift (F1-S9
+  // slice 90.5b, PR #97 draft round 6, Codex, cid 3626754037, P1 BLOCKER --
+  // the THIRD dimension of the identical TOCTOU shape: unlike a head-SHA
+  // move, a base-branch advance is NOT a configured `pull_request` event
+  // for this workflow, so no replacement run ever fires to self-correct a
+  // stale verdict published against the OLD base -- this dimension has no
+  // natural retry, making it the most important of the three to close
+  // here). Reuses `fetchAndVerifyPrShas` UNCHANGED (the same function this
+  // run's own EARLIER T0 snapshot used, so the head-SHA check is
+  // byte-for-byte the same check, not a second implementation) for ONE
+  // fetch that covers ALL THREE dimensions: its own head-SHA throw covers
+  // the second, its returned `pr.body` is fed to
+  // `deriveLinkedReferenceIssueNumberSets`/`linkedReferenceSnapshotsMatch`
+  // (the same shared primitives `verifyLinkedReferenceSnapshotUnchanged`
+  // itself is built from) for the first, and its returned `pr.base.sha` is
+  // compared against `spine.reviewedBaseSha` for the third -- the EXACT
+  // same comparison and error wording as this run's own T0 base-SHA check
+  // above, mirrored rather than reimplemented differently. Deliberately
+  // NOT baking head-SHA or base-SHA into `verifyLinkedReferenceSnapshotUnchanged`
+  // itself, since `deleteDeReferencedInlineBlockerComments`'s own re-verify
+  // has no SHA concept and must not gain one just because this caller
+  // needs it. After this, all three T0-validated, verdict-affecting
+  // dimensions (head, base, references) are re-verified again at T2,
+  // immediately before the write.
+  try {
+    await upsertSummaryComment(token, owner, repo, prNumber, body, {
+      preWriteCheck: async () => {
+        const prAtPublish = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+        if (prAtPublish.base.sha !== spine.reviewedBaseSha) {
+          throw new PreWriteVerificationDriftError(
+            `this PR's current base SHA (${prAtPublish.base.sha}) no longer matches the base this run's ` +
+              `own review actually diffed against (${spine.reviewedBaseSha}) -- the target branch ` +
+              `advanced again since this run's own earlier snapshot, in the window between this run's ` +
+              `comment lookup completing and the write; refusing to publish a verdict produced against a ` +
+              `different base.`,
+          );
+        }
+        const freshReferenceSets = deriveLinkedReferenceIssueNumberSets(prAtPublish.body, `${owner}/${repo}`);
+        if (!linkedReferenceSnapshotsMatch(freshReferenceSets, currentClosingIssueNumbers, currentReferencedIssueNumbers)) {
+          throw new PreWriteVerificationDriftError(
+            `this PR's linked-issue references changed again since this run's own earlier snapshot, in ` +
+              `the window between this run's comment lookup completing and the write -- refusing to ` +
+              `publish a summary built against a body this run can no longer vouch for; a fresh ` +
+              `spec-grounded review will re-evaluate against this PR's current body.`,
+          );
+        }
+      },
+    });
+  } catch (err) {
+    const reason =
+      err instanceof PreWriteVerificationDriftError
+        ? err.message
+        : `failed to re-verify this PR's identity and linked-issue references immediately before ` +
+          `publishing: ${err instanceof Error ? err.message : String(err)}`;
+    await publishFallback(token, owner, repo, prNumber, [reason]);
+    process.exitCode = 1;
+    return;
+  }
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
       `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +

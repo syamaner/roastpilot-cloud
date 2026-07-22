@@ -126,18 +126,20 @@ function prFetchHandler() {
 
 /**
  * Sibling of {@link prFetchHandler} with explicit overrides (PR #87
- * review round 3, Codex, P1, TOCTOU fold) so a test can simulate the PR
- * having moved (`headSha`) or gained a new closing reference (`body`)
- * since the read-only runner ran -- both inputs {@link
- * isStillSafeToDeleteInlineBlockerThreads}'s own revalidation re-checks.
- * A separate function (not an optional param on `prFetchHandler` itself)
- * so every existing bare `prFetchHandler` usage (passed directly as a
- * mockFetch handler) keeps its own simple, argument-free signature.
+ * review round 3, Codex, P1, TOCTOU fold; `baseSha` added F1-S9 slice
+ * 90.5b, PR #97 draft round 6, Codex, cid 3626754037) so a test can
+ * simulate the PR having moved (`headSha`), advanced its target branch
+ * (`baseSha`), or gained a new closing reference (`body`) since an
+ * earlier snapshot -- every input `publishSummary`'s own T0 and pre-write
+ * (T2) re-verifies both check. A separate function (not an optional param
+ * on `prFetchHandler` itself) so every existing bare `prFetchHandler`
+ * usage (passed directly as a mockFetch handler) keeps its own simple,
+ * argument-free signature.
  */
-function prFetchHandlerWithOverrides(overrides: { headSha?: string; body?: string | null }): Response {
+function prFetchHandlerWithOverrides(overrides: { headSha?: string; baseSha?: string; body?: string | null }): Response {
   return jsonResponse({
     head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
-    base: { sha: TRUSTED_BASE_SHA },
+    base: { sha: overrides.baseSha ?? TRUSTED_BASE_SHA },
     body: overrides.body ?? null,
   });
 }
@@ -1237,7 +1239,7 @@ describe("main — the happy path", () => {
     const body = (post?.body as { body: string }).body;
     expect(body).not.toContain("No blocking findings.");
     expect(body).toMatch(/could not run to completion/i);
-    expect(body).toMatch(/closing references changed since this run's own earlier snapshot/i);
+    expect(body).toMatch(/references changed since this run's own earlier snapshot/i);
   });
 
   it("FAILS CLOSED when the closing-reference set is the SAME SIZE but a DIFFERENT issue number between the snapshot and the reconcile's own internal re-verify (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1 -- the element-mismatch branch, distinct from the size-mismatch one)", async () => {
@@ -1300,7 +1302,7 @@ describe("main — the happy path", () => {
     const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const body = (post?.body as { body: string }).body;
     expect(body).toMatch(/could not run to completion/i);
-    expect(body).toMatch(/closing references changed since this run's own earlier snapshot/i);
+    expect(body).toMatch(/references changed since this run's own earlier snapshot/i);
   });
 
   it("applies the SAME current-body staleness re-check to unreviewedClosingIssues, not just criterion blockers -- posts the still-referenced one inline, skips the stale one (PR #87 review round 4, Codex, P1)", async () => {
@@ -1573,7 +1575,14 @@ describe("main — the happy path", () => {
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      // Explicit body needed (F1-S9 slice 90.5b, PR #96 review round 2,
+      // Codex, cid 3626169268): the diff-truncation blocker now depends on
+      // the PR's CURRENT body still referencing #12 as closing, not merely
+      // on the review-time spine -- the bare `prFetchHandler` returns
+      // `body: null`, which would (correctly, under the fix) suppress this
+      // blocker entirely, since there'd be no live closing claim left to
+      // protect.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(""),
       // Reconciliation's own fetch -- runs unconditionally now (F1-S9
@@ -1592,6 +1601,374 @@ describe("main — the happy path", () => {
     const body = (post?.body as { body: string }).body;
     expect(body).toContain("1 blocking finding(s)");
     expect(body).toMatch(/this pr's own diff was truncated/i);
+  });
+
+  it("does NOT re-post (or keep counting) the diff-truncation blocker once its only closing reference has been downgraded -- closes the PERMANENT over-gate an aggregate blocker would otherwise become (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5b: reconciliation can never auto-delete an aggregate-marked comment, so a stale flag would re-post it every run, forever)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 downgraded from Closes to Refs since the review ran -- no
+      // longer a live closing claim for the truncated diff to protect.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Refs #12" }),
+      // NOT actually called (F1-S9 slice 90.5b, PR #97 draft round 3, Codex,
+      // cid 3626596213): `tryPostBlockersInline`'s own current-state
+      // recompute finds nothing left to plan or post, so it early-returns
+      // BEFORE ever fetching the diff -- this handler is registered
+      // defensively only, in case a future regression reintroduces the
+      // unconditional fetch this fix removed.
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(""),
+      // The de-reference reconcile runs unconditionally now, even on this
+      // zero-blocker (post-fix) path.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("No blocking findings.");
+    expect(body).not.toMatch(/this pr's own diff was truncated/i);
+  });
+
+  it("does NOT re-create the diff-truncation aggregate blocker via a currently-closing but FULLY-SATISFIED 'phantom' issue once the real review-time blocker has been downgraded (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230, P1 -- the completed fix for the same permanent-over-gate class cid 3626169268 first closed): #12 was a real review-time criterion blocker on a closing keyword, since downgraded to a plain reference; #13 is a SEPARATE issue this run also reviewed and found fully satisfied (zero unmet criteria -- so it has neither a `joined` entry nor an `unreviewedClosingIssues` entry, only a `reviewedClosingIssueNumbers` trace), and is STILL currently closing-referenced. The buggy `currentlyClosingIssueNumbers.size > 0` check would go true from #13 alone and re-create the aggregate; the fix must not", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: false, rationale: "Missing the retry wrapper." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        // Both #12 and #13 were fetched and reviewed this run (#13 simply
+        // had nothing unmet, so it never produced a spine entry at all --
+        // the same "omitted from specs entirely" shape as the 90.2
+        // regression class).
+        reviewedClosingIssueNumbers: [12, 13],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 downgraded from Closes to Refs since the review ran; #13 is a
+      // brand-new closing reference this run already reviewed (fully
+      // satisfied) -- still closing-referenced right now.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Refs #12, closes #13" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(""),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // The review-time criterion blocker (#12) is still counted in the
+    // headline (issue #89's own deliberate fail-safe over-count -- that
+    // count itself is untouched by this fix), but it was skipped as
+    // stale (downgraded) and nothing is left to actually post inline --
+    // NOT the anchor-fallback/permanently-gated case, so the job stays
+    // healthy (exit code unset) and no inline comment is ever attempted.
+    expect(process.exitCode).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("1 blocking finding(s)");
+    // The specific bug this test proves fixed: no aggregate diff-truncation
+    // blocker was fabricated from #13's mere presence in
+    // `currentlyClosingIssueNumbers` alone.
+    expect(body).not.toMatch(/this pr's own diff was truncated/i);
+    const inlinePost = calls.find(
+      (c) => c.method === "POST" && c.url.includes("/pulls/83/comments"),
+    );
+    expect(inlinePost).toBeUndefined();
+  });
+
+  it("never calls the diff-compare API at all -- and so survives it being down -- once the current-state recompute finds nothing left to plan or post (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2): the caller only reaches tryPostBlockersInline on a nonzero REVIEW-TIME blocker count (here, the diff-truncation term alone), but the only closing reference it was protecting can still have been downgraded since -- leaving nothing for the network round-trip to be worth. A transient compare-API failure must not over-gate a run with no real blocking obligation left", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 downgraded from Closes to Refs since the review ran -- no
+      // longer a live closing claim for the truncated diff to protect;
+      // `criterionBlockers` was already empty (satisfied: true), so
+      // there is truly nothing left for tryPostBlockersInline to plan or
+      // post once its own current-state recompute runs.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Refs #12" }),
+      // Stubbed as a TRANSIENT failure, deliberately -- proves the early
+      // return happens BEFORE this call, not merely that this call happens
+      // to succeed. If a future regression reintroduces the unconditional
+      // fetch this fix removed, this test fails loudly (a thrown
+      // GithubApiError surfacing as a visible fallback + exitCode 1)
+      // instead of silently passing.
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse("service unavailable", 500),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const compareCall = calls.find((c) => c.url.includes("/compare/"));
+    expect(compareCall).toBeUndefined();
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("No blocking findings.");
+  });
+
+  it("FAILS CLOSED, rather than publishing a narrowed all-clear, when the PR body changes AGAIN between the reconcile's own re-verify and the publish itself (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid 3626639088, P1 BLOCKER -- a genuine TOCTOU fail-open the #2 narrowing introduced): body=Refs #12 at this run's own first fetch (the diff-truncation term narrows to false, planning a clean all-clear) AND still at the reconcile's own re-verify (so that re-verify sees no drift and proceeds) -- but body=Closes #12 by the time this fix's own pre-publish re-verify runs, a THIRD, independent fetch. Without this fix, nothing would ever re-check the body a third time, and this run would publish 'No blocking findings' + exit 0 for a closing claim it never verified against this run's own truncated diff", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Call 1 (fetchAndVerifyPrShas, this run's own initial snapshot)
+        // and call 2 (the reconcile's own pre-delete re-verify, inside
+        // deleteDeReferencedInlineBlockerComments) both still see the
+        // downgraded body -- an attacker's edit restoring the closing
+        // keyword lands strictly AFTER call 2 but BEFORE call 3, this
+        // fix's own pre-publish re-verify, which is the only thing that
+        // catches it.
+        const body = prFetchCallCount >= 3 ? "Closes #12" : "Refs #12";
+        return prFetchHandlerWithOverrides({ body });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect(post).toBeDefined();
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/changed again since this run's own earlier snapshot/i);
+    // Never got as far as a real inline-comment attempt on this failed run.
+    expect(calls.some((c) => c.method === "POST" && c.url.includes("/pulls/83/comments"))).toBe(false);
+  });
+
+  it("posts a visible fallback and exits nonzero when this run's own pre-write reference/head-SHA re-verify genuinely fails (F1-S9 slice 90.5b, PR #97 draft round 5) -- a genuine (non-drift) network failure on the THIRD `/pulls/83` fetch, never silently swallowed or treated as a clean all-clear", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Call 1 (fetchAndVerifyPrShas, this run's own initial snapshot)
+        // and call 2 (the reconcile's own pre-delete re-verify) both
+        // succeed; call 3 -- this fix's own preWriteCheck, threaded into
+        // upsertSummaryComment and firing AFTER findExistingSummaryComment's
+        // own pagination -- hits a transient GitHub outage.
+        if (prFetchCallCount >= 3) {
+          return new Response("service unavailable", { status: 500 });
+        }
+        return prFetchHandler();
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/failed to re-verify this pr's identity and linked-issue references immediately before publishing/i);
+    expect(body).toMatch(/500/);
+  });
+
+  it("FAILS CLOSED, rather than publishing a narrowed all-clear, when the PR body is restored DURING findExistingSummaryComment's own multi-page pagination (F1-S9 slice 90.5b, PR #97 draft round 5, Codex, cid 3626686028, P1 BLOCKER -- the residual window round 4's fix left open): body=Refs #12 at this run's own first fetch and at the reconcile's own re-verify; findExistingSummaryComment then genuinely paginates (a full page-1 of 100 unrelated comments, forcing a real page-2 fetch) before this fix's own preWriteCheck runs its THIRD, independent /pulls/83 fetch -- which is where the restored body=Closes #12 is finally caught, immediately before the write", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    // A full page of 100 unrelated comments -- none carry the marker
+    // findExistingSpecGroundingSummaryCommentId looks for -- forces
+    // findExistingSummaryComment to fetch a genuine page 2, proving this
+    // fix's own re-verify sits AFTER that real pagination, not merely
+    // after a single, trivially-empty page.
+    const unrelatedCommentsPage = Array.from({ length: 100 }, (_, i) => ({
+      id: 9000 + i,
+      body: "an unrelated human comment",
+      user: { type: "User", login: "someone" },
+    }));
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Calls 1 (fetchAndVerifyPrShas) and 2 (the reconcile's own
+        // pre-delete re-verify) both still see the downgraded body; the
+        // restore lands strictly after those but before call 3 -- this
+        // fix's own preWriteCheck, which only runs once pagination below
+        // has fully completed.
+        const body = prFetchCallCount >= 3 ? "Closes #12" : "Refs #12";
+        return prFetchHandlerWithOverrides({ body });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse(unrelatedCommentsPage),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=2": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    // Real pagination happened (page 2 was actually fetched), and the
+    // pre-publish re-verify ran strictly AFTER it (the third /pulls/83
+    // fetch, which is what caught the restore).
+    expect(calls.some((c) => c.url.includes("/issues/83/comments?per_page=100&page=2"))).toBe(true);
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/changed again since this run's own earlier snapshot/i);
+    // Never actually wrote the stale, narrowed all-clear.
+    expect(body).not.toMatch(/this pr's own diff was truncated/i);
+  });
+
+  it("FAILS CLOSED, rather than publishing a stale verdict, when the PR's head SHA changes between this run's own T0 snapshot and the pre-write re-verify (F1-S9 slice 90.5b, PR #97 draft round 5, security-reviewer MEDIUM -- a different dimension of the same TOCTOU shape cid 3626686028 closed for references): a push landing after this run's own trusted head SHA was captured but before the write must not let a verdict reviewed against the OLD head get published as if it still applied", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const MOVED_HEAD_SHA = "movedsha0000000000000000000000000000000";
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Calls 1 and 2 still see this run's own trusted head; a push
+        // lands strictly after those but before call 3 -- this fix's own
+        // preWriteCheck, which reuses fetchAndVerifyPrShas and so throws
+        // on this exact mismatch.
+        const headSha = prFetchCallCount >= 3 ? MOVED_HEAD_SHA : TRUSTED_HEAD_SHA;
+        return prFetchHandlerWithOverrides({ headSha, body: null });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/failed to re-verify this pr's identity and linked-issue references immediately before publishing/i);
+    expect(body).toMatch(new RegExp(MOVED_HEAD_SHA));
+  });
+
+  it("FAILS CLOSED, rather than publishing a stale verdict, when the PR's BASE SHA changes between this run's own T0 snapshot and the pre-write re-verify (F1-S9 slice 90.5b, PR #97 draft round 6, Codex, cid 3626754037, P1 BLOCKER -- the third dimension of the same TOCTOU shape: unlike a head-SHA move, a base-branch advance fires no replacement run at all, so a stale verdict would stand permanently uncorrected): a target-branch push landing after this run's own T0 base snapshot but before the write, with the PR's head and linked-issue references BOTH unchanged, must still be caught", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const MOVED_BASE_SHA = "movedbasesha00000000000000000000000000000";
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        // Calls 1 (fetchAndVerifyPrShas, T0) and 2 (the reconcile's own
+        // pre-delete re-verify) both still see this run's own reviewed
+        // base; the target branch advances strictly after those but
+        // before call 3 -- this fix's own preWriteCheck. Head SHA and
+        // body stay unchanged throughout, isolating this test to the
+        // base-SHA dimension alone.
+        const baseSha = prFetchCallCount >= 3 ? MOVED_BASE_SHA : TRUSTED_BASE_SHA;
+        return prFetchHandlerWithOverrides({ baseSha, body: null });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/this pr's current base sha .* no longer matches the base this run's own review actually diffed against/i);
+    expect(body).toMatch(new RegExp(MOVED_BASE_SHA));
+    // Never actually wrote the stale, published verdict.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
   it("edits the existing summary comment instead of posting a duplicate on re-run", async () => {

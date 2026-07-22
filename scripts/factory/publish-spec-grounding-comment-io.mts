@@ -95,6 +95,23 @@ export async function findExistingSummaryComment(
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param body - The comment body to post or PATCH in place.
+ * @param options - `preWriteCheck`, if given, runs AFTER {@link
+ *   findExistingSummaryComment}'s own pagination (up to
+ *   `MAX_COMMENT_PAGES` sequential GETs) completes and IMMEDIATELY BEFORE
+ *   the actual PATCH/POST write — narrowing a caller's own TOCTOU window
+ *   to the single write call itself, the irreducible floor (F1-S9 slice
+ *   90.5b, PR #97 draft round 5, Codex, cid 3626686028, P1 BLOCKER — a
+ *   residual of cid 3626639088's own fix: re-verifying immediately before
+ *   THIS function was called still left the whole multi-page lookup
+ *   above between that re-verify and the write). Throwing from
+ *   `preWriteCheck` aborts the write entirely — this function does not
+ *   catch it, so it propagates to the caller, matching every other
+ *   fail-closed convention in this codebase (the caller converts it into
+ *   a visible fallback). Only the summary-publish caller
+ *   (`publish-spec-grounding-verdict.mts`'s own `publishSummary`) passes
+ *   this; `publishFallback`/`clearStaleSpecGroundingSummary` do not need
+ *   it — neither publishes a "current state" verdict a body edit could
+ *   invalidate.
  */
 export async function upsertSummaryComment(
   token: string,
@@ -102,8 +119,10 @@ export async function upsertSummaryComment(
   repo: string,
   prNumber: number,
   body: string,
+  options?: { readonly preWriteCheck?: () => Promise<void> },
 ): Promise<void> {
   const existingId = await findExistingSummaryComment(token, owner, repo, prNumber);
+  await options?.preWriteCheck?.();
   if (existingId !== null) {
     await githubRequest(token, "PATCH", `/repos/${owner}/${repo}/issues/comments/${existingId}`, { body });
   } else {
