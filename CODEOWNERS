@@ -1,0 +1,55 @@
+# Pipeline self-modification guard (F1-S7, issue #10; AGENTS.md "Pipeline
+# self-modification"; factory.md §13 point 3).
+#
+# Mirrors PROTECTED_PATH_PREFIXES / PROTECTED_EXACT_PATHS in
+# scripts/factory/implement-patch-logic.mts's findForbiddenPatchPaths
+# exactly — that function already rejects any implementing agent's patch
+# that touches these paths at all (a fail-closed publish-time guard, unit
+# tested); this file adds the complementary human-review control at the
+# GitHub level (required code-owner review, once branch protection's
+# require_code_owner_reviews is enabled) for the conventional, human
+# -directed PRs that legitimately DO touch these paths. Keep the two lists
+# in lockstep: any path added to one belongs in the other.
+#
+# The invariant both controls enforce together: an implementing agent can
+# never grant itself more pipeline power, and a human changing pipeline
+# power always goes through an explicit, visible review by the operator.
+#
+# PRECEDENCE NOTE (factory-security review, LOW): GitHub reads CODEOWNERS
+# from three possible locations, in this priority order — .github/,
+# then the repo root, then docs/ — using only the FIRST one it finds.
+# This file lives at the repo root, which is NOT top priority: a later,
+# human-authored PR that adds a .github/CODEOWNERS would silently SHADOW
+# every rule below with no error or warning from GitHub. If a
+# .github/CODEOWNERS or docs/CODEOWNERS ever needs to exist, merge its
+# rules into (or move this file to) whichever location must win, rather
+# than letting two files quietly disagree about who owns what.
+
+# The factory's own workflow files — triggers, permissions, secrets,
+# action pins, allowlists.
+/.github/ @syamaner
+
+# The privileged glue/publisher scripts (read-only-agent /
+# privileged-publisher split, factory.md §13) — these decide what an
+# agent's patch is allowed to do, so they must never be self-editable by
+# that same patch.
+/scripts/factory/ @syamaner
+
+# The spec-grounded-review skill: claude-code-review.yml's restore step
+# re-applies this path unconditionally from PR-head, the same treatment
+# as scripts/factory/ (see findForbiddenPatchPaths's own docstring for
+# the full reasoning) — so it needs the same human-review control.
+/.claude/skills/spec-grounded-review/ @syamaner
+
+# This file itself — an agent (or anyone) editing CODEOWNERS to drop a
+# protected path must go through the same review the paths it protects
+# require, not bypass it by editing the control.
+/CODEOWNERS @syamaner
+
+# The guard's OTHER recognized CODEOWNERS location (findForbiddenPatchPaths'
+# own PROTECTED_EXACT_PATHS lists both "CODEOWNERS" and "docs/CODEOWNERS"),
+# and one of GitHub's three official locations — exactly why the guard
+# defends it too. Nothing lives at this path today; owning it pre-emptively
+# closes the gap where a human-directed PR could create or edit it without
+# code-owner review (factory-security review, MEDIUM).
+/docs/CODEOWNERS @syamaner
