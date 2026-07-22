@@ -8,6 +8,7 @@ import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/pub
 import {
   criterionBlockerCommentMarker,
   inlineBlockerGenerationMarker,
+  unreviewedClosingIssueCommentMarker,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 
 /**
@@ -1278,6 +1279,183 @@ describe("main — the happy path", () => {
     // held under real end-to-end wiring, not just in unit isolation.
     expect(summaryBody.length).toBeLessThan(10_000);
     expect(summaryBody.length).toBeLessThan(65_536);
+  });
+
+  it("does NOT list a DOWNGRADED (or de-referenced) blocker's own full detail in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #376 -- the caller used to pass the RAW, unfiltered, review-time criterionBlockers here, contradicting the skip-notes appended right below): #12 stays closing (inline posting degrades, so its detail belongs in the fallback), #34 downgraded Closes->Refs -- its own detail must NOT appear in the fallback (that would claim it's still a live obligation while the downgraded skip-note, right below, says otherwise)", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "Still-live blocker rationale." },
+          { criterionId: "34:0", satisfied: false, rationale: "Downgraded blocker rationale." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      // #12 stays a live Closes; #34 downgraded to a plain Refs.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12, refs #34" }),
+      // An EMPTY diff -- no addable anchor at all, forcing the
+      // anchor-fallback path (blockersPostedInline: false, degradeReason:
+      // "no-addable-anchor").
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(""),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // #12's own full detail belongs in the fallback -- it's still a live
+    // obligation with no inline thread.
+    expect(summaryBody).toContain("Still-live blocker rationale.");
+    // #34's own full detail must NOT appear here -- it's downgraded, and
+    // its own skip-note (appended separately, below) already covers it
+    // accurately. Listing it in the fallback too would contradict that
+    // note by implying #34 is still a live, resolvable obligation.
+    expect(summaryBody).not.toContain("Downgraded blocker rationale.");
+    // The downgraded skip-note IS present, and is the ONLY place #34 is
+    // described.
+    expect(summaryBody).toMatch(/#34 were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i);
+  });
+
+  it("does NOT list an ALREADY-POSTED blocker's own full detail in the ANCHOR-FALLBACK supplement after a MID-PLAN 422 (F1-S9 slice 90.6a, issue #90's own #378 -- postInlineCommentPlan's return used to carry no record of what posted before the rejection, so the fallback claimed 'no inline thread exists' for one that already does): #12 PATCHes an existing comment successfully; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted", async () => {
+    const stillLiveMarker = criterionBlockerCommentMarker("12:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "First rationale, already posted." },
+          { criterionId: "34:0", satisfied: false, rationale: "Second rationale, 422 on create." },
+          { criterionId: "56:0", satisfied: false, rationale: "Third rationale, never attempted." },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "closing", criterionId: "12:0" },
+          { issueNumber: 34, kind: "closing", criterionId: "34:0" },
+          { issueNumber: 56, kind: "closing", criterionId: "56:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [12, 34, 56],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    // All three stay closing -- isolating this test to the posted-subset
+    // dimension alone, not overlapping with the bucket-split (#376).
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12, closes #34, closes #56" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      // #12 already has a prior comment -- PATCHes successfully. #34 and
+      // #56 have no prior comment -- #34 is the FIRST genuine CREATE
+      // attempt (the diagnostic one); its own 422 degrades the whole
+      // plan, so #56 is never even attempted.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 201,
+            body: `First rationale, already posted.\n${stillLiveMarker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/201": () => jsonResponse({}),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // #12 already has a REAL inline thread (the PATCH succeeded) -- its
+    // own full detail must NOT be re-listed in the fallback, which would
+    // falsely claim no inline thread exists for it.
+    expect(summaryBody).not.toContain("First rationale, already posted.");
+    // #34 and #56 genuinely have no inline thread -- both belong in the fallback.
+    expect(summaryBody).toContain("Second rationale, 422 on create.");
+    expect(summaryBody).toContain("Third rationale, never attempted.");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(true);
+  });
+
+  it("applies the SAME already-posted exclusion to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully; #90 is the first genuine CREATE and 422s, degrading the whole plan", async () => {
+    const marker78 = unreviewedClosingIssueCommentMarker(78);
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [] },
+      spine: {
+        entries: [],
+        truncated: true,
+        unreviewedClosingIssues: [
+          { issueNumber: 78, truncationKind: "fully-dropped" },
+          { issueNumber: 90, truncationKind: "fully-dropped" },
+        ],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #78, closes #90" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      // #78 already has a prior comment -- PATCHes successfully. #90 has
+      // none -- the first genuine CREATE attempt, and its own 422
+      // degrades the whole plan.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 301,
+            body: `prior\n${marker78}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/301": () => jsonResponse({}),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toMatch(/blocking findings could not be posted as inline comments/i);
+    // #78 already has a REAL inline thread -- must NOT be re-listed.
+    expect(summaryBody).not.toMatch(/Issue #78: \*\*never reviewed at all\*\*/);
+    // #90 genuinely has no inline thread -- belongs in the fallback.
+    expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
+    expect(calls.some((c) => c.method === "PATCH")).toBe(true);
   });
 
   it("PATCHes a still-closing-referenced criterion's own comment (still unmet) while DELETING a de-referenced sibling's own comment via reconciliation, in the SAME run (F1-S9 slice 90.4, redesigned -- de-reference is now a real delete, not a 'leave in place, note it as stale' no-op)", async () => {

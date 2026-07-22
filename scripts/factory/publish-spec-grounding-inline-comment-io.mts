@@ -228,10 +228,17 @@ export async function upsertInlineComment(
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param headSha - The trusted head SHA this run's diff was fetched against.
  * @param plan - This run's planned inline comments, in the order to post them.
- * @returns `{ ok: true }` once every comment posted/updated successfully
- *   (including the trivial case of an empty plan); `{ ok: false, reason:
- *   "anchor-rejected-422" }` if the first genuine CREATE attempt was
- *   rejected with a 422.
+ * @returns `{ ok: true, postedMarkers }` once every comment posted/updated
+ *   successfully (including the trivial case of an empty plan, where
+ *   `postedMarkers` is `[]`); `{ ok: false, reason: "anchor-rejected-422",
+ *   postedMarkers }` if the first genuine CREATE attempt was rejected with
+ *   a 422 — `postedMarkers` is every entry's own `marker` that WAS
+ *   successfully posted/patched BEFORE that rejection, in plan order
+ *   (F1-S9 slice 90.6a, issue #90's own #378 — a mid-plan 422 does not
+ *   undo the entries that already succeeded; the caller needs to know
+ *   which ones those are so it never re-describes an already-live inline
+ *   thread as if none existed, see `tryPostBlockersInline`'s own use of
+ *   this field).
  */
 export async function postInlineCommentPlan(
   token: string,
@@ -240,12 +247,16 @@ export async function postInlineCommentPlan(
   prNumber: number,
   headSha: string,
   plan: readonly BlockerCommentPlan[],
-): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: InlinePostingDegradeReason }> {
+): Promise<
+  | { readonly ok: true; readonly postedMarkers: readonly string[] }
+  | { readonly ok: false; readonly reason: InlinePostingDegradeReason; readonly postedMarkers: readonly string[] }
+> {
   if (plan.length === 0) {
-    return { ok: true };
+    return { ok: true, postedMarkers: [] };
   }
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
   let firstCreateSucceeded = false;
+  const postedMarkers: string[] = [];
   for (const entry of plan) {
     // Determined BEFORE the call, independent of success or failure -- a
     // PATCH (an existing match) never re-validates the anchor at all
@@ -254,17 +265,18 @@ export async function postInlineCommentPlan(
     const isCreateAttempt = findExistingInlineCommentId(existing, entry) === null;
     try {
       await upsertInlineComment(token, owner, repo, prNumber, headSha, existing, entry);
+      postedMarkers.push(entry.marker);
       if (isCreateAttempt) {
         firstCreateSucceeded = true;
       }
     } catch (err) {
       if (isCreateAttempt && !firstCreateSucceeded && err instanceof GithubApiError && err.status === 422) {
-        return { ok: false, reason: "anchor-rejected-422" };
+        return { ok: false, reason: "anchor-rejected-422", postedMarkers };
       }
       throw err;
     }
   }
-  return { ok: true };
+  return { ok: true, postedMarkers };
 }
 
 /**

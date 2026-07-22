@@ -126,6 +126,7 @@ import {
   MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
   parseCriteriaSpineArtifact,
   type ParsedCriteriaSpine,
+  type UnreviewedClosingIssueResult,
 } from "./spec-grounding-runner-logic.mts";
 import {
   buildDowngradedClosingBlockerSkippedNote,
@@ -141,7 +142,9 @@ import {
 } from "./publish-spec-grounding-verdict-logic.mts";
 import {
   buildAnchorFallbackSummarySupplement,
+  criterionBlockerCommentMarker,
   planBlockerInlineComments,
+  unreviewedClosingIssueCommentMarker,
   type InlinePostingDegradeReason,
 } from "./publish-spec-grounding-blocker-logic.mts";
 import {
@@ -964,6 +967,24 @@ interface TryPostBlockersInlineResult {
    * computation.
    */
   readonly currentDiffTruncationBlocksClosingClaim: boolean;
+  /**
+   * The criterion blockers the caller's own anchor-fallback supplement
+   * should actually render — ALREADY filtered to the still-closing
+   * subset (F1-S9 slice 90.6a, issue #90's own #376) AND, on a mid-plan
+   * 422 degrade, further filtered to exclude any entry this function
+   * itself already posted/patched as a real inline comment before that
+   * degrade happened (issue #90's own #378) — never the raw, unfiltered,
+   * review-time `criterionBlockers` this function was called with. Empty
+   * when `postedInline` is `true` (the caller never renders the
+   * anchor-fallback supplement in that case, so this is unused, but
+   * populated for type consistency rather than left implicit).
+   */
+  readonly fallbackCriterionBlockers: readonly JoinedCriterionResult[];
+  /**
+   * Sibling of {@link fallbackCriterionBlockers} for unreviewed closing
+   * issues — same filtering, same rationale.
+   */
+  readonly fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[];
 }
 
 /**
@@ -1222,6 +1243,11 @@ async function tryPostBlockersInline(
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      // Never rendered by the caller when postedInline is true -- but
+      // populated (empty) rather than left implicit, matching this
+      // result's own established discipline for every other field.
+      fallbackCriterionBlockers: [],
+      fallbackUnreviewedClosingIssues: [],
     };
   }
 
@@ -1240,16 +1266,42 @@ async function tryPostBlockersInline(
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      // NOTHING was ever attempted (no anchor to post to at all) -- the
+      // full still-referenced subsets, unfiltered, are exactly what the
+      // fallback needs to render (F1-S9 slice 90.6a, issue #90's own
+      // #376: the caller used to pass the RAW, unfiltered, review-time
+      // `criterionBlockers`/`spine.unreviewedClosingIssues` here instead
+      // -- could list a since-downgraded/de-referenced issue as if it
+      // were still a live obligation, contradicting the skip-notes this
+      // same run appends right below it).
+      fallbackCriterionBlockers: stillReferencedCriterionBlockers,
+      fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues,
     };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
+    // A MID-PLAN 422: some entries in `plan` may have already posted or
+    // patched successfully as REAL inline comments before the rejection
+    // (F1-S9 slice 90.6a, issue #90's own #378) -- excluded here from
+    // both fallback subsets so the anchor-fallback supplement never
+    // re-describes an already-live inline thread as "no inline thread
+    // exists for this" (the exact contradiction #378 names). Matched by
+    // MARKER, the same stable identity `postInlineCommentPlan` itself
+    // used to find/update each entry, not by array position (the plan's
+    // own ordering is not guaranteed to match either input array's).
+    const postedMarkerSet = new Set(postResult.postedMarkers);
     return {
       postedInline: false,
       degradeReason: postResult.reason,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      fallbackCriterionBlockers: stillReferencedCriterionBlockers.filter(
+        (entry) => !postedMarkerSet.has(criterionBlockerCommentMarker(entry.criterionId)),
+      ),
+      fallbackUnreviewedClosingIssues: stillReferencedUnreviewedClosingIssues.filter(
+        (entry) => !postedMarkerSet.has(unreviewedClosingIssueCommentMarker(entry.issueNumber)),
+      ),
     };
   }
   return {
@@ -1258,6 +1310,8 @@ async function tryPostBlockersInline(
     staleBlockerIssueNumbers,
     downgradedClosingBlockerIssueNumbers,
     currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    fallbackCriterionBlockers: [],
+    fallbackUnreviewedClosingIssues: [],
   };
 }
 
@@ -1477,6 +1531,12 @@ async function publishSummary(
   // otherwise, matching every other kind-aware-filtered value above (there
   // is nothing to have recomputed when `totalBlockerCount` is 0).
   let currentDiffTruncationBlocksClosingClaim = false;
+  // What the anchor-fallback supplement should actually render (F1-S9
+  // slice 90.6a, issue #90's own #376/#378) — see
+  // `TryPostBlockersInlineResult`'s own field docs for why this is NOT
+  // simply `criterionBlockers`/`spine.unreviewedClosingIssues`.
+  let fallbackCriterionBlockers: readonly JoinedCriterionResult[] = [];
+  let fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
   if (totalBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1495,6 +1555,8 @@ async function publishSummary(
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
       downgradedClosingBlockerIssueNumbers = result.downgradedClosingBlockerIssueNumbers;
       currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
+      fallbackCriterionBlockers = result.fallbackCriterionBlockers;
+      fallbackUnreviewedClosingIssues = result.fallbackUnreviewedClosingIssues;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
       // inline-posting failure) — NOT the anchor-fallback or 422-degrade
@@ -1590,8 +1652,19 @@ async function publishSummary(
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
     body += "\n" + buildAnchorFallbackSummarySupplement(
-      criterionBlockers,
-      spine.unreviewedClosingIssues,
+      // FILTERED, not the raw review-time `criterionBlockers`/
+      // `spine.unreviewedClosingIssues` (F1-S9 slice 90.6a, issue #90's
+      // own #376/#378, folding two accuracy gaps this same call site
+      // used to have): `tryPostBlockersInline` already computed exactly
+      // what still needs anchor-fallback rendering -- the still-closing
+      // subset (#376), further excluding anything it already posted or
+      // patched as a real inline comment before a mid-plan 422 (#378).
+      // Passing the unfiltered arrays here could list a since-downgraded/
+      // de-referenced issue as a live obligation (contradicting the
+      // skip-notes appended right below), or claim "no inline thread
+      // exists" for one that already does.
+      fallbackCriterionBlockers,
+      fallbackUnreviewedClosingIssues,
       // KIND-AWARE, CURRENT value (PR #96 review round 2, Codex, cid
       // 3626169268, BLOCKER) -- NOT the raw, review-time
       // `diffTruncationBlocksClosingClaim` computed further up in this

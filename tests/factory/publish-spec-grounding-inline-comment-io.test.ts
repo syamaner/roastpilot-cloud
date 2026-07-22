@@ -225,13 +225,24 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ]);
 
     expect(result.ok).toBe(true);
+    // F1-S9 slice 90.6a, issue #90's own #378: every marker this call
+    // actually posted, in plan order.
+    expect(result).toEqual({
+      ok: true,
+      postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+    });
     const posts = calls.filter((c) => c.method === "POST");
     expect(posts).toHaveLength(2);
     expect((posts[0]?.body as { body: string }).body).toBe("first");
     expect((posts[1]?.body as { body: string }).body).toBe("second");
   });
 
-  it("abandons the whole plan (never attempts comment 2+) when the FIRST comment 422s", async () => {
+  it("returns an EMPTY postedMarkers for the trivial empty-plan case (F1-S9 slice 90.6a, issue #90's own #378)", async () => {
+    const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", []);
+    expect(result).toEqual({ ok: true, postedMarkers: [] });
+  });
+
+  it("abandons the whole plan (never attempts comment 2+) when the FIRST comment 422s -- postedMarkers is EMPTY, since nothing succeeded before the rejection", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/o/r/pulls/5/comments": () => errorResponse(422, "Unprocessable Entity"),
@@ -245,10 +256,13 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
 
     expect(result.ok).toBe(false);
     // The discriminated reason (PR #87 review round 4, Codex, P1), not
-    // just a bare boolean -- the caller's own summary wording branches on it.
-    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422" });
+    // just a bare boolean -- the caller's own summary wording branches on
+    // it. postedMarkers (F1-S9 slice 90.6a, #378) is empty here -- the
+    // very first entry is the one that 422'd, so nothing posted before it.
+    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422", postedMarkers: [] });
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
   });
+
 
   it("propagates a NON-422 failure on the first comment as a genuine error, not a degrade", async () => {
     const { fetchMock } = mockFetch({
@@ -281,7 +295,7 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
     ).rejects.toThrow(/422/);
   });
 
-  it("probes the FIRST actual CREATE (POST), not literal plan index 0 -- when entry 0 matches an existing comment and PATCHes, entry 1's own POST is the diagnostic one (PR #87 review, Codex, P2)", async () => {
+  it("probes the FIRST actual CREATE (POST), not literal plan index 0 -- when entries 0 and 1 both match existing comments and PATCH, entry 2's own POST is the diagnostic one, and postedMarkers accumulates BOTH successful PATCHes before the degrade (PR #87 review, Codex, P2; postedMarkers F1-S9 slice 90.6a, issue #90's own #378)", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([
@@ -290,25 +304,40 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
             body: `prior\n${criterionBlockerCommentMarker("12:0")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
+          {
+            id: 89,
+            body: `prior\n${criterionBlockerCommentMarker("12:1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
         ]),
       "PATCH /repos/o/r/pulls/comments/88": () => jsonResponse({}),
+      "PATCH /repos/o/r/pulls/comments/89": () => jsonResponse({}),
       "POST /repos/o/r/pulls/5/comments": () => errorResponse(422, "Unprocessable Entity"),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", [
-      plan({ marker: criterionBlockerCommentMarker("12:0"), body: "update" }),
-      plan({ marker: criterionBlockerCommentMarker("12:1"), body: "create" }),
-      plan({ marker: criterionBlockerCommentMarker("12:2"), body: "never attempted" }),
+      plan({ marker: criterionBlockerCommentMarker("12:0"), body: "update 1" }),
+      plan({ marker: criterionBlockerCommentMarker("12:1"), body: "update 2" }),
+      plan({ marker: criterionBlockerCommentMarker("12:2"), body: "create" }),
+      plan({ marker: criterionBlockerCommentMarker("12:3"), body: "never attempted" }),
     ]);
 
     expect(result.ok).toBe(false);
-    expect(result).toEqual({ ok: false, reason: "anchor-rejected-422" });
-    // Entry 0's own PATCH succeeded (it's not a degrade signal at all --
-    // never even reaches the probe check); entry 1's own POST is the
-    // first genuine create attempt, and its 422 correctly degrades the
-    // whole plan; entry 2 is never attempted.
-    expect(calls.some((c) => c.method === "PATCH")).toBe(true);
+    // Entries 0 and 1's own PATCHes succeeded (never a degrade signal at
+    // all -- a PATCH never even reaches the probe check); entry 2's own
+    // POST is the first genuine create attempt, and its 422 correctly
+    // degrades the whole plan; entry 3 is never attempted. postedMarkers
+    // (F1-S9 slice 90.6a, #378) reports BOTH already-live PATCHed
+    // comments, in plan order -- the caller needs this to know those two
+    // already have real inline threads, even though this run's own
+    // overall posting degraded.
+    expect(result).toEqual({
+      ok: false,
+      reason: "anchor-rejected-422",
+      postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+    });
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(2);
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
   });
 
