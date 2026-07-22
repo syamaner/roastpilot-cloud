@@ -14,6 +14,16 @@
 # The invariant both controls enforce together: an implementing agent can
 # never grant itself more pipeline power, and a human changing pipeline
 # power always goes through an explicit, visible review by the operator.
+#
+# PRECEDENCE NOTE (factory-security review, LOW): GitHub reads CODEOWNERS
+# from three possible locations, in this priority order — .github/,
+# then the repo root, then docs/ — using only the FIRST one it finds.
+# This file lives at the repo root, which is NOT top priority: a later,
+# human-authored PR that adds a .github/CODEOWNERS would silently SHADOW
+# every rule below with no error or warning from GitHub. If a
+# .github/CODEOWNERS or docs/CODEOWNERS ever needs to exist, merge its
+# rules into (or move this file to) whichever location must win, rather
+# than letting two files quietly disagree about who owns what.
 
 # The factory's own workflow files — triggers, permissions, secrets,
 # action pins, allowlists.
@@ -35,3 +45,11 @@
 # protected path must go through the same review the paths it protects
 # require, not bypass it by editing the control.
 /CODEOWNERS @syamaner
+
+# The guard's OTHER recognized CODEOWNERS location (findForbiddenPatchPaths'
+# own PROTECTED_EXACT_PATHS lists both "CODEOWNERS" and "docs/CODEOWNERS"),
+# and one of GitHub's three official locations — exactly why the guard
+# defends it too. Nothing lives at this path today; owning it pre-emptively
+# closes the gap where a human-directed PR could create or edit it without
+# code-owner review (factory-security review, MEDIUM).
+/docs/CODEOWNERS @syamaner
