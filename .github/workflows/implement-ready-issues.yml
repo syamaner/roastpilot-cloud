@@ -522,7 +522,7 @@ jobs:
           # the real control.
           claude_args: >-
             --permission-mode acceptEdits
-            --allowedTools "Read,ToolSearch,Edit,Write,MultiEdit,Bash(npm ci),Bash(npm install),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
+            --allowedTools "Read,ToolSearch,Edit,Write,MultiEdit,Bash(npm ci --ignore-scripts),Bash(npm install --ignore-scripts),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*),Read(.git/**),Grep(.git/**),Edit(.git/**),Write(.git/**),MultiEdit(.git/**),Edit(.github/**),Write(.github/**),MultiEdit(.github/**),Edit(scripts/factory/**),Write(scripts/factory/**),MultiEdit(scripts/factory/**),Edit(CODEOWNERS),Write(CODEOWNERS),MultiEdit(CODEOWNERS),Edit(docs/CODEOWNERS),Write(docs/CODEOWNERS),MultiEdit(docs/CODEOWNERS)"
             --max-turns ${{ inputs.max_turns }}
           prompt: |
@@ -666,9 +666,17 @@ jobs:
         # outright). Test-content mutation testing is F1-S9's job
         # (factory.md §13.5/§13.6); the dispatch-first human review/merge
         # gate is the interim catch for that until F1-S9 lands.
+        # F1-S7 (issue #10): unlike the "Install dependencies (before the
+        # agent runs, so it never has to)" step earlier in this job — which
+        # runs against the pristine, not-yet-agent-touched checkout — this
+        # `npm ci` runs AFTER the agent's own edits, against the SAME
+        # agent-authored tree this step's own comment above says it
+        # independently re-checks. A patch adding a root `postinstall`/
+        # `prepare` script would otherwise execute here, before any of the
+        # gates below even run. `--ignore-scripts` closes that.
         run: |
           set -euo pipefail
-          npm ci
+          npm ci --ignore-scripts
           npx eslint .
           npx tsc --noEmit
           npx vitest run --coverage
