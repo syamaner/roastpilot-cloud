@@ -42,7 +42,17 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci
+        # F1-S7 (issue #10): this workflow runs on `pull_request` — i.e.
+        # against an agent-authored diff, same as any other PR. `npm ci`
+        # runs root `postinstall`/`prepare` scripts BEFORE any gate below
+        # executes; a patch adding such a hook could rewrite tests/configs
+        # pre-gate (#64's review). `--ignore-scripts` closes that at the
+        # root, matching the convention already established on the
+        # factory's own agent-diff jobs (claude-code-review.yml,
+        # implement-ready-issues.yml's post-agent "Run local gates" step).
+        # No behavior change today: package.json has no postinstall/
+        # prepare/preinstall scripts to skip.
+        run: npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint
@@ -89,7 +99,9 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci
+        # F1-S7 (issue #10): see the `gates` job's identical comment above
+        # — same `pull_request`-triggered, agent-diff-reachable install.
+        run: npm ci --ignore-scripts
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
