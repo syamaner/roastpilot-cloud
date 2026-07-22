@@ -1727,12 +1727,21 @@ async function publishSummary(
       // own #376/#378, folding two accuracy gaps this same call site
       // used to have): `tryPostBlockersInline` already computed exactly
       // what still needs anchor-fallback rendering -- the still-closing
-      // subset (#376), further excluding anything it already posted or
-      // patched as a real inline comment before a mid-plan 422 (#378).
-      // Passing the unfiltered arrays here could list a since-downgraded/
-      // de-referenced issue as a live obligation (contradicting the
-      // skip-notes appended right below), or claim "no inline thread
-      // exists" for one that already does.
+      // subset (#376); the fallback lists EVERY still-closing blocker,
+      // including any already posted/patched inline -- precisely
+      // excluding a posted-but-still-open one (the original #378 goal)
+      // needs thread-RESOLUTION state (GraphQL `isResolved`, not
+      // available via the REST endpoint this file uses), deferred to a
+      // future slice (see `fallbackCriterionBlockers`'s own field
+      // docs); conservatively listing all is fail-safe, since a real
+      // gating thread still blocks merge via `required_conversation_
+      // resolution` regardless of this wording (PR #99 review, cid
+      // 3627282617, round 5 -- the resolved-thread fail-open fix).
+      // Passing the unfiltered arrays here could still list a
+      // since-downgraded/de-referenced issue as a live obligation
+      // (contradicting the skip-notes appended right below), or claim
+      // "no inline thread exists" for one that already does -- #376's
+      // still-closing filter is unaffected by the #378 rewording above.
       fallbackCriterionBlockers,
       fallbackUnreviewedClosingIssues,
       // KIND-AWARE, CURRENT value (PR #96 review round 2, Codex, cid
