@@ -128,12 +128,14 @@ import {
   type ParsedCriteriaSpine,
 } from "./spec-grounding-runner-logic.mts";
 import {
+  buildDowngradedClosingBlockerSkippedNote,
   buildSpecGroundingSummaryCommentBody,
   buildStaleBlockerSkippedNote,
   deriveSeverity,
   findUnreviewedNewClosingReferences,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
+  splitSkippedBlockerNoteBudget,
   type JoinedCriterionResult,
   type NoCriteriaReason,
 } from "./publish-spec-grounding-verdict-logic.mts";
@@ -931,7 +933,26 @@ export async function main(): Promise<void> {
 interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
+  /**
+   * Issue numbers skipped from inline posting because the PR's CURRENT
+   * body no longer references them AT ALL — de-referenced entirely, as
+   * distinct from {@link downgradedClosingBlockerIssueNumbers} (F1-S9
+   * slice 90.6a — the stale-vs-downgraded bucket-split, Codex cid
+   * 3626169271's own any-kind reference dimension made load-bearing:
+   * see this function's own docstring for how the split is derived).
+   */
   readonly staleBlockerIssueNumbers: readonly number[];
+  /**
+   * Issue numbers skipped from inline posting because the PR's CURRENT
+   * body still references them, but no longer with a closing keyword
+   * (`Closes #N` downgraded to a plain `Refs #N`) — as distinct from
+   * {@link staleBlockerIssueNumbers} (de-referenced entirely). Before
+   * F1-S9 slice 90.6a, both cases were folded into ONE bucket (a
+   * deliberate, documented simplification — see `buildStaleBlockerSkippedNote`'s
+   * own pre-90.6a docstring history); this field lets the caller word the
+   * two cases accurately instead of one wording covering both.
+   */
+  readonly downgradedClosingBlockerIssueNumbers: readonly number[];
   /**
    * This function's own KIND-AWARE, CURRENT-state re-derivation of
    * whether the diff truncation still blocks a closing claim (F1-S9 slice
@@ -1074,14 +1095,27 @@ async function tryPostBlockersInline(
   spine: ParsedCriteriaSpine,
   runNumber: string,
 ): Promise<TryPostBlockersInlineResult> {
-  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   // KIND-AWARE (F1-S9 slice 90.4, PR #95 review round 2): closing-kind
   // only, matching `publishSummary`'s own `currentClosingIssueNumbers` --
   // see this function's own docstring for the downgraded-reference gate
-  // bypass this filter (previously presence-only) allowed.
-  const currentlyClosingIssueNumbers = new Set(
-    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
-  );
+  // bypass this filter (previously presence-only) allowed. Derived via the
+  // SAME shared `deriveLinkedReferenceIssueNumberSets` primitive
+  // `publishSummary`'s own T2 pre-write check uses (F1-S9 slice 90.6a --
+  // previously an inline parse+filter here, replaced so this function's own
+  // any-kind set below can never diverge from how every other caller
+  // derives it), against THIS function's own re-parse of `pr.body` (a
+  // deliberate SECOND parse of the same string per run, independent of
+  // `publishSummary`'s own snapshot -- see that function's own comment on
+  // why the two stay independent).
+  const currentReferenceSets = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`);
+  const currentlyClosingIssueNumbers = currentReferenceSets.closing;
+  // ANY-KIND (F1-S9 slice 90.6a, the stale-vs-downgraded bucket-split,
+  // Codex cid 3626169271's own any-kind dimension made LOAD-BEARING here):
+  // needed to distinguish "no longer referenced with a closing keyword,
+  // but still referenced" (downgraded) from "not referenced at all"
+  // (de-referenced entirely) below -- see `staleBlockerIssueNumbers`'s and
+  // `downgradedClosingBlockerIssueNumbers`'s own derivation.
+  const currentlyReferencedIssueNumbers = currentReferenceSets.referenced;
   const stillReferencedCriterionBlockers = criterionBlockers.filter((blocker) =>
     currentlyClosingIssueNumbers.has(blocker.issueNumber),
   );
@@ -1134,13 +1168,29 @@ async function tryPostBlockersInline(
     stillReferencedUnreviewedClosingIssues,
     spine.diffTruncated,
   );
-  const staleBlockerIssueNumbers = [
+  // The STALE-VS-DOWNGRADED bucket-split (F1-S9 slice 90.6a): every
+  // no-longer-closing issue number falls into exactly one of two buckets,
+  // both derived from the SAME `noLongerClosingIssueNumbers` set so they
+  // are disjoint and exhaustive by construction -- never two independently
+  // (and potentially inconsistently) filtered passes.
+  const noLongerClosingIssueNumbers = [
     ...new Set(
       [...criterionBlockers, ...spine.unreviewedClosingIssues]
         .map((entry) => entry.issueNumber)
         .filter((issueNumber) => !currentlyClosingIssueNumbers.has(issueNumber)),
     ),
-  ].sort((a, b) => a - b);
+  ];
+  // De-referenced ENTIRELY -- the PR's current body no longer mentions
+  // this issue at all, in any kind.
+  const staleBlockerIssueNumbers = noLongerClosingIssueNumbers
+    .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber))
+    .sort((a, b) => a - b);
+  // DOWNGRADED -- still referenced (any kind), just no longer with a
+  // closing keyword (`Closes #N` edited to `Refs #N`), as distinct from
+  // de-referenced entirely.
+  const downgradedClosingBlockerIssueNumbers = noLongerClosingIssueNumbers
+    .filter((issueNumber) => currentlyReferencedIssueNumbers.has(issueNumber))
+    .sort((a, b) => a - b);
 
   // Gated on CURRENT-state applicability, before ever touching the network
   // (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2):
@@ -1170,6 +1220,7 @@ async function tryPostBlockersInline(
       postedInline: true,
       degradeReason: null,
       staleBlockerIssueNumbers,
+      downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
     };
   }
@@ -1187,6 +1238,7 @@ async function tryPostBlockersInline(
       postedInline: false,
       degradeReason: "no-addable-anchor",
       staleBlockerIssueNumbers,
+      downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
     };
   }
@@ -1196,6 +1248,7 @@ async function tryPostBlockersInline(
       postedInline: false,
       degradeReason: postResult.reason,
       staleBlockerIssueNumbers,
+      downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
     };
   }
@@ -1203,6 +1256,7 @@ async function tryPostBlockersInline(
     postedInline: true,
     degradeReason: null,
     staleBlockerIssueNumbers,
+    downgradedClosingBlockerIssueNumbers,
     currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
   };
 }
@@ -1416,6 +1470,9 @@ async function publishSummary(
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
   let staleBlockerIssueNumbers: readonly number[] = [];
+  // De-referenced-vs-downgraded bucket-split (F1-S9 slice 90.6a) — see
+  // `TryPostBlockersInlineResult`'s own field docs.
+  let downgradedClosingBlockerIssueNumbers: readonly number[] = [];
   // Populated only when `tryPostBlockersInline` actually runs -- `false`
   // otherwise, matching every other kind-aware-filtered value above (there
   // is nothing to have recomputed when `totalBlockerCount` is 0).
@@ -1436,6 +1493,7 @@ async function publishSummary(
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
+      downgradedClosingBlockerIssueNumbers = result.downgradedClosingBlockerIssueNumbers;
       currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
     } catch (err) {
       // A genuine error (a diff-fetch failure, a non-first or non-422
@@ -1527,6 +1585,7 @@ async function publishSummary(
     blockersPostedInline,
     degradeReason,
     staleBlockerIssueNumbers,
+    downgradedClosingBlockerIssueNumbers,
     currentClosingIssueNumbers,
   );
   if (totalBlockerCount > 0 && !blockersPostedInline) {
@@ -1546,8 +1605,18 @@ async function publishSummary(
       degradeReason ?? "no-addable-anchor",
     );
   }
+  // The two skip-notes' issue-number lists SHARE one character budget,
+  // computed ONCE here and passed to both (F1-S9 slice 90.6a, PR #98
+  // review, Codex, cid 3626932819, P2 -- two independently-capped notes
+  // could together reach 2x the single pre-split note's own bound; see
+  // `splitSkippedBlockerNoteBudget`'s own docstring for the full
+  // regression this closes).
+  const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(staleBlockerIssueNumbers);
   if (staleBlockerIssueNumbers.length > 0) {
-    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers);
+    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers, staleMaxListLength);
+  }
+  if (downgradedClosingBlockerIssueNumbers.length > 0) {
+    body += "\n" + buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers, downgradedMaxListLength);
   }
 
   // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE
@@ -1645,7 +1714,8 @@ async function publishSummary(
   console.log(
     `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
       `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
-      `${staleBlockerIssueNumbers.length} stale blocker(s) skipped.`,
+      `${staleBlockerIssueNumbers.length} de-referenced blocker(s) and ` +
+      `${downgradedClosingBlockerIssueNumbers.length} downgraded blocker(s) skipped.`,
   );
 
   if (totalBlockerCount > 0 && !blockersPostedInline) {

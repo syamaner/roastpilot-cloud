@@ -668,16 +668,38 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   reached in that case, but a `null` is still required rather than
  *   defaulted, matching `blockersPostedInline`'s own discipline.
  * @param staleBlockerIssueNumbers - The issue numbers `tryPostBlockersInline`
- *   skipped because the PR's CURRENT body no longer references them at
- *   all (PR #87 review round 4b, Codex, P1 — a follow-up wording fold:
- *   `totalBlockerCount` below is still the REVIEW-TIME count, including
- *   any stale ones, deliberately NOT filtered here — see issue #89 for
- *   the deeper "should the count/exit-code reflect only the still-
- *   referenced subset" design question, tracked ahead of the gate-enable
- *   decision #47. When this array is non-empty, the headline below is
- *   reworded to state the count is REVIEW-TIME and explicitly reconciles
- *   it against the posted subset, rather than implying every counted
- *   finding has its own inline thread when some do not.
+ *   skipped because the PR's CURRENT body no longer references them AT
+ *   ALL — de-referenced entirely, as distinct from
+ *   `downgradedClosingBlockerIssueNumbers` (PR #87 review round 4b, Codex,
+ *   P1 — a follow-up wording fold, generalized F1-S9 slice 90.6a for the
+ *   bucket-split: `totalBlockerCount` below is still the REVIEW-TIME
+ *   count, including every skipped one, deliberately NOT filtered here —
+ *   see issue #89 for the deeper "should the count/exit-code reflect only
+ *   the still-referenced subset" design question, tracked ahead of the
+ *   gate-enable decision #47. The HEADLINE's own "N of these were
+ *   skipped" reconciliation below uses the UNION of this array and
+ *   `downgradedClosingBlockerIssueNumbers` — see that param's own docs
+ *   for why the union, not just this one bucket, is required there).
+ * @param downgradedClosingBlockerIssueNumbers - The issue numbers
+ *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
+ *   references them, but no longer with a closing keyword — DOWNGRADED,
+ *   as distinct from `staleBlockerIssueNumbers` (F1-S9 slice 90.6a, the
+ *   stale-vs-downgraded bucket-split). Combined with
+ *   `staleBlockerIssueNumbers` via union for the headline's own "N of
+ *   these were skipped" reconciliation (PR #98 review, Codex, cid
+ *   3626878151, P2 — a real regression the bucket-split itself
+ *   introduced: before the split, `staleBlockerIssueNumbers` was the
+ *   LUMPED no-longer-closing set, and this headline reconciled against
+ *   ALL of it; narrowing the array passed in to de-referenced-only
+ *   without ALSO widening the headline's own reconciliation would have
+ *   silently stopped subtracting downgraded blockers from the "posted
+ *   inline" count — overstating gate state for a downgrade-only or mixed
+ *   run, on the exact repo where an inline thread IS the merge gate).
+ *   Kept SEPARATE from `staleBlockerIssueNumbers` as a parameter (rather
+ *   than pre-unioned by the caller) so this function's own signature
+ *   documents both buckets explicitly, matching how the two skip-notes
+ *   themselves stay separate — only the headline's internal count needs
+ *   the union, not the two buckets' own identities.
  * @param currentlyClosingIssueNumbers - This PR's CURRENT closing-kind
  *   references (PR #96 review round 2, Codex, cid 3626169268, BLOCKER —
  *   used ONLY to re-derive the diff-truncation blocker's own applicability
@@ -704,8 +726,22 @@ export function buildSpecGroundingSummaryCommentBody(
   blockersPostedInline: boolean,
   degradeReason: InlinePostingDegradeReason | null,
   staleBlockerIssueNumbers: readonly number[],
+  downgradedClosingBlockerIssueNumbers: readonly number[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
 ): string {
+  // The UNION of both buckets -- exactly what the single, pre-90.6a
+  // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
+  // slice 90.6a, PR #98 review, Codex, cid 3626878151, P2 fold): the
+  // headline's own "N of these were skipped" reconciliation must count
+  // EVERY review-time blocker no longer posted inline, regardless of
+  // WHICH bucket it fell into, or a downgrade-only (or mixed) run would
+  // understate/overstate the skipped subset and misreport "posted inline"
+  // gate state. De-duplicated via `Set` even though the two buckets are
+  // disjoint by construction at their only current call site -- cheap
+  // defense against a future caller passing overlapping arrays.
+  const skippedBlockerIssueNumbers = [
+    ...new Set([...staleBlockerIssueNumbers, ...downgradedClosingBlockerIssueNumbers]),
+  ].sort((a, b) => a - b);
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
   // KIND-AWARE, against CURRENT state (PR #96 review round 2, Codex, cid
@@ -761,33 +797,42 @@ export function buildSpecGroundingSummaryCommentBody(
         : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
           "only deletes content)";
     // PR #87 review round 4b, Codex, P1 -- a cheap, honest-wording fold:
-    // when some (not all) blockers were skipped as stale, `totalBlockerCount`
-    // (deliberately still the REVIEW-TIME count, see this function's own
-    // `staleBlockerIssueNumbers` param docs and issue #89) must not be
-    // presented as if every one of them has its own inline thread or
-    // summary listing below -- reword the headline to say the count is
-    // review-time and explicitly reconcile it against the posted/listed
-    // subset, pointing at the separate stale-skip note for the rest.
-    const staleReconciliation =
-      staleBlockerIssueNumbers.length > 0
-        ? ` (${staleBlockerIssueNumbers.length} of these were skipped as no longer referenced by this ` +
-          "PR's current body — see the note below, not repeated here.)"
+    // when some (not all) blockers were skipped (de-referenced OR
+    // downgraded -- F1-S9 slice 90.6a, PR #98 review, Codex, cid
+    // 3626878151: reconciled against the UNION of both buckets, exactly
+    // what the pre-90.6a lumped set meant, never just one bucket alone),
+    // `totalBlockerCount` (deliberately still the REVIEW-TIME count, see
+    // this function's own `staleBlockerIssueNumbers`/
+    // `downgradedClosingBlockerIssueNumbers` param docs and issue #89)
+    // must not be presented as if every one of them has its own inline
+    // thread or summary listing below -- reword the headline to say the
+    // count is review-time and explicitly reconcile it against the
+    // posted/listed subset, pointing at the separate skip-note(s) for the
+    // rest. Wording says "no longer CLOSING" (the honest common
+    // denominator for BOTH buckets), not "no longer referenced" (true
+    // only for the de-referenced bucket, false for the downgraded one,
+    // which IS still referenced).
+    const skippedReconciliation =
+      skippedBlockerIssueNumbers.length > 0
+        ? ` (${skippedBlockerIssueNumbers.length} of these are no longer CLOSING obligations this PR's ` +
+          "current body makes — removed entirely, or downgraded to a non-closing reference — see the " +
+          "note(s) below, not repeated here.)"
         : "";
     lines.push(
       blockersPostedInline
-        ? staleBlockerIssueNumbers.length > 0
+        ? skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable to this PR's current linked issues are reported as separate, " +
               `resolvable inline review comment(s) below — see those threads, not this summary, ` +
-              `to resolve them.${staleReconciliation} ${blockerKindsExplanation} See the inline ` +
+              `to resolve them.${skippedReconciliation} ${blockerKindsExplanation} See the inline ` +
               "comment for which case applies and why."
           : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
-        : staleBlockerIssueNumbers.length > 0
+        : skippedBlockerIssueNumbers.length > 0
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
               "still applicable are listed below in THIS summary, not as separate inline comments " +
-              `— ${degradeExplanation}, so there is no inline thread for them.${staleReconciliation} ` +
+              `— ${degradeExplanation}, so there is no inline thread for them.${skippedReconciliation} ` +
               blockerKindsExplanation
           : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary, not as ` +
               `separate inline comments — ${degradeExplanation}, so there is no inline thread for ` +
@@ -850,29 +895,132 @@ export function buildSpecGroundingSummaryCommentBody(
 }
 
 /**
- * Upper bound on {@link buildStaleBlockerSkippedNote}'s own displayed
- * issue-number list, in characters (PR #87 review round 7, Codex,
- * BLOCKER): `staleBlockerIssueNumbers` is derived from `criterionBlockers`
- * and `unreviewedClosingIssues`, both themselves influenced by the PR's
- * own (attacker-controlled) body — a body naming far more issues than
- * the runner's own fetch cap, or a body edit that removes references to
- * many of them at once, could otherwise make this note's own joined
- * issue-number list grow unboundedly, pushing the WHOLE summary comment
- * past GitHub's 65,536-character limit and failing the only write this
- * run makes — the worst outcome, since this note (like the fallback and
- * anchor-fallback ones) is a signal a human needs, never optional.
- * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the
- * fallback comment's own reasons list — a budget over the TOTAL joined
- * string, any remainder reported as an omitted count, never silently
- * dropped.
+ * Upper bound on the COMBINED total of {@link buildStaleBlockerSkippedNote}'s
+ * AND {@link buildDowngradedClosingBlockerSkippedNote}'s own displayed
+ * issue-number lists, in characters (PR #87 review round 7, Codex,
+ * BLOCKER; re-scoped from a PER-NOTE cap to a SHARED total, F1-S9 slice
+ * 90.6a, PR #98 review, Codex, cid 3626932819, P2): `staleBlockerIssueNumbers`/
+ * `downgradedClosingBlockerIssueNumbers` are both derived from
+ * `criterionBlockers`/`unreviewedClosingIssues`, in turn influenced by the
+ * PR's own (attacker-controlled) body — a body naming far more issues than
+ * the runner's own fetch cap, or a body edit that removes/downgrades
+ * references to many of them at once, could otherwise make either note's
+ * own joined issue-number list grow unboundedly, pushing the WHOLE summary
+ * comment past GitHub's 65,536-character limit and failing the only write
+ * this run makes — the worst outcome, since these notes (like the fallback
+ * and anchor-fallback ones) are a signal a human needs, never optional.
+ * Capped the SAME way {@link MAX_REASONS_LIST_LENGTH} bounds the fallback
+ * comment's own reasons list — a budget over the TOTAL joined string, any
+ * remainder reported as an omitted count, never silently dropped. ONE
+ * constant, ONE budget, SPLIT between the two notes by {@link
+ * splitSkippedBlockerNoteBudget} rather than applied to EACH independently
+ * — the bucket-split's own first version of this constant let two
+ * independently-capped notes each reach the full budget, doubling the
+ * combined bound the single pre-split note respected; this constant now
+ * governs the SUM, never either note alone.
  */
-const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+const MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
+
+/** {@link renderCappedIssueNumberList}'s own result — see that function's docstring. */
+interface CappedIssueNumberListResult {
+  readonly list: string;
+  /** The ACTUAL rendered length of `list` (not the budget it was given) — what a caller threading a SHARED budget across multiple renders needs to decrement by. */
+  readonly usedLength: number;
+}
+
+/**
+ * Renders a deduplicated, ascending issue-number list as `#N, #M, ...`,
+ * capped at the caller-supplied `maxLength` characters with any remainder
+ * reported as an "(and N more)" omitted count rather than silently
+ * dropped — the shared DoS-safe rendering primitive both {@link
+ * buildStaleBlockerSkippedNote} and {@link
+ * buildDowngradedClosingBlockerSkippedNote} build on (F1-S9 slice 90.6a),
+ * so the availability guard is maintained in exactly one place.
+ *
+ * TAKES `maxLength` AS A PARAMETER, not the shared constant directly (PR
+ * #98 review, Codex, cid 3626932819, P2 — the bucket-split's own 2nd
+ * regression: with two INDEPENDENTLY-capped notes, each capable of using
+ * the FULL {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH} budget,
+ * their COMBINED length could reach 2x what the single pre-split note
+ * ever could — enough, with other content in the assembled comment, to
+ * push the WHOLE summary past GitHub's 65,536-character limit and fail
+ * the only write this run makes, losing the actionable blocker details
+ * to the generic failure fallback). Taking an explicit `maxLength` (and
+ * returning `usedLength`) lets {@link splitSkippedBlockerNoteBudget}
+ * allocate ONE shared budget across both notes' own list renders,
+ * restoring the single-budget bound the pre-split note respected.
+ *
+ * @param issueNumbers - The (deduplicated, ascending) issue numbers to render.
+ * @param maxLength - The character budget this render must not exceed.
+ * @returns The capped, comma-joined issue-number list, and its own actual rendered length.
+ */
+function renderCappedIssueNumberList(issueNumbers: readonly number[], maxLength: number): CappedIssueNumberListResult {
+  const issueTokens: string[] = [];
+  let issueListLength = 0;
+  let addedCount = 0;
+  for (const issueNumber of issueNumbers) {
+    const token = `#${issueNumber}`;
+    if (issueListLength + token.length + 2 > maxLength) {
+      break; // The remainder is reported as an omitted count below, not silently dropped.
+    }
+    issueTokens.push(token);
+    issueListLength += token.length + 2; // ", " separator budget.
+    addedCount += 1;
+  }
+  const omittedCount = issueNumbers.length - addedCount;
+  const list = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  return { list, usedLength: list.length };
+}
+
+/**
+ * Splits the SHARED {@link MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ * budget between the two skip notes' own issue-number-list renders (F1-S9
+ * slice 90.6a, PR #98 review, Codex, cid 3626932819, P2 — see {@link
+ * renderCappedIssueNumberList}'s own docstring for the regression this
+ * closes). Allocates GREEDILY, in a fixed order: the de-referenced (stale)
+ * list renders first against the FULL shared budget; whatever budget it
+ * does NOT use is what the downgraded list gets — so the two lists'
+ * COMBINED rendered length can never exceed the shared budget, restoring
+ * exactly the bound the single pre-split note respected. No principled
+ * reason favors one bucket over the other for priority (both get the
+ * SAME reconciliation treatment); greedy-first-then-remainder is simply
+ * the simplest deterministic split, easy to reason about and test.
+ *
+ * Called ONCE, by the caller building BOTH notes (`publish-spec-grounding-
+ * verdict.mts`'s own `publishSummary`), so the two note-append calls each
+ * pass the SAME, already-decided budgets rather than either one computing
+ * its own independently — the ONLY way to guarantee the two renders never
+ * exceed their shared total.
+ *
+ * TAKES ONLY the stale bucket, not both (a deliberate asymmetry, not an
+ * oversight): under this greedy-first-then-remainder scheme, the
+ * downgraded bucket's own ALLOCATED budget is simply "whatever the stale
+ * bucket did not use" — a function of the stale bucket's rendered length
+ * alone. The downgraded bucket's own SIZE never factors into deciding
+ * that allocation (only into how much of it that allocation ends up
+ * covering, which is {@link buildDowngradedClosingBlockerSkippedNote}'s
+ * own concern when it actually renders against the budget it's given).
+ *
+ * @param staleBlockerIssueNumbers - The de-referenced-entirely bucket —
+ *   the ONLY bucket this split decision needs to inspect.
+ * @returns The character budget each note's own list render should use.
+ */
+export function splitSkippedBlockerNoteBudget(
+  staleBlockerIssueNumbers: readonly number[],
+): { readonly staleMaxListLength: number; readonly downgradedMaxListLength: number } {
+  const staleUsedLength = renderCappedIssueNumberList(
+    staleBlockerIssueNumbers,
+    MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH,
+  ).usedLength;
+  const downgradedMaxListLength = Math.max(0, MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH - staleUsedLength);
+  return { staleMaxListLength: MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH, downgradedMaxListLength };
+}
 
 /**
  * Builds the note appended when one or more planned blocker findings were
  * skipped from inline posting because the PR's CURRENT body no longer
- * references their own issue with a closing keyword at all (PR #87 review
- * round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
+ * references their own issue AT ALL — de-referenced entirely (PR #87
+ * review round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
  * `tryPostBlockersInline` in `publish-spec-grounding-verdict.mts` re-checks
  * each planned blocker's own `issueNumber` against a fresh re-parse of the
  * PR's CURRENT body, not the runner-time one the verdict/spine were
@@ -880,16 +1028,12 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  * this run could otherwise post an inline comment reasserting an
  * obligation the PR no longer claims to have at all).
  *
- * COVERS TWO CASES, DELIBERATELY NOT DISTINGUISHED (F1-S9 slice 90.4, PR
- * #95 review round 2 — Codex and claude-review, independently, on the
- * same root cause): the issue may be entirely REMOVED from the body, or
- * merely DOWNGRADED (still mentioned, but a `Closes #N` edited to a plain
- * `Refs #N`) — `tryPostBlockersInline`'s own filter treats both the same
- * way (closing-kind reference gone), since both mean "no live closing
- * obligation this run can verify" regardless of which one actually
- * happened. The wording below says "no longer ... with a closing
- * keyword", not "no longer references ... at all" (the round-1 wording),
- * specifically so it stays accurate for the downgrade case too.
+ * NARROWED to the de-referenced-entirely case ONLY (F1-S9 slice 90.6a —
+ * the stale-vs-downgraded bucket-split): before this slice, this note
+ * covered BOTH "removed entirely" and "downgraded to a plain reference"
+ * with one wording, deliberately not distinguished (PR #95 review round
+ * 2). {@link buildDowngradedClosingBlockerSkippedNote} now covers the
+ * downgrade case with its own accurate wording — see that function.
  *
  * DOES NOT UNCONDITIONALLY CLAIM REMOVAL (Codex finding, PR #95 review
  * round 2, P2 — a real overclaim in an earlier version): this same run's
@@ -910,40 +1054,83 @@ const MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH = 2_000;
  *
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
- *   `unreviewedClosingIssues` whose own issue is no longer referenced
- *   with a closing keyword in the PR's current body (removed entirely, or
- *   downgraded to a plain reference).
+ *   `unreviewedClosingIssues` whose own issue is no longer referenced by
+ *   the PR's current body AT ALL, of any kind.
+ * @param maxListLength - This note's OWN share of the character budget for
+ *   its issue-number list — see {@link splitSkippedBlockerNoteBudget},
+ *   which the caller uses to compute this alongside {@link
+ *   buildDowngradedClosingBlockerSkippedNote}'s own share, so the two
+ *   notes' combined list length can never exceed the shared total
+ *   (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2).
+ *   Required, not defaulted — the caller must always make this an
+ *   explicit, deliberate choice rather than risk an un-audited default
+ *   silently reintroducing an unbounded (or double-budgeted) list.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within {@link MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH}
+ *   skipped, ALWAYS within `maxListLength`
  *   regardless of how many issue numbers were skipped.
  */
-export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[]): string {
+export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[], maxListLength: number): string {
   if (staleBlockerIssueNumbers.length === 0) {
     return "";
   }
-  const issueTokens: string[] = [];
-  let issueListLength = 0;
-  let addedCount = 0;
-  for (const issueNumber of staleBlockerIssueNumbers) {
-    const token = `#${issueNumber}`;
-    if (issueListLength + token.length + 2 > MAX_STALE_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH) {
-      break; // The remainder is reported as an omitted count below, not silently dropped.
-    }
-    issueTokens.push(token);
-    issueListLength += token.length + 2; // ", " separator budget.
-    addedCount += 1;
-  }
-  const omittedCount = staleBlockerIssueNumbers.length - addedCount;
-  const issueList = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
+  const { list: issueList } = renderCappedIssueNumberList(staleBlockerIssueNumbers, maxListLength);
   return (
     `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
-    "body no longer references them with a closing keyword (removed, or downgraded to a plain " +
-    "reference, since the spec-grounded review ran against this PR's head), so those findings no " +
-    "longer reflect a live closing obligation this run could verify. Any prior inline comment for " +
-    "them that this run's own reconciliation could positively confirm was safe to remove has been " +
-    "deleted; a comment covering multiple issues together, or one this run could not confirm " +
-    "predates it, may still be open and needs a human to resolve it directly. A fresh " +
-    "spec-grounded review run will re-evaluate against the PR's current state."
+    "body no longer references them at all (removed since the spec-grounded review ran against " +
+    "this PR's head), so those findings no longer reflect a live closing obligation this run could " +
+    "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
+    "confirm was safe to remove has been deleted; a comment covering multiple issues together, or " +
+    "one this run could not confirm predates it, may still be open and needs a human to resolve it " +
+    "directly. A fresh spec-grounded review run will re-evaluate against the PR's current state."
+  );
+}
+
+/**
+ * Builds the note appended when one or more planned blocker findings were
+ * skipped from inline posting because the PR's CURRENT body still
+ * references their own issue, but no longer with a closing keyword —
+ * DOWNGRADED (a `Closes #N` edited to a plain `Refs #N`), as distinct from
+ * {@link buildStaleBlockerSkippedNote}'s de-referenced-entirely case
+ * (F1-S9 slice 90.6a — the stale-vs-downgraded bucket-split; see that
+ * function's own docstring for why the two were originally one note and
+ * why they were split).
+ *
+ * Shares {@link buildStaleBlockerSkippedNote}'s own "does not
+ * unconditionally claim removal" caveat identically: this same run's own
+ * `deleteDeReferencedInlineBlockerComments` only deletes an INDIVIDUAL,
+ * generation-confirmed prior inline comment for one of these issues — an
+ * aggregate-marker comment covering this issue alongside others, or one
+ * with an unparseable generation, is left untouched, and this note is the
+ * only place a human learns that residual exists.
+ *
+ * @param downgradedClosingBlockerIssueNumbers - The (deduplicated,
+ *   ascending) issue numbers `tryPostBlockersInline` skipped, still
+ *   referenced by the PR's current body but no longer with a closing
+ *   keyword.
+ * @param maxListLength - This note's OWN share of the character budget for
+ *   its issue-number list — see {@link buildStaleBlockerSkippedNote}'s
+ *   own identical param docs and {@link splitSkippedBlockerNoteBudget}.
+ * @returns The Markdown section to append, or `""` if nothing was
+ *   skipped, ALWAYS within `maxListLength`
+ *   regardless of how many issue numbers were skipped.
+ */
+export function buildDowngradedClosingBlockerSkippedNote(
+  downgradedClosingBlockerIssueNumbers: readonly number[],
+  maxListLength: number,
+): string {
+  if (downgradedClosingBlockerIssueNumbers.length === 0) {
+    return "";
+  }
+  const { list: issueList } = renderCappedIssueNumberList(downgradedClosingBlockerIssueNumbers, maxListLength);
+  return (
+    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    "body still references them, but no longer with a closing keyword (downgraded from a `Closes " +
+    "#N`-style reference to a plain one, like `Refs #N`, since the spec-grounded review ran against " +
+    "this PR's head), so those findings no longer reflect a live closing obligation this run could " +
+    "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
+    "confirm was safe to remove has been deleted; a comment covering multiple issues together, or " +
+    "one this run could not confirm predates it, may still be open and needs a human to resolve it " +
+    "directly. A fresh spec-grounded review run will re-evaluate against the PR's current state."
   );
 }
 
