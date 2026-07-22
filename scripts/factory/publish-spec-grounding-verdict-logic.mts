@@ -866,8 +866,17 @@ export function buildSpecGroundingSummaryCommentBody(
         : partiallyPostedInline
           ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; of those ` +
               "still applicable to this PR's current linked issues, " +
-              `**${postedInlineCount}** already exist as separate, resolvable inline review ` +
-              "comment(s) — see those threads, not this summary, to resolve them — and " +
+              // FINDINGS, not "comments" (PR #99 review, Codex, cid
+              // 3627282621, P3): postedInlineCount counts still-applicable
+              // BLOCKERS, not the inline COMMENTS covering them -- when
+              // more than MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS (or
+              // the unreviewed-issue sibling cap) already posted, several
+              // findings share ONE aggregate comment, so "N already exist
+              // as separate... comment(s)" would overstate how many
+              // distinct threads actually exist. "Covered by" is honest
+              // regardless of the individual-vs-aggregate split.
+              `**${postedInlineCount}** finding(s) are already covered by inline review comment(s) ` +
+              "— see those threads, not this summary, to resolve them — and " +
               `**${fallbackListedCount}** are listed below in THIS summary instead, since ` +
               `${degradeExplanation} left them with no inline thread.${skippedReconciliation} ` +
               blockerKindsExplanation

@@ -768,9 +768,26 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     // The key assertion: NOT the old all-or-nothing "listed below" claim
     // for every still-applicable blocker.
     expect(body).not.toMatch(/those\s+still applicable are listed below in this summary/i);
-    expect(body).toMatch(/\*\*1\*\* already exist as separate, resolvable inline review comment\(s\)/i);
+    expect(body).toMatch(/\*\*1\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
     expect(body).toMatch(/\*\*2\*\* are listed below in this summary instead/i);
     expect(body).toContain("3 blocking finding(s)");
+  });
+
+  it("says FINDINGS, not 'separate comments', so an overflow run (findings sharing one aggregate comment) is never overstated (PR #99 review, Codex, cid 3627282621, P3): the wording must stay accurate even though postedInlineCount counts BLOCKERS, not the distinct inline COMMENTS covering them", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ issueNumber: 12, kind: "closing", satisfied: false })],
+      [],
+      { truncated: false, diffTruncated: false },
+      false,
+      "anchor-rejected-422",
+      [],
+      [],
+      ALL_CLOSING,
+      7, // e.g. 7 findings sharing 6 comments (5 individual + 1 aggregate) -- must not claim "7 separate comments".
+      1,
+    );
+    expect(body).not.toMatch(/already exist as separate, resolvable inline review comment/i);
+    expect(body).toMatch(/\*\*7\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
   });
 
   it("does NOT use the partial-posting wording when postedInlineCount is 0, even if blockersPostedInline is false -- keeps the EXISTING all-or-nothing wording for the common (nothing-posted) degrade case", () => {
@@ -786,7 +803,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       0,
       1,
     );
-    expect(body).not.toMatch(/already exist as separate, resolvable inline review comment/i);
+    expect(body).not.toMatch(/finding\(s\) are already covered by inline review comment/i);
     expect(body).toMatch(/listed below in THIS summary, not as/i);
   });
 });

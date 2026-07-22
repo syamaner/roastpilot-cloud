@@ -1410,7 +1410,7 @@ describe("main — the happy path", () => {
     // inline thread" claim, which would have directly contradicted the
     // fallback's own (correct) omission of #12 above.
     expect(summaryBody).toContain("3 blocking finding(s)");
-    expect(summaryBody).toMatch(/\*\*1\*\* already exist as separate, resolvable inline review comment\(s\)/i);
+    expect(summaryBody).toMatch(/\*\*1\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
     expect(summaryBody).toMatch(/\*\*2\*\* are listed below in this summary instead/i);
     expect(summaryBody).not.toMatch(/those\s+still applicable are listed below in this summary/i);
   });
@@ -1467,7 +1467,7 @@ describe("main — the happy path", () => {
     expect(summaryBody).toContain("2 blocking finding(s)");
     // #12 already posted (1); the diff-truncation blocker did NOT (1) --
     // 1 + 1 === 2, the invariant this test pins directly.
-    expect(summaryBody).toMatch(/\*\*1\*\* already exist as separate, resolvable inline review comment\(s\)/i);
+    expect(summaryBody).toMatch(/\*\*1\*\* finding\(s\) are already covered by inline review comment\(s\)/i);
     expect(summaryBody).toMatch(/\*\*1\*\* are listed below in this summary instead/i);
     // #12's own rationale must NOT be re-listed (already posted).
     expect(summaryBody).not.toContain("Still-live blocker rationale.");
