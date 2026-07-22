@@ -1311,30 +1311,29 @@ async function publishSummary(
     return;
   }
 
-  // This PR's CURRENT closing-kind references, from the SAME
-  // already-verified `pr.body` (F1-S9 slice 90.4, redesigned reconcile):
-  // computed ONCE here, independent of `tryPostBlockersInline`'s own
-  // separate internal re-parse (which needs ALL references, closing or
-  // not, for its own unrelated staleness filter) -- a deliberate, cheap
-  // second parse of the same body per run, traded for keeping
-  // `tryPostBlockersInline` and the reconcile call below fully
+  // This PR's CURRENT references, from the SAME already-verified `pr.body`
+  // (F1-S9 slice 90.4, redesigned reconcile) — parsed ONCE here (team-lead's
+  // own pre-open fold, F1-S9 slice 90.5b: an earlier version called
+  // `parseLinkedIssueReferences` a second time for `currentReferencedIssueNumbers`
+  // below, a needless re-parse of the exact same, already-in-hand `pr.body`
+  // string — deterministic, so the two calls could never actually
+  // disagree, just redundant work), independent of `tryPostBlockersInline`'s
+  // own SEPARATE internal re-parse (which needs ALL references, closing or
+  // not, for its own unrelated staleness filter) — that one stays a
+  // deliberate, cheap second parse of the same body per run, traded for
+  // keeping `tryPostBlockersInline` and the reconcile call below fully
   // independent and independently reviewable, rather than threading a
   // shared computation between two otherwise-unrelated mechanisms.
+  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`)
-      .filter((reference) => reference.kind === "closing")
-      .map((reference) => reference.issueNumber),
+    currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
   );
-  // This PR's CURRENT references of ANY kind, from the SAME
-  // already-verified `pr.body` (F1-S9 slice 90.5b, PR #96 review round 2,
-  // Codex, cid 3626169271) -- another deliberate, independent re-parse
-  // (same reasoning as `currentClosingIssueNumbers` just above), passed to
-  // the reconcile call below so it can detect drift in the any-kind set
-  // too, not just the closing set -- see
+  // This PR's CURRENT references of ANY kind (F1-S9 slice 90.5b, PR #96
+  // review round 2, Codex, cid 3626169271) — derived from the SAME parse
+  // just above, passed to the reconcile call below so it can detect drift
+  // in the any-kind set too, not just the closing set — see
   // `deleteDeReferencedInlineBlockerComments`'s own docstring.
-  const currentReferencedIssueNumbers = new Set(
-    parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`).map((reference) => reference.issueNumber),
-  );
+  const currentReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
 
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
