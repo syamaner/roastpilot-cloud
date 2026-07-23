@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
-import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+import {
+  assembleSpecGroundingSummaryCommentBody,
+  SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
+} from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
 import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   criterionBlockerCommentMarker,
@@ -1598,11 +1601,17 @@ describe("main — the happy path", () => {
     );
   });
 
-  it("SURVIVES Codex's own combined worst case (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2): BOTH skip buckets large enough that either alone could reach the full shared budget -- 300 de-referenced + 300 downgraded, alongside a still-live blocker -- the assembled summary stays well within GitHub's 65,536-char comment limit and posts REAL content, never the generic could-not-run-to-completion fallback", async () => {
+  it("budgets the COMPLETE assembled comment across a near-max non-blocking list, anchor fallback, and both capped skip-note buckets (F1-S9 slice 90.6b-1, issue #90)", async () => {
+    const LIVE_COUNT = 5;
     const STALE_COUNT = 300;
     const DOWNGRADED_COUNT = 300;
+    const NON_BLOCKING_COUNT = 180;
     const findings = [
-      { criterionId: "1:0", satisfied: false, rationale: "Still-live blocker." },
+      ...Array.from({ length: LIVE_COUNT }, (_unused, i) => ({
+        criterionId: `${i + 1}:0`,
+        satisfied: false,
+        rationale: "L".repeat(2_000),
+      })),
       ...Array.from({ length: STALE_COUNT }, (_unused, i) => ({
         criterionId: `${1000 + i}:0`,
         satisfied: false,
@@ -1613,9 +1622,18 @@ describe("main — the happy path", () => {
         satisfied: false,
         rationale: "Downgraded blocker.",
       })),
+      ...Array.from({ length: NON_BLOCKING_COUNT }, (_unused, i) => ({
+        criterionId: `${3000 + i}:0`,
+        satisfied: false,
+        rationale: "N".repeat(2_000),
+      })),
     ];
     const entries = [
-      { issueNumber: 1, kind: "closing" as const, criterionId: "1:0" },
+      ...Array.from({ length: LIVE_COUNT }, (_unused, i) => ({
+        issueNumber: i + 1,
+        kind: "closing" as const,
+        criterionId: `${i + 1}:0`,
+      })),
       ...Array.from({ length: STALE_COUNT }, (_unused, i) => ({
         issueNumber: 1000 + i,
         kind: "closing" as const,
@@ -1626,9 +1644,14 @@ describe("main — the happy path", () => {
         kind: "closing" as const,
         criterionId: `${2000 + i}:0`,
       })),
+      ...Array.from({ length: NON_BLOCKING_COUNT }, (_unused, i) => ({
+        issueNumber: 3000 + i,
+        kind: "non-closing" as const,
+        criterionId: `${3000 + i}:0`,
+      })),
     ];
     const reviewedClosingIssueNumbers = [
-      1,
+      ...Array.from({ length: LIVE_COUNT }, (_unused, i) => i + 1),
       ...Array.from({ length: STALE_COUNT }, (_unused, i) => 1000 + i),
       ...Array.from({ length: DOWNGRADED_COUNT }, (_unused, i) => 2000 + i),
     ];
@@ -1646,39 +1669,46 @@ describe("main — the happy path", () => {
     process.env.OUTCOME_PATH = outcomePath;
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
-    // The CURRENT body: #1 stays Closes; the 300 "downgraded" issues are
-    // still referenced, but only via Refs; the 300 "stale" issues are not
-    // mentioned at all anymore (removed since the review ran).
+    // The CURRENT body: five blockers stay closing; the 300 "downgraded"
+    // issues are still referenced, but only via Refs; the 300 "stale"
+    // issues are not mentioned at all anymore.
     const currentBody =
-      "Closes #1, " + Array.from({ length: DOWNGRADED_COUNT }, (_unused, i) => `refs #${2000 + i}`).join(", ");
+      Array.from({ length: LIVE_COUNT }, (_unused, i) => `Closes #${i + 1}`).join(", ") +
+      ", " +
+      Array.from({ length: DOWNGRADED_COUNT }, (_unused, i) => `refs #${2000 + i}`).join(", ");
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: currentBody }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
-        textResponse(DIFF_WITH_ANCHOR),
+        textResponse(""),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await main();
+    const budgetProbeSection = `ENTRYPOINT-BUDGET-PROBE:${"P".repeat(10_000)}`;
+    await main((buildBaseBody, appendedSections) => {
+      expect(appendedSections).toHaveLength(3);
+      return assembleSpecGroundingSummaryCommentBody(
+        buildBaseBody,
+        [...appendedSections, budgetProbeSection],
+      );
+    });
 
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
     // Real content posted -- never the generic fallback.
     expect(summaryBody).not.toMatch(/could not run to completion/i);
     expect(summaryBody).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
-    expect(summaryBody).toMatch(/were NOT posted inline/i);
-    // The whole point: BOTH skip buckets are large enough that, pre-fix
-    // (each independently capped at the full shared budget), the two
-    // lists ALONE could combine for roughly 2x the single shared budget
-    // -- comfortably within GitHub's 65,536-char limit here, but this is
-    // exactly the class of growth the fix bounds. Assert generously well
-    // under the real GitHub limit, proving the shared-budget mechanism
-    // held under real end-to-end wiring, not just in unit isolation.
-    expect(summaryBody.length).toBeLessThan(10_000);
-    expect(summaryBody.length).toBeLessThan(65_536);
+    expect(summaryBody).toMatch(/blocking findings are listed here/i);
+    expect(summaryBody).toMatch(/were NOT posted inline[\s\S]*no longer references them at all/i);
+    expect(summaryBody).toMatch(
+      /were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i,
+    );
+    expect(summaryBody.match(/and \d+ more/gi)).toHaveLength(2);
+    expect(summaryBody).toMatch(/further finding\(s\) omitted/i);
+    expect(summaryBody.endsWith(budgetProbeSection)).toBe(true);
+    expect(summaryBody.length).toBeLessThanOrEqual(65_536);
   });
 
   it("does NOT list a DOWNGRADED (or de-referenced) blocker's own full detail in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #376 -- the caller used to pass the RAW, unfiltered, review-time criterionBlockers here, contradicting the skip-notes appended right below): #12 stays closing (inline posting degrades, so its detail belongs in the fallback), #34 downgraded Closes->Refs -- its own detail must NOT appear in the fallback (that would claim it's still a live obligation while the downgraded skip-note, right below, says otherwise)", async () => {

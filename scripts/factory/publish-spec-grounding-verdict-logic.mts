@@ -591,6 +591,9 @@ export function findUnreviewedNewClosingReferences(
  */
 const MAX_FINDINGS_LIST_LENGTH = 55_000;
 
+/** GitHub's maximum accepted issue-comment body length, in characters. */
+export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
+
 /**
  * Builds the single, non-blocking summary comment body.
  *
@@ -742,6 +745,10 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  * the degrade headline reverts to the simple, pre-round-3
  * `blockersPostedInline`-based wording below, which is what actually
  * renders in every reachable case anyway).
+ * @param maxFindingsListLength - Maximum rendered length of the
+ *   non-blocking findings list. The entrypoint lowers this from
+ *   {@link MAX_FINDINGS_LIST_LENGTH} when later summary sections need
+ *   space in the same GitHub comment.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -753,6 +760,7 @@ export function buildSpecGroundingSummaryCommentBody(
   staleBlockerIssueNumbers: readonly number[],
   downgradedClosingBlockerIssueNumbers: readonly number[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
+  maxFindingsListLength: number = MAX_FINDINGS_LIST_LENGTH,
 ): string {
   // The UNION of both buckets -- exactly what the single, pre-90.6a
   // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
@@ -905,7 +913,7 @@ export function buildSpecGroundingSummaryCommentBody(
       const bullet =
         `- Issue #${entry.issueNumber}, criterion \`${entry.criterionId}\` (${entry.kind}): ` +
         `**${entry.satisfied ? "satisfied" : "unsatisfied"}** — ${formatRationaleForDisplay(entry)}`;
-      if (findingsListLength + bullet.length + 1 > MAX_FINDINGS_LIST_LENGTH) {
+      if (findingsListLength + bullet.length + 1 > Math.max(0, maxFindingsListLength)) {
         break; // Remaining entries are reported as an omitted count below, not silently dropped.
       }
       lines.push(bullet);
@@ -942,6 +950,58 @@ export function buildSpecGroundingSummaryCommentBody(
   );
 
   return lines.join("\n");
+}
+
+/**
+ * Builds one complete summary comment while reserving space for every
+ * required section appended after the base summary.
+ *
+ * The base builder is called with progressively smaller non-blocking
+ * findings-list budgets until the COMPLETE assembled body fits GitHub's
+ * comment limit. Only whole finding bullets are omitted; fixed warnings,
+ * blocker fallback details, skip notes, the omitted-count note, and the
+ * tracking marker are never sliced or silently dropped.
+ *
+ * @param buildBaseBody - Builds the base summary for a caller-supplied
+ *   non-blocking findings-list budget.
+ * @param appendedSections - Required sections to append, in display order.
+ *   Empty sections are ignored.
+ * @returns The complete comment body, within GitHub's comment limit.
+ * @throws Error when fixed content alone exceeds GitHub's limit.
+ */
+export function assembleSpecGroundingSummaryCommentBody(
+  buildBaseBody: (maxFindingsListLength: number) => string,
+  appendedSections: readonly string[],
+): string {
+  const suffix = appendedSections
+    .filter((section) => section.length > 0)
+    .map((section) => `\n${section}`)
+    .join("");
+  const minimumBody = buildBaseBody(0);
+  if (minimumBody.length + suffix.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+    throw new Error(
+      "Spec-grounding summary fixed sections exceed GitHub's 65,536-character comment limit.",
+    );
+  }
+
+  let findingsBudget = Math.min(
+    MAX_FINDINGS_LIST_LENGTH,
+    MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH - suffix.length,
+  );
+  while (true) {
+    const baseBody = buildBaseBody(findingsBudget);
+    const assembledLength = baseBody.length + suffix.length;
+    if (assembledLength <= MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+      return baseBody + suffix;
+    }
+
+    // The base builder admits whole bullets only. Reserve one rationale-
+    // sized step beyond the measured overflow so the next pass crosses
+    // any current bullet boundary instead of repeatedly rebuilding the
+    // same body for nearby budgets.
+    const overflow = assembledLength - MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH;
+    findingsBudget = Math.max(0, findingsBudget - overflow - MAX_RATIONALE_DISPLAY_LENGTH);
+  }
 }
 
 /**
@@ -1003,23 +1063,32 @@ interface CappedIssueNumberListResult {
  * @param issueNumbers - The (deduplicated, ascending) issue numbers to render.
  * @param maxLength - The character budget this render must not exceed.
  * @returns The capped, comma-joined issue-number list, and its own actual rendered length.
+ * @throws RangeError when the budget cannot fit even an omission count.
  */
 function renderCappedIssueNumberList(issueNumbers: readonly number[], maxLength: number): CappedIssueNumberListResult {
-  const issueTokens: string[] = [];
-  let issueListLength = 0;
-  let addedCount = 0;
-  for (const issueNumber of issueNumbers) {
-    const token = `#${issueNumber}`;
-    if (issueListLength + token.length + 2 > maxLength) {
-      break; // The remainder is reported as an omitted count below, not silently dropped.
+  let prefix = "";
+  let bestList: string | null = null;
+  for (let addedCount = 0; addedCount <= issueNumbers.length; addedCount += 1) {
+    if (addedCount > 0) {
+      const token = `#${issueNumbers[addedCount - 1]}`;
+      prefix += `${addedCount === 1 ? "" : ", "}${token}`;
     }
-    issueTokens.push(token);
-    issueListLength += token.length + 2; // ", " separator budget.
-    addedCount += 1;
+    const omittedCount = issueNumbers.length - addedCount;
+    const suffix =
+      omittedCount === 0
+        ? ""
+        : addedCount === 0
+          ? `(${omittedCount} issue(s) omitted)`
+          : ` (and ${omittedCount} more)`;
+    const candidate = prefix + suffix;
+    if (candidate.length <= maxLength) {
+      bestList = candidate;
+    }
   }
-  const omittedCount = issueNumbers.length - addedCount;
-  const list = issueTokens.join(", ") + (omittedCount > 0 ? ` (and ${omittedCount} more)` : "");
-  return { list, usedLength: list.length };
+  if (bestList === null) {
+    throw new RangeError(`Issue-number-list budget ${maxLength} is too small to report omitted entries.`);
+  }
+  return { list: bestList, usedLength: bestList.length };
 }
 
 /**
@@ -1042,28 +1111,29 @@ function renderCappedIssueNumberList(issueNumbers: readonly number[], maxLength:
  * its own independently — the ONLY way to guarantee the two renders never
  * exceed their shared total.
  *
- * TAKES ONLY the stale bucket, not both (a deliberate asymmetry, not an
- * oversight): under this greedy-first-then-remainder scheme, the
- * downgraded bucket's own ALLOCATED budget is simply "whatever the stale
- * bucket did not use" — a function of the stale bucket's rendered length
- * alone. The downgraded bucket's own SIZE never factors into deciding
- * that allocation (only into how much of it that allocation ends up
- * covering, which is {@link buildDowngradedClosingBlockerSkippedNote}'s
- * own concern when it actually renders against the budget it's given).
- *
  * @param staleBlockerIssueNumbers - The de-referenced-entirely bucket —
- *   the ONLY bucket this split decision needs to inspect.
+ *   rendered first against the shared budget.
+ * @param downgradedClosingBlockerIssueNumbers - The downgraded bucket.
+ *   When non-empty, its omission-only representation is reserved before
+ *   the stale bucket renders so its required suffix cannot overshoot the
+ *   shared budget.
  * @returns The character budget each note's own list render should use.
  */
 export function splitSkippedBlockerNoteBudget(
   staleBlockerIssueNumbers: readonly number[],
+  downgradedClosingBlockerIssueNumbers: readonly number[],
 ): { readonly staleMaxListLength: number; readonly downgradedMaxListLength: number } {
+  const downgradedMinimumLength =
+    downgradedClosingBlockerIssueNumbers.length === 0
+      ? 0
+      : `(${downgradedClosingBlockerIssueNumbers.length} issue(s) omitted)`.length;
+  const staleMaxListLength = MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH - downgradedMinimumLength;
   const staleUsedLength = renderCappedIssueNumberList(
     staleBlockerIssueNumbers,
-    MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH,
+    staleMaxListLength,
   ).usedLength;
   const downgradedMaxListLength = Math.max(0, MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH - staleUsedLength);
-  return { staleMaxListLength: MAX_SKIPPED_BLOCKER_ISSUE_NUMBERS_LIST_LENGTH, downgradedMaxListLength };
+  return { staleMaxListLength, downgradedMaxListLength };
 }
 
 /**
@@ -1116,8 +1186,9 @@ export function splitSkippedBlockerNoteBudget(
  *   explicit, deliberate choice rather than risk an un-audited default
  *   silently reintroducing an unbounded (or double-budgeted) list.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within `maxListLength`
- *   regardless of how many issue numbers were skipped.
+ *   skipped. Its issue-number-list portion is always within
+ *   `maxListLength`, regardless of how many issue numbers were skipped.
+ * @throws RangeError when `maxListLength` cannot fit even an omission count.
  */
 export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly number[], maxListLength: number): string {
   if (staleBlockerIssueNumbers.length === 0) {
@@ -1161,8 +1232,9 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
  *   its issue-number list — see {@link buildStaleBlockerSkippedNote}'s
  *   own identical param docs and {@link splitSkippedBlockerNoteBudget}.
  * @returns The Markdown section to append, or `""` if nothing was
- *   skipped, ALWAYS within `maxListLength`
- *   regardless of how many issue numbers were skipped.
+ *   skipped. Its issue-number-list portion is always within
+ *   `maxListLength`, regardless of how many issue numbers were skipped.
+ * @throws RangeError when `maxListLength` cannot fit even an omission count.
  */
 export function buildDowngradedClosingBlockerSkippedNote(
   downgradedClosingBlockerIssueNumbers: readonly number[],

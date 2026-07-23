@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assembleSpecGroundingSummaryCommentBody,
   bodyContainsMarkerAsStandaloneLine,
   buildDowngradedClosingBlockerSkippedNote,
   buildSpecGroundingClearedSummaryCommentBody,
@@ -12,6 +13,7 @@ import {
   formatRationaleForDisplay,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
+  MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH,
   splitSkippedBlockerNoteBudget,
   SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN,
   SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
@@ -572,6 +574,53 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body.endsWith(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);
   });
 
+  it("budgets the COMPLETE assembled comment, preserving required later sections and omitting only whole non-blocking findings", () => {
+    const manyFindings = Array.from({ length: 200 }, (_unused, i) =>
+      joined({
+        kind: "non-closing",
+        satisfied: false,
+        issueNumber: 8,
+        criterionId: `8:${i}`,
+        rationale: `${"x".repeat(299)}😀${"x".repeat(1_700)}`,
+      }),
+    );
+    const requiredSection = `REQUIRED-LATER-SECTION:${"z".repeat(10_000)}`;
+    const independentlyBuiltBody = buildSpecGroundingSummaryCommentBody(
+      manyFindings,
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [],
+      [],
+      ALL_CLOSING,
+    );
+    expect(independentlyBuiltBody.length + 1 + requiredSection.length).toBeGreaterThan(
+      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH,
+    );
+    const body = assembleSpecGroundingSummaryCommentBody(
+      (maxFindingsListLength) =>
+        buildSpecGroundingSummaryCommentBody(
+          manyFindings,
+          [],
+          { truncated: false, diffTruncated: false },
+          true,
+          null,
+          [],
+          [],
+          ALL_CLOSING,
+          maxFindingsListLength,
+        ),
+      [requiredSection],
+    );
+
+    expect(body.length).toBeLessThanOrEqual(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
+    expect(body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
+    expect(body).toMatch(/further finding\(s\) omitted/i);
+    expect(body.endsWith(requiredSection)).toBe(true);
+    expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+  });
+
   it("explains why an unaddressed finding specifically needs the criteria-spine artifact, not just the verdict, in the omitted-count note (PR #82 round 4 review, Codex, FOLD 2, LOW -- an unaddressed finding has no verdict entry at all)", () => {
     // Many UNADDRESSED closing... no, non-closing (non-blocking) findings,
     // each with a long-enough surrounding bullet that the list budget is
@@ -798,6 +847,30 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
   // tested above (blockersPostedInline=false) is what ALWAYS applies now.
 });
 
+describe("assembleSpecGroundingSummaryCommentBody (F1-S9 slice 90.6b-1, issue #90)", () => {
+  it("accepts a complete body exactly at GitHub's comment limit, including the separator and a preserved suffix", () => {
+    const requiredSection = "required suffix";
+    const fixedPrefix = "x".repeat(
+      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH - 55_000 - 1 - requiredSection.length,
+    );
+    const body = assembleSpecGroundingSummaryCommentBody(
+      (maxFindingsListLength) => fixedPrefix + "y".repeat(maxFindingsListLength),
+      [requiredSection],
+    );
+    expect(body.length).toBe(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
+    expect(body.endsWith(`\n${requiredSection}`)).toBe(true);
+  });
+
+  it("fails explicitly when required fixed sections alone exceed GitHub's comment limit", () => {
+    expect(() =>
+      assembleSpecGroundingSummaryCommentBody(
+        () => "base",
+        ["z".repeat(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH)],
+      ),
+    ).toThrow(/fixed sections exceed/i);
+  });
+});
+
 describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5)", () => {
   it("does NOT count the diff-truncation blocker when the only closing reference has since been downgraded or de-referenced -- re-derives it against CURRENT closing state, not the permanently-true review-time snapshot (before 90.6a-3, the resulting aggregate could not be auto-deleted, so a stale flag would re-post it forever)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
@@ -883,17 +956,13 @@ describe("buildStaleBlockerSkippedNote (PR #87 review round 4, Codex, P1 -- symm
   });
 
   it("respects a SMALLER caller-supplied budget too, not just the full one (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819 -- proves this function actually HONORS the shared-budget allocation, not just accepts the parameter)", () => {
-    // A 10-char budget fits #12 and #34 (5 chars each, including the ", "
-    // separator budget) but not #56 -- forces a real, non-trivial omission.
-    const note = buildStaleBlockerSkippedNote([12, 34, 56], 10);
-    expect(extractSkippedBlockerListPortion(note).length).toBeLessThan(40); // the list portion itself, capped near the 10-char budget; the surrounding prose is fixed and outside this budget's own scope.
+    const note = buildStaleBlockerSkippedNote([12, 34, 56, 78, 90], 22);
+    expect(extractSkippedBlockerListPortion(note).length).toBeLessThanOrEqual(22);
     expect(note).toMatch(/and \d+ more/i);
   });
 
-  it("renders NOTHING of the list (an all-omitted note) when the budget is 0 -- never throws or renders unbounded", () => {
-    const note = buildStaleBlockerSkippedNote([12, 34], 0);
-    expect(note).toMatch(/and 2 more/i);
-    expect(note).not.toContain("#12");
+  it("rejects a budget too small to report even the omission count instead of silently dropping it", () => {
+    expect(() => buildStaleBlockerSkippedNote([12, 34], 0)).toThrow(/too small/i);
   });
 
   it("does not report an omitted count when every stale issue number fits within the budget", () => {
@@ -929,8 +998,8 @@ describe("buildDowngradedClosingBlockerSkippedNote (F1-S9 slice 90.6a -- the sta
   });
 
   it("respects a SMALLER caller-supplied budget too (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819 -- the case that actually matters: this is the note that receives whatever budget is LEFT after the stale note's own share)", () => {
-    const note = buildDowngradedClosingBlockerSkippedNote([12, 34, 56], 10);
-    expect(extractSkippedBlockerListPortion(note).length).toBeLessThan(40);
+    const note = buildDowngradedClosingBlockerSkippedNote([12, 34, 56, 78, 90], 22);
+    expect(extractSkippedBlockerListPortion(note).length).toBeLessThanOrEqual(22);
     expect(note).toMatch(/and \d+ more/i);
   });
 
@@ -940,10 +1009,10 @@ describe("buildDowngradedClosingBlockerSkippedNote (F1-S9 slice 90.6a -- the sta
   });
 });
 
-describe("splitSkippedBlockerNoteBudget (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2 -- closes the bucket-split's OWN regression: two independently-capped notes could together reach 2x the single pre-split note's own bound)", () => {
-  it("gives the stale bucket's list render the FULL shared budget, and leaves the downgraded bucket nearly all of it back (its own leftover budget must still be a large, well-defined, non-negative number, never 2,000 exactly once the stale bucket has ACTUALLY used a few characters)", () => {
-    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget([12, 34]);
-    expect(staleMaxListLength).toBe(2_000);
+describe("splitSkippedBlockerNoteBudget (F1-S9 slice 90.6a/90.6b-1, issue #90)", () => {
+  it("reserves the downgraded bucket's omission suffix before giving the stale bucket the remaining shared budget", () => {
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget([12, 34], [56]);
+    expect(staleMaxListLength).toBeLessThan(2_000);
     expect(downgradedMaxListLength).toBeGreaterThan(1_900);
     expect(downgradedMaxListLength).toBeLessThanOrEqual(2_000);
   });
@@ -953,8 +1022,11 @@ describe("splitSkippedBlockerNoteBudget (F1-S9 slice 90.6a, PR #98 review, Codex
     // budget on its own (each token is "#N, " -- ~2,000 issue numbers
     // comfortably exceeds the 2,000-character budget).
     const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
-    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(manyStaleIssueNumbers);
-    expect(staleMaxListLength).toBe(2_000);
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(
+      manyStaleIssueNumbers,
+      [10_000],
+    );
+    expect(staleMaxListLength).toBeLessThan(2_000);
     // The stale render used (nearly) the entire 2,000-char budget, so the
     // downgraded bucket is left with little to nothing -- NEVER the full
     // 2,000 again (the pre-fix bug), and never negative.
@@ -965,29 +1037,22 @@ describe("splitSkippedBlockerNoteBudget (F1-S9 slice 90.6a, PR #98 review, Codex
   it("PROVES THE FIX end-to-end (Codex's own combined worst case -- BOTH buckets large enough that either alone could reach the full shared budget): the two notes' COMBINED rendered list length stays close to the single shared budget, never anywhere near the 2x a pair of independently-capped notes could reach pre-fix", () => {
     const manyStaleIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 1);
     const manyDowngradedIssueNumbers = Array.from({ length: 2000 }, (_unused, i) => i + 10_000);
-    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(manyStaleIssueNumbers);
+    const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(
+      manyStaleIssueNumbers,
+      manyDowngradedIssueNumbers,
+    );
     const staleNote = buildStaleBlockerSkippedNote(manyStaleIssueNumbers, staleMaxListLength);
     const downgradedNote = buildDowngradedClosingBlockerSkippedNote(manyDowngradedIssueNumbers, downgradedMaxListLength);
     const staleListLength = extractSkippedBlockerListPortion(staleNote).length;
     const downgradedListLength = extractSkippedBlockerListPortion(downgradedNote).length;
-    // A small, BOUNDED margin above the 2,000-char shared budget is
-    // expected and pre-existing (unchanged by this fix): each list's own
-    // break-loop bounds only the TOKEN portion; the "(and N more)"
-    // omitted-count suffix is appended AFTERWARD, unbudgeted -- the exact
-    // same characteristic the single pre-split note always had (PR #87
-    // round 7). With TWO notes, at most TWO such suffixes (each at most
-    // ~20 characters) can overshoot -- nowhere near the ~2,000-character
-    // overshoot a pair of independently-2,000-capped notes could reach
-    // pre-fix (this test's whole point). Tightening this to a byte-exact
-    // guarantee is 90.6b's own whole-comment budget scope, not this fix's.
-    expect(staleListLength + downgradedListLength).toBeLessThan(2_100);
+    expect(staleListLength + downgradedListLength).toBeLessThanOrEqual(2_000);
+    expect(staleNote).toMatch(/and \d+ more/i);
+    expect(downgradedNote).toMatch(/and \d+ more/i);
   });
 
-  it("does not shrink the downgraded budget when the stale bucket is small or absent -- the split reflects the stale bucket's ACTUAL rendered usage, never a blind 50/50", () => {
-    const { downgradedMaxListLength } = splitSkippedBlockerNoteBudget([12]);
-    // #12's own rendered list is a handful of characters -- the
-    // downgraded bucket keeps nearly the entire 2,000-char budget.
-    expect(downgradedMaxListLength).toBeGreaterThan(1_900);
+  it("gives the downgraded bucket the full shared budget when the stale bucket is absent", () => {
+    const { downgradedMaxListLength } = splitSkippedBlockerNoteBudget([], [12]);
+    expect(downgradedMaxListLength).toBe(2_000);
   });
 });
 
