@@ -452,7 +452,7 @@ export interface SpecGroundingTruncationFlags {
  * diff that would have shown the criterion unmet. This is a WHOLE-RUN
  * signal, not tied to any one criterion, so it is computed once here and
  * consumed by both {@link buildSpecGroundingSummaryCommentBody} (counts
- * it in `totalBlockerCount`) and the privileged publisher's inline-
+ * it in the current-applicable headline) and the privileged publisher's inline-
  * comment planner (`publish-spec-grounding-blocker-logic.mts`'s
  * `planBlockerInlineComments`, which the entrypoint must pass this same
  * computed value to — kept as ONE shared decision, not duplicated logic
@@ -535,7 +535,7 @@ export function isDiffTruncationUnverifiableForClosing(
  * kickoff spec widens this to run on both, since a NEW/upgraded closing
  * reference makes the ENTIRE run's verdict suspect for that issue, not
  * just its own already-joined criteria). Placed BEFORE the
- * `totalBlockerCount` branch in `publishSummary`, so a non-empty result
+ * review-time blocker branch in `publishSummary`, so a non-empty result
  * fails the WHOLE run closed before any posting or reconciliation is
  * attempted (F1-S9 slice 90.4's own reconcile-delete included) — a stale
  * verdict must never delete a prior run's still-valid gate.
@@ -675,16 +675,12 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   ALL — de-referenced entirely, as distinct from
  *   `downgradedClosingBlockerIssueNumbers` (PR #87 review round 4b, Codex,
  *   P1 — a follow-up wording fold, generalized F1-S9 slice 90.6a for the
- *   bucket-split: `totalBlockerCount` below is still the REVIEW-TIME
- *   count, including every skipped one, deliberately NOT filtered here —
- *   see issue #89 for the deeper "should the count/exit-code reflect only
- *   the still-referenced subset" design question, tracked ahead of the
- *   gate-enable decision #47. The HEADLINE's reconciliation below uses
- *   the UNION of this array and `downgradedClosingBlockerIssueNumbers`
- *   to identify skipped issues, then counts every blocking FINDING tied
- *   to them so both headline counts use the same unit (F1-S9 slice
- *   90.6b, issue #90, Codex cid 3627450885) — see that param's own docs
- *   for why the union, not just this one bucket, is required there).
+ *   bucket-split). The current-applicable headline excludes this bucket;
+ *   the separate review-time note counts every skipped blocking FINDING
+ *   tied to the UNION of this array and
+ *   `downgradedClosingBlockerIssueNumbers`, preserving criterion-level
+ *   units even when one issue owns multiple findings (F1-S9 slice 90.6b,
+ *   issue #90, Codex cid 3627450885).
  * @param downgradedClosingBlockerIssueNumbers - The issue numbers
  *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
  *   references them, but no longer with a closing keyword — DOWNGRADED,
@@ -701,9 +697,10 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   subtracting downgraded blockers from the "posted inline" count —
  *   overstating gate state for a downgrade-only or mixed run, on the
  *   exact repo where an inline thread IS the merge gate). The union's
- *   deduplicated ISSUE count is deliberately not rendered: the headline
- *   instead counts each criterion/whole-issue blocker tied to the union,
- *   matching `totalBlockerCount`'s finding unit (slice 90.6b).
+ *   deduplicated ISSUE count is deliberately not rendered: the separate
+ *   review-time note instead counts each criterion/whole-issue blocker
+ *   tied to the union, matching the headline's finding unit (slice
+ *   90.6b).
  *   Kept SEPARATE from `staleBlockerIssueNumbers` as a parameter (rather
  *   than pre-unioned by the caller) so this function's own signature
  *   documents both buckets explicitly, matching how the two skip-notes
@@ -711,16 +708,14 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   the union, not the two buckets' own identities.
  * @param currentlyClosingIssueNumbers - This PR's CURRENT closing-kind
  *   references (PR #96 review round 2, Codex, cid 3626169268, BLOCKER —
- *   used ONLY to re-derive the diff-truncation blocker's own applicability
- *   against CURRENT state, NOT to filter `criterionBlockers`/
- *   `unreviewedClosingIssues` themselves, which stay REVIEW-TIME here —
- *   the deeper "should the whole count reflect only the still-referenced
- *   subset" question is issue #89's own separate rework, tracked for a
- *   later slice). Without this, a body edit that downgrades or removes
- *   EVERY closing reference this run's diff-truncation flag was
- *   protecting would leave `diffTruncationBlocksClosingClaim` PERMANENTLY
- *   `true` (computed from the review-time `joined`/`unreviewedClosingIssues`
- *   sets, which never change kind after the fact) — and since the
+ *   used by isolated pure-logic callers to derive the current-applicable
+ *   criterion, whole-issue, and diff-truncation count. Production passes
+ *   `currentApplicableBlockerCount`, computed once by the same filtering
+ *   that decides inline posting and exit status (F1-S9 slice 90.6b-2,
+ *   issue #89). Without the current-state diff check, a body edit that
+ *   downgrades or removes EVERY closing reference this run's
+ *   diff-truncation flag was protecting would leave that aggregate
+ *   PERMANENTLY applicable — and since the
  *   resulting AGGREGATE blocker comment can never be auto-deleted by
  *   reconciliation (an aggregate's own decoded issue number is always
  *   `null`), this specific blocker could never be cleared by anything
@@ -749,6 +744,11 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   non-blocking findings list. The entrypoint lowers this from
  *   {@link MAX_FINDINGS_LIST_LENGTH} when later summary sections need
  *   space in the same GitHub comment.
+ * @param currentApplicableBlockerCount - The caller's shared CURRENT-state
+ *   count from inline-post filtering (F1-S9 slice 90.6b-2, issue #89).
+ *   Production always supplies it so headline reporting and exit status
+ *   use the same value. Omitted only by isolated pure-logic callers, which
+ *   retain the previous local derivation from `currentlyClosingIssueNumbers`.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -761,6 +761,7 @@ export function buildSpecGroundingSummaryCommentBody(
   downgradedClosingBlockerIssueNumbers: readonly number[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
   maxFindingsListLength: number = MAX_FINDINGS_LIST_LENGTH,
+  currentApplicableBlockerCount?: number,
 ): string {
   // The UNION of both buckets -- exactly what the single, pre-90.6a
   // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
@@ -778,7 +779,7 @@ export function buildSpecGroundingSummaryCommentBody(
   const skippedBlockerIssueNumberSet = new Set(skippedBlockerIssueNumbers);
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
-  // Count in the SAME unit as `totalBlockerCount` below: one finding per
+  // Count in the SAME unit as the current-applicable headline below: one finding per
   // criterion blocker or unreviewed-closing-issue blocker, never one per
   // deduplicated issue number. A single skipped issue can own multiple
   // criterion findings, so using `skippedBlockerIssueNumbers.length` in
@@ -787,24 +788,29 @@ export function buildSpecGroundingSummaryCommentBody(
   const skippedBlockerCount =
     criterionBlockers.filter((entry) => skippedBlockerIssueNumberSet.has(entry.issueNumber)).length +
     unreviewedClosingIssues.filter((entry) => skippedBlockerIssueNumberSet.has(entry.issueNumber)).length;
-  // KIND-AWARE, against CURRENT state (PR #96 review round 2, Codex, cid
-  // 3626169268, BLOCKER) -- deliberately narrower than filtering
-  // `criterionBlockers`/`unreviewedClosingIssues` themselves (those stay
-  // review-time, issue #89's own separate rework): ONLY the diff-truncation
-  // blocker's own applicability is re-derived here, since it is the one
-  // that can become a PERMANENT, un-clearable over-gate otherwise (see
-  // this function's own `currentlyClosingIssueNumbers` param docs).
-  const currentlyClosingJoined = joined.filter((e) => currentlyClosingIssueNumbers.has(e.issueNumber));
-  const currentlyClosingUnreviewedClosingIssues = unreviewedClosingIssues.filter((e) =>
-    currentlyClosingIssueNumbers.has(e.issueNumber),
-  );
-  const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
-    currentlyClosingJoined,
-    currentlyClosingUnreviewedClosingIssues,
-    truncation.diffTruncated,
-  );
-  const totalBlockerCount =
-    criterionBlockers.length + unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
+  const renderedCurrentApplicableBlockerCount =
+    currentApplicableBlockerCount ??
+    (() => {
+      const currentlyClosingCriterionBlockers = criterionBlockers.filter((entry) =>
+        currentlyClosingIssueNumbers.has(entry.issueNumber),
+      );
+      const currentlyClosingJoined = joined.filter((entry) =>
+        currentlyClosingIssueNumbers.has(entry.issueNumber),
+      );
+      const currentlyClosingUnreviewedClosingIssues = unreviewedClosingIssues.filter((entry) =>
+        currentlyClosingIssueNumbers.has(entry.issueNumber),
+      );
+      const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
+        currentlyClosingJoined,
+        currentlyClosingUnreviewedClosingIssues,
+        truncation.diffTruncated,
+      );
+      return (
+        currentlyClosingCriterionBlockers.length +
+        currentlyClosingUnreviewedClosingIssues.length +
+        (diffTruncationBlocksClosingClaim ? 1 : 0)
+      );
+    })();
 
   const lines: string[] = ["**Spec-grounded review summary**", ""];
 
@@ -825,7 +831,7 @@ export function buildSpecGroundingSummaryCommentBody(
     );
   }
 
-  if (totalBlockerCount > 0) {
+  if (renderedCurrentApplicableBlockerCount > 0) {
     const blockerKindsExplanation =
       "A blocking finding is a criterion this PR's own closing keyword references that the " +
       "reviewer found unsatisfied, a whole linked issue this PR claims to close that was never " +
@@ -844,28 +850,23 @@ export function buildSpecGroundingSummaryCommentBody(
     // downgraded -- F1-S9 slice 90.6a, PR #98 review, Codex, cid
     // 3626878151: reconciled against the UNION of both buckets, exactly
     // what the pre-90.6a lumped set meant, never just one bucket alone),
-    // `totalBlockerCount` (deliberately still the REVIEW-TIME count, see
-    // this function's own `staleBlockerIssueNumbers`/
-    // `downgradedClosingBlockerIssueNumbers` param docs and issue #89)
-    // must not be presented as if every one of them has its own inline
-    // thread or summary listing below -- reword the headline to say the
-    // count is review-time and explicitly reconcile it against the
-    // posted/listed subset, pointing at the separate skip-note(s) for the
-    // rest. The reconciliation count is ALSO in blocking-FINDING units,
-    // not deduplicated-issue units (F1-S9 slice 90.6b, issue #90, Codex
-    // cid 3627450885): two stale criteria on one issue count as two of
-    // the headline's findings, not one issue. Wording says "no longer
-    // CLOSING" (the honest common denominator for BOTH buckets), not "no
-    // longer referenced" (true only for the de-referenced bucket, false
-    // for the downgraded one, which IS still referenced).
+    // The headline is CURRENT-applicable, while the reconciliation clause
+    // separately reports REVIEW-TIME findings that no longer apply. Both
+    // counts stay in blocking-FINDING units, not deduplicated-issue units
+    // (F1-S9 slice 90.6b, issue #90, Codex cid 3627450885): two stale
+    // criteria on one issue count as two review-time findings, not one
+    // issue. Wording says "no longer CLOSING" (the honest common
+    // denominator for BOTH buckets), not "no longer referenced" (true
+    // only for the de-referenced bucket, false for the downgraded one,
+    // which IS still referenced).
     const skippedFindingDescription =
       skippedBlockerCount === 1
-        ? "1 blocking finding in that review-time total concerns an issue that is no longer a CLOSING obligation"
-        : `${skippedBlockerCount} blocking findings in that review-time total concern issues that are no longer CLOSING obligations`;
+        ? "The review also identified 1 blocking finding for an issue that is no longer a CLOSING obligation"
+        : `The review also identified ${skippedBlockerCount} blocking findings for issues that are no longer CLOSING obligations`;
     const skippedReconciliation =
       skippedBlockerIssueNumbers.length > 0
-        ? ` (${skippedFindingDescription} in this PR's current body — removed entirely, or ` +
-          "downgraded to a non-closing reference — see the note(s) below, not repeated here.)"
+        ? ` ${skippedFindingDescription} in this PR's current body — removed entirely, or ` +
+          "downgraded to a non-closing reference; see the note(s) below, not repeated here."
         : "";
     // NO partial-posting wording (F1-S9 slice 90.6a, PR #99 review, Codex,
     // cid 3627145120 added one, cid 3627282617 removed it again -- see
@@ -878,27 +879,31 @@ export function buildSpecGroundingSummaryCommentBody(
     lines.push(
       blockersPostedInline
         ? skippedBlockerIssueNumbers.length > 0
-          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
-              "still applicable to this PR's current linked issues are reported as separate, " +
+          ? `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** are reported as separate, ` +
               `resolvable inline review comment(s) below — see those threads, not this summary, ` +
               `to resolve them.${skippedReconciliation} ${blockerKindsExplanation} See the inline ` +
               "comment for which case applies and why."
-          : `**${totalBlockerCount} blocking finding(s)** reported as separate, resolvable inline ` +
+          : `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** reported as separate, resolvable inline ` +
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
         : skippedBlockerIssueNumbers.length > 0
-          ? `**${totalBlockerCount} blocking finding(s)** were identified at review time; those ` +
-              "still applicable are listed below in THIS summary — " +
+          ? `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** are listed below in THIS summary — ` +
               `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
               `these first; address any remaining ones below.${skippedReconciliation} ` +
               blockerKindsExplanation
-          : `**${totalBlockerCount} blocking finding(s)** listed below in THIS summary — ` +
+          : `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** listed below in THIS summary — ` +
               `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
               `these first; address any remaining ones below. ${blockerKindsExplanation}`,
       "",
     );
   } else {
-    lines.push("No blocking findings.", "");
+    lines.push(
+      skippedBlockerIssueNumbers.length > 0
+        ? "No current-applicable blocking findings. Review-time blocking findings for issues that " +
+            "are no longer closing obligations are explained in the note(s) below."
+        : "No blocking findings.",
+      "",
+    );
   }
 
   if (nonBlocking.length > 0) {
@@ -930,7 +935,7 @@ export function buildSpecGroundingSummaryCommentBody(
       );
     }
     lines.push("");
-  } else if (totalBlockerCount === 0) {
+  } else if (renderedCurrentApplicableBlockerCount === 0 && skippedBlockerIssueNumbers.length === 0) {
     lines.push(
       truncation.truncated || truncation.diffTruncated
         ? "_No unmet acceptance criteria were found among what WAS reviewed. This run was " +

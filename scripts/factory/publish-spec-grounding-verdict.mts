@@ -1005,6 +1005,14 @@ interface TryPostBlockersInlineResult {
   readonly postedInline: boolean;
   readonly degradeReason: InlinePostingDegradeReason | null;
   /**
+   * Blocking findings that still apply to this PR's CURRENT closing
+   * references: filtered criterion blockers + filtered unreviewed-closing
+   * issues + the current diff-truncation aggregate, each counted once.
+   * The caller uses this SAME value for summary reporting and exit status
+   * so those two surfaces cannot drift (F1-S9 slice 90.6b-2, issue #89).
+   */
+  readonly currentApplicableBlockerCount: number;
+  /**
    * Issue numbers skipped from inline posting because the PR's CURRENT
    * body no longer references them AT ALL — de-referenced entirely, as
    * distinct from {@link downgradedClosingBlockerIssueNumbers} (F1-S9
@@ -1146,27 +1154,15 @@ interface TryPostBlockersInlineResult {
  * function no longer fetches or verifies anything itself; it trusts its
  * caller already did.
  *
- * DELIBERATE DESIGN (team-lead's ruling, PR #87 review round 4b): the
- * caller's own {@link buildSpecGroundingSummaryCommentBody} still counts
- * `criterionBlockers.length + unreviewedClosingIssues.length` from the
- * UNFILTERED (review-time) sets for its own "N blocking finding(s)"
- * wording and exit-code decision — it does NOT recompute that count from
- * the staleness filtering this function does internally. This is
- * intentionally FAIL-SAFE, not a bug: it can only ever OVER-gate (exit
- * nonzero, or keep counting a stale finding) never UNDER-gate (erase a
- * real one), and `buildSpecGroundingSummaryCommentBody` (round 4b, this
- * same fold) now labels the count explicitly as review-time and
- * reconciles it against `staleBlockerIssueNumbers` whenever any exist —
- * so the headline stays ACCURATE, not misleading, without needing to
- * restructure the count itself. The DEEPER design question — should the
- * count/exit-code instead reflect only the still-referenced subset, and
- * should non-blocking findings get the same staleness treatment — is
- * tracked in issue #89, ahead of the gate-enable decision (#47); not
- * folded into this one, since it would require passing
- * `buildSpecGroundingSummaryCommentBody` FILTERED `joined`/
- * `unreviewedClosingIssues` arrays, which also carry non-blocking
- * findings that should NOT be filtered by this same staleness logic — a
- * real restructuring, not a cheap fold.
+ * CURRENT-APPLICABLE COUNT (F1-S9 slice 90.6b-2, issue #89): this
+ * function computes one count from the same filtered criterion blockers,
+ * unreviewed-closing issues, and current diff-truncation applicability
+ * that drive inline posting. The caller uses that exact scalar for the
+ * summary headline and fallback exit decision, so stale/downgraded
+ * review-time blockers cannot overstate either surface. The unfiltered
+ * arrays remain intact for non-blocking reporting and the explicitly
+ * labeled review-time skip notes; the reconcile/delete and fallback
+ * blocker arrays are unchanged.
  *
  * @param joined - EVERY spine criterion's joined result (not just
  *   `criterionBlockers`, the blocker-severity subset) — needed so this
@@ -1269,19 +1265,21 @@ async function tryPostBlockersInline(
   // the exact same permanent-unclearable-aggregate class this fix exists to
   // close, just via a different trigger than the original bug.
   //
-  // Re-derived by calling `isDiffTruncationUnverifiableForClosing` directly
-  // -- the SAME shared primitive `publishSummary`'s own summary-side
-  // recompute uses (see that call site) -- against `joined`/
-  // `stillReferencedUnreviewedClosingIssues` filtered to CURRENT state,
-  // guaranteeing the posting-side and summary-side values can never drift
-  // apart by construction, rather than two independently-maintained
-  // reimplementations of the same predicate.
+  // Re-derived by calling `isDiffTruncationUnverifiableForClosing`
+  // directly against `joined`/`stillReferencedUnreviewedClosingIssues`
+  // filtered to CURRENT state. The resulting aggregate term is included
+  // in `currentApplicableBlockerCount`, which the caller reuses for the
+  // summary and exit decision rather than independently recomputing it.
   const currentlyClosingJoined = joined.filter((entry) => currentlyClosingIssueNumbers.has(entry.issueNumber));
   const diffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
     currentlyClosingJoined,
     stillReferencedUnreviewedClosingIssues,
     spine.diffTruncated,
   );
+  const currentApplicableBlockerCount =
+    stillReferencedCriterionBlockers.length +
+    stillReferencedUnreviewedClosingIssues.length +
+    (diffTruncationBlocksClosingClaim ? 1 : 0);
   // The STALE-VS-DOWNGRADED bucket-split (F1-S9 slice 90.6a): every
   // no-longer-closing issue number falls into exactly one of two buckets,
   // both derived from the SAME `noLongerClosingIssueNumbers` set so they
@@ -1308,8 +1306,8 @@ async function tryPostBlockersInline(
 
   // Gated on CURRENT-state applicability, before ever touching the network
   // (F1-S9 slice 90.5b, PR #97 draft round 3, Codex, cid 3626596213, P2):
-  // the caller only reaches this function when the REVIEW-TIME
-  // `totalBlockerCount` was nonzero, but every relevant reference can still
+  // the caller only reaches this function when the REVIEW-TIME blocker
+  // count was nonzero, but every relevant reference can still
   // have been removed or downgraded since -- exactly the case the three
   // "still referenced" values above already detect. Without this early
   // return, `fetchPrDiff` ran UNCONDITIONALLY even when there is nothing
@@ -1333,6 +1331,7 @@ async function tryPostBlockersInline(
     return {
       postedInline: true,
       degradeReason: null,
+      currentApplicableBlockerCount,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
@@ -1356,6 +1355,7 @@ async function tryPostBlockersInline(
     return {
       postedInline: false,
       degradeReason: "no-addable-anchor",
+      currentApplicableBlockerCount,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
@@ -1433,6 +1433,7 @@ async function tryPostBlockersInline(
     return {
       postedInline: false,
       degradeReason: postResult.reason,
+      currentApplicableBlockerCount,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
@@ -1443,6 +1444,7 @@ async function tryPostBlockersInline(
   return {
     postedInline: true,
     degradeReason: null,
+    currentApplicableBlockerCount,
     staleBlockerIssueNumbers,
     downgradedClosingBlockerIssueNumbers,
     currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
@@ -1541,13 +1543,13 @@ async function publishSummary(
   // the call (attempting to post/reconcile against zero still-applicable
   // blockers is a safe no-op, see `tryPostBlockersInline`'s own handling
   // of empty inputs), never under-trigger it.
-  const totalBlockerCount =
+  const reviewTimeBlockerCount =
     criterionBlockers.length + spine.unreviewedClosingIssues.length + (diffTruncationBlocksClosingClaim ? 1 : 0);
 
   // Verified UNCONDITIONALLY, before the blocker-count branch (PR #87
   // review round 7, Codex, medium, fail-open close): an earlier version
   // only fetched/verified the PR's current head SHA INSIDE
-  // tryPostBlockersInline, which only ran when totalBlockerCount > 0 --
+  // tryPostBlockersInline, which only runs when reviewTimeBlockerCount > 0 --
   // meaning the zero-blocker "no blocking findings" all-clear path never
   // verified anything at all, so a push moving the PR after the read-only
   // review ran could still get a stale all-clear posted for a head this
@@ -1606,7 +1608,7 @@ async function publishSummary(
   // it. Runs UNCONDITIONALLY, on EVERY hasCriteria: true publish -- BOTH
   // the zero-blocker and blocker-bearing paths (team-lead's #90 kickoff
   // spec) -- and, on a nonzero result, fails closed BEFORE the
-  // totalBlockerCount branch below, so a run with an unreviewed new
+  // reviewTimeBlockerCount branch below, so a run with an unreviewed new
   // closing reference touches NOTHING further: no all-clear, no blocker
   // posting, and no reconcile-delete either (F1-S9 slice 90.4) -- a stale
   // verdict must never delete a prior run's still-valid gate.
@@ -1660,6 +1662,7 @@ async function publishSummary(
 
   let blockersPostedInline = false;
   let degradeReason: InlinePostingDegradeReason | null = null;
+  let currentApplicableBlockerCount = 0;
   let staleBlockerIssueNumbers: readonly number[] = [];
   // De-referenced-vs-downgraded bucket-split (F1-S9 slice 90.6a) — see
   // `TryPostBlockersInlineResult`'s own field docs.
@@ -1681,7 +1684,7 @@ async function publishSummary(
   // simply `criterionBlockers`/`spine.unreviewedClosingIssues`.
   let fallbackCriterionBlockers: readonly JoinedCriterionResult[] = [];
   let fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
-  if (totalBlockerCount > 0) {
+  if (reviewTimeBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
         token,
@@ -1696,6 +1699,7 @@ async function publishSummary(
       );
       blockersPostedInline = result.postedInline;
       degradeReason = result.degradeReason;
+      currentApplicableBlockerCount = result.currentApplicableBlockerCount;
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
       downgradedClosingBlockerIssueNumbers = result.downgradedClosingBlockerIssueNumbers;
       currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
@@ -1794,7 +1798,7 @@ async function publishSummary(
   }
 
   const appendedSummarySections: string[] = [];
-  if (totalBlockerCount > 0 && !blockersPostedInline) {
+  if (currentApplicableBlockerCount > 0 && !blockersPostedInline) {
     appendedSummarySections.push(buildAnchorFallbackSummarySupplement(
       // FILTERED, not the raw review-time `criterionBlockers`/
       // `spine.unreviewedClosingIssues` (F1-S9 slice 90.6a, issue #90's
@@ -1864,6 +1868,7 @@ async function publishSummary(
         downgradedClosingBlockerIssueNumbers,
         currentClosingIssueNumbers,
         maxFindingsListLength,
+        currentApplicableBlockerCount,
       ),
     appendedSummarySections,
   );
@@ -1960,13 +1965,14 @@ async function publishSummary(
     return;
   }
   console.log(
-    `Published spec-grounded review summary for PR #${prNumber}: ${totalBlockerCount} blocking ` +
-      `finding(s) (postedInline=${blockersPostedInline}), ${joined.length} criterion(a) reviewed, ` +
+    `Published spec-grounded review summary for PR #${prNumber}: ${currentApplicableBlockerCount} current-applicable ` +
+      `blocking finding(s) (${reviewTimeBlockerCount} at review time, postedInline=${blockersPostedInline}), ` +
+      `${joined.length} criterion(a) reviewed, ` +
       `${staleBlockerIssueNumbers.length} de-referenced blocker(s) and ` +
       `${downgradedClosingBlockerIssueNumbers.length} downgraded blocker(s) skipped.`,
   );
 
-  if (totalBlockerCount > 0 && !blockersPostedInline) {
+  if (currentApplicableBlockerCount > 0 && !blockersPostedInline) {
     // A blocker posted as a REAL inline thread is already gated by
     // `required_conversation_resolution` on the thread itself — this job
     // does not also need to fail red for that, healthy case. Exiting

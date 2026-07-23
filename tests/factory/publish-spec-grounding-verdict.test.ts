@@ -1382,7 +1382,7 @@ describe("main — the happy path", () => {
     });
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
-    expect(summaryBody).toContain("1 blocking finding(s)");
+    expect(summaryBody).toContain("1 current-applicable blocking finding(s)");
     expect(summaryBody).toMatch(/reported as separate, resolvable inline review comment/i);
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
@@ -1514,12 +1514,52 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/#34, #99[\s\S]*were NOT posted inline/i);
     expect(summaryBody).toMatch(/no longer references them/i);
     expect(summaryBody).not.toMatch(/#12[\s\S]*were NOT posted inline/i);
-    // KNOWN RESIDUAL, documented not hidden (see tryPostBlockersInline's
-    // own docstring): the "N blocking finding(s)" count still comes from
-    // the UNFILTERED runner-time set (3), even though only 1 was actually
-    // posted inline -- the stale-note above is what reconciles the
-    // difference for a human reading this summary.
-    expect(summaryBody).toContain("3 blocking finding(s)");
+    // One live finding is current-applicable; the two stale findings are
+    // reported separately in review-time finding units.
+    expect(summaryBody).toContain("1 current-applicable blocking finding(s)");
+    expect(summaryBody).toMatch(
+      /review also identified 2 blocking findings for issues that are no longer closing obligations/i,
+    );
+  });
+
+  it("publishes a coherent zero-current headline and exits successfully when every review-time blocker is de-referenced", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [{ criterionId: "34:0", satisfied: false, rationale: "Stale blocker." }],
+      },
+      spine: {
+        entries: [{ issueNumber: 34, kind: "closing", criterionId: "34:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [34],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "No linked issue remains." }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const summaryPost = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toContain("No current-applicable blocking findings.");
+    expect(summaryBody).toMatch(/review-time blocking findings.*note\(s\) below/i);
+    expect(summaryBody).toMatch(/#34 were NOT posted inline[\s\S]*no longer references them at all/i);
+    expect(summaryBody).not.toMatch(/\*\*\d+ current-applicable blocking finding/);
+    expect(summaryBody).not.toContain("No unmet acceptance criteria were found at all.");
   });
 
   it("distinguishes a DOWNGRADED closing blocker from a fully DE-REFERENCED one, in the SAME run, with two separate accurate notes (F1-S9 slice 90.6a -- the stale-vs-downgraded bucket-split): #12 still closing (posted inline normally), #34 and #78 both downgraded Closes->Refs (still referenced, but no longer closing -- two, deliberately out of ascending order, to exercise the downgraded bucket's own sort, not just a single-element no-op), #99 removed from the body entirely (not referenced at all)", async () => {
@@ -1587,17 +1627,12 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/#99[\s\S]{0,80}still references them, but no longer with a closing keyword/i);
     // #12 never appears in either skip-note.
     expect(summaryBody).not.toMatch(/#12[\s\S]{0,40}were NOT posted inline/i);
-    // The HEADLINE's own reconciliation count (F1-S9 slices 90.6a/90.6b,
-    // PR #98 review cids 3626878151 + 3627450885 -- proves both fixes
-    // end-to-end, not just at the unit level): 4 blocking FINDINGS
-    // identified at review time (#12, #34, #78, #99); 3 FINDINGS in the
-    // union of both issue buckets (#99 de-referenced, #34+#78 downgraded)
-    // are no longer live closing obligations. The two headline counts
-    // must stay in finding units, while the separate notes below list
-    // deduplicated issue numbers.
-    expect(summaryBody).toContain("4 blocking finding(s)");
+    // The headline and exit path share the one CURRENT-applicable finding
+    // (#12). The separate review-time note counts the other three findings
+    // while the detailed notes retain deduplicated issue-number buckets.
+    expect(summaryBody).toContain("1 current-applicable blocking finding(s)");
     expect(summaryBody).toMatch(
-      /3 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+      /review also identified 3 blocking findings for issues that are no longer closing obligations/i,
     );
   });
 
@@ -1850,7 +1885,7 @@ describe("main — the happy path", () => {
     // The HEADLINE uses the SIMPLE all-listed wording -- ALL 3 findings,
     // no partial split (createdMarkers is empty here: #12's success was a
     // PATCH, not a CREATE, so nothing was excluded from anything).
-    expect(summaryBody).toContain("3 blocking finding(s)");
+    expect(summaryBody).toContain("3 current-applicable blocking finding(s)");
     expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary —/i);
     expect(summaryBody).not.toMatch(/finding\(s\) are already covered by inline review comment/i);
   });
@@ -1875,7 +1910,7 @@ describe("main — the happy path", () => {
     process.env.CRITERIA_SPINE_PATH = spinePath;
     // #12 stays closing -- no drift, isolating this test to the
     // diff-truncation dimension of the split alone (no stale/downgraded
-    // blockers, so totalBlockerCount exactly equals the still-applicable
+    // blockers, so the review-time count exactly equals the still-applicable
     // total the invariant is checked against).
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
@@ -1904,7 +1939,7 @@ describe("main — the happy path", () => {
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
     // Review-time total: 1 criterion blocker + 1 diff-truncation term = 2.
-    expect(summaryBody).toContain("2 blocking finding(s)");
+    expect(summaryBody).toContain("2 current-applicable blocking finding(s)");
     // The simple all-listed headline wording -- createdMarkers is empty
     // (the diff-truncation comment's own CREATE failed; #12's own success
     // was a PATCH, not a create), so nothing was excluded from anything.
@@ -2064,7 +2099,7 @@ describe("main — the happy path", () => {
     // set (contrast the old, reverted policy, under which all six would
     // have been excluded and the headline would have said "1 blocking
     // finding(s)").
-    expect(summaryBody).toContain("7 blocking finding(s)");
+    expect(summaryBody).toContain("7 current-applicable blocking finding(s)");
     // `buildAnchorFallbackSummarySupplement` has its own, SEPARATE display
     // cap (MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS, unrelated to
     // createdMarkers) on how many criteria it lists individually before
@@ -2073,7 +2108,7 @@ describe("main — the happy path", () => {
     // INDIVIDUAL marker was never used in the plan, only the shared
     // AGGREGATE marker) folds into that note instead. THE KEY ASSERTION:
     // that fold is purely a DISPLAY-density choice, not an exclusion --
-    // 12:5 is still counted in "7 blocking finding(s)" above, proving
+    // 12:5 is still counted in "7 current-applicable blocking finding(s)" above, proving
     // `criterionCoveringMarkers`/`issueCoveringMarkers` still correctly
     // resolves the aggregate-covered entry to "not a fresh CREATE" (kept),
     // rather than wrongly treating it as excluded.
@@ -2431,6 +2466,10 @@ describe("main — the happy path", () => {
     const summaryBody = (summaryPost?.body as { body: string }).body;
     expect(summaryBody).toMatch(/#56[\s\S]*were NOT posted inline/i);
     expect(summaryBody).not.toMatch(/#12[\s\S]*were NOT posted inline/i);
+    expect(summaryBody).toContain("1 current-applicable blocking finding(s)");
+    expect(summaryBody).toMatch(
+      /review also identified 1 blocking finding for an issue that is no longer a closing obligation/i,
+    );
   });
 
   it("degrades to the fallback summary and exits nonzero when the diff has NO addable line at all (anchorFallbackNeeded, structural) -- reconciliation STILL runs (F1-S9 slice 90.4, redesigned, Fork-1: unconditional) even though this run's own new blockers could not post inline", async () => {
@@ -2456,7 +2495,7 @@ describe("main — the happy path", () => {
     expect(calls.some((c) => c.method === "GET" && c.url.includes("/pulls/83/comments"))).toBe(true);
     const post = calls.find((c) => c.method === "POST");
     const body = (post?.body as { body: string }).body;
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(/listed below in THIS summary/i);
     expect(body).toContain("Missing the retry wrapper.");
     // NOT a categorical "no inline thread for them" claim (F1-S9 slice
@@ -2487,7 +2526,7 @@ describe("main — the happy path", () => {
     expect(process.exitCode).toBe(1);
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const body = (summaryPost?.body as { body: string }).body;
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(/listed below in THIS summary/i);
     expect(body).toContain("Missing the retry wrapper.");
     // A graceful degrade, NOT the "pipeline broke" fallback wording --
@@ -2681,7 +2720,7 @@ describe("main — the happy path", () => {
     expect(process.exitCode).toBe(1);
     const post = calls.find((c) => c.method === "POST");
     const body = (post?.body as { body: string }).body;
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(/this pr's own diff was truncated/i);
   });
 
@@ -2827,16 +2866,13 @@ describe("main — the happy path", () => {
 
     await main();
 
-    // The review-time criterion blocker (#12) is still counted in the
-    // headline (issue #89's own deliberate fail-safe over-count -- that
-    // count itself is untouched by this fix), but it was skipped as
-    // stale (downgraded) and nothing is left to actually post inline --
-    // NOT the anchor-fallback/permanently-gated case, so the job stays
-    // healthy (exit code unset) and no inline comment is ever attempted.
+    // The review-time criterion blocker (#12) was downgraded, so nothing
+    // remains current-applicable: no inline attempt and no fallback exit.
     expect(process.exitCode).toBeUndefined();
     const post = calls.find((c) => c.method === "POST");
     const body = (post?.body as { body: string }).body;
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("No current-applicable blocking findings.");
+    expect(body).toMatch(/review-time blocking findings.*note\(s\) below/i);
     // The specific bug this test proves fixed: no aggregate diff-truncation
     // blocker was fabricated from #13's mere presence in
     // `currentlyClosingIssueNumbers` alone.
