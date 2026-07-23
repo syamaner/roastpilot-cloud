@@ -7,12 +7,12 @@
  * Extracted from `apply-triage-verdict.mts` (F1-S2) when F1-S3 needed the
  * identical helper — kept in one place rather than duplicated.
  *
- * F1-S10 (#13, factory.md §13 point 8) added 429/`Retry-After` backoff
- * (previously deferred — this module's own prior docstring said so) —
- * see {@link githubRequest}'s own doc for the retry behavior. Applying it
- * here, in the one shared client, covers every privileged call this
- * factory makes (PR create/refresh, issue/PR comments, labels, triage
- * verdicts) rather than bolting retry logic onto individual call sites.
+ * F1-S10 (#13, factory.md §13 point 8) added bounded rate-limit backoff,
+ * completed for GitHub's documented REST response shapes by D114/#54 — see
+ * {@link githubRequest}'s own doc for the retry behavior. Applying it here,
+ * in the one shared client, covers every privileged call this factory makes
+ * (PR create/refresh, issue/PR comments, labels, triage verdicts) rather than
+ * bolting retry logic onto individual call sites.
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -50,41 +50,41 @@ export class GithubApiError extends Error {
 export const MAX_RATE_LIMIT_RETRIES = 5;
 
 /**
- * Upper bound on a single `Retry-After`-driven wait, in seconds. GitHub's
- * real values are typically single-digit-to-low-double-digit seconds;
- * this exists purely to bound an unexpectedly large or malformed header
- * value (still GitHub's own API, not attacker-controlled in the security
- * sense, but a job should never stall unboundedly on any header value it
- * didn't itself choose).
+ * Upper bound on a single rate-limit wait, in seconds. This bounds
+ * `Retry-After`, primary reset timestamps, and the headerless-response
+ * fallback alike: GitHub's response headers are not attacker-controlled in
+ * the normal security sense, but a job must not stall unboundedly on timing
+ * input it did not choose.
  */
 export const MAX_RETRY_AFTER_SECONDS = 60;
 
 /**
- * True when a GitHub API response represents rate limiting this client
- * should back off and retry for, rather than fail immediately.
- *
- * A bare 429 is GitHub's documented shape for BOTH primary and secondary
- * rate limiting, so it always qualifies. A 403 only qualifies when it
- * carries a `Retry-After` header — GitHub's documented secondary-rate-
- * limit response can be either status code, but an ORDINARY permissions
- * 403 (a genuinely unauthorized/expired token, a scope the token lacks)
- * never carries that header, and must still fail immediately rather than
- * be retried into a slow, misleading timeout.
- *
- * @param status - The response's HTTP status code.
- * @param retryAfterHeader - The response's `Retry-After` header value, or
- *   `null` if absent.
- * @returns Whether this response should be retried with backoff.
+ * GitHub's minimum wait when a rate-limit response carries neither a usable
+ * `Retry-After` nor a usable primary-limit reset tuple.
  */
-export function isRateLimitedResponse(
-  status: number,
-  retryAfterHeader: string | null,
-): boolean {
-  if (status === 429) {
-    return true;
-  }
-  return status === 403 && retryAfterHeader !== null;
-}
+export const MIN_RATE_LIMIT_FALLBACK_SECONDS = 60;
+
+/** The timing signal that determined a rate-limit decision. */
+export type RateLimitWaitSource = "retry-after" | "rate-limit-reset" | "fallback";
+
+/**
+ * A complete decision for one GitHub REST response.
+ *
+ * `give-up` preserves the server-requested wait rather than clamping it and
+ * retrying before GitHub says the limit has cleared.
+ */
+export type RateLimitDecision =
+  | { readonly kind: "not-rate-limited" }
+  | {
+      readonly kind: "retry";
+      readonly waitMs: number;
+      readonly source: RateLimitWaitSource;
+    }
+  | {
+      readonly kind: "give-up";
+      readonly waitMs: number;
+      readonly source: RateLimitWaitSource;
+    };
 
 /**
  * Parses a `Retry-After` header's value into milliseconds to wait.
@@ -102,9 +102,8 @@ export function isRateLimitedResponse(
  * actually elapsed, burning part of the retry budget against a request
  * that was still guaranteed to be rejected. This function's job is only
  * to report what the server actually asked for; {@link
- * shouldGiveUpOnRateLimit} is the caller's signal for "this wait is
- * longer than we're willing to retry for at all — stop, don't retry
- * early instead."
+ * decideRateLimitResponse} turns an above-cap value into a `give-up`
+ * decision rather than retrying early.
  *
  * @param headerValue - The raw header value, or `null` if the response
  *   had none.
@@ -112,76 +111,101 @@ export function isRateLimitedResponse(
  *   `null` if the value is missing, non-numeric, or negative.
  */
 export function parseRetryAfterMs(headerValue: string | null): number | null {
-  if (headerValue === null) {
+  if (headerValue === null || !/^\d+$/.test(headerValue)) {
     return null;
   }
   const seconds = Number(headerValue);
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return null;
-  }
   return seconds * 1000;
 }
 
 /**
- * True when a rate-limited response's `Retry-After` header requests a
- * wait LONGER than {@link MAX_RETRY_AFTER_SECONDS} — the caller must
- * give up (let the failure surface) rather than retry at all.
+ * Parses GitHub's `X-RateLimit-Reset` UTC epoch timestamp into a wait.
  *
- * The cap bounds how long this client is willing to sit idle waiting on
- * GitHub; it does not license retrying EARLY against a genuine,
- * longer-than-usual wait GitHub explicitly asked for. Clamping the wait
- * down to the cap and retrying anyway (the bug this replaces, Codex P2,
- * #53) would hit the server again before its own requested delay
- * elapsed — a wasted attempt against a request still guaranteed to be
- * rejected. Giving up cleanly is the safe choice once the legitimately-
- * requested wait exceeds what this client will wait for.
- *
- * A missing or unparseable header returns `false` — that's a genuinely
- * different situation (no real guidance from the server at all), handled
- * instead by {@link computeBackoffMs}'s own capped exponential fallback.
- *
- * @param headerValue - The rate-limited response's `Retry-After` header
- *   value, or `null`.
- * @returns Whether the caller should give up rather than retry.
+ * @param headerValue - The raw reset header, in UTC epoch seconds.
+ * @param nowMs - The current UTC epoch time in milliseconds.
+ * @returns Milliseconds until reset (zero when reset is at or before
+ *   `nowMs`), or `null` for an invalid timestamp or clock value.
  */
-export function shouldGiveUpOnRateLimit(headerValue: string | null): boolean {
-  const ms = parseRetryAfterMs(headerValue);
-  return ms !== null && ms > MAX_RETRY_AFTER_SECONDS * 1000;
+export function parseRateLimitResetWaitMs(
+  headerValue: string | null,
+  nowMs: number,
+): number | null {
+  if (
+    headerValue === null ||
+    !/^\d+$/.test(headerValue) ||
+    !Number.isSafeInteger(nowMs) ||
+    nowMs < 0
+  ) {
+    return null;
+  }
+  const resetSeconds = Number(headerValue);
+  const resetMs = resetSeconds * 1000;
+  if (!Number.isSafeInteger(resetSeconds) || !Number.isSafeInteger(resetMs)) {
+    return null;
+  }
+  return Math.max(0, resetMs - nowMs);
+}
+
+function boundedRateLimitDecision(
+  waitMs: number,
+  source: RateLimitWaitSource,
+): RateLimitDecision {
+  if (waitMs > MAX_RETRY_AFTER_SECONDS * 1000) {
+    return { kind: "give-up", waitMs, source };
+  }
+  return { kind: "retry", waitMs, source };
 }
 
 /**
- * Computes how long to wait before the next retry attempt.
+ * Classifies one GitHub REST response using GitHub's documented precedence.
  *
- * Prefers the response's own `Retry-After` header when present and
- * parseable — GitHub telling us exactly how long to wait is always
- * better than guessing. Falls back to a capped exponential backoff
- * (500ms doubling per attempt, capped at {@link MAX_RETRY_AFTER_SECONDS})
- * when the header is absent or unparseable, so a retry still makes
- * bounded forward progress even when GitHub's response is silent on
- * timing.
+ * A valid `Retry-After` wins. Otherwise a zero remaining count plus a valid
+ * reset timestamp identifies primary exhaustion. A bare `429` without either
+ * usable signal starts at GitHub's minimum 60-second fallback and doubles on
+ * a continued failure; because the second wait exceeds this client's ceiling,
+ * that second response gives up rather than retrying early. A `403` without a
+ * usable rate-limit signal remains an ordinary authorization failure.
  *
- * Callers MUST check {@link shouldGiveUpOnRateLimit} first and never call
- * this when it returns `true` — this function does not re-check the cap
- * against a header-provided value, since by the time it's called that
- * value is already guaranteed (by the caller's own prior check) to be
- * within {@link MAX_RETRY_AFTER_SECONDS}.
- *
- * @param retryAfterHeader - The rate-limited response's `Retry-After`
- *   header value, or `null`.
- * @param attempt - The zero-based retry attempt number (0 for the first
- *   retry after the initial request).
- * @returns The wait, in milliseconds.
+ * @param status - The response's HTTP status code.
+ * @param retryAfterHeader - Raw `Retry-After`, or `null`.
+ * @param remainingHeader - Raw `X-RateLimit-Remaining`, or `null`.
+ * @param resetHeader - Raw `X-RateLimit-Reset`, or `null`.
+ * @param nowMs - Current UTC epoch time in milliseconds.
+ * @param attempt - Zero-based retry attempt number.
+ * @returns The retry, give-up, or non-rate-limit decision.
  */
-export function computeBackoffMs(
+export function decideRateLimitResponse(
+  status: number,
   retryAfterHeader: string | null,
-  attempt: number,
-): number {
-  const fromHeader = parseRetryAfterMs(retryAfterHeader);
-  if (fromHeader !== null) {
-    return fromHeader;
+  remainingHeader: string | null,
+  resetHeader: string | null,
+  nowMs: number,
+  attempt = 0,
+): RateLimitDecision {
+  if (status !== 403 && status !== 429) {
+    return { kind: "not-rate-limited" };
   }
-  const exponential = 500 * 2 ** attempt;
-  return Math.min(exponential, MAX_RETRY_AFTER_SECONDS * 1000);
+
+  const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+  if (retryAfterMs !== null) {
+    return boundedRateLimitDecision(retryAfterMs, "retry-after");
+  }
+
+  if (remainingHeader?.trim() === "0") {
+    const resetWaitMs = parseRateLimitResetWaitMs(resetHeader, nowMs);
+    if (resetWaitMs !== null) {
+      return boundedRateLimitDecision(resetWaitMs, "rate-limit-reset");
+    }
+  }
+
+  if (status === 429) {
+    return boundedRateLimitDecision(
+      MIN_RATE_LIMIT_FALLBACK_SECONDS * 1000 * 2 ** attempt,
+      "fallback",
+    );
+  }
+
+  return { kind: "not-rate-limited" };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -195,17 +219,20 @@ function sleep(ms: number): Promise<void> {
  * the request's media type / response parsing, and the text-response size
  * ceiling. Every field defaults to a real, production-sane value, so
  * `options` itself is never REQUIRED; some fields exist for test
- * convenience (`sleepFn`, `maxRateLimitRetries`, `maxTextResponseLength`
- * let a test swap in a fast sleep, shrink the retry budget, or shrink the
- * size ceiling, instead of waiting out a real backoff or generating a
- * multi-megabyte fixture), others (`accept`, `responseType`) are needed in
- * production too, for a non-JSON endpoint like the PR diff fetch.
+ * convenience (`sleepFn`, `nowFn`, `maxRateLimitRetries`,
+ * `maxTextResponseLength` let a test swap in a fast sleep or fixed clock,
+ * shrink the retry budget, or shrink the size ceiling, instead of waiting
+ * out a real backoff or generating a multi-megabyte fixture), others
+ * (`accept`, `responseType`) are needed in production too, for a non-JSON
+ * endpoint like the PR diff fetch.
  */
 export interface GithubRequestOptions {
   /** Overrides {@link MAX_RATE_LIMIT_RETRIES}. */
   readonly maxRateLimitRetries?: number;
   /** Overrides the real `setTimeout`-based wait — test-only. */
   readonly sleepFn?: (ms: number) => Promise<void>;
+  /** Overrides `Date.now()` for deterministic reset-time tests. */
+  readonly nowFn?: () => number;
   /**
    * Overrides the default `Accept: application/vnd.github+json` header
    * (F1-S9 slice 3b, issue #12): the pulls endpoint serves the raw unified
@@ -290,8 +317,8 @@ export function requireEnv(name: string): string {
 /**
  * Makes an authenticated JSON request against the GitHub REST API.
  *
- * Retries a rate-limited response (see {@link isRateLimitedResponse}) with
- * backoff (see {@link computeBackoffMs}), up to
+ * Retries a rate-limited response (see {@link decideRateLimitResponse}) with
+ * bounded waits, up to
  * {@link MAX_RATE_LIMIT_RETRIES} additional attempts, before surfacing it
  * as a real failure. This is always safe to retry regardless of HTTP
  * method: a rate-limited response means GitHub rejected the request
@@ -314,7 +341,7 @@ export function requireEnv(name: string): string {
  * @throws A {@link GithubApiError} (carrying the response's status code)
  *   if the response status is not ok (2xx) and either isn't rate
  *   limiting, the server's requested wait exceeds
- *   {@link MAX_RETRY_AFTER_SECONDS} (see {@link shouldGiveUpOnRateLimit}),
+ *   {@link MAX_RETRY_AFTER_SECONDS},
  *   or the retry budget is exhausted. Also throws a plain `Error` (not a
  *   `GithubApiError` — this is a client-side rejection, not an HTTP
  *   response) for a `responseType: "text"` call whose response declares
@@ -330,6 +357,7 @@ export async function githubRequest<T>(
 ): Promise<T> {
   const maxRetries = options?.maxRateLimitRetries ?? MAX_RATE_LIMIT_RETRIES;
   const sleepFn = options?.sleepFn ?? sleep;
+  const nowFn = options?.nowFn ?? Date.now;
   const accept = options?.accept ?? "application/vnd.github+json";
   const responseType = options?.responseType ?? "json";
 
@@ -346,28 +374,32 @@ export async function githubRequest<T>(
     });
 
     const retryAfterHeader = response.headers.get("retry-after");
+    const rateLimitDecision = decideRateLimitResponse(
+      response.status,
+      retryAfterHeader,
+      response.headers.get("x-ratelimit-remaining"),
+      response.headers.get("x-ratelimit-reset"),
+      nowFn(),
+      attempt,
+    );
     if (
-      isRateLimitedResponse(response.status, retryAfterHeader) &&
-      attempt < maxRetries &&
-      !shouldGiveUpOnRateLimit(retryAfterHeader)
+      rateLimitDecision.kind === "retry" &&
+      attempt < maxRetries
     ) {
-      const waitMs = computeBackoffMs(retryAfterHeader, attempt);
       console.warn(
         `GitHub API ${method} ${path} rate-limited (status ${response.status}); ` +
-          `retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`,
+          `retrying in ${rateLimitDecision.waitMs}ms from ${rateLimitDecision.source} ` +
+          `(attempt ${attempt + 1}/${maxRetries})`,
       );
-      await sleepFn(waitMs);
+      await sleepFn(rateLimitDecision.waitMs);
       continue;
     }
 
-    if (
-      isRateLimitedResponse(response.status, retryAfterHeader) &&
-      shouldGiveUpOnRateLimit(retryAfterHeader)
-    ) {
+    if (rateLimitDecision.kind === "give-up") {
       console.warn(
-        `GitHub API ${method} ${path} rate-limited (status ${response.status}) with a ` +
-          `Retry-After of ${retryAfterHeader}s, exceeding the ${MAX_RETRY_AFTER_SECONDS}s ` +
-          `cap — giving up rather than retrying before that wait elapses.`,
+        `GitHub API ${method} ${path} rate-limited (status ${response.status}); ` +
+          `${rateLimitDecision.source} requires ${rateLimitDecision.waitMs}ms, exceeding ` +
+          `the ${MAX_RETRY_AFTER_SECONDS}s cap — giving up rather than retrying early.`,
       );
     }
 

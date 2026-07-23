@@ -2887,8 +2887,8 @@ index 0000000..abc1234
 });
 
 describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After backoff, end-to-end through the real script", () => {
-  // github-api.test.ts already unit-tests computeBackoffMs/
-  // isRateLimitedResponse/githubRequest's retry loop in isolation. These
+  // github-api.test.ts already unit-tests decideRateLimitResponse and
+  // githubRequest's retry loop in isolation. These
   // two tests prove the SAME behavior actually engages when driven
   // through the real publish script — the PR-create and comment-post
   // call sites the story brief specifically named ("honor 429/Retry-After
