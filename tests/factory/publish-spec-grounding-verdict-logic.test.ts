@@ -502,6 +502,97 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).toContain("Confirmed in file Y.");
   });
 
+  it("omits satisfied and unsatisfied non-blocking findings when their issues are no longer referenced", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [
+        joined({
+          issueNumber: 34,
+          criterionId: "34:0",
+          kind: "non-closing",
+          satisfied: false,
+          rationale: "STALE_UNSATISFIED",
+        }),
+        joined({
+          issueNumber: 56,
+          criterionId: "56:0",
+          kind: "closing",
+          satisfied: true,
+          rationale: "STALE_SATISFIED",
+        }),
+      ],
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [],
+      [],
+      ALL_CLOSING,
+      undefined,
+      undefined,
+      new Set(),
+    );
+    expect(body).not.toContain("**Other findings**");
+    expect(body).not.toContain("STALE_UNSATISFIED");
+    expect(body).not.toContain("STALE_SATISFIED");
+    expect(body).not.toContain("No unmet acceptance criteria were found at all.");
+  });
+
+  it("retains non-blocking findings for issues still referenced in any kind, including a downgraded closing issue", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [
+        joined({
+          issueNumber: 12,
+          criterionId: "12:0",
+          kind: "non-closing",
+          satisfied: false,
+          rationale: "STILL_NON_CLOSING",
+        }),
+        joined({
+          issueNumber: 34,
+          criterionId: "34:0",
+          kind: "closing",
+          satisfied: true,
+          rationale: "DOWNGRADED_BUT_REFERENCED",
+        }),
+      ],
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [],
+      [],
+      ALL_CLOSING,
+      undefined,
+      undefined,
+      new Set([12, 34]),
+    );
+    expect(body).toContain("STILL_NON_CLOSING");
+    expect(body).toContain("DOWNGRADED_BUT_REFERENCED");
+    expect(body.indexOf("STILL_NON_CLOSING")).toBeLessThan(body.indexOf("DOWNGRADED_BUT_REFERENCED"));
+  });
+
+  it("computes the budget omission count from retained non-blocking findings only", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [
+        joined({ issueNumber: 12, criterionId: "12:0", kind: "non-closing", satisfied: false }),
+        joined({ issueNumber: 34, criterionId: "34:0", kind: "non-closing", satisfied: false }),
+        joined({ issueNumber: 56, criterionId: "56:0", kind: "non-closing", satisfied: false }),
+      ],
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [],
+      [],
+      ALL_CLOSING,
+      0,
+      undefined,
+      new Set([12, 56]),
+    );
+    expect(body).toContain("2 further finding(s) omitted");
+    expect(body).not.toContain("3 further finding(s) omitted");
+  });
+
   it("does NOT render a truncation caveat when neither flag is set", () => {
     const body = buildSpecGroundingSummaryCommentBody([], [], { truncated: false, diffTruncated: false }, true, null, [], [], ALL_CLOSING);
     expect(body).not.toContain("may be incomplete");

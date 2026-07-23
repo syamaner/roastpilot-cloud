@@ -1188,6 +1188,51 @@ describe("main — the happy path", () => {
     expect((post?.body as { body: string }).body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
   });
 
+  it("renders only non-blocking findings whose issues remain referenced in the PR current body", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [
+          { criterionId: "12:0", satisfied: false, rationale: "CURRENT_NON_CLOSING" },
+          { criterionId: "34:0", satisfied: false, rationale: "STALE_NON_CLOSING" },
+          { criterionId: "56:0", satisfied: true, rationale: "DOWNGRADED_BUT_REFERENCED" },
+        ],
+      },
+      spine: {
+        entries: [
+          { issueNumber: 12, kind: "non-closing", criterionId: "12:0" },
+          { issueNumber: 34, kind: "non-closing", criterionId: "34:0" },
+          { issueNumber: 56, kind: "closing", criterionId: "56:0" },
+        ],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [56],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Refs #12 and refs #56" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.url.includes("/compare/"))).toBe(false);
+    const post = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).toContain("CURRENT_NON_CLOSING");
+    expect(body).toContain("DOWNGRADED_BUT_REFERENCED");
+    expect(body).not.toContain("STALE_NON_CLOSING");
+  });
+
   it("posts a visible fallback and exits nonzero when reconciling obsolete inline blocker comments fails -- a genuine non-404 failure is never silently swallowed", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
@@ -1705,12 +1750,14 @@ describe("main — the happy path", () => {
     process.env.VERDICT_PATH = verdictPath;
     process.env.CRITERIA_SPINE_PATH = spinePath;
     // The CURRENT body: five blockers stay closing; the 300 "downgraded"
-    // issues are still referenced, but only via Refs; the 300 "stale"
-    // issues are not mentioned at all anymore.
+    // issues and all non-blocking issues are still referenced via Refs;
+    // the 300 "stale" blocker issues are absent.
     const currentBody =
       Array.from({ length: LIVE_COUNT }, (_unused, i) => `Closes #${i + 1}`).join(", ") +
       ", " +
-      Array.from({ length: DOWNGRADED_COUNT }, (_unused, i) => `refs #${2000 + i}`).join(", ");
+      Array.from({ length: DOWNGRADED_COUNT }, (_unused, i) => `refs #${2000 + i}`).join(", ") +
+      ", " +
+      Array.from({ length: NON_BLOCKING_COUNT }, (_unused, i) => `refs #${3000 + i}`).join(", ");
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: currentBody }),
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
@@ -2975,6 +3022,47 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/changed again since this run's own earlier snapshot/i);
     // Never got as far as a real inline-comment attempt on this failed run.
     expect(calls.some((c) => c.method === "POST" && c.url.includes("/pulls/83/comments"))).toBe(false);
+  });
+
+  it("fails closed when an any-kind reference disappears after non-blocking findings were filtered but before the summary write", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: {
+        findings: [{ criterionId: "12:0", satisfied: false, rationale: "MUST_NOT_PUBLISH_STALE_CONTEXT" }],
+      },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "non-closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCallCount += 1;
+        return prFetchHandlerWithOverrides({
+          body: prFetchCallCount >= 3 ? "No linked issues remain." : "Refs #12",
+        });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prFetchCallCount).toBeGreaterThanOrEqual(3);
+    expect(process.exitCode).toBe(1);
+    const post = calls.find((call) => call.method === "POST" && call.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/changed again since this run's own earlier snapshot/i);
+    expect(body).not.toContain("MUST_NOT_PUBLISH_STALE_CONTEXT");
   });
 
   it("posts a visible fallback and exits nonzero when this run's own pre-write reference/head-SHA re-verify genuinely fails (F1-S9 slice 90.5b, PR #97 draft round 5) -- a genuine (non-drift) network failure on the THIRD `/pulls/83` fetch, never silently swallowed or treated as a clean all-clear", async () => {
