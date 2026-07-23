@@ -921,6 +921,29 @@ describe("main — the outcome.json tri-state", () => {
     expect(fallbackPost).toBeDefined();
     expect((fallbackPost?.body as { body: string }).body).toMatch(/clearing its prior spec-grounding state failed/i);
   });
+
+  it("stringifies a non-Error stale-state cleanup failure in the visible fallback", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        throw "raw cleanup rejection";
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect((fallbackPost?.body as { body: string }).body).toMatch(/failed: raw cleanup rejection/i);
+  });
 });
 
 describe("main — hasCriteria: true, verdict/spine reading", () => {

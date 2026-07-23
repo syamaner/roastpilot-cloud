@@ -430,6 +430,15 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
 describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
   const alwaysSafe = async (): Promise<boolean> => true;
 
+  it("preserves a non-Error cleanup cause as a readable typed error", () => {
+    expect(new InlineBlockerCleanupError(2, "raw rejection")).toMatchObject({
+      name: "InlineBlockerCleanupError",
+      message: "raw rejection",
+      deletedCount: 2,
+      cause: "raw rejection",
+    });
+  });
+
   it("deletes every prior inline comment carrying any one of the five blocker markers, ignoring non-blocker comments", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
