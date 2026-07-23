@@ -73,6 +73,179 @@ interface GitHubReviewComment {
 }
 
 const COMMENT_PAGE_SIZE = 100;
+const REVIEW_THREAD_PAGE_SIZE = 100;
+const MAX_REVIEW_THREAD_PAGES = 50;
+
+const REVIEW_THREAD_RESOLUTION_QUERY = `
+  query ReviewThreadResolution(
+    $owner: String!
+    $repo: String!
+    $prNumber: Int!
+    $cursor: String
+  ) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $prNumber) {
+        reviewThreads(first: ${REVIEW_THREAD_PAGE_SIZE}, after: $cursor) {
+          nodes {
+            isResolved
+            comments(first: 1) {
+              nodes {
+                databaseId
+              }
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface ReviewThreadResolution {
+  readonly commentId: number;
+  readonly isResolved: boolean;
+}
+
+interface ReviewThreadResolutionPage {
+  readonly threads: readonly ReviewThreadResolution[];
+  readonly hasNextPage: boolean;
+  readonly endCursor: string | null;
+}
+
+function asRecord(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`GitHub GraphQL review-thread response has invalid ${field}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseReviewThreadResolutionPage(value: unknown): ReviewThreadResolutionPage {
+  const root = asRecord(value, "root");
+  if (root.errors !== undefined) {
+    if (!Array.isArray(root.errors)) {
+      throw new Error("GitHub GraphQL review-thread response has invalid errors");
+    }
+    if (root.errors.length > 0) {
+      throw new Error("GitHub GraphQL review-thread response contains errors");
+    }
+  }
+  const data = asRecord(root.data, "data");
+  const repository = asRecord(data.repository, "repository");
+  const pullRequest = asRecord(repository.pullRequest, "pullRequest");
+  const reviewThreads = asRecord(pullRequest.reviewThreads, "reviewThreads");
+  if (!Array.isArray(reviewThreads.nodes)) {
+    throw new Error("GitHub GraphQL review-thread response has invalid nodes");
+  }
+  const pageInfo = asRecord(reviewThreads.pageInfo, "pageInfo");
+  if (typeof pageInfo.hasNextPage !== "boolean") {
+    throw new Error("GitHub GraphQL review-thread response has invalid hasNextPage");
+  }
+  if (pageInfo.endCursor !== null && typeof pageInfo.endCursor !== "string") {
+    throw new Error("GitHub GraphQL review-thread response has invalid endCursor");
+  }
+  if (pageInfo.hasNextPage && (typeof pageInfo.endCursor !== "string" || pageInfo.endCursor.length === 0)) {
+    throw new Error("GitHub GraphQL review-thread response is missing its next-page cursor");
+  }
+
+  const threads = reviewThreads.nodes.map((node, index): ReviewThreadResolution => {
+    const thread = asRecord(node, `nodes[${index}]`);
+    if (typeof thread.isResolved !== "boolean") {
+      throw new Error(`GitHub GraphQL review-thread response has invalid nodes[${index}].isResolved`);
+    }
+    const comments = asRecord(thread.comments, `nodes[${index}].comments`);
+    if (!Array.isArray(comments.nodes) || comments.nodes.length === 0) {
+      throw new Error(`GitHub GraphQL review-thread response has invalid nodes[${index}].comments.nodes`);
+    }
+    const rootComment = asRecord(comments.nodes[0], `nodes[${index}].comments.nodes[0]`);
+    if (
+      typeof rootComment.databaseId !== "number" ||
+      !Number.isSafeInteger(rootComment.databaseId) ||
+      rootComment.databaseId <= 0
+    ) {
+      throw new Error(`GitHub GraphQL review-thread response has invalid nodes[${index}] root comment databaseId`);
+    }
+    return {
+      commentId: rootComment.databaseId,
+      isResolved: thread.isResolved,
+    };
+  });
+
+  return {
+    threads,
+    hasNextPage: pageInfo.hasNextPage,
+    endCursor: pageInfo.endCursor,
+  };
+}
+
+/**
+ * Finds which target root review-comment IDs belong to confirmed-unresolved
+ * review threads.
+ *
+ * Uses GitHub's GraphQL-only `PullRequestReviewThread.isResolved` field and
+ * maps it back to the REST review-comment IDs already used for marker-based
+ * PATCHes via each thread's root comment `databaseId`. The query is fixed;
+ * owner/repo/PR/cursor are variables. Pagination is bounded to the same 5,000
+ * thread ceiling as the module's REST comment scan.
+ *
+ * A target absent from every fetched page is deliberately absent from the
+ * result: the caller may exclude only confirmed-unresolved comments and must
+ * keep any unlocated target in its conservative fallback. Malformed GraphQL
+ * data or an API failure throws so the caller can retain every affected
+ * blocker rather than trusting partial/invalid state.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The trusted repository owner.
+ * @param repo - The trusted repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param targetCommentIds - REST IDs of successfully PATCHed root review comments.
+ * @returns The subset whose review threads are confirmed unresolved.
+ */
+export async function findConfirmedUnresolvedReviewCommentIds(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  targetCommentIds: ReadonlySet<number>,
+): Promise<ReadonlySet<number>> {
+  const remaining = new Set(targetCommentIds);
+  const unresolved = new Set<number>();
+  if (remaining.size === 0) {
+    return unresolved;
+  }
+
+  let cursor: string | null = null;
+  for (let page = 1; page <= MAX_REVIEW_THREAD_PAGES; page++) {
+    const response = await githubRequest<unknown>(token, "POST", "/graphql", {
+      query: REVIEW_THREAD_RESOLUTION_QUERY,
+      variables: { owner, repo, prNumber, cursor },
+    });
+    const parsed = parseReviewThreadResolutionPage(response);
+    for (const thread of parsed.threads) {
+      if (!remaining.has(thread.commentId)) {
+        continue;
+      }
+      remaining.delete(thread.commentId);
+      if (!thread.isResolved) {
+        unresolved.add(thread.commentId);
+      }
+    }
+    if (remaining.size === 0 || !parsed.hasNextPage) {
+      break;
+    }
+    cursor = parsed.endCursor;
+  }
+
+  if (remaining.size > 0) {
+    console.warn(
+      `Could not locate ${remaining.size} PATCHed blocker comment(s) in review threads on PR #${prNumber}; ` +
+        "they will stay in the fallback.",
+    );
+  }
+  return unresolved;
+}
 
 /** Result of generation-safe no-criteria cleanup, including fail-closed partial progress. */
 export type ClearStaleInlineBlockerCommentsResult =
@@ -275,6 +448,12 @@ export async function upsertInlineComment(
  *   since the resolved thread stays resolved, NOR listed, since it was
  *   "already posted." A fresh CREATE has no such ambiguity: no comment
  *   existed before this run, so nothing could have been resolved).
+ *   `unresolvedPostedMarkers` is present on the degrade result only: the
+ *   subset represented by either a fresh CREATE or a successfully PATCHed
+ *   comment whose GraphQL review thread is confirmed unresolved. A
+ *   resolved, unlocated, malformed, or lookup-failed PATCH is absent so
+ *   the caller conservatively keeps its blocker in fallback (issue #90's
+ *   resolution-aware fallback exclusion).
  */
 export async function postInlineCommentPlan(
   token: string,
@@ -290,6 +469,7 @@ export async function postInlineCommentPlan(
       readonly reason: InlinePostingDegradeReason;
       readonly postedMarkers: readonly string[];
       readonly createdMarkers: readonly string[];
+      readonly unresolvedPostedMarkers: readonly string[];
     }
 > {
   if (plan.length === 0) {
@@ -299,22 +479,55 @@ export async function postInlineCommentPlan(
   let firstCreateSucceeded = false;
   const postedMarkers: string[] = [];
   const createdMarkers: string[] = [];
+  const patchedCommentIdsByMarker = new Map<string, number>();
   for (const entry of plan) {
     // Determined BEFORE the call, independent of success or failure -- a
     // PATCH (an existing match) never re-validates the anchor at all
     // (see upsertInlineComment's own docstring), so only a CREATE
     // attempt is ever diagnostic for the whole plan's shared anchor.
-    const isCreateAttempt = findExistingInlineCommentId(existing, entry) === null;
+    const existingCommentId = findExistingInlineCommentId(existing, entry);
+    const isCreateAttempt = existingCommentId === null;
     try {
       await upsertInlineComment(token, owner, repo, prNumber, headSha, existing, entry);
       postedMarkers.push(entry.marker);
-      if (isCreateAttempt) {
+      if (existingCommentId === null) {
         firstCreateSucceeded = true;
         createdMarkers.push(entry.marker);
+      } else {
+        patchedCommentIdsByMarker.set(entry.marker, existingCommentId);
       }
     } catch (err) {
       if (isCreateAttempt && !firstCreateSucceeded && err instanceof GithubApiError && err.status === 422) {
-        return { ok: false, reason: "anchor-rejected-422", postedMarkers, createdMarkers };
+        const unresolvedPostedMarkerSet = new Set(createdMarkers);
+        if (patchedCommentIdsByMarker.size > 0) {
+          try {
+            const unresolvedCommentIds = await findConfirmedUnresolvedReviewCommentIds(
+              token,
+              owner,
+              repo,
+              prNumber,
+              new Set(patchedCommentIdsByMarker.values()),
+            );
+            for (const [marker, commentId] of patchedCommentIdsByMarker) {
+              if (unresolvedCommentIds.has(commentId)) {
+                unresolvedPostedMarkerSet.add(marker);
+              }
+            }
+          } catch (resolutionError) {
+            console.warn(
+              `Could not confirm PATCHed blocker review-thread resolution on PR #${prNumber}; ` +
+                "all PATCHed blockers will stay in the fallback. " +
+                (resolutionError instanceof Error ? resolutionError.message : String(resolutionError)),
+            );
+          }
+        }
+        return {
+          ok: false,
+          reason: "anchor-rejected-422",
+          postedMarkers,
+          createdMarkers,
+          unresolvedPostedMarkers: postedMarkers.filter((marker) => unresolvedPostedMarkerSet.has(marker)),
+        };
       }
       throw err;
     }

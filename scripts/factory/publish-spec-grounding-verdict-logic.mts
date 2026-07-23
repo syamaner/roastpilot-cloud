@@ -733,17 +733,13 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  * REMOVED both — see `tryPostBlockersInline`'s own docstring for the full
  * reasoning: fixing cid 3627282617's real fail-open (a PATCH can silently
  * update an ALREADY-RESOLVED thread, so excluding it from the fallback
- * could make a re-detected blocker vanish) requires keying the fallback
- * exclusion off `createdMarkers` (fresh CREATEs only, never PATCHes) —
- * and `createdMarkers` is PROVABLY ALWAYS EMPTY whenever a mid-plan 422
- * actually degrades a run (the degrade condition itself requires no
- * earlier CREATE to have succeeded; only PATCHes can occupy that
- * position). So `postedInlineCount` would always be `0` on the one branch
- * that ever consulted it — the partial-headline wording could never
- * actually render. Removed rather than kept as dead/`v8-ignore`d code;
- * the degrade headline reverts to the simple, pre-round-3
- * `blockersPostedInline`-based wording below, which is what actually
- * renders in every reachable case anyway).
+ * could make a re-detected blocker vanish) originally required keying the
+ * fallback exclusion off fresh CREATEs only. Issue #90's later
+ * resolution-aware slice adds GraphQL `isResolved` state, so confirmed
+ * unresolved PATCHes can now be excluded too. The summary still avoids a
+ * brittle posted-vs-fallback count split: its degraded wording explicitly
+ * directs the reader to unresolved inline threads and/or fallback details,
+ * while the headline remains the shared current-applicable blocker count.
  * @param maxFindingsListLength - Maximum rendered length of the
  *   non-blocking findings list. The entrypoint lowers this from
  *   {@link MAX_FINDINGS_LIST_LENGTH} when later summary sections need
@@ -882,14 +878,10 @@ export function buildSpecGroundingSummaryCommentBody(
         ? ` ${skippedFindingDescription} in this PR's current body — removed entirely, or ` +
           "downgraded to a non-closing reference; see the note(s) below, not repeated here."
         : "";
-    // NO partial-posting wording (F1-S9 slice 90.6a, PR #99 review, Codex,
-    // cid 3627145120 added one, cid 3627282617 removed it again -- see
-    // this function's own top-level docstring for the full reasoning: a
-    // mid-plan degrade can never leave anything meaningfully "already
-    // posted" once the fallback exclusion is correctly keyed off
-    // `createdMarkers` alone, so the all-or-nothing wording below is what
-    // ALWAYS actually applies on this branch, not a simplification that
-    // loses real information).
+    // No fragile posted-vs-fallback count split: the headline reports the
+    // shared current-applicable total, while the degraded wording covers
+    // both confirmed-unresolved inline threads and the remaining fallback
+    // details. This stays accurate for all-fallback and mixed cases.
     lines.push(
       blockersPostedInline
         ? skippedBlockerIssueNumbers.length > 0
@@ -901,13 +893,15 @@ export function buildSpecGroundingSummaryCommentBody(
               "review comment(s) on this PR; see those threads, not this summary, to resolve them. " +
               `${blockerKindsExplanation} See the inline comment for which case applies and why.`
         : skippedBlockerIssueNumbers.length > 0
-          ? `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** are listed below in THIS summary — ` +
-              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
-              `these first; address any remaining ones below.${skippedReconciliation} ` +
+          ? `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** remain actionable through ` +
+              `unresolved inline review thread(s) and/or the fallback details below — ${degradeExplanation}. ` +
+              `Resolve any inline thread that already exists for one of these first; address any remaining ones ` +
+              `below.${skippedReconciliation} ` +
               blockerKindsExplanation
-          : `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** listed below in THIS summary — ` +
-              `${degradeExplanation}. Resolve any inline thread that already exists for one of ` +
-              `these first; address any remaining ones below. ${blockerKindsExplanation}`,
+          : `**${renderedCurrentApplicableBlockerCount} current-applicable blocking finding(s)** remain actionable through ` +
+              `unresolved inline review thread(s) and/or the fallback details below — ${degradeExplanation}. ` +
+              `Resolve any inline thread that already exists for one of these first; address any remaining ones below. ` +
+              blockerKindsExplanation,
       "",
     );
   } else {

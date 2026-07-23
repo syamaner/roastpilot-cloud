@@ -1048,39 +1048,20 @@ interface TryPostBlockersInlineResult {
    * should actually render — ALREADY filtered to the still-closing
    * subset (F1-S9 slice 90.6a, issue #90's own #376) AND, on a mid-plan
    * 422 degrade, further filtered to exclude any entry this function
-   * itself freshly CREATED (never a PATCH — see this function's own
-   * `createdMarkerSet` docs, PR #99 review, Codex, cid 3627282617, P2)
-   * as a real inline comment before that degrade happened (issue #90's
-   * own #378) — never the raw, unfiltered, review-time `criterionBlockers`
-   * this function was called with.
+   * confirmed is represented by an UNRESOLVED inline thread — a fresh
+   * CREATE, or a successful PATCH whose GraphQL
+   * `PullRequestReviewThread.isResolved` state is false (issue #90's
+   * resolution-aware fallback exclusion) — never the raw, unfiltered,
+   * review-time `criterionBlockers` this function was called with.
    *
-   * ON THE MID-422 BRANCH SPECIFICALLY, this exclusion is CURRENTLY
-   * VACUOUS in practice (F1-S9 slice 90.6a, PR #99 review, Codex, cid
-   * 3627282617 — the finding that keyed this off `createdMarkers` rather
-   * than `postedMarkers` in the first place): a mid-plan degrade requires
-   * `postInlineCommentPlan`'s own `!firstCreateSucceeded` at the moment
-   * of the failing entry, which is PROVABLY only ever true when no
-   * earlier entry was a successful CREATE — only PATCHes can have already
-   * succeeded before a degrade. So `createdMarkerSet` is ALWAYS empty
-   * here, and this array will ALWAYS equal the FULL `stillReferenced*`
-   * set it was filtered from — conservatively listing every still-closing
-   * blocker in the fallback, EVEN ONES with an already-existing (but
-   * possibly PATCHed-and-still-open, possibly PATCHed-and-resolved) inline
-   * comment. That's the deliberate fail-safe choice: a PATCH can silently
-   * update an ALREADY-RESOLVED thread without reopening it (see {@link
+   * A PATCH can update an ALREADY-RESOLVED thread without reopening it
+   * (see {@link
    * import("./publish-spec-grounding-inline-comment-io.mts").upsertInlineComment}'s
-   * own "ACCEPTED LIMITATION" docs), so we cannot safely exclude a
-   * PATCHed entry without knowing its thread's own resolution state — a
-   * capability this codebase does not have (GitHub's REST API exposes no
-   * such field; it is GraphQL-only, `PullRequestReviewThread.isResolved`,
-   * with zero existing GraphQL plumbing in this codebase to build on).
-   * PRECISELY excluding a posted-but-still-open (not resolved) blocker
-   * from the fallback — issue #90's own #378 in its full, original form —
-   * is therefore DEFERRED to a future, focused slice that adds real
-   * thread-resolution awareness; this mechanism (the `createdMarkers`-keyed
-   * filter itself) is kept in place as the CORRECT semantic scaffolding
-   * for that future slice to plug into, not removed just because it is
-   * vacuous on the currently-reachable paths.
+   * own "ACCEPTED LIMITATION" docs). The GraphQL state is therefore
+   * load-bearing: unresolved PATCHes are omitted from this duplicate
+   * fallback list, while resolved or resolution-unknown PATCHes remain.
+   * Query/API/schema/pagination uncertainty confirms nothing and retains
+   * the blocker, preserving the pre-slice conservative behavior.
    */
   readonly fallbackCriterionBlockers: readonly JoinedCriterionResult[];
   /**
@@ -1373,41 +1354,16 @@ async function tryPostBlockersInline(
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   if (!postResult.ok) {
-    // A MID-PLAN 422: some entries in `plan` may have already posted or
-    // patched successfully as REAL inline comments before the rejection
-    // (F1-S9 slice 90.6a, issue #90's own #378). Excluded here from both
-    // fallback subsets ONLY when they were a genuine CREATE, never a
-    // PATCH (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627282617, P2
-    // -- an earlier version of this fix keyed the exclusion off
-    // `postResult.postedMarkers`, which includes BOTH: a PATCH can
-    // silently update an ALREADY-RESOLVED thread without reopening it
-    // (see `upsertInlineComment`'s own "ACCEPTED LIMITATION" docs), so
-    // excluding a patched-but-possibly-resolved entry could make a
-    // re-detected blocker vanish entirely -- neither gating, since the
-    // resolved thread stays resolved, NOR listed here, since it was
-    // "already posted." Keying off `createdMarkers` instead is the
-    // surface-not-force fix: a fresh CREATE has no such ambiguity (no
-    // comment existed before this run, so nothing could have been
-    // resolved) and is safe to exclude; a PATCH stays conservatively
-    // listed here too, redundant with whatever thread it already has but
-    // never silently invisible. This does NOT change gate semantics --
-    // a resolved thread still does not gate, and a still-open PATCHed
-    // thread still DOES gate via `required_conversation_resolution`
-    // regardless of this wording -- it only changes what a human SEES.
-    //
-    // NOTE (F1-S9 slice 90.6a, PR #99 review, Codex, cid 3627282617):
-    // `createdMarkerSet` is PROVABLY EMPTY on this branch -- reaching a
-    // degrade requires `postInlineCommentPlan`'s own `!firstCreateSucceeded`
-    // to still hold at the failing entry, which is only possible when no
-    // EARLIER entry was a successful CREATE (a successful create would
-    // have already flipped `firstCreateSucceeded`, making any later
-    // failure THROW rather than degrade). Only PATCHes can have already
-    // succeeded before a degrade -- so this filter conservatively keeps
-    // EVERY still-closing blocker in the fallback on this branch today.
-    // Kept in place anyway (not simplified to a bare pass-through) as the
-    // correct semantic scaffolding a future thread-resolution-aware slice
-    // would plug into -- see this function's own `fallbackCriterionBlockers`
-    // field docs for the full reasoning and #90's own tracked follow-up.
+    // A MID-PLAN 422: some entries in `plan` may have already PATCHed real
+    // inline comments before the first genuine CREATE was rejected.
+    // Exclude only covering markers whose threads are CONFIRMED UNRESOLVED
+    // by `postInlineCommentPlan`'s bounded GraphQL lookup. A resolved or
+    // resolution-unknown PATCH stays visible in fallback, so a
+    // re-detected blocker can never vanish merely because PATCH does not
+    // reopen a resolved thread. This does not change gate semantics:
+    // unresolved threads still gate via required conversation resolution;
+    // this only removes duplicate fallback detail when that gate is known
+    // to exist.
     //
     // Matched by the marker of the comment that ACTUALLY COVERS each
     // entry -- `plan.criterionCoveringMarkers`/`plan.issueCoveringMarkers`,
@@ -1420,15 +1376,15 @@ async function tryPostBlockersInline(
     // returned maps here — rather than re-deriving the cap/split
     // independently — is the lockstep fix: this filter and the plan can
     // never disagree about which marker covers which entry.
-    const createdMarkerSet = new Set(postResult.createdMarkers);
+    const unresolvedPostedMarkerSet = new Set(postResult.unresolvedPostedMarkers);
     const fallbackCriterionBlockers = stillReferencedCriterionBlockers.filter((entry) => {
       const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
-      return !createdMarkerSet.has(coveringMarker);
+      return !unresolvedPostedMarkerSet.has(coveringMarker);
     });
     const fallbackUnreviewedClosingIssues = stillReferencedUnreviewedClosingIssues.filter((entry) => {
       const coveringMarker =
         plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
-      return !createdMarkerSet.has(coveringMarker);
+      return !unresolvedPostedMarkerSet.has(coveringMarker);
     });
     return {
       postedInline: false,
@@ -1801,20 +1757,12 @@ async function publishSummary(
   if (currentApplicableBlockerCount > 0 && !blockersPostedInline) {
     appendedSummarySections.push(buildAnchorFallbackSummarySupplement(
       // FILTERED, not the raw review-time `criterionBlockers`/
-      // `spine.unreviewedClosingIssues` (F1-S9 slice 90.6a, issue #90's
-      // own #376/#378, folding two accuracy gaps this same call site
-      // used to have): `tryPostBlockersInline` already computed exactly
-      // what still needs anchor-fallback rendering -- the still-closing
-      // subset (#376); the fallback lists EVERY still-closing blocker,
-      // including any already posted/patched inline -- precisely
-      // excluding a posted-but-still-open one (the original #378 goal)
-      // needs thread-RESOLUTION state (GraphQL `isResolved`, not
-      // available via the REST endpoint this file uses), deferred to a
-      // future slice (see `fallbackCriterionBlockers`'s own field
-      // docs); conservatively listing all is fail-safe, since a real
-      // gating thread still blocks merge via `required_conversation_
-      // resolution` regardless of this wording (PR #99 review, cid
-      // 3627282617, round 5 -- the resolved-thread fail-open fix).
+      // `spine.unreviewedClosingIssues`: `tryPostBlockersInline` already
+      // computed the still-closing subset (#376) and removed only entries
+      // represented by CONFIRMED-UNRESOLVED review threads. Resolved or
+      // resolution-unknown PATCHes remain visible, preserving the
+      // create-vs-patch fail-safe while completing #378's precise
+      // exclusion.
       // Passing the unfiltered arrays here could still list a
       // since-downgraded/de-referenced issue as a live obligation
       // (contradicting the skip-notes appended right below), or claim
