@@ -597,13 +597,17 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
 /**
  * Builds the single, non-blocking summary comment body.
  *
- * Lists every NON-blocking joined result ({@link deriveSeverity} !==
- * `"blocker"`) — a `non-closing` reference's unmet criteria, any satisfied
- * criterion regardless of kind, and any criterion the agent never
- * addressed that didn't escalate to a blocker — UP TO {@link
- * MAX_FINDINGS_LIST_LENGTH}; any remainder is reported as an omitted
- * count, with a pointer to the uploaded verdict artifact, never silently
- * dropped. Blocking findings — BOTH per-criterion ones and whole-issue
+ * Lists every CURRENTLY REFERENCED, NON-blocking joined result
+ * ({@link deriveSeverity} !== `"blocker"`) — a `non-closing` reference's
+ * unmet criteria, any satisfied criterion regardless of kind, and any
+ * criterion the agent never addressed that didn't escalate to a blocker
+ * — UP TO {@link MAX_FINDINGS_LIST_LENGTH}; any remainder is reported as
+ * an omitted count, with a pointer to the uploaded verdict artifact,
+ * never silently dropped. Review-time informational findings for issues
+ * the PR no longer references at all are omitted (F1-S9 slice 90.6b-3,
+ * issue #89); findings for downgraded closing references remain because
+ * the issue is still referenced. Blocking findings — BOTH per-criterion
+ * ones and whole-issue
  * {@link UnreviewedClosingIssueResult} ones — are DELIBERATELY NOT
  * repeated here in full (only counted, with a pointer to the separate inline
  * comments) — the inline comment IS their canonical, resolvable home;
@@ -749,6 +753,12 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   Production always supplies it so headline reporting and exit status
  *   use the same value. Omitted only by isolated pure-logic callers, which
  *   retain the previous local derivation from `currentlyClosingIssueNumbers`.
+ * @param currentlyReferencedIssueNumbers - This PR's CURRENT references
+ *   of any kind. Non-blocking findings whose issue is absent from this
+ *   set are omitted as stale informational output (F1-S9 slice 90.6b-3,
+ *   issue #89). Production supplies the publisher's already parsed,
+ *   pre-write-revalidated snapshot. Isolated pure callers may omit it to
+ *   preserve all joined findings.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildSpecGroundingSummaryCommentBody(
@@ -762,6 +772,7 @@ export function buildSpecGroundingSummaryCommentBody(
   currentlyClosingIssueNumbers: ReadonlySet<number>,
   maxFindingsListLength: number = MAX_FINDINGS_LIST_LENGTH,
   currentApplicableBlockerCount?: number,
+  currentlyReferencedIssueNumbers: ReadonlySet<number> = new Set(joined.map((entry) => entry.issueNumber)),
 ): string {
   // The UNION of both buckets -- exactly what the single, pre-90.6a
   // `staleBlockerIssueNumbers` used to mean before the bucket-split (F1-S9
@@ -778,7 +789,10 @@ export function buildSpecGroundingSummaryCommentBody(
   ].sort((a, b) => a - b);
   const skippedBlockerIssueNumberSet = new Set(skippedBlockerIssueNumbers);
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
-  const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
+  const reviewTimeNonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
+  const nonBlocking = reviewTimeNonBlocking.filter((entry) =>
+    currentlyReferencedIssueNumbers.has(entry.issueNumber),
+  );
   // Count in the SAME unit as the current-applicable headline below: one finding per
   // criterion blocker or unreviewed-closing-issue blocker, never one per
   // deduplicated issue number. A single skipped issue can own multiple
@@ -935,7 +949,11 @@ export function buildSpecGroundingSummaryCommentBody(
       );
     }
     lines.push("");
-  } else if (renderedCurrentApplicableBlockerCount === 0 && skippedBlockerIssueNumbers.length === 0) {
+  } else if (
+    renderedCurrentApplicableBlockerCount === 0 &&
+    skippedBlockerIssueNumbers.length === 0 &&
+    reviewTimeNonBlocking.length === 0
+  ) {
     lines.push(
       truncation.truncated || truncation.diffTruncated
         ? "_No unmet acceptance criteria were found among what WAS reviewed. This run was " +

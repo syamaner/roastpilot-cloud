@@ -1869,6 +1869,7 @@ async function publishSummary(
         currentClosingIssueNumbers,
         maxFindingsListLength,
         currentApplicableBlockerCount,
+        currentReferencedIssueNumbers,
       ),
     appendedSummarySections,
   );
