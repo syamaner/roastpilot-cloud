@@ -4,12 +4,14 @@
  *
  * The caller owns filesystem discovery. This module parses one workflow or
  * composite-action manifest at a time so YAML-equivalent spellings cannot
- * bypass the guard.
+ * bypass the guard, and optionally validates referenced local-action targets
+ * against a repository checkout.
  */
 
 import {
   LineCounter,
   isAlias,
+  isMap,
   isNode,
   isScalar,
   isSeq,
@@ -18,6 +20,8 @@ import {
   type Node,
   type Pair,
 } from "yaml";
+import { lstatSync, readdirSync } from "node:fs";
+import { posix, resolve } from "node:path";
 
 /**
  * The reviewed `claude-code-action` commit used by every audited manifest.
@@ -50,6 +54,7 @@ export interface WorkflowPinViolation {
   readonly kind:
     | "invalid-yaml"
     | "unpinned-action"
+    | "unsafe-local-action"
     | "wildcard-allowlist";
   /** 1-based line number within the audited manifest. */
   readonly line: number;
@@ -76,6 +81,65 @@ export function isWorkflowPinAuditManifestPath(
     /^\.github\/workflows\/.+\.ya?ml$/i.test(normalized) ||
     /^\.github\/actions\/(?:.+\/)?action\.ya?ml$/i.test(normalized)
   );
+}
+
+function localActionRepositoryPath(
+  actionReference: string,
+): string | undefined {
+  const separatorsNormalized = actionReference.replaceAll("\\", "/");
+  if (!separatorsNormalized.startsWith("./")) {
+    return undefined;
+  }
+  return posix.normalize(separatorsNormalized).replace(/^\.\//, "");
+}
+
+function isAllowedLocalActionPath(repositoryPath: string): boolean {
+  return (
+    repositoryPath === ".github/actions" ||
+    repositoryPath.startsWith(".github/actions/")
+  );
+}
+
+function localActionTargetViolation(
+  repositoryRoot: string,
+  repositoryPath: string,
+): string | undefined {
+  const segments = repositoryPath.split("/");
+  let currentPath = resolve(repositoryRoot);
+  for (const segment of segments) {
+    currentPath = resolve(currentPath, segment);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(currentPath);
+    } catch {
+      return `local action target "${repositoryPath}" does not exist`;
+    }
+    if (stats.isSymbolicLink()) {
+      return `local action target "${repositoryPath}" contains symlink component "${segment}"`;
+    }
+  }
+
+  if (!lstatSync(currentPath).isDirectory()) {
+    return `local action target "${repositoryPath}" must be a directory`;
+  }
+
+  const manifests = readdirSync(currentPath, {
+    withFileTypes: true,
+  }).filter((entry) => /^action\.ya?ml$/i.test(entry.name));
+  if (manifests.length !== 1) {
+    return `local action target "${repositoryPath}" must contain exactly one action.yml or action.yaml manifest, found ${manifests.length}`;
+  }
+  const manifest = manifests[0];
+  if (manifest.name !== "action.yml" && manifest.name !== "action.yaml") {
+    return `local action target "${repositoryPath}" manifest "${manifest.name}" must use the exact lowercase name action.yml or action.yaml`;
+  }
+  if (manifest.isSymbolicLink()) {
+    return `local action target "${repositoryPath}" contains symlink manifest "${manifest.name}"`;
+  }
+  if (!manifest.isFile()) {
+    return `local action target "${repositoryPath}" manifest "${manifest.name}" must be a regular file`;
+  }
+  return undefined;
 }
 
 function nodeLine(node: Node, lineCounter: LineCounter): number {
@@ -147,8 +211,49 @@ function findUnsafeAllowlistValue(
   return undefined;
 }
 
+function findStepUsesPairs(
+  document: ReturnType<typeof parseDocument>,
+  resolveAlias: (node: Node) => Node | undefined,
+): Set<Pair> {
+  const stepUsesPairs = new Set<Pair>();
+  visit(document, {
+    Pair(_key, pair): void {
+      if (pairKey(pair, resolveAlias)?.toLowerCase() !== "steps") {
+        return;
+      }
+      /* v8 ignore next -- parsed Pair values use Scalar(null), not null. */
+      if (!isNode(pair.value)) {
+        return;
+      }
+      const steps = resolveAlias(pair.value);
+      if (!isSeq(steps)) {
+        return;
+      }
+      for (const item of steps.items) {
+        /* v8 ignore next -- parsed sequence items use Scalar(null), not null. */
+        if (!isNode(item)) {
+          continue;
+        }
+        const step = resolveAlias(item);
+        if (!isMap(step)) {
+          continue;
+        }
+        for (const stepPair of step.items) {
+          if (
+            pairKey(stepPair, resolveAlias)?.toLowerCase() === "uses"
+          ) {
+            stepUsesPairs.add(stepPair);
+          }
+        }
+      }
+    },
+  });
+  return stepUsesPairs;
+}
+
 function inspectWorkflowManifest(
   fileContent: string,
+  repositoryRoot?: string,
 ): WorkflowPinViolation[] {
   const lineCounter = new LineCounter();
   const document = parseDocument(fileContent, {
@@ -186,6 +291,7 @@ function inspectWorkflowManifest(
   const exactActionScalars = new Set<Node>();
   const resolveAlias = (node: Node): Node | undefined =>
     isAlias(node) ? node.resolve(document) : node;
+  const stepUsesPairs = findStepUsesPairs(document, resolveAlias);
 
   visit(document, {
     Pair(_key, pair): void {
@@ -233,7 +339,33 @@ function inspectWorkflowManifest(
           return;
         }
         const actual = resolved.value.trim();
-        if (actual.startsWith("./") || actual.startsWith(".\\")) {
+        const localPath = localActionRepositoryPath(actual);
+        if (localPath !== undefined) {
+          if (
+            stepUsesPairs.has(pair) &&
+            !isAllowedLocalActionPath(localPath)
+          ) {
+            violations.push({
+              kind: "unsafe-local-action",
+              line: nodeLine(pair.value, lineCounter),
+              detail: `local action reference "${actual}" must stay within "./.github/actions/**" after normalization, found "${localPath}"`,
+            });
+          } else if (
+            stepUsesPairs.has(pair) &&
+            repositoryRoot !== undefined
+          ) {
+            const detail = localActionTargetViolation(
+              repositoryRoot,
+              localPath,
+            );
+            if (detail) {
+              violations.push({
+                kind: "unsafe-local-action",
+                line: nodeLine(pair.value, lineCounter),
+                detail,
+              });
+            }
+          }
           return;
         }
         // Mirror the runner's remote-action parsing before enforcing identity.
@@ -336,10 +468,13 @@ export function findWildcardAllowlistUsages(
  * Runs the complete structural pin and allowlist audit for one manifest.
  *
  * @param fileContent - Raw YAML for one audited manifest.
+ * @param repositoryRoot - Optional repository checkout root. When supplied,
+ * local action references are also validated against the filesystem.
  * @returns Every violation in source order.
  */
 export function findWorkflowPinViolations(
   fileContent: string,
+  repositoryRoot?: string,
 ): WorkflowPinViolation[] {
-  return inspectWorkflowManifest(fileContent);
+  return inspectWorkflowManifest(fileContent, repositoryRoot);
 }

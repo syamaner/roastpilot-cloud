@@ -1,4 +1,14 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -35,6 +45,37 @@ function listFilesRecursively(directory: string): string[] {
 
 function repositoryRelativePath(path: string): string {
   return relative(REPOSITORY_ROOT, path).replaceAll("\\", "/");
+}
+
+function withTemporaryRepository(
+  run: (repositoryRoot: string) => void,
+): void {
+  const repositoryRoot = mkdtempSync(
+    join(tmpdir(), "workflow-pin-audit-"),
+  );
+  try {
+    run(repositoryRoot);
+  } finally {
+    rmSync(repositoryRoot, { force: true, recursive: true });
+  }
+}
+
+function writeActionManifest(
+  repositoryRoot: string,
+  actionName: string,
+  extension: "yml" | "yaml" = "yml",
+  content = "name: fixture\nruns:\n  using: composite\n  steps: []\n",
+): string {
+  const actionDirectory = join(
+    repositoryRoot,
+    ".github",
+    "actions",
+    actionName,
+  );
+  mkdirSync(actionDirectory, { recursive: true });
+  const manifestPath = join(actionDirectory, `action.${extension}`);
+  writeFileSync(manifestPath, content);
+  return manifestPath;
 }
 
 function manifestUsesPinnedClaudeAction(
@@ -225,6 +266,287 @@ describe("isWorkflowPinAuditManifestPath (issue #102)", () => {
     "examples/.github/workflows/review.yml",
   ])("excludes non-audited path %s", (path) => {
     expect(isWorkflowPinAuditManifestPath(path)).toBe(false);
+  });
+});
+
+describe("local action policy (issue #114)", () => {
+  it.each([
+    "./.github/actions/review",
+    String.raw`.\.github\actions\review`,
+    "./.github/actions/./review",
+    "./.github/actions/nested/../review",
+  ])("accepts an allowed normalized local action path %s", (reference) => {
+    const content = `steps:\n  - uses: ${reference}\n`;
+    expect(findWorkflowPinViolations(content)).toEqual([]);
+  });
+
+  it.each([
+    "./actions/review",
+    String.raw`.\actions\review`,
+    "./.github/workflows/review",
+    "./.github/actions/../../actions/review",
+    "./",
+  ])("rejects a local action outside the protected root: %s", (reference) => {
+    const content = `steps:\n  - uses: ${reference}\n`;
+    expect(findWorkflowPinViolations(content)).toEqual([
+      expect.objectContaining({
+        kind: "unsafe-local-action",
+        line: 2,
+        detail: expect.stringContaining(
+          'must stay within "./.github/actions/**"',
+        ),
+      }),
+    ]);
+  });
+
+  it("rejects an alias-backed outside-root local action at the use site", () => {
+    const content = [
+      "action: &local-action ./actions/review",
+      "steps:",
+      "  - uses: *local-action",
+    ].join("\n");
+    expect(findWorkflowPinViolations(content)).toEqual([
+      expect.objectContaining({
+        kind: "unsafe-local-action",
+        line: 3,
+      }),
+    ]);
+  });
+
+  it("rejects an outside-root action in an alias-backed steps sequence", () => {
+    const content = [
+      "shared_steps: &shared-steps",
+      "  - uses: ./actions/review",
+      "jobs:",
+      "  review:",
+      "    steps: *shared-steps",
+    ].join("\n");
+    expect(findWorkflowPinViolations(content)).toEqual([
+      expect.objectContaining({
+        kind: "unsafe-local-action",
+        line: 2,
+      }),
+    ]);
+  });
+
+  it("does not classify a job-level local reusable workflow as an action", () => {
+    const content = [
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+    ].join("\n");
+    expect(findWorkflowPinViolations(content)).toEqual([]);
+  });
+
+  it("ignores non-sequence steps and non-mapping step items", () => {
+    const content = [
+      "metadata:",
+      "  steps: not-a-sequence",
+      "other:",
+      "  steps:",
+      "    - not-a-step-mapping",
+    ].join("\n");
+    expect(findWorkflowPinViolations(content)).toEqual([]);
+  });
+
+  it.each(["yml", "yaml"] as const)(
+    "accepts exactly one regular action.%s manifest",
+    (extension) => {
+      withTemporaryRepository((repositoryRoot) => {
+        writeActionManifest(repositoryRoot, "review", extension);
+        const content = "steps:\n  - uses: ./.github/actions/review\n";
+        expect(
+          findWorkflowPinViolations(content, repositoryRoot),
+        ).toEqual([]);
+      });
+    },
+  );
+
+  it("accepts a genuinely nested local action target", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      writeActionManifest(repositoryRoot, "group/review");
+      const content =
+        "steps:\n  - uses: ./.github/actions/group/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual(
+        [],
+      );
+    });
+  });
+
+  it.each([
+    ["missing target", "does not exist"],
+    ["target with no manifest", "found 0"],
+  ])("rejects a %s", (_name, detail) => {
+    withTemporaryRepository((repositoryRoot) => {
+      if (detail === "found 0") {
+        mkdirSync(
+          join(repositoryRoot, ".github", "actions", "review"),
+          { recursive: true },
+        );
+      }
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining(detail),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a non-directory target", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const actionsRoot = join(repositoryRoot, ".github", "actions");
+      mkdirSync(actionsRoot, { recursive: true });
+      writeFileSync(join(actionsRoot, "review"), "not a directory");
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("must be a directory"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects multiple action manifest extensions in one target", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      writeActionManifest(repositoryRoot, "review", "yml");
+      writeActionManifest(repositoryRoot, "review", "yaml");
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("found 2"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a symlinked action-directory component", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const outsideDirectory = join(repositoryRoot, "outside");
+      mkdirSync(outsideDirectory, { recursive: true });
+      writeFileSync(join(outsideDirectory, "action.yml"), "name: outside\n");
+      const actionsRoot = join(repositoryRoot, ".github", "actions");
+      mkdirSync(actionsRoot, { recursive: true });
+      symlinkSync(outsideDirectory, join(actionsRoot, "review"));
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("contains symlink component"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects an intermediate symlinked directory component", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const outsideGroup = join(repositoryRoot, "outside", "group");
+      const outsideAction = join(outsideGroup, "review");
+      mkdirSync(outsideAction, { recursive: true });
+      writeFileSync(join(outsideAction, "action.yml"), "name: outside\n");
+      const actionsRoot = join(repositoryRoot, ".github", "actions");
+      mkdirSync(actionsRoot, { recursive: true });
+      symlinkSync(outsideGroup, join(actionsRoot, "group"));
+      const content =
+        "steps:\n  - uses: ./.github/actions/group/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("contains symlink component"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a symlinked action manifest", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const actionDirectory = join(
+        repositoryRoot,
+        ".github",
+        "actions",
+        "review",
+      );
+      mkdirSync(actionDirectory, { recursive: true });
+      writeFileSync(join(actionDirectory, "real.yml"), "name: fixture\n");
+      symlinkSync(
+        join(actionDirectory, "real.yml"),
+        join(actionDirectory, "action.yml"),
+      );
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("contains symlink manifest"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a mixed-case action manifest consistently across filesystems", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const actionDirectory = join(
+        repositoryRoot,
+        ".github",
+        "actions",
+        "review",
+      );
+      mkdirSync(actionDirectory, { recursive: true });
+      writeFileSync(join(actionDirectory, "Action.yml"), "name: fixture\n");
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("exact lowercase name"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a non-regular action manifest", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const actionDirectory = join(
+        repositoryRoot,
+        ".github",
+        "actions",
+        "review",
+      );
+      mkdirSync(join(actionDirectory, "action.yml"), { recursive: true });
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("must be a regular file"),
+        }),
+      ]);
+    });
+  });
+
+  it("audits nested cyclic local actions independently", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const actionA = writeActionManifest(
+        repositoryRoot,
+        "a",
+        "yml",
+        "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/b\n",
+      );
+      const actionB = writeActionManifest(
+        repositoryRoot,
+        "b",
+        "yaml",
+        "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/a\n",
+      );
+      expect(
+        [actionA, actionB].flatMap((path) =>
+          findWorkflowPinViolations(
+            readFileSync(path, "utf8"),
+            repositoryRoot,
+          ),
+        ),
+      ).toEqual([]);
+    });
   });
 });
 
@@ -688,7 +1010,10 @@ describe("live audited manifests (issue #102)", () => {
     expect(auditedFiles.length).toBeGreaterThan(0);
 
     const failures = auditedFiles.flatMap((path) =>
-      findWorkflowPinViolations(readFileSync(path, "utf8")).map(
+      findWorkflowPinViolations(
+        readFileSync(path, "utf8"),
+        REPOSITORY_ROOT,
+      ).map(
         (violation) =>
           `${repositoryRelativePath(path)}:${violation.line} -- ${violation.detail}`,
       ),
