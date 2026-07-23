@@ -298,8 +298,8 @@ export async function postInlineCommentPlan(
 }
 
 /**
- * Deletes every existing inline review comment this workflow previously
- * posted as a blocker on a PR that no longer has any linked-issue
+ * Deletes generation-safe existing inline review comments this workflow
+ * previously posted as blockers on a PR that no longer has any linked-issue
  * criteria to review at all (PR #86 review, Codex, P2): a PR's body edit
  * that removes its last closing-keyword reference makes the runner emit
  * `hasCriteria: false`, but the earlier run's own inline blocker
@@ -310,7 +310,11 @@ export async function postInlineCommentPlan(
  * `publish-spec-grounding-blocker-logic.mts`'s five own marker shapes),
  * never a specific run's own plan — there IS no plan at all once
  * criteria are gone, so matching against `plan.marker` the way {@link
- * findExistingInlineCommentId} does is not available here.
+ * findExistingInlineCommentId} does is not available here. A comment is
+ * eligible only when its exact generation marker parses and is less than
+ * or equal to this run's generation. Missing, malformed, and newer
+ * generations remain untouched, so an older cleanup can never delete a
+ * newer publisher's valid blocker even if workflow serialization weakens.
  *
  * Tolerates a 404 on an individual DELETE (a human already resolved or
  * deleted that thread themselves, between this run's own fetch and the
@@ -324,6 +328,7 @@ export async function postInlineCommentPlan(
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
+ * @param currentGeneration - This run's validated `github.run_number`.
  * @returns The number of stale inline comments actually deleted.
  */
 export async function clearStaleInlineBlockerComments(
@@ -331,11 +336,24 @@ export async function clearStaleInlineBlockerComments(
   owner: string,
   repo: string,
   prNumber: number,
+  currentGeneration: number,
 ): Promise<number> {
+  if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
+    throw new Error("currentGeneration must be a positive safe integer");
+  }
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
   const stale = existing.filter(
-    (c) =>
-      c.authorType === "Bot" && c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN && bodyContainsAnyBlockerMarker(c.body),
+    (c) => {
+      if (
+        c.authorType !== "Bot" ||
+        c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN ||
+        !bodyContainsAnyBlockerMarker(c.body)
+      ) {
+        return false;
+      }
+      const generation = extractInlineBlockerGeneration(c.body);
+      return generation !== null && generation <= currentGeneration;
+    },
   );
   let deletedCount = 0;
   for (const comment of stale) {
