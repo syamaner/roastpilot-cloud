@@ -20,8 +20,8 @@ import {
   type Node,
   type Pair,
 } from "yaml";
-import { lstatSync, readdirSync } from "node:fs";
-import { posix, resolve } from "node:path";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { posix, resolve, win32 } from "node:path";
 
 /**
  * The reviewed `claude-code-action` commit used by every audited manifest.
@@ -100,6 +100,112 @@ function isAllowedLocalActionPath(repositoryPath: string): boolean {
   );
 }
 
+type LocalActionEntrypoint = {
+  readonly field: "image" | "main" | "post" | "pre";
+  readonly path: string;
+};
+
+type LocalActionEntrypointInspection =
+  | { readonly entrypoints: readonly LocalActionEntrypoint[] }
+  | { readonly error: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function inspectLocalActionEntrypoints(
+  manifestPath: string,
+): LocalActionEntrypointInspection {
+  const document = parseDocument(readFileSync(manifestPath, "utf8"), {
+    logLevel: "silent",
+    prettyErrors: true,
+    strict: true,
+    uniqueKeys: true,
+    version: "1.2",
+  });
+  if (document.errors.length > 0) {
+    return { error: "cannot inspect entrypoints because its YAML is invalid" };
+  }
+
+  let manifest: unknown;
+  try {
+    manifest = document.toJS({ maxAliasCount: 100 }) as unknown;
+  } catch {
+    return {
+      error: "cannot inspect entrypoints because its YAML aliases are invalid",
+    };
+  }
+  if (!isRecord(manifest) || !isRecord(manifest.runs)) {
+    return { entrypoints: [] };
+  }
+
+  const runs = manifest.runs;
+  const using = runs.using;
+  if (typeof using !== "string") {
+    return { entrypoints: [] };
+  }
+  const fields: readonly LocalActionEntrypoint["field"][] = using
+    .toLowerCase()
+    .startsWith("node")
+    ? ["main", "pre", "post"]
+    : using.toLowerCase() === "docker"
+      ? ["image"]
+      : [];
+  const entrypoints = fields.flatMap((field) => {
+    const path = runs[field];
+    if (typeof path !== "string" || path.trim() === "") {
+      return [];
+    }
+    if (
+      field === "image" &&
+      path.trim().toLowerCase().startsWith("docker://")
+    ) {
+      return [];
+    }
+    return [{ field, path: path.trim() }];
+  });
+  return { entrypoints };
+}
+
+function localActionEntrypointViolation(
+  actionDirectory: string,
+  repositoryPath: string,
+  entrypoint: LocalActionEntrypoint,
+): string | undefined {
+  const normalizedSeparators = entrypoint.path.replaceAll("\\", "/");
+  if (
+    posix.isAbsolute(normalizedSeparators) ||
+    win32.parse(entrypoint.path).root !== ""
+  ) {
+    return `local action target "${repositoryPath}" runs.${entrypoint.field} path "${entrypoint.path}" must be relative to the action directory`;
+  }
+  const normalizedPath = posix.normalize(normalizedSeparators);
+  if (
+    normalizedPath === ".." ||
+    normalizedPath.startsWith("../")
+  ) {
+    return `local action target "${repositoryPath}" runs.${entrypoint.field} path "${entrypoint.path}" escapes the action directory after normalization`;
+  }
+
+  let currentPath = actionDirectory;
+  for (const segment of normalizedPath.split("/")) {
+    currentPath = resolve(currentPath, segment);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(currentPath);
+    } catch {
+      return `local action target "${repositoryPath}" runs.${entrypoint.field} path "${entrypoint.path}" does not exist`;
+    }
+    if (stats.isSymbolicLink()) {
+      return `local action target "${repositoryPath}" runs.${entrypoint.field} path "${entrypoint.path}" contains symlink component "${segment}"`;
+    }
+  }
+  if (!lstatSync(currentPath).isFile()) {
+    return `local action target "${repositoryPath}" runs.${entrypoint.field} path "${entrypoint.path}" must be a regular file`;
+  }
+  return undefined;
+}
+
 function localActionTargetViolation(
   repositoryRoot: string,
   repositoryPath: string,
@@ -138,6 +244,22 @@ function localActionTargetViolation(
   }
   if (!manifest.isFile()) {
     return `local action target "${repositoryPath}" manifest "${manifest.name}" must be a regular file`;
+  }
+
+  const manifestPath = resolve(currentPath, manifest.name);
+  const inspection = inspectLocalActionEntrypoints(manifestPath);
+  if ("error" in inspection) {
+    return `local action target "${repositoryPath}" manifest "${manifest.name}" ${inspection.error}`;
+  }
+  for (const entrypoint of inspection.entrypoints) {
+    const violation = localActionEntrypointViolation(
+      currentPath,
+      repositoryPath,
+      entrypoint,
+    );
+    if (violation) {
+      return violation;
+    }
   }
   return undefined;
 }

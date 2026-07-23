@@ -373,6 +373,243 @@ describe("local action policy (issue #114)", () => {
     });
   });
 
+  it("accepts contained Node lifecycle entrypoints with normalized separators", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      const manifestPath = writeActionManifest(
+        repositoryRoot,
+        "review",
+        "yml",
+        [
+          "runs:",
+          "  using: node20",
+          String.raw`  main: .\dist\.\main.js`,
+          "  pre: hooks/../hooks/pre.js",
+          "  post: hooks/post.js",
+        ].join("\n"),
+      );
+      const actionDirectory = join(manifestPath, "..");
+      mkdirSync(join(actionDirectory, "dist"), { recursive: true });
+      mkdirSync(join(actionDirectory, "hooks"), { recursive: true });
+      for (const path of [
+        join(actionDirectory, "dist", "main.js"),
+        join(actionDirectory, "hooks", "pre.js"),
+        join(actionDirectory, "hooks", "post.js"),
+      ]) {
+        writeFileSync(path, "export {};\n");
+      }
+
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual(
+        [],
+      );
+    });
+  });
+
+  it.each([
+    ["Dockerfile", true],
+    ["docker://alpine:3.22", false],
+  ])("accepts a contained Docker image reference %s", (image, fileBacked) => {
+    withTemporaryRepository((repositoryRoot) => {
+      const manifestPath = writeActionManifest(
+        repositoryRoot,
+        "review",
+        "yml",
+        `runs:\n  using: docker\n  image: ${image}\n`,
+      );
+      if (fileBacked) {
+        writeFileSync(join(manifestPath, "..", image), "FROM scratch\n");
+      }
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual(
+        [],
+      );
+    });
+  });
+
+  it.each([
+    ["node20", "main", "../../../lib/main.js"],
+    ["node20", "pre", "../../../lib/pre.js"],
+    ["node20", "post", "../../../lib/post.js"],
+    ["docker", "image", "../../../Dockerfile"],
+  ])(
+    "rejects an escaping %s runs.%s entrypoint",
+    (using, field, entrypoint) => {
+      withTemporaryRepository((repositoryRoot) => {
+        const actionDirectory = join(
+          repositoryRoot,
+          ".github",
+          "actions",
+          "review",
+        );
+        mkdirSync(actionDirectory, { recursive: true });
+        const requiredMain =
+          using === "node20" && field !== "main"
+            ? "  main: main.js\n"
+            : "";
+        writeFileSync(
+          join(actionDirectory, "action.yml"),
+          `runs:\n  using: ${using}\n${requiredMain}  ${field}: ${entrypoint}\n`,
+        );
+        if (requiredMain) {
+          writeFileSync(join(actionDirectory, "main.js"), "export {};\n");
+        }
+        const content = "steps:\n  - uses: ./.github/actions/review\n";
+        expect(
+          findWorkflowPinViolations(content, repositoryRoot),
+        ).toEqual([
+          expect.objectContaining({
+            kind: "unsafe-local-action",
+            detail: expect.stringContaining(`runs.${field}`),
+          }),
+        ]);
+        expect(
+          findWorkflowPinViolations(content, repositoryRoot)[0]?.detail,
+        ).toContain("escapes the action directory");
+      });
+    },
+  );
+
+  it.each([
+    "/tmp/outside.js",
+    String.raw`C:\outside\main.js`,
+    String.raw`C:main.js`,
+    String.raw`D:outside\main.js`,
+  ])(
+    "rejects an absolute Node entrypoint %s on every platform",
+    (entrypoint) => {
+      withTemporaryRepository((repositoryRoot) => {
+        writeActionManifest(
+          repositoryRoot,
+          "review",
+          "yml",
+          `runs:\n  using: node20\n  main: ${entrypoint}\n`,
+        );
+        const content = "steps:\n  - uses: ./.github/actions/review\n";
+        expect(
+          findWorkflowPinViolations(content, repositoryRoot),
+        ).toEqual([
+          expect.objectContaining({
+            kind: "unsafe-local-action",
+            detail: expect.stringContaining(
+              "must be relative to the action directory",
+            ),
+          }),
+        ]);
+      });
+    },
+  );
+
+  it.each([
+    ["missing", false, "does not exist"],
+    ["directory", true, "must be a regular file"],
+  ])("rejects a %s Node entrypoint", (_name, createDirectory, detail) => {
+    withTemporaryRepository((repositoryRoot) => {
+      const manifestPath = writeActionManifest(
+        repositoryRoot,
+        "review",
+        "yml",
+        "runs:\n  using: node20\n  main: dist/main.js\n",
+      );
+      if (createDirectory) {
+        mkdirSync(join(manifestPath, "..", "dist", "main.js"), {
+          recursive: true,
+        });
+      }
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining(detail),
+        }),
+      ]);
+    });
+  });
+
+  it.each(["entrypoint", "entrypoint-directory"])(
+    "rejects a symlinked Node %s",
+    (symlinkKind) => {
+      withTemporaryRepository((repositoryRoot) => {
+        const manifestPath = writeActionManifest(
+          repositoryRoot,
+          "review",
+          "yml",
+          "runs:\n  using: node20\n  main: dist/main.js\n",
+        );
+        const actionDirectory = join(manifestPath, "..");
+        const outsideDirectory = join(repositoryRoot, "outside");
+        mkdirSync(outsideDirectory, { recursive: true });
+        writeFileSync(join(outsideDirectory, "main.js"), "export {};\n");
+        if (symlinkKind === "entrypoint-directory") {
+          symlinkSync(outsideDirectory, join(actionDirectory, "dist"));
+        } else {
+          mkdirSync(join(actionDirectory, "dist"));
+          symlinkSync(
+            join(outsideDirectory, "main.js"),
+            join(actionDirectory, "dist", "main.js"),
+          );
+        }
+        const content = "steps:\n  - uses: ./.github/actions/review\n";
+        expect(
+          findWorkflowPinViolations(content, repositoryRoot),
+        ).toEqual([
+          expect.objectContaining({
+            kind: "unsafe-local-action",
+            detail: expect.stringContaining("contains symlink component"),
+          }),
+        ]);
+      });
+    },
+  );
+
+  it("rejects a manifest with invalid YAML", () => {
+    withTemporaryRepository((repositoryRoot) => {
+      writeActionManifest(repositoryRoot, "review", "yml", "runs: [");
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("YAML is invalid"),
+        }),
+      ]);
+    });
+  });
+
+  it("rejects a manifest with excessive alias expansion", () => {
+    const aliases = (anchor: string): string =>
+      Array.from({ length: 11 }, () => `*${anchor}`).join(", ");
+    const manifest = [
+      "a: &a [value]",
+      `b: &b [${aliases("a")}]`,
+      `c: &c [${aliases("b")}]`,
+      `runs: &runs [${aliases("c")}]`,
+    ].join("\n");
+    withTemporaryRepository((repositoryRoot) => {
+      writeActionManifest(repositoryRoot, "review", "yml", manifest);
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual([
+        expect.objectContaining({
+          kind: "unsafe-local-action",
+          detail: expect.stringContaining("YAML aliases are invalid"),
+        }),
+      ]);
+    });
+  });
+
+  it.each([
+    "just-a-scalar\n",
+    "runs: null\n",
+    "runs:\n  using: 20\n",
+    "runs:\n  using: node20\n  main: ''\n",
+  ])("leaves runner schema validation to GitHub for %j", (manifest) => {
+    withTemporaryRepository((repositoryRoot) => {
+      writeActionManifest(repositoryRoot, "review", "yml", manifest);
+      const content = "steps:\n  - uses: ./.github/actions/review\n";
+      expect(findWorkflowPinViolations(content, repositoryRoot)).toEqual(
+        [],
+      );
+    });
+  });
+
   it.each([
     ["missing target", "does not exist"],
     ["target with no manifest", "found 0"],
