@@ -171,6 +171,14 @@ describe("findUnpinnedActionReferences (issue #102)", () => {
     ]);
   });
 
+  it("accepts a correctly pinned action ref in another embedded scalar", () => {
+    const content = [
+      "metadata:",
+      `  OTHER_ACTION_REF: "anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}"`,
+    ].join("\n");
+    expect(findUnpinnedActionReferences(content)).toEqual([]);
+  });
+
   it("resolves an aliased action reference structurally", () => {
     const content = [
       "action: &review-action Anthropics/Claude-Code-Action@main",
@@ -315,6 +323,11 @@ describe("findWildcardAllowlistUsages (issue #102)", () => {
     ].join("\n");
     expect(findWildcardAllowlistUsages(content)).toEqual([]);
   });
+
+  it("does not treat a mapping-valued allowlist as a wildcard scalar", () => {
+    const content = 'with:\n  allowed_bots: { pattern: "*" }\n';
+    expect(findWildcardAllowlistUsages(content)).toEqual([]);
+  });
 });
 
 describe("findWorkflowPinViolations (issue #102)", () => {
@@ -334,15 +347,20 @@ describe("findWorkflowPinViolations (issue #102)", () => {
   });
 
   it("fails closed on malformed YAML", () => {
-    const violations = findWorkflowPinViolations(
-      'steps:\n  - uses: "unterminated\n',
-    );
+    const content = 'steps:\n  - uses: "unterminated\n';
+    const violations = findWorkflowPinViolations(content);
     expect(violations).toEqual([
       expect.objectContaining({
         kind: "invalid-yaml",
         line: 3,
         detail: expect.stringContaining("invalid YAML"),
       }),
+    ]);
+    expect(findUnpinnedActionReferences(content)).toEqual([
+      expect.objectContaining({ kind: "invalid-yaml" }),
+    ]);
+    expect(findWildcardAllowlistUsages(content)).toEqual([
+      expect.objectContaining({ kind: "invalid-yaml" }),
     ]);
   });
 

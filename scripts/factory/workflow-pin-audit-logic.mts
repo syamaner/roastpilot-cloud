@@ -75,8 +75,8 @@ export function isWorkflowPinAuditManifestPath(
 }
 
 function nodeLine(node: Node, lineCounter: LineCounter): number {
-  const offset = node.range?.[0];
-  return offset === undefined ? 1 : lineCounter.linePos(offset).line;
+  // Every node passed here comes from parseDocument and therefore has a range.
+  return lineCounter.linePos(node.range![0]).line;
 }
 
 function pairKey(
@@ -145,7 +145,7 @@ function inspectWorkflowManifest(
   if (document.errors.length > 0) {
     return document.errors.map((error) => ({
       kind: "invalid-yaml",
-      line: error.linePos?.[0].line ?? lineCounter.linePos(error.pos[0]).line,
+      line: lineCounter.linePos(error.pos[0]).line,
       detail: `invalid YAML (${error.code}): ${error.message.split("\n")[0]}`,
     }));
   }
@@ -153,7 +153,8 @@ function inspectWorkflowManifest(
   try {
     document.toJS({ maxAliasCount: 100 });
   } catch (error: unknown) {
-    const detail = error instanceof Error ? error.message : String(error);
+    // yaml reports alias-expansion failures as Error subclasses.
+    const detail = (error as Error).message;
     return [
       {
         kind: "invalid-yaml",
