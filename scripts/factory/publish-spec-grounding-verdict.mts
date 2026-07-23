@@ -129,6 +129,7 @@ import {
   type UnreviewedClosingIssueResult,
 } from "./spec-grounding-runner-logic.mts";
 import {
+  assembleSpecGroundingSummaryCommentBody,
   buildDowngradedClosingBlockerSkippedNote,
   buildSpecGroundingSummaryCommentBody,
   buildStaleBlockerSkippedNote,
@@ -844,7 +845,18 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   }
 }
 
-export async function main(): Promise<void> {
+/**
+ * Runs the privileged spec-grounding publisher.
+ *
+ * @param assembleSummaryCommentBody - Pure complete-comment assembler.
+ *   Injectable so integration tests can add boundary pressure while
+ *   exercising the real `publishSummary` wiring; production uses
+ *   {@link assembleSpecGroundingSummaryCommentBody}.
+ */
+export async function main(
+  assembleSummaryCommentBody: typeof assembleSpecGroundingSummaryCommentBody =
+    assembleSpecGroundingSummaryCommentBody,
+): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
   if (!owner || !repo) {
@@ -984,6 +996,7 @@ export async function main(): Promise<void> {
     runNumber,
     spineResult.spine,
     verdictResult.verdict,
+    assembleSummaryCommentBody,
   );
 }
 
@@ -1464,6 +1477,7 @@ async function publishSummary(
   runNumber: string,
   spine: ParsedCriteriaSpine,
   verdict: SpecGroundingVerdict,
+  assembleSummaryCommentBody: typeof assembleSpecGroundingSummaryCommentBody,
 ): Promise<void> {
   // Validated and canonicalized ONCE, at the very top of this function --
   // BEFORE any posting, patching, or reconciliation is ever attempted
@@ -1779,18 +1793,9 @@ async function publishSummary(
     return;
   }
 
-  let body = buildSpecGroundingSummaryCommentBody(
-    joined,
-    spine.unreviewedClosingIssues,
-    { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
-    blockersPostedInline,
-    degradeReason,
-    staleBlockerIssueNumbers,
-    downgradedClosingBlockerIssueNumbers,
-    currentClosingIssueNumbers,
-  );
+  const appendedSummarySections: string[] = [];
   if (totalBlockerCount > 0 && !blockersPostedInline) {
-    body += "\n" + buildAnchorFallbackSummarySupplement(
+    appendedSummarySections.push(buildAnchorFallbackSummarySupplement(
       // FILTERED, not the raw review-time `criterionBlockers`/
       // `spine.unreviewedClosingIssues` (F1-S9 slice 90.6a, issue #90's
       // own #376/#378, folding two accuracy gaps this same call site
@@ -1824,7 +1829,7 @@ async function publishSummary(
       // (populated on every `postedInline: false` result) -- the
       // fallback is defensive only, never expected to actually apply.
       degradeReason ?? "no-addable-anchor",
-    );
+    ));
   }
   // The two skip-notes' issue-number lists SHARE one character budget,
   // computed ONCE here and passed to both (F1-S9 slice 90.6a, PR #98
@@ -1832,13 +1837,36 @@ async function publishSummary(
   // could together reach 2x the single pre-split note's own bound; see
   // `splitSkippedBlockerNoteBudget`'s own docstring for the full
   // regression this closes).
-  const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(staleBlockerIssueNumbers);
+  const { staleMaxListLength, downgradedMaxListLength } = splitSkippedBlockerNoteBudget(
+    staleBlockerIssueNumbers,
+    downgradedClosingBlockerIssueNumbers,
+  );
   if (staleBlockerIssueNumbers.length > 0) {
-    body += "\n" + buildStaleBlockerSkippedNote(staleBlockerIssueNumbers, staleMaxListLength);
+    appendedSummarySections.push(buildStaleBlockerSkippedNote(staleBlockerIssueNumbers, staleMaxListLength));
   }
   if (downgradedClosingBlockerIssueNumbers.length > 0) {
-    body += "\n" + buildDowngradedClosingBlockerSkippedNote(downgradedClosingBlockerIssueNumbers, downgradedMaxListLength);
+    appendedSummarySections.push(
+      buildDowngradedClosingBlockerSkippedNote(
+        downgradedClosingBlockerIssueNumbers,
+        downgradedMaxListLength,
+      ),
+    );
   }
+  const body = assembleSummaryCommentBody(
+    (maxFindingsListLength) =>
+      buildSpecGroundingSummaryCommentBody(
+        joined,
+        spine.unreviewedClosingIssues,
+        { truncated: spine.truncated, diffTruncated: spine.diffTruncated },
+        blockersPostedInline,
+        degradeReason,
+        staleBlockerIssueNumbers,
+        downgradedClosingBlockerIssueNumbers,
+        currentClosingIssueNumbers,
+        maxFindingsListLength,
+      ),
+    appendedSummarySections,
+  );
 
   // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE
   // ACTUAL WRITE -- not merely before the `upsertSummaryComment` CALL
