@@ -73,6 +73,25 @@ interface GitHubReviewComment {
 }
 
 const COMMENT_PAGE_SIZE = 100;
+
+/** Result of generation-safe no-criteria cleanup, including fail-closed partial progress. */
+export type ClearStaleInlineBlockerCommentsResult =
+  | { readonly ok: true; readonly deletedCount: number }
+  | { readonly ok: false; readonly deletedCount: number };
+
+/**
+ * A no-criteria cleanup failure carrying the number of earlier deletes
+ * that completed while the destructive-boundary predicate still matched.
+ */
+export class InlineBlockerCleanupError extends Error {
+  readonly deletedCount: number;
+
+  constructor(deletedCount: number, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "InlineBlockerCleanupError";
+    this.deletedCount = deletedCount;
+  }
+}
 /** Same rationale and value as `publish-spec-grounding-comment-io.mts`'s own identical constant. */
 const MAX_COMMENT_PAGES = 50;
 
@@ -315,21 +334,30 @@ export async function postInlineCommentPlan(
  * or equal to this run's generation. Missing, malformed, and newer
  * generations remain untouched, so an older cleanup can never delete a
  * newer publisher's valid blocker even if workflow serialization weakens.
+ * After comment pagination, `preDeleteCheck` revalidates the caller's
+ * no-reference predicate immediately before every eligible DELETE. Drift
+ * stops the loop and reports the number already deleted while the predicate
+ * still matched.
  *
  * Tolerates a 404 on an individual DELETE (a human already resolved or
  * deleted that thread themselves, between this run's own fetch and the
  * delete) as a benign no-op — the SAME best-effort-cleanup tolerance
  * `publish-implement-patch.mts`'s own `removeNoAutoChainLabelBestEffort`
  * applies to its own identical "already gone" case. Any OTHER failure
- * propagates uncaught, so the caller can surface it as a genuine error
- * rather than silently leaving a stale thread in place.
+ * propagates as {@link InlineBlockerCleanupError}, preserving partial
+ * progress so the caller can surface both the genuine error and any
+ * blocker already removed. Automatic rate-limit retries are disabled for
+ * the DELETE itself: a delayed retry would otherwise occur without another
+ * `preDeleteCheck`, reopening the destructive-boundary race this function
+ * closes.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is publishing for.
  * @param currentGeneration - This run's validated `github.run_number`.
- * @returns The number of stale inline comments actually deleted.
+ * @param preDeleteCheck - Fresh no-reference verification at the destructive boundary.
+ * @returns Success with the delete count, or fail-closed drift with partial progress.
  */
 export async function clearStaleInlineBlockerComments(
   token: string,
@@ -337,7 +365,8 @@ export async function clearStaleInlineBlockerComments(
   repo: string,
   prNumber: number,
   currentGeneration: number,
-): Promise<number> {
+  preDeleteCheck: () => Promise<boolean>,
+): Promise<ClearStaleInlineBlockerCommentsResult> {
   if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
     throw new Error("currentGeneration must be a positive safe integer");
   }
@@ -357,17 +386,32 @@ export async function clearStaleInlineBlockerComments(
   );
   let deletedCount = 0;
   for (const comment of stale) {
+    let stillSafeToDelete: boolean;
     try {
-      await githubRequest(token, "DELETE", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`);
+      stillSafeToDelete = await preDeleteCheck();
+    } catch (err) {
+      throw new InlineBlockerCleanupError(deletedCount, err);
+    }
+    if (!stillSafeToDelete) {
+      return { ok: false, deletedCount };
+    }
+    try {
+      await githubRequest(
+        token,
+        "DELETE",
+        `/repos/${owner}/${repo}/pulls/comments/${comment.id}`,
+        undefined,
+        { maxRateLimitRetries: 0 },
+      );
       deletedCount += 1;
     } catch (err) {
       if (err instanceof GithubApiError && err.status === 404) {
         continue; // Already gone -- nothing to do, not a failure.
       }
-      throw err;
+      throw new InlineBlockerCleanupError(deletedCount, err);
     }
   }
-  return deletedCount;
+  return { ok: true, deletedCount };
 }
 
 /** A PR body's own derived closing-kind and any-kind linked-issue-reference sets — see {@link deriveLinkedReferenceIssueNumberSets}. */

@@ -1394,9 +1394,20 @@ export type ClearedSummaryReason = NoCriteriaReason | "race-detected-before-dele
  * a second one alongside it.
  *
  * @param reason - Why this run is clearing/updating this comment.
+ * @param deletedInlineBlockerCount - Blockers safely deleted before a later
+ *   destructive-boundary recheck detected drift.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildSpecGroundingClearedSummaryCommentBody(reason: ClearedSummaryReason): string {
+export function buildSpecGroundingClearedSummaryCommentBody(
+  reason: ClearedSummaryReason,
+  deletedInlineBlockerCount = 0,
+): string {
+  const raceCleanupDetail =
+    deletedInlineBlockerCount > 0
+      ? ` This run deleted ${deletedInlineBlockerCount} stale inline blocker comment(s) while the ` +
+        `no-reference snapshot still matched, then detected the state change and stopped; no ` +
+        `further blocker was deleted after drift.`
+      : "";
   const explanation =
     reason === "no-references"
       ? "An earlier run of the spec-grounded review posted a summary or fallback comment here, but " +
@@ -1413,8 +1424,8 @@ export function buildSpecGroundingClearedSummaryCommentBody(reason: ClearedSumma
         : "An earlier run of the spec-grounded review posted a summary or fallback comment here. " +
           "Since then, this PR's own state changed (its head moved, or its body now shows a new " +
           "closing-issue reference) in a way this run could not safely re-verify against the earlier " +
-          "review, so any inline blocker thread from that earlier run has been deliberately LEFT IN " +
-          "PLACE, not cleared: a fresh spec-grounded review run will re-evaluate them against this " +
+          "review, so remaining inline blocker threads from that earlier run have been deliberately " +
+          `LEFT IN PLACE, not cleared.${raceCleanupDetail} A fresh spec-grounded review run will re-evaluate them against this ` +
           "PR's current state.";
   return [
     `**This PR's linked-issue acceptance criteria are no longer being actively spec-ground.** ${explanation}`,

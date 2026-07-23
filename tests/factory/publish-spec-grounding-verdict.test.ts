@@ -455,6 +455,231 @@ describe("main — the outcome.json tri-state", () => {
     ]);
   });
 
+  it("reason=no-references: rechecks after inline-comment pagination and stops before DELETE when a closing reference is re-added in that window", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({ body: pullsCallCount < 3 ? "" : "Closes #12" });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body: `became applicable again\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(3);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/55"));
+    expect((patch?.body as { body: string }).body).toMatch(/left in place/i);
+    expect((patch?.body as { body: string }).body).not.toMatch(/deleted \d+ stale inline blocker/i);
+  });
+
+  it("reason=no-references: reports partial safe cleanup and stops subsequent deletes when state drifts between candidates", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({ body: pullsCallCount < 4 ? "" : "Closes #12" });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 55,
+            body: `stale summary\n<!-- roastpilot-factory:spec-grounding-summary:do-not-edit -->`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/55": () => jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(4);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+    const patch = calls.find((c) => c.method === "PATCH" && c.url.includes("/issues/comments/55"));
+    const body = (patch?.body as { body: string }).body;
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/no further blocker was deleted after drift/i);
+  });
+
+  it("reason=no-references: reports a completed delete when the next destructive-boundary recheck fails", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return pullsCallCount === 4
+          ? new Response("recheck unavailable", { status: 503 })
+          : prFetchHandler();
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (fallbackPost?.body as { body: string }).body;
+    expect(body).toMatch(/failed: GitHub API GET .* 503/i);
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/no further blocker was deleted after the failure/i);
+  });
+
+  it("reason=no-references: reports a completed delete when the next DELETE fails", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/78": () =>
+        new Response("forbidden", { status: 403 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+      expect.stringMatching(/comments\/78$/),
+    ]);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (fallbackPost?.body as { body: string }).body;
+    expect(body).toMatch(/failed: GitHub API DELETE .* 403/i);
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+  });
+
+  it("reason=no-references: retains the partial delete count when writing the drift summary fails", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    let summaryLookupCalls = 0;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({ body: pullsCallCount < 4 ? "" : "Closes #12" });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => {
+        summaryLookupCalls += 1;
+        return summaryLookupCalls === 1
+          ? new Response("rate limited", { status: 403 })
+          : jsonResponse([]);
+      },
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (fallbackPost?.body as { body: string }).body;
+    expect(body).toMatch(/failed: GitHub API GET .* 403/i);
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+  });
+
   it("reason=no-references: fails visibly before stale-state cleanup when GITHUB_RUN_NUMBER is invalid", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
@@ -678,6 +903,7 @@ describe("main — the outcome.json tri-state", () => {
     let summaryLookupCalls = 0;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => {
         summaryLookupCalls += 1;
         return summaryLookupCalls === 1

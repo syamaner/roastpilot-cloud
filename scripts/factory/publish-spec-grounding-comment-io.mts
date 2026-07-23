@@ -304,6 +304,8 @@ export async function publishFallback(
  *   review, Codex, P1/medium fold + round 3's own TOCTOU fold) — passed
  *   straight through to {@link buildSpecGroundingClearedSummaryCommentBody}
  *   so the posted message is accurate for the case that actually applies.
+ * @param deletedInlineBlockerCount - Blockers safely deleted before a later
+ *   destructive-boundary recheck detected drift.
  * @returns `true` if a prior comment was found and cleared in place,
  *   `false` if there was nothing to clear.
  */
@@ -313,11 +315,18 @@ export async function clearStaleSpecGroundingSummary(
   repo: string,
   prNumber: number,
   reason: ClearedSummaryReason,
+  deletedInlineBlockerCount = 0,
 ): Promise<boolean> {
   const existingId = await findExistingSummaryComment(token, owner, repo, prNumber);
   if (existingId === null) {
     return false;
   }
-  await upsertSummaryComment(token, owner, repo, prNumber, buildSpecGroundingClearedSummaryCommentBody(reason));
+  await upsertSummaryComment(
+    token,
+    owner,
+    repo,
+    prNumber,
+    buildSpecGroundingClearedSummaryCommentBody(reason, deletedInlineBlockerCount),
+  );
   return true;
 }

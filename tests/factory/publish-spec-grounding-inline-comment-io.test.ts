@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
+  InlineBlockerCleanupError,
   reconcileObsoleteInlineBlockerComments,
   findExistingInlineCommentId,
   findExistingInlineComments,
@@ -427,6 +428,8 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
 });
 
 describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
+  const alwaysSafe = async (): Promise<boolean> => true;
+
   it("deletes every prior inline comment carrying any one of the five blocker markers, ignoring non-blocker comments", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
@@ -456,9 +459,9 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2, alwaysSafe);
 
-    expect(deletedCount).toBe(2);
+    expect(result).toEqual({ ok: true, deletedCount: 2 });
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/2"))).toBe(true);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/3"))).toBe(false);
@@ -470,9 +473,9 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2, alwaysSafe);
 
-    expect(deletedCount).toBe(0);
+    expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
@@ -496,11 +499,11 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2, alwaysSafe);
 
     // Only the genuinely-deleted one counts -- the 404'd one was already
     // gone, tolerated as a no-op, not counted as a delete this run made.
-    expect(deletedCount).toBe(1);
+    expect(result).toEqual({ ok: true, deletedCount: 1 });
   });
 
   it("propagates a genuine (non-404) DELETE failure rather than silently swallowing it", async () => {
@@ -517,7 +520,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(clearStaleInlineBlockerComments("token", "o", "r", 5, 2)).rejects.toThrow(/403/);
+    await expect(clearStaleInlineBlockerComments("token", "o", "r", 5, 2, alwaysSafe)).rejects.toThrow(/403/);
   });
 
   it("retains newer, missing, and malformed generations while deleting only current-or-older bot-owned blockers", async () => {
@@ -568,9 +571,9 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 5);
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 5, alwaysSafe);
 
-    expect(deletedCount).toBe(2);
+    expect(result).toEqual({ ok: true, deletedCount: 2 });
     expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
       expect.stringMatching(/comments\/1$/),
       expect.stringMatching(/comments\/2$/),
@@ -584,11 +587,152 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await expect(
-        clearStaleInlineBlockerComments("token", "o", "r", 5, currentGeneration),
+        clearStaleInlineBlockerComments("token", "o", "r", 5, currentGeneration, alwaysSafe),
       ).rejects.toThrow(/positive safe integer/);
       expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+
+  it("stops before the first DELETE when the destructive-boundary recheck detects drift after pagination", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `stale\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2, async () => false);
+
+    expect(result).toEqual({ ok: false, deletedCount: 0 });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("reports partial progress and stops before a subsequent DELETE when state drifts between candidates", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    let preDeleteChecks = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [1, 2].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2, async () => {
+      preDeleteChecks += 1;
+      return preDeleteChecks === 1;
+    });
+
+    expect(result).toEqual({ ok: false, deletedCount: 1 });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/1$/),
+    ]);
+  });
+
+  it("preserves partial progress when a subsequent destructive-boundary recheck fails", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    let preDeleteChecks = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [1, 2].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = clearStaleInlineBlockerComments("token", "o", "r", 5, 2, async () => {
+      preDeleteChecks += 1;
+      if (preDeleteChecks === 2) {
+        throw new Error("recheck unavailable");
+      }
+      return true;
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      name: "InlineBlockerCleanupError",
+      message: "recheck unavailable",
+      deletedCount: 1,
+    });
+    await expect(promise).rejects.toBeInstanceOf(InlineBlockerCleanupError);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/1$/),
+    ]);
+  });
+
+  it("preserves partial progress when a subsequent DELETE fails with a non-404 response", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [1, 2].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response("forbidden", { status: 403 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = clearStaleInlineBlockerComments("token", "o", "r", 5, 2, alwaysSafe);
+
+    await expect(promise).rejects.toMatchObject({
+      name: "InlineBlockerCleanupError",
+      message: expect.stringMatching(/403/),
+      deletedCount: 1,
+    });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/1$/),
+      expect.stringMatching(/comments\/2$/),
+    ]);
+  });
+
+  it("does not retry a rate-limited DELETE without another destructive-boundary recheck", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    let preDeleteChecks = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `stale\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () =>
+        new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      clearStaleInlineBlockerComments("token", "o", "r", 5, 2, async () => {
+        preDeleteChecks += 1;
+        return true;
+      }),
+    ).rejects.toMatchObject({
+      name: "InlineBlockerCleanupError",
+      deletedCount: 0,
+    });
+    expect(preDeleteChecks).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
+  });
 });
 
 describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)", () => {
