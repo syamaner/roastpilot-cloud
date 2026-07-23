@@ -1782,6 +1782,53 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/references changed since this run's own earlier snapshot/i);
   });
 
+  it.each([
+    ["head", /head SHA changed after this run's reviewed snapshot/i, { headSha: "moved-head" }],
+    ["base", /base SHA changed after this run's reviewed snapshot/i, { baseSha: "moved-base" }],
+  ] as const)(
+    "fails closed with the specific %s-drift fallback and no delete when PR identity changes during reconciliation",
+    async (_dimension, expectedFallback, overrides) => {
+      const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+        verdict: { findings: [{ criterionId: "34:0", satisfied: false, rationale: "Still genuinely unmet." }] },
+        spine: {
+          entries: [{ issueNumber: 34, kind: "closing", criterionId: "34:0" }],
+          truncated: false,
+          unreviewedClosingIssues: [],
+          diffTruncated: false,
+          reviewedClosingIssueNumbers: [34],
+          reviewedBaseSha: TRUSTED_BASE_SHA,
+        },
+      });
+      process.env.OUTCOME_PATH = outcomePath;
+      process.env.VERDICT_PATH = verdictPath;
+      process.env.CRITERIA_SPINE_PATH = spinePath;
+      let prFetchCount = 0;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+          prFetchCount += 1;
+          return prFetchHandlerWithOverrides({
+            body: "",
+            ...(prFetchCount === 1 ? {} : overrides),
+          });
+        },
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      expect(prFetchCount).toBe(2);
+      expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+      const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+      const body = (post?.body as { body: string }).body;
+      expect(body).toMatch(expectedFallback);
+      expect(body).toMatch(/failing closed without deleting any blocker/i);
+    },
+  );
+
   it("FAILS CLOSED when the closing-reference set is the SAME SIZE but a DIFFERENT issue number between the snapshot and the reconcile's own internal re-verify (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1 -- the element-mismatch branch, distinct from the size-mismatch one)", async () => {
     const marker = criterionBlockerCommentMarker("34:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
