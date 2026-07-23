@@ -38,6 +38,11 @@ const ALLOWLIST_KEYS = new Set([
   "allowed_non_write_users",
 ]);
 
+type UnsafeAllowlistValue = {
+  readonly node: Node;
+  readonly description: string;
+};
+
 /**
  * One actionable violation of the audited workflow invariants.
  */
@@ -92,11 +97,11 @@ function pairKey(
     : undefined;
 }
 
-function findWildcardNode(
+function findUnsafeAllowlistValue(
   node: Node,
   resolveAlias: (alias: Node) => Node | undefined,
   seen: Set<Node> = new Set(),
-): Node | undefined {
+): UnsafeAllowlistValue | undefined {
   if (seen.has(node)) {
     return undefined;
   }
@@ -104,14 +109,24 @@ function findWildcardNode(
 
   if (isAlias(node)) {
     const resolved = resolveAlias(node);
-    return resolved && findWildcardNode(resolved, resolveAlias, seen)
-      ? node
+    const unsafeValue =
+      resolved &&
+      findUnsafeAllowlistValue(resolved, resolveAlias, seen);
+    return unsafeValue
+      ? { node, description: unsafeValue.description }
       : undefined;
   }
   if (isScalar(node)) {
-    return typeof node.value === "string" && node.value.trim() === "*"
-      ? node
-      : undefined;
+    if (typeof node.value !== "string") {
+      return undefined;
+    }
+    if (node.value.trim() === "*") {
+      return { node, description: 'a "*" wildcard' };
+    }
+    if (node.value.includes("${{")) {
+      return { node, description: "a dynamic GitHub expression" };
+    }
+    return undefined;
   }
   if (isSeq(node)) {
     for (const item of node.items) {
@@ -119,9 +134,13 @@ function findWildcardNode(
       if (!isNode(item)) {
         continue;
       }
-      const wildcard = findWildcardNode(item, resolveAlias, seen);
-      if (wildcard) {
-        return wildcard;
+      const unsafeValue = findUnsafeAllowlistValue(
+        item,
+        resolveAlias,
+        seen,
+      );
+      if (unsafeValue) {
+        return unsafeValue;
       }
     }
   }
@@ -177,12 +196,15 @@ function inspectWorkflowManifest(
       }
 
       if (ALLOWLIST_KEYS.has(key)) {
-        const wildcard = findWildcardNode(pair.value, resolveAlias);
-        if (wildcard) {
+        const unsafeValue = findUnsafeAllowlistValue(
+          pair.value,
+          resolveAlias,
+        );
+        if (unsafeValue) {
           violations.push({
             kind: "wildcard-allowlist",
-            line: nodeLine(wildcard, lineCounter),
-            detail: `"${key}" resolves to a "*" wildcard — must be an explicit allowlist`,
+            line: nodeLine(unsafeValue.node, lineCounter),
+            detail: `"${key}" resolves to ${unsafeValue.description} — must be a static explicit allowlist`,
           });
         }
       }
@@ -291,7 +313,11 @@ export function findUnpinnedActionReferences(
 }
 
 /**
- * Finds wildcard Claude action actor allowlists in structurally parsed YAML.
+ * Finds unsafe Claude action actor allowlists in structurally parsed YAML.
+ *
+ * Literal wildcards and dynamic GitHub expressions both fail closed because
+ * the audit cannot prove that a runtime expression resolves to an explicit
+ * actor list.
  *
  * @param fileContent - Raw YAML for one audited manifest.
  * @returns Wildcard allowlists, or parse violations when YAML is invalid.

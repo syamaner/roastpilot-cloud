@@ -384,11 +384,44 @@ describe("findWildcardAllowlistUsages (issue #102)", () => {
     ]);
   });
 
+  it.each([
+    ["allowed_bots", "${{ '*' }}"],
+    ["allowed_non_write_users", "${{ vars.ALLOWED_USERS }}"],
+    ["allowed_bots", "claude[bot],${{ vars.ALLOWED_BOTS }}"],
+  ])("rejects a dynamic %s value %s", (key, value) => {
+    const content = `with:\n  ${key}: "${value}"\n`;
+    expect(findWildcardAllowlistUsages(content)).toEqual([
+      expect.objectContaining({
+        kind: "wildcard-allowlist",
+        line: 2,
+        detail: expect.stringContaining("dynamic GitHub expression"),
+      }),
+    ]);
+  });
+
+  it("rejects an alias-backed dynamic allowlist sequence item", () => {
+    const content = [
+      'dynamic: &dynamic "${{ vars.ALLOWED_BOTS }}"',
+      "with:",
+      "  allowed_bots:",
+      "    - claude[bot]",
+      "    - *dynamic",
+    ].join("\n");
+    expect(findWildcardAllowlistUsages(content)).toEqual([
+      expect.objectContaining({
+        kind: "wildcard-allowlist",
+        line: 5,
+        detail: expect.stringContaining("dynamic GitHub expression"),
+      }),
+    ]);
+  });
+
   it("does not flag wildcards on unrelated keys or in comments", () => {
     const content = [
       "with:",
       '  file_glob: "*"',
       '  allowed_bots: claude # not "*"',
+      '  other_input: "${{ vars.ALLOWED_BOTS }}"',
     ].join("\n");
     expect(findWildcardAllowlistUsages(content)).toEqual([]);
   });
