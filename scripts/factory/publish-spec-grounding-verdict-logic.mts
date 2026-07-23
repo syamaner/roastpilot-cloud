@@ -676,25 +676,31 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
  *   count, including every skipped one, deliberately NOT filtered here —
  *   see issue #89 for the deeper "should the count/exit-code reflect only
  *   the still-referenced subset" design question, tracked ahead of the
- *   gate-enable decision #47. The HEADLINE's own "N of these were
- *   skipped" reconciliation below uses the UNION of this array and
- *   `downgradedClosingBlockerIssueNumbers` — see that param's own docs
+ *   gate-enable decision #47. The HEADLINE's reconciliation below uses
+ *   the UNION of this array and `downgradedClosingBlockerIssueNumbers`
+ *   to identify skipped issues, then counts every blocking FINDING tied
+ *   to them so both headline counts use the same unit (F1-S9 slice
+ *   90.6b, issue #90, Codex cid 3627450885) — see that param's own docs
  *   for why the union, not just this one bucket, is required there).
  * @param downgradedClosingBlockerIssueNumbers - The issue numbers
  *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
  *   references them, but no longer with a closing keyword — DOWNGRADED,
  *   as distinct from `staleBlockerIssueNumbers` (F1-S9 slice 90.6a, the
  *   stale-vs-downgraded bucket-split). Combined with
- *   `staleBlockerIssueNumbers` via union for the headline's own "N of
- *   these were skipped" reconciliation (PR #98 review, Codex, cid
- *   3626878151, P2 — a real regression the bucket-split itself
- *   introduced: before the split, `staleBlockerIssueNumbers` was the
- *   LUMPED no-longer-closing set, and this headline reconciled against
- *   ALL of it; narrowing the array passed in to de-referenced-only
- *   without ALSO widening the headline's own reconciliation would have
- *   silently stopped subtracting downgraded blockers from the "posted
- *   inline" count — overstating gate state for a downgrade-only or mixed
- *   run, on the exact repo where an inline thread IS the merge gate).
+ *   `staleBlockerIssueNumbers` via union to identify which issues' own
+ *   blocking findings belong in the headline reconciliation (PR #98
+ *   review, Codex, cid 3626878151, P2 — a real regression the bucket-
+ *   split itself introduced: before the split,
+ *   `staleBlockerIssueNumbers` was the LUMPED no-longer-closing set, and
+ *   this headline reconciled against ALL of it; narrowing the array
+ *   passed in to de-referenced-only without ALSO widening the
+ *   headline's own reconciliation would have silently stopped
+ *   subtracting downgraded blockers from the "posted inline" count —
+ *   overstating gate state for a downgrade-only or mixed run, on the
+ *   exact repo where an inline thread IS the merge gate). The union's
+ *   deduplicated ISSUE count is deliberately not rendered: the headline
+ *   instead counts each criterion/whole-issue blocker tied to the union,
+ *   matching `totalBlockerCount`'s finding unit (slice 90.6b).
  *   Kept SEPARATE from `staleBlockerIssueNumbers` as a parameter (rather
  *   than pre-unioned by the caller) so this function's own signature
  *   documents both buckets explicitly, matching how the two skip-notes
@@ -761,8 +767,18 @@ export function buildSpecGroundingSummaryCommentBody(
   const skippedBlockerIssueNumbers = [
     ...new Set([...staleBlockerIssueNumbers, ...downgradedClosingBlockerIssueNumbers]),
   ].sort((a, b) => a - b);
+  const skippedBlockerIssueNumberSet = new Set(skippedBlockerIssueNumbers);
   const criterionBlockers = joined.filter((e) => deriveSeverity(e) === "blocker");
   const nonBlocking = joined.filter((e) => deriveSeverity(e) !== "blocker");
+  // Count in the SAME unit as `totalBlockerCount` below: one finding per
+  // criterion blocker or unreviewed-closing-issue blocker, never one per
+  // deduplicated issue number. A single skipped issue can own multiple
+  // criterion findings, so using `skippedBlockerIssueNumbers.length` in
+  // the headline would make its two counts contradictory (issue #90
+  // slice 90.6b, Codex cid 3627450885).
+  const skippedBlockerCount =
+    criterionBlockers.filter((entry) => skippedBlockerIssueNumberSet.has(entry.issueNumber)).length +
+    unreviewedClosingIssues.filter((entry) => skippedBlockerIssueNumberSet.has(entry.issueNumber)).length;
   // KIND-AWARE, against CURRENT state (PR #96 review round 2, Codex, cid
   // 3626169268, BLOCKER) -- deliberately narrower than filtering
   // `criterionBlockers`/`unreviewedClosingIssues` themselves (those stay
@@ -827,15 +843,21 @@ export function buildSpecGroundingSummaryCommentBody(
     // thread or summary listing below -- reword the headline to say the
     // count is review-time and explicitly reconcile it against the
     // posted/listed subset, pointing at the separate skip-note(s) for the
-    // rest. Wording says "no longer CLOSING" (the honest common
-    // denominator for BOTH buckets), not "no longer referenced" (true
-    // only for the de-referenced bucket, false for the downgraded one,
-    // which IS still referenced).
+    // rest. The reconciliation count is ALSO in blocking-FINDING units,
+    // not deduplicated-issue units (F1-S9 slice 90.6b, issue #90, Codex
+    // cid 3627450885): two stale criteria on one issue count as two of
+    // the headline's findings, not one issue. Wording says "no longer
+    // CLOSING" (the honest common denominator for BOTH buckets), not "no
+    // longer referenced" (true only for the de-referenced bucket, false
+    // for the downgraded one, which IS still referenced).
+    const skippedFindingDescription =
+      skippedBlockerCount === 1
+        ? "1 blocking finding in that review-time total concerns an issue that is no longer a CLOSING obligation"
+        : `${skippedBlockerCount} blocking findings in that review-time total concern issues that are no longer CLOSING obligations`;
     const skippedReconciliation =
       skippedBlockerIssueNumbers.length > 0
-        ? ` (${skippedBlockerIssueNumbers.length} of these are no longer CLOSING obligations this PR's ` +
-          "current body makes — removed entirely, or downgraded to a non-closing reference — see the " +
-          "note(s) below, not repeated here.)"
+        ? ` (${skippedFindingDescription} in this PR's current body — removed entirely, or ` +
+          "downgraded to a non-closing reference — see the note(s) below, not repeated here.)"
         : "";
     // NO partial-posting wording (F1-S9 slice 90.6a, PR #99 review, Codex,
     // cid 3627145120 added one, cid 3627282617 removed it again -- see

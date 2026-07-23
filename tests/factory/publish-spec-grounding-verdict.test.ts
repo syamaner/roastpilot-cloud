@@ -1187,16 +1187,18 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/#99[\s\S]{0,80}still references them, but no longer with a closing keyword/i);
     // #12 never appears in either skip-note.
     expect(summaryBody).not.toMatch(/#12[\s\S]{0,40}were NOT posted inline/i);
-    // The HEADLINE's own reconciliation count (F1-S9 slice 90.6a, PR #98
-    // review, Codex, cid 3626878151, P2 -- proves the fix end-to-end, not
-    // just at the unit level): 4 blockers identified at review time
-    // (#12, #34, #78, #99); 3 of those (the UNION of both buckets -- #99
-    // de-referenced, #34+#78 downgraded) are no longer live closing
-    // obligations. Before this fix, the headline only subtracted the
-    // de-referenced bucket (1), claiming 3 blockers were posted inline as
-    // resolvable threads when only #12 actually was.
+    // The HEADLINE's own reconciliation count (F1-S9 slices 90.6a/90.6b,
+    // PR #98 review cids 3626878151 + 3627450885 -- proves both fixes
+    // end-to-end, not just at the unit level): 4 blocking FINDINGS
+    // identified at review time (#12, #34, #78, #99); 3 FINDINGS in the
+    // union of both issue buckets (#99 de-referenced, #34+#78 downgraded)
+    // are no longer live closing obligations. The two headline counts
+    // must stay in finding units, while the separate notes below list
+    // deduplicated issue numbers.
     expect(summaryBody).toContain("4 blocking finding(s)");
-    expect(summaryBody).toMatch(/3 of these are no longer closing obligations this pr's current body makes/i);
+    expect(summaryBody).toMatch(
+      /3 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+    );
   });
 
   it("SURVIVES Codex's own combined worst case (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626932819, P2): BOTH skip buckets large enough that either alone could reach the full shared budget -- 300 de-referenced + 300 downgraded, alongside a still-live blocker -- the assembled summary stays well within GitHub's 65,536-char comment limit and posts REAL content, never the generic could-not-run-to-completion fallback", async () => {
