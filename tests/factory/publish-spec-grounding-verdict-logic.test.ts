@@ -397,7 +397,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [],
       { truncated: false, diffTruncated: false },
       true, null, [], [], ALL_CLOSING);
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).not.toContain("SECRET_RATIONALE_TEXT");
   });
 
@@ -452,7 +452,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [{ issueNumber: 99, truncationKind: "fully-dropped" }],
       { truncated: false, diffTruncated: false },
       true, null, [], [], ALL_CLOSING);
-    expect(body).toContain("2 blocking finding(s)");
+    expect(body).toContain("2 current-applicable blocking finding(s)");
   });
 
   it("reports a dropped-closing-issue-only blocker count correctly when there are no criterion-level blockers at all", () => {
@@ -461,7 +461,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [{ issueNumber: 99, truncationKind: "fully-dropped" }],
       { truncated: false, diffTruncated: false },
       true, null, [], [], ALL_CLOSING);
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
   });
 
   it("reports that no unmet acceptance criteria were found at all when both inputs are empty AND neither truncation flag is set", () => {
@@ -546,7 +546,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       { truncated: true, diffTruncated: false },
       true, null, [], [], ALL_CLOSING);
     expect(body).toContain("may be incomplete");
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
   });
 
   it("does NOT overflow GitHub's 65,536-character comment limit for a fully schema-valid verdict at its own worst case, EVEN when the per-rationale cap alone isn't enough -- reports an omitted count instead of inflating without bound (PR #82 review, FOLD 3, LOW: the concrete case that surfaced this was ~34 non-blocking findings at the (then-uncapped) rationale length alone approaching ~70,000 characters; this test uses enough findings that even AFTER the per-rationale cap this session's fix added, the findings LIST itself still exceeds its own budget -- proving the list-level guard is a real second layer, not dead code the per-rationale cap alone already made unreachable)", () => {
@@ -657,7 +657,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [],
       { truncated: false, diffTruncated: true },
       true, null, [], [], ALL_CLOSING);
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).not.toContain("No blocking findings.");
   });
 
@@ -676,7 +676,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [],
       { truncated: false, diffTruncated: true },
       true, null, [], [], ALL_CLOSING);
-    expect(body).toContain("2 blocking finding(s)");
+    expect(body).toContain("2 current-applicable blocking finding(s)");
   });
 
   it("mentions the diff-truncation blocker class in the blocking-findings paragraph", () => {
@@ -714,7 +714,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).not.toMatch(/no addable line to anchor them to/i);
   });
 
-  it("for blockersPostedInline=true with SOME de-referenced (stale) blockers, labels the count as review-time and reconciles it against the posted subset, rather than implying every counted finding has its own inline thread (PR #87 review round 4b, Codex, P1)", () => {
+  it("reports one current-applicable finding and one separate review-time stale finding when each issue owns one criterion (F1-S9 slice 90.6b-2, issue #89)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -725,16 +725,15 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
       null,
       [34], [],
-      ALL_CLOSING);
-    expect(body).toMatch(/were identified at review time/i);
-    expect(body).toMatch(/still applicable to this pr's current linked issues/i);
+      new Set([12]));
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(
-      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+      /review also identified 1 blocking finding for an issue that is no longer a closing obligation/i,
     );
-    expect(body).toContain("2 blocking finding(s)");
+    expect(body).not.toContain("2 current-applicable blocking finding(s)");
   });
 
-  it("counts every stale criterion in the same blocking-finding unit as the headline when one issue owns multiple criteria (F1-S9 slice 90.6b, issue #90, Codex cid 3627450885)", () => {
+  it("keeps the headline current-applicable when one stale issue owns multiple criteria, while the review-time note counts both findings (F1-S9 slice 90.6b-2, issues #89/#90)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -747,16 +746,16 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       null,
       [34],
       [],
-      ALL_CLOSING,
+      new Set([12]),
     );
-    expect(body).toContain("3 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(
-      /2 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+      /review also identified 2 blocking findings for issues that are no longer closing obligations/i,
     );
-    expect(body).not.toMatch(/1 blocking finding in that review-time total/i);
+    expect(body).not.toContain("3 current-applicable blocking finding(s)");
   });
 
-  it("for blockersPostedInline=true with SOME DOWNGRADED (not de-referenced) blockers, ALSO reconciles the headline count -- a downgrade-only run must NOT claim every review-time blocker was posted inline (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626878151, P2 -- the bucket-split's own regression: narrowing staleBlockerIssueNumbers to de-referenced-only, without ALSO widening this headline's reconciliation to the union, silently stopped subtracting downgraded blockers from the count)", () => {
+  it("uses the same current-applicable count for a single live criterion plus a downgraded criterion", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -767,19 +766,15 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
       null,
       [], [34],
-      ALL_CLOSING);
-    expect(body).toMatch(/were identified at review time/i);
-    expect(body).toMatch(/still applicable to this pr's current linked issues/i);
+      new Set([12]));
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(
-      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+      /review also identified 1 blocking finding for an issue that is no longer a closing obligation/i,
     );
-    expect(body).toContain("2 blocking finding(s)");
-    // The specific regression this test guards: NOT claiming both were
-    // posted inline as resolvable threads when only #12 actually was.
-    expect(body).not.toMatch(/\*\*2 blocking finding\(s\)\*\* reported as separate, resolvable inline/i);
+    expect(body).not.toContain("2 current-applicable blocking finding(s)");
   });
 
-  it("reconciles the headline count against the UNION of both buckets, not just one, on a MIXED run (two criteria on one de-referenced issue, one downgraded criterion, one still live)", () => {
+  it("keeps a mixed de-referenced/downgraded/live run coherent in finding units", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -792,11 +787,32 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       true,
       null,
       [34], [56],
-      ALL_CLOSING);
+      new Set([12]));
     expect(body).toMatch(
-      /3 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+      /review also identified 3 blocking findings for issues that are no longer closing obligations/i,
     );
-    expect(body).toContain("4 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
+    expect(body).not.toContain("4 current-applicable blocking finding(s)");
+  });
+
+  it("reports no current-applicable blockers when every review-time criterion is stale or downgraded", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [
+        joined({ issueNumber: 34, kind: "closing", satisfied: false, criterionId: "34:0" }),
+        joined({ issueNumber: 56, kind: "closing", satisfied: false, criterionId: "56:0" }),
+      ],
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [34],
+      [56],
+      new Set(),
+    );
+    expect(body).toContain("No current-applicable blocking findings.");
+    expect(body).toMatch(/review-time blocking findings.*note\(s\) below/i);
+    expect(body).not.toMatch(/\*\*\d+ current-applicable blocking finding/);
+    expect(body).not.toContain("No unmet acceptance criteria were found at all.");
   });
 
   it("for blockersPostedInline=true with NO skipped blockers of either bucket, keeps the EXISTING wording verbatim (no reconciliation clause at all)", () => {
@@ -813,7 +829,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body).toMatch(/reported as separate, resolvable inline review comment\(s\) on this pr/i);
   });
 
-  it("for blockersPostedInline=false with SOME de-referenced (stale) blockers, ALSO labels the count as review-time in the anchor-fallback wording (PR #87 review round 4b, Codex, P1)", () => {
+  it("uses the current-applicable count in anchor-fallback wording when another review-time blocker is stale", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
@@ -824,12 +840,12 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       false,
       "no-addable-anchor",
       [34], [],
-      ALL_CLOSING);
-    expect(body).toMatch(/were identified at review time/i);
+      new Set([12]));
+    expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(
-      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+      /review also identified 1 blocking finding for an issue that is no longer a closing obligation/i,
     );
-    expect(body).toContain("2 blocking finding(s)");
+    expect(body).not.toContain("2 current-applicable blocking finding(s)");
   });
 
   // The "partial-posting" headline wording (postedInlineCount > 0, "X
@@ -895,13 +911,10 @@ describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness
       null,
       [], [],
       new Set([12]));
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("1 current-applicable blocking finding(s)");
   });
 
-  it("does NOT filter criterionBlockers/unreviewedClosingIssues themselves -- only the diff-truncation flag is kind-aware here; the deeper count-accuracy rework stays issue #89's own separate slice", () => {
-    // issue 34 is NOT in currentlyClosingIssueNumbers, yet its own
-    // criterion blocker still counts (review-time, unchanged) -- only the
-    // diff-truncation contribution is re-derived against current state.
+  it("filters criterion blockers as well as diff truncation when deriving the current-applicable count", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ issueNumber: 34, kind: "closing", satisfied: false })],
       [],
@@ -910,11 +923,10 @@ describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness
       null,
       [],
       [],
-      new Set(), // 34 no longer currently closing -- suppresses the diff-truncation term...
+      new Set(),
     );
-    // ... but the criterion blocker itself still counts (review-time-only,
-    // unaffected by this narrow fix) -- 1, not 2.
-    expect(body).toContain("1 blocking finding(s)");
+    expect(body).toContain("No blocking findings.");
+    expect(body).not.toMatch(/\*\*\d+ current-applicable blocking finding/);
   });
 });
 
