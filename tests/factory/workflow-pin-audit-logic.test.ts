@@ -2,7 +2,15 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { isAlias, isNode, isScalar, parseDocument, visit } from "yaml";
+import {
+  isAlias,
+  isMap,
+  isNode,
+  isScalar,
+  isSeq,
+  parseDocument,
+  type Node,
+} from "yaml";
 import {
   EXPECTED_CLAUDE_CODE_ACTION_SHA,
   findUnpinnedActionReferences,
@@ -15,6 +23,8 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const GITHUB_DIR = join(REPOSITORY_ROOT, ".github");
 const WORKFLOWS_DIR = join(GITHUB_DIR, "workflows");
 const ACTIONS_DIR = join(GITHUB_DIR, "actions");
+const WORKFLOW_FIXTURE_PATH = ".github/workflows/review.yml";
+const COMPOSITE_FIXTURE_PATH = ".github/actions/review/action.yml";
 
 function listFilesRecursively(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -27,61 +37,173 @@ function repositoryRelativePath(path: string): string {
   return relative(REPOSITORY_ROOT, path).replaceAll("\\", "/");
 }
 
-function manifestUsesPinnedClaudeAction(fileContent: string): boolean {
+function manifestUsesPinnedClaudeAction(
+  repositoryPath: string,
+  fileContent: string,
+): boolean {
   const document = parseDocument(fileContent);
-  let found = false;
-
-  visit(document, {
-    Pair(_key, pair): void {
-      if (
-        !isScalar(pair.key) ||
-        typeof pair.key.value !== "string" ||
-        pair.key.value.toLowerCase() !== "uses" ||
-        !isNode(pair.value)
-      ) {
-        return;
+  const normalizedPath = repositoryPath
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "");
+  const isWorkflowManifest =
+    /^\.github\/workflows\/.+\.ya?ml$/i.test(normalizedPath);
+  const isCompositeManifest =
+    /^\.github\/actions\/(?:.+\/)?action\.ya?ml$/i.test(normalizedPath);
+  const resolveNode = (value: unknown): Node | undefined => {
+    if (!isNode(value)) {
+      return undefined;
+    }
+    return isAlias(value) ? value.resolve(document) : value;
+  };
+  const mappingValue = (
+    mappingNode: Node | undefined,
+    key: string,
+  ): Node | undefined => {
+    const mapping = resolveNode(mappingNode);
+    if (!isMap(mapping)) {
+      return undefined;
+    }
+    for (const pair of mapping.items) {
+      const resolvedKey = resolveNode(pair.key);
+      if (isScalar(resolvedKey) && resolvedKey.value === key) {
+        return resolveNode(pair.value);
       }
-      const resolved = isAlias(pair.value)
-        ? pair.value.resolve(document)
-        : pair.value;
-      if (!isScalar(resolved) || typeof resolved.value !== "string") {
-        return;
-      }
-      const [actionPath, ref, ...extraAtSegments] = resolved.value
-        .trim()
-        .split("@");
-      const pathSegments = actionPath
-        .split(/[\\/]/)
-        .filter((segment) => segment.length > 0);
-      found ||= Boolean(
-        extraAtSegments.length === 0 &&
-          pathSegments.length === 2 &&
-          `${pathSegments[0]}/${pathSegments[1]}`.toLowerCase() ===
-            "anthropics/claude-code-action" &&
-          ref.toLowerCase() === EXPECTED_CLAUDE_CODE_ACTION_SHA.toLowerCase(),
-      );
-    },
-  });
+    }
+    return undefined;
+  };
+  const stepUsesPinnedAction = (stepNode: unknown): boolean => {
+    const uses = mappingValue(resolveNode(stepNode), "uses");
+    if (!isScalar(uses) || typeof uses.value !== "string") {
+      return false;
+    }
+    const [actionPath, ref, ...extraAtSegments] = uses.value
+      .trim()
+      .split("@");
+    const pathSegments = actionPath
+      .split(/[\\/]/)
+      .filter((segment) => segment.length > 0);
+    return Boolean(
+      extraAtSegments.length === 0 &&
+        pathSegments.length === 2 &&
+        `${pathSegments[0]}/${pathSegments[1]}`.toLowerCase() ===
+          "anthropics/claude-code-action" &&
+        typeof ref === "string" &&
+        ref.toLowerCase() === EXPECTED_CLAUDE_CODE_ACTION_SHA.toLowerCase(),
+    );
+  };
+  const stepsUsePinnedAction = (stepsNode: Node | undefined): boolean => {
+    const steps = resolveNode(stepsNode);
+    return (
+      isSeq(steps) &&
+      steps.items.some((step) => stepUsesPinnedAction(step))
+    );
+  };
 
-  return found;
+  const root = resolveNode(document.contents);
+  if (isWorkflowManifest) {
+    const jobs = resolveNode(mappingValue(root, "jobs"));
+    return Boolean(
+      isMap(jobs) &&
+        jobs.items.some((job) =>
+          stepsUsePinnedAction(mappingValue(resolveNode(job.value), "steps")),
+        ),
+    );
+  }
+  if (!isCompositeManifest) {
+    return false;
+  }
+
+  const runs = resolveNode(mappingValue(root, "runs"));
+  const using = mappingValue(runs, "using");
+  return Boolean(
+    isScalar(using) &&
+      typeof using.value === "string" &&
+      using.value === "composite" &&
+      stepsUsePinnedAction(mappingValue(runs, "steps")),
+  );
 }
 
 describe("manifestUsesPinnedClaudeAction", () => {
   it.each([
-    `env:\n  IMPLEMENT_AGENT_ACTION_REF: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
-    `# uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\nsteps: []\n`,
-    `steps:\n  - uses: attacker/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
-  ])("does not count a non-invocation as a live action use", (content) => {
-    expect(manifestUsesPinnedClaudeAction(content)).toBe(false);
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `env:\n  IMPLEMENT_AGENT_ACTION_REF: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `# uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\nsteps: []\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `env:\n  uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `metadata:\n  uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `steps:\n  - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `jobs:\n  review:\n    uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `jobs:\n  review:\n    steps:\n      - uses: attacker/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      "jobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@main\n",
+    ],
+    [
+      WORKFLOW_FIXTURE_PATH,
+      `runs:\n  using: composite\n  steps:\n    - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      COMPOSITE_FIXTURE_PATH,
+      `jobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      COMPOSITE_FIXTURE_PATH,
+      `runs:\n  steps:\n    - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+    [
+      COMPOSITE_FIXTURE_PATH,
+      `runs:\n  using: node20\n  steps:\n    - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    ],
+  ])(
+    "does not count a non-invocation as a live action use",
+    (path, content) => {
+      expect(manifestUsesPinnedClaudeAction(path, content)).toBe(false);
+    },
+  );
+
+  it("counts an alias-backed pinned workflow action step", () => {
+    const content = [
+      "env:",
+      `  REVIEW_ACTION: &review-action anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: *review-action",
+    ].join("\n");
+    expect(
+      manifestUsesPinnedClaudeAction(WORKFLOW_FIXTURE_PATH, content),
+    ).toBe(true);
   });
 
-  it("counts an alias-backed pinned action use", () => {
+  it("counts a pinned composite action step", () => {
     const content = [
-      `action: &review-action anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
-      "steps:",
-      "  - uses: *review-action",
+      "runs:",
+      "  using: composite",
+      "  steps:",
+      `    - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
     ].join("\n");
-    expect(manifestUsesPinnedClaudeAction(content)).toBe(true);
+    expect(
+      manifestUsesPinnedClaudeAction(COMPOSITE_FIXTURE_PATH, content),
+    ).toBe(true);
   });
 });
 
@@ -592,7 +714,10 @@ describe("live audited manifests (issue #102)", () => {
   it("finds at least one real pinned Claude action invocation", () => {
     const actionUseFiles = auditedFiles
       .filter((path) =>
-        manifestUsesPinnedClaudeAction(readFileSync(path, "utf8")),
+        manifestUsesPinnedClaudeAction(
+          repositoryRelativePath(path),
+          readFileSync(path, "utf8"),
+        ),
       )
       .map(repositoryRelativePath);
     expect(actionUseFiles.length).toBeGreaterThan(0);
