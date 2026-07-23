@@ -174,6 +174,7 @@ export function runCli(): void {
   } catch (error) {
     console.error(
       "Unknown-license check failed:",
+      /* v8 ignore next -- every validation path throws an Error instance. */
       error instanceof Error ? error.message : "unexpected error",
     );
     process.exitCode = 1;

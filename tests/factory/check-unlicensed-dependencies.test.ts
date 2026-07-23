@@ -333,6 +333,38 @@ describe("unlicensed dependency failure reporting", () => {
     expect(report).not.toContain("package-29@");
   });
 
+  it("substitutes labels for empty dependency fields", () => {
+    const report = formatUnlicensedDependencyReport([
+      {
+        manifest: " ",
+        name: "",
+        version: "\n",
+        packageUrl: "\t",
+        license: null,
+      },
+    ]);
+
+    expect(report).toContain(
+      "- 1. (empty name)@(empty version) | manifest: (empty manifest) | purl: (empty PURL)",
+    );
+  });
+
+  it("bounds individual dependency fields in the report", () => {
+    const longName = "x".repeat(241);
+    const report = formatUnlicensedDependencyReport([
+      {
+        manifest: "package-lock.json",
+        name: longName,
+        version: "1.0.0",
+        packageUrl: "pkg:npm/example@1.0.0",
+        license: null,
+      },
+    ]);
+
+    expect(report).toContain(`${"x".repeat(240)}...@1.0.0`);
+    expect(report).not.toContain(`${longName}@1.0.0`);
+  });
+
   it("wires the environment through main on the successful path", () => {
     process.env.INVALID_LICENSE_CHANGES = actionOutput([]);
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
