@@ -399,7 +399,9 @@ describe("main — the outcome.json tri-state", () => {
         jsonResponse([
           {
             id: 77,
-            body: `stale blocker\n<!-- roastpilot-factory:spec-grounding-blocker:criterion:12:0:do-not-edit -->`,
+            body:
+              `stale blocker\n<!-- roastpilot-factory:spec-grounding-blocker:criterion:12:0:do-not-edit -->\n` +
+              inlineBlockerGenerationMarker("1"),
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -414,6 +416,69 @@ describe("main — the outcome.json tri-state", () => {
     expect(patch).toBeDefined();
     expect((patch?.body as { body: string }).body).toMatch(/no longer references any issue/i);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/77"))).toBe(true);
+  });
+
+  it("reason=no-references: passes the validated run generation through and retains a newer run's blocker", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "5";
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body: `current generation\n${marker}\n${inlineBlockerGenerationMarker("5")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 78,
+            body: `newer generation\n${marker}\n${inlineBlockerGenerationMarker("6")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+  });
+
+  it("reason=no-references: fails visibly before stale-state cleanup when GITHUB_RUN_NUMBER is invalid", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "not-a-number";
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((c) => c.method === "PATCH" || c.method === "DELETE")).toBe(false);
+    expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    expect((fallbackPost?.body as { body: string }).body).toMatch(
+      /GITHUB_RUN_NUMBER.*not a valid positive integer/i,
+    );
   });
 
   it("reason=no-references BUT the PR moved (head SHA no longer matches trusted) since the review ran: FAILS CLOSED with a visible fallback (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262 -- Fork A's own new head-verify now runs BEFORE either reason-specific branch, uniformly matching publishSummary's own hasCriteria:true behavior, rather than the narrower graceful degrade isStillSafeToDeleteInlineBlockerThreads used to provide for this exact scenario)", async () => {

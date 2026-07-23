@@ -433,12 +433,16 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
         jsonResponse([
           {
             id: 1,
-            body: `stale criterion blocker\n${criterionBlockerCommentMarker("12:0")}`,
+            body:
+              `stale criterion blocker\n${criterionBlockerCommentMarker("12:0")}\n` +
+              inlineBlockerGenerationMarker("1"),
             user: { type: "Bot", login: "github-actions[bot]" },
           },
           {
             id: 2,
-            body: `stale diff-truncated blocker\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}`,
+            body:
+              `stale diff-truncated blocker\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("2"),
             user: { type: "Bot", login: "github-actions[bot]" },
           },
           {
@@ -452,7 +456,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
 
     expect(deletedCount).toBe(2);
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
@@ -466,7 +470,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
 
     expect(deletedCount).toBe(0);
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
@@ -478,12 +482,12 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
         jsonResponse([
           {
             id: 1,
-            body: `stale\n${criterionBlockerCommentMarker("12:0")}`,
+            body: `stale\n${criterionBlockerCommentMarker("12:0")}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
           {
             id: 2,
-            body: `stale\n${criterionBlockerCommentMarker("12:1")}`,
+            body: `stale\n${criterionBlockerCommentMarker("12:1")}\n${inlineBlockerGenerationMarker("2")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -492,7 +496,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5);
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 2);
 
     // Only the genuinely-deleted one counts -- the 404'd one was already
     // gone, tolerated as a no-op, not counted as a delete this run made.
@@ -505,7 +509,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
         jsonResponse([
           {
             id: 1,
-            body: `stale\n${criterionBlockerCommentMarker("12:0")}`,
+            body: `stale\n${criterionBlockerCommentMarker("12:0")}\n${inlineBlockerGenerationMarker("1")}`,
             user: { type: "Bot", login: "github-actions[bot]" },
           },
         ]),
@@ -513,8 +517,78 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(clearStaleInlineBlockerComments("token", "o", "r", 5)).rejects.toThrow(/403/);
+    await expect(clearStaleInlineBlockerComments("token", "o", "r", 5, 2)).rejects.toThrow(/403/);
   });
+
+  it("retains newer, missing, and malformed generations while deleting only current-or-older bot-owned blockers", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `older\n${marker}\n${inlineBlockerGenerationMarker("4")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body: `current\n${marker}\n${inlineBlockerGenerationMarker("5")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 3,
+            body: `newer\n${marker}\n${inlineBlockerGenerationMarker("6")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 4,
+            body: `legacy without generation\n${marker}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 5,
+            body:
+              `malformed generation\n${marker}\n` +
+              "<!-- roastpilot-factory:spec-grounding-blocker:generation:not-a-number:do-not-edit -->",
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 6,
+            body: `generation only\n${inlineBlockerGenerationMarker("4")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 7,
+            body: `wrong bot\n${marker}\n${inlineBlockerGenerationMarker("4")}`,
+            user: { type: "Bot", login: "some-other-bot" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletedCount = await clearStaleInlineBlockerComments("token", "o", "r", 5, 5);
+
+    expect(deletedCount).toBe(2);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/1$/),
+      expect.stringMatching(/comments\/2$/),
+    ]);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects an invalid current generation %s before reading or deleting comments",
+    async (currentGeneration) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        clearStaleInlineBlockerComments("token", "o", "r", 5, currentGeneration),
+      ).rejects.toThrow(/positive safe integer/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)", () => {

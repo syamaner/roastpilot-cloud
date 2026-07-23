@@ -1107,4 +1107,13 @@ describe("bodyContainsAnyBlockerMarker", () => {
       false,
     );
   });
+
+  it("does not treat the separate generation marker or an unknown shared-prefix marker as blocker identity", () => {
+    expect(bodyContainsAnyBlockerMarker(inlineBlockerGenerationMarker(TEST_GENERATION))).toBe(false);
+    expect(
+      bodyContainsAnyBlockerMarker(
+        "<!-- roastpilot-factory:spec-grounding-blocker:not-a-real-identity:do-not-edit -->",
+      ),
+    ).toBe(false);
+  });
 });

@@ -594,13 +594,12 @@ export function extractIssueNumberFromInlineBlockerMarker(body: string): number 
 }
 
 /**
- * Matches ANY of this module's five own marker shapes ({@link
+ * Matches exactly ANY of this module's five own identity-marker shapes ({@link
  * criterionBlockerCommentMarker}, {@link unreviewedClosingIssueCommentMarker},
  * {@link CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER}, {@link
  * UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER}, {@link
- * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}) as a single pattern — every one
- * shares the exact `<!-- roastpilot-factory:spec-grounding-blocker:...
- * :do-not-edit -->` prefix/suffix, varying only the middle segment. Used
+ * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}), excluding the separate generation
+ * marker and any unknown value that merely shares their prefix/suffix. Used
  * by the privileged publish entrypoint (PR #86 review, Codex, P2 —
  * clearing stale inline blocker comments when a PR's linked criteria
  * disappear entirely) to find "any inline blocker comment this workflow
@@ -608,7 +607,11 @@ export function extractIssueNumberFromInlineBlockerMarker(body: string): number 
  * plan (there is no plan at all once criteria are gone) to match a
  * specific marker against.
  */
-const ANY_BLOCKER_MARKER_LINE_PATTERN = /^<!-- roastpilot-factory:spec-grounding-blocker:.+:do-not-edit -->$/;
+const AGGREGATE_BLOCKER_MARKERS = new Set([
+  CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
+  UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+]);
 
 /**
  * Whether `body` carries any ONE of this module's five marker shapes as a
@@ -616,14 +619,21 @@ const ANY_BLOCKER_MARKER_LINE_PATTERN = /^<!-- roastpilot-factory:spec-grounding
  * substring" discipline {@link
  * import("./publish-spec-grounding-verdict-logic.mts").bodyContainsMarkerAsStandaloneLine}
  * applies to the summary comment's own single marker, generalized here to
- * "any of the five", via {@link ANY_BLOCKER_MARKER_LINE_PATTERN}.
+ * "any of the five", while rejecting the separate generation marker.
  *
  * @param body - A comment's own body text.
  * @returns `true` only if some line of `body`, trimmed, matches the shared
  *   blocker-marker pattern exactly.
  */
 export function bodyContainsAnyBlockerMarker(body: string): boolean {
-  return body.split(/\r?\n/).some((line) => ANY_BLOCKER_MARKER_LINE_PATTERN.test(line.trim()));
+  return body.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return (
+      CRITERION_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
+      ISSUE_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
+      AGGREGATE_BLOCKER_MARKERS.has(trimmed)
+    );
+  });
 }
 
 /**

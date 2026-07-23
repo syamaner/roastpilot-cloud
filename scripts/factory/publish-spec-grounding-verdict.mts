@@ -699,6 +699,8 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  *   same name for this run (F1-S9 slice 90.5) — every closing-kind issue
  *   `spec-grounding-runner.mts` discovered at review time, on this
  *   `hasCriteria: false` run.
+ * @param runNumber - This run's `GITHUB_RUN_NUMBER`, validated before the
+ *   `"no-references"` branch performs any stale-state cleanup.
  */
 async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   token: string,
@@ -708,6 +710,7 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   reason: NoCriteriaReason,
   trustedHeadSha: string,
   reviewedClosingIssueNumbers: readonly number[],
+  runNumber: string,
 ): Promise<void> {
   try {
     const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
@@ -736,6 +739,13 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
     }
 
     if (reason === "no-references") {
+      const currentGeneration = Number(runNumber);
+      if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
+        throw new Error(
+          `GITHUB_RUN_NUMBER ("${runNumber}") is not a valid positive integer -- refusing to clear ` +
+            `generation-marked inline blockers without a trustworthy generation to compare against.`,
+        );
+      }
       const stillSafeToDelete = await isStillSafeToDeleteInlineBlockerThreads(
         token,
         owner,
@@ -745,7 +755,13 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
       );
       if (stillSafeToDelete) {
         const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, "no-references");
-        const clearedInlineCount = await clearStaleInlineBlockerComments(token, owner, repo, prNumber);
+        const clearedInlineCount = await clearStaleInlineBlockerComments(
+          token,
+          owner,
+          repo,
+          prNumber,
+          currentGeneration,
+        );
         console.log(
           `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
             `reason=no-references, revalidated) — cleared stale prior state (summary comment cleared=` +
@@ -854,6 +870,7 @@ export async function main(): Promise<void> {
       outcome.noCriteriaReason,
       trustedHeadSha,
       outcome.reviewedClosingIssueNumbers,
+      runNumber,
     );
     return;
   }
