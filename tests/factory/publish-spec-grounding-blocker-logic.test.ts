@@ -1074,6 +1074,17 @@ describe("buildAnchorFallbackSummarySupplement (F1-S9 slice 3b-iii-c, issue #12)
     expect(body).toMatch(/github itself rejected the deterministic anchor/i);
     expect(body).not.toMatch(/no addable line to anchor them to/i);
   });
+
+  it("for a resolved-or-unknown PATCH, explains that PATCH does not reopen the thread", () => {
+    const body = buildAnchorFallbackSummarySupplement(
+      [joined()],
+      [],
+      false,
+      "resolved-or-unknown-patched-thread",
+    );
+    expect(body).toMatch(/already resolved|resolution could not be confirmed/i);
+    expect(body).toMatch(/patch does not reopen/i);
+  });
 });
 
 describe("bodyContainsAnyBlockerMarker", () => {

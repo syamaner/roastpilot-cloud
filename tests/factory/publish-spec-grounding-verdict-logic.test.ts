@@ -420,7 +420,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       false, "no-addable-anchor", [], [], ALL_CLOSING);
     expect(body).not.toMatch(/reported as separate, resolvable inline review comment/i);
     expect(body).not.toMatch(/see those threads, not this summary/i);
-    expect(body).toMatch(/listed below in THIS summary/i);
+    expect(body).toMatch(/unresolved inline review thread\(s\) and\/or the fallback details below/i);
     expect(body).toMatch(/no addable line to anchor them to/i);
     // NOT a categorical "no inline thread for them" claim (F1-S9 slice
     // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- see
@@ -803,6 +803,21 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       ALL_CLOSING);
     expect(body).toMatch(/github itself rejected the deterministic anchor/i);
     expect(body).not.toMatch(/no addable line to anchor them to/i);
+  });
+
+  it("for a resolved-or-unknown PATCH, explains that PATCH does not reopen the thread", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [joined({ kind: "closing", satisfied: false })],
+      [],
+      { truncated: false, diffTruncated: false },
+      false,
+      "resolved-or-unknown-patched-thread",
+      [],
+      [],
+      ALL_CLOSING,
+    );
+    expect(body).toMatch(/already resolved|resolution could not be confirmed/i);
+    expect(body).toMatch(/patch does not reopen/i);
   });
 
   it("reports one current-applicable finding and one separate review-time stale finding when each issue owns one criterion (F1-S9 slice 90.6b-2, issue #89)", () => {

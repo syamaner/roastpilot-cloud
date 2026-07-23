@@ -70,6 +70,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function reviewThreadsResponse(
+  nodes: readonly { readonly commentId: number; readonly isResolved: boolean }[],
+): Response {
+  return jsonResponse({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: nodes.map((node) => ({
+              isResolved: node.isResolved,
+              comments: { nodes: [{ fullDatabaseId: String(node.commentId) }] },
+            })),
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    },
+  });
+}
+
 function textResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
 }
@@ -1481,6 +1501,7 @@ describe("main — the happy path", () => {
           { id: 77, body: priorRunBody, user: { type: "Bot", login: "github-actions[bot]" } },
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved: false }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
     });
@@ -1501,6 +1522,42 @@ describe("main — the happy path", () => {
     expect(patchedBody).toContain(criterionBlockerCommentMarker("12:0"));
     expect(patchedBody).toContain(inlineBlockerGenerationMarker("2"));
     expect(patchedBody).not.toContain(inlineBlockerGenerationMarker("1"));
+  });
+
+  it("falls back and exits nonzero when a fully successful PATCH updated a resolved blocker thread", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body: `prior\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved: true }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/pulls/comments/77"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toContain("Missing the retry wrapper.");
+    expect(summaryBody).toMatch(/patch does not reopen a resolved thread/i);
   });
 
   it("skips posting an inline comment for a blocker whose issue is NO LONGER referenced in the PR's CURRENT body (a body-only edit removed it since the review ran), posting the still-referenced blocker normally and noting the skip in the summary, in ascending issue-number order regardless of the runner's own ordering (PR #87 review round 4, Codex, P1 -- symmetric to the delete-path TOCTOU fold)", async () => {
@@ -1856,7 +1913,7 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/#34 were NOT posted inline[\s\S]*still references them, but no longer with a closing keyword/i);
   });
 
-  it("KEEPS a PATCHED-but-possibly-RESOLVED blocker's own full detail VISIBLE in the ANCHOR-FALLBACK supplement after a MID-PLAN 422 -- the fail-safe fix (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2): an earlier version of this fix excluded #12 here because its own PATCH succeeded, but a PATCH can silently update an ALREADY-RESOLVED thread without reopening it (upsertInlineComment's own documented limitation) -- so excluding it could make a re-detected-but-resolved blocker vanish entirely (neither gating, nor listed). Keying the exclusion off fresh CREATEs only (never PATCHes) fixes that: #12 PATCHes an existing comment successfully and STAYS listed; #34 is the first genuine CREATE and gets a 422, degrading the whole plan; #56 is never attempted. The headline uses the simple all-listed wording -- the partial-split headline this fix's own PRIOR version added (cid 3627145120) was removed again, since createdMarkers is provably always empty on this branch (see buildSpecGroundingSummaryCommentBody's own docstring)", async () => {
+  it("keeps a PATCHed RESOLVED criterion blocker visible in fallback after a later first-CREATE 422", async () => {
     const stillLiveMarker = criterionBlockerCommentMarker("12:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1903,6 +1960,7 @@ describe("main — the happy path", () => {
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/201": () => jsonResponse({}),
       "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 201, isResolved: true }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -1920,24 +1978,20 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
     expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
     expect(summaryBody).not.toMatch(/no inline thread for them/i);
-    // #12's own PATCH succeeded, but that alone does NOT prove its thread
-    // is still gating -- it might already be RESOLVED. Conservatively
-    // STAYS visible here too, so a re-detected-but-resolved blocker can
-    // never silently vanish (the fail-safe fix this test pins).
+    // #12's own PATCH succeeded, but GraphQL confirms its thread is
+    // RESOLVED. It stays visible so PATCH's inability to reopen the thread
+    // cannot make the blocker disappear.
     expect(summaryBody).toContain("First rationale, already posted.");
     // #34 and #56 genuinely have no inline thread -- both belong in the fallback too.
     expect(summaryBody).toContain("Second rationale, 422 on create.");
     expect(summaryBody).toContain("Third rationale, never attempted.");
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
-    // The HEADLINE uses the SIMPLE all-listed wording -- ALL 3 findings,
-    // no partial split (createdMarkers is empty here: #12's success was a
-    // PATCH, not a CREATE, so nothing was excluded from anything).
     expect(summaryBody).toContain("3 current-applicable blocking finding(s)");
-    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary —/i);
+    expect(summaryBody).toMatch(/unresolved inline review thread\(s\) and\/or the fallback details below/i);
     expect(summaryBody).not.toMatch(/finding\(s\) are already covered by inline review comment/i);
   });
 
-  it("keeps BOTH a PATCHED criterion blocker AND the WHOLE-RUN diff-truncation blocker visible in the fallback when the diff-truncation comment itself is the one that 422s (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2 -- the fail-safe fix): #12 already has an inline comment and PATCHes successfully -- STAYS listed (possibly-resolved, conservatively kept); the diff-truncation aggregate has none and is the first genuine CREATE, which 422s, degrading the whole plan -- also listed, since it genuinely never posted", async () => {
+  it("excludes a PATCHed UNRESOLVED criterion blocker while keeping the later failed diff-truncation CREATE in fallback", async () => {
     const marker12 = criterionBlockerCommentMarker("12:0");
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -1976,6 +2030,7 @@ describe("main — the happy path", () => {
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/301": () => jsonResponse({}),
       "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 301, isResolved: false }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -1987,19 +2042,16 @@ describe("main — the happy path", () => {
     const summaryBody = (summaryPost?.body as { body: string }).body;
     // Review-time total: 1 criterion blocker + 1 diff-truncation term = 2.
     expect(summaryBody).toContain("2 current-applicable blocking finding(s)");
-    // The simple all-listed headline wording -- createdMarkers is empty
-    // (the diff-truncation comment's own CREATE failed; #12's own success
-    // was a PATCH, not a create), so nothing was excluded from anything.
-    expect(summaryBody).toMatch(/blocking finding\(s\)\*\* listed below in THIS summary —/i);
-    // #12's own rationale STAYS listed (conservatively kept -- its PATCH
-    // succeeded, but that thread could already be resolved).
-    expect(summaryBody).toContain("Still-live blocker rationale.");
+    expect(summaryBody).toMatch(/unresolved inline review thread\(s\) and\/or the fallback details below/i);
+    // #12's updated thread is confirmed unresolved, so its duplicate
+    // fallback detail is omitted while the real thread continues to gate.
+    expect(summaryBody).not.toContain("Still-live blocker rationale.");
     // The diff-truncation blocker's own detail is ALSO in the fallback --
     // it genuinely never posted at all.
     expect(summaryBody).toMatch(/this pr's own diff was truncated/i);
   });
 
-  it("applies the SAME fail-safe (keep-visible) treatment to unreviewedClosingIssues, not just criterion blockers, in the ANCHOR-FALLBACK supplement (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review, Codex, cid 3627282617, P2 -- the sibling filter, exercising the OTHER half of tryPostBlockersInline's fallback-subset computation): #78 already has an inline comment and PATCHes successfully -- STAYS listed; #90 is the first genuine CREATE and 422s, degrading the whole plan -- also listed, since it genuinely never posted", async () => {
+  it("excludes a PATCHed UNRESOLVED unreviewed-closing-issue blocker while keeping the later failed CREATE in fallback", async () => {
     const marker78 = unreviewedClosingIssueCommentMarker(78);
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [] },
@@ -2036,6 +2088,7 @@ describe("main — the happy path", () => {
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/301": () => jsonResponse({}),
       "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 301, isResolved: false }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -2053,16 +2106,15 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
     expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
     expect(summaryBody).not.toMatch(/no inline thread for them/i);
-    // #78's own PATCH succeeded, but that thread might already be
-    // RESOLVED -- conservatively STAYS listed here too, so it can never
-    // silently vanish.
-    expect(summaryBody).toMatch(/Issue #78: \*\*never reviewed at all\*\*/);
+    // #78's PATCHed thread is confirmed unresolved, so it remains actionable
+    // there and its duplicate fallback detail is omitted.
+    expect(summaryBody).not.toMatch(/Issue #78: \*\*never reviewed at all\*\*/);
     // #90 genuinely has no inline thread -- belongs in the fallback too.
     expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
   });
 
-  it("KEEPS an OVERFLOW criterion blocker VISIBLE in the anchor-fallback even when the AGGREGATE comment covering it already PATCHed successfully -- the aggregate/overflow boundary, conservative-by-construction under the create-vs-patch fail-safe (F1-S9 slice 90.6a, issue #90's own #378, PR #99 review round 5, cid 3627282617: a PATCH -- individual or aggregate -- never proves its thread isn't already RESOLVED, so `createdMarkers` stays empty for every entry here and NONE of the 6 criteria are excluded; this scenario still exercises the overflow/aggregate marker plumbing itself -- see `criterionCoveringMarkers`/`issueCoveringMarkers` -- but now proves the conservative KEEP outcome, the opposite of what an earlier, reverted round of this test asserted before that exclusion policy was found fail-open): 5 individual criterion blockers (12:0-12:4) all already PATCH successfully; the 6th (12:5) overflows into ONE aggregate comment, which ALSO already exists and PATCHes successfully; a separate unreviewed-closing issue (#90) is the first genuine CREATE in the whole plan and 422s, degrading it", async () => {
+  it("excludes criteria covered by PATCHed UNRESOLVED individual and aggregate threads while keeping a later failed CREATE in fallback", async () => {
     const individualMarkers = Array.from({ length: 5 }, (_unused, i) => criterionBlockerCommentMarker(`12:${i}`));
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: {
@@ -2120,6 +2172,11 @@ describe("main — the happy path", () => {
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/104": () => jsonResponse({}),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/200": () => jsonResponse({}),
       "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => new Response("Unprocessable Entity", { status: 422 }),
+      "POST /graphql": () =>
+        reviewThreadsResponse([
+          ...Array.from({ length: 5 }, (_unused, i) => ({ commentId: 100 + i, isResolved: false })),
+          { commentId: 200, isResolved: false },
+        ]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -2137,32 +2194,14 @@ describe("main — the happy path", () => {
     expect(summaryBody).toMatch(/resolve any inline thread that already exists for one of these first/i);
     expect(summaryBody).not.toMatch(/could not be posted as inline comments/i);
     expect(summaryBody).not.toMatch(/no inline thread for them/i);
-    // ALL SEVEN findings (6 criteria + issue #90) count as still applicable
-    // -- none of the six criteria were ever a fresh CREATE (every one
-    // already PATCHed an existing comment, individual or aggregate), so
-    // `createdMarkers` is empty and the create-vs-patch fail-safe excludes
-    // nothing: a PATCH alone never proves the thread isn't already
-    // RESOLVED, so every one of the six stays in the conservatively-kept
-    // set (contrast the old, reverted policy, under which all six would
-    // have been excluded and the headline would have said "1 blocking
-    // finding(s)").
+    // The headline remains the review-time total, while the fallback details
+    // include only #90: all six criteria remain actionable through confirmed
+    // unresolved threads.
     expect(summaryBody).toContain("7 current-applicable blocking finding(s)");
-    // `buildAnchorFallbackSummarySupplement` has its own, SEPARATE display
-    // cap (MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS, unrelated to
-    // createdMarkers) on how many criteria it lists individually before
-    // folding the remainder into a "N more" aggregate note -- so 12:0-12:4
-    // render individually and 12:5 (the overflow entry whose own
-    // INDIVIDUAL marker was never used in the plan, only the shared
-    // AGGREGATE marker) folds into that note instead. THE KEY ASSERTION:
-    // that fold is purely a DISPLAY-density choice, not an exclusion --
-    // 12:5 is still counted in "7 current-applicable blocking finding(s)" above, proving
-    // `criterionCoveringMarkers`/`issueCoveringMarkers` still correctly
-    // resolves the aggregate-covered entry to "not a fresh CREATE" (kept),
-    // rather than wrongly treating it as excluded.
     for (let i = 0; i < 5; i++) {
-      expect(summaryBody).toContain(`Rationale for 12:${i}.`);
+      expect(summaryBody).not.toContain(`Rationale for 12:${i}.`);
     }
-    expect(summaryBody).toMatch(/1 more unmet acceptance criterion\(a\) also treated as unsatisfied/i);
+    expect(summaryBody).not.toMatch(/more unmet acceptance criterion\(a\) also treated as unsatisfied/i);
     // #90 genuinely has no inline thread -- belongs in the fallback.
     expect(summaryBody).toMatch(/Issue #90: \*\*never reviewed at all\*\*/);
     expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(6);
@@ -2543,7 +2582,7 @@ describe("main — the happy path", () => {
     const post = calls.find((c) => c.method === "POST");
     const body = (post?.body as { body: string }).body;
     expect(body).toContain("1 current-applicable blocking finding(s)");
-    expect(body).toMatch(/listed below in THIS summary/i);
+    expect(body).toMatch(/unresolved inline review thread\(s\) and\/or the fallback details below/i);
     expect(body).toContain("Missing the retry wrapper.");
     // NOT a categorical "no inline thread for them" claim (F1-S9 slice
     // 90.6a, PR #99 review, Codex, cid 3627450889, P2) -- see the sibling
@@ -2574,7 +2613,7 @@ describe("main — the happy path", () => {
     const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
     const body = (summaryPost?.body as { body: string }).body;
     expect(body).toContain("1 current-applicable blocking finding(s)");
-    expect(body).toMatch(/listed below in THIS summary/i);
+    expect(body).toMatch(/unresolved inline review thread\(s\) and\/or the fallback details below/i);
     expect(body).toContain("Missing the retry wrapper.");
     // A graceful degrade, NOT the "pipeline broke" fallback wording --
     // the summary itself was still built and posted successfully.
@@ -2770,6 +2809,59 @@ describe("main — the happy path", () => {
     expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(/this pr's own diff was truncated/i);
   });
+
+  it.each([
+    ["unresolved", false, undefined, false],
+    ["resolved", true, 1, true],
+  ] as const)(
+    "filters a PATCHed %s diff-truncation aggregate by its thread resolution",
+    async (_state, isResolved, expectedExitCode, expectsFallbackDetail) => {
+      const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+        verdict: {
+          findings: [{ criterionId: "12:0", satisfied: true, rationale: "Satisfied against a truncated diff." }],
+        },
+        spine: {
+          entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+          truncated: false,
+          unreviewedClosingIssues: [],
+          diffTruncated: true,
+          reviewedClosingIssueNumbers: [12],
+          reviewedBaseSha: TRUSTED_BASE_SHA,
+        },
+      });
+      process.env.OUTCOME_PATH = outcomePath;
+      process.env.VERDICT_PATH = verdictPath;
+      process.env.CRITERIA_SPINE_PATH = spinePath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+          prFetchHandlerWithOverrides({ body: "Closes #12" }),
+        [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+          textResponse(DIFF_WITH_ANCHOR),
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+          jsonResponse([
+            {
+              id: 77,
+              body:
+                `prior\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+                inlineBlockerGenerationMarker("1"),
+              user: { type: "Bot", login: "github-actions[bot]" },
+            },
+          ]),
+        "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+        "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved }]),
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(expectedExitCode);
+      const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+      const summaryBody = (summaryPost?.body as { body: string }).body;
+      expect(summaryBody.includes("**This PR's own diff was truncated**")).toBe(expectsFallbackDetail);
+    },
+  );
 
   it("does not re-post or keep counting a diff-truncation blocker after its only closing reference is downgraded, and deletes the obsolete prior aggregate (F1-S9 slices 90.5b and 90.6a-3)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
