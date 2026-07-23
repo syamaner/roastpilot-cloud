@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { isAlias, isNode, isScalar, parseDocument, visit } from "yaml";
 import {
   EXPECTED_CLAUDE_CODE_ACTION_SHA,
   findUnpinnedActionReferences,
@@ -25,6 +26,64 @@ function listFilesRecursively(directory: string): string[] {
 function repositoryRelativePath(path: string): string {
   return relative(REPOSITORY_ROOT, path).replaceAll("\\", "/");
 }
+
+function manifestUsesPinnedClaudeAction(fileContent: string): boolean {
+  const document = parseDocument(fileContent);
+  let found = false;
+
+  visit(document, {
+    Pair(_key, pair): void {
+      if (
+        !isScalar(pair.key) ||
+        typeof pair.key.value !== "string" ||
+        pair.key.value.toLowerCase() !== "uses" ||
+        !isNode(pair.value)
+      ) {
+        return;
+      }
+      const resolved = isAlias(pair.value)
+        ? pair.value.resolve(document)
+        : pair.value;
+      if (!isScalar(resolved) || typeof resolved.value !== "string") {
+        return;
+      }
+      const [actionPath, ref, ...extraAtSegments] = resolved.value
+        .trim()
+        .split("@");
+      const pathSegments = actionPath
+        .split(/[\\/]/)
+        .filter((segment) => segment.length > 0);
+      found ||= Boolean(
+        extraAtSegments.length === 0 &&
+          pathSegments.length === 2 &&
+          `${pathSegments[0]}/${pathSegments[1]}`.toLowerCase() ===
+            "anthropics/claude-code-action" &&
+          ref.toLowerCase() === EXPECTED_CLAUDE_CODE_ACTION_SHA.toLowerCase(),
+      );
+    },
+  });
+
+  return found;
+}
+
+describe("manifestUsesPinnedClaudeAction", () => {
+  it.each([
+    `env:\n  IMPLEMENT_AGENT_ACTION_REF: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+    `# uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\nsteps: []\n`,
+    `steps:\n  - uses: attacker/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}\n`,
+  ])("does not count a non-invocation as a live action use", (content) => {
+    expect(manifestUsesPinnedClaudeAction(content)).toBe(false);
+  });
+
+  it("counts an alias-backed pinned action use", () => {
+    const content = [
+      `action: &review-action anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
+      "steps:",
+      "  - uses: *review-action",
+    ].join("\n");
+    expect(manifestUsesPinnedClaudeAction(content)).toBe(true);
+  });
+});
 
 describe("isWorkflowPinAuditManifestPath (issue #102)", () => {
   it.each([
@@ -528,6 +587,15 @@ describe("live audited manifests (issue #102)", () => {
       .map(repositoryRelativePath)
       .sort();
     expect(auditedFiles.map(repositoryRelativePath).sort()).toEqual(expected);
+  });
+
+  it("finds at least one real pinned Claude action invocation", () => {
+    const actionUseFiles = auditedFiles
+      .filter((path) =>
+        manifestUsesPinnedClaudeAction(readFileSync(path, "utf8")),
+      )
+      .map(repositoryRelativePath);
+    expect(actionUseFiles.length).toBeGreaterThan(0);
   });
 
   it("covers the live IMPLEMENT_AGENT_ACTION_REF provenance scalar", () => {
