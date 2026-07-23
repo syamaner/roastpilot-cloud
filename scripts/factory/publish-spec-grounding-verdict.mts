@@ -773,6 +773,7 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
             prNumber,
             "race-detected-before-delete",
             clearResult.deletedCount,
+            clearResult.deletedCount > 0,
           );
           console.log(
             `PR #${prNumber}'s state changed at the inline-blocker destructive boundary — stopped ` +
@@ -818,14 +819,23 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
         `any prior inline blocker thread(s) were deliberately LEFT UNTOUCHED, not cleared.`,
     );
   } catch (err) {
+    let cleanupErrorPhase: "pre-delete-check" | "delete" | null = null;
     if (err instanceof InlineBlockerCleanupError) {
       deletedInlineBlockerCount = err.deletedCount;
+      cleanupErrorPhase = err.phase;
     }
     const partialCleanupDetail =
-      deletedInlineBlockerCount > 0
-        ? ` This run deleted ${deletedInlineBlockerCount} stale inline blocker comment(s) while the ` +
-          `no-reference snapshot still matched; no further blocker was deleted after the failure.`
-        : "";
+      cleanupErrorPhase === "delete"
+        ? deletedInlineBlockerCount > 0
+          ? ` This run confirmed ${deletedInlineBlockerCount} stale inline blocker comment(s) deleted ` +
+            `while the no-reference snapshot still matched. The failed DELETE request's outcome is ` +
+            `unknown, and no later candidate DELETE was attempted.`
+          : ` No DELETE received a confirmed-success response before the failure. The failed DELETE ` +
+            `request's outcome is unknown, and no later candidate DELETE was attempted.`
+        : deletedInlineBlockerCount > 0
+          ? ` This run confirmed ${deletedInlineBlockerCount} stale inline blocker comment(s) deleted ` +
+            `while the no-reference snapshot still matched; no further DELETE was attempted after the failure.`
+          : "";
     await publishFallback(token, owner, repo, prNumber, [
       `PR #${prNumber} has no unmet linked-issue criteria left to review, but clearing its prior ` +
         `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}.${partialCleanupDetail}`,

@@ -306,8 +306,10 @@ export async function publishFallback(
  *   so the posted message is accurate for the case that actually applies.
  * @param deletedInlineBlockerCount - Blockers safely deleted before a later
  *   destructive-boundary recheck detected drift.
- * @returns `true` if a prior comment was found and cleared in place,
- *   `false` if there was nothing to clear.
+ * @param createIfMissing - Whether partial destructive progress requires a
+ *   visible summary even when no prior summary comment exists.
+ * @returns `true` if a summary was updated or created, `false` if there was
+ *   nothing to clear and `createIfMissing` was false.
  */
 export async function clearStaleSpecGroundingSummary(
   token: string,
@@ -316,10 +318,21 @@ export async function clearStaleSpecGroundingSummary(
   prNumber: number,
   reason: ClearedSummaryReason,
   deletedInlineBlockerCount = 0,
+  createIfMissing = false,
 ): Promise<boolean> {
   const existingId = await findExistingSummaryComment(token, owner, repo, prNumber);
   if (existingId === null) {
-    return false;
+    if (!createIfMissing) {
+      return false;
+    }
+    await upsertSummaryComment(
+      token,
+      owner,
+      repo,
+      prNumber,
+      buildSpecGroundingClearedSummaryCommentBody(reason, deletedInlineBlockerCount),
+    );
+    return true;
   }
   await upsertSummaryComment(
     token,

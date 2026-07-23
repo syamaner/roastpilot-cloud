@@ -549,6 +549,47 @@ describe("main — the outcome.json tri-state", () => {
     expect(body).toMatch(/no further blocker was deleted after drift/i);
   });
 
+  it("reason=no-references: creates a visible warning after partial cleanup when no prior summary exists", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({ body: pullsCallCount < 4 ? "" : "Closes #12" });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 56 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/remaining inline blocker threads[\s\S]*left in place/i);
+  });
+
   it("reason=no-references: reports a completed delete when the next destructive-boundary recheck fails", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
@@ -589,8 +630,8 @@ describe("main — the outcome.json tri-state", () => {
     const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
     const body = (fallbackPost?.body as { body: string }).body;
     expect(body).toMatch(/failed: GitHub API GET .* 503/i);
-    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
-    expect(body).toMatch(/no further blocker was deleted after the failure/i);
+    expect(body).toMatch(/confirmed 1 stale inline blocker comment\(s\) deleted/i);
+    expect(body).toMatch(/no further DELETE was attempted after the failure/i);
   });
 
   it("reason=no-references: reports a completed delete when the next DELETE fails", async () => {
@@ -630,7 +671,48 @@ describe("main — the outcome.json tri-state", () => {
     const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
     const body = (fallbackPost?.body as { body: string }).body;
     expect(body).toMatch(/failed: GitHub API DELETE .* 403/i);
-    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/confirmed 1 stale inline blocker comment\(s\) deleted/i);
+    expect(body).toMatch(/failed DELETE request's outcome is unknown/i);
+    expect(body).toMatch(/no later candidate DELETE was attempted/i);
+  });
+
+  it("reason=no-references: reports an unknown outcome when the first DELETE fails", async () => {
+    const outcomePath = join(workdir, "outcome.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [77, 78].map((id) => ({
+            id,
+            body: `stale ${id}\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () =>
+        new Response("server error", { status: 503 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/77$/),
+    ]);
+    const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
+    const body = (fallbackPost?.body as { body: string }).body;
+    expect(body).toMatch(/no DELETE received a confirmed-success response/i);
+    expect(body).toMatch(/failed DELETE request's outcome is unknown/i);
+    expect(body).toMatch(/no later candidate DELETE was attempted/i);
   });
 
   it("reason=no-references: retains the partial delete count when writing the drift summary fails", async () => {
@@ -677,7 +759,7 @@ describe("main — the outcome.json tri-state", () => {
     const fallbackPost = calls.find((c) => c.method === "POST" && c.url.includes("/issues/83/comments"));
     const body = (fallbackPost?.body as { body: string }).body;
     expect(body).toMatch(/failed: GitHub API GET .* 403/i);
-    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/confirmed 1 stale inline blocker comment\(s\) deleted/i);
   });
 
   it("reason=no-references: fails visibly before stale-state cleanup when GITHUB_RUN_NUMBER is invalid", async () => {

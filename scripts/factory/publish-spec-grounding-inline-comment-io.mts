@@ -79,17 +79,23 @@ export type ClearStaleInlineBlockerCommentsResult =
   | { readonly ok: true; readonly deletedCount: number }
   | { readonly ok: false; readonly deletedCount: number };
 
+/** Operation phase that failed during generation-safe no-criteria cleanup. */
+export type InlineBlockerCleanupErrorPhase = "pre-delete-check" | "delete";
+
 /**
  * A no-criteria cleanup failure carrying the number of earlier deletes
- * that completed while the destructive-boundary predicate still matched.
+ * confirmed by successful responses while the destructive-boundary
+ * predicate still matched.
  */
 export class InlineBlockerCleanupError extends Error {
   readonly deletedCount: number;
+  readonly phase: InlineBlockerCleanupErrorPhase;
 
-  constructor(deletedCount: number, cause: unknown) {
+  constructor(deletedCount: number, phase: InlineBlockerCleanupErrorPhase, cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "InlineBlockerCleanupError";
     this.deletedCount = deletedCount;
+    this.phase = phase;
   }
 }
 /** Same rationale and value as `publish-spec-grounding-comment-io.mts`'s own identical constant. */
@@ -390,7 +396,7 @@ export async function clearStaleInlineBlockerComments(
     try {
       stillSafeToDelete = await preDeleteCheck();
     } catch (err) {
-      throw new InlineBlockerCleanupError(deletedCount, err);
+      throw new InlineBlockerCleanupError(deletedCount, "pre-delete-check", err);
     }
     if (!stillSafeToDelete) {
       return { ok: false, deletedCount };
@@ -408,7 +414,7 @@ export async function clearStaleInlineBlockerComments(
       if (err instanceof GithubApiError && err.status === 404) {
         continue; // Already gone -- nothing to do, not a failure.
       }
-      throw new InlineBlockerCleanupError(deletedCount, err);
+      throw new InlineBlockerCleanupError(deletedCount, "delete", err);
     }
   }
   return { ok: true, deletedCount };

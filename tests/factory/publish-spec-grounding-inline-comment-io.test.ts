@@ -431,10 +431,11 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
   const alwaysSafe = async (): Promise<boolean> => true;
 
   it("preserves a non-Error cleanup cause as a readable typed error", () => {
-    expect(new InlineBlockerCleanupError(2, "raw rejection")).toMatchObject({
+    expect(new InlineBlockerCleanupError(2, "delete", "raw rejection")).toMatchObject({
       name: "InlineBlockerCleanupError",
       message: "raw rejection",
       deletedCount: 2,
+      phase: "delete",
       cause: "raw rejection",
     });
   });
@@ -677,6 +678,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
       name: "InlineBlockerCleanupError",
       message: "recheck unavailable",
       deletedCount: 1,
+      phase: "pre-delete-check",
     });
     await expect(promise).rejects.toBeInstanceOf(InlineBlockerCleanupError);
     expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
@@ -706,6 +708,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
       name: "InlineBlockerCleanupError",
       message: expect.stringMatching(/403/),
       deletedCount: 1,
+      phase: "delete",
     });
     expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
       expect.stringMatching(/comments\/1$/),
@@ -738,6 +741,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     ).rejects.toMatchObject({
       name: "InlineBlockerCleanupError",
       deletedCount: 0,
+      phase: "delete",
     });
     expect(preDeleteChecks).toBe(1);
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
