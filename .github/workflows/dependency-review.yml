@@ -17,7 +17,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
       - name: Dependency Review
+        id: dependency-review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
@@ -51,3 +57,8 @@ jobs:
             GPL-3.0-only, GPL-3.0-or-later,
             AGPL-1.0-only, AGPL-1.0-or-later,
             AGPL-3.0-only, AGPL-3.0-or-later
+
+      - name: Fail on undetected dependency licenses
+        env:
+          INVALID_LICENSE_CHANGES: ${{ steps.dependency-review.outputs.invalid-license-changes }}
+        run: node --experimental-strip-types scripts/factory/check-unlicensed-dependencies.mts
