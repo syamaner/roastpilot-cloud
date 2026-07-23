@@ -679,8 +679,32 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       ALL_CLOSING);
     expect(body).toMatch(/were identified at review time/i);
     expect(body).toMatch(/still applicable to this pr's current linked issues/i);
-    expect(body).toMatch(/1 of these are no longer closing obligations this pr's current body makes/i);
+    expect(body).toMatch(
+      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+    );
     expect(body).toContain("2 blocking finding(s)");
+  });
+
+  it("counts every stale criterion in the same blocking-finding unit as the headline when one issue owns multiple criteria (F1-S9 slice 90.6b, issue #90, Codex cid 3627450885)", () => {
+    const body = buildSpecGroundingSummaryCommentBody(
+      [
+        joined({ issueNumber: 12, kind: "closing", satisfied: false }),
+        joined({ issueNumber: 34, kind: "closing", satisfied: false, criterionId: "34:0" }),
+        joined({ issueNumber: 34, kind: "closing", satisfied: false, criterionId: "34:1" }),
+      ],
+      [],
+      { truncated: false, diffTruncated: false },
+      true,
+      null,
+      [34],
+      [],
+      ALL_CLOSING,
+    );
+    expect(body).toContain("3 blocking finding(s)");
+    expect(body).toMatch(
+      /2 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+    );
+    expect(body).not.toMatch(/1 blocking finding in that review-time total/i);
   });
 
   it("for blockersPostedInline=true with SOME DOWNGRADED (not de-referenced) blockers, ALSO reconciles the headline count -- a downgrade-only run must NOT claim every review-time blocker was posted inline (F1-S9 slice 90.6a, PR #98 review, Codex, cid 3626878151, P2 -- the bucket-split's own regression: narrowing staleBlockerIssueNumbers to de-referenced-only, without ALSO widening this headline's reconciliation to the union, silently stopped subtracting downgraded blockers from the count)", () => {
@@ -697,18 +721,21 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       ALL_CLOSING);
     expect(body).toMatch(/were identified at review time/i);
     expect(body).toMatch(/still applicable to this pr's current linked issues/i);
-    expect(body).toMatch(/1 of these are no longer closing obligations this pr's current body makes/i);
+    expect(body).toMatch(
+      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+    );
     expect(body).toContain("2 blocking finding(s)");
     // The specific regression this test guards: NOT claiming both were
     // posted inline as resolvable threads when only #12 actually was.
     expect(body).not.toMatch(/\*\*2 blocking finding\(s\)\*\* reported as separate, resolvable inline/i);
   });
 
-  it("reconciles the headline count against the UNION of both buckets, not just one, on a MIXED run (one de-referenced, one downgraded, one still live)", () => {
+  it("reconciles the headline count against the UNION of both buckets, not just one, on a MIXED run (two criteria on one de-referenced issue, one downgraded criterion, one still live)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [
         joined({ issueNumber: 12, kind: "closing", satisfied: false }),
         joined({ issueNumber: 34, kind: "closing", satisfied: false, criterionId: "34:0" }),
+        joined({ issueNumber: 34, kind: "closing", satisfied: false, criterionId: "34:1" }),
         joined({ issueNumber: 56, kind: "closing", satisfied: false, criterionId: "56:0" }),
       ],
       [],
@@ -717,8 +744,10 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       null,
       [34], [56],
       ALL_CLOSING);
-    expect(body).toMatch(/2 of these are no longer closing obligations this pr's current body makes/i);
-    expect(body).toContain("3 blocking finding(s)");
+    expect(body).toMatch(
+      /3 blocking findings in that review-time total concern issues that are no longer closing obligations/i,
+    );
+    expect(body).toContain("4 blocking finding(s)");
   });
 
   it("for blockersPostedInline=true with NO skipped blockers of either bucket, keeps the EXISTING wording verbatim (no reconciliation clause at all)", () => {
@@ -748,7 +777,9 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
       [34], [],
       ALL_CLOSING);
     expect(body).toMatch(/were identified at review time/i);
-    expect(body).toMatch(/1 of these are no longer closing obligations this pr's current body makes/i);
+    expect(body).toMatch(
+      /1 blocking finding in that review-time total concerns an issue that is no longer a closing obligation/i,
+    );
     expect(body).toContain("2 blocking finding(s)");
   });
 
