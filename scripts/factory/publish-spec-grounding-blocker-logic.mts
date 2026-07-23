@@ -498,11 +498,8 @@ const INLINE_BLOCKER_GENERATION_MARKER_LINE_PATTERN =
  * discipline {@link bodyContainsAnyBlockerMarker} already uses for this
  * file's other markers.
  *
- * UNUSED by any delete-comparison logic as of this slice (see {@link
- * inlineBlockerGenerationMarker}'s own docstring) — round-trip-tested
- * here so slice 90.4's own comparison has an already-correct,
- * already-reviewed primitive to call, rather than writing and reviewing
- * it under that later slice's own time pressure.
+ * Consumed by the generation-safe individual and diff-truncation aggregate
+ * reconciliation in `publish-spec-grounding-inline-comment-io.mts`.
  *
  * @param body - A comment's own body text — the caller is responsible
  *   for having already confirmed this comment is bot-authored under

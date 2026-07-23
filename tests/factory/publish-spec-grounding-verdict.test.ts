@@ -8,6 +8,7 @@ import { SPEC_GROUNDING_SUMMARY_COMMENT_MARKER } from "../../scripts/factory/pub
 import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   criterionBlockerCommentMarker,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   inlineBlockerGenerationMarker,
   unreviewedClosingIssueCommentMarker,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
@@ -788,7 +789,7 @@ describe("main — the happy path", () => {
     expect((post?.body as { body: string }).body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
   });
 
-  it("posts a visible fallback and exits nonzero when reconciling this run's own de-referenced inline blocker comments fails (F1-S9 slice 90.4) -- a genuine (non-404) failure, never silently swallowed", async () => {
+  it("posts a visible fallback and exits nonzero when reconciling obsolete inline blocker comments fails -- a genuine non-404 failure is never silently swallowed", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
     });
@@ -811,7 +812,7 @@ describe("main — the happy path", () => {
     const body = (post?.body as { body: string }).body;
     expect(body).not.toContain("No blocking findings.");
     expect(body).toMatch(/could not run to completion/i);
-    expect(body).toMatch(/failed to reconcile this run's own de-referenced inline blocker comments/i);
+    expect(body).toMatch(/failed to reconcile this run's own obsolete inline blocker comments/i);
     expect(body).toMatch(/403/);
   });
 
@@ -2211,7 +2212,7 @@ describe("main — the happy path", () => {
     expect(body).toMatch(/this pr's own diff was truncated/i);
   });
 
-  it("does NOT re-post (or keep counting) the diff-truncation blocker once its only closing reference has been downgraded -- closes the PERMANENT over-gate an aggregate blocker would otherwise become (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5b: reconciliation can never auto-delete an aggregate-marked comment, so a stale flag would re-post it every run, forever)", async () => {
+  it("does not re-post or keep counting a diff-truncation blocker after its only closing reference is downgraded, and deletes the obsolete prior aggregate (F1-S9 slices 90.5b and 90.6a-3)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
       spine: {
@@ -2238,9 +2239,19 @@ describe("main — the happy path", () => {
       // unconditional fetch this fix removed.
       [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
         textResponse(""),
-      // The de-reference reconcile runs unconditionally now, even on this
-      // zero-blocker (post-fix) path.
-      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      // Reconciliation runs unconditionally and now removes the prior
+      // whole-run aggregate whose current applicability flipped false.
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 41,
+            body:
+              `obsolete whole-run blocker\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/41": () => new Response(null, { status: 204 }),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
     });
@@ -2253,6 +2264,7 @@ describe("main — the happy path", () => {
     const body = (post?.body as { body: string }).body;
     expect(body).toContain("No blocking findings.");
     expect(body).not.toMatch(/this pr's own diff was truncated/i);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/41"))).toBe(true);
   });
 
   it("does NOT re-create the diff-truncation aggregate blocker via a currently-closing but FULLY-SATISFIED 'phantom' issue once the real review-time blocker has been downgraded (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230, P1 -- the completed fix for the same permanent-over-gate class cid 3626169268 first closed): #12 was a real review-time criterion blocker on a closing keyword, since downgraded to a plain reference; #13 is a SEPARATE issue this run also reviewed and found fully satisfied (zero unmet criteria -- so it has neither a `joined` entry nor an `unreviewedClosingIssues` entry, only a `reviewedClosingIssueNumbers` trace), and is STILL currently closing-referenced. The buggy `currentlyClosingIssueNumbers.size > 0` check would go true from #13 alone and re-create the aggregate; the fix must not", async () => {
@@ -2377,7 +2389,7 @@ describe("main — the happy path", () => {
         prFetchCallCount += 1;
         // Call 1 (fetchAndVerifyPrShas, this run's own initial snapshot)
         // and call 2 (the reconcile's own pre-delete re-verify, inside
-        // deleteDeReferencedInlineBlockerComments) both still see the
+        // reconcileObsoleteInlineBlockerComments) both still see the
         // downgraded body -- an attacker's edit restoring the closing
         // keyword lands strictly AFTER call 2 but BEFORE call 3, this
         // fix's own pre-publish re-verify, which is the only thing that
