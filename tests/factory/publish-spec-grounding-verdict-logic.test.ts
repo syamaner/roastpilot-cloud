@@ -1169,6 +1169,13 @@ describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2;
     expect(body).not.toMatch(/have been\s+cleared/i);
   });
 
+  it("for a race after partial cleanup, reports the exact safely-deleted count and that no further blocker was deleted after drift", () => {
+    const body = buildSpecGroundingClearedSummaryCommentBody("race-detected-before-delete", 2);
+    expect(body).toMatch(/deleted 2 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/no further blocker was deleted after drift/i);
+    expect(body).toMatch(/remaining inline blocker threads[\s\S]*left in place/i);
+  });
+
   it("ends with the SAME marker a normal summary/fallback comment uses, so a later run that finds criteria again upserts over this cleared comment", () => {
     const body = buildSpecGroundingClearedSummaryCommentBody("no-references");
     expect(bodyContainsMarkerAsStandaloneLine(body, SPEC_GROUNDING_SUMMARY_COMMENT_MARKER)).toBe(true);

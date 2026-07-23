@@ -332,6 +332,30 @@ describe("clearStaleSpecGroundingSummary (PR #86 review, Codex, P2; reason-param
     expect(calls.some((c) => c.method === "PATCH" || c.method === "POST")).toBe(false);
   });
 
+  it("creates a visible partial-cleanup summary when explicitly required and no prior summary exists", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/o/r/issues/5/comments": () => jsonResponse({ id: 56 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const written = await clearStaleSpecGroundingSummary(
+      "token",
+      "o",
+      "r",
+      5,
+      "race-detected-before-delete",
+      1,
+      true,
+    );
+
+    expect(written).toBe(true);
+    const post = calls.find((c) => c.method === "POST");
+    const body = (post?.body as { body: string }).body;
+    expect(body).toMatch(/deleted 1 stale inline blocker comment\(s\)/i);
+    expect(body).toMatch(/remaining inline blocker threads[\s\S]*left in place/i);
+  });
+
   it("PATCHes the prior summary/fallback comment in place with the cleared body (reason=no-references) when one exists", async () => {
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/issues/5/comments?per_page=100&page=1": () =>

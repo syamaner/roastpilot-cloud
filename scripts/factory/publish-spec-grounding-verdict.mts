@@ -156,6 +156,7 @@ import {
 import {
   clearStaleInlineBlockerComments,
   deriveLinkedReferenceIssueNumberSets,
+  InlineBlockerCleanupError,
   linkedReferenceSnapshotsMatch,
   postInlineCommentPlan,
   reconcileObsoleteInlineBlockerComments,
@@ -712,6 +713,7 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   reviewedClosingIssueNumbers: readonly number[],
   runNumber: string,
 ): Promise<void> {
+  let deletedInlineBlockerCount = 0;
   try {
     const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
     const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
@@ -754,18 +756,37 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
         trustedHeadSha,
       );
       if (stillSafeToDelete) {
-        const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, "no-references");
-        const clearedInlineCount = await clearStaleInlineBlockerComments(
+        const clearResult = await clearStaleInlineBlockerComments(
           token,
           owner,
           repo,
           prNumber,
           currentGeneration,
+          () => isStillSafeToDeleteInlineBlockerThreads(token, owner, repo, prNumber, trustedHeadSha),
         );
+        deletedInlineBlockerCount = clearResult.deletedCount;
+        if (!clearResult.ok) {
+          const summaryCleared = await clearStaleSpecGroundingSummary(
+            token,
+            owner,
+            repo,
+            prNumber,
+            "race-detected-before-delete",
+            clearResult.deletedCount,
+            clearResult.deletedCount > 0,
+          );
+          console.log(
+            `PR #${prNumber}'s state changed at the inline-blocker destructive boundary — stopped ` +
+              `cleanup after ${clearResult.deletedCount} safe delete(s); summary comment updated ` +
+              `(cleared=${summaryCleared}), and no blocker was deleted after drift.`,
+          );
+          return;
+        }
+        const summaryCleared = await clearStaleSpecGroundingSummary(token, owner, repo, prNumber, "no-references");
         console.log(
           `PR #${prNumber} has no linked-issue reference at all (hasCriteria: false, ` +
             `reason=no-references, revalidated) — cleared stale prior state (summary comment cleared=` +
-            `${summaryCleared}, ${clearedInlineCount} inline comment(s) removed).`,
+            `${summaryCleared}, ${clearResult.deletedCount} inline comment(s) removed).`,
         );
         return;
       }
@@ -798,9 +819,26 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
         `any prior inline blocker thread(s) were deliberately LEFT UNTOUCHED, not cleared.`,
     );
   } catch (err) {
+    let cleanupErrorPhase: "pre-delete-check" | "delete" | null = null;
+    if (err instanceof InlineBlockerCleanupError) {
+      deletedInlineBlockerCount = err.deletedCount;
+      cleanupErrorPhase = err.phase;
+    }
+    const partialCleanupDetail =
+      cleanupErrorPhase === "delete"
+        ? deletedInlineBlockerCount > 0
+          ? ` This run confirmed ${deletedInlineBlockerCount} stale inline blocker comment(s) deleted ` +
+            `while the no-reference snapshot still matched. The failed DELETE request's outcome is ` +
+            `unknown, and no later candidate DELETE was attempted.`
+          : ` No DELETE received a confirmed-success response before the failure. The failed DELETE ` +
+            `request's outcome is unknown, and no later candidate DELETE was attempted.`
+        : deletedInlineBlockerCount > 0
+          ? ` This run confirmed ${deletedInlineBlockerCount} stale inline blocker comment(s) deleted ` +
+            `while the no-reference snapshot still matched; no further DELETE was attempted after the failure.`
+          : "";
     await publishFallback(token, owner, repo, prNumber, [
       `PR #${prNumber} has no unmet linked-issue criteria left to review, but clearing its prior ` +
-        `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}`,
+        `spec-grounding state failed: ${err instanceof Error ? err.message : String(err)}.${partialCleanupDetail}`,
     ]);
     process.exitCode = 1;
   }
