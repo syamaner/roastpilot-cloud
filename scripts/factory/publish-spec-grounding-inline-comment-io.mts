@@ -478,7 +478,10 @@ export async function verifyPullRequestSnapshotUnchanged(
  * Before either kind is deleted, this
  * function paginates existing comments and freshly re-verifies the head SHA,
  * base SHA, closing references, and any-kind references from one PR response.
- * Any drift returns a fail-closed result without deleting anything.
+ * Aggregate candidates are processed before individuals and reverified again
+ * immediately before each aggregate DELETE. A final reverify after aggregate
+ * processing preserves the individual loop's own freshness boundary. Any
+ * drift returns a fail-closed result with the number already deleted.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -506,7 +509,7 @@ export async function reconcileObsoleteInlineBlockerComments(
   currentGeneration: number,
 ): Promise<
   | { readonly ok: true; readonly deletedCount: number }
-  | { readonly ok: false; readonly reason: PullRequestSnapshotDriftReason }
+  | { readonly ok: false; readonly reason: PullRequestSnapshotDriftReason; readonly deletedCount: number }
 > {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
 
@@ -521,38 +524,85 @@ export async function reconcileObsoleteInlineBlockerComments(
     currentlyReferencedIssueNumbers,
   );
   if (!snapshotVerification.ok) {
-    return snapshotVerification;
+    return { ...snapshotVerification, deletedCount: 0 };
   }
 
-  const obsolete = existing.filter((c) => {
+  const obsoleteIndividuals: ExistingComment[] = [];
+  const obsoleteAggregates: ExistingComment[] = [];
+  for (const c of existing) {
     if (c.authorType !== "Bot" || c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) {
-      return false;
+      continue;
     }
     const generation = extractInlineBlockerGeneration(c.body);
     if (generation === null || generation > currentGeneration) {
-      return false;
+      continue;
     }
     const issueNumber = extractIssueNumberFromInlineBlockerMarker(c.body);
     if (issueNumber !== null) {
-      return !currentlyClosingIssueNumbers.has(issueNumber);
+      if (!currentlyClosingIssueNumbers.has(issueNumber)) {
+        obsoleteIndividuals.push(c);
+      }
+      continue;
     }
-    return (
+    if (
       currentlyClosingIssueNumbers.size === 0 &&
       !diffTruncationBlocksClosingClaim &&
       bodyContainsMarkerAsStandaloneLine(c.body, DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER)
-    );
-  });
+    ) {
+      obsoleteAggregates.push(c);
+    }
+  }
+
   let deletedCount = 0;
-  for (const comment of obsolete) {
+  const deleteComment = async (comment: ExistingComment): Promise<void> => {
     try {
       await githubRequest(token, "DELETE", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`);
       deletedCount += 1;
     } catch (err) {
       if (err instanceof GithubApiError && err.status === 404) {
-        continue; // Already gone -- nothing to do, not a failure.
+        return; // Already gone -- nothing to do, not a failure.
       }
       throw err;
     }
+  };
+
+  // Aggregate deletion is the new privileged capability in 90.6a-3.
+  // Re-check immediately before every aggregate DELETE so no earlier DELETE
+  // becomes an attacker-visible signal for an edit that makes it applicable.
+  for (const comment of obsoleteAggregates) {
+    const aggregateVerification = await verifyPullRequestSnapshotUnchanged(
+      token,
+      owner,
+      repo,
+      prNumber,
+      trustedHeadSha,
+      reviewedBaseSha,
+      currentlyClosingIssueNumbers,
+      currentlyReferencedIssueNumbers,
+    );
+    if (!aggregateVerification.ok) {
+      return { ...aggregateVerification, deletedCount };
+    }
+    await deleteComment(comment);
+  }
+
+  if (obsoleteAggregates.length > 0 && obsoleteIndividuals.length > 0) {
+    const individualVerification = await verifyPullRequestSnapshotUnchanged(
+      token,
+      owner,
+      repo,
+      prNumber,
+      trustedHeadSha,
+      reviewedBaseSha,
+      currentlyClosingIssueNumbers,
+      currentlyReferencedIssueNumbers,
+    );
+    if (!individualVerification.ok) {
+      return { ...individualVerification, deletedCount };
+    }
+  }
+  for (const comment of obsoleteIndividuals) {
+    await deleteComment(comment);
   }
   return { ok: true, deletedCount };
 }

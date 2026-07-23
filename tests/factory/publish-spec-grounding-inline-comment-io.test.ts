@@ -646,8 +646,14 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
               inlineBlockerGenerationMarker("7"),
             user: { type: "Bot", login: "github-actions[bot]" },
           },
+          {
+            id: 2,
+            body: `obsolete individual\n${criterionBlockerCommentMarker("34:0")}\n${inlineBlockerGenerationMarker("7")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
         ]),
       "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -664,8 +670,11 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
       7,
     );
 
-    expect(result).toEqual({ ok: true, deletedCount: 1 });
-    expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
+    expect(result).toEqual({ ok: true, deletedCount: 2 });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/comments\/1$/),
+      expect.stringMatching(/comments\/2$/),
+    ]);
   });
 
   it("keeps a diff-truncation aggregate when a closing reference remains even if this run's current predicate is false, preserving #77 across unobservable linked-issue edits", async () => {
@@ -831,8 +840,141 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
       1,
     );
 
-    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("re-verifies immediately before an aggregate DELETE and never deletes an earlier individual first", async () => {
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => {
+        prFetchCount += 1;
+        return prSnapshotResponse(prFetchCount === 1 ? "Refs #12" : "Closes #12");
+      },
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `API-ordered individual\n${criterionBlockerCommentMarker("34:0")}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body:
+              `aggregate must be rechecked first\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileObsoleteInlineBlockerComments(
+      "token",
+      "o",
+      "r",
+      5,
+      TRUSTED_HEAD_SHA,
+      REVIEWED_BASE_SHA,
+      new Set(),
+      new Set([12]),
+      false,
+      1,
+    );
+
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
+    expect(prFetchCount).toBe(2);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("reports partial duplicate-aggregate cleanup and leaves later blockers when state changes between aggregate DELETEs", async () => {
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => {
+        prFetchCount += 1;
+        return prSnapshotResponse(prFetchCount < 3 ? "Refs #12" : "Closes #12");
+      },
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `individual remains\n${criterionBlockerCommentMarker("34:0")}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          ...[2, 3].map((id) => ({
+            id,
+            body:
+              `duplicate aggregate ${id}\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ]),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileObsoleteInlineBlockerComments(
+      "token",
+      "o",
+      "r",
+      5,
+      TRUSTED_HEAD_SHA,
+      REVIEWED_BASE_SHA,
+      new Set(),
+      new Set([12]),
+      false,
+      1,
+    );
+
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 1 });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/pulls\/comments\/2$/),
+    ]);
+  });
+
+  it("re-verifies after aggregate cleanup before deleting any obsolete individual", async () => {
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => {
+        prFetchCount += 1;
+        return prSnapshotResponse(prFetchCount < 3 ? "Refs #12" : "Closes #12");
+      },
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 1,
+            body: `individual remains\n${criterionBlockerCommentMarker("34:0")}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+          {
+            id: 2,
+            body:
+              `aggregate deletes first\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/o/r/pulls/comments/2": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileObsoleteInlineBlockerComments(
+      "token",
+      "o",
+      "r",
+      5,
+      TRUSTED_HEAD_SHA,
+      REVIEWED_BASE_SHA,
+      new Set(),
+      new Set([12]),
+      false,
+      1,
+    );
+
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 1 });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      expect.stringMatching(/pulls\/comments\/2$/),
+    ]);
   });
 
   it.each([
@@ -869,7 +1011,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
         1,
       );
 
-      expect(result).toEqual({ ok: false, reason });
+      expect(result).toEqual({ ok: false, reason, deletedCount: 0 });
       expect(calls.some((c) => c.method === "DELETE")).toBe(false);
     },
   );
@@ -1057,7 +1199,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
 
     const result = await reconcileObsoleteInlineBlockerComments("token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA, new Set(), new Set(), true, 1);
 
-    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
     // The comment fetch (pagination) DID happen -- the mismatch is only
     // detected AFTER it -- but no DELETE is ever attempted once detected.
     expect(calls.some((c) => c.method === "GET" && c.url.includes("/pulls/5/comments"))).toBe(true);
@@ -1086,7 +1228,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
     // here; the function's own fresh re-fetch finds {99}, a mismatch.
     const result = await reconcileObsoleteInlineBlockerComments("token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA, new Set(), new Set(), true, 1);
 
-    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
@@ -1147,7 +1289,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
       1,
     );
 
-    expect(result).toEqual({ ok: false, reason: "linked-references-changed" });
+    expect(result).toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 });

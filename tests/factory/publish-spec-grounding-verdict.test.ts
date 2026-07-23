@@ -2314,6 +2314,58 @@ describe("main — the happy path", () => {
     expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/41"))).toBe(true);
   });
 
+  it("fails closed during duplicate aggregate cleanup, reports the partial delete, and never publishes the normal summary", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Looks present, but the diff was cut short." }] },
+      spine: {
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+        truncated: false,
+        unreviewedClosingIssues: [],
+        diffTruncated: true,
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    let prFetchCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        prFetchCount += 1;
+        return prFetchHandlerWithOverrides({ body: prFetchCount < 4 ? "Refs #12" : "Closes #12" });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse(
+          [41, 42].map((id) => ({
+            id,
+            body:
+              `duplicate obsolete aggregate ${id}\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          })),
+        ),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/41": () => new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(prFetchCount).toBe(4);
+    expect(calls.filter((call) => call.method === "DELETE").map((call) => call.url)).toEqual([
+      expect.stringMatching(/pulls\/comments\/41$/),
+    ]);
+    const post = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    const body = (post?.body as { body: string }).body;
+    expect(body).not.toContain("No blocking findings.");
+    expect(body).toMatch(/linked-issue references changed/i);
+    expect(body).toMatch(/after deleting 1 blocker comment\(s\) while the snapshot still matched/i);
+    expect(body).toMatch(/no blocker was deleted after drift was detected/i);
+  });
+
   it("does NOT re-create the diff-truncation aggregate blocker via a currently-closing but FULLY-SATISFIED 'phantom' issue once the real review-time blocker has been downgraded (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid 3626534230, P1 -- the completed fix for the same permanent-over-gate class cid 3626169268 first closed): #12 was a real review-time criterion blocker on a closing keyword, since downgraded to a plain reference; #13 is a SEPARATE issue this run also reviewed and found fully satisfied (zero unmet criteria -- so it has neither a `joined` entry nor an `unreviewedClosingIssues` entry, only a `reviewedClosingIssueNumbers` trace), and is STILL currently closing-referenced. The buggy `currentlyClosingIssueNumbers.size > 0` check would go true from #13 alone and re-create the aggregate; the fix must not", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: false, rationale: "Missing the retry wrapper." }] },

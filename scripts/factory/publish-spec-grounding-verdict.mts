@@ -1699,9 +1699,14 @@ async function publishSummary(
             ? `this PR's base SHA changed after this run's reviewed snapshot`
             : `this PR's linked-issue references changed since this run's own earlier snapshot was taken ` +
               `(a closing-kind reference, or a reference of any other kind)`;
+      const deletionNote =
+        reconcileResult.deletedCount === 0
+          ? `without deleting any blocker`
+          : `after deleting ${reconcileResult.deletedCount} blocker comment(s) while the snapshot still matched; ` +
+            `no blocker was deleted after drift was detected`;
       await publishFallback(token, owner, repo, prNumber, [
         `${driftReason} -- the blocker posting/skip and reconciliation decisions computed against ` +
-          `that snapshot may now be stale; failing closed without deleting any blocker or ` +
+          `that snapshot may now be stale; failing closed ${deletionNote} and not ` +
           `publishing a summary this run can no longer vouch for. A fresh spec-grounded review run ` +
           `will re-evaluate against the PR's current state.`,
       ]);
