@@ -799,7 +799,7 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
 });
 
 describe("buildSpecGroundingSummaryCommentBody -- diff-truncation kind-awareness (PR #96 review round 2, Codex, cid 3626169268, BLOCKER, F1-S9 slice 90.5)", () => {
-  it("does NOT count the diff-truncation blocker when the only closing reference has since been downgraded or de-referenced -- re-derives it against CURRENT closing state, not the permanently-true review-time snapshot (a PERMANENT over-gate otherwise: the resulting aggregate comment can never be auto-deleted by reconciliation, so a stale flag would re-post it forever)", () => {
+  it("does NOT count the diff-truncation blocker when the only closing reference has since been downgraded or de-referenced -- re-derives it against CURRENT closing state, not the permanently-true review-time snapshot (before 90.6a-3, the resulting aggregate could not be auto-deleted, so a stale flag would re-post it forever)", () => {
     const body = buildSpecGroundingSummaryCommentBody(
       [joined({ issueNumber: 12, kind: "closing", satisfied: true })],
       [],

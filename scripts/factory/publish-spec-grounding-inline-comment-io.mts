@@ -53,6 +53,7 @@
 import { GithubApiError, githubRequest } from "./github-api.mts";
 import {
   bodyContainsAnyBlockerMarker,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
   extractIssueNumberFromInlineBlockerMarker,
   type BlockerCommentPlan,
@@ -351,124 +352,6 @@ export async function clearStaleInlineBlockerComments(
   return deletedCount;
 }
 
-/**
- * Deletes every bot-owned inline blocker comment whose OWN issue is no
- * longer among this PR's CURRENT closing-kind references (F1-S9 slice
- * 90.4, redesigned — the #90 PR-plan's own core reconciliation item,
- * #363, per the operator's #801 resolution): a de-referenced or
- * downgraded-to-non-closing obligation stops gating forever, so a FIXED
- * blocker for one no longer has a live thread pinning it open.
- *
- * DELIBERATELY DOES NOT auto-clear a VERDICT-SATISFIED blocker whose own
- * issue is STILL closing-referenced (#801, the operator's own anti-gaming
- * ruling): a human resolves that class — this function's own membership
- * test never looks at the agent's verdict at all, only at whether the
- * comment's own issue is CURRENTLY closing-referenced, so a satisfied-
- * but-still-referenced criterion's comment is structurally never a
- * candidate here regardless of what any run's verdict says about it.
- * Distinct from {@link clearStaleInlineBlockerComments}'s own
- * `hasCriteria: false` path (no linked criteria left at all) — this
- * function runs on the `hasCriteria: true` side, alongside posting/
- * patching this run's own plan, never instead of it.
- *
- * GATED, mirroring {@link clearStaleInlineBlockerComments}'s own scope
- * discipline, PLUS the generation guard this function alone needs:
- * 1. `authorType === "Bot"` and `authorLogin ===
- *    SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN` — genuinely posted by this
- *    workflow, never mistaken for a look-alike from elsewhere.
- * 2. {@link extractIssueNumberFromInlineBlockerMarker}`(c.body)` is
- *    non-null — an INDIVIDUAL, per-issue blocker marker (never one of
- *    the three fixed AGGREGATE markers, which have no single issue to
- *    test membership for at all — see that function's own docstring for
- *    why `null` there IS the "leave aggregates alone" gate).
- * 3. NOT in `currentlyClosingIssueNumbers` — this comment's own decoded
- *    issue number is absent from the PR's CURRENT closing-kind
- *    references. Covers BOTH the de-referenced case (the issue is not
- *    mentioned at all anymore) and the downgraded case (still mentioned,
- *    but only as a plain/non-closing reference now, e.g. `Closes #N`
- *    edited to `Refs #N`) — both are equally "no live closing obligation
- *    for this issue", the operator's own bright line for what may be
- *    auto-cleared.
- * 4. GENERATION-SAFE — {@link extractInlineBlockerGeneration}`(c.body)`
- *    is a non-null value `<= currentGeneration`. A NULL/unparseable
- *    generation (a pre-90.3 comment predating this whole mechanism, or a
- *    corrupted one) is NEVER deleted here — this function cannot confirm
- *    it is safe to remove, so it fails closed by leaving it in place (a
- *    documented residual, not a gap: legacy pre-90.3 comments are
- *    near-zero, since the generation-marker mechanism only just shipped,
- *    and a corrupted marker is this workflow's OWN trusted output, never
- *    adversarial content).
- *
- * WHY THE GENERATION GUARD MATTERS: this workflow's own dedicated,
- * serialized concurrency group (`cancel-in-progress: false`) means two
- * publish runs for the same PR never execute concurrently, but an OLDER
- * run can still be the one QUEUED to run after a NEWER one already
- * posted a comment for a genuinely new closing reference. Comparing
- * generations means an older run only ever deletes what it can PROVE is
- * at least as old as itself, never something a newer run already
- * established.
- *
- * NO CALLER-SIDE RELIABILITY GATE NEEDED (unlike the prior, reverted
- * verdict-keep-set design): this function's own membership test depends
- * ONLY on `currentlyClosingIssueNumbers` (the CURRENT, already-verified
- * PR body — see this function's own caller, `publish-spec-grounding-
- * verdict.mts`'s `publishSummary`) and each comment's own generation —
- * NEITHER of which is affected by whether THIS run's own new blockers
- * happened to post inline successfully. Team-lead's Fork-1 ruling: call
- * this UNCONDITIONALLY on every `hasCriteria: true` publish, regardless
- * of this run's own blocker count or posting outcome.
- *
- * RE-VERIFIES `currentlyClosingIssueNumbers` ITSELF, AFTER pagination,
- * IMMEDIATELY BEFORE THE FIRST DELETE (F1-S9 slice 90.4, PR #95 review
- * round 4, Codex, P1, cid 3625635476 — round 3's own re-verify, in the
- * CALLER, ran before this function was ever invoked, leaving this
- * function's own {@link findExistingInlineComments} pagination — a
- * multi-page GET loop, not instantaneous — still inside the TOCTOU
- * window). Re-fetching and re-parsing the body here, after pagination
- * completes and immediately before the delete loop below, narrows that
- * window to the delete loop's own execution time — as tight as this
- * mechanism can get without true API-level atomicity, which GitHub's
- * REST API does not offer across multiple separate calls.
- *
- * ALSO RE-VERIFIES `currentlyReferencedIssueNumbers` (ANY kind, PR #96
- * review round 2, Codex, cid 3626169271) — defense-in-depth alongside the
- * closing-set re-verify above: even though this function's OWN
- * delete-eligibility test depends only on the closing set (per #801's own
- * rule), re-confirming the any-kind set is ALSO unchanged means a future
- * consumer of this same snapshot (e.g. a note distinguishing "de-referenced
- * entirely" from "still referenced, merely downgraded" — tracked for a
- * later slice) can trust it was re-validated at the SAME point the closing
- * set was, rather than needing its own separate re-verify call bolted on
- * later. A mismatch on EITHER set fails closed identically.
- *
- * @param token - The job's own `pull-requests: write` token.
- * @param owner - The repository owner.
- * @param repo - The repository name.
- * @param prNumber - The trusted PR number this run is publishing for.
- * @param currentlyClosingIssueNumbers - Every issue number this PR's
- *   CURRENT (already head/base-verified) body referenced with a
- *   `closing`-kind keyword, AT THE TIME the caller took this snapshot —
- *   re-verified fresh by this function itself before it is trusted for
- *   any delete (see above).
- * @param currentlyReferencedIssueNumbers - Every issue number this PR's
- *   CURRENT body referenced, of ANY kind, at the SAME snapshot moment —
- *   re-verified fresh alongside `currentlyClosingIssueNumbers` (see
- *   above); NOT used by the delete-eligibility test itself (that only
- *   ever needs the closing set), only to detect drift on this second
- *   dimension too.
- * @param currentGeneration - This run's own validated, canonicalized
- *   `github.run_number`, as a number.
- * @returns `{ ok: true, deletedCount }` once every eligible de-referenced
- *   comment has been deleted (`deletedCount` may be `0`); `{ ok: false,
- *   reason: "linked-references-changed" }` if the re-verify found the
- *   PR's closing-kind OR any-kind reference set no longer matches the
- *   snapshot the caller passed in — NO delete is attempted in that case,
- *   for ANY comment, since the caller's own posting decisions (computed
- *   against the SAME now-stale snapshot) are equally suspect; the caller
- *   is expected to treat this as a fail-closed signal for the WHOLE run,
- *   not merely skip this one function's own work (see
- *   `publish-spec-grounding-verdict.mts`'s own `publishSummary`).
- */
 /** A PR body's own derived closing-kind and any-kind linked-issue-reference sets — see {@link deriveLinkedReferenceIssueNumberSets}. */
 export interface LinkedReferenceIssueNumberSets {
   readonly closing: ReadonlySet<number>;
@@ -478,7 +361,7 @@ export interface LinkedReferenceIssueNumberSets {
 /**
  * The PURE parsing half of the reference re-verify: derives the closing-kind
  * and any-kind issue-number sets from an already-in-hand PR body string.
- * Factored out of {@link verifyLinkedReferenceSnapshotUnchanged} so a caller
+ * Shared with {@link verifyPullRequestSnapshotUnchanged} so a caller
  * that already fetched the PR for its OWN reasons (e.g. one that also needed
  * head-SHA verification from that same fetch, see `publish-spec-grounding-
  * verdict.mts`'s own `publishSummary`) can derive the identical sets from its
@@ -530,114 +413,196 @@ export function linkedReferenceSnapshotsMatch(
   );
 }
 
+/** A precise fail-closed drift reason from the pre-delete PR snapshot check. */
+export type PullRequestSnapshotDriftReason =
+  | "head-sha-changed"
+  | "base-sha-changed"
+  | "linked-references-changed";
+
 /**
- * Re-fetches this PR's CURRENT body fresh (an independent network call, not
- * shared state with whatever snapshot the caller already has) and confirms
- * both its closing-kind and any-kind linked-issue reference sets still
- * exactly match the snapshot the caller took earlier — the shared "re-verify
- * immediately before a privileged action" primitive originally built for
- * {@link deleteDeReferencedInlineBlockerComments}'s own pre-delete re-verify
- * (F1-S9 slice 90.4/90.5b, Codex, cid 3625635476 / cid 3626169271), and now
- * ALSO the reference-derivation basis for the pre-publish-write re-verify
- * (F1-S9 slice 90.5b, PR #97 draft round 4, Codex, cid 3626639088 /
- * cid 3626686028, P1 BLOCKER — see `publish-spec-grounding-verdict.mts`'s own
- * `publishSummary` call site for the TOCTOU window this closes there; that
- * caller reuses {@link deriveLinkedReferenceIssueNumberSets} and {@link
- * linkedReferenceSnapshotsMatch} directly, on a body it already fetched for
- * its OWN head-SHA check, rather than calling this function and paying for
- * a second fetch).
+ * Re-fetches all mutable PR state that can affect blocker reconciliation.
  *
- * Factored out rather than left as independently-maintained inline copies of
- * the same fetch+parse+compare, per this codebase's own recurring "shared
- * primitive, not parallel reimplementation" discipline — a future change to
- * the comparison semantics (e.g. a bucket-split re-verify) only needs to
- * change in one place.
+ * One fresh GET verifies head SHA, base SHA, closing references, and any-kind
+ * references after inline-comment pagination and immediately before the first
+ * DELETE. Keeping all four checks on one response avoids composing separately
+ * fetched snapshots with a new TOCTOU gap between them.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
  * @param repo - The repository name.
  * @param prNumber - The trusted PR number this run is acting on.
- * @param snapshotClosingIssueNumbers - Every issue number the caller's own
- *   snapshot considered closing-referenced.
- * @param snapshotReferencedIssueNumbers - Every issue number the caller's
- *   own snapshot considered referenced, of ANY kind.
- * @returns `true` only if a FRESH fetch of this PR's body yields exactly
- *   the same closing-kind AND any-kind reference sets as the snapshot
- *   passed in; `false` on ANY drift in either set (an addition, a removal,
- *   or a kind change) — the caller must fail closed on `false`, never
- *   partially trust the stale snapshot for the privileged action it was
- *   about to take.
+ * @param trustedHeadSha - The workflow event's reviewed head SHA.
+ * @param reviewedBaseSha - The runner-observed base SHA from the spine.
+ * @param snapshotClosingIssueNumbers - Closing-reference snapshot.
+ * @param snapshotReferencedIssueNumbers - Any-kind reference snapshot.
+ * @returns `{ ok: true }` only when all dimensions still match; otherwise
+ *   the exact drift dimension, with no caller permission to delete.
  */
-export async function verifyLinkedReferenceSnapshotUnchanged(
+export async function verifyPullRequestSnapshotUnchanged(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
+  trustedHeadSha: string,
+  reviewedBaseSha: string,
   snapshotClosingIssueNumbers: ReadonlySet<number>,
   snapshotReferencedIssueNumbers: ReadonlySet<number>,
-): Promise<boolean> {
-  const pr = await githubRequest<{ readonly body: string | null }>(
-    token,
-    "GET",
-    `/repos/${owner}/${repo}/pulls/${prNumber}`,
-  );
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: PullRequestSnapshotDriftReason }> {
+  const pr = await githubRequest<{
+    readonly body: string | null;
+    readonly head: { readonly sha: string };
+    readonly base: { readonly sha: string };
+  }>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
+  if (pr.head.sha !== trustedHeadSha) {
+    return { ok: false, reason: "head-sha-changed" };
+  }
+  if (pr.base.sha !== reviewedBaseSha) {
+    return { ok: false, reason: "base-sha-changed" };
+  }
   const fresh = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`);
-  return linkedReferenceSnapshotsMatch(fresh, snapshotClosingIssueNumbers, snapshotReferencedIssueNumbers);
+  if (!linkedReferenceSnapshotsMatch(fresh, snapshotClosingIssueNumbers, snapshotReferencedIssueNumbers)) {
+    return { ok: false, reason: "linked-references-changed" };
+  }
+  return { ok: true };
 }
 
-export async function deleteDeReferencedInlineBlockerComments(
+/**
+ * Deletes generation-safe bot-owned blockers whose current obligation ended.
+ *
+ * Individual blockers are eligible when their decoded issue is absent from
+ * the current closing-reference set. The diff-truncation aggregate is eligible
+ * only when its exact standalone marker is present, its current applicability
+ * predicate is false, and no closing references remain. The zero-closing
+ * boundary preserves issue #77's interim guarantee that existing blocker
+ * threads survive linked-issue criteria edits, which do not change PR state.
+ * Before either kind is deleted, this
+ * function paginates existing comments and freshly re-verifies the head SHA,
+ * base SHA, closing references, and any-kind references from one PR response.
+ * Aggregate candidates are processed before individuals and reverified again
+ * immediately before each aggregate DELETE. A final reverify after aggregate
+ * processing preserves the individual loop's own freshness boundary. Any
+ * drift returns a fail-closed result with the number already deleted.
+ *
+ * @param token - The job's own `pull-requests: write` token.
+ * @param owner - The repository owner.
+ * @param repo - The repository name.
+ * @param prNumber - The trusted PR number this run is publishing for.
+ * @param trustedHeadSha - The workflow event's reviewed head SHA.
+ * @param reviewedBaseSha - The runner-observed base SHA from the spine.
+ * @param currentlyClosingIssueNumbers - Closing-reference snapshot.
+ * @param currentlyReferencedIssueNumbers - Any-kind reference snapshot.
+ * @param diffTruncationBlocksClosingClaim - Current aggregate applicability;
+ *   false permits deletion only when the closing-reference set is also empty.
+ * @param currentGeneration - This run's validated `github.run_number`.
+ * @returns The number deleted, or a fail-closed PR-snapshot drift result.
+ */
+export async function reconcileObsoleteInlineBlockerComments(
   token: string,
   owner: string,
   repo: string,
   prNumber: number,
+  trustedHeadSha: string,
+  reviewedBaseSha: string,
   currentlyClosingIssueNumbers: ReadonlySet<number>,
   currentlyReferencedIssueNumbers: ReadonlySet<number>,
+  diffTruncationBlocksClosingClaim: boolean,
   currentGeneration: number,
 ): Promise<
-  { readonly ok: true; readonly deletedCount: number } | { readonly ok: false; readonly reason: "linked-references-changed" }
+  | { readonly ok: true; readonly deletedCount: number }
+  | { readonly ok: false; readonly reason: PullRequestSnapshotDriftReason; readonly deletedCount: number }
 > {
   const existing = await findExistingInlineComments(token, owner, repo, prNumber);
 
-  const unchanged = await verifyLinkedReferenceSnapshotUnchanged(
+  const snapshotVerification = await verifyPullRequestSnapshotUnchanged(
     token,
     owner,
     repo,
     prNumber,
+    trustedHeadSha,
+    reviewedBaseSha,
     currentlyClosingIssueNumbers,
     currentlyReferencedIssueNumbers,
   );
-  if (!unchanged) {
-    return { ok: false, reason: "linked-references-changed" };
+  if (!snapshotVerification.ok) {
+    return { ...snapshotVerification, deletedCount: 0 };
   }
 
-  const deReferenced = existing.filter((c) => {
+  const obsoleteIndividuals: ExistingComment[] = [];
+  const obsoleteAggregates: ExistingComment[] = [];
+  for (const c of existing) {
     if (c.authorType !== "Bot" || c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) {
-      return false;
-    }
-    const issueNumber = extractIssueNumberFromInlineBlockerMarker(c.body);
-    if (issueNumber === null) {
-      return false; // Not an individual issue/criterion marker (aggregate, generation-only, or not ours) -- conservative, never delete.
-    }
-    if (currentlyClosingIssueNumbers.has(issueNumber)) {
-      return false; // Still closing-referenced -- verdict-satisfied stays human-resolved (#801).
+      continue;
     }
     const generation = extractInlineBlockerGeneration(c.body);
     if (generation === null || generation > currentGeneration) {
-      return false;
+      continue;
     }
-    return true;
-  });
+    const issueNumber = extractIssueNumberFromInlineBlockerMarker(c.body);
+    if (issueNumber !== null) {
+      if (!currentlyClosingIssueNumbers.has(issueNumber)) {
+        obsoleteIndividuals.push(c);
+      }
+      continue;
+    }
+    if (
+      currentlyClosingIssueNumbers.size === 0 &&
+      !diffTruncationBlocksClosingClaim &&
+      bodyContainsMarkerAsStandaloneLine(c.body, DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER)
+    ) {
+      obsoleteAggregates.push(c);
+    }
+  }
+
   let deletedCount = 0;
-  for (const comment of deReferenced) {
+  const deleteComment = async (comment: ExistingComment): Promise<void> => {
     try {
       await githubRequest(token, "DELETE", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`);
       deletedCount += 1;
     } catch (err) {
       if (err instanceof GithubApiError && err.status === 404) {
-        continue; // Already gone -- nothing to do, not a failure.
+        return; // Already gone -- nothing to do, not a failure.
       }
       throw err;
     }
+  };
+
+  // Aggregate deletion is the new privileged capability in 90.6a-3.
+  // Re-check immediately before every aggregate DELETE so no earlier DELETE
+  // becomes an attacker-visible signal for an edit that makes it applicable.
+  for (const comment of obsoleteAggregates) {
+    const aggregateVerification = await verifyPullRequestSnapshotUnchanged(
+      token,
+      owner,
+      repo,
+      prNumber,
+      trustedHeadSha,
+      reviewedBaseSha,
+      currentlyClosingIssueNumbers,
+      currentlyReferencedIssueNumbers,
+    );
+    if (!aggregateVerification.ok) {
+      return { ...aggregateVerification, deletedCount };
+    }
+    await deleteComment(comment);
+  }
+
+  if (obsoleteAggregates.length > 0 && obsoleteIndividuals.length > 0) {
+    const individualVerification = await verifyPullRequestSnapshotUnchanged(
+      token,
+      owner,
+      repo,
+      prNumber,
+      trustedHeadSha,
+      reviewedBaseSha,
+      currentlyClosingIssueNumbers,
+      currentlyReferencedIssueNumbers,
+    );
+    if (!individualVerification.ok) {
+      return { ...individualVerification, deletedCount };
+    }
+  }
+  for (const comment of obsoleteIndividuals) {
+    await deleteComment(comment);
   }
   return { ok: true, deletedCount };
 }

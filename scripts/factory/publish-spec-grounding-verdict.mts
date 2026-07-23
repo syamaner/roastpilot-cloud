@@ -101,7 +101,7 @@
  *   `publish-spec-grounding-blocker-logic.mts`'s own
  *   `inlineBlockerGenerationMarker` for the full design reasoning — and
  *   consumed by the de-reference reconcile's own generation guard (F1-S9
- *   slice 90.4, `deleteDeReferencedInlineBlockerComments`).
+ *   slices 90.4/90.6a-3, `reconcileObsoleteInlineBlockerComments`).
  * - `SPEC_GROUNDED_REVIEW_JOB_RESULT` — `needs.spec-grounded-review.result`.
  *
  * Optional environment variables (artifact paths, overridable for tests /
@@ -155,10 +155,10 @@ import {
 } from "./publish-spec-grounding-comment-io.mts";
 import {
   clearStaleInlineBlockerComments,
-  deleteDeReferencedInlineBlockerComments,
   deriveLinkedReferenceIssueNumberSets,
   linkedReferenceSnapshotsMatch,
   postInlineCommentPlan,
+  reconcileObsoleteInlineBlockerComments,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
 interface GitHubPullRequestShas {
@@ -1059,7 +1059,7 @@ interface TryPostBlockersInlineResult {
  * stayed in `currentlyReferencedIssueNumbers` (a presence-only set), so
  * this function POSTED/PATCHED its inline comment THIS run and reported
  * `postedInline: true` — only for `publishSummary`'s own
- * `deleteDeReferencedInlineBlockerComments` call to immediately delete
+ * `reconcileObsoleteInlineBlockerComments` call to immediately delete
  * that SAME comment (since it correctly excludes non-closing references)
  * — a deterministic body-edit bypass: the summary and exit code both
  * claimed a healthy, gated state (`blockersPostedInline: true`) for a
@@ -1179,14 +1179,12 @@ async function tryPostBlockersInline(
   // CURRENT body says. A body edit that downgrades or removes EVERY
   // closing reference this run's diff-truncation flag was protecting
   // still left this function planning/posting (or re-posting on every
-  // subsequent run) a diff-truncation AGGREGATE blocker comment -- and
-  // `deleteDeReferencedInlineBlockerComments` deliberately never
-  // auto-deletes an aggregate-marked comment (an aggregate's own decoded
-  // issue number is always `null`, the "leave aggregates conservative"
-  // gate), so this specific blocker could NEVER be cleared by anything
-  // other than a human resolving the thread -- and even then, the NEXT
-  // run would recompute the same permanently-true flag and re-post it,
-  // forever.
+  // subsequent run) a diff-truncation AGGREGATE blocker comment. Before
+  // slice 90.6a-3, reconciliation deliberately left every aggregate
+  // untouched because an aggregate has no decoded issue number, so this
+  // specific blocker could NEVER be cleared by anything other than a
+  // human resolving the thread -- and even then, the NEXT run would
+  // recompute the same permanently-true flag and re-post it, forever.
   //
   // FIXED (F1-S9 slice 90.5b, PR #97 draft round 2, Codex, cid
   // 3626534230, P1 -- this fix's own FIRST attempt was itself incomplete):
@@ -1428,7 +1426,7 @@ async function publishSummary(
   // on. THIS numeric conversion is different in a way that matters: a
   // corrupted `GITHUB_RUN_NUMBER` becoming `NaN` would make EVERY
   // `generation > currentGeneration` comparison in
-  // `deleteDeReferencedInlineBlockerComments` evaluate to `false` (any
+  // `reconcileObsoleteInlineBlockerComments` evaluate to `false` (any
   // comparison against `NaN` is `false`), silently defeating the entire
   // generation-safety guard with NO visible error at all -- the worst
   // possible failure mode for the one check that exists specifically to
@@ -1439,7 +1437,7 @@ async function publishSummary(
   if (!Number.isSafeInteger(currentGeneration) || currentGeneration <= 0) {
     await publishFallback(token, owner, repo, prNumber, [
       `GITHUB_RUN_NUMBER ("${runNumber}") is not a valid positive integer -- refusing to post any ` +
-        `generation-marked inline comment or reconcile this run's own de-referenced ones without a ` +
+        `generation-marked inline comment or reconcile obsolete blockers without a ` +
         `trustworthy generation to compare against.`,
     ]);
     process.exitCode = 1;
@@ -1588,7 +1586,7 @@ async function publishSummary(
   // review round 2, Codex, cid 3626169271) — derived from the SAME parse
   // just above, passed to the reconcile call below so it can detect drift
   // in the any-kind set too, not just the closing set — see
-  // `deleteDeReferencedInlineBlockerComments`'s own docstring.
+  // `reconcileObsoleteInlineBlockerComments`'s own docstring.
   const currentReferencedIssueNumbers = new Set(currentReferences.map((reference) => reference.issueNumber));
 
   let blockersPostedInline = false;
@@ -1597,10 +1595,17 @@ async function publishSummary(
   // De-referenced-vs-downgraded bucket-split (F1-S9 slice 90.6a) — see
   // `TryPostBlockersInlineResult`'s own field docs.
   let downgradedClosingBlockerIssueNumbers: readonly number[] = [];
-  // Populated only when `tryPostBlockersInline` actually runs -- `false`
-  // otherwise, matching every other kind-aware-filtered value above (there
-  // is nothing to have recomputed when `totalBlockerCount` is 0).
-  let currentDiffTruncationBlocksClosingClaim = false;
+  // Compute this on every hasCriteria:true run, independently of whether
+  // inline posting is needed: slice 90.6a-3's reconciliation must know
+  // whether an existing whole-run aggregate is obsolete even on a
+  // zero-blocker path. When posting runs, its independently-derived result
+  // replaces this value so posting, fallback, and deletion stay locked to
+  // the same predicate.
+  let currentDiffTruncationBlocksClosingClaim = isDiffTruncationUnverifiableForClosing(
+    joined.filter((entry) => currentClosingIssueNumbers.has(entry.issueNumber)),
+    spine.unreviewedClosingIssues.filter((entry) => currentClosingIssueNumbers.has(entry.issueNumber)),
+    spine.diffTruncated,
+  );
   // What the anchor-fallback supplement should actually render (F1-S9
   // slice 90.6a, issue #90's own #376/#378) — see
   // `TryPostBlockersInlineResult`'s own field docs for why this is NOT
@@ -1643,21 +1648,16 @@ async function publishSummary(
     }
   }
 
-  // Reconciliation (F1-S9 slice 90.4, redesigned per the operator's #801
-  // resolution): deletes any bot-owned inline blocker comment whose OWN
-  // issue is no longer among `currentClosingIssueNumbers` -- covers both
-  // a de-referenced issue (not mentioned at all anymore) and a
-  // DOWNGRADED one (still mentioned, but no longer with a closing
-  // keyword) -- never a verdict-satisfied one still closing-referenced
-  // (a human resolves that class; see `deleteDeReferencedInlineBlockerComments`'s
-  // own docstring for the full reasoning). Runs UNCONDITIONALLY, on
-  // every `hasCriteria: true` publish (team-lead's Fork-1 ruling, this
-  // slice): unlike the prior, reverted verdict-keep-set design, this
-  // mechanism's own membership test depends ONLY on
-  // `currentClosingIssueNumbers` (the CURRENT, already-verified body) and
-  // each comment's own generation -- NEITHER of which is affected by
-  // whether THIS run's own new blockers happened to post inline
-  // successfully, so there is nothing left to gate on.
+  // Reconciliation (F1-S9 slices 90.4 and 90.6a-3): deletes an individual
+  // blocker whose issue is no longer closing-referenced, plus an exact
+  // whole-run diff-truncation aggregate when its CURRENT applicability
+  // predicate is false AND no closing references remain. That conservative
+  // boundary preserves #77's cross-object-staleness mitigation: issue edits
+  // cannot make a still-closing aggregate disappear. It never deletes a
+  // verdict-satisfied individual
+  // blocker whose issue remains closing-referenced (a human resolves that
+  // class). Runs unconditionally on every hasCriteria:true publish and is
+  // independent of whether this run's own new blockers posted inline.
   //
   // FAIL CLOSED on a snapshot mismatch, not merely a non-destructive skip
   // (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 --
@@ -1673,26 +1673,40 @@ async function publishSummary(
   // delete are stale, so the caller now treats it as a single fail-closed
   // signal covering both -- no stale delete AND no stale summary --
   // rather than trying to partially salvage a summary this run can no
-  // longer vouch for. `deleteDeReferencedInlineBlockerComments`'s own
+  // longer vouch for. `reconcileObsoleteInlineBlockerComments`'s own
   // re-verify (after its own comment pagination, immediately before its
   // first DELETE call -- see that function's own docstring, cid
   // 3625635476) is what actually detects the mismatch; this is purely
   // the caller's own response to that signal.
   try {
-    const reconcileResult = await deleteDeReferencedInlineBlockerComments(
+    const reconcileResult = await reconcileObsoleteInlineBlockerComments(
       token,
       owner,
       repo,
       prNumber,
+      trustedHeadSha,
+      spine.reviewedBaseSha,
       currentClosingIssueNumbers,
       currentReferencedIssueNumbers,
+      currentDiffTruncationBlocksClosingClaim,
       currentGeneration,
     );
     if (!reconcileResult.ok) {
+      const driftReason =
+        reconcileResult.reason === "head-sha-changed"
+          ? `this PR's head SHA changed after this run's reviewed snapshot`
+          : reconcileResult.reason === "base-sha-changed"
+            ? `this PR's base SHA changed after this run's reviewed snapshot`
+            : `this PR's linked-issue references changed since this run's own earlier snapshot was taken ` +
+              `(a closing-kind reference, or a reference of any other kind)`;
+      const deletionNote =
+        reconcileResult.deletedCount === 0
+          ? `without deleting any blocker`
+          : `after deleting ${reconcileResult.deletedCount} blocker comment(s) while the snapshot still matched; ` +
+            `no blocker was deleted after drift was detected`;
       await publishFallback(token, owner, repo, prNumber, [
-        `this PR's linked-issue references changed since this run's own earlier snapshot was taken ` +
-          `(a closing-kind reference, or a reference of any other kind) -- the blocker posting/skip ` +
-          `decisions computed against that snapshot may now be stale; failing closed rather than ` +
+        `${driftReason} -- the blocker posting/skip and reconciliation decisions computed against ` +
+          `that snapshot may now be stale; failing closed ${deletionNote} and not ` +
           `publishing a summary this run can no longer vouch for. A fresh spec-grounded review run ` +
           `will re-evaluate against the PR's current state.`,
       ]);
@@ -1703,7 +1717,7 @@ async function publishSummary(
     // Same "visible fallback, never silent" treatment as every other
     // artifact/network failure in this entrypoint.
     await publishFallback(token, owner, repo, prNumber, [
-      `failed to reconcile this run's own de-referenced inline blocker comments: ` +
+      `failed to reconcile this run's own obsolete inline blocker comments: ` +
         `${err instanceof Error ? err.message : String(err)}`,
     ]);
     process.exitCode = 1;
@@ -1818,16 +1832,15 @@ async function publishSummary(
   // fetch that covers ALL THREE dimensions: its own head-SHA throw covers
   // the second, its returned `pr.body` is fed to
   // `deriveLinkedReferenceIssueNumberSets`/`linkedReferenceSnapshotsMatch`
-  // (the same shared primitives `verifyLinkedReferenceSnapshotUnchanged`
-  // itself is built from) for the first, and its returned `pr.base.sha` is
+  // (the same shared primitives `verifyPullRequestSnapshotUnchanged`
+  // uses for the earlier pre-delete check) for the first, and its returned
+  // `pr.base.sha` is
   // compared against `spine.reviewedBaseSha` for the third -- the EXACT
   // same comparison and error wording as this run's own T0 base-SHA check
-  // above, mirrored rather than reimplemented differently. Deliberately
-  // NOT baking head-SHA or base-SHA into `verifyLinkedReferenceSnapshotUnchanged`
-  // itself, since `deleteDeReferencedInlineBlockerComments`'s own re-verify
-  // has no SHA concept and must not gain one just because this caller
-  // needs it. After this, all three T0-validated, verdict-affecting
-  // dimensions (head, base, references) are re-verified again at T2,
+  // above, mirrored rather than reimplemented differently. The earlier
+  // pre-delete check independently verifies these same dimensions because
+  // aggregate deletion also depends on the reviewed diff identity. This
+  // final check remains necessary after summary-comment pagination and
   // immediately before the write.
   try {
     await upsertSummaryComment(token, owner, repo, prNumber, body, {

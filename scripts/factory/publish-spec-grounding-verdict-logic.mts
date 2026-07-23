@@ -1087,7 +1087,7 @@ export function splitSkippedBlockerNoteBudget(
  *
  * DOES NOT UNCONDITIONALLY CLAIM REMOVAL (Codex finding, PR #95 review
  * round 2, P2 — a real overclaim in an earlier version): this same run's
- * own `deleteDeReferencedInlineBlockerComments`
+ * own `reconcileObsoleteInlineBlockerComments`
  * (`publish-spec-grounding-inline-comment-io.mts`) deletes a PRIOR run's
  * own inline comment for one of these exact issues only when it can
  * positively confirm it is safe to (an INDIVIDUAL marker, a non-null
@@ -1147,7 +1147,7 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
  *
  * Shares {@link buildStaleBlockerSkippedNote}'s own "does not
  * unconditionally claim removal" caveat identically: this same run's own
- * `deleteDeReferencedInlineBlockerComments` only deletes an INDIVIDUAL,
+ * `reconcileObsoleteInlineBlockerComments` only deletes an INDIVIDUAL,
  * generation-confirmed prior inline comment for one of these issues — an
  * aggregate-marker comment covering this issue alongside others, or one
  * with an unparseable generation, is left untouched, and this note is the
