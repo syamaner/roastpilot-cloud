@@ -853,8 +853,11 @@ export function buildSpecGroundingSummaryCommentBody(
       degradeReason === "anchor-rejected-422"
         ? "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
           "attempt)"
-        : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
-          "only deletes content)";
+        : degradeReason === "resolved-or-unknown-patched-thread"
+          ? "one or more blocker comments were updated in review threads that are already resolved, " +
+            "or whose resolution could not be confirmed; PATCH does not reopen a resolved thread"
+          : "this PR's diff had no addable line to anchor them to (an empty diff, or a diff that " +
+            "only deletes content)";
     // PR #87 review round 4b, Codex, P1 -- a cheap, honest-wording fold:
     // when some (not all) blockers were skipped (de-referenced OR
     // downgraded -- F1-S9 slice 90.6a, PR #98 review, Codex, cid

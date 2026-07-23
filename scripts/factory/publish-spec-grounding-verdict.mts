@@ -144,6 +144,7 @@ import {
 import {
   buildAnchorFallbackSummarySupplement,
   criterionBlockerCommentMarker,
+  DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   planBlockerInlineComments,
   unreviewedClosingIssueCommentMarker,
   type InlinePostingDegradeReason,
@@ -1043,13 +1044,15 @@ interface TryPostBlockersInlineResult {
    * computation.
    */
   readonly currentDiffTruncationBlocksClosingClaim: boolean;
+  /** Current diff-truncation blocker filtered to fallback-only rendering. */
+  readonly fallbackDiffTruncationBlocksClosingClaim: boolean;
   /**
    * The criterion blockers the caller's own anchor-fallback supplement
    * should actually render — ALREADY filtered to the still-closing
-   * subset (F1-S9 slice 90.6a, issue #90's own #376) AND, on a mid-plan
-   * 422 degrade, further filtered to exclude any entry this function
-   * confirmed is represented by an UNRESOLVED inline thread — a fresh
-   * CREATE, or a successful PATCH whose GraphQL
+   * subset (F1-S9 slice 90.6a, issue #90's own #376) AND further filtered
+   * on every posting outcome to exclude any entry this function confirmed
+   * is represented by an UNRESOLVED inline thread — a fresh CREATE, or a
+   * successful PATCH whose GraphQL
    * `PullRequestReviewThread.isResolved` state is false (issue #90's
    * resolution-aware fallback exclusion) — never the raw, unfiltered,
    * review-time `criterionBlockers` this function was called with.
@@ -1316,6 +1319,7 @@ async function tryPostBlockersInline(
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      fallbackDiffTruncationBlocksClosingClaim: false,
       // Never rendered by the caller when postedInline is true -- but
       // populated (empty) rather than left implicit, matching this
       // result's own established discipline for every other field.
@@ -1340,6 +1344,7 @@ async function tryPostBlockersInline(
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      fallbackDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
       // NOTHING was ever attempted (no anchor to post to at all) -- the
       // full still-referenced subsets, unfiltered, are exactly what the
       // fallback needs to render (F1-S9 slice 90.6a, issue #90's own
@@ -1353,9 +1358,26 @@ async function tryPostBlockersInline(
     };
   }
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
-  if (!postResult.ok) {
-    // A MID-PLAN 422: some entries in `plan` may have already PATCHed real
-    // inline comments before the first genuine CREATE was rejected.
+  const unresolvedPostedMarkerSet = new Set(postResult.unresolvedPostedMarkers);
+  const fallbackCriterionBlockers = stillReferencedCriterionBlockers.filter((entry) => {
+    const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
+    return !unresolvedPostedMarkerSet.has(coveringMarker);
+  });
+  const fallbackUnreviewedClosingIssues = stillReferencedUnreviewedClosingIssues.filter((entry) => {
+    const coveringMarker =
+      plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
+    return !unresolvedPostedMarkerSet.has(coveringMarker);
+  });
+  const fallbackDiffTruncationBlocksClosingClaim =
+    diffTruncationBlocksClosingClaim && !unresolvedPostedMarkerSet.has(DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER);
+  if (
+    !postResult.ok ||
+    fallbackCriterionBlockers.length > 0 ||
+    fallbackUnreviewedClosingIssues.length > 0 ||
+    fallbackDiffTruncationBlocksClosingClaim
+  ) {
+    // A resolved/unknown PATCH on a fully successful plan, or a MID-PLAN
+    // 422 after earlier PATCHes, leaves some entries needing fallback.
     // Exclude only covering markers whose threads are CONFIRMED UNRESOLVED
     // by `postInlineCommentPlan`'s bounded GraphQL lookup. A resolved or
     // resolution-unknown PATCH stays visible in fallback, so a
@@ -1376,23 +1398,14 @@ async function tryPostBlockersInline(
     // returned maps here — rather than re-deriving the cap/split
     // independently — is the lockstep fix: this filter and the plan can
     // never disagree about which marker covers which entry.
-    const unresolvedPostedMarkerSet = new Set(postResult.unresolvedPostedMarkers);
-    const fallbackCriterionBlockers = stillReferencedCriterionBlockers.filter((entry) => {
-      const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
-      return !unresolvedPostedMarkerSet.has(coveringMarker);
-    });
-    const fallbackUnreviewedClosingIssues = stillReferencedUnreviewedClosingIssues.filter((entry) => {
-      const coveringMarker =
-        plan.issueCoveringMarkers.get(entry.issueNumber) ?? unreviewedClosingIssueCommentMarker(entry.issueNumber);
-      return !unresolvedPostedMarkerSet.has(coveringMarker);
-    });
     return {
       postedInline: false,
-      degradeReason: postResult.reason,
+      degradeReason: postResult.ok ? "resolved-or-unknown-patched-thread" : postResult.reason,
       currentApplicableBlockerCount,
       staleBlockerIssueNumbers,
       downgradedClosingBlockerIssueNumbers,
       currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+      fallbackDiffTruncationBlocksClosingClaim,
       fallbackCriterionBlockers,
       fallbackUnreviewedClosingIssues,
     };
@@ -1404,6 +1417,7 @@ async function tryPostBlockersInline(
     staleBlockerIssueNumbers,
     downgradedClosingBlockerIssueNumbers,
     currentDiffTruncationBlocksClosingClaim: diffTruncationBlocksClosingClaim,
+    fallbackDiffTruncationBlocksClosingClaim: false,
     fallbackCriterionBlockers: [],
     fallbackUnreviewedClosingIssues: [],
   };
@@ -1640,6 +1654,7 @@ async function publishSummary(
   // simply `criterionBlockers`/`spine.unreviewedClosingIssues`.
   let fallbackCriterionBlockers: readonly JoinedCriterionResult[] = [];
   let fallbackUnreviewedClosingIssues: readonly UnreviewedClosingIssueResult[] = [];
+  let fallbackDiffTruncationBlocksClosingClaim = false;
   if (reviewTimeBlockerCount > 0) {
     try {
       const result = await tryPostBlockersInline(
@@ -1659,6 +1674,7 @@ async function publishSummary(
       staleBlockerIssueNumbers = result.staleBlockerIssueNumbers;
       downgradedClosingBlockerIssueNumbers = result.downgradedClosingBlockerIssueNumbers;
       currentDiffTruncationBlocksClosingClaim = result.currentDiffTruncationBlocksClosingClaim;
+      fallbackDiffTruncationBlocksClosingClaim = result.fallbackDiffTruncationBlocksClosingClaim;
       fallbackCriterionBlockers = result.fallbackCriterionBlockers;
       fallbackUnreviewedClosingIssues = result.fallbackUnreviewedClosingIssues;
     } catch (err) {
@@ -1770,13 +1786,9 @@ async function publishSummary(
       // still-closing filter is unaffected by the #378 rewording above.
       fallbackCriterionBlockers,
       fallbackUnreviewedClosingIssues,
-      // KIND-AWARE, CURRENT value (PR #96 review round 2, Codex, cid
-      // 3626169268, BLOCKER) -- NOT the raw, review-time
-      // `diffTruncationBlocksClosingClaim` computed further up in this
-      // function for the posting-gate decision. See
-      // `TryPostBlockersInlineResult`'s own `currentDiffTruncationBlocksClosingClaim`
-      // docs for the permanent-over-gate this closes.
-      currentDiffTruncationBlocksClosingClaim,
+      // Current-state diff-truncation applicability, further filtered so a
+      // confirmed-unresolved aggregate thread is not duplicated below.
+      fallbackDiffTruncationBlocksClosingClaim,
       // Always non-null here by tryPostBlockersInline's own contract
       // (populated on every `postedInline: false` result) -- the
       // fallback is defensive only, never expected to actually apply.

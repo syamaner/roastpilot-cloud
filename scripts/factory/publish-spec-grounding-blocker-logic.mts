@@ -959,8 +959,15 @@ export interface BlockerCommentPlanResult {
  *   why only the first attempt is diagnostic). A materially different
  *   situation from the anchor-absent case — an anchor existed and was
  *   tried, GitHub itself refused it.
+ * - `"resolved-or-unknown-patched-thread"` — every planned write
+ *   succeeded, but at least one PATCHed blocker thread is resolved or its
+ *   resolution could not be confirmed. PATCH does not reopen a resolved
+ *   thread, so those blockers must remain visible in fallback.
  */
-export type InlinePostingDegradeReason = "no-addable-anchor" | "anchor-rejected-422";
+export type InlinePostingDegradeReason =
+  | "no-addable-anchor"
+  | "anchor-rejected-422"
+  | "resolved-or-unknown-patched-thread";
 
 /**
  * Plans this run's blocker inline comments.
@@ -1159,8 +1166,10 @@ export function planBlockerInlineComments(
  *   round 4, Codex, P1 — the opening explanation line now differs by
  *   reason instead of always assuming the anchor-absent case): pass
  *   `"no-addable-anchor"` when {@link planBlockerInlineComments}'s own
- *   `anchorFallbackNeeded` was `true`, or `"anchor-rejected-422"` when a
- *   real anchor was selected and tried but GitHub itself rejected it.
+ *   `anchorFallbackNeeded` was `true`, `"anchor-rejected-422"` when a
+ *   real anchor was selected and tried but GitHub itself rejected it, or
+ *   `"resolved-or-unknown-patched-thread"` when PATCHed blockers are not
+ *   confirmed to remain unresolved.
  * @returns The Markdown section to append, or `""` if there is nothing to
  *   report (the caller should only call this when `anchorFallbackNeeded`
  *   is `true`, but an empty-input call degrades safely to an empty string
@@ -1184,9 +1193,12 @@ export function buildAnchorFallbackSummarySupplement(
     degradeReason === "no-addable-anchor"
       ? "this PR's diff has no addable line to anchor them to (an empty diff, or a diff that only " +
         "deletes content)"
-      : "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
-        "attempt) — our own textual diff parsing and GitHub's own internal diff-position mapping " +
-        "disagreed at the edges";
+      : degradeReason === "anchor-rejected-422"
+        ? "GitHub itself rejected the deterministic anchor this run selected (a 422 on the first " +
+          "attempt) — our own textual diff parsing and GitHub's own internal diff-position mapping " +
+          "disagreed at the edges"
+        : "one or more blocker comments were updated in review threads that are already resolved, " +
+          "or whose resolution could not be confirmed; PATCH does not reopen a resolved thread";
   // NOT a categorical "no inline thread exists for these" claim (F1-S9
   // slice 90.6a, PR #99 review, Codex, cid 3627450889, P2): on the
   // `"anchor-rejected-422"` branch specifically, an entry retained here

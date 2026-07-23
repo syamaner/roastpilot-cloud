@@ -89,7 +89,7 @@ function reviewThreadsResponse(
           reviewThreads: {
             nodes: nodes.map((node) => ({
               isResolved: node.isResolved,
-              comments: { nodes: [{ databaseId: node.commentId }] },
+              comments: { nodes: [{ fullDatabaseId: String(node.commentId) }] },
             })),
             pageInfo,
           },
@@ -217,21 +217,28 @@ describe("findConfirmedUnresolvedReviewCommentIds", () => {
   });
 
   it("maps REST root-comment database IDs to confirmed-unresolved threads using fixed-query variables", async () => {
+    const productionScaleCommentId = 3_639_737_883;
     const { fetchMock, calls } = mockFetch({
       "POST /graphql": () =>
         reviewThreadsResponse([
-          { commentId: 88, isResolved: false },
+          { commentId: productionScaleCommentId, isResolved: false },
           { commentId: 89, isResolved: true },
           { commentId: 999, isResolved: false },
         ]),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await findConfirmedUnresolvedReviewCommentIds("token", "o", "r", 5, new Set([88, 89]));
+    const result = await findConfirmedUnresolvedReviewCommentIds(
+      "token",
+      "o",
+      "r",
+      5,
+      new Set([productionScaleCommentId, 89]),
+    );
 
-    expect(result).toEqual(new Set([88]));
+    expect(result).toEqual(new Set([productionScaleCommentId]));
     expect(calls[0]?.body).toMatchObject({
-      query: expect.stringContaining("reviewThreads"),
+      query: expect.stringContaining("fullDatabaseId"),
       variables: { owner: "o", repo: "r", prNumber: 5, cursor: null },
     });
   });
@@ -329,7 +336,7 @@ describe("findConfirmedUnresolvedReviewCommentIds", () => {
           repository: {
             pullRequest: {
               reviewThreads: {
-                nodes: [{ isResolved: "no", comments: { nodes: [{ databaseId: 88 }] } }],
+                nodes: [{ isResolved: "no", comments: { nodes: [{ fullDatabaseId: "88" }] } }],
                 pageInfo: { hasNextPage: false, endCursor: null },
               },
             },
@@ -359,7 +366,7 @@ describe("findConfirmedUnresolvedReviewCommentIds", () => {
           repository: {
             pullRequest: {
               reviewThreads: {
-                nodes: [{ isResolved: false, comments: { nodes: [{ databaseId: 0 }] } }],
+                nodes: [{ isResolved: false, comments: { nodes: [{ fullDatabaseId: "0" }] } }],
                 pageInfo: { hasNextPage: false, endCursor: null },
               },
             },
@@ -376,6 +383,16 @@ describe("findConfirmedUnresolvedReviewCommentIds", () => {
     await expect(
       findConfirmedUnresolvedReviewCommentIds("token", "o", "r", 5, new Set([88])),
     ).rejects.toThrow(/GitHub GraphQL review-thread response/i);
+  });
+
+  it("rejects an unsafe REST target ID before querying GraphQL", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      findConfirmedUnresolvedReviewCommentIds("token", "o", "r", 5, new Set([Number.MAX_SAFE_INTEGER + 1])),
+    ).rejects.toThrow(/positive safe integer/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -448,6 +465,10 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
       ok: true,
       postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
       createdMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
+      unresolvedPostedMarkers: [
+        criterionBlockerCommentMarker("12:0"),
+        criterionBlockerCommentMarker("12:1"),
+      ],
     });
     const posts = calls.filter((c) => c.method === "POST");
     expect(posts).toHaveLength(2);
@@ -457,7 +478,7 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
 
   it("returns EMPTY postedMarkers and createdMarkers for the trivial empty-plan case (F1-S9 slice 90.6a, issue #90's own #378)", async () => {
     const result = await postInlineCommentPlan("token", "o", "r", 5, "abc123", []);
-    expect(result).toEqual({ ok: true, postedMarkers: [], createdMarkers: [] });
+    expect(result).toEqual({ ok: true, postedMarkers: [], createdMarkers: [], unresolvedPostedMarkers: [] });
   });
 
   it("abandons the whole plan (never attempts comment 2+) when the FIRST comment 422s -- postedMarkers and createdMarkers are BOTH EMPTY, since nothing succeeded before the rejection", async () => {
@@ -621,6 +642,7 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
         ]),
       "PATCH /repos/o/r/pulls/comments/88": () => jsonResponse({}),
       "POST /repos/o/r/pulls/5/comments": () => jsonResponse({ id: 2 }, 201),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: true }]),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -633,7 +655,37 @@ describe("postInlineCommentPlan -- the 422 probe-then-degrade", () => {
       ok: true,
       postedMarkers: [criterionBlockerCommentMarker("12:0"), criterionBlockerCommentMarker("12:1")],
       createdMarkers: [criterionBlockerCommentMarker("12:1")],
+      unresolvedPostedMarkers: [criterionBlockerCommentMarker("12:1")],
     });
+  });
+
+  it("keeps a fully successful PATCH unconfirmed when its GraphQL lookup is malformed", async () => {
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 88,
+            body: `prior\n${marker}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/o/r/pulls/comments/88": () => jsonResponse({}),
+      "POST /graphql": () => jsonResponse({ data: null }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      postInlineCommentPlan("token", "o", "r", 5, "abc123", [plan({ marker, body: "update" })]),
+    ).resolves.toEqual({
+      ok: true,
+      postedMarkers: [marker],
+      createdMarkers: [],
+      unresolvedPostedMarkers: [],
+    });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/all PATCHed blockers will stay in the fallback/i));
+    warnSpy.mockRestore();
   });
 
   it("propagates a PATCH's own 422 as a genuine error, never as a degrade signal -- a PATCH never re-validates the anchor at all", async () => {

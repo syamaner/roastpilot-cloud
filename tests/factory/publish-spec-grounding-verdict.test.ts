@@ -80,7 +80,7 @@ function reviewThreadsResponse(
           reviewThreads: {
             nodes: nodes.map((node) => ({
               isResolved: node.isResolved,
-              comments: { nodes: [{ databaseId: node.commentId }] },
+              comments: { nodes: [{ fullDatabaseId: String(node.commentId) }] },
             })),
             pageInfo: { hasNextPage: false, endCursor: null },
           },
@@ -1501,6 +1501,7 @@ describe("main — the happy path", () => {
           { id: 77, body: priorRunBody, user: { type: "Bot", login: "github-actions[bot]" } },
         ]),
       "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved: false }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
     });
@@ -1521,6 +1522,42 @@ describe("main — the happy path", () => {
     expect(patchedBody).toContain(criterionBlockerCommentMarker("12:0"));
     expect(patchedBody).toContain(inlineBlockerGenerationMarker("2"));
     expect(patchedBody).not.toContain(inlineBlockerGenerationMarker("1"));
+  });
+
+  it("falls back and exits nonzero when a fully successful PATCH updated a resolved blocker thread", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const marker = criterionBlockerCommentMarker("12:0");
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body: `prior\n${marker}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved: true }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/pulls/comments/77"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toContain("Missing the retry wrapper.");
+    expect(summaryBody).toMatch(/patch does not reopen a resolved thread/i);
   });
 
   it("skips posting an inline comment for a blocker whose issue is NO LONGER referenced in the PR's CURRENT body (a body-only edit removed it since the review ran), posting the still-referenced blocker normally and noting the skip in the summary, in ascending issue-number order regardless of the runner's own ordering (PR #87 review round 4, Codex, P1 -- symmetric to the delete-path TOCTOU fold)", async () => {
@@ -2772,6 +2809,59 @@ describe("main — the happy path", () => {
     expect(body).toContain("1 current-applicable blocking finding(s)");
     expect(body).toMatch(/this pr's own diff was truncated/i);
   });
+
+  it.each([
+    ["unresolved", false, undefined, false],
+    ["resolved", true, 1, true],
+  ] as const)(
+    "filters a PATCHed %s diff-truncation aggregate by its thread resolution",
+    async (_state, isResolved, expectedExitCode, expectsFallbackDetail) => {
+      const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+        verdict: {
+          findings: [{ criterionId: "12:0", satisfied: true, rationale: "Satisfied against a truncated diff." }],
+        },
+        spine: {
+          entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+          truncated: false,
+          unreviewedClosingIssues: [],
+          diffTruncated: true,
+          reviewedClosingIssueNumbers: [12],
+          reviewedBaseSha: TRUSTED_BASE_SHA,
+        },
+      });
+      process.env.OUTCOME_PATH = outcomePath;
+      process.env.VERDICT_PATH = verdictPath;
+      process.env.CRITERIA_SPINE_PATH = spinePath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+          prFetchHandlerWithOverrides({ body: "Closes #12" }),
+        [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+          textResponse(DIFF_WITH_ANCHOR),
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+          jsonResponse([
+            {
+              id: 77,
+              body:
+                `prior\n${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+                inlineBlockerGenerationMarker("1"),
+              user: { type: "Bot", login: "github-actions[bot]" },
+            },
+          ]),
+        "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => jsonResponse({}),
+        "POST /graphql": () => reviewThreadsResponse([{ commentId: 77, isResolved }]),
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(expectedExitCode);
+      const summaryPost = calls.find((c) => c.method === "POST" && c.url.endsWith("/issues/83/comments"));
+      const summaryBody = (summaryPost?.body as { body: string }).body;
+      expect(summaryBody.includes("**This PR's own diff was truncated**")).toBe(expectsFallbackDetail);
+    },
+  );
 
   it("does not re-post or keep counting a diff-truncation blocker after its only closing reference is downgraded, and deletes the obsolete prior aggregate (F1-S9 slices 90.5b and 90.6a-3)", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
