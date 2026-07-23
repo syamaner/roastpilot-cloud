@@ -114,6 +114,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # F1-S7 / #41: source-reviewed at this exact commit. The marketplace
+      # resolves code-review to ./plugins/code-review, whose tree contains
+      # only its manifest, README, and command (no hooks or MCP servers).
+      # Remove any PR-controlled file or symlink at the nested checkout path
+      # first. No trailing slash: GNU rm then unlinks a symlink rather than
+      # following it into the repository checkout.
+      - name: Clear Claude Code plugin marketplace path
+        shell: bash
+        run: rm -rf -- "${GITHUB_WORKSPACE:?}/.claude-marketplace"
+
+      - name: Checkout Claude Code plugin marketplace
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: anthropics/claude-code
+          ref: 2982f951552e94f38cd972764ae94c1d90c41da3
+          path: .claude-marketplace
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
@@ -202,7 +221,7 @@ jobs:
           # full transcript/output to a public step summary.
           allowed_non_write_users: ""
           show_full_output: false
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugin_marketplaces: './.claude-marketplace'
           plugins: 'code-review@claude-code-plugins'
           # Always post a visible tracking comment, even when the review
           # has no findings — a clean review must be distinguishable from a
