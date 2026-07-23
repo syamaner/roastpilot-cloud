@@ -54,6 +54,8 @@ describe("findUnpinnedActionReferences (issue #102)", () => {
       "steps:",
       `  - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
       `  - uses: Anthropics/Claude-Code-Action@${upperSha}`,
+      String.raw`  - uses: anthropics\claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
+      `  - uses: anthropics//claude-code-action/@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
     ].join("\n");
     expect(findUnpinnedActionReferences(content)).toEqual([]);
   });
@@ -76,6 +78,40 @@ describe("findUnpinnedActionReferences (issue #102)", () => {
     "attacker/claude-code-action@main",
     `evilanthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
   ])("rejects wrong repository identity %s", (reference) => {
+    const content = `steps:\n  - uses: ${reference}\n`;
+    expect(findUnpinnedActionReferences(content)).toEqual([
+      expect.objectContaining({
+        kind: "unpinned-action",
+        line: 2,
+        detail: expect.stringContaining(reference),
+      }),
+    ]);
+  });
+
+  it.each([
+    "attacker/claude-code-action/subdir@main",
+    `anthropics/claude-code-action/subdir@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
+    `Anthropics/Claude-Code-Action/nested/action@${EXPECTED_CLAUDE_CODE_ACTION_SHA.toUpperCase()}`,
+    String.raw`anthropics\claude-code-action\subdir@main`,
+    String.raw`anthropics/claude-code-action\subdir@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
+  ])("rejects subdirectory action reference %s", (reference) => {
+    const content = `steps:\n  - uses: ${reference}\n`;
+    expect(findUnpinnedActionReferences(content)).toEqual([
+      expect.objectContaining({
+        kind: "unpinned-action",
+        line: 2,
+        detail: expect.stringContaining(reference),
+      }),
+    ]);
+  });
+
+  it.each([
+    String.raw`anthropics\claude-code-action@main`,
+    String.raw`attacker\claude-code-action@main`,
+    "anthropics//claude-code-action@main",
+    "anthropics/claude-code-action/@main",
+    "anthropics///claude-code-action///@main",
+  ])("rejects runner-equivalent mutable action reference %s", (reference) => {
     const content = `steps:\n  - uses: ${reference}\n`;
     expect(findUnpinnedActionReferences(content)).toEqual([
       expect.objectContaining({
@@ -190,9 +226,42 @@ describe("findUnpinnedActionReferences (issue #102)", () => {
     ]);
   });
 
+  it("rejects an alias-backed subdirectory action reference", () => {
+    const content = [
+      "action: &review-action attacker/claude-code-action/subdir@main",
+      "steps:",
+      "  - uses: *review-action",
+    ].join("\n");
+    expect(findUnpinnedActionReferences(content)).toEqual([
+      expect.objectContaining({ kind: "unpinned-action", line: 3 }),
+    ]);
+  });
+
+  it("rejects an alias-backed action reference with runner separators", () => {
+    const reference = String.raw`anthropics\claude-code-action\subdir@main`;
+    const content = [
+      `action: &review-action ${reference}`,
+      "steps:",
+      "  - uses: *review-action",
+    ].join("\n");
+    expect(findUnpinnedActionReferences(content)).toEqual([
+      expect.objectContaining({ kind: "unpinned-action", line: 3 }),
+    ]);
+  });
+
   it("does not inspect comments as action references", () => {
     const content =
       "# uses: anthropics/claude-code-action@main\nsteps: []\n";
+    expect(findUnpinnedActionReferences(content)).toEqual([]);
+  });
+
+  it("does not classify local action paths containing @ as remote actions", () => {
+    const content = [
+      "steps:",
+      "  - uses: ./claude-code-action@main",
+      String.raw`  - uses: .\claude-code-action@main`,
+      "  - uses: docker://node:20",
+    ].join("\n");
     expect(findUnpinnedActionReferences(content)).toEqual([]);
   });
 

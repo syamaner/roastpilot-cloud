@@ -31,7 +31,6 @@ export const EXPECTED_CLAUDE_CODE_ACTION_SHA =
 
 const ACTION_REFERENCE_PATTERN =
   /(?<![A-Za-z0-9._-])anthropics\/claude-code-action@(\S+)/gi;
-const USES_ACTION_PATTERN = /^([^/\s]+\/claude-code-action)@(\S+)$/i;
 const EXPECTED_ACTION_REPOSITORY = "anthropics/claude-code-action";
 const EXPECTED_ACTION_REFERENCE = `${EXPECTED_ACTION_REPOSITORY}@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`;
 const ALLOWLIST_KEYS = new Set([
@@ -211,18 +210,33 @@ function inspectWorkflowManifest(
         if (!isScalar(resolved) || typeof resolved.value !== "string") {
           return;
         }
+        const actual = resolved.value.trim();
+        if (actual.startsWith("./") || actual.startsWith(".\\")) {
+          return;
+        }
+        // Mirror the runner's remote-action parsing before enforcing identity.
+        const usesSegments = actual.split("@");
+        if (usesSegments.length !== 2) {
+          return;
+        }
+        const pathSegments = usesSegments[0]
+          .split(/[\\/]/)
+          .filter((segment) => segment.length > 0);
+        if (pathSegments[1]?.toLowerCase() !== "claude-code-action") {
+          return;
+        }
         exactActionScalars.add(resolved);
-        const match = USES_ACTION_PATTERN.exec(resolved.value.trim());
+        const repository = `${pathSegments[0]}/${pathSegments[1]}`;
         if (
-          match &&
-          (match[1].toLowerCase() !== EXPECTED_ACTION_REPOSITORY ||
-            match[2].toLowerCase() !==
-              EXPECTED_CLAUDE_CODE_ACTION_SHA.toLowerCase())
+          repository.toLowerCase() !== EXPECTED_ACTION_REPOSITORY ||
+          pathSegments.length !== 2 ||
+          usesSegments[1].toLowerCase() !==
+            EXPECTED_CLAUDE_CODE_ACTION_SHA.toLowerCase()
         ) {
           violations.push({
             kind: "unpinned-action",
             line: nodeLine(pair.value, lineCounter),
-            detail: `action reference "${match[1]}@${match[2]}" must equal "${EXPECTED_ACTION_REPOSITORY}@${EXPECTED_CLAUDE_CODE_ACTION_SHA}"`,
+            detail: `action reference "${actual}" must equal "${EXPECTED_ACTION_REFERENCE}"`,
           });
         }
       }
