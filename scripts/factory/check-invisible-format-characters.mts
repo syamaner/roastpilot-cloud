@@ -9,11 +9,13 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  lstatSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   readlinkSync,
-  type Stats,
 } from "node:fs";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +197,15 @@ function safePathForLog(path: string): string {
   );
 }
 
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === code
+  );
+}
+
 /**
  * Formats a finding without echoing attacker-controlled source content.
  *
@@ -229,19 +240,30 @@ export function loadTrackedWorkingTreeEntry(
     );
   }
 
-  let stats: Stats;
   try {
-    stats = lstatSync(absolutePath);
+    try {
+      return readlinkSync(absolutePath, { encoding: "buffer" });
+    } catch (error) {
+      if (!hasErrorCode(error, "EINVAL")) {
+        throw error;
+      }
+    }
+
+    const descriptor = openSync(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    try {
+      if (!fstatSync(descriptor).isFile()) {
+        return null;
+      }
+      return readFileSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
   } catch {
     throw new Error(`cannot inspect tracked path: ${safePathForLog(path)}`);
   }
-  if (stats.isSymbolicLink()) {
-    return readlinkSync(absolutePath, { encoding: "buffer" });
-  }
-  if (!stats.isFile()) {
-    return null;
-  }
-  return readFileSync(absolutePath);
 }
 
 /**

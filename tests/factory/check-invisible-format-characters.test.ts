@@ -461,6 +461,24 @@ describe("scanner entrypoint", () => {
     });
   });
 
+  it("does not scan an untracked symlink target's contents", () => {
+    withTemporaryGitRepository((repositoryRoot) => {
+      writeFileSync(
+        join(repositoryRoot, "target.txt"),
+        String.fromCodePoint(0x200b),
+      );
+      symlinkSync("target.txt", join(repositoryRoot, "safe-link"));
+      execFileSync("git", ["add", "--", "safe-link"], {
+        cwd: repositoryRoot,
+      });
+
+      const result = scanRepository(repositoryRoot);
+
+      expect(result.findings).toEqual([]);
+      expect(result.scannedTextFiles).toBe(1);
+    });
+  });
+
   it("preserves NUL-delimited tracked paths and escapes newlines in diagnostics", () => {
     withTemporaryGitRepository((repositoryRoot) => {
       const path = "src/line\nbreak.ts";
