@@ -1,6 +1,6 @@
 /**
- * Rejects literal zero-width and bidi-format characters in tracked UTF-8
- * repository text.
+ * Rejects literal zero-width and bidi-format characters in tracked repository
+ * file and symlink content.
  *
  * This scanner is dependency-free so CI can run it before `npm ci`. It reads
  * the working tree rather than Git object contents so the same command also
@@ -26,7 +26,9 @@ const DISALLOWED_FORMAT_CHARACTER_PATTERN =
 const LOG_UNSAFE_CHARACTER_PATTERN =
   /[\p{Default_Ignorable_Code_Point}\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu;
 const UTF8_DECODER = new TextDecoder("utf-8", {
-  fatal: true,
+  // Replacement decoding keeps valid target sequences visible even when
+  // unrelated malformed or binary bytes occur elsewhere in the entry.
+  fatal: false,
   // Preserve a leading UTF-8 BOM as U+FEFF so the guard can reject it.
   ignoreBOM: true,
 });
@@ -51,8 +53,8 @@ export interface InvisibleFormatFinding {
 /** Aggregate result from scanning the tracked working tree. */
 export interface InvisibleFormatScanResult {
   readonly findings: readonly InvisibleFormatFinding[];
-  readonly scannedTextFiles: number;
-  readonly skippedNonTextEntries: number;
+  readonly scannedEntries: number;
+  readonly skippedNonFileEntries: number;
   readonly skippedAllowlistedEntries: number;
 }
 
@@ -128,20 +130,13 @@ export function findInvisibleFormatCharacters(
 }
 
 /**
- * Decodes content only when it is NUL-free, valid UTF-8 text.
+ * Decodes tracked bytes without allowing malformed bytes to suppress scanning.
  *
  * @param content - Raw tracked working-tree bytes.
- * @returns Decoded text, or `null` for binary/non-UTF-8 content.
+ * @returns Replacement-decoded text; NUL and malformed bytes remain nonfatal.
  */
-export function decodeTrackedText(content: Uint8Array): string | null {
-  if (content.includes(0)) {
-    return null;
-  }
-  try {
-    return UTF8_DECODER.decode(content);
-  } catch {
-    return null;
-  }
+export function decodeTrackedContent(content: Uint8Array): string {
+  return UTF8_DECODER.decode(content);
 }
 
 /**
@@ -159,8 +154,8 @@ export function scanTrackedPaths(
   allowlistedPaths: ReadonlySet<string> = ALLOWLISTED_TRACKED_PATHS,
 ): InvisibleFormatScanResult {
   const findings: InvisibleFormatFinding[] = [];
-  let scannedTextFiles = 0;
-  let skippedNonTextEntries = 0;
+  let scannedEntries = 0;
+  let skippedNonFileEntries = 0;
   let skippedAllowlistedEntries = 0;
 
   for (const path of trackedPaths) {
@@ -170,22 +165,18 @@ export function scanTrackedPaths(
     }
     const content = loadEntry(path);
     if (content === null) {
-      skippedNonTextEntries += 1;
+      skippedNonFileEntries += 1;
       continue;
     }
-    const text = decodeTrackedText(content);
-    if (text === null) {
-      skippedNonTextEntries += 1;
-      continue;
-    }
-    scannedTextFiles += 1;
+    const text = decodeTrackedContent(content);
+    scannedEntries += 1;
     findings.push(...findInvisibleFormatCharacters(path, text));
   }
 
   return {
     findings,
-    scannedTextFiles,
-    skippedNonTextEntries,
+    scannedEntries,
+    skippedNonFileEntries,
     skippedAllowlistedEntries,
   };
 }
@@ -303,8 +294,8 @@ export function main(): void {
     );
   }
   console.log(
-    `Invisible-format guard passed: scanned ${result.scannedTextFiles} tracked UTF-8 text file(s); ` +
-      `skipped ${result.skippedNonTextEntries} non-text and ${result.skippedAllowlistedEntries} allowlisted entry/entries.`,
+    `Invisible-format guard passed: scanned ${result.scannedEntries} tracked file/symlink entry/entries; ` +
+      `skipped ${result.skippedNonFileEntries} non-file and ${result.skippedAllowlistedEntries} allowlisted entry/entries.`,
   );
 }
 

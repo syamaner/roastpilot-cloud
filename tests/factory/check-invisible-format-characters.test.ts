@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 import {
   ALLOWLISTED_TRACKED_PATHS,
-  decodeTrackedText,
+  decodeTrackedContent,
   findInvisibleFormatCharacters,
   formatInvisibleFormatFinding,
   isDirectExecution,
@@ -229,27 +229,28 @@ describe("findInvisibleFormatCharacters", () => {
   });
 });
 
-describe("decodeTrackedText", () => {
+describe("decodeTrackedContent", () => {
   it("preserves a leading UTF-8 BOM so U+FEFF is rejected", () => {
-    const decoded = decodeTrackedText(
+    const decoded = decodeTrackedContent(
       Uint8Array.from([0xef, 0xbb, 0xbf, 0x61]),
     );
-    expect(decoded).not.toBeNull();
-    expect(
-      findInvisibleFormatCharacters("bom.txt", decoded ?? ""),
-    ).toEqual([
+    expect(findInvisibleFormatCharacters("bom.txt", decoded)).toEqual([
       { path: "bom.txt", line: 1, column: 1, codePoint: 0xfeff },
     ]);
   });
 
-  it("skips NUL-bearing and invalid UTF-8 content", () => {
-    expect(decodeTrackedText(Uint8Array.from([0x61, 0x00, 0x62]))).toBeNull();
-    expect(decodeTrackedText(Uint8Array.from([0xc3, 0x28]))).toBeNull();
+  it("preserves NULs and replacement-decodes malformed UTF-8", () => {
+    expect(
+      decodeTrackedContent(Uint8Array.from([0x61, 0x00, 0x62])),
+    ).toBe("a\0b");
+    expect(decodeTrackedContent(Uint8Array.from([0xc3, 0x28]))).toBe(
+      "\uFFFD(",
+    );
   });
 });
 
 describe("scanTrackedPaths", () => {
-  it("counts text and non-text entries and collects all findings", () => {
+  it("counts scanned and non-file entries and collects all findings", () => {
     const contents = new Map<string, Uint8Array | null>([
       ["clean.txt", Buffer.from("clean")],
       [
@@ -274,8 +275,8 @@ describe("scanTrackedPaths", () => {
           codePoint: 0x200b,
         },
       ],
-      scannedTextFiles: 2,
-      skippedNonTextEntries: 2,
+      scannedEntries: 3,
+      skippedNonFileEntries: 1,
       skippedAllowlistedEntries: 0,
     });
   });
@@ -405,7 +406,7 @@ describe("scanner entrypoint", () => {
       main();
       expect(log).toHaveBeenCalledWith(
         expect.stringContaining(
-          "Invisible-format guard passed: scanned 1 tracked UTF-8 text file(s)",
+          "Invisible-format guard passed: scanned 1 tracked file/symlink entry/entries",
         ),
       );
 
@@ -413,7 +414,7 @@ describe("scanner entrypoint", () => {
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
-        "Invisible-format guard passed: scanned 1 tracked UTF-8 text file(s)",
+        "Invisible-format guard passed: scanned 1 tracked file/symlink entry/entries",
       );
       expect(result.stderr).toBe("");
     });
@@ -430,7 +431,7 @@ describe("scanner entrypoint", () => {
 
       const result = scanRepository(repositoryRoot);
 
-      expect(result.scannedTextFiles).toBe(2);
+      expect(result.scannedEntries).toBe(2);
       expect(result.findings).toEqual([
         {
           path: "nested/z-bad.ts",
@@ -468,6 +469,60 @@ describe("scanner entrypoint", () => {
       );
       expect(result.stderr).not.toContain("secret-before");
       expect(result.stdout).toBe("");
+    });
+  });
+
+  it.each([
+    {
+      name: "NUL-bearing",
+      prefix: Uint8Array.from(Buffer.from("// comment\0\n// ")),
+    },
+    {
+      name: "malformed-UTF-8",
+      prefix: Uint8Array.from([
+        ...Buffer.from("// comment "),
+        0xc3,
+        0x28,
+        ...Buffer.from("\n// "),
+      ]),
+    },
+  ])(
+    "rejects a default-ignorable sequence in executable $name source",
+    ({ prefix }) => {
+      withTemporaryGitRepository((repositoryRoot) => {
+        const path = "src/bypass.js";
+        const content = Buffer.concat([
+          prefix,
+          Buffer.from(String.fromCodePoint(0x202e)),
+          Buffer.from("\nconsole.log(\"executed\");\n"),
+        ]);
+        writeTrackedFile(repositoryRoot, path, content);
+
+        const execution = spawnSync(process.execPath, [path], {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+        });
+        expect(execution.status).toBe(0);
+        expect(execution.stdout).toBe("executed\n");
+
+        const result = runEntrypoint(repositoryRoot);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "\"src/bypass.js\":2:4: forbidden U+202E",
+        );
+      });
+    },
+  );
+
+  it.each([
+    ["NUL-bearing", Uint8Array.from([0x00, 0x01])],
+    ["malformed-UTF-8", Uint8Array.from([0xc3, 0x28])],
+  ])("allows $name content without a default-ignorable sequence", (_name, bytes) => {
+    withTemporaryGitRepository((repositoryRoot) => {
+      writeTrackedFile(repositoryRoot, "clean.bin", bytes);
+
+      const result = runEntrypoint(repositoryRoot);
+      expect(result.status).toBe(0);
     });
   });
 
@@ -512,7 +567,7 @@ describe("scanner entrypoint", () => {
       const result = scanRepository(repositoryRoot);
 
       expect(result.findings).toEqual([]);
-      expect(result.scannedTextFiles).toBe(1);
+      expect(result.scannedEntries).toBe(1);
     });
   });
 
@@ -560,7 +615,7 @@ describe("scanner entrypoint", () => {
   it("passes the current repository without a literal forbidden character", () => {
     const result = scanRepository(REPOSITORY_ROOT);
     expect(result.findings).toEqual([]);
-    expect(result.scannedTextFiles).toBeGreaterThan(0);
+    expect(result.scannedEntries).toBeGreaterThan(0);
   });
 });
 
