@@ -59,6 +59,7 @@ jobs:
       issues: write
     outputs:
       triage_comment_id: ${{ steps.establish-hold.outputs.comment_id }}
+      triage_execution: ${{ steps.establish-hold.outputs.triage_execution }}
     steps:
       - name: Establish needs-triage seed or re-triage hold
         id: establish-hold
@@ -188,6 +189,7 @@ jobs:
             echo "::error::re-triage generation hold verification failed on #$ISSUE_NUMBER"
             exit 1
           fi
+          echo "triage_execution=$TRIAGE_EXECUTION" >> "$GITHUB_OUTPUT"
           echo "Established generation + readiness hold on #$ISSUE_NUMBER."
 
   # --- triage: read-only agent job. Runs the .claude/skills/triage skill,
@@ -461,6 +463,6 @@ jobs:
           # job success is a second, independent gate, not implied by
           # schema validity.
           TRIAGE_JOB_RESULT: ${{ needs.triage.result }}
-          TRIAGE_EXECUTION: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}
+          TRIAGE_EXECUTION: ${{ needs.seed.outputs.triage_execution }}
           VERDICT_PATH: triage-output/verdict.json
         run: node --experimental-strip-types scripts/factory/apply-triage-verdict.mts

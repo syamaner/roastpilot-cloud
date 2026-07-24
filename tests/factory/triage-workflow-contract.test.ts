@@ -266,6 +266,8 @@ describe("bounded triage context contract", () => {
     });
     expect(asMapping(seed?.outputs)).toEqual({
       triage_comment_id: "${{ steps.establish-hold.outputs.comment_id }}",
+      triage_execution:
+        "${{ steps.establish-hold.outputs.triage_execution }}",
     });
     expect(asMapping(seed?.permissions)).toEqual({ issues: "write" });
 
@@ -313,6 +315,7 @@ describe("bounded triage context contract", () => {
       ".body == $body",
       "re-triage generation hold verification failed",
       "exit 1",
+      'echo "triage_execution=$TRIAGE_EXECUTION" >> "$GITHUB_OUTPUT"',
     ]);
     expect(holdRun).not.toContain("--method PUT");
     expect(holdRun).not.toContain("gh issue edit");
@@ -370,9 +373,13 @@ describe("bounded triage context contract", () => {
       TRUSTED_ISSUE_NUMBER: "${{ github.event.issue.number }}",
       TRUSTED_TRIAGE_COMMENT_ID:
         "${{ needs.seed.outputs.triage_comment_id }}",
-      TRIAGE_EXECUTION:
-        "${{ format('{0}.{1}', github.run_id, github.run_attempt) }}",
+      TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
     });
+    expect(
+      asMapping(
+        namedStep(apply, "Validate and apply the triage verdict").env,
+      )?.TRIAGE_EXECUTION,
+    ).not.toContain("github.run_attempt");
   });
 
   it("uses an opaque cursor to patch a marker found after a full page", () => {
