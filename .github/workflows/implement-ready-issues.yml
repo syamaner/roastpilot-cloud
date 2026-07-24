@@ -218,9 +218,18 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           set -euo pipefail
+          if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "issue_number must be a canonical positive decimal integer — got: $ISSUE_NUMBER"
+            exit 1
+          fi
           issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
             --json number,author,title,body,state,labels,comments)
+          state=$(echo "$issue_json" | jq -r '.state')
           labels=$(echo "$issue_json" | jq -r '[.labels[].name] | join(",")')
+          if [ "$state" != "OPEN" ]; then
+            echo "Issue #$ISSUE_NUMBER is not open (current state: $state) — refusing to implement."
+            exit 1
+          fi
           # FIX (round 6, Codex P2): a stale or typo'd dispatch must not
           # implement (and Closes #N) an issue that was never actually
           # authorized by triage — checked here, deterministically,
@@ -780,6 +789,9 @@ jobs:
     # overriding this branch check.
     if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    concurrency:
+      group: factory-issue-privileged-${{ inputs.issue_number }}
+      queue: max
     # This block scopes the built-in GITHUB_TOKEN — still the FALLBACK
     # identity (see the checkout/GH_TOKEN steps below) when no factory App
     # token was minted, so it stays declared even though a minted App

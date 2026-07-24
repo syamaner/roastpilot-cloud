@@ -109,6 +109,33 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function stubFetch(fetchMock: ReturnType<typeof vi.fn>): void {
+  const invoke = fetchMock as unknown as (
+    input: string | URL,
+    init?: RequestInit,
+  ) => Promise<Response>;
+  const wrapped = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const response = await invoke(input, init);
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    if (
+      method === "GET" &&
+      url.pathname === "/repos/syamaner/roastpilot-cloud/issues/6" &&
+      response.ok &&
+      response.headers.get("x-test-complete-issue") !== "true"
+    ) {
+      const body = (await response.clone().json()) as Record<string, unknown>;
+      return jsonResponse({
+        state: "open",
+        labels: [{ name: "ready-to-implement" }],
+        ...body,
+      });
+    }
+    return response;
+  });
+  vi.stubGlobal("fetch", wrapped);
+}
+
 /**
  * A fetch mock for tests that expect `main()` to reject BEFORE ever
  * reaching the issue-fetch/PR-lookup/PR-create calls (every forbidden-path
@@ -142,6 +169,9 @@ function stubHappyPathFetch(options?: {
     base?: { ref: string };
   }>;
   createResponse?: { number: number; html_url: string };
+  issueLabels?: readonly string[];
+  rawIssueLabels?: unknown;
+  issueState?: string;
   issueTitle?: string;
   /**
    * Simulates a prior implement-failure comment already on the issue
@@ -156,9 +186,26 @@ function stubHappyPathFetch(options?: {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-      return jsonResponse({
-        title: options?.issueTitle ?? "[F1-S3] Implement workflow",
-      });
+      return new Response(
+        JSON.stringify({
+          title: options?.issueTitle ?? "[F1-S3] Implement workflow",
+          state: options?.issueState ?? "open",
+          labels: Object.prototype.hasOwnProperty.call(
+            options ?? {},
+            "rawIssueLabels",
+          )
+            ? options?.rawIssueLabels
+            : (options?.issueLabels ?? ["ready-to-implement"]).map((name) => ({
+                name,
+              })),
+        }),
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-test-complete-issue": "true",
+          },
+        },
+      );
     }
     if (method === "GET" && url.includes("/pulls?state=open")) {
       // Defaults every existingPrs entry's head.repo to THIS repo, and its
@@ -223,7 +270,7 @@ function stubHappyPathFetch(options?: {
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
-  vi.stubGlobal("fetch", fetchMock);
+  stubFetch(fetchMock);
   return fetchMock;
 }
 
@@ -262,6 +309,77 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     });
     expect(log).toContain("Implement #6");
     expect(log).toContain("Closes #6");
+  });
+
+  it.each([
+    {
+      name: "closed issue",
+      options: { issueState: "closed" },
+      reason: "is not open",
+    },
+    {
+      name: "withdrawn readiness",
+      options: { issueLabels: ["needs-triage"] },
+      reason: "is not currently labelled ready-to-implement",
+    },
+  ])("rejects $name before branch or PR writes", async ({ options, reason }) => {
+    const fetchMock = stubHappyPathFetch(options);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(
+        ([url]) => String(url).includes("/pulls?state=open"),
+      ),
+    ).toBe(false);
+    const failurePost = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain(reason);
+  });
+
+  it.each([
+    ["omitted labels", undefined],
+    ["non-array labels", { name: "ready-to-implement" }],
+    ["malformed label members", [null, "ready-to-implement", {}, { name: 42 }]],
+  ])("fails closed for %s", async (_name, rawIssueLabels) => {
+    const fetchMock = stubHappyPathFetch({ rawIssueLabels });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    const failurePost = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain(
+      "is not currently labelled ready-to-implement",
+    );
   });
 
   it("force-pushes cleanly on a re-run against an already-existing remote branch (idempotent re-dispatch)", async () => {
@@ -386,7 +504,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -426,7 +544,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -479,7 +597,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -599,7 +717,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -845,7 +963,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -890,7 +1008,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -949,7 +1067,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -986,7 +1104,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1107,7 +1225,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -1143,7 +1261,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1612,7 +1730,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     // main() itself REJECTS here — postFailureComment's error propagates
     // out of the catch block (no internal try/catch of its own), and only
@@ -1652,7 +1770,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1745,7 +1863,7 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary-placeholder.diff", placeholderDiff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -1967,7 +2085,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2181,7 +2299,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     // The existing PR's branch must already exist on the remote for the
     // force-push to a REUSED branch to succeed.
@@ -2235,7 +2353,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2310,7 +2428,7 @@ index abc1234..def5678 100644
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2351,7 +2469,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2375,7 +2493,7 @@ index abc1234..def5678 100644
     process.env.PATCH_PATH = await writePatch(scratchDir, "glue.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2414,7 +2532,7 @@ index abc1234..def5678 100644
     process.env.PATCH_PATH = await writePatch(scratchDir, "exploit-rename-out.diff", exploitDiff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2440,7 +2558,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-github.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2463,7 +2581,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-codeowners.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2484,7 +2602,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-docs-codeowners.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2501,7 +2619,7 @@ copy to scripts/factory/evil-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-into.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2521,7 +2639,7 @@ copy to lib/leaked-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-out.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2546,7 +2664,7 @@ copy to lib/copy-dest.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-from.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2565,7 +2683,7 @@ copy to "scripts/factory/evil-copy.mts"
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-to.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2589,7 +2707,7 @@ rename to "scripts/other/x.mts"
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-rename.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2630,7 +2748,7 @@ rename to "scripts/other/x.mts"
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "nonascii-rename.diff", exploitDiff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2654,7 +2772,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "space.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2688,7 +2806,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "empty.diff", "");
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2738,7 +2856,7 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2917,7 +3035,7 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2955,7 +3073,7 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();

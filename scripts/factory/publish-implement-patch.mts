@@ -247,8 +247,12 @@ export const MAX_GIT_QUERY_BUFFER_BYTES = 16 * 1024 * 1024;
  */
 class PublishRejection extends Error {}
 
+const READY_TO_IMPLEMENT_LABEL = "ready-to-implement";
+
 interface GitHubIssue {
   readonly title: string;
+  readonly state: string;
+  readonly labels: unknown;
 }
 
 interface GitHubComment {
@@ -1279,7 +1283,16 @@ export async function main(): Promise<void> {
       `GITHUB_REPOSITORY must be "owner/repo", got ${process.env.GITHUB_REPOSITORY}`,
     );
   }
-  const issueNumber = Number(requireEnv("TRUSTED_ISSUE_NUMBER"));
+  const trustedIssueNumber = requireEnv("TRUSTED_ISSUE_NUMBER");
+  if (!/^[1-9][0-9]*$/.test(trustedIssueNumber)) {
+    throw new Error(
+      `TRUSTED_ISSUE_NUMBER must be a canonical positive decimal integer, got ${trustedIssueNumber}`,
+    );
+  }
+  const issueNumber = Number(trustedIssueNumber);
+  if (!Number.isSafeInteger(issueNumber)) {
+    throw new Error(`TRUSTED_ISSUE_NUMBER exceeds JavaScript's safe integer range`);
+  }
   const implementJobResult = requireEnv("IMPLEMENT_JOB_RESULT");
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
@@ -1450,6 +1463,26 @@ export async function main(): Promise<void> {
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}`,
     );
+    if (issue.state !== "open") {
+      throw new PublishRejection(
+        `target #${issueNumber} is not open (state=${issue.state}); ` +
+          `refusing branch/PR publish`,
+      );
+    }
+    const issueLabels = Array.isArray(issue.labels) ? issue.labels : [];
+    const isReadyToImplement = issueLabels.some(
+      (label) =>
+        typeof label === "object" &&
+        label !== null &&
+        "name" in label &&
+        label.name === READY_TO_IMPLEMENT_LABEL,
+    );
+    if (!isReadyToImplement) {
+      throw new PublishRejection(
+        `target #${issueNumber} is not currently labelled ` +
+          `${READY_TO_IMPLEMENT_LABEL}; refusing branch/PR publish`,
+      );
+    }
 
     // Idempotency keys off the issue number (stable), never a freshly
     // re-derived title slug — see findPrForIssueNumber's docstring.
