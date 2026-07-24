@@ -42,9 +42,13 @@ const UTF8_DECODER = new TextDecoder("utf-8", {
  */
 export const ALLOWLISTED_TRACKED_PATHS: ReadonlySet<string> = new Set();
 
+/** Whether a finding belongs to a tracked pathname or loaded entry content. */
+export type InvisibleFormatSubject = "path" | "content";
+
 /** One forbidden character and its one-based location. */
 export interface InvisibleFormatFinding {
   readonly path: string;
+  readonly subject: InvisibleFormatSubject;
   readonly line: number;
   readonly column: number;
   readonly codePoint: number;
@@ -59,7 +63,7 @@ export interface InvisibleFormatScanResult {
 }
 
 /** File loader injected into the pure tracked-path traversal. */
-export type TrackedEntryLoader = (path: string) => Uint8Array | null;
+export type TrackedEntryLoader = (path: string, index: number) => Uint8Array | null;
 
 function codePointLabel(codePoint: number): string {
   return `U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}`;
@@ -97,12 +101,14 @@ function advancePosition(
  * Finds forbidden literal format characters in decoded text.
  *
  * @param path - Repo-relative tracked path used only in returned diagnostics.
- * @param text - Valid UTF-8 text to inspect.
+ * @param text - Replacement-decoded text to inspect.
+ * @param subject - Whether `text` is a pathname or loaded entry content.
  * @returns Findings in source order with one-based line and code-point column.
  */
 export function findInvisibleFormatCharacters(
   path: string,
   text: string,
+  subject: InvisibleFormatSubject = "content",
 ): InvisibleFormatFinding[] {
   const findings: InvisibleFormatFinding[] = [];
   let cursor = 0;
@@ -117,6 +123,7 @@ export function findInvisibleFormatCharacters(
     const character = match[0];
     findings.push({
       path,
+      subject,
       line,
       column,
       codePoint: character.codePointAt(0)!,
@@ -145,25 +152,33 @@ export function decodeTrackedContent(content: Uint8Array): string {
  * @param trackedPaths - Repo-relative paths from `git ls-files -z`.
  * @param loadEntry - Loads a regular file or symlink's tracked bytes; returns
  *   `null` for non-file entries such as submodules.
- * @param allowlistedPaths - Exact repo-relative paths exempt from findings.
+ * @param allowlistedPaths - Exact repo-relative paths whose content is exempt.
+ *   Pathnames themselves are never exempt.
+ * @param rawTrackedPaths - Optional raw Git pathname bytes. Malformed UTF-8
+ *   names are categorically ineligible for the string allowlist.
  * @returns Counts and findings sorted by the supplied path order.
  */
 export function scanTrackedPaths(
   trackedPaths: readonly string[],
   loadEntry: TrackedEntryLoader,
   allowlistedPaths: ReadonlySet<string> = ALLOWLISTED_TRACKED_PATHS,
+  rawTrackedPaths?: readonly Uint8Array[],
 ): InvisibleFormatScanResult {
   const findings: InvisibleFormatFinding[] = [];
   let scannedEntries = 0;
   let skippedNonFileEntries = 0;
   let skippedAllowlistedEntries = 0;
 
-  for (const path of trackedPaths) {
-    if (allowlistedPaths.has(path)) {
+  for (const [index, path] of trackedPaths.entries()) {
+    findings.push(...findInvisibleFormatCharacters(path, path, "path"));
+    const rawPath = rawTrackedPaths?.[index];
+    const hasExactUtf8Name =
+      rawPath === undefined || Buffer.from(path, "utf8").equals(rawPath);
+    if (hasExactUtf8Name && allowlistedPaths.has(path)) {
       skippedAllowlistedEntries += 1;
       continue;
     }
-    const content = loadEntry(path);
+    const content = loadEntry(path, index);
     if (content === null) {
       skippedNonFileEntries += 1;
       continue;
@@ -206,30 +221,37 @@ function hasErrorCode(error: unknown, code: string): boolean {
 export function formatInvisibleFormatFinding(
   finding: InvisibleFormatFinding,
 ): string {
-  return `${safePathForLog(finding.path)}:${finding.line}:${finding.column}: forbidden ${codePointLabel(finding.codePoint)}`;
+  const location = `${safePathForLog(finding.path)}:${finding.line}:${finding.column}`;
+  const subject = finding.subject === "path" ? "tracked path " : "";
+  return `${subject}${location}: forbidden ${codePointLabel(finding.codePoint)}`;
 }
 
 /**
  * Loads one tracked working-tree entry without following symlinks.
  *
  * @param repositoryRoot - Repository root containing the tracked path.
- * @param path - Repo-relative path reported by Git.
+ * @param path - Replacement-decoded repo-relative path reported by Git.
+ * @param rawPath - Raw Git pathname bytes retained for filesystem identity.
  * @returns Regular-file bytes, symlink text bytes, or `null` for a non-file
  *   entry such as a gitlink directory.
  */
 export function loadTrackedWorkingTreeEntry(
   repositoryRoot: string,
   path: string,
+  rawPath?: Uint8Array,
 ): Uint8Array | null {
-  const absolutePath = resolve(repositoryRoot, path);
-  const rootPrefix = repositoryRoot.endsWith(sep)
-    ? repositoryRoot
-    : `${repositoryRoot}${sep}`;
-  if (!absolutePath.startsWith(rootPrefix)) {
+  const resolvedRoot = resolve(repositoryRoot);
+  const resolvedPath = resolve(resolvedRoot, path);
+  const rootPrefix = `${resolvedRoot}${sep}`;
+  if (!resolvedPath.startsWith(rootPrefix)) {
     throw new Error(
       `tracked path escapes repository root: ${safePathForLog(path)}`,
     );
   }
+  const absolutePath: string | Buffer =
+    rawPath === undefined
+      ? resolvedPath
+      : Buffer.concat([Buffer.from(rootPrefix), Buffer.from(rawPath)]);
 
   try {
     try {
@@ -269,14 +291,24 @@ export function scanRepository(
   const resolvedRoot = resolve(repositoryRoot);
   const trackedPathOutput = execFileSync("git", ["ls-files", "-z"], {
     cwd: resolvedRoot,
-    encoding: "utf8",
     maxBuffer: MAX_TRACKED_PATH_LIST_BYTES,
   });
-  const trackedPaths = trackedPathOutput.split("\0").filter(Boolean);
+  const rawTrackedPaths = trackedPathOutput
+    .toString("latin1")
+    .split("\0")
+    .filter(Boolean)
+    .map((path) => Buffer.from(path, "latin1"));
+  const trackedPaths = rawTrackedPaths.map(decodeTrackedContent);
   return scanTrackedPaths(
     trackedPaths,
-    (path) => loadTrackedWorkingTreeEntry(resolvedRoot, path),
+    (path, index) =>
+      loadTrackedWorkingTreeEntry(
+        resolvedRoot,
+        path,
+        rawTrackedPaths[index],
+      ),
     ALLOWLISTED_TRACKED_PATHS,
+    rawTrackedPaths,
   );
 }
 

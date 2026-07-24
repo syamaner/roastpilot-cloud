@@ -136,6 +136,7 @@ describe("findInvisibleFormatCharacters", () => {
       expect(findInvisibleFormatCharacters("src/example.ts", text)).toEqual([
         {
           path: "src/example.ts",
+          subject: "content",
           line: 1,
           column: 7,
           codePoint,
@@ -187,12 +188,14 @@ describe("findInvisibleFormatCharacters", () => {
     expect(findings).toEqual([
       {
         path: "src/example.ts",
+        subject: "content",
         line: 2,
         column: 2,
         codePoint: 0x202e,
       },
       {
         path: "src/example.ts",
+        subject: "content",
         line: 2,
         column: 4,
         codePoint: 0x202e,
@@ -212,6 +215,7 @@ describe("findInvisibleFormatCharacters", () => {
     expect(findings).toEqual([
       {
         path: "src/lines.ts",
+        subject: "content",
         line: 5,
         column: 2,
         codePoint: 0x200b,
@@ -235,7 +239,13 @@ describe("decodeTrackedContent", () => {
       Uint8Array.from([0xef, 0xbb, 0xbf, 0x61]),
     );
     expect(findInvisibleFormatCharacters("bom.txt", decoded)).toEqual([
-      { path: "bom.txt", line: 1, column: 1, codePoint: 0xfeff },
+      {
+        path: "bom.txt",
+        subject: "content",
+        line: 1,
+        column: 1,
+        codePoint: 0xfeff,
+      },
     ]);
   });
 
@@ -270,6 +280,7 @@ describe("scanTrackedPaths", () => {
       findings: [
         {
           path: "bad.txt",
+          subject: "content",
           line: 1,
           column: 2,
           codePoint: 0x200b,
@@ -294,6 +305,89 @@ describe("scanTrackedPaths", () => {
     ]);
     expect(result.skippedAllowlistedEntries).toBe(1);
     expect(ALLOWLISTED_TRACKED_PATHS.size).toBe(0);
+  });
+
+  it("never lets a content allowlist exempt an invisible pathname", () => {
+    const forbidden = String.fromCodePoint(0x200b);
+    const path = `src/${forbidden}allowed.ts`;
+    const result = scanTrackedPaths(
+      [path],
+      () => Buffer.from(`content${forbidden}`),
+      new Set([path]),
+    );
+
+    expect(result.findings).toEqual([
+      {
+        path,
+        subject: "path",
+        line: 1,
+        column: 5,
+        codePoint: 0x200b,
+      },
+    ]);
+    expect(result.skippedAllowlistedEntries).toBe(1);
+  });
+
+  it("never lets a decoded collision allowlist malformed raw names", () => {
+    const rawPath = Buffer.from([
+      ...Buffer.from("src/"),
+      0xff,
+      ...Buffer.from("source.ts"),
+    ]);
+    const path = decodeTrackedContent(rawPath);
+    const forbidden = String.fromCodePoint(0x202e);
+    const result = scanTrackedPaths(
+      [path],
+      () => Buffer.from(forbidden),
+      new Set([path]),
+      [rawPath],
+    );
+
+    expect(result.findings).toEqual([
+      {
+        path,
+        subject: "content",
+        line: 1,
+        column: 1,
+        codePoint: 0x202e,
+      },
+    ]);
+    expect(result.skippedAllowlistedEntries).toBe(0);
+  });
+
+  it("labels path and content findings in deterministic order", () => {
+    const pathCodePoint = 0xe0100;
+    const path = `dir${String.fromCodePoint(pathCodePoint)}/source.ts`;
+    const contentCodePoint = 0x202e;
+
+    expect(
+      scanTrackedPaths(
+        [path],
+        () => Buffer.from(`x${String.fromCodePoint(contentCodePoint)}`),
+      ).findings,
+    ).toEqual([
+      {
+        path,
+        subject: "path",
+        line: 1,
+        column: 4,
+        codePoint: pathCodePoint,
+      },
+      {
+        path,
+        subject: "content",
+        line: 1,
+        column: 2,
+        codePoint: contentCodePoint,
+      },
+    ]);
+  });
+
+  it("allows visible adjacent Unicode in a pathname", () => {
+    const path = `src/${String.fromCodePoint(0x2029)}visible.ts`;
+    expect(scanTrackedPaths([path], () => Buffer.from("clean")).findings).toEqual(
+      [],
+    );
   });
 });
 
@@ -331,11 +425,27 @@ describe("formatInvisibleFormatFinding", () => {
     expect(
       formatInvisibleFormatFinding({
         path: "src/example.ts",
+        subject: "content",
         line: 2,
         column: 4,
         codePoint: 0x202e,
       }),
     ).toBe("\"src/example.ts\":2:4: forbidden U+202E");
+  });
+
+  it("labels and sanitizes a tracked-path diagnostic", () => {
+    const forbidden = String.fromCodePoint(0x200b);
+    expect(
+      formatInvisibleFormatFinding({
+        path: `src/${forbidden}stealth.ts`,
+        subject: "path",
+        line: 1,
+        column: 5,
+        codePoint: 0x200b,
+      }),
+    ).toBe(
+      'tracked path "src/[U+200B]stealth.ts":1:5: forbidden U+200B',
+    );
   });
 
   it("neutralizes control and bidi characters in an attacker-controlled path", () => {
@@ -344,6 +454,7 @@ describe("formatInvisibleFormatFinding", () => {
       `src/${arabicLetterMark}\nname${String.fromCodePoint(0x202e)}` + ".ts";
     const formatted = formatInvisibleFormatFinding({
       path: unsafePath,
+      subject: "content",
       line: 1,
       column: 1,
       codePoint: 0x200b,
@@ -435,6 +546,7 @@ describe("scanner entrypoint", () => {
       expect(result.findings).toEqual([
         {
           path: "nested/z-bad.ts",
+          subject: "content",
           line: 1,
           column: 4,
           codePoint: 0x2060,
@@ -471,6 +583,60 @@ describe("scanner entrypoint", () => {
       expect(result.stdout).toBe("");
     });
   });
+
+  it("rejects a clean live-workflow body with an invisible pathname", () => {
+    withTemporaryGitRepository((repositoryRoot) => {
+      const forbidden = String.fromCodePoint(0x200b);
+      const path = `.github/workflows/${forbidden}stealth.yml`;
+      writeTrackedFile(repositoryRoot, path, "name: clean\non: push\n");
+
+      const result = runEntrypoint(repositoryRoot);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        'tracked path ".github/workflows/[U+200B]stealth.yml":1:19: forbidden U+200B',
+      );
+      expect(result.stderr).not.toContain(forbidden);
+    });
+  });
+
+  it.runIf(process.platform === "linux")(
+    "retains malformed raw pathname identity for scanning",
+    () => {
+      withTemporaryGitRepository((repositoryRoot) => {
+        const rawPath = Buffer.from([
+          ...Buffer.from(`${repositoryRoot}/src/`),
+          0xff,
+          ...Buffer.from("source.js"),
+        ]);
+        const cleanRawPath = Buffer.from([
+          ...Buffer.from(`${repositoryRoot}/src/`),
+          0xfe,
+          ...Buffer.from("clean.js"),
+        ]);
+        mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+        writeFileSync(
+          rawPath,
+          `// ${String.fromCodePoint(0x202e)}\nconsole.log("ok");\n`,
+        );
+        writeFileSync(cleanRawPath, 'console.log("clean");\n');
+        execFileSync("git", ["add", "-A"], { cwd: repositoryRoot });
+
+        const result = scanRepository(repositoryRoot);
+
+        expect(result.scannedEntries).toBe(2);
+        expect(result.findings).toEqual([
+          {
+            path: `src/${String.fromCodePoint(0xfffd)}source.js`,
+            subject: "content",
+            line: 1,
+            column: 4,
+            codePoint: 0x202e,
+          },
+        ]);
+      });
+    },
+  );
 
   it.each([
     {
@@ -537,6 +703,7 @@ describe("scanner entrypoint", () => {
       expect(scanRepository(repositoryRoot).findings).toEqual([
         {
           path: "unsafe-link",
+          subject: "content",
           line: 1,
           column: 9,
           codePoint: 0x2064,
@@ -582,7 +749,13 @@ describe("scanner entrypoint", () => {
 
       const scan = scanRepository(repositoryRoot);
       expect(scan.findings).toEqual([
-        { path, line: 1, column: 2, codePoint: 0x200f },
+        {
+          path,
+          subject: "content",
+          line: 1,
+          column: 2,
+          codePoint: 0x200f,
+        },
       ]);
 
       const result = runEntrypoint(repositoryRoot);
