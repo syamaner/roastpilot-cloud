@@ -1211,7 +1211,7 @@ export function buildAnchorFallbackSummarySupplement(
   // without needing per-entry patched-vs-never-posted state threaded
   // through this function.
   const lines: string[] = [
-    `> ⚠️ **Blocking findings are listed here** — ${openingExplanation}. ` +
+    `> ⚠\uFE0F **Blocking findings are listed here** — ${openingExplanation}. ` +
       "Resolve any inline thread that already exists for one of these first; address any " +
       "remaining ones below:",
     "",

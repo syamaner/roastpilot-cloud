@@ -41,11 +41,28 @@ const CI_WORKFLOW_PATH = join(
 const CHECK_COMMAND =
   "node --experimental-strip-types scripts/factory/check-invisible-format-characters.mts";
 
-const DISALLOWED_CODE_POINTS = [
+const REQUIRED_DEFAULT_IGNORABLE_EXAMPLES = [
+  0x00ad,
+  0x034f,
+  0x061c,
+  0x115f,
+  0x17b4,
+  0x180b,
+  0x180e,
   ...codePointRange(0x200b, 0x200f),
   ...codePointRange(0x202a, 0x202e),
-  ...codePointRange(0x2060, 0x2064),
+  ...codePointRange(0x2060, 0x206f),
+  0x3164,
+  0xfe00,
+  0xfe0f,
   0xfeff,
+  0xffa0,
+  0xe0000,
+  0xe0001,
+  0xe0020,
+  0xe007f,
+  0xe0100,
+  0xe01ef,
 ] as const;
 
 type Mapping = Record<string, unknown>;
@@ -112,8 +129,8 @@ afterEach(() => {
 });
 
 describe("findInvisibleFormatCharacters", () => {
-  it.each(DISALLOWED_CODE_POINTS)(
-    "rejects literal U+%s",
+  it.each(REQUIRED_DEFAULT_IGNORABLE_EXAMPLES)(
+    "rejects representative default-ignorable U+%s",
     (codePoint) => {
       const text = `before${String.fromCodePoint(codePoint)}after`;
       expect(findInvisibleFormatCharacters("src/example.ts", text)).toEqual([
@@ -127,7 +144,27 @@ describe("findInvisibleFormatCharacters", () => {
     },
   );
 
-  it.each([0x200a, 0x2010, 0x2029, 0x202f, 0x205f, 0x2065, 0xfefe, 0xff00])(
+  it.each([
+    0x00ac,
+    0x00ae,
+    0x034e,
+    0x0350,
+    0x061b,
+    0x061d,
+    0x200a,
+    0x2010,
+    0x2029,
+    0x202f,
+    0x205f,
+    0x2070,
+    0x3163,
+    0x3165,
+    0xfefe,
+    0xff00,
+    0xdffff,
+    0xe1000,
+    0x10ffff,
+  ])(
     "allows adjacent non-target U+%s",
     (codePoint) => {
       expect(
@@ -186,7 +223,7 @@ describe("findInvisibleFormatCharacters", () => {
     expect(
       findInvisibleFormatCharacters(
         "tests/example.test.ts",
-        "const payload = \"\\u200B\";",
+        "const payload = \"\\u200B\\u061C\\u{E0100}\";",
       ),
     ).toEqual([]);
   });

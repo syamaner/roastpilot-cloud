@@ -35,7 +35,7 @@ jobs:
         run: |
           echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — seed/triage/apply will NOT run for this event. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
           {
-            echo "## ⏸️ Factory paused"
+            echo "## ⏸ Factory paused"
             echo "\`FACTORY_PAUSED\` is \`true\` — no triage jobs ran for this event."
             echo "See [docs/factory-runbook.md](https://github.com/${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
           } >> "$GITHUB_STEP_SUMMARY"

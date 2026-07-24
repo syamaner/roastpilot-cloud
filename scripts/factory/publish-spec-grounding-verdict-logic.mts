@@ -833,7 +833,7 @@ export function buildSpecGroundingSummaryCommentBody(
       causes.push("this PR's own diff");
     }
     lines.push(
-      `> ⚠️ **This review may be incomplete.** ${causes.join(" and ")} exceeded a resource cap ` +
+      `> ⚠\uFE0F **This review may be incomplete.** ${causes.join(" and ")} exceeded a resource cap ` +
         "during this run, so the reviewer may not have seen every criterion or every change. " +
         "Treat a clean result here with appropriate caution and consider a manual pass on the " +
         "parts a byte/file-count cap could have cut off.",
@@ -1216,7 +1216,7 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
   }
   const { list: issueList } = renderCappedIssueNumberList(staleBlockerIssueNumbers, maxListLength);
   return (
-    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    `> ℹ\uFE0F **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
     "body no longer references them at all (removed since the spec-grounded review ran against " +
     "this PR's head), so those findings no longer reflect a live closing obligation this run could " +
     "verify. Any prior inline comment for them that this run's own reconciliation could positively " +
@@ -1265,7 +1265,7 @@ export function buildDowngradedClosingBlockerSkippedNote(
   }
   const { list: issueList } = renderCappedIssueNumberList(downgradedClosingBlockerIssueNumbers, maxListLength);
   return (
-    `> ℹ️ **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
+    `> ℹ\uFE0F **Blocking finding(s) for issue(s) ${issueList} were NOT posted inline.** This PR's own ` +
     "body still references them, but no longer with a closing keyword (downgraded from a `Closes " +
     "#N`-style reference to a plain one, like `Refs #N`, since the spec-grounded review ran against " +
     "this PR's head), so those findings no longer reflect a live closing obligation this run could " +

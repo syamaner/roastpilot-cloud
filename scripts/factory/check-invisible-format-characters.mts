@@ -22,9 +22,9 @@ import { fileURLToPath } from "node:url";
 
 const MAX_TRACKED_PATH_LIST_BYTES = 16 * 1024 * 1024;
 const DISALLOWED_FORMAT_CHARACTER_PATTERN =
-  /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/gu;
+  /\p{Default_Ignorable_Code_Point}/gu;
 const LOG_UNSAFE_CHARACTER_PATTERN =
-  /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF]/gu;
+  /[\p{Default_Ignorable_Code_Point}\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu;
 const UTF8_DECODER = new TextDecoder("utf-8", {
   fatal: true,
   // Preserve a leading UTF-8 BOM as U+FEFF so the guard can reject it.

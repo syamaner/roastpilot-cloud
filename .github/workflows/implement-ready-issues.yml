@@ -74,7 +74,7 @@ jobs:
         run: |
           echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — this dispatch will NOT implement or publish anything. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
           {
-            echo "## ⏸️ Factory paused"
+            echo "## ⏸ Factory paused"
             echo "\`FACTORY_PAUSED\` is \`true\` — this dispatch did not implement or publish anything."
             echo "See [docs/factory-runbook.md](https://github.com/${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
           } >> "$GITHUB_STEP_SUMMARY"
