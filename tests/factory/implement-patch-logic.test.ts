@@ -1330,14 +1330,14 @@ describe("buildImplementPrBody", () => {
       ...baseContext,
       publishedViaFallback: true,
     });
-    expect(body).toContain("⚠️");
+    expect(body).toContain("⚠\uFE0F");
     expect(body).toContain("GITHUB_TOKEN fallback");
     expect(body).toContain("Do not merge without a manual review pass");
     expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
     // The warning must lead the body, not be buried below the fold —
     // asserted structurally (its position precedes "## Story"), not just
     // "somewhere in the string".
-    expect(body.indexOf("⚠️")).toBeLessThan(body.indexOf("## Story"));
+    expect(body.indexOf("⚠\uFE0F")).toBeLessThan(body.indexOf("## Story"));
     expect(body.indexOf("## Story")).toBeGreaterThan(-1);
   });
 });
@@ -1627,10 +1627,10 @@ describe("buildPublishSuccessStepSummary", () => {
       prUrl: "https://github.com/o/r/pull/99",
       wasRefresh: false,
     });
-    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("⚠\uFE0F Fell back to `GITHUB_TOKEN`");
     expect(summary).toContain("`github-actions[bot]`");
     expect(summary).toContain("`FACTORY_PUBLISHER_APP_ID is not configured`");
-    expect(summary).toContain("⚠️ **Suppressed**");
+    expect(summary).toContain("⚠\uFE0F **Suppressed**");
     expect(summary).toContain("no-review-automation");
     expect(summary).toContain("Codex does NOT auto-trigger either");
   });
@@ -1672,7 +1672,7 @@ describe("buildPublishSuccessStepSummary", () => {
       prUrl: "https://github.com/o/r/pull/99",
       wasRefresh: false,
     });
-    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("⚠\uFE0F Fell back to `GITHUB_TOKEN`");
     // No " — `<reason>`" suffix when the reason is absent.
     expect(summary).not.toContain(" — `");
   });
@@ -1804,7 +1804,7 @@ describe("buildPublishRejectedStepSummary", () => {
       fallbackReason: "the mint step failed (outcome=failure)",
       reasons: ["unexpected error: network timeout"],
     });
-    expect(summary).toContain("⚠️ Fell back to `GITHUB_TOKEN`");
+    expect(summary).toContain("⚠\uFE0F Fell back to `GITHUB_TOKEN`");
     expect(summary).toContain("`the mint step failed (outcome=failure)`");
   });
 

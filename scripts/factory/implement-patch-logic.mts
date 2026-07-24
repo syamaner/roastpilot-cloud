@@ -916,7 +916,7 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
  */
 export function buildGamingBothLostReviewBody(flag: GamingFlag): string {
   return [
-    "> ⚠️ **Fallback signal:** the anti-gaming classifier flagged this diff, but both the " +
+    "> ⚠\uFE0F **Fallback signal:** the anti-gaming classifier flagged this diff, but both the " +
       "label and the annotation comment failed to post — this review exists so the flag " +
       "isn't silently lost. Confirm the flagged content below is intentional and correct " +
       "before merging.",
@@ -1236,7 +1236,7 @@ export function assertLabelDescriptionWithinLimit(
  */
 export function buildFallbackRefreshCommentBody(runUrl: string): string {
   return [
-    "> ⚠️ **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
+    "> ⚠\uFE0F **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
       "workflows did NOT run against the new commit(s).**",
     "",
     "No factory App token was minted for this run (the App wasn't configured, or minting " +
@@ -1360,7 +1360,7 @@ export function isLabelNotFoundOnIssueError(err: unknown): boolean {
 export function buildImplementPrBody(context: ImplementPrContext): string {
   const fallbackWarning = context.publishedViaFallback
     ? [
-        "> ⚠️ **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
+        "> ⚠\uFE0F **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
           "NOT run on this PR.** No factory App token was minted when this PR was " +
           "published (the App wasn't configured, or minting failed), so CodeQL, " +
           "Codex, and Claude Code Review never triggered (GitHub suppresses " +
@@ -1681,7 +1681,7 @@ function publisherIdentityLine(context: PublishStepSummaryContext): string {
   const reasonSuffix = context.fallbackReason
     ? ` — ${sanitizeStepSummaryText(context.fallbackReason)}`
     : "";
-  return `⚠️ Fell back to \`GITHUB_TOKEN\` (identity: ${login})${reasonSuffix}`;
+  return `⚠\uFE0F Fell back to \`GITHUB_TOKEN\` (identity: ${login})${reasonSuffix}`;
 }
 
 /**
@@ -1746,7 +1746,7 @@ export function buildPublishSuccessStepSummary(
 ): string {
   const labelLine =
     context.labelApplied === false
-      ? `⚠️ attempted but FAILED to apply — check the run's logs`
+      ? `⚠\uFE0F attempted but FAILED to apply — check the run's logs`
       : `the \`${NO_REVIEW_AUTOMATION_LABEL}\` label was applied`;
   // Adjudicated fix (Codex P2, #46 reshape): Codex's real behavior is
   // narrower than "triggered normally" implied. It auto-reviews at PR
@@ -1771,14 +1771,14 @@ export function buildPublishSuccessStepSummary(
   // — reporting it as "triggered normally" here would be false on the
   // one path this summary exists to be honest about.
   const reviewAutomationLine = context.publishedViaFallback
-    ? "⚠️ **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
+    ? "⚠\uFE0F **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
       "a manual review pass is required before merging."
     : "✅ CI, CodeQL, and dependency review triggered normally. Codex auto-reviewed " +
       "at creation, but the operator must still manually `@codex review` the FINAL " +
       "commit and wait for its verdict before merging (AGENTS.md's Codex-wait rule) " +
-      "— this is NOT satisfied automatically. ⚠️ **Claude Code Review does NOT yet " +
+      "— this is NOT satisfied automatically. ⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
