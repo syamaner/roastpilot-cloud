@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   TRIAGE_COMMENT_MARKER,
   buildFallbackCommentBody,
+  buildTriageGenerationMarker,
   buildVerdictCommentBody,
   computeNewLabelSet,
+  extractTriageGeneration,
   findExistingTriageCommentId,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
@@ -132,51 +134,79 @@ describe("findExistingTriageCommentId", () => {
 
 describe("buildVerdictCommentBody", () => {
   it("includes the readiness, reasoning, and marker", () => {
-    const body = buildVerdictCommentBody(verdict);
+    const body = buildVerdictCommentBody(verdict, "123");
     expect(body).toContain("ready-to-implement");
     expect(body).toContain(verdict.reasoning);
     expect(body.endsWith(TRIAGE_COMMENT_MARKER)).toBe(true);
   });
 
   it("lists missing-info questions when present", () => {
-    const body = buildVerdictCommentBody({
-      ...verdict,
-      readiness: "needs-info",
-      missing_info_questions: ["Which Snowflake role owns this?"],
-    });
+    const body = buildVerdictCommentBody(
+      {
+        ...verdict,
+        readiness: "needs-info",
+        missing_info_questions: ["Which Snowflake role owns this?"],
+      },
+      "123",
+    );
     expect(body).toContain("Which Snowflake role owns this?");
   });
 
   it("omits the questions section when there are none", () => {
-    const body = buildVerdictCommentBody(verdict);
+    const body = buildVerdictCommentBody(verdict, "123");
     expect(body).not.toContain("Questions for a human");
   });
 
   it("tells a human to confirm and close on a wontfix verdict, never closing itself", () => {
-    const body = buildVerdictCommentBody({
-      ...verdict,
-      readiness: "wontfix",
-      reasoning: "Superseded by #500.",
-    });
+    const body = buildVerdictCommentBody(
+      {
+        ...verdict,
+        readiness: "wontfix",
+        reasoning: "Superseded by #500.",
+      },
+      "123",
+    );
     expect(body).toContain("maintainer should confirm");
     expect(body).toContain("does not close issues");
   });
 
   it("omits the wontfix close-confirmation note for other readiness values", () => {
-    const body = buildVerdictCommentBody(verdict);
+    const body = buildVerdictCommentBody(verdict, "123");
     expect(body).not.toContain("does not close issues");
   });
 });
 
 describe("buildFallbackCommentBody", () => {
   it("lists every validation error and ends with the marker", () => {
-    const body = buildFallbackCommentBody([
-      "readiness must be one of ...",
-      "issue_number mismatch: ...",
-    ]);
+    const body = buildFallbackCommentBody(
+      [
+        "readiness must be one of ...",
+        "issue_number mismatch: ...",
+      ],
+      "123",
+    );
     expect(body).toContain("readiness must be one of");
     expect(body).toContain("issue_number mismatch");
     expect(body).toContain("needs-triage");
     expect(body.endsWith(TRIAGE_COMMENT_MARKER)).toBe(true);
+  });
+});
+
+describe("triage generation marker", () => {
+  it("round-trips only the marker anchored beside the final factory marker", () => {
+    const body =
+      `untrusted ${buildTriageGenerationMarker("999")}\n` +
+      `${TRIAGE_COMMENT_MARKER}\nordinary rationale\n` +
+      buildVerdictCommentBody(verdict, "123");
+    expect(extractTriageGeneration(body)).toBe("123");
+  });
+
+  it("uses none for legacy history and rejects malformed generation input", () => {
+    expect(extractTriageGeneration(`legacy\n${TRIAGE_COMMENT_MARKER}`)).toBe(
+      "none",
+    );
+    expect(() => buildTriageGenerationMarker("not-a-run")).toThrow(
+      /positive decimal/,
+    );
   });
 });

@@ -102,6 +102,8 @@ jobs:
     # selected.
     if: vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
     permissions:
       contents: read
       # Needed to fetch the target issue's title/body/labels:
@@ -212,14 +214,21 @@ jobs:
           persist-credentials: false
 
       - name: Fetch target issue, verify it is ready-to-implement, write context for the agent
+        id: issue-context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           set -euo pipefail
-          issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json number,title,body,labels)
+          issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+            --json number,author,title,body,state,labels,comments)
+          state=$(echo "$issue_json" | jq -r '.state')
           labels=$(echo "$issue_json" | jq -r '[.labels[].name] | join(",")')
+          if [ "$state" != "OPEN" ]; then
+            echo "Issue #$ISSUE_NUMBER is not open (current state: $state) — refusing to implement."
+            exit 1
+          fi
           # FIX (round 6, Codex P2): a stale or typo'd dispatch must not
           # implement (and Closes #N) an issue that was never actually
           # authorized by triage — checked here, deterministically,
@@ -235,7 +244,17 @@ jobs:
           fi
           echo "Confirmed: issue #$ISSUE_NUMBER is ready-to-implement."
           mkdir -p issue-context
-          echo "$issue_json" | jq '{number, title, body}' > issue-context/issue.json
+          echo "$issue_json" |
+            jq -cj -f .claude/skills/triage/authorized-comments.jq \
+              > issue-context/issue.json
+          triage_generation=$(jq -er '
+            [
+              .comments[]
+              | select(.kind == "factory_triage_history")
+              | .triage_generation
+            ][0] // "none"
+          ' issue-context/issue.json)
+          echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"
 
       - name: Assert no Snowflake/Vercel secrets are present in this job's environment
         # Issue #6's verification note calls for this asserted, not just
@@ -531,9 +550,10 @@ jobs:
             authorized run (issue #${{ inputs.issue_number }} in
             ${{ github.repository }}).
 
-            Read the target issue from issue-context/issue.json (title +
-            body) — do not call any GitHub API, you hold no writable
-            token and this is the only way you're given the issue content.
+            Read the target issue from issue-context/issue.json (title,
+            body, and provenance-filtered authorized clarifications) — do
+            not call any GitHub API, you hold no writable token and this
+            is the only way you're given the issue content.
             Follow this repository's AGENTS.md exactly, the same way any
             Claude Code session would: stack rules, gate commands, PR
             hygiene, and the Architecture Invariants section. Implement
@@ -943,6 +963,7 @@ jobs:
           # artifact at all — job success is a second, independent gate,
           # not implied by the patch merely existing.
           IMPLEMENT_JOB_RESULT: ${{ needs.implement.result }}
+          EXPECTED_TRIAGE_GENERATION: ${{ needs.implement.outputs.triage_generation }}
           PATCH_PATH: patch-output/patch.diff
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Minimal PR-body provenance (Codex round 3, partial factory.md

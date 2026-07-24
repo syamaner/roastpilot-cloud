@@ -6,11 +6,12 @@
  * GitHub token, and it never executes anything the agent produced — it
  * reads a JSON artifact written by the read-only `triage` job, validates it
  * with {@link validateTriageVerdict} (schema.mts), and if (and only if)
- * that passes, makes two deterministic GitHub REST API calls: replace the
- * issue's label set, and upsert a tracking comment. All agent-controlled
- * text (the verdict's `reasoning` / `missing_info_questions`) reaches
- * GitHub only as a JSON request body over `fetch` — never through a shell
- * command — so there is no shell-interpolation injection surface.
+ * that passes, re-checks the trusted target is still open, then makes
+ * deterministic GitHub REST API calls to replace the issue's label set and
+ * upsert a tracking comment. All agent-controlled text (the verdict's
+ * `reasoning` / `missing_info_questions`) reaches GitHub only as a JSON
+ * request body over `fetch` — never through a shell command — so there is
+ * no shell-interpolation injection surface.
  *
  * On a missing or invalid verdict, readiness is explicitly RESET to
  * `needs-triage` (not just left as whatever it already was — a rerun could
@@ -24,8 +25,8 @@
  * Required environment variables:
  * - `GH_TOKEN` — the job's `permissions: issues: write` token.
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
- * - `TRUSTED_ISSUE_NUMBER` — from `github.event.issue.number`, never from
- *   the verdict artifact.
+ * - `TRUSTED_ISSUE_NUMBER` — normalized from the workflow's issue event or
+ *   required dispatch input, never from the verdict artifact.
  * - `TRIAGE_JOB_RESULT` — `needs.triage.result` from the workflow. A verdict
  *   artifact is only ever trusted when this is exactly `"success"` — the
  *   `triage` step uploads its artifact with `if: always()` (so a failed run
@@ -34,6 +35,8 @@
  *   (timeout, internal error, a forbidden-tool attempt). Schema validity
  *   alone is not sufficient grounds to apply a verdict; job success is a
  *   second, independent gate checked BEFORE the artifact is even read.
+ * - `GITHUB_RUN_ID` — the trusted Actions run generation embedded in the
+ *   factory comment before readiness is restored.
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
@@ -54,6 +57,10 @@ import {
 
 interface GitHubIssueLabel {
   readonly name: string;
+}
+
+interface GitHubIssue {
+  readonly state: string;
 }
 
 interface GitHubComment {
@@ -213,6 +220,7 @@ async function applyValidVerdict(
   owner: string,
   repo: string,
   result: Extract<TriageVerdictValidationResult, { ok: true }>,
+  generation: string,
 ): Promise<void> {
   const { verdict } = result;
 
@@ -221,7 +229,7 @@ async function applyValidVerdict(
     owner,
     repo,
     verdict.issue_number,
-    buildVerdictCommentBody(verdict),
+    buildVerdictCommentBody(verdict, generation),
   );
 
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
@@ -252,6 +260,7 @@ async function applyFallback(
   repo: string,
   issueNumber: number,
   errors: readonly string[],
+  generation: string,
 ): Promise<void> {
   // Fail closed on readiness, not just on comment content: a rerun could
   // find the issue already carrying a stale ready-to-implement (from an
@@ -293,7 +302,7 @@ async function applyFallback(
     owner,
     repo,
     issueNumber,
-    buildFallbackCommentBody(errors),
+    buildFallbackCommentBody(errors, generation),
   );
   console.error(
     `Triage verdict for #${issueNumber} was invalid; readiness reset to ` +
@@ -311,19 +320,42 @@ export async function main(): Promise<void> {
   }
   const trustedIssueNumber = Number(requireEnv("TRUSTED_ISSUE_NUMBER"));
   const verdictPath = process.env.VERDICT_PATH ?? "triage-output/verdict.json";
+  const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
+  const generation = requireEnv("GITHUB_RUN_ID");
+
+  // Re-check immediately at the privileged boundary. The issue can close
+  // after seed validates it, and neither a verdict nor the fail-closed
+  // fallback may relabel or comment on closed work.
+  const issue = await githubRequest<GitHubIssue>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${trustedIssueNumber}`,
+  );
+  if (issue.state !== "open") {
+    throw new Error(
+      `target #${trustedIssueNumber} is not open (state=${issue.state}); ` +
+        `refusing all triage writes`,
+    );
+  }
 
   // Gate on triage job success BEFORE ever reading the artifact. A verdict
   // is applied only when (triage succeeded AND the artifact is valid) —
   // schema validity alone is not enough, since `if: always()` means the
   // artifact can exist and be well-formed even from a run that failed
   // partway through after writing it.
-  const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
   if (triageJobResult !== "success") {
-    await applyFallback(token, owner, repo, trustedIssueNumber, [
-      `triage job result was "${triageJobResult}", not "success" — the ` +
-        `verdict artifact (even if present and schema-valid) is not ` +
-        `trusted; only a successful triage run's verdict is ever applied`,
-    ]);
+    await applyFallback(
+      token,
+      owner,
+      repo,
+      trustedIssueNumber,
+      [
+        `triage job result was "${triageJobResult}", not "success" — the ` +
+          `verdict artifact (even if present and schema-valid) is not ` +
+          `trusted; only a successful triage run's verdict is ever applied`,
+      ],
+      generation,
+    );
     process.exitCode = 1;
     return;
   }
@@ -337,19 +369,33 @@ export async function main(): Promise<void> {
   }
 
   if (readError !== null) {
-    await applyFallback(token, owner, repo, trustedIssueNumber, [readError]);
+    await applyFallback(
+      token,
+      owner,
+      repo,
+      trustedIssueNumber,
+      [readError],
+      generation,
+    );
     process.exitCode = 1;
     return;
   }
 
   const result = validateTriageVerdict(raw, trustedIssueNumber);
   if (!result.ok) {
-    await applyFallback(token, owner, repo, trustedIssueNumber, result.errors);
+    await applyFallback(
+      token,
+      owner,
+      repo,
+      trustedIssueNumber,
+      result.errors,
+      generation,
+    );
     process.exitCode = 1;
     return;
   }
 
-  await applyValidVerdict(token, owner, repo, result);
+  await applyValidVerdict(token, owner, repo, result, generation);
 }
 
 // Only self-invoke when run directly (`node apply-triage-verdict.mts`), not

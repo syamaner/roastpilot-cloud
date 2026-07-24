@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../../scripts/factory/publish-implement-patch.mts";
+import {
+  buildTriageGenerationMarker,
+  TRIAGE_COMMENT_MARKER,
+} from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 /**
  * Proves the actual git plumbing AND the patch-path guard genuinely work
@@ -69,6 +73,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
+  process.env.EXPECTED_TRIAGE_GENERATION = "none";
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.env.PATCH_PATH = patchPath;
   process.exitCode = undefined;
@@ -82,6 +87,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
+  delete process.env.EXPECTED_TRIAGE_GENERATION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   delete process.env.IMPLEMENT_PROMPT_VERSION;
@@ -134,6 +140,31 @@ function rejectionOnlyFetchMock(): ReturnType<typeof vi.fn> {
   });
 }
 
+function stubFetch(fetchMock: ReturnType<typeof vi.fn>): void {
+  const invoke = fetchMock as unknown as (
+    input: string | URL,
+    init?: RequestInit,
+  ) => Promise<Response>;
+  const wrapped = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    try {
+      return await invoke(input, init);
+    } catch (error) {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (
+        method === "GET" &&
+        url.includes("/comments") &&
+        error instanceof Error &&
+        error.message.startsWith("unexpected fetch:")
+      ) {
+        return jsonResponse([]);
+      }
+      throw error;
+    }
+  });
+  vi.stubGlobal("fetch", wrapped);
+}
+
 /** A fetch mock covering the issue-fetch + PR-list + PR-create calls a successful run makes. */
 function stubHappyPathFetch(options?: {
   existingPrs?: Array<{
@@ -142,7 +173,11 @@ function stubHappyPathFetch(options?: {
     base?: { ref: string };
   }>;
   createResponse?: { number: number; html_url: string };
+  issueLabels?: readonly string[];
+  rawIssueLabels?: unknown;
   issueTitle?: string;
+  issueState?: string;
+  triageGeneration?: string;
   /**
    * Simulates a prior implement-failure comment already on the issue
    * (Codex round-3 upsert idempotency) — when set, the mocked
@@ -156,8 +191,18 @@ function stubHappyPathFetch(options?: {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+      const labels = Object.prototype.hasOwnProperty.call(
+        options ?? {},
+        "rawIssueLabels",
+      )
+        ? options?.rawIssueLabels
+        : (options?.issueLabels ?? ["ready-to-implement"]).map(
+            (name) => ({ name }),
+          );
       return jsonResponse({
         title: options?.issueTitle ?? "[F1-S3] Implement workflow",
+        state: options?.issueState ?? "open",
+        labels,
       });
     }
     if (method === "GET" && url.includes("/pulls?state=open")) {
@@ -194,13 +239,24 @@ function stubHappyPathFetch(options?: {
       // POSTing/PATCHing — reached on every failure path, not just the
       // ones a test is specifically targeting, so this must always
       // answer (empty by default: "no prior comment, POST a fresh one").
-      return jsonResponse(options?.existingFailureComment ? [
-        {
+      const comments: unknown[] = [];
+      if (options?.triageGeneration) {
+        comments.push({
+          id: 40,
+          body:
+            `Triage verdict\n${buildTriageGenerationMarker(options.triageGeneration)}\n` +
+            TRIAGE_COMMENT_MARKER,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        });
+      }
+      if (options?.existingFailureComment) {
+        comments.push({
           id: options.existingFailureComment.id,
           body: options.existingFailureComment.body,
           user: { type: "Bot", login: "github-actions[bot]" },
-        },
-      ] : []);
+        });
+      }
+      return jsonResponse(comments);
     }
     if (method === "PATCH" && url.includes("/issues/comments/")) {
       return jsonResponse({}, 200);
@@ -223,7 +279,7 @@ function stubHappyPathFetch(options?: {
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
-  vi.stubGlobal("fetch", fetchMock);
+  stubFetch(fetchMock);
   return fetchMock;
 }
 
@@ -289,6 +345,383 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       { cwd: bareRemoteDir, encoding: "utf8" },
     );
     expect(branches).toContain("feature/6-implement-workflow");
+  });
+});
+
+describe("publish-implement-patch — open issue eligibility at the privileged boundary", () => {
+  it("rejects a closed issue before creating a branch or PR", async () => {
+    const fetchMock = stubHappyPathFetch({ issueState: "closed" });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/pulls") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/labels") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    const failurePosts = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    expect(failurePosts).toHaveLength(1);
+    const failureBody = JSON.parse(
+      (failurePosts[0]?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(failureBody.body).toContain("not open");
+    expect(failureBody.body).toContain(
+      "No branch was created and nothing was pushed",
+    );
+  });
+
+  it("does not change an existing implementation branch when the issue closed mid-run", async () => {
+    git(localCloneDir, ["checkout", "-b", "feature/6-implement-workflow"]);
+    await fsWriteFile(join(localCloneDir, "existing.txt"), "existing\n");
+    git(localCloneDir, ["add", "existing.txt"]);
+    git(localCloneDir, ["commit", "-q", "-m", "existing implementation"]);
+    git(localCloneDir, ["push", "origin", "feature/6-implement-workflow"]);
+    const before = git(bareRemoteDir, [
+      "rev-parse",
+      "refs/heads/feature/6-implement-workflow",
+    ]).trim();
+    git(localCloneDir, ["checkout", "main"]);
+
+    const fetchMock = stubHappyPathFetch({
+      issueState: "closed",
+      existingPrs: [
+        { number: 50, head: { ref: "feature/6-implement-workflow" } },
+      ],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, [
+        "rev-parse",
+        "refs/heads/feature/6-implement-workflow",
+      ]).trim(),
+    ).toBe(before);
+
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).includes("/issues/50/") && init?.method !== "GET",
+      ),
+    ).toBe(false);
+    expect(
+      calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("rejects withdrawn readiness before PR lookup or a fresh branch push", async () => {
+    const fetchMock = stubHappyPathFetch({ issueLabels: ["needs-info"] });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/pulls") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/labels") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    const failurePosts = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    expect(failurePosts).toHaveLength(1);
+    const failureBody = JSON.parse(
+      (failurePosts[0]?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(failureBody.body).toContain(
+      "not currently labelled ready-to-implement",
+    );
+    expect(failureBody.body).toContain(
+      "No branch was created and nothing was pushed",
+    );
+  });
+
+  it("does not refresh an existing implementation branch after readiness is withdrawn", async () => {
+    git(localCloneDir, ["checkout", "-b", "feature/6-implement-workflow"]);
+    await fsWriteFile(join(localCloneDir, "existing.txt"), "existing\n");
+    git(localCloneDir, ["add", "existing.txt"]);
+    git(localCloneDir, ["commit", "-q", "-m", "existing implementation"]);
+    git(localCloneDir, ["push", "origin", "feature/6-implement-workflow"]);
+    const before = git(bareRemoteDir, [
+      "rev-parse",
+      "refs/heads/feature/6-implement-workflow",
+    ]).trim();
+    git(localCloneDir, ["checkout", "main"]);
+
+    const fetchMock = stubHappyPathFetch({
+      issueLabels: ["needs-info"],
+      existingPrs: [
+        { number: 50, head: { ref: "feature/6-implement-workflow" } },
+      ],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, [
+        "rev-parse",
+        "refs/heads/feature/6-implement-workflow",
+      ]).trim(),
+    ).toBe(before);
+
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).includes("/issues/50/") && init?.method !== "GET",
+      ),
+    ).toBe(false);
+    expect(
+      calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("publishes when the exact readiness label is present among unrelated labels", async () => {
+    stubHappyPathFetch({
+      issueLabels: ["epic:F1", "ready-to-implement", "priority:medium"],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toContain("feature/6-implement-workflow");
+  });
+
+  it("publishes only when the trusted triage generation still matches", async () => {
+    process.env.EXPECTED_TRIAGE_GENERATION = "123";
+    stubHappyPathFetch({ triageGeneration: "123" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toContain("feature/6-implement-workflow");
+  });
+
+  it("rejects a withdraw-then-restore re-triage generation before PR lookup", async () => {
+    process.env.EXPECTED_TRIAGE_GENERATION = "123";
+    const fetchMock = stubHappyPathFetch({ triageGeneration: "456" });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    const failurePost = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const failureBody = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(failureBody.body).toContain(
+      "triage generation changed from 123 to 456",
+    );
+  });
+
+  it("fails closed when triage history exceeds the bounded comment scan", async () => {
+    const unrelatedFullPage = Array.from({ length: 100 }, (_, index) => ({
+      id: 4000 + index,
+      body: `unrelated comment ${index}`,
+      user: { type: "User", login: "someone" },
+    }));
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.match(/\/issues\/\d+$/)) {
+        return jsonResponse({
+          title: "[F1-S3] Implement workflow",
+          state: "open",
+          labels: [{ name: "ready-to-implement" }],
+        });
+      }
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse(unrelatedFullPage);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        return jsonResponse({}, 201);
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    const commentCalls = calls.filter(([url]) =>
+      String(url).includes("/comments"),
+    );
+    expect(commentCalls).toHaveLength(101);
+    expect(
+      commentCalls.filter(
+        ([url, init]) =>
+          String(url).includes("page=50") && (init?.method ?? "GET") === "GET",
+      ),
+    ).toHaveLength(2);
+    const failurePost = commentCalls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const failureBody = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(failureBody.body).toContain(
+      "could not determine the current triage generation within 5000 issue comments",
+    );
+  });
+
+  it.each([
+    ["an omitted labels field", undefined],
+    ["a non-array labels object", { name: "ready-to-implement" }],
+    [
+      "malformed label-array members",
+      [null, "ready-to-implement", {}, { name: 42 }],
+    ],
+  ])("fails closed for %s", async (_case, rawIssueLabels) => {
+    const fetchMock = stubHappyPathFetch({ rawIssueLabels });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/pulls") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(
+      calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("fails closed when the publish-time issue-state fetch fails", async () => {
+    const fetchMock = vi.fn(
+      async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (method === "GET" && url.endsWith("/issues/6")) {
+          return new Response("service unavailable", { status: 503 });
+        }
+        if (method === "GET" && url.includes("/comments")) {
+          return jsonResponse([]);
+        }
+        if (method === "POST" && url.endsWith("/issues/6/comments")) {
+          return jsonResponse({}, 201);
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      },
+    );
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/pulls") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(
+      calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
   });
 });
 
@@ -370,7 +803,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -386,7 +819,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -402,7 +835,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -426,7 +859,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -449,7 +882,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -479,7 +912,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -583,7 +1016,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([
@@ -599,7 +1032,7 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -823,7 +1256,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([
@@ -845,7 +1278,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -874,7 +1307,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -890,7 +1323,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -933,7 +1366,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -949,7 +1382,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -968,7 +1401,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -986,7 +1419,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1087,7 +1520,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([
@@ -1107,7 +1540,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -1122,7 +1555,7 @@ index 0000000..abc1234
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([
@@ -1143,7 +1576,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1612,7 +2045,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     // main() itself REJECTS here — postFailureComment's error propagates
     // out of the catch block (no internal try/catch of its own), and only
@@ -1639,7 +2072,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -1652,7 +2085,7 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await main();
@@ -1745,7 +2178,7 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary-placeholder.diff", placeholderDiff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -1967,7 +2400,7 @@ index 0000000..abc1234
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2168,7 +2601,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         if (url.includes("page=2")) {
@@ -2181,7 +2614,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     // The existing PR's branch must already exist on the remote for the
     // force-push to a REUSED branch to succeed.
@@ -2225,7 +2658,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse(unrelatedFullPage);
@@ -2235,7 +2668,7 @@ describe("publish-implement-patch — Codex round 7: open-PR listing is paginate
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2310,7 +2743,7 @@ index abc1234..def5678 100644
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2351,7 +2784,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "evil.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2375,7 +2808,7 @@ index abc1234..def5678 100644
     process.env.PATCH_PATH = await writePatch(scratchDir, "glue.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2414,7 +2847,7 @@ index abc1234..def5678 100644
     process.env.PATCH_PATH = await writePatch(scratchDir, "exploit-rename-out.diff", exploitDiff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2440,7 +2873,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-github.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2463,7 +2896,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-codeowners.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2484,7 +2917,7 @@ index abc1234..def5678 100644
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "rename-out-docs-codeowners.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2501,7 +2934,7 @@ copy to scripts/factory/evil-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-into.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2521,7 +2954,7 @@ copy to lib/leaked-copy.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "copy-out.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2546,7 +2979,7 @@ copy to lib/copy-dest.mts
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-from.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2565,7 +2998,7 @@ copy to "scripts/factory/evil-copy.mts"
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-copy-to.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2589,7 +3022,7 @@ rename to "scripts/other/x.mts"
 `;
     process.env.PATCH_PATH = await writePatch(scratchDir, "quoted-rename.diff", diff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2630,7 +3063,7 @@ rename to "scripts/other/x.mts"
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "nonascii-rename.diff", exploitDiff);
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2654,7 +3087,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "space.diff", diff);
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2688,7 +3121,7 @@ index 0000000..abc1234
     process.env.PATCH_PATH = await writePatch(scratchDir, "empty.diff", "");
 
     const fetchMock = rejectionOnlyFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2722,7 +3155,7 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -2738,7 +3171,7 @@ describe("publish-implement-patch — FIX 5: accurate reporting when publish par
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     await main();
 
@@ -2900,7 +3333,7 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
       const url = String(input);
       const method = init?.method ?? "GET";
       if (method === "GET" && url.match(/\/issues\/\d+$/)) {
-        return jsonResponse({ title: "[F1-S3] Implement workflow" });
+        return jsonResponse({ title: "[F1-S3] Implement workflow", state: "open", labels: [{ name: "ready-to-implement" }] });
       }
       if (method === "GET" && url.includes("/pulls?state=open")) {
         return jsonResponse([]);
@@ -2917,7 +3350,7 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();
@@ -2955,7 +3388,7 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await main();

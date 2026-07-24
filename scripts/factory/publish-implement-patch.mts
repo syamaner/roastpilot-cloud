@@ -8,8 +8,9 @@
  * consumer, not a script interpreter), never executed. Mirrors
  * `apply-triage-verdict.mts`'s shape closely: read an artifact the
  * read-only agent job produced, validate it thoroughly BEFORE trusting it,
- * and only then perform the privileged side effects — here, applying the
- * patch, pushing a branch, and opening a PR, instead of a label/comment.
+ * re-check the trusted issue is still open, and only then perform the
+ * privileged side effects — here, applying the patch, pushing a branch,
+ * and opening a PR, instead of a label/comment.
  *
  * The patch-path guard is APPLIER-AUTHORITATIVE, not a re-parse — and it
  * took THREE rounds of finding a new diff-text-encoding variant to reach
@@ -108,14 +109,17 @@
  * - `GITHUB_REPOSITORY` — `owner/repo`.
  * - `TRUSTED_ISSUE_NUMBER` — from the `workflow_dispatch` `issue_number`
  *   input. Trusted because dispatch-first means a human explicitly chose
- *   this issue for this run — the human dispatch IS the authorization
- *   seam (factory.md's staged-autonomy note); this is not read from
- *   anything agent-controlled.
+ *   this issue for this run; this is not read from anything
+ *   agent-controlled. Dispatch selects the target, but does not keep a
+ *   withdrawn authorization alive: the publisher revalidates the current
+ *   `ready-to-implement` label before any branch or PR write.
  * - `IMPLEMENT_JOB_RESULT` — `needs.implement.result`. A patch artifact is
  *   only ever trusted when this is exactly `"success"` — same F1-S2
  *   lesson (FIX E) applied here: the `implement` step uploads its patch
  *   with `if: always()`, so a non-empty, well-formed patch can exist even
  *   from a run that did not succeed.
+ * - `EXPECTED_TRIAGE_GENERATION` — the trusted triage-comment generation
+ *   captured before the implement agent started (`none` for legacy history).
  * - `PATCH_PATH` — path to the downloaded patch artifact (may not exist).
  * - `RUN_URL` — link to the implement run, for the PR body / failure
  *   comment.
@@ -173,6 +177,11 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
+import {
+  extractTriageGeneration,
+  TRIAGE_COMMENT_AUTHOR_LOGIN,
+  TRIAGE_COMMENT_MARKER,
+} from "./apply-triage-verdict-logic.mts";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
@@ -247,8 +256,12 @@ export const MAX_GIT_QUERY_BUFFER_BYTES = 16 * 1024 * 1024;
  */
 class PublishRejection extends Error {}
 
+const READY_TO_IMPLEMENT_LABEL = "ready-to-implement";
+
 interface GitHubIssue {
   readonly title: string;
+  readonly state: string;
+  readonly labels: unknown;
 }
 
 interface GitHubComment {
@@ -726,6 +739,39 @@ async function findExistingImplementFailureComment(
       `one rather than risking missing a marker beyond this page limit.`,
   );
   return null;
+}
+
+/** Reads the trusted run id, or `none` for legacy/no triage history. */
+async function findCurrentTriageGeneration(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<string> {
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const comments = await githubRequest<GitHubComment[]>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
+    );
+    const comment = comments.find(
+      (candidate) =>
+        candidate.user?.type === "Bot" &&
+        candidate.user.login === TRIAGE_COMMENT_AUTHOR_LOGIN &&
+        (candidate.body === TRIAGE_COMMENT_MARKER ||
+          candidate.body.endsWith(`\n${TRIAGE_COMMENT_MARKER}`)),
+    );
+    if (comment) {
+      return extractTriageGeneration(comment.body);
+    }
+    if (comments.length < COMMENT_PAGE_SIZE) {
+      return "none";
+    }
+  }
+  throw new PublishRejection(
+    `could not determine the current triage generation within ` +
+      `${MAX_COMMENT_PAGES * COMMENT_PAGE_SIZE} issue comments`,
+  );
 }
 
 /**
@@ -1281,6 +1327,8 @@ export async function main(): Promise<void> {
   }
   const issueNumber = Number(requireEnv("TRUSTED_ISSUE_NUMBER"));
   const implementJobResult = requireEnv("IMPLEMENT_JOB_RESULT");
+  const expectedTriageGeneration =
+    process.env.EXPECTED_TRIAGE_GENERATION ?? "";
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
   // Provenance metadata only (Codex round-3 finding) — soft-defaulted,
@@ -1374,6 +1422,11 @@ export async function main(): Promise<void> {
           `trusted; only a successful implement run's patch is ever applied`,
       );
     }
+    if (!/^(?:none|[1-9][0-9]*)$/.test(expectedTriageGeneration)) {
+      throw new PublishRejection(
+        "implement job did not report a valid trusted triage generation",
+      );
+    }
 
     await assertPatchArtifactSize(patchPath);
 
@@ -1450,6 +1503,39 @@ export async function main(): Promise<void> {
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}`,
     );
+    if (issue.state !== "open") {
+      throw new PublishRejection(
+        `target #${issueNumber} is not open (state=${issue.state}); ` +
+          `refusing branch/PR publish`,
+      );
+    }
+    const issueLabels = Array.isArray(issue.labels) ? issue.labels : [];
+    const isReadyToImplement = issueLabels.some(
+      (label) =>
+        typeof label === "object" &&
+        label !== null &&
+        "name" in label &&
+        label.name === READY_TO_IMPLEMENT_LABEL,
+    );
+    if (!isReadyToImplement) {
+      throw new PublishRejection(
+        `target #${issueNumber} is not currently labelled ` +
+          `${READY_TO_IMPLEMENT_LABEL}; refusing branch/PR publish`,
+      );
+    }
+    const currentTriageGeneration = await findCurrentTriageGeneration(
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
+    if (currentTriageGeneration !== expectedTriageGeneration) {
+      throw new PublishRejection(
+        `target #${issueNumber} triage generation changed from ` +
+          `${expectedTriageGeneration} to ${currentTriageGeneration}; ` +
+          `refusing stale branch/PR publish`,
+      );
+    }
 
     // Idempotency keys off the issue number (stable), never a freshly
     // re-derived title slug — see findPrForIssueNumber's docstring.

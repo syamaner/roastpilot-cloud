@@ -31,7 +31,11 @@ function mockFetch(
     const call: FetchCall = { url, method, body };
     calls.push(call);
     const key = `${method} ${url.replace("https://api.github.com", "")}`;
-    const handler = handlers[key];
+    const handler =
+      handlers[key] ??
+      (key === "GET /repos/syamaner/roastpilot-cloud/issues/42"
+        ? () => jsonResponse({ state: "open" })
+        : undefined);
     if (!handler) {
       throw new Error(`unexpected fetch call: ${key}`);
     }
@@ -55,6 +59,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "42";
   process.env.TRIAGE_JOB_RESULT = "success";
+  process.env.GITHUB_RUN_ID = "123";
   process.exitCode = undefined;
 });
 
@@ -65,6 +70,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.TRIAGE_JOB_RESULT;
+  delete process.env.GITHUB_RUN_ID;
   delete process.env.VERDICT_PATH;
   process.exitCode = undefined;
 });
@@ -110,6 +116,9 @@ describe("main — valid verdict path", () => {
     );
     expect((postComment?.body as { body: string }).body).toContain(
       TRIAGE_COMMENT_MARKER,
+    );
+    expect((postComment?.body as { body: string }).body).toContain(
+      "triage-generation:123:do-not-edit",
     );
 
     // FIX F ordering: the comment POST must happen before the label PUT —
@@ -589,6 +598,55 @@ describe("main — input validation and transport edge cases", () => {
   });
 });
 
+describe("main — open issue eligibility", () => {
+  it.each([
+    { triageJobResult: "success", verdictFile: true },
+    { triageJobResult: "failure", verdictFile: false },
+  ])(
+    "writes nothing for a closed issue on the $triageJobResult path",
+    async ({ triageJobResult, verdictFile }) => {
+      process.env.TRIAGE_JOB_RESULT = triageJobResult;
+      if (verdictFile) {
+        const verdictPath = join(workdir, "verdict.json");
+        await writeFile(
+          verdictPath,
+          JSON.stringify({
+            issue_number: 42,
+            readiness: "ready-to-implement",
+            reasoning: "Meets the intake bar.",
+            missing_info_questions: [],
+          }),
+        );
+        process.env.VERDICT_PATH = verdictPath;
+      }
+
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+          jsonResponse({ state: "closed" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(
+        /not open.*refusing all triage writes/,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe("GET");
+    },
+  );
+
+  it("fails closed when the issue-state fetch fails", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        new Response("service unavailable", { status: 503 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/503/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+});
+
 describe("main — fail-closed paths", () => {
   it("resets readiness to needs-triage and posts a fallback comment when the verdict is missing", async () => {
     process.env.VERDICT_PATH = join(workdir, "does-not-exist.json");
@@ -677,7 +735,7 @@ describe("main — fail-closed paths", () => {
     // No write ever targets issue 999 — the mock would throw
     // "unexpected fetch call" if the script tried, which would surface as
     // an unhandled rejection/test failure.
-    expect(calls.every((c) => c.url.includes("/issues/42/"))).toBe(true);
+    expect(calls.every((c) => /\/issues\/42(?:\/|$)/.test(c.url))).toBe(true);
     const put = calls.find((c) => c.method === "PUT");
     expect((put?.body as { labels: string[] }).labels).toEqual([
       "needs-triage",

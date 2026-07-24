@@ -72,6 +72,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
+  process.env.EXPECTED_TRIAGE_GENERATION = "none";
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.exitCode = undefined;
   vi.mocked(execFileSync).mockReset();
@@ -84,6 +85,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
+  delete process.env.EXPECTED_TRIAGE_GENERATION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   process.exitCode = undefined;
@@ -118,6 +120,26 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     const comment = calls.find((c) => c.method === "POST");
     expect((comment?.body as { body: string }).body).toContain(
       'implement job result was "failure"',
+    );
+  });
+
+  it("rejects a successful job without a trusted triage generation", async () => {
+    delete process.env.EXPECTED_TRIAGE_GENERATION;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+        jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+    const comment = calls.find((call) => call.method === "POST");
+    expect((comment?.body as { body: string }).body).toContain(
+      "did not report a valid trusted triage generation",
     );
   });
 
