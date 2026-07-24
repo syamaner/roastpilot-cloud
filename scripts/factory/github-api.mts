@@ -171,7 +171,8 @@ function boundedRateLimitDecision(
  * @param remainingHeader - Raw `X-RateLimit-Remaining`, or `null`.
  * @param resetHeader - Raw `X-RateLimit-Reset`, or `null`.
  * @param nowMs - Current UTC epoch time in milliseconds.
- * @param attempt - Zero-based retry attempt number.
+ * @param fallbackAttempt - Zero-based count of consecutive prior headerless
+ *   `429` fallback retries.
  * @returns The retry, give-up, or non-rate-limit decision.
  */
 export function decideRateLimitResponse(
@@ -180,7 +181,7 @@ export function decideRateLimitResponse(
   remainingHeader: string | null,
   resetHeader: string | null,
   nowMs: number,
-  attempt = 0,
+  fallbackAttempt = 0,
 ): RateLimitDecision {
   if (status !== 403 && status !== 429) {
     return { kind: "not-rate-limited" };
@@ -200,7 +201,7 @@ export function decideRateLimitResponse(
 
   if (status === 429) {
     return boundedRateLimitDecision(
-      MIN_RATE_LIMIT_FALLBACK_SECONDS * 1000 * 2 ** attempt,
+      MIN_RATE_LIMIT_FALLBACK_SECONDS * 1000 * 2 ** fallbackAttempt,
       "fallback",
     );
   }
@@ -360,6 +361,7 @@ export async function githubRequest<T>(
   const nowFn = options?.nowFn ?? Date.now;
   const accept = options?.accept ?? "application/vnd.github+json";
   const responseType = options?.responseType ?? "json";
+  let fallbackAttempt = 0;
 
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(`${GITHUB_API}${path}`, {
@@ -380,8 +382,14 @@ export async function githubRequest<T>(
       response.headers.get("x-ratelimit-remaining"),
       response.headers.get("x-ratelimit-reset"),
       nowFn(),
-      attempt,
+      fallbackAttempt,
     );
+    if (
+      rateLimitDecision.kind !== "not-rate-limited" &&
+      rateLimitDecision.source !== "fallback"
+    ) {
+      fallbackAttempt = 0;
+    }
     if (
       rateLimitDecision.kind === "retry" &&
       attempt < maxRetries
@@ -391,6 +399,9 @@ export async function githubRequest<T>(
           `retrying in ${rateLimitDecision.waitMs}ms from ${rateLimitDecision.source} ` +
           `(attempt ${attempt + 1}/${maxRetries})`,
       );
+      if (rateLimitDecision.source === "fallback") {
+        fallbackAttempt += 1;
+      }
       await sleepFn(rateLimitDecision.waitMs);
       continue;
     }

@@ -613,6 +613,66 @@ describe("githubRequest — bounded rate-limit handling (F1-S10, factory.md D114
     );
   });
 
+  it("starts a first headerless-429 fallback at 60 seconds even after a Retry-After retry", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("rate limited with timing", {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      }
+      if (attempts === 2) {
+        return new Response("rate limited without timing", { status: 429 });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      githubRequest("tok", "POST", "/pulls", undefined, { sleepFn }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleepFn.mock.calls).toEqual([[0], [60_000]]);
+  });
+
+  it("resets accumulated fallback state after an authoritative timing signal", async () => {
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1 || attempts === 3) {
+        return new Response("rate limited without timing", { status: 429 });
+      }
+      if (attempts === 2) {
+        return new Response("rate limited with timing", {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sleepFn = vi.fn(async () => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      githubRequest("tok", "POST", "/pulls", undefined, { sleepFn }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(sleepFn.mock.calls).toEqual([[60_000], [0], [60_000]]);
+  });
+
   it("gives up on a continued headerless 429 instead of retrying before the doubled wait", async () => {
     const fetchMock = vi.fn(
       async () => new Response("secondary rate limited", { status: 429 }),
