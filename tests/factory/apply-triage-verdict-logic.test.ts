@@ -5,6 +5,8 @@ import {
   buildVerdictCommentBody,
   computeNewLabelSet,
   findExistingTriageCommentId,
+  hasAdjacentTriageGenerationMarker,
+  hasBlockingTriageGeneration,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 import type { TriageVerdict } from "../../scripts/factory/triage-verdict-schema.mts";
@@ -127,6 +129,88 @@ describe("findExistingTriageCommentId", () => {
       },
     ];
     expect(findExistingTriageCommentId(comments)).toBeNull();
+  });
+
+  it("ignores an embedded marker that is not terminal", () => {
+    const comments: ExistingComment[] = [
+      {
+        id: 1,
+        body: `${TRIAGE_COMMENT_MARKER}\ntrailing text`,
+        authorType: "Bot",
+        authorLogin: "github-actions[bot]",
+      },
+    ];
+    expect(findExistingTriageCommentId(comments)).toBeNull();
+  });
+});
+
+describe("transitional triage-generation fence", () => {
+  it.each([
+    "123",
+    "123.1",
+    "hold:123.1",
+    "malformed",
+    "",
+  ])("detects adjacent generation namespace value %j", (generation) => {
+    expect(
+      hasAdjacentTriageGenerationMarker(
+        `verdict\n<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->\n` +
+          TRIAGE_COMMENT_MARKER,
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores generation-like rationale that is not adjacent to the terminal marker", () => {
+    expect(
+      hasAdjacentTriageGenerationMarker(
+        "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+          `ordinary rationale\n${TRIAGE_COMMENT_MARKER}`,
+      ),
+    ).toBe(false);
+  });
+
+  it("detects adjacent generation syntax in a CRLF-normalized body", () => {
+    expect(
+      hasAdjacentTriageGenerationMarker(
+        "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\r\n" +
+          TRIAGE_COMMENT_MARKER,
+      ),
+    ).toBe(true);
+  });
+
+  it("blocks any generated exact-owned terminal history in a mixed page", () => {
+    const generatedBody =
+      "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+      TRIAGE_COMMENT_MARKER;
+    const comments: ExistingComment[] = [
+      {
+        id: 1,
+        body: `legacy\n${TRIAGE_COMMENT_MARKER}`,
+        authorType: "Bot",
+        authorLogin: "github-actions[bot]",
+      },
+      {
+        id: 2,
+        body: generatedBody,
+        authorType: "User",
+        authorLogin: "github-actions[bot]",
+      },
+      {
+        id: 3,
+        body: generatedBody,
+        authorType: "Bot",
+        authorLogin: "another-app[bot]",
+      },
+      {
+        id: 4,
+        body: generatedBody,
+        authorType: "Bot",
+        authorLogin: "github-actions[bot]",
+      },
+    ];
+
+    expect(hasBlockingTriageGeneration(comments)).toBe(true);
+    expect(hasBlockingTriageGeneration(comments.slice(0, 3))).toBe(false);
   });
 });
 
