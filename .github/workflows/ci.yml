@@ -41,6 +41,9 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Reject literal invisible format characters
+        run: node --experimental-strip-types scripts/factory/check-invisible-format-characters.mts
+
       - name: Install dependencies
         # F1-S7 (issue #10): this workflow runs on `pull_request` — i.e.
         # against an agent-authored diff, same as any other PR. `npm ci`
