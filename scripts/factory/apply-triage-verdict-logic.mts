@@ -22,6 +22,24 @@ import {
 export const TRIAGE_COMMENT_MARKER =
   "<!-- roastpilot-factory:triage-verdict:do-not-edit -->";
 
+const ADJACENT_TRIAGE_GENERATION_PATTERN =
+  /(?:^|\n)<!-- roastpilot-factory:triage-generation:[^\r\n]*\r?\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->$/;
+
+/**
+ * Reports whether trusted triage-comment syntax carries a generation line.
+ *
+ * The line must be immediately adjacent to the terminal fixed marker.
+ * Generation-like text elsewhere is agent-authored rationale, not syntax.
+ * The value is deliberately not parsed here: valid and malformed adjacent
+ * generation lines both block publication during the transitional fence.
+ *
+ * @param body - Complete triage-comment body.
+ * @returns Whether an adjacent generation namespace line is present.
+ */
+export function hasAdjacentTriageGenerationMarker(body: string): boolean {
+  return ADJACENT_TRIAGE_GENERATION_PATTERN.test(body);
+}
+
 const READINESS_LABEL_SET = new Set<string>(READINESS_LABELS);
 
 /**
@@ -62,6 +80,34 @@ export interface ExistingComment {
   readonly authorLogin: string | null;
 }
 
+function isOwnedTerminalTriageComment(comment: ExistingComment): boolean {
+  return (
+    comment.authorType === "Bot" &&
+    comment.authorLogin === TRIAGE_COMMENT_AUTHOR_LOGIN &&
+    (comment.body === TRIAGE_COMMENT_MARKER ||
+      comment.body.endsWith(`\n${TRIAGE_COMMENT_MARKER}`))
+  );
+}
+
+/**
+ * Reports whether any exact owned terminal triage history blocks publication.
+ *
+ * Callers aggregate every comment page before treating `false` as conclusive;
+ * a blocker may safely short-circuit.
+ *
+ * @param comments - One page of issue comments.
+ * @returns Whether this page contains generated triage history.
+ */
+export function hasBlockingTriageGeneration(
+  comments: readonly ExistingComment[],
+): boolean {
+  return comments.some(
+    (comment) =>
+      isOwnedTerminalTriageComment(comment) &&
+      hasAdjacentTriageGenerationMarker(comment.body),
+  );
+}
+
 /**
  * Finds the previous triage comment this job posted on an earlier run, if
  * any, so a re-run edits it instead of posting a duplicate.
@@ -85,10 +131,7 @@ export function findExistingTriageCommentId(
   comments: readonly ExistingComment[],
 ): number | null {
   const match = comments.find(
-    (c) =>
-      c.authorType === "Bot" &&
-      c.authorLogin === TRIAGE_COMMENT_AUTHOR_LOGIN &&
-      c.body.includes(TRIAGE_COMMENT_MARKER),
+    (comment) => isOwnedTerminalTriageComment(comment),
   );
   return match ? match.id : null;
 }

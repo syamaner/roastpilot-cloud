@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -111,6 +112,57 @@ describe("main — input validation", () => {
 });
 
 describe("main — fail-closed paths that never reach git (no branch, no PR, one comment)", () => {
+  it("rejects generated triage history before invoking any local git command", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "POST /graphql": () =>
+        jsonResponse({
+          data: {
+            repository: {
+              issue: {
+                comments: {
+                  nodes: [
+                    {
+                      body:
+                        "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                        TRIAGE_COMMENT_MARKER,
+                      author: {
+                        __typename: "Bot",
+                        login: "github-actions",
+                      },
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+        jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.url.includes("/pulls"))).toBe(false);
+    expect(calls.some((call) => call.url.endsWith("/issues/6"))).toBe(false);
+    const comment = calls.find(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect((comment?.body as { body: string }).body).toContain(
+      "generation-era triage history",
+    );
+  });
+
   it("rejects a FAILED implement job without ever reading the patch or calling git", async () => {
     process.env.IMPLEMENT_JOB_RESULT = "failure";
     const patchPath = join(workdir, "patch.diff");

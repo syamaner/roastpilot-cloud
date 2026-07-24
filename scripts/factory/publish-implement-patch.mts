@@ -174,6 +174,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
+  hasBlockingTriageGeneration,
+  TRIAGE_COMMENT_AUTHOR_LOGIN,
+  type ExistingComment as ExistingTriageComment,
+} from "./apply-triage-verdict-logic.mts";
+import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
   buildFallbackRefreshCommentBody,
@@ -691,6 +696,156 @@ const COMMENT_PAGE_SIZE = 100;
  * `apply-triage-verdict.mts`'s `MAX_COMMENT_PAGES`.
  */
 const MAX_COMMENT_PAGES = 50;
+
+const TRIAGE_COMMENTS_QUERY = `
+  query TriageComments(
+    $owner: String!
+    $repo: String!
+    $issueNumber: Int!
+    $cursor: String
+  ) {
+    repository(owner: $owner, name: $repo) {
+      issue(number: $issueNumber) {
+        comments(first: 100, after: $cursor) {
+          nodes {
+            body
+            author {
+              __typename
+              login
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+`;
+
+function asResponseRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new PublishRejection(`invalid GraphQL triage response: ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseTriageCommentPage(response: unknown): {
+  readonly comments: ExistingTriageComment[];
+  readonly hasNextPage: boolean;
+  readonly endCursor: string | null;
+} {
+  const root = asResponseRecord(response, "response");
+  if (root.errors !== undefined) {
+    if (!Array.isArray(root.errors)) {
+      throw new PublishRejection(`invalid GraphQL triage response: errors`);
+    }
+    if (root.errors.length > 0) {
+      throw new PublishRejection(`GraphQL triage response contains errors`);
+    }
+  }
+  const data = asResponseRecord(root.data, "data");
+  const repository = asResponseRecord(data.repository, "repository");
+  const issue = asResponseRecord(repository.issue, "issue");
+  const connection = asResponseRecord(issue.comments, "comments");
+  if (!Array.isArray(connection.nodes)) {
+    throw new PublishRejection(`invalid GraphQL triage response: nodes`);
+  }
+  const comments = connection.nodes.map((node, index) => {
+    const comment = asResponseRecord(node, `nodes[${index}]`);
+    if (typeof comment.body !== "string") {
+      throw new PublishRejection(
+        `invalid GraphQL triage response: nodes[${index}].body`,
+      );
+    }
+    const author =
+      comment.author === null
+        ? null
+        : asResponseRecord(comment.author, `nodes[${index}].author`);
+    if (
+      author !== null &&
+      (typeof author.__typename !== "string" ||
+        typeof author.login !== "string")
+    ) {
+      throw new PublishRejection(
+        `invalid GraphQL triage response: nodes[${index}].author identity`,
+      );
+    }
+    const authorType = author === null ? null : (author.__typename as string);
+    const graphqlLogin = author === null ? null : (author.login as string);
+    const authorLogin =
+      authorType === "Bot" &&
+      (graphqlLogin === "github-actions" ||
+        graphqlLogin === TRIAGE_COMMENT_AUTHOR_LOGIN)
+        ? TRIAGE_COMMENT_AUTHOR_LOGIN
+        : graphqlLogin;
+    return { id: index, body: comment.body, authorType, authorLogin };
+  });
+  const pageInfo = asResponseRecord(connection.pageInfo, "pageInfo");
+  if (typeof pageInfo.hasNextPage !== "boolean") {
+    throw new PublishRejection(
+      `invalid GraphQL triage response: pageInfo.hasNextPage`,
+    );
+  }
+  if (
+    pageInfo.endCursor !== null &&
+    typeof pageInfo.endCursor !== "string"
+  ) {
+    throw new PublishRejection(
+      `invalid GraphQL triage response: pageInfo.endCursor`,
+    );
+  }
+  const endCursor =
+    typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null;
+  if (pageInfo.hasNextPage && !endCursor) {
+    throw new PublishRejection(
+      `invalid GraphQL triage response: pageInfo.endCursor`,
+    );
+  }
+  return { comments, hasNextPage: pageInfo.hasNextPage, endCursor };
+}
+
+/**
+ * Checks every reachable issue-comment page for generation-era triage state.
+ *
+ * A blocking entry may short-circuit, but an allow requires a terminal page.
+ * Reaching the scan cap is ambiguous and therefore rejects publication.
+ */
+async function hasGenerationEraTriageHistory(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<boolean> {
+  let cursor: string | null = null;
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const response = await githubRequest<unknown>(
+      token,
+      "POST",
+      "/graphql",
+      {
+        query: TRIAGE_COMMENTS_QUERY,
+        variables: { owner, repo, issueNumber, cursor },
+      },
+    );
+    const parsed = parseTriageCommentPage(response);
+    if (hasBlockingTriageGeneration(parsed.comments)) {
+      return true;
+    }
+    if (!parsed.hasNextPage) {
+      return false;
+    }
+    cursor = parsed.endCursor;
+  }
+  throw new PublishRejection(
+    `could not prove generation-free triage history within ` +
+      `${MAX_COMMENT_PAGES * COMMENT_PAGE_SIZE} comments`,
+  );
+}
 
 /**
  * Finds this job's own prior implement-failure comment on this issue, if
@@ -1389,6 +1544,20 @@ export async function main(): Promise<void> {
     }
 
     await assertPatchArtifactSize(patchPath);
+
+    if (
+      await hasGenerationEraTriageHistory(
+        token,
+        owner,
+        repo,
+        issueNumber,
+      )
+    ) {
+      throw new PublishRejection(
+        `target #${issueNumber} carries generation-era triage history; ` +
+          `publication is disabled until exact-generation matching lands`,
+      );
+    }
 
     const { changedPaths, diffText } = await getAuthoritativePatchAnalysis(patchPath);
     if (changedPaths.length === 0) {

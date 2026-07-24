@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../../scripts/factory/publish-implement-patch.mts";
+import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 /**
  * Proves the actual git plumbing AND the patch-path guard genuinely work
@@ -109,15 +110,47 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function stubFetch(fetchMock: ReturnType<typeof vi.fn>): void {
+function triageGraphqlResponse(
+  nodes: readonly unknown[],
+  hasNextPage = false,
+  endCursor: string | null = null,
+): unknown {
+  return {
+    data: {
+      repository: {
+        issue: {
+          comments: {
+            nodes,
+            pageInfo: { hasNextPage, endCursor },
+          },
+        },
+      },
+    },
+  };
+}
+
+function stubFetch(
+  fetchMock: ReturnType<typeof vi.fn>,
+  delegateInitialCommentScan = false,
+): void {
   const invoke = fetchMock as unknown as (
     input: string | URL,
     init?: RequestInit,
   ) => Promise<Response>;
+  let initialCommentScanAnswered = false;
   const wrapped = vi.fn(async (input: string | URL, init?: RequestInit) => {
-    const response = await invoke(input, init);
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
+    if (
+      !delegateInitialCommentScan &&
+      !initialCommentScanAnswered &&
+      method === "POST" &&
+      url.pathname === "/graphql"
+    ) {
+      initialCommentScanAnswered = true;
+      return jsonResponse(triageGraphqlResponse([]));
+    }
+    const response = await invoke(input, init);
     if (
       method === "GET" &&
       url.pathname === "/repos/syamaner/roastpilot-cloud/issues/6" &&
@@ -173,6 +206,7 @@ function stubHappyPathFetch(options?: {
   rawIssueLabels?: unknown;
   issueState?: string;
   issueTitle?: string;
+  triageGraphqlPage?: (cursor: string | null) => unknown | Response;
   /**
    * Simulates a prior implement-failure comment already on the issue
    * (Codex round-3 upsert idempotency) — when set, the mocked
@@ -185,6 +219,17 @@ function stubHappyPathFetch(options?: {
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    if (method === "POST" && url.endsWith("/graphql")) {
+      const request = JSON.parse(init?.body as string) as {
+        variables: { cursor: string | null };
+      };
+      const pageResponse = options?.triageGraphqlPage
+        ? options.triageGraphqlPage(request.variables.cursor)
+        : triageGraphqlResponse([]);
+      return pageResponse instanceof Response
+        ? pageResponse
+        : jsonResponse(pageResponse);
+    }
     if (method === "GET" && url.match(/\/issues\/\d+$/)) {
       return new Response(
         JSON.stringify({
@@ -270,7 +315,7 @@ function stubHappyPathFetch(options?: {
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
-  stubFetch(fetchMock);
+  stubFetch(fetchMock, true);
   return fetchMock;
 }
 
@@ -309,6 +354,417 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     });
     expect(log).toContain("Implement #6");
     expect(log).toContain("Closes #6");
+  });
+
+  it("preserves the existing publication path for marker-only legacy triage history", async () => {
+    stubHappyPathFetch({
+      triageGraphqlPage: () =>
+        ({
+          errors: [],
+          ...(triageGraphqlResponse([
+            {
+              body: "comment from a deleted account",
+              author: null,
+            },
+            {
+              body: `legacy verdict\n${TRIAGE_COMMENT_MARKER}`,
+              author: {
+                __typename: "Bot",
+                login: "github-actions[bot]",
+              },
+            },
+          ]) as Record<string, unknown>),
+        }),
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toContain("feature/6-implement-workflow");
+  });
+
+  it("allows publication after exhausting multiple generation-free cursor pages", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      body: `ordinary comment ${index}`,
+      author: { __typename: "User", login: `user-${index}` },
+    }));
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: (cursor) =>
+        cursor === null
+          ? triageGraphqlResponse(firstPage, true, "cursor-after-100")
+          : triageGraphqlResponse([
+              {
+                body: `legacy verdict\n${TRIAGE_COMMENT_MARKER}`,
+                author: { __typename: "Bot", login: "github-actions" },
+              },
+            ]),
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toContain("feature/6-implement-workflow");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const graphqlCalls = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/graphql") && init?.method === "POST",
+    );
+    expect(graphqlCalls).toHaveLength(2);
+    expect(
+      JSON.parse(graphqlCalls[1]?.[1]?.body as string).variables.cursor,
+    ).toBe("cursor-after-100");
+  });
+
+  it.each(["123", "123.1", "hold:123.1", "malformed"])(
+    "rejects adjacent generation value %s before publication",
+    async (generation) => {
+      const fetchMock = stubHappyPathFetch({
+        triageGraphqlPage: () =>
+          triageGraphqlResponse([
+            {
+              body:
+                `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->\n` +
+                TRIAGE_COMMENT_MARKER,
+              author: { __typename: "Bot", login: "github-actions" },
+            },
+          ]),
+      });
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      expect(
+        git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+      ).toBe("");
+      const calls = fetchMock.mock.calls as Array<
+        [string | URL, RequestInit | undefined]
+      >;
+      expect(
+        calls.some(([url]) => String(url).includes("/pulls?state=open")),
+      ).toBe(false);
+      const failurePost = calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      );
+      expect(failurePost).toBeDefined();
+    },
+  );
+
+  it("uses the opaque cursor so a page-boundary deletion cannot skip generated history", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      body:
+        index === 0
+          ? `legacy verdict\n${TRIAGE_COMMENT_MARKER}`
+          : `ordinary comment ${index}`,
+      author:
+        index === 0
+          ? { __typename: "Bot", login: "github-actions" }
+          : { __typename: "User", login: `user-${index}` },
+    }));
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: (cursor) =>
+        cursor === null
+          ? triageGraphqlResponse(firstPage, true, "cursor-after-100")
+          : triageGraphqlResponse([
+              {
+                body:
+                  "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                  TRIAGE_COMMENT_MARKER,
+                author: { __typename: "Bot", login: "github-actions" },
+              },
+            ]),
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const graphqlCalls = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/graphql") && init?.method === "POST",
+    );
+    expect(graphqlCalls).toHaveLength(2);
+    expect(
+      JSON.parse(graphqlCalls[1]?.[1]?.body as string).variables.cursor,
+    ).toBe("cursor-after-100");
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+  });
+
+  it("fails closed when 50 full comment pages cannot prove exhaustion", async () => {
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({
+      body: `ordinary comment ${index}`,
+      author: { __typename: "User", login: `user-${index}` },
+    }));
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: (cursor) => {
+        const page =
+          cursor === null ? 1 : Number(cursor.replace("cursor-", "")) + 1;
+        return triageGraphqlResponse(fullPage, true, `cursor-${page}`);
+      },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const graphqlCalls = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/graphql") && init?.method === "POST",
+    );
+    expect(graphqlCalls).toHaveLength(50);
+    expect(
+      JSON.parse(graphqlCalls[49]?.[1]?.body as string).variables.cursor,
+    ).toBe("cursor-49");
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+  });
+
+  it("detects generated history on the final bounded page", async () => {
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({
+      body: `ordinary comment ${index}`,
+      author: { __typename: "User", login: `user-${index}` },
+    }));
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: (cursor) => {
+        const page =
+          cursor === null ? 1 : Number(cursor.replace("cursor-", "")) + 1;
+        return page < 50
+          ? triageGraphqlResponse(fullPage, true, `cursor-${page}`)
+          : triageGraphqlResponse([
+              {
+                body:
+                  "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                  TRIAGE_COMMENT_MARKER,
+                author: { __typename: "Bot", login: "github-actions" },
+              },
+            ]);
+      },
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const graphqlCalls = calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/graphql") && init?.method === "POST",
+    );
+    expect(graphqlCalls).toHaveLength(50);
+    expect(
+      JSON.parse(graphqlCalls[49]?.[1]?.body as string).variables.cursor,
+    ).toBe("cursor-49");
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+  });
+
+  it("fails closed on a later-page comment API error", async () => {
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({
+      body: `ordinary comment ${index}`,
+      author: { __typename: "User", login: `user-${index}` },
+    }));
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: (cursor) =>
+        cursor === null
+          ? triageGraphqlResponse(fullPage, true, "cursor-after-100")
+          : new Response("forbidden", { status: 403 }),
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+    const failurePost = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    expect(failurePost).toBeDefined();
+  });
+
+  it.each([
+    {
+      name: "missing data",
+      response: { unexpected: "object" },
+    },
+    {
+      name: "partial data with GraphQL errors",
+      response: {
+        errors: [{ message: "partial failure" }],
+        ...triageGraphqlResponse([]) as Record<string, unknown>,
+      },
+    },
+    {
+      name: "non-array GraphQL errors",
+      response: {
+        errors: { message: "invalid errors shape" },
+        ...triageGraphqlResponse([]) as Record<string, unknown>,
+      },
+    },
+    {
+      name: "non-string end cursor",
+      response: {
+        data: {
+          repository: {
+            issue: {
+              comments: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: 123 },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "non-array comment nodes",
+      response: {
+        data: {
+          repository: {
+            issue: {
+              comments: {
+                nodes: {},
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "non-string comment body",
+      response: triageGraphqlResponse([
+        {
+          body: 123,
+          author: { __typename: "Bot", login: "github-actions" },
+        },
+      ]),
+    },
+    {
+      name: "non-boolean next-page flag",
+      response: {
+        data: {
+          repository: {
+            issue: {
+              comments: {
+                nodes: [],
+                pageInfo: { hasNextPage: "false", endCursor: null },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "missing next-page cursor",
+      response: triageGraphqlResponse([], true, null),
+    },
+    {
+      name: "non-string author type",
+      response: triageGraphqlResponse([
+        {
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          author: { __typename: 123, login: "github-actions" },
+        },
+      ]),
+    },
+    {
+      name: "non-string author login",
+      response: triageGraphqlResponse([
+        {
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          author: { __typename: "Bot", login: 123 },
+        },
+      ]),
+    },
+  ])("fails closed on $name in the comment API response", async ({ response }) => {
+    const fetchMock = stubHappyPathFetch({
+      triageGraphqlPage: () => response,
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
+  });
+
+  it("does not refresh an existing remote branch when generated history is present", async () => {
+    git(localCloneDir, ["checkout", "-b", "feature/6-implement-workflow"]);
+    await fsWriteFile(join(localCloneDir, "existing.txt"), "existing\n");
+    git(localCloneDir, ["add", "existing.txt"]);
+    git(localCloneDir, ["commit", "-q", "-m", "existing implementation"]);
+    git(localCloneDir, ["push", "origin", "feature/6-implement-workflow"]);
+    git(localCloneDir, ["checkout", "main"]);
+    const before = git(bareRemoteDir, [
+      "rev-parse",
+      "refs/heads/feature/6-implement-workflow",
+    ]);
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [
+        { number: 50, head: { ref: "feature/6-implement-workflow" } },
+      ],
+      triageGraphqlPage: () =>
+        triageGraphqlResponse([
+          {
+            body:
+              "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+              TRIAGE_COMMENT_MARKER,
+            author: { __typename: "Bot", login: "github-actions" },
+          },
+        ]),
+    });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, [
+        "rev-parse",
+        "refs/heads/feature/6-implement-workflow",
+      ]),
+    ).toBe(before);
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(([url]) => String(url).includes("/pulls?state=open")),
+    ).toBe(false);
   });
 
   it.each([
