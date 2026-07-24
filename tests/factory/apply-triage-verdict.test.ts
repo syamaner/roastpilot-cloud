@@ -277,6 +277,48 @@ describe("main — valid verdict path", () => {
     expect(fallbackPut).toBeLessThan(fallbackVerify);
   });
 
+  it("records a non-Error ambiguous write failure before rethrowing it", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          throw "transport vanished";
+        }
+        return jsonResponse({});
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+        () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toBe("transport vanished");
+
+    const posts = calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/comments"),
+    );
+    expect(posts).toHaveLength(2);
+    expect((posts[1]?.body as { body: string }).body).toContain(
+      "validated verdict readiness apply failed: transport vanished",
+    );
+  });
+
   it("fails closed when the ambiguous-write fallback reset PUT fails", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
