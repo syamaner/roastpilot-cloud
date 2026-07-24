@@ -88,6 +88,12 @@ describe("isProtectedPath", () => {
     ).toBe(true);
   });
 
+  it("protects the workflow-executed triage sanitizer", () => {
+    expect(
+      isProtectedPath(".claude/skills/triage/authorized-comments.jq"),
+    ).toBe(true);
+  });
+
   it("does not protect ordinary application paths", () => {
     expect(isProtectedPath("lib/slug.ts")).toBe(false);
     expect(isProtectedPath("app/r/[slug]/page.tsx")).toBe(false);
@@ -152,6 +158,20 @@ describe("findForbiddenPatchPaths", () => {
       "b/.claude/skills/spec-grounded-review/SKILL.md",
     ]);
     expect(forbidden).toEqual([".claude/skills/spec-grounded-review/SKILL.md"]);
+  });
+
+  it("flags both sides of a rename crossing the protected triage-skill boundary", () => {
+    expect(
+      findForbiddenPatchPaths([
+        "a/.claude/skills/triage/authorized-comments.jq",
+        "b/lib/renamed-filter.jq",
+        "a/lib/replacement.jq",
+        "b/.claude/skills/triage/replacement.jq",
+      ]),
+    ).toEqual([
+      ".claude/skills/triage/authorized-comments.jq",
+      ".claude/skills/triage/replacement.jq",
+    ]);
   });
 
   it("flags a rename INTO a protected path even if the source path was safe", () => {

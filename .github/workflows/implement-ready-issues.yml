@@ -218,7 +218,8 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           set -euo pipefail
-          issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json number,title,body,labels)
+          issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+            --json number,author,title,body,state,labels,comments)
           labels=$(echo "$issue_json" | jq -r '[.labels[].name] | join(",")')
           # FIX (round 6, Codex P2): a stale or typo'd dispatch must not
           # implement (and Closes #N) an issue that was never actually
@@ -235,7 +236,9 @@ jobs:
           fi
           echo "Confirmed: issue #$ISSUE_NUMBER is ready-to-implement."
           mkdir -p issue-context
-          echo "$issue_json" | jq '{number, title, body}' > issue-context/issue.json
+          echo "$issue_json" |
+            jq -cj -f .claude/skills/triage/authorized-comments.jq \
+              > issue-context/issue.json
 
       - name: Assert no Snowflake/Vercel secrets are present in this job's environment
         # Issue #6's verification note calls for this asserted, not just
@@ -523,7 +526,7 @@ jobs:
           claude_args: >-
             --permission-mode acceptEdits
             --allowedTools "Read,ToolSearch,Edit,Write,MultiEdit,Bash(npm ci --ignore-scripts),Bash(npm install --ignore-scripts),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run test),Bash(npm run test:*),Bash(npm run build),Bash(git status),Bash(git diff:*),Bash(git log:*)"
-            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*),Read(.git/**),Grep(.git/**),Edit(.git/**),Write(.git/**),MultiEdit(.git/**),Edit(.github/**),Write(.github/**),MultiEdit(.github/**),Edit(scripts/factory/**),Write(scripts/factory/**),MultiEdit(scripts/factory/**),Edit(CODEOWNERS),Write(CODEOWNERS),MultiEdit(CODEOWNERS),Edit(docs/CODEOWNERS),Write(docs/CODEOWNERS),MultiEdit(docs/CODEOWNERS)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*),Read(.git/**),Grep(.git/**),Edit(.git/**),Write(.git/**),MultiEdit(.git/**),Edit(.github/**),Write(.github/**),MultiEdit(.github/**),Edit(scripts/factory/**),Write(scripts/factory/**),MultiEdit(scripts/factory/**),Edit(.claude/skills/triage/**),Write(.claude/skills/triage/**),MultiEdit(.claude/skills/triage/**),Edit(CODEOWNERS),Write(CODEOWNERS),MultiEdit(CODEOWNERS),Edit(docs/CODEOWNERS),Write(docs/CODEOWNERS),MultiEdit(docs/CODEOWNERS)"
             --max-turns ${{ inputs.max_turns }}
           prompt: |
             You are implementing a story for the roastpilot-cloud software
@@ -531,9 +534,10 @@ jobs:
             authorized run (issue #${{ inputs.issue_number }} in
             ${{ github.repository }}).
 
-            Read the target issue from issue-context/issue.json (title +
-            body) — do not call any GitHub API, you hold no writable
-            token and this is the only way you're given the issue content.
+            Read the target issue from issue-context/issue.json (title,
+            body, and provenance-filtered authorized clarifications) — do
+            not call any GitHub API, you hold no writable token and this
+            is the only way you're given the issue content.
             Follow this repository's AGENTS.md exactly, the same way any
             Claude Code session would: stack rules, gate commands, PR
             hygiene, and the Architecture Invariants section. Implement
@@ -553,11 +557,11 @@ jobs:
               available to you regardless. Leave your changes in the
               working tree, uncommitted. A separate privileged job turns
               your working-tree diff into a commit, branch, and PR.
-            - Do NOT edit anything under .github/**, scripts/factory/**
-              (the factory's own pipeline and privileged glue scripts),
-              or CODEOWNERS — this is enforced at the tool level and
-              independently double-checked before your changes are ever
-              applied, so an attempt here will not silently succeed.
+            - Do NOT edit anything under .github/**, scripts/factory/**,
+              .claude/skills/triage/** (the factory's pipeline, privileged
+              glue, and executable input sanitizer), or CODEOWNERS — this is
+              enforced at the tool level and independently double-checked
+              before your changes are ever applied.
             - Do NOT read or write anything under .git/** — that path can
               hold a git remote URL with an embedded, short-lived GitHub
               token.

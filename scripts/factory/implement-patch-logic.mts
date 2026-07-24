@@ -33,6 +33,8 @@
  * agent's patch reach an unguarded path isn't enabled yet. Add any
  * future PR-head-reapplied path here in the same commit that adds it to
  * the workflow's restore step — the two lists must stay in lockstep.
+ * `.claude/skills/triage/` is also protected because both agent workflows
+ * execute its deterministic input sanitizer before model exposure.
  *
  * Branch-protection config has no file-level guard here — it's a GitHub
  * API/settings-level control, not a repo path, so a file-diff guard
@@ -42,6 +44,7 @@ const PROTECTED_PATH_PREFIXES = [
   ".github/",
   "scripts/factory/",
   ".claude/skills/spec-grounded-review/",
+  ".claude/skills/triage/",
 ] as const;
 const PROTECTED_EXACT_PATHS = ["CODEOWNERS", "docs/CODEOWNERS"] as const;
 
