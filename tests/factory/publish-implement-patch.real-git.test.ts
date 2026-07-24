@@ -359,12 +359,22 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
   it("preserves the existing publication path for marker-only legacy triage history", async () => {
     stubHappyPathFetch({
       triageGraphqlPage: () =>
-        triageGraphqlResponse([
-          {
-            body: `legacy verdict\n${TRIAGE_COMMENT_MARKER}`,
-            author: { __typename: "Bot", login: "github-actions" },
-          },
-        ]),
+        ({
+          errors: [],
+          ...(triageGraphqlResponse([
+            {
+              body: "comment from a deleted account",
+              author: null,
+            },
+            {
+              body: `legacy verdict\n${TRIAGE_COMMENT_MARKER}`,
+              author: {
+                __typename: "Bot",
+                login: "github-actions[bot]",
+              },
+            },
+          ]) as Record<string, unknown>),
+        }),
     });
 
     await main();
