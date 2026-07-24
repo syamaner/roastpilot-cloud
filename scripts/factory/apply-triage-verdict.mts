@@ -37,7 +37,8 @@
  *   alone is not sufficient grounds to apply a verdict; job success is a
  *   second, independent gate checked BEFORE the artifact is even read.
  * - `TRIAGE_EXECUTION` — trusted `<run_id>.<run_attempt>` identity. Seed
- *   installed `hold:<TRIAGE_EXECUTION>` before the agent started.
+ *   installed `hold:<TRIAGE_EXECUTION>` before the agent started; an
+ *   apply-only retry may find the same final generation.
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
@@ -124,13 +125,14 @@ async function readVerdictArtifact(path: string): Promise<unknown> {
   }
 }
 
-async function requireCurrentTriageHold(
+async function requireRetryableTriageGeneration(
   token: string,
   owner: string,
   repo: string,
   issueNumber: number,
   commentId: number,
   expectedHold: string,
+  expectedFinal: string,
 ): Promise<void> {
   const comment = await githubRequest<GitHubComment>(
     token,
@@ -146,10 +148,14 @@ async function requireCurrentTriageHold(
   const currentGeneration = isOwned
     ? extractTriageGeneration(comment.body)
     : "none";
-  if (!isOwned || currentGeneration !== expectedHold) {
+  if (
+    !isOwned ||
+    (currentGeneration !== expectedHold && currentGeneration !== expectedFinal)
+  ) {
     throw new Error(
-      `target #${issueNumber} triage hold changed from ${expectedHold} ` +
-        `to ${currentGeneration}; refusing stale triage writes`,
+      `target #${issueNumber} triage generation is not ${expectedHold} or ` +
+        `${expectedFinal}; found ${currentGeneration}; ` +
+        `refusing stale triage writes`,
     );
   }
 }
@@ -370,13 +376,14 @@ export async function main(): Promise<void> {
         `refusing all triage writes`,
     );
   }
-  await requireCurrentTriageHold(
+  await requireRetryableTriageGeneration(
     token,
     owner,
     repo,
     trustedIssueNumber,
     trustedCommentId,
     holdGeneration,
+    generation,
   );
   const fallback = (errors: readonly string[]): Promise<void> =>
     applyFallback(

@@ -168,6 +168,46 @@ describe("main — valid verdict path", () => {
     expect(verifyIndex).toBeGreaterThan(putIndex);
   });
 
+  it("retries label application from the exact final generation", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+        jsonResponse({
+          id: 99,
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["ready-to-implement"],
+    });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      body: expect.stringContaining("triage-generation:123.1:do-not-edit"),
+    });
+  });
+
   it("does not enable readiness when the final-generation comment update fails", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
@@ -539,88 +579,97 @@ describe("main — valid verdict path", () => {
     expect(post).toBeUndefined();
   });
 
-  it("rejects a hold comment that is not owned by github-actions[bot]", async () => {
-    const verdictPath = join(workdir, "verdict.json");
-    await writeFile(
-      verdictPath,
-      JSON.stringify({
-        issue_number: 42,
-        readiness: "ready-to-implement",
-        reasoning: "Meets the bar.",
-        missing_info_questions: [],
-      }),
-    );
-    process.env.VERDICT_PATH = verdictPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
-        jsonResponse({
-          id: 99,
-          body:
-            "<!-- roastpilot-factory:triage-generation:hold:123.1:do-not-edit -->\n" +
-            TRIAGE_COMMENT_MARKER,
-          user: { type: "Bot", login: "some-other-app[bot]" },
+  it.each(["hold:123.1", "123.1"])(
+    "rejects generation %s when the comment is not owned by github-actions[bot]",
+    async (commentGeneration) => {
+      const verdictPath = join(workdir, "verdict.json");
+      await writeFile(
+        verdictPath,
+        JSON.stringify({
+          issue_number: 42,
+          readiness: "ready-to-implement",
+          reasoning: "Meets the bar.",
+          missing_info_questions: [],
         }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+      );
+      process.env.VERDICT_PATH = verdictPath;
 
-    await expect(main()).rejects.toThrow(/triage hold changed/);
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 99,
+            body:
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
+            user: { type: "Bot", login: "some-other-app[bot]" },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
-  });
+      await expect(main()).rejects.toThrow(/triage generation is not/);
 
-  it("rejects a fetched hold whose returned id differs from the trusted id", async () => {
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
-        jsonResponse({
-          id: 98,
-          body:
-            "<!-- roastpilot-factory:triage-generation:hold:123.1:do-not-edit -->\n" +
-            TRIAGE_COMMENT_MARKER,
-          user: { type: "Bot", login: "github-actions[bot]" },
+      expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+    },
+  );
+
+  it.each(["hold:123.1", "123.1"])(
+    "rejects generation %s when the returned id differs from the trusted id",
+    async (commentGeneration) => {
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 98,
+            body:
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(/triage generation is not/);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.url).toContain("/issues/comments/99");
+      expect(calls.some((call) => call.method !== "GET")).toBe(false);
+    },
+  );
+
+  it.each(["hold:456.1", "456.1"])(
+    "rejects stale generation %s from a newer execution",
+    async (commentGeneration) => {
+      const verdictPath = join(workdir, "verdict.json");
+      await writeFile(
+        verdictPath,
+        JSON.stringify({
+          issue_number: 42,
+          readiness: "ready-to-implement",
+          reasoning: "Meets the bar.",
+          missing_info_questions: [],
         }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+      );
+      process.env.VERDICT_PATH = verdictPath;
 
-    await expect(main()).rejects.toThrow(/triage hold changed/);
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 99,
+            body:
+              "A newer re-triage is in progress.\n" +
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.url).toContain("/issues/comments/99");
-    expect(calls.some((call) => call.method !== "GET")).toBe(false);
-  });
+      await expect(main()).rejects.toThrow(
+        new RegExp(`found ${commentGeneration.replace(".", "\\.")}`),
+      );
 
-  it("rejects a stale execution after a newer seed replaced its hold", async () => {
-    const verdictPath = join(workdir, "verdict.json");
-    await writeFile(
-      verdictPath,
-      JSON.stringify({
-        issue_number: 42,
-        readiness: "ready-to-implement",
-        reasoning: "Meets the bar.",
-        missing_info_questions: [],
-      }),
-    );
-    process.env.VERDICT_PATH = verdictPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
-        jsonResponse({
-          id: 99,
-          body:
-            "A newer re-triage is in progress.\n" +
-            "<!-- roastpilot-factory:triage-generation:hold:456.1:do-not-edit -->\n" +
-            TRIAGE_COMMENT_MARKER,
-          user: { type: "Bot", login: "github-actions[bot]" },
-        }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(main()).rejects.toThrow(
-      /triage hold changed from hold:123\.1 to hold:456\.1/,
-    );
-
-    expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
-  });
+      expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+    },
+  );
 
   it("rejects a malformed trusted hold-comment id before any network call", async () => {
     const verdictPath = join(workdir, "verdict.json");
@@ -667,6 +716,14 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+        jsonResponse({
+          id: 99,
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        }),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
@@ -689,6 +746,9 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
     // the artifact was never trusted enough to even validate its fields.
     expect((patch?.body as { body: string }).body).not.toContain(
       "Meets the intake bar in full.",
+    );
+    expect((patch?.body as { body: string }).body).toContain(
+      "triage-generation:hold:123.1:do-not-edit",
     );
   });
 
