@@ -24,6 +24,11 @@ export const TRIAGE_COMMENT_MARKER =
 
 const ADJACENT_TRIAGE_GENERATION_PATTERN =
   /(?:^|\n)<!-- roastpilot-factory:triage-generation:[^\r\n]*\r?\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->$/;
+const TRIAGE_GENERATION_PATTERN =
+  /(?:^|\n)<!-- roastpilot-factory:triage-generation:(hold:[1-9][0-9]*\.[1-9][0-9]*|[1-9][0-9]*(?:\.[1-9][0-9]*)?):do-not-edit -->\r?\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->$/;
+const TRIAGE_GENERATION_VALUE_PATTERN =
+  /^(?:hold:[1-9][0-9]*\.[1-9][0-9]*|[1-9][0-9]*(?:\.[1-9][0-9]*)?)$/;
+const TRIAGE_EXECUTION_PATTERN = /^[1-9][0-9]*\.[1-9][0-9]*$/;
 
 /**
  * Reports whether trusted triage-comment syntax carries a generation line.
@@ -38,6 +43,42 @@ const ADJACENT_TRIAGE_GENERATION_PATTERN =
  */
 export function hasAdjacentTriageGenerationMarker(body: string): boolean {
   return ADJACENT_TRIAGE_GENERATION_PATTERN.test(body);
+}
+
+/**
+ * Builds the trusted marker placed immediately before the fixed marker.
+ *
+ * @param generation - A legacy, hold, or final triage generation.
+ * @returns The hidden generation marker.
+ */
+export function buildTriageGenerationMarker(generation: string): string {
+  if (!TRIAGE_GENERATION_VALUE_PATTERN.test(generation)) {
+    throw new Error(`triage generation has an invalid format`);
+  }
+  return `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->`;
+}
+
+/**
+ * Extracts the generation anchored beside the final factory marker.
+ *
+ * @param body - The complete trusted triage comment body.
+ * @returns The generation, or `none` for legacy history.
+ */
+export function extractTriageGeneration(body: string): string {
+  return TRIAGE_GENERATION_PATTERN.exec(body)?.[1] ?? "none";
+}
+
+/**
+ * Builds the non-authorizing generation installed before re-triage.
+ *
+ * @param execution - The trusted `<run_id>.<run_attempt>` identity.
+ * @returns The corresponding hold generation.
+ */
+export function buildTriageHoldGeneration(execution: string): string {
+  if (!TRIAGE_EXECUTION_PATTERN.test(execution)) {
+    throw new Error(`triage execution must be <run_id>.<run_attempt>`);
+  }
+  return `hold:${execution}`;
 }
 
 const READINESS_LABEL_SET = new Set<string>(READINESS_LABELS);

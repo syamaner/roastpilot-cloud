@@ -22,8 +22,12 @@ interface FetchCall {
 
 function mockFetch(
   handlers: Record<string, (call: FetchCall) => Response>,
+  options?: {
+    readonly verificationLabels?: readonly string[];
+  },
 ): { fetchMock: ReturnType<typeof vi.fn>; calls: FetchCall[] } {
   const calls: FetchCall[] = [];
+  let lastWrittenLabels: readonly string[] | null = null;
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -31,11 +35,31 @@ function mockFetch(
     const call: FetchCall = { url, method, body };
     calls.push(call);
     const key = `${method} ${url.replace("https://api.github.com", "")}`;
-    const handler = handlers[key];
+    if (
+      key ===
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100" &&
+      lastWrittenLabels !== null
+    ) {
+      const labels = options?.verificationLabels ?? lastWrittenLabels;
+      return jsonResponse(labels.map((name) => ({ name })));
+    }
+    const handler =
+      handlers[key] ??
+      (key === "GET /repos/syamaner/roastpilot-cloud/issues/42"
+        ? () => jsonResponse({ state: "open" })
+        : undefined);
     if (!handler) {
       throw new Error(`unexpected fetch call: ${key}`);
     }
-    return handler(call);
+    const response = handler(call);
+    if (
+      key === "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels" &&
+      response.ok
+    ) {
+      lastWrittenLabels = (body as { readonly labels: readonly string[] })
+        .labels;
+    }
+    return response;
   });
   return { fetchMock, calls };
 }
@@ -150,6 +174,295 @@ describe("main — valid verdict path", () => {
     await expect(main()).rejects.toThrow(/503/);
 
     expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+  });
+
+  it("resets readiness when the verification read does not match the PUT", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch(
+      {
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+          () => jsonResponse([{ name: "needs-triage" }]),
+        "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+          jsonResponse({}),
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+          () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+          jsonResponse({ id: 1 }, 201),
+      },
+      { verificationLabels: ["needs-triage"] },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/readiness verification failed/);
+
+    const puts = calls.filter((call) => call.method === "PUT");
+    expect(puts).toHaveLength(2);
+    expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
+    const posts = calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/comments"),
+    );
+    expect(posts).toHaveLength(2);
+    expect((posts[1]?.body as { body: string }).body).toContain(
+      "validated verdict readiness apply failed",
+    );
+  });
+
+  it("resets readiness after an ambiguous authorizing PUT failure", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse(
+          putAttempts === 0
+            ? [{ name: "needs-triage" }]
+            : [{ name: "ready-to-implement" }],
+        ),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        return putAttempts === 1
+          ? new Response("response lost", { status: 503 })
+          : jsonResponse({});
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+        () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/503/);
+
+    const puts = calls.filter((call) => call.method === "PUT");
+    expect(puts).toHaveLength(2);
+    expect(puts[0]?.body).toEqual({ labels: ["ready-to-implement"] });
+    expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
+    const firstPut = calls.indexOf(puts[0] as FetchCall);
+    const fallbackRead = calls.findIndex(
+      (call, index) =>
+        index > firstPut &&
+        call.method === "GET" &&
+        call.url.includes("/labels"),
+    );
+    const fallbackPut = calls.indexOf(puts[1] as FetchCall);
+    const fallbackVerify = calls.findIndex(
+      (call, index) =>
+        index > fallbackPut &&
+        call.method === "GET" &&
+        call.url.includes("/labels"),
+    );
+    expect(firstPut).toBeLessThan(fallbackRead);
+    expect(fallbackRead).toBeLessThan(fallbackPut);
+    expect(fallbackPut).toBeLessThan(fallbackVerify);
+  });
+
+  it("records a non-Error ambiguous write failure before rethrowing it", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          throw "transport vanished";
+        }
+        return jsonResponse({});
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+        () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toBe("transport vanished");
+
+    const posts = calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/comments"),
+    );
+    expect(posts).toHaveLength(2);
+    expect((posts[1]?.body as { body: string }).body).toContain(
+      "validated verdict readiness apply failed: transport vanished",
+    );
+  });
+
+  it("fails closed when the ambiguous-write fallback reset PUT fails", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse(
+          putAttempts === 0
+            ? [{ name: "needs-triage" }]
+            : [{ name: "ready-to-implement" }],
+        ),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        return new Response(
+          putAttempts === 1 ? "response lost" : "reset unavailable",
+          { status: putAttempts === 1 ? 503 : 502 },
+        );
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+        () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+        jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/502/);
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+    expect(
+      calls.filter(
+        (call) => call.method === "POST" && call.url.includes("/comments"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("fails closed when the ambiguous-write fallback verification fails", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch(
+      {
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+          () =>
+            jsonResponse(
+              putAttempts === 0
+                ? [{ name: "needs-triage" }]
+                : [{ name: "ready-to-implement" }],
+            ),
+        "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+          putAttempts += 1;
+          return putAttempts === 1
+            ? new Response("response lost", { status: 503 })
+            : jsonResponse({});
+        },
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+          () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+          jsonResponse({ id: 1 }, 201),
+      },
+      { verificationLabels: ["ready-to-implement"] },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/readiness verification failed/);
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+    expect(
+      calls.filter(
+        (call) => call.method === "POST" && call.url.includes("/comments"),
+      ),
+    ).toHaveLength(1);
+    const fallbackPut = calls.findLastIndex((call) => call.method === "PUT");
+    const failedVerification = calls.findLastIndex(
+      (call) => call.method === "GET" && call.url.includes("/labels"),
+    );
+    expect(failedVerification).toBeGreaterThan(fallbackPut);
+  });
+
+  it("keeps verified needs-triage when the fallback comment fails", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+    let postAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse(
+          putAttempts === 0
+            ? [{ name: "needs-triage" }]
+            : [{ name: "ready-to-implement" }],
+        ),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        return putAttempts === 1
+          ? new Response("response lost", { status: 503 })
+          : jsonResponse({});
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
+        () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () => {
+        postAttempts += 1;
+        return postAttempts === 1
+          ? jsonResponse({ id: 1 }, 201)
+          : new Response("comment unavailable", { status: 502 });
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/502/);
+
+    const puts = calls.filter((call) => call.method === "PUT");
+    expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
+    expect(
+      calls.findLastIndex(
+        (call) => call.method === "GET" && call.url.includes("/labels"),
+      ),
+    ).toBeGreaterThan(calls.indexOf(puts[1] as FetchCall));
   });
 
   it("edits the existing bot comment instead of posting a duplicate on re-run", async () => {
@@ -469,6 +782,44 @@ describe("main — input validation and transport edge cases", () => {
     await expect(main()).rejects.toThrow(/owner\/repo/);
   });
 
+  it.each(["0", "-1", "01", "1.5", "not-a-number", "9007199254740993"])(
+    "rejects non-canonical trusted issue number %s before any API call",
+    async (issueNumber) => {
+      process.env.TRUSTED_ISSUE_NUMBER = issueNumber;
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(/TRUSTED_ISSUE_NUMBER/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses all writes when the trusted target is no longer open", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "closed" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(
+      /not open.*refusing all triage writes/,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+
+  it("fails closed when the issue-state fetch fails", async () => {
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        new Response("service unavailable", { status: 503 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/503/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+
   it("rejects an oversized artifact via stat, before ever reading its contents into memory", async () => {
     // A runaway or adversarial multi-GB artifact must be rejected up
     // front. This test uses a smaller-but-still-over-the-limit file (the
@@ -677,7 +1028,7 @@ describe("main — fail-closed paths", () => {
     // No write ever targets issue 999 — the mock would throw
     // "unexpected fetch call" if the script tried, which would surface as
     // an unhandled rejection/test failure.
-    expect(calls.every((c) => c.url.includes("/issues/42/"))).toBe(true);
+    expect(calls.every((c) => /\/issues\/42(?:\/|$)/.test(c.url))).toBe(true);
     const put = calls.find((c) => c.method === "PUT");
     expect((put?.body as { labels: string[] }).labels).toEqual([
       "needs-triage",
