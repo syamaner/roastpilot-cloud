@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   TRIAGE_COMMENT_MARKER,
   buildFallbackCommentBody,
+  buildTriageGenerationMarker,
+  buildTriageHoldGeneration,
   buildVerdictCommentBody,
   computeNewLabelSet,
+  extractTriageGeneration,
   findExistingTriageCommentId,
   hasAdjacentTriageGenerationMarker,
   hasBlockingTriageGeneration,
@@ -262,5 +265,68 @@ describe("buildFallbackCommentBody", () => {
     expect(body).toContain("issue_number mismatch");
     expect(body).toContain("needs-triage");
     expect(body.endsWith(TRIAGE_COMMENT_MARKER)).toBe(true);
+  });
+});
+
+describe("triage generation marker", () => {
+  it("round-trips only the marker anchored beside the final factory marker", () => {
+    const body =
+      `untrusted ${buildTriageGenerationMarker("999")}\n` +
+      `${TRIAGE_COMMENT_MARKER}\nordinary rationale\n` +
+      `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`;
+    expect(extractTriageGeneration(body)).toBe("123.1");
+  });
+
+  it("distinguishes legacy history, holds, and final executions", () => {
+    expect(extractTriageGeneration(`legacy\n${TRIAGE_COMMENT_MARKER}`)).toBe(
+      "none",
+    );
+    expect(buildTriageHoldGeneration("123.2")).toBe("hold:123.2");
+    expect(
+      extractTriageGeneration(
+        `${buildTriageGenerationMarker("hold:123.2")}\n${TRIAGE_COMMENT_MARKER}`,
+      ),
+    ).toBe("hold:123.2");
+    expect(() => buildTriageGenerationMarker("not-a-run")).toThrow(
+      /invalid format/,
+    );
+    expect(() => buildTriageHoldGeneration("123")).toThrow(
+      /<run_id>\.<run_attempt>/,
+    );
+  });
+
+  it.each(["123", "123.1", "hold:123.1"])(
+    "round-trips valid generation %s with LF and CRLF adjacency",
+    (generation) => {
+      const marker = buildTriageGenerationMarker(generation);
+      expect(
+        extractTriageGeneration(`${marker}\n${TRIAGE_COMMENT_MARKER}`),
+      ).toBe(generation);
+      expect(
+        extractTriageGeneration(`${marker}\r\n${TRIAGE_COMMENT_MARKER}`),
+      ).toBe(generation);
+    },
+  );
+
+  it.each([
+    "0",
+    "01",
+    "123.0",
+    "123.01",
+    "123.1.1",
+    "hold:123",
+    "hold:0.1",
+    "hold:123.0",
+    "hold:123.01",
+  ])("rejects malformed generation %s", (generation) => {
+    expect(() => buildTriageGenerationMarker(generation)).toThrow(
+      /invalid format/,
+    );
+    expect(
+      extractTriageGeneration(
+        `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->\n` +
+          TRIAGE_COMMENT_MARKER,
+      ),
+    ).toBe("none");
   });
 });

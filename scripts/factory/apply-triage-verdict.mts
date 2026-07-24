@@ -6,8 +6,9 @@
  * GitHub token, and it never executes anything the agent produced — it
  * reads a JSON artifact written by the read-only `triage` job, validates it
  * with {@link validateTriageVerdict} (schema.mts), and if (and only if)
- * that passes, makes two deterministic GitHub REST API calls: replace the
- * issue's label set, and upsert a tracking comment. All agent-controlled
+ * that passes, re-checks the target and makes deterministic GitHub REST API
+ * calls to upsert a tracking comment, replace the issue's label set, and
+ * verify the result. All agent-controlled
  * text (the verdict's `reasoning` / `missing_info_questions`) reaches
  * GitHub only as a JSON request body over `fetch` — never through a shell
  * command — so there is no shell-interpolation injection surface.
@@ -24,8 +25,8 @@
  * Required environment variables:
  * - `GH_TOKEN` — the job's `permissions: issues: write` token.
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
- * - `TRUSTED_ISSUE_NUMBER` — from `github.event.issue.number`, never from
- *   the verdict artifact.
+ * - `TRUSTED_ISSUE_NUMBER` — the canonical workflow target, never from the
+ *   verdict artifact.
  * - `TRIAGE_JOB_RESULT` — `needs.triage.result` from the workflow. A verdict
  *   artifact is only ever trusted when this is exactly `"success"` — the
  *   `triage` step uploads its artifact with `if: always()` (so a failed run
@@ -54,6 +55,10 @@ import {
 
 interface GitHubIssueLabel {
   readonly name: string;
+}
+
+interface GitHubIssue {
+  readonly state: string;
 }
 
 interface GitHubComment {
@@ -194,6 +199,31 @@ async function upsertComment(
   }
 }
 
+async function verifyLabelSet(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  expectedLabels: readonly string[],
+): Promise<void> {
+  const labels = await githubRequest<GitHubIssueLabel[]>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${issueNumber}/labels?per_page=100`,
+  );
+  const actual = Array.from(new Set(labels.map((label) => label.name))).sort();
+  const expected = Array.from(new Set(expectedLabels)).sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((label, index) => label !== expected[index])
+  ) {
+    throw new Error(
+      `target #${issueNumber} readiness verification failed: expected ` +
+        `[${expected.join(", ")}], got [${actual.join(", ")}]`,
+    );
+  }
+}
+
 /**
  * Applies a validated verdict: upserts the tracking comment, THEN swaps the
  * readiness label — comment first, label flip last, deliberately. The
@@ -233,12 +263,27 @@ async function applyValidVerdict(
     currentLabels.map((l) => l.name),
     verdict.readiness,
   );
-  await githubRequest(
-    token,
-    "PUT",
-    `/repos/${owner}/${repo}/issues/${verdict.issue_number}/labels`,
-    { labels: newLabelSet },
-  );
+  try {
+    await githubRequest(
+      token,
+      "PUT",
+      `/repos/${owner}/${repo}/issues/${verdict.issue_number}/labels`,
+      { labels: newLabelSet },
+    );
+    await verifyLabelSet(
+      token,
+      owner,
+      repo,
+      verdict.issue_number,
+      newLabelSet,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await applyFallback(token, owner, repo, verdict.issue_number, [
+      `validated verdict readiness apply failed: ${message}`,
+    ]);
+    throw err;
+  }
 
   console.log(
     `Applied verdict for #${verdict.issue_number}: readiness=${verdict.readiness}, ` +
@@ -287,6 +332,7 @@ async function applyFallback(
     `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
     { labels: resetLabelSet },
   );
+  await verifyLabelSet(token, owner, repo, issueNumber, resetLabelSet);
 
   await upsertComment(
     token,
@@ -309,15 +355,38 @@ export async function main(): Promise<void> {
       `GITHUB_REPOSITORY must be "owner/repo", got ${process.env.GITHUB_REPOSITORY}`,
     );
   }
-  const trustedIssueNumber = Number(requireEnv("TRUSTED_ISSUE_NUMBER"));
+  const trustedIssueNumberRaw = requireEnv("TRUSTED_ISSUE_NUMBER");
+  if (!/^[1-9][0-9]*$/.test(trustedIssueNumberRaw)) {
+    throw new Error(
+      `TRUSTED_ISSUE_NUMBER must be a canonical positive decimal integer`,
+    );
+  }
+  const trustedIssueNumber = Number(trustedIssueNumberRaw);
+  if (!Number.isSafeInteger(trustedIssueNumber)) {
+    throw new Error(
+      `TRUSTED_ISSUE_NUMBER exceeds JavaScript's safe integer range`,
+    );
+  }
   const verdictPath = process.env.VERDICT_PATH ?? "triage-output/verdict.json";
+  const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
+
+  const issue = await githubRequest<GitHubIssue>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${trustedIssueNumber}`,
+  );
+  if (issue.state !== "open") {
+    throw new Error(
+      `target #${trustedIssueNumber} is not open (state=${issue.state}); ` +
+        `refusing all triage writes`,
+    );
+  }
 
   // Gate on triage job success BEFORE ever reading the artifact. A verdict
   // is applied only when (triage succeeded AND the artifact is valid) —
   // schema validity alone is not enough, since `if: always()` means the
   // artifact can exist and be well-formed even from a run that failed
   // partway through after writing it.
-  const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
   if (triageJobResult !== "success") {
     await applyFallback(token, owner, repo, trustedIssueNumber, [
       `triage job result was "${triageJobResult}", not "success" — the ` +
