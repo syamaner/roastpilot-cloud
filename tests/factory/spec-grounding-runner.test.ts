@@ -485,12 +485,11 @@ describe("main — real unmet criteria", () => {
 
   it.each([
     ["403 (auth/permissions, no Retry-After -- fails immediately, not a rate-limit case)", 403, undefined],
-    // A Retry-After exceeding MAX_RETRY_AFTER_SECONDS (60) makes
-    // shouldGiveUpOnRateLimit give up on the FIRST attempt, so this test
-    // stays fast -- an unbounded/small Retry-After would exercise
-    // githubRequest's real (slow) exponential-backoff retry loop instead,
-    // which is githubRequest's own concern, already covered by
-    // github-api.test.ts, not this test's.
+    // A Retry-After exceeding MAX_RETRY_AFTER_SECONDS (60) makes the shared
+    // rate-limit decision give up on the FIRST attempt, so this test stays
+    // fast -- an in-budget Retry-After would exercise githubRequest's real
+    // timer instead, which is githubRequest's own concern, already covered
+    // by github-api.test.ts, not this test's.
     ["429 (rate limited, requested wait exceeds this client's retry budget)", 429, "9999"],
     ["500 (server error)", 500, undefined],
   ])(
