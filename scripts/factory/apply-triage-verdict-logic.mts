@@ -22,6 +22,22 @@ import {
 export const TRIAGE_COMMENT_MARKER =
   "<!-- roastpilot-factory:triage-verdict:do-not-edit -->";
 
+const TRIAGE_GENERATION_PATTERN =
+  /\n<!-- roastpilot-factory:triage-generation:([1-9][0-9]*):do-not-edit -->\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->$/;
+
+/** Builds the trusted marker placed immediately before the fixed marker. */
+export function buildTriageGenerationMarker(generation: string): string {
+  if (!/^[1-9][0-9]*$/.test(generation)) {
+    throw new Error(`triage generation must be a positive decimal integer`);
+  }
+  return `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->`;
+}
+
+/** Extracts an anchored generation, or `none` for legacy history. */
+export function extractTriageGeneration(body: string): string {
+  return TRIAGE_GENERATION_PATTERN.exec(body)?.[1] ?? "none";
+}
+
 const READINESS_LABEL_SET = new Set<string>(READINESS_LABELS);
 
 /**
@@ -105,7 +121,10 @@ export function findExistingTriageCommentId(
  * @param verdict - The validated verdict.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildVerdictCommentBody(verdict: TriageVerdict): string {
+export function buildVerdictCommentBody(
+  verdict: TriageVerdict,
+  generation: string,
+): string {
   const lines: string[] = [
     `**Automated triage verdict: \`${verdict.readiness}\`**`,
     "",
@@ -134,6 +153,7 @@ export function buildVerdictCommentBody(verdict: TriageVerdict): string {
       "This label reflects the automated verdict above — a human may " +
       "override it._",
     "",
+    buildTriageGenerationMarker(generation),
     TRIAGE_COMMENT_MARKER,
   );
 
@@ -150,7 +170,10 @@ export function buildVerdictCommentBody(verdict: TriageVerdict): string {
  *   the artifact itself was missing.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildFallbackCommentBody(errors: readonly string[]): string {
+export function buildFallbackCommentBody(
+  errors: readonly string[],
+  generation: string,
+): string {
   const lines: string[] = [
     "**Automated triage failed.** The `needs-triage` label is unchanged; " +
       "a human should review this issue manually.",
@@ -158,6 +181,7 @@ export function buildFallbackCommentBody(errors: readonly string[]): string {
     "Validation errors:",
     ...errors.map((e) => `- ${e}`),
     "",
+    buildTriageGenerationMarker(generation),
     TRIAGE_COMMENT_MARKER,
   ];
   return lines.join("\n");
