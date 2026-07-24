@@ -94,6 +94,20 @@ describe("main — input validation", () => {
     process.env.GITHUB_REPOSITORY = "not-a-valid-repo-string";
     await expect(main()).rejects.toThrow(/owner\/repo/);
   });
+
+  it.each(["051", " 51", "51 ", "0", "-1", "1.5", "9007199254740992"])(
+    "rejects non-canonical or unsafe issue number %s before any write",
+    async (issueNumber) => {
+      process.env.TRUSTED_ISSUE_NUMBER = issueNumber;
+      const { fetchMock, calls } = mockFetch({});
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(/TRUSTED_ISSUE_NUMBER/);
+
+      expect(calls).toEqual([]);
+      expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("main — fail-closed paths that never reach git (no branch, no PR, one comment)", () => {

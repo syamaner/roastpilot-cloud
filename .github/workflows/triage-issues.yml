@@ -11,7 +11,7 @@ on:
 
 concurrency:
   group: triage-issue-${{ github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # Default-deny; every job declares exactly the scopes it needs.
 permissions: {}
@@ -53,6 +53,9 @@ jobs:
     # starts — see `pause-notice` above for the paired observability half).
     if: vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: factory-issue-privileged-${{ github.event.issue.number }}
+      queue: max
     permissions:
       issues: write
     steps:
@@ -298,6 +301,9 @@ jobs:
     # since always() alone would otherwise ignore it.
     if: always() && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: factory-issue-privileged-${{ github.event.issue.number }}
+      queue: max
     permissions:
       contents: read
       issues: write

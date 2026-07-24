@@ -96,7 +96,7 @@ describe("bounded triage context contract", () => {
     expect(on).not.toHaveProperty("workflow_dispatch");
     expect(workflow.concurrency).toEqual({
       group: "triage-issue-${{ github.event.issue.number }}",
-      "cancel-in-progress": true,
+      "cancel-in-progress": false,
     });
     expect(asMapping(seed?.permissions)).toEqual({ issues: "write" });
     expect(seed?.outputs).toBeUndefined();
@@ -342,9 +342,15 @@ describe("bounded triage context contract", () => {
     const run = String(step.run);
 
     expectOrdered(run, [
+      'if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then',
+      "exit 1",
       "--json number,author,title,body,state,labels,comments",
+      `state=$(echo "$issue_json" | jq -r '.state')`,
       `labels=$(echo "$issue_json" | jq -r`,
+      `if [ "$state" != "OPEN" ]; then`,
+      "exit 1",
       `if ! echo ",$labels," | grep -q ",ready-to-implement,"; then`,
+      "exit 1",
       "jq -cj -f .claude/skills/triage/authorized-comments.jq",
       "> issue-context/issue.json",
     ]);
@@ -370,11 +376,39 @@ describe("bounded triage context contract", () => {
     });
 
     const publish = asMapping(asMapping(workflow.jobs)?.publish);
+    expect(asMapping(publish?.concurrency)).toEqual({
+      group: "factory-issue-privileged-${{ inputs.issue_number }}",
+      queue: "max",
+    });
     expect(
       asMapping(
         namedStep(publish, "Validate and publish the implement patch").env,
       ),
     ).not.toHaveProperty("EXPECTED_TRIAGE_GENERATION");
+  });
+
+  it("serializes only privileged issue mutations across both workflows", () => {
+    const triageWorkflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
+    const triageJobs = asMapping(triageWorkflow.jobs);
+    const seed = asMapping(triageJobs?.seed);
+    const triage = asMapping(triageJobs?.triage);
+    const apply = asMapping(triageJobs?.apply);
+    const sharedGroup =
+      "factory-issue-privileged-${{ github.event.issue.number }}";
+
+    expect(triageWorkflow.concurrency).toEqual({
+      group: "triage-issue-${{ github.event.issue.number }}",
+      "cancel-in-progress": false,
+    });
+    expect(asMapping(seed?.concurrency)).toEqual({
+      group: sharedGroup,
+      queue: "max",
+    });
+    expect(triage?.concurrency).toBeUndefined();
+    expect(asMapping(apply?.concurrency)).toEqual({
+      group: sharedGroup,
+      queue: "max",
+    });
   });
 
   it("denies triage-sanitizer edits in the implementing agent", () => {
