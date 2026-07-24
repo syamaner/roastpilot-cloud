@@ -106,8 +106,8 @@ export function computeNewLabelSet(
 
 /**
  * The exact GitHub identity that posts on behalf of this workflow's
- * `secrets.GITHUB_TOKEN` — the only comment author {@link findExistingTriageCommentId}
- * will ever treat as "our own prior comment".
+ * `secrets.GITHUB_TOKEN` — required by owned terminal-history and current-hold
+ * checks.
  */
 export const TRIAGE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
 
@@ -150,34 +150,6 @@ export function hasBlockingTriageGeneration(
 }
 
 /**
- * Finds the previous triage comment this job posted on an earlier run, if
- * any, so a re-run edits it instead of posting a duplicate.
- *
- * Scoped to comments authored by exactly {@link TRIAGE_COMMENT_AUTHOR_LOGIN}
- * (the `secrets.GITHUB_TOKEN` identity) — not just any bot. `authorType ===
- * "Bot"` alone is too broad: a different GitHub App or bot installed on
- * this repo could also carry `type: "Bot"`, and if it ever posted a comment
- * containing our marker string (whether by planting it deliberately or by
- * innocently echoing back content that happens to include it), matching on
- * type alone would let that comment be mistaken for our own and get
- * silently overwritten (PATCHed) by this job. Matching on the exact login
- * closes that off. (A verdict's `reasoning` text is separately untrusted
- * and could itself contain the marker string — that risk is what the type
- * check originally guarded against, and the login check subsumes it.)
- *
- * @param comments - Comments currently on the issue.
- * @returns The existing comment's id, or `null` if none found.
- */
-export function findExistingTriageCommentId(
-  comments: readonly ExistingComment[],
-): number | null {
-  const match = comments.find(
-    (comment) => isOwnedTerminalTriageComment(comment),
-  );
-  return match ? match.id : null;
-}
-
-/**
  * Builds the comment body posted for a verdict that passed validation.
  *
  * Deliberately never closes the issue, for any readiness including
@@ -187,9 +159,13 @@ export function findExistingTriageCommentId(
  * absence of a close action to read as an oversight.
  *
  * @param verdict - The validated verdict.
+ * @param generation - The final trusted triage execution.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildVerdictCommentBody(verdict: TriageVerdict): string {
+export function buildVerdictCommentBody(
+  verdict: TriageVerdict,
+  generation: string,
+): string {
   const lines: string[] = [
     `**Automated triage verdict: \`${verdict.readiness}\`**`,
     "",
@@ -218,6 +194,7 @@ export function buildVerdictCommentBody(verdict: TriageVerdict): string {
       "This label reflects the automated verdict above — a human may " +
       "override it._",
     "",
+    buildTriageGenerationMarker(generation),
     TRIAGE_COMMENT_MARKER,
   );
 
@@ -226,15 +203,19 @@ export function buildVerdictCommentBody(verdict: TriageVerdict): string {
 
 /**
  * Builds the comment body posted when the triage artifact was missing or
- * failed schema validation. The `needs-triage` label seeded at issue-open
- * time is left in place (the apply job never removes it on this path) —
+ * failed schema validation. The `needs-triage` label installed by seed is
+ * left in place (the apply job never removes it on this path) —
  * this comment exists purely for visibility.
  *
  * @param errors - The validation errors, or a single explanatory entry if
  *   the artifact itself was missing.
+ * @param generation - The non-authorizing hold generation.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
-export function buildFallbackCommentBody(errors: readonly string[]): string {
+export function buildFallbackCommentBody(
+  errors: readonly string[],
+  generation: string,
+): string {
   const lines: string[] = [
     "**Automated triage failed.** The `needs-triage` label is unchanged; " +
       "a human should review this issue manually.",
@@ -242,6 +223,7 @@ export function buildFallbackCommentBody(errors: readonly string[]): string {
     "Validation errors:",
     ...errors.map((e) => `- ${e}`),
     "",
+    buildTriageGenerationMarker(generation),
     TRIAGE_COMMENT_MARKER,
   ];
   return lines.join("\n");

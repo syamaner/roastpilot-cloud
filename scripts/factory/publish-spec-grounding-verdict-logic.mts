@@ -381,8 +381,8 @@ export function bodyContainsMarkerAsStandaloneLine(body: string, marker: string)
  *
  * Scoped to comments authored by exactly {@link SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN}
  * — not just any bot with the marker string, for the identical reason
- * `apply-triage-verdict-logic.mts`'s own `findExistingTriageCommentId`
- * documents: a different bot echoing the marker string (deliberately or by
+ * the live triage-generation fence requires exact author and marker
+ * ownership: a different bot echoing the marker string (deliberately or by
  * innocently reflecting agent-authored rationale text that happens to
  * contain it) must not be mistaken for our own comment and silently
  * overwritten. ALSO matches structurally, via {@link

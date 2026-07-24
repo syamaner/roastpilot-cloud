@@ -47,6 +47,19 @@ function mockFetch(
       handlers[key] ??
       (key === "GET /repos/syamaner/roastpilot-cloud/issues/42"
         ? () => jsonResponse({ state: "open" })
+        : key ===
+            "GET /repos/syamaner/roastpilot-cloud/issues/comments/99"
+          ? () =>
+              jsonResponse({
+                id: 99,
+                body:
+                  "<!-- roastpilot-factory:triage-generation:hold:123.1:do-not-edit -->\n" +
+                  TRIAGE_COMMENT_MARKER,
+                user: { type: "Bot", login: "github-actions[bot]" },
+              })
+          : key ===
+              "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99"
+            ? () => jsonResponse({})
         : undefined);
     if (!handler) {
       throw new Error(`unexpected fetch call: ${key}`);
@@ -78,7 +91,9 @@ beforeEach(async () => {
   process.env.GH_TOKEN = "test-token";
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "42";
+  process.env.TRUSTED_TRIAGE_COMMENT_ID = "99";
   process.env.TRIAGE_JOB_RESULT = "success";
+  process.env.TRIAGE_EXECUTION = "123.1";
   process.exitCode = undefined;
 });
 
@@ -88,13 +103,15 @@ afterEach(async () => {
   delete process.env.GH_TOKEN;
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
+  delete process.env.TRUSTED_TRIAGE_COMMENT_ID;
   delete process.env.TRIAGE_JOB_RESULT;
+  delete process.env.TRIAGE_EXECUTION;
   delete process.env.VERDICT_PATH;
   process.exitCode = undefined;
 });
 
 describe("main — valid verdict path", () => {
-  it("replaces the label set and posts a new comment", async () => {
+  it("replaces the hold before enabling and verifying readiness", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -112,10 +129,6 @@ describe("main — valid verdict path", () => {
         jsonResponse([{ name: "needs-triage" }, { name: "epic:F1" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -129,25 +142,33 @@ describe("main — valid verdict path", () => {
     expect((putLabels?.body as { labels: string[] }).labels).not.toContain(
       "needs-triage",
     );
-    const postComment = calls.find(
-      (c) => c.method === "POST" && c.url.includes("/comments"),
+    const patchComment = calls.find(
+      (c) => c.method === "PATCH" && c.url.includes("/comments/99"),
     );
-    expect((postComment?.body as { body: string }).body).toContain(
+    expect((patchComment?.body as { body: string }).body).toContain(
       TRIAGE_COMMENT_MARKER,
     );
+    expect((patchComment?.body as { body: string }).body).toContain(
+      "triage-generation:123.1:do-not-edit",
+    );
 
-    // FIX F ordering: the comment POST must happen before the label PUT —
-    // a comment failure should leave the label untouched, never the
-    // reverse.
-    const postIndex = calls.findIndex(
-      (c) => c.method === "POST" && c.url.includes("/comments"),
+    const firstLabelReadIndex = calls.findIndex(
+      (c) => c.method === "GET" && c.url.includes("/labels"),
+    );
+    const verifyIndex = calls.findLastIndex(
+      (c) => c.method === "GET" && c.url.includes("/labels"),
     );
     const putIndex = calls.findIndex((c) => c.method === "PUT");
-    expect(postIndex).toBeGreaterThanOrEqual(0);
-    expect(putIndex).toBeGreaterThan(postIndex);
+    const patchIndex = calls.findIndex(
+      (c) => c.method === "PATCH" && c.url.includes("/comments/99"),
+    );
+    expect(patchIndex).toBeGreaterThanOrEqual(0);
+    expect(firstLabelReadIndex).toBeGreaterThan(patchIndex);
+    expect(putIndex).toBeGreaterThan(firstLabelReadIndex);
+    expect(verifyIndex).toBeGreaterThan(putIndex);
   });
 
-  it("never flips the readiness label when the comment write fails first (FIX F fail-closed ordering)", async () => {
+  it("retries label application from the exact final generation", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -161,19 +182,55 @@ describe("main — valid verdict path", () => {
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
+      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+        jsonResponse({
+          id: 99,
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["ready-to-implement"],
+    });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      body: expect.stringContaining("triage-generation:123.1:do-not-edit"),
+    });
+  });
+
+  it("does not enable readiness when the final-generation comment update fails", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
         new Response("service unavailable", { status: 503 }),
-      // Deliberately no labels GET/PUT handler: if the code tried to flip
-      // the label after a failed comment, the mock would throw
-      // "unexpected fetch call" and fail the test.
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).rejects.toThrow(/503/);
 
     expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
   });
 
   it("resets readiness when the verification read does not match the PUT", async () => {
@@ -195,10 +252,6 @@ describe("main — valid verdict path", () => {
           () => jsonResponse([{ name: "needs-triage" }]),
         "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
           jsonResponse({}),
-        "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-          () => jsonResponse([]),
-        "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-          jsonResponse({ id: 1 }, 201),
       },
       { verificationLabels: ["needs-triage"] },
     );
@@ -206,15 +259,16 @@ describe("main — valid verdict path", () => {
 
     await expect(main()).rejects.toThrow(/readiness verification failed/);
 
+    expect(calls.findIndex((call) => call.method === "PATCH")).toBeLessThan(
+      calls.findIndex((call) => call.method === "PUT"),
+    );
     const puts = calls.filter((call) => call.method === "PUT");
     expect(puts).toHaveLength(2);
     expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
-    const posts = calls.filter(
-      (call) => call.method === "POST" && call.url.includes("/comments"),
-    );
-    expect(posts).toHaveLength(2);
-    expect((posts[1]?.body as { body: string }).body).toContain(
-      "validated verdict readiness apply failed",
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(patches).toHaveLength(2);
+    expect((patches[1]?.body as { body: string }).body).toContain(
+      "triage-generation:hold:123.1:do-not-edit",
     );
   });
 
@@ -245,10 +299,6 @@ describe("main — valid verdict path", () => {
           ? new Response("response lost", { status: 503 })
           : jsonResponse({});
       },
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-        () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -272,50 +322,15 @@ describe("main — valid verdict path", () => {
         call.method === "GET" &&
         call.url.includes("/labels"),
     );
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(patches).toHaveLength(2);
+    const fallbackPatch = calls.indexOf(patches[1] as FetchCall);
     expect(firstPut).toBeLessThan(fallbackRead);
     expect(fallbackRead).toBeLessThan(fallbackPut);
     expect(fallbackPut).toBeLessThan(fallbackVerify);
-  });
-
-  it("records a non-Error ambiguous write failure before rethrowing it", async () => {
-    const verdictPath = join(workdir, "verdict.json");
-    await writeFile(
-      verdictPath,
-      JSON.stringify({
-        issue_number: 42,
-        readiness: "ready-to-implement",
-        reasoning: "Meets the intake bar in full.",
-        missing_info_questions: [],
-      }),
-    );
-    process.env.VERDICT_PATH = verdictPath;
-    let putAttempts = 0;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
-        jsonResponse([{ name: "needs-triage" }]),
-      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
-        putAttempts += 1;
-        if (putAttempts === 1) {
-          throw "transport vanished";
-        }
-        return jsonResponse({});
-      },
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-        () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(main()).rejects.toBe("transport vanished");
-
-    const posts = calls.filter(
-      (call) => call.method === "POST" && call.url.includes("/comments"),
-    );
-    expect(posts).toHaveLength(2);
-    expect((posts[1]?.body as { body: string }).body).toContain(
-      "validated verdict readiness apply failed: transport vanished",
+    expect(fallbackVerify).toBeLessThan(fallbackPatch);
+    expect((patches[1]?.body as { body: string }).body).toContain(
+      "triage-generation:hold:123.1:do-not-edit",
     );
   });
 
@@ -347,20 +362,13 @@ describe("main — valid verdict path", () => {
           { status: putAttempts === 1 ? 503 : 502 },
         );
       },
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-        () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).rejects.toThrow(/502/);
+
     expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2);
-    expect(
-      calls.filter(
-        (call) => call.method === "POST" && call.url.includes("/comments"),
-      ),
-    ).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
   });
 
   it("fails closed when the ambiguous-write fallback verification fails", async () => {
@@ -392,27 +400,101 @@ describe("main — valid verdict path", () => {
             ? new Response("response lost", { status: 503 })
             : jsonResponse({});
         },
-        "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-          () => jsonResponse([]),
-        "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-          jsonResponse({ id: 1 }, 201),
       },
       { verificationLabels: ["ready-to-implement"] },
     );
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).rejects.toThrow(/readiness verification failed/);
+
     expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2);
-    expect(
-      calls.filter(
-        (call) => call.method === "POST" && call.url.includes("/comments"),
-      ),
-    ).toHaveLength(1);
-    const fallbackPut = calls.findLastIndex((call) => call.method === "PUT");
-    const failedVerification = calls.findLastIndex(
-      (call) => call.method === "GET" && call.url.includes("/labels"),
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+  });
+
+  it("fails closed when restoring the exact hold comment fails", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
     );
-    expect(failedVerification).toBeGreaterThan(fallbackPut);
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+    let patchAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse(
+          putAttempts === 0
+            ? [{ name: "needs-triage" }]
+            : [{ name: "ready-to-implement" }],
+        ),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        return putAttempts === 1
+          ? new Response("response lost", { status: 503 })
+          : jsonResponse({});
+      },
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () => {
+        patchAttempts += 1;
+        return patchAttempts === 1
+          ? jsonResponse({})
+          : new Response("comment unavailable", { status: 502 });
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/502/);
+
+    const puts = calls.filter((call) => call.method === "PUT");
+    expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(patches).toHaveLength(2);
+    expect((patches[1]?.body as { body: string }).body).toContain(
+      "triage-generation:hold:123.1:do-not-edit",
+    );
+  });
+
+  it("records a non-Error ambiguous write failure before rethrowing it", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "Meets the intake bar in full.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          throw "transport vanished";
+        }
+        return jsonResponse({});
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toBe("transport vanished");
+
+    const patches = calls.filter(
+      (call) => call.method === "PATCH" && call.url.includes("/comments/99"),
+    );
+    expect(patches).toHaveLength(2);
+    expect((patches[1]?.body as { body: string }).body).toContain(
+      "validated verdict readiness apply failed: transport vanished",
+    );
   });
 
   it("keeps verified needs-triage when the fallback comment fails", async () => {
@@ -428,7 +510,7 @@ describe("main — valid verdict path", () => {
     );
     process.env.VERDICT_PATH = verdictPath;
     let putAttempts = 0;
-    let postAttempts = 0;
+    let patchAttempts = 0;
 
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
@@ -443,12 +525,10 @@ describe("main — valid verdict path", () => {
           ? new Response("response lost", { status: 503 })
           : jsonResponse({});
       },
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1":
-        () => jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () => {
-        postAttempts += 1;
-        return postAttempts === 1
-          ? jsonResponse({ id: 1 }, 201)
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () => {
+        patchAttempts += 1;
+        return patchAttempts === 1
+          ? jsonResponse({})
           : new Response("comment unavailable", { status: 502 });
       },
     });
@@ -483,14 +563,6 @@ describe("main — valid verdict path", () => {
         jsonResponse([{ name: "needs-triage" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 99,
-            body: `previous verdict\n${TRIAGE_COMMENT_MARKER}`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-        ]),
       "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
         jsonResponse({}),
     });
@@ -507,50 +579,99 @@ describe("main — valid verdict path", () => {
     expect(post).toBeUndefined();
   });
 
-  it("P3: posts a new comment rather than PATCHing another bot's comment, even with a matching marker and type Bot", async () => {
-    const verdictPath = join(workdir, "verdict.json");
-    await writeFile(
-      verdictPath,
-      JSON.stringify({
-        issue_number: 42,
-        readiness: "ready-to-implement",
-        reasoning: "Meets the bar.",
-        missing_info_questions: [],
-      }),
-    );
-    process.env.VERDICT_PATH = verdictPath;
+  it.each(["hold:123.1", "123.1"])(
+    "rejects generation %s when the comment is not owned by github-actions[bot]",
+    async (commentGeneration) => {
+      const verdictPath = join(workdir, "verdict.json");
+      await writeFile(
+        verdictPath,
+        JSON.stringify({
+          issue_number: 42,
+          readiness: "ready-to-implement",
+          reasoning: "Meets the bar.",
+          missing_info_questions: [],
+        }),
+      );
+      process.env.VERDICT_PATH = verdictPath;
 
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
-        jsonResponse([{ name: "needs-triage" }]),
-      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
-        jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 77,
-            // Same marker, same authorType, but NOT our workflow's own
-            // token identity — must not be mistaken for our prior comment.
-            body: `decoy\n${TRIAGE_COMMENT_MARKER}`,
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 99,
+            body:
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
             user: { type: "Bot", login: "some-other-app[bot]" },
-          },
-        ]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 100 }, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    await main();
+      await expect(main()).rejects.toThrow(/triage generation is not/);
 
-    expect(process.exitCode).toBeUndefined();
-    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
-    const post = calls.find(
-      (c) => c.method === "POST" && c.url.includes("/comments"),
-    );
-    expect(post).toBeDefined();
-  });
+      expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+    },
+  );
 
-  it("finds a prior triage comment on page 2 (>100 comments) instead of double-posting", async () => {
+  it.each(["hold:123.1", "123.1"])(
+    "rejects generation %s when the returned id differs from the trusted id",
+    async (commentGeneration) => {
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 98,
+            body:
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(/triage generation is not/);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.url).toContain("/issues/comments/99");
+      expect(calls.some((call) => call.method !== "GET")).toBe(false);
+    },
+  );
+
+  it.each(["hold:456.1", "456.1"])(
+    "rejects stale generation %s from a newer execution",
+    async (commentGeneration) => {
+      const verdictPath = join(workdir, "verdict.json");
+      await writeFile(
+        verdictPath,
+        JSON.stringify({
+          issue_number: 42,
+          readiness: "ready-to-implement",
+          reasoning: "Meets the bar.",
+          missing_info_questions: [],
+        }),
+      );
+      process.env.VERDICT_PATH = verdictPath;
+
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+          jsonResponse({
+            id: 99,
+            body:
+              "A newer re-triage is in progress.\n" +
+              `<!-- roastpilot-factory:triage-generation:${commentGeneration}:do-not-edit -->\n` +
+              TRIAGE_COMMENT_MARKER,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(
+        new RegExp(`found ${commentGeneration.replace(".", "\\.")}`),
+      );
+
+      expect(calls.some((c) => c.url.includes("/labels"))).toBe(false);
+    },
+  );
+
+  it("rejects a malformed trusted hold-comment id before any network call", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -563,83 +684,15 @@ describe("main — valid verdict path", () => {
     );
     process.env.VERDICT_PATH = verdictPath;
 
-    const page1 = Array.from({ length: 100 }, (_, i) => ({
-      id: i,
-      body: `unrelated human comment ${i}`,
-      user: { type: "User", login: "someone" },
-    }));
-    const page2 = [
-      {
-        id: 999,
-        body: `prior verdict\n${TRIAGE_COMMENT_MARKER}`,
-        user: { type: "Bot", login: "github-actions[bot]" },
-      },
-    ];
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
-        jsonResponse([{ name: "needs-triage" }]),
-      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
-        jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse(page1),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=2": () =>
-        jsonResponse(page2),
-      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/999": () =>
-        jsonResponse({}),
-    });
+    process.env.TRUSTED_TRIAGE_COMMENT_ID = "not-a-number";
+    const { fetchMock, calls } = mockFetch({});
     vi.stubGlobal("fetch", fetchMock);
 
-    await main();
-
-    expect(process.exitCode).toBeUndefined();
-    const page2Fetch = calls.find((c) =>
-      c.url.includes("comments?per_page=100&page=2"),
+    await expect(main()).rejects.toThrow(
+      /TRUSTED_TRIAGE_COMMENT_ID must be a positive integer/,
     );
-    expect(page2Fetch).toBeDefined();
-    const patch = calls.find((c) => c.method === "PATCH");
-    expect(patch).toBeDefined();
-    const post = calls.find(
-      (c) => c.method === "POST" && c.url.includes("/comments"),
-    );
-    expect(post).toBeUndefined();
-  });
 
-  it("stops after the last (partial) page and posts a new comment when no marker was found anywhere", async () => {
-    const verdictPath = join(workdir, "verdict.json");
-    await writeFile(
-      verdictPath,
-      JSON.stringify({
-        issue_number: 42,
-        readiness: "ready-to-implement",
-        reasoning: "Meets the bar.",
-        missing_info_questions: [],
-      }),
-    );
-    process.env.VERDICT_PATH = verdictPath;
-
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
-        jsonResponse([{ name: "needs-triage" }]),
-      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
-        jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: "unrelated", user: { type: "User", login: "someone" } }]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 2 }, 201),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await main();
-
-    expect(process.exitCode).toBeUndefined();
-    // Only one page fetched (fewer than per_page results = last page); no
-    // page=2 request should have been made.
-    expect(calls.some((c) => c.url.includes("page=2"))).toBe(false);
-    const post = calls.find(
-      (c) => c.method === "POST" && c.url.includes("/comments"),
-    );
-    expect(post).toBeDefined();
+    expect(calls).toEqual([]);
   });
 });
 
@@ -663,14 +716,18 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+        jsonResponse({
+          id: 99,
+          body:
+            "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+            TRIAGE_COMMENT_MARKER,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        }),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -681,14 +738,17 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
     expect((put?.body as { labels: string[] }).labels).toEqual([
       "needs-triage",
     ]);
-    const post = calls.find((c) => c.method === "POST");
-    expect((post?.body as { body: string }).body).toContain(
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect((patch?.body as { body: string }).body).toContain(
       'triage job result was "failure"',
     );
     // The verdict's own content (readiness/reasoning) must never surface —
     // the artifact was never trusted enough to even validate its fields.
-    expect((post?.body as { body: string }).body).not.toContain(
+    expect((patch?.body as { body: string }).body).not.toContain(
       "Meets the intake bar in full.",
+    );
+    expect((patch?.body as { body: string }).body).toContain(
+      "triage-generation:hold:123.1:do-not-edit",
     );
   });
 
@@ -713,18 +773,14 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
           jsonResponse([]),
         "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
           jsonResponse({}),
-        "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-          jsonResponse([]),
-        "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-          jsonResponse({ id: 1 }, 201),
       });
       vi.stubGlobal("fetch", fetchMock);
 
       await main();
 
       expect(process.exitCode).toBe(1);
-      const post = calls.find((c) => c.method === "POST");
-      expect((post?.body as { body: string }).body).toContain(
+      const patch = calls.find((c) => c.method === "PATCH");
+      expect((patch?.body as { body: string }).body).toContain(
         `triage job result was "${result}"`,
       );
     },
@@ -750,10 +806,6 @@ describe("main — FIX E: a verdict is only trusted from a successful triage job
     process.env.VERDICT_PATH = verdictPath;
 
     const { fetchMock, calls } = mockFetch({
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
         jsonResponse([]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
@@ -782,7 +834,16 @@ describe("main — input validation and transport edge cases", () => {
     await expect(main()).rejects.toThrow(/owner\/repo/);
   });
 
-  it.each(["0", "-1", "01", "1.5", "not-a-number", "9007199254740993"])(
+  it.each([
+    "0",
+    "-1",
+    "01",
+    " 42",
+    "42 ",
+    "1.5",
+    "not-a-number",
+    "9007199254740993",
+  ])(
     "rejects non-canonical trusted issue number %s before any API call",
     async (issueNumber) => {
       process.env.TRUSTED_ISSUE_NUMBER = issueNumber;
@@ -835,18 +896,14 @@ describe("main — input validation and transport edge cases", () => {
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
 
     expect(process.exitCode).toBe(1);
-    const post = calls.find((c) => c.method === "POST");
-    expect((post?.body as { body: string }).body).toContain(
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect((patch?.body as { body: string }).body).toContain(
       "exceeds the 20000-byte limit",
     );
     const put = calls.find((c) => c.method === "PUT");
@@ -865,18 +922,14 @@ describe("main — input validation and transport edge cases", () => {
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await main();
 
     expect(process.exitCode).toBe(1);
-    const post = calls.find((c) => c.method === "POST");
-    expect((post?.body as { body: string }).body).toContain(
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect((patch?.body as { body: string }).body).toContain(
       "not valid JSON",
     );
     const put = calls.find((c) => c.method === "PUT");
@@ -928,16 +981,50 @@ describe("main — input validation and transport edge cases", () => {
         jsonResponse([]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         new Response(null, { status: 204 }),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).resolves.toBeUndefined();
     expect(process.exitCode).toBeUndefined();
   });
+});
+
+describe("main — open issue eligibility", () => {
+  it.each([
+    { triageJobResult: "success", verdictFile: true },
+    { triageJobResult: "failure", verdictFile: false },
+  ])(
+    "writes nothing for a closed issue on the $triageJobResult path",
+    async ({ triageJobResult, verdictFile }) => {
+      process.env.TRIAGE_JOB_RESULT = triageJobResult;
+      if (verdictFile) {
+        const verdictPath = join(workdir, "verdict.json");
+        await writeFile(
+          verdictPath,
+          JSON.stringify({
+            issue_number: 42,
+            readiness: "ready-to-implement",
+            reasoning: "Meets the intake bar.",
+            missing_info_questions: [],
+          }),
+        );
+        process.env.VERDICT_PATH = verdictPath;
+      }
+
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+          jsonResponse({ state: "closed" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(main()).rejects.toThrow(
+        /not open.*refusing all triage writes/,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe("GET");
+    },
+  );
+
 });
 
 describe("main — fail-closed paths", () => {
@@ -949,10 +1036,6 @@ describe("main — fail-closed paths", () => {
         jsonResponse([{ name: "epic:F1" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -964,8 +1047,8 @@ describe("main — fail-closed paths", () => {
     expect((put?.body as { labels: string[] }).labels.sort()).toEqual(
       ["epic:F1", "needs-triage"].sort(),
     );
-    const post = calls.find((c) => c.method === "POST");
-    expect((post?.body as { body: string }).body).toContain("needs-triage");
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect((patch?.body as { body: string }).body).toContain("needs-triage");
   });
 
   it("STRIPS a stale ready-to-implement (e.g. from a superseded earlier verdict) back to needs-triage on a rerun's malformed verdict", async () => {
@@ -979,10 +1062,6 @@ describe("main — fail-closed paths", () => {
         jsonResponse([{ name: "ready-to-implement" }, { name: "epic:C2" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1015,10 +1094,6 @@ describe("main — fail-closed paths", () => {
         jsonResponse([]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
         jsonResponse({}),
-      "GET /repos/syamaner/roastpilot-cloud/issues/42/comments?per_page=100&page=1": () =>
-        jsonResponse([]),
-      "POST /repos/syamaner/roastpilot-cloud/issues/42/comments": () =>
-        jsonResponse({ id: 1 }, 201),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1028,7 +1103,13 @@ describe("main — fail-closed paths", () => {
     // No write ever targets issue 999 — the mock would throw
     // "unexpected fetch call" if the script tried, which would surface as
     // an unhandled rejection/test failure.
-    expect(calls.every((c) => /\/issues\/42(?:\/|$)/.test(c.url))).toBe(true);
+    expect(
+      calls.every(
+        (c) =>
+          /\/issues\/42(?:\/|$)/.test(c.url) ||
+          c.url.endsWith("/issues/comments/99"),
+      ),
+    ).toBe(true);
     const put = calls.find((c) => c.method === "PUT");
     expect((put?.body as { labels: string[] }).labels).toEqual([
       "needs-triage",
