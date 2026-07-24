@@ -40,9 +40,8 @@ jobs:
             echo "See [docs/factory-runbook.md](https://github.com/${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # --- seed: dumb, deterministic, no agent involved. Applies `needs-triage`
-  # if the issue has no readiness label yet, so the inbox is in a known
-  # state even if `triage` or `apply` fails outright. ---
+  # --- seed: dumb, deterministic, no agent involved. Applies the
+  # non-authorizing readiness and generation hold before triage starts. ---
   seed:
     name: Seed inbox label
     # §13 point 9's manual kill-switch (F1-S10): a repo variable the whole
@@ -58,25 +57,138 @@ jobs:
       queue: max
     permissions:
       issues: write
+    outputs:
+      triage_comment_id: ${{ steps.establish-hold.outputs.comment_id }}
     steps:
-      - name: Apply needs-triage if no readiness label is present
+      - name: Establish needs-triage seed or re-triage hold
+        id: establish-hold
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          TRIAGE_EXECUTION: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}
         run: |
           set -euo pipefail
           # factory.md §4's exact taxonomy.
-          readiness='["needs-triage","ready-to-implement","ready-to-spec","needs-info","wait-to-implement","wontfix"]'
-          current_labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels -q '[.labels[].name]')
-          has_readiness=$(jq -n --argjson current "$current_labels" --argjson readiness "$readiness" \
-            '[$current[] | select(. as $l | $readiness | index($l))] | length > 0')
-          if [ "$has_readiness" = "true" ]; then
-            echo "Readiness label already present on #$ISSUE_NUMBER; leaving as-is."
-          else
-            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label needs-triage
-            echo "Seeded needs-triage on #$ISSUE_NUMBER."
+          issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")
+          if jq -e 'has("pull_request")' <<< "$issue" > /dev/null; then
+            echo "::error::target #$ISSUE_NUMBER is a pull request, not an issue"
+            exit 1
           fi
+          if [ "$(jq -r '.state' <<< "$issue")" != "open" ]; then
+            echo "::error::target #$ISSUE_NUMBER is not an open issue"
+            exit 1
+          fi
+          current_labels=$(jq -c '[.labels[].name]' <<< "$issue")
+
+          comment_marker='<!-- roastpilot-factory:triage-verdict:do-not-edit -->'
+          hold_generation="hold:$TRIAGE_EXECUTION"
+          owner="${REPO%%/*}"
+          repo_name="${REPO#*/}"
+          graphql_query='query($owner:String!,$repo:String!,$issue:Int!,$cursor:String){repository(owner:$owner,name:$repo){issue(number:$issue){comments(first:100,after:$cursor){nodes{fullDatabaseId body author{__typename login}}pageInfo{hasNextPage endCursor}}}}}'
+          cursor=""
+          matches='[]'
+          for page in $(seq 1 50); do
+            query_args=(-f query="$graphql_query" -f owner="$owner" -f repo="$repo_name" -F issue="$ISSUE_NUMBER")
+            if [ -n "$cursor" ]; then query_args+=(-f cursor="$cursor"); fi
+            response=$(gh api graphql "${query_args[@]}")
+            page_state=$(jq -ec --arg marker "$comment_marker" '
+              if (has("errors") and (((.errors | type) != "array") or ((.errors | length) > 0)))
+              then error("GraphQL comment scan returned errors")
+              else .data.repository.issue.comments as $comments
+              | if (($comments.nodes | type) != "array"
+                    or ($comments.pageInfo.hasNextPage | type) != "boolean"
+                    or ($comments.pageInfo.endCursor != null and ($comments.pageInfo.endCursor | type) != "string")
+                    or ($comments.pageInfo.hasNextPage and (($comments.pageInfo.endCursor // "") | length) == 0)
+                    or any($comments.nodes[]; (.body | type) != "string"
+                      or (.author != null and ((.author.__typename | type) != "string"
+                        or (.author.login | type) != "string"))))
+                then error("invalid GraphQL comment scan response")
+                else {
+                  matches: [
+                    $comments.nodes[]
+                    | select(.author.__typename == "Bot"
+                        and .author.login == "github-actions"
+                        and (.body == $marker or (.body | endswith("\n" + $marker))))
+                    | if ((.fullDatabaseId | type) != "string"
+                        or ((.fullDatabaseId | test("^[1-9][0-9]*$")) | not))
+                      then error("invalid GraphQL comment id")
+                      else {id: .fullDatabaseId, body} end
+                  ],
+                  has_next: $comments.pageInfo.hasNextPage,
+                  cursor: $comments.pageInfo.endCursor
+                } end
+              end
+            ' <<< "$response")
+            page_matches=$(jq -c '.matches' <<< "$page_state")
+            matches=$(jq -cn --argjson all "$matches" --argjson page "$page_matches" '$all + $page')
+            if [ "$(jq 'length' <<< "$matches")" -gt 1 ]; then
+              echo "::error::multiple bot-owned triage comments make generation history ambiguous"; exit 1
+            fi
+            if [ "$(jq -r '.has_next' <<< "$page_state")" != "true" ]; then
+              break
+            fi
+            cursor=$(jq -r '.cursor' <<< "$page_state")
+            if [ "$page" -eq 50 ]; then
+              echo "::error::could not exhaust triage comments within 5000 entries"
+              exit 1
+            fi
+          done
+          comment_id=$(jq -r '.[0].id // empty' <<< "$matches")
+          existing_body=$(jq -r '.[0].body // ""' <<< "$matches")
+          hold_body="${existing_body%"$comment_marker"}<!-- roastpilot-factory:triage-generation:$hold_generation:do-not-edit -->
+          $comment_marker"
+          payload=$(jq -cn --arg body "$hold_body" '{body: $body}')
+
+          if jq -e 'index("ready-to-implement") != null' <<< "$current_labels" > /dev/null; then
+            gh api --method DELETE \
+              "repos/$REPO/issues/$ISSUE_NUMBER/labels/ready-to-implement" > /dev/null
+          fi
+          gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/labels" \
+            -f "labels[]=needs-triage" > /dev/null
+          for label in ready-to-spec needs-info wait-to-implement wontfix; do
+            if jq -e --arg label "$label" 'index($label) != null' \
+              <<< "$current_labels" > /dev/null; then
+              gh api --method DELETE \
+                "repos/$REPO/issues/$ISSUE_NUMBER/labels/$label" > /dev/null
+            fi
+          done
+
+          held_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")
+          if ! jq -e '
+            [.labels[].name] as $labels
+            | ($labels | index("needs-triage")) != null
+              and all(
+                (
+                  "ready-to-implement", "ready-to-spec", "needs-info",
+                  "wait-to-implement", "wontfix"
+                );
+                . as $label | ($labels | index($label)) == null
+              )
+          ' <<< "$held_issue" > /dev/null; then
+            echo "::error::re-triage readiness hold verification failed on #$ISSUE_NUMBER"
+            exit 1
+          fi
+
+          if [ -n "$comment_id" ]; then
+            held_comment=$(gh api --method PATCH \
+              "repos/$REPO/issues/comments/$comment_id" --input - <<< "$payload")
+          else
+            held_comment=$(gh api --method POST \
+              "repos/$REPO/issues/$ISSUE_NUMBER/comments" --input - <<< "$payload")
+          fi
+          comment_id=$(jq -er '.id' <<< "$held_comment")
+          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
+          verified_comment=$(gh api "repos/$REPO/issues/comments/$comment_id")
+          if ! jq -e --arg body "$hold_body" '
+            .user.type == "Bot"
+              and .user.login == "github-actions[bot]"
+              and .body == $body
+          ' <<< "$verified_comment" > /dev/null; then
+            echo "::error::re-triage generation hold verification failed on #$ISSUE_NUMBER"
+            exit 1
+          fi
+          echo "Established generation + readiness hold on #$ISSUE_NUMBER."
 
   # --- triage: read-only agent job. Runs the .claude/skills/triage skill,
   # which judges the issue and writes ONLY a JSON verdict file — it never
@@ -288,18 +400,19 @@ jobs:
   # --- apply: privileged job. Runs a deterministic script — never agent
   # output as code — that validates the verdict artifact against the exact
   # schema/taxonomy BEFORE any write, then swaps the readiness label and
-  # upserts the triage comment (idempotent: edits its own prior comment on
-  # a re-run instead of duplicate-posting). On a missing or invalid verdict,
+  # replaces the exact generation hold (idempotent: edits its own prior
+  # comment on a re-run instead of duplicate-posting). On a missing or invalid
+  # verdict,
   # readiness is explicitly RESET to `needs-triage` (fail closed — a rerun
   # must not leave a stale ready-to-implement in place just because this
   # run's triage failed). ---
   apply:
     name: Apply triage verdict (privileged)
-    needs: triage
+    needs: [seed, triage]
     # always() so a triage failure still reaches the fallback path (needs
     # -triage reset + explanatory comment); still gated on the pause flag,
     # since always() alone would otherwise ignore it.
-    if: always() && vars.FACTORY_PAUSED != 'true'
+    if: always() && needs.seed.result == 'success' && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: factory-issue-privileged-${{ github.event.issue.number }}
@@ -336,9 +449,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Trusted issue number, from the workflow's own event context —
-          # never from the verdict artifact itself. apply-triage-verdict.mts
-          # rejects any verdict whose self-reported issue_number disagrees.
+          # never from the verdict artifact itself.
+          # apply-triage-verdict.mts rejects any verdict whose self-reported
+          # issue_number disagrees.
           TRUSTED_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          TRUSTED_TRIAGE_COMMENT_ID: ${{ needs.seed.outputs.triage_comment_id }}
           # The `triage` step uploads its artifact with `if: always()`, so a
           # schema-valid verdict can exist even from a run that did NOT
           # succeed (timeout, internal error, a forbidden-tool attempt).
@@ -346,5 +461,6 @@ jobs:
           # job success is a second, independent gate, not implied by
           # schema validity.
           TRIAGE_JOB_RESULT: ${{ needs.triage.result }}
+          TRIAGE_EXECUTION: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}
           VERDICT_PATH: triage-output/verdict.json
         run: node --experimental-strip-types scripts/factory/apply-triage-verdict.mts

@@ -1471,8 +1471,9 @@ export interface ExistingComment {
  * Scoped to comments authored by exactly `authorLogin` AND carrying the
  * marker — matching on bot-type alone would let a different bot's comment
  * (containing the marker string coincidentally, or by an untrusted echo)
- * be mistaken for this job's own and silently overwritten. Same reasoning
- * as `findExistingTriageCommentId`. The expected `authorType` is derived
+ * be mistaken for this job's own and silently overwritten. This matches
+ * the live triage-generation fence's exact-author and exact-marker rule.
+ * The expected `authorType` is derived
  * from `authorLogin`'s own shape (a `[bot]`-suffixed login is always type
  * `"Bot"` on GitHub; anything else is type `"User"`) rather than assumed —
  * this keeps the check correct whether the publisher identity is the
