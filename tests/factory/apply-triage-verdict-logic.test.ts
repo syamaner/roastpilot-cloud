@@ -7,8 +7,10 @@ import {
   buildVerdictCommentBody,
   computeNewLabelSet,
   extractTriageGeneration,
+  extractOwnedTriageGenerations,
   hasAdjacentTriageGenerationMarker,
   hasBlockingTriageGeneration,
+  isAuthorizingTriageGeneration,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 import type { TriageVerdict } from "../../scripts/factory/triage-verdict-schema.mts";
@@ -123,6 +125,10 @@ describe("transitional triage-generation fence", () => {
 
     expect(hasBlockingTriageGeneration(comments)).toBe(true);
     expect(hasBlockingTriageGeneration(comments.slice(0, 3))).toBe(false);
+    expect(extractOwnedTriageGenerations(comments)).toEqual([
+      "none",
+      "123.1",
+    ]);
   });
 });
 
@@ -211,6 +217,10 @@ describe("triage generation marker", () => {
     expect(() => buildTriageHoldGeneration("123")).toThrow(
       /<run_id>\.<run_attempt>/,
     );
+    expect(isAuthorizingTriageGeneration("123.2")).toBe(true);
+    expect(isAuthorizingTriageGeneration("123")).toBe(false);
+    expect(isAuthorizingTriageGeneration("hold:123.2")).toBe(false);
+    expect(isAuthorizingTriageGeneration("none")).toBe(false);
   });
   it.each(["123", "123.1", "hold:123.1"])(
     "round-trips valid generation %s with LF and CRLF adjacency",

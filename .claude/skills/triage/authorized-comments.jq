@@ -4,6 +4,17 @@ def factory_marker:
 def max_retained_comments: 50;
 def max_context_bytes: 65536;
 
+def triage_generation:
+  try (
+    capture(
+      "(^|\n)<!-- roastpilot-factory:triage-generation:(?<generation>hold:[1-9][0-9]*\\.[1-9][0-9]*|[1-9][0-9]*(\\.[1-9][0-9]*)?):do-not-edit -->\\r?\n"
+      + factory_marker
+      + "$"
+    ).generation
+    // "none"
+  )
+  catch "none";
+
 def trusted_association:
   . == "OWNER" or . == "MEMBER" or . == "COLLABORATOR";
 
@@ -37,6 +48,7 @@ def is_authorized_clarification($issue_author):
             author: .author.login,
             author_association: .authorAssociation,
             created_at: .createdAt,
+            triage_generation: (.body | triage_generation),
             body
           }
         elif is_authorized_clarification($issue.author.login // null) then

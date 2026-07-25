@@ -73,6 +73,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
+  process.env.EXPECTED_TRIAGE_GENERATION = "123.1";
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.exitCode = undefined;
   vi.mocked(execFileSync).mockReset();
@@ -85,6 +86,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
+  delete process.env.EXPECTED_TRIAGE_GENERATION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   process.exitCode = undefined;
@@ -112,10 +114,11 @@ describe("main — input validation", () => {
 });
 
 describe("main — fail-closed paths that never reach git (no branch, no PR, one comment)", () => {
-  it("rejects generated triage history before invoking any local git command", async () => {
+  it("rejects a stale captured generation before invoking any local git command", async () => {
     const patchPath = join(workdir, "patch.diff");
     await writeFile(patchPath, VALID_DIFF);
     process.env.PATCH_PATH = patchPath;
+    process.env.EXPECTED_TRIAGE_GENERATION = "456.1";
 
     const { fetchMock, calls } = mockFetch({
       "POST /graphql": () =>
@@ -159,7 +162,77 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
         call.method === "POST" && call.url.endsWith("/issues/6/comments"),
     );
     expect((comment?.body as { body: string }).body).toContain(
-      "generation-era triage history",
+      "triage generation changed from 456.1 to 123.1",
+    );
+  });
+
+  it("rejects a missing captured generation before reading the patch", async () => {
+    delete process.env.EXPECTED_TRIAGE_GENERATION;
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+        jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.method === "POST")).toBe(true);
+    expect((calls.find((call) => call.method === "POST")?.body as { body: string }).body).toContain(
+      "did not report an authorizing",
+    );
+  });
+
+  it("rejects missing bot-owned terminal history before invoking git", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "POST /graphql": () =>
+        jsonResponse({
+          data: {
+            repository: {
+              issue: {
+                comments: {
+                  nodes: [
+                    {
+                      body:
+                        "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                        TRIAGE_COMMENT_MARKER,
+                      author: { __typename: "Bot", login: "another-app" },
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+        jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+    const comment = calls.find(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect((comment?.body as { body: string }).body).toContain(
+      "has no bot-owned terminal triage comment",
     );
   });
 

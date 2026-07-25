@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../../scripts/factory/publish-implement-patch.mts";
-import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdict-logic.mts";
+import {
+  buildTriageGenerationMarker,
+  TRIAGE_COMMENT_MARKER,
+} from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 /**
  * Proves the actual git plumbing AND the patch-path guard genuinely work
@@ -70,6 +73,7 @@ beforeEach(async () => {
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
+  process.env.EXPECTED_TRIAGE_GENERATION = "123.1";
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.env.PATCH_PATH = patchPath;
   process.exitCode = undefined;
@@ -83,6 +87,7 @@ afterEach(async () => {
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
+  delete process.env.EXPECTED_TRIAGE_GENERATION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   delete process.env.IMPLEMENT_PROMPT_VERSION;
@@ -129,6 +134,15 @@ function triageGraphqlResponse(
   };
 }
 
+function ownedTriageComment(generation: string): unknown {
+  return {
+    body:
+      `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->\n` +
+      TRIAGE_COMMENT_MARKER,
+    author: { __typename: "Bot", login: "github-actions" },
+  };
+}
+
 function stubFetch(
   fetchMock: ReturnType<typeof vi.fn>,
   delegateInitialCommentScan = false,
@@ -148,7 +162,9 @@ function stubFetch(
       url.pathname === "/graphql"
     ) {
       initialCommentScanAnswered = true;
-      return jsonResponse(triageGraphqlResponse([]));
+      return jsonResponse(
+        triageGraphqlResponse([ownedTriageComment("123.1")]),
+      );
     }
     const response = await invoke(input, init);
     if (
@@ -225,7 +241,7 @@ function stubHappyPathFetch(options?: {
       };
       const pageResponse = options?.triageGraphqlPage
         ? options.triageGraphqlPage(request.variables.cursor)
-        : triageGraphqlResponse([]);
+        : triageGraphqlResponse([ownedTriageComment("123.1")]);
       return pageResponse instanceof Response
         ? pageResponse
         : jsonResponse(pageResponse);
@@ -356,7 +372,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     expect(log).toContain("Closes #6");
   });
 
-  it("preserves the existing publication path for marker-only legacy triage history", async () => {
+  it("rejects marker-only legacy triage history", async () => {
     stubHappyPathFetch({
       triageGraphqlPage: () =>
         ({
@@ -379,13 +395,13 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(1);
     expect(
       git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
-    ).toContain("feature/6-implement-workflow");
+    ).toBe("");
   });
 
-  it("allows publication after exhausting multiple generation-free cursor pages", async () => {
+  it("allows an exact match after exhausting multiple cursor pages", async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       body: `ordinary comment ${index}`,
       author: { __typename: "User", login: `user-${index}` },
@@ -394,12 +410,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       triageGraphqlPage: (cursor) =>
         cursor === null
           ? triageGraphqlResponse(firstPage, true, "cursor-after-100")
-          : triageGraphqlResponse([
-              {
-                body: `legacy verdict\n${TRIAGE_COMMENT_MARKER}`,
-                author: { __typename: "Bot", login: "github-actions" },
-              },
-            ]),
+          : triageGraphqlResponse([ownedTriageComment("123.1")]),
     });
 
     await main();
@@ -421,8 +432,8 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     ).toBe("cursor-after-100");
   });
 
-  it.each(["123", "123.1", "hold:123.1", "malformed"])(
-    "rejects adjacent generation value %s before publication",
+  it.each(["123", "hold:123.1", "malformed"])(
+    "rejects non-authorizing generation value %s before publication",
     async (generation) => {
       const fetchMock = stubHappyPathFetch({
         triageGraphqlPage: () =>
@@ -457,7 +468,53 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     },
   );
 
-  it("uses the opaque cursor so a page-boundary deletion cannot skip generated history", async () => {
+  it.each([
+    {
+      name: "another bot",
+      author: { __typename: "Bot", login: "another-app" },
+    },
+    {
+      name: "a user with the Actions login",
+      author: { __typename: "User", login: "github-actions" },
+    },
+  ])(
+    "rejects an exact generation from $name before publication",
+    async ({ author }) => {
+      const fetchMock = stubHappyPathFetch({
+        triageGraphqlPage: () =>
+          triageGraphqlResponse([
+            {
+              body:
+                buildTriageGenerationMarker("123.1") +
+                "\n" +
+                TRIAGE_COMMENT_MARKER,
+              author,
+            },
+          ]),
+      });
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      expect(
+        git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+      ).toBe("");
+      const calls = fetchMock.mock.calls as Array<
+        [string | URL, RequestInit | undefined]
+      >;
+      expect(
+        calls.some(([url]) => String(url).includes("/pulls")),
+      ).toBe(false);
+      const failurePost = calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      );
+      expect(failurePost).toBeDefined();
+    },
+  );
+
+  it("uses the opaque cursor and rejects duplicate owned history across pages", async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       body:
         index === 0
@@ -472,14 +529,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       triageGraphqlPage: (cursor) =>
         cursor === null
           ? triageGraphqlResponse(firstPage, true, "cursor-after-100")
-          : triageGraphqlResponse([
-              {
-                body:
-                  "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
-                  TRIAGE_COMMENT_MARKER,
-                author: { __typename: "Bot", login: "github-actions" },
-              },
-            ]),
+          : triageGraphqlResponse([ownedTriageComment("123.1")]),
     });
 
     await main();
@@ -533,7 +583,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     ).toBe(false);
   });
 
-  it("detects generated history on the final bounded page", async () => {
+  it("accepts the matching generation on the final bounded page", async () => {
     const fullPage = Array.from({ length: 100 }, (_, index) => ({
       body: `ordinary comment ${index}`,
       author: { __typename: "User", login: `user-${index}` },
@@ -544,20 +594,13 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
           cursor === null ? 1 : Number(cursor.replace("cursor-", "")) + 1;
         return page < 50
           ? triageGraphqlResponse(fullPage, true, `cursor-${page}`)
-          : triageGraphqlResponse([
-              {
-                body:
-                  "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
-                  TRIAGE_COMMENT_MARKER,
-                author: { __typename: "Bot", login: "github-actions" },
-              },
-            ]);
+          : triageGraphqlResponse([ownedTriageComment("123.1")]);
       },
     });
 
     await main();
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBeUndefined();
     const calls = fetchMock.mock.calls as Array<
       [string | URL, RequestInit | undefined]
     >;
@@ -571,7 +614,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     ).toBe("cursor-49");
     expect(
       calls.some(([url]) => String(url).includes("/pulls?state=open")),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("fails closed on a later-page comment API error", async () => {
@@ -724,7 +767,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
     ).toBe(false);
   });
 
-  it("does not refresh an existing remote branch when generated history is present", async () => {
+  it("does not refresh an existing remote branch after generation changes", async () => {
     git(localCloneDir, ["checkout", "-b", "feature/6-implement-workflow"]);
     await fsWriteFile(join(localCloneDir, "existing.txt"), "existing\n");
     git(localCloneDir, ["add", "existing.txt"]);
@@ -740,14 +783,7 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
         { number: 50, head: { ref: "feature/6-implement-workflow" } },
       ],
       triageGraphqlPage: () =>
-        triageGraphqlResponse([
-          {
-            body:
-              "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
-              TRIAGE_COMMENT_MARKER,
-            author: { __typename: "Bot", login: "github-actions" },
-          },
-        ]),
+        triageGraphqlResponse([ownedTriageComment("456.1")]),
     });
 
     await main();
