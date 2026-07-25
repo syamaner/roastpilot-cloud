@@ -595,19 +595,22 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
     expect(privilegedFindings(content)).toHaveLength(1);
   });
 
-  it("does not treat explicitly disabled checkout persistence as a credential", () => {
-    const content = [
-      "permissions: {}",
-      "jobs:",
-      "  review:",
-      "    steps:",
-      "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
-      "        with:",
-      "          persist-credentials: false",
-      "      - uses: ./.github/actions/review",
-    ].join("\n");
-    expect(privilegedFindings(content)).toEqual([]);
-  });
+  it.each(["false", '"false"'])(
+    "does not treat checkout persistence %s as a credential",
+    (persistCredentials) => {
+      const content = [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    steps:",
+        "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        `          persist-credentials: ${persistCredentials}`,
+        "      - uses: ./.github/actions/review",
+      ].join("\n");
+      expect(privilegedFindings(content)).toEqual([]);
+    },
+  );
 
   it("does not reinterpret an action input named uses as executable", () => {
     const content = [
@@ -670,7 +673,10 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "sequence-valued jobs",
       [
         "permissions: {}",
-        "jobs:",
+        "jobs_key: &jobs_key jobs",
+        "? *jobs_key",
+        ":",
+        "  - malformed",
         "  - steps:",
         "      - uses: ./.github/actions/review",
       ],
@@ -688,6 +694,9 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
     expect(privilegedFindings(lines.join("\n"))).toHaveLength(1);
   });
 
+  it("handles a malformed scalar jobs value without inventing an invocation", () => {
+    expect(privilegedFindings("permissions: {}\njobs: malformed\n")).toEqual([]);
+  });
   it("resolves merge keys and aliases before classifying the job", () => {
     const content = [
       "permissions: {}",
@@ -695,15 +704,60 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "  permissions: read-all",
       "  steps:",
       "    - uses: ./.github/actions/review",
-      "jobs:",
+      "shared_jobs: &shared-jobs",
       "  review:",
       "    <<: *privileged",
+      "jobs: *shared-jobs",
     ].join("\n");
     expect(privilegedFindings(content)).toEqual([
       expect.objectContaining({
         kind: "privileged-local-action",
         line: 8,
       }),
+    ]);
+  });
+
+  it.each([
+    [
+      "root-level jobs mapping",
+      [
+        "workflow: &workflow",
+        "  jobs:",
+        "    review:",
+        "      permissions: read-all",
+        "      steps:",
+        "        - uses: ./.github/actions/review",
+        "<<: *workflow",
+      ],
+    ],
+    [
+      "job mapping",
+      [
+        "review: &review",
+        "  permissions: read-all",
+        "  steps:",
+        "    - uses: ./.github/actions/review",
+        "jobs:",
+        "  <<:",
+        "    review: *review",
+      ],
+    ],
+  ])("classifies a credentialed local action from a merged %s", (_name, lines) => {
+    expect(privilegedFindings(lines.join("\n"))).toEqual([
+      expect.objectContaining({ line: 1 }),
+    ]);
+  });
+
+  it("classifies a local action from a merged malformed jobs sequence", () => {
+    const content = [
+      "workflow: &workflow",
+      "  jobs:",
+      "    - steps:",
+      "        - uses: ./.github/actions/review",
+      "<<: *workflow",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([
+      expect.objectContaining({ line: 1 }),
     ]);
   });
 

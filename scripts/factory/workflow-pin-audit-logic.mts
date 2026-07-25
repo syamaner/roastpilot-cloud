@@ -333,6 +333,7 @@ function workflowFieldLine(
 ): number {
   const resolveAlias = (node: Node): Node | undefined =>
     isAlias(node) ? node.resolve(document) : node;
+  /* v8 ignore next -- a semantic object with `jobs` has a Node root. */
   const root = isNode(document.contents)
     ? resolveAlias(document.contents)
     : undefined;
@@ -355,6 +356,7 @@ function workflowJobLine(
 ): number {
   const resolveAlias = (node: Node): Node | undefined =>
     isAlias(node) ? node.resolve(document) : node;
+  /* v8 ignore next -- a semantic object with `jobs` has a Node root. */
   const root = isNode(document.contents)
     ? resolveAlias(document.contents)
     : undefined;
