@@ -41,6 +41,9 @@ const ALLOWLIST_KEYS = new Set([
   "allowed_bots",
   "allowed_non_write_users",
 ]);
+const APPROVED_GITHUB_HOSTED_RUNNER_LABELS = new Set([
+  "ubuntu-latest",
+]);
 const GITHUB_TOKEN_PERMISSION_KEYS = new Set([
   "actions",
   "artifact-metadata",
@@ -143,7 +146,7 @@ function containsCredentialExpression(value: unknown): boolean {
   if (typeof value === "string") {
     return (
       /\$\{\{[\s\S]*?\bsecrets\b[\s\S]*?\}\}/i.test(value) ||
-      /\$\{\{[\s\S]*?\b(?:github|inputs|steps|needs)\b[\s\S]*?\}\}/i.test(
+      /\$\{\{[\s\S]*?\b(?:github|inputs|steps|needs|vars)\b[\s\S]*?\}\}/i.test(
         value,
       )
     );
@@ -213,6 +216,13 @@ function permissionsCarryCredential(value: unknown): boolean {
   );
 }
 
+function runnerCarriesCredential(value: unknown): boolean {
+  return (
+    typeof value !== "string" ||
+    !APPROVED_GITHUB_HOSTED_RUNNER_LABELS.has(value.trim())
+  );
+}
+
 function hasUnknownCredentialShape(
   workflow: Record<string, unknown>,
   job: Record<string, unknown>,
@@ -248,6 +258,8 @@ function jobCarriesCredential(
   }
   if (
     Object.hasOwn(job, "environment") ||
+    (Object.hasOwn(job, "runs-on") &&
+      runnerCarriesCredential(job["runs-on"])) ||
     (Object.hasOwn(job, "with") &&
       (!isRecord(job.with) || Object.keys(job.with).length > 0)) ||
     hasUnknownCredentialShape(workflow, job) ||

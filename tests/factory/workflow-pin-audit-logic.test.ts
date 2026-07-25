@@ -541,6 +541,10 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
     "${{ toJSON(github) }}",
     "${{ fromJSON(toJSON(github)).token }}",
     "${{ github }}",
+    "${{ vars.DEPLOY_TOKEN }}",
+    "${{ vars[format('deploy_{0}', 'token')] }}",
+    "${{ toJSON(vars) }}",
+    "${{ vars.REGION }}",
   ])("fails closed on runtime context expression %s", (expression) => {
     const content = [
       "permissions: {}",
@@ -561,7 +565,7 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "jobs:",
       "  review:",
       "    env:",
-      "      VALUE: github inputs needs secrets steps",
+      "      VALUE: github inputs needs secrets steps vars",
       "    steps:",
       "      - uses: ./.github/actions/review",
     ].join("\n");
@@ -575,6 +579,37 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "  review:",
       "    env:",
       '      VALUE: "${{ github.event_name }}"',
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("allows the approved GitHub-hosted runner without another credential source", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it.each([
+    ["self-hosted scalar", "self-hosted"],
+    ["custom runner label", "corp-runner"],
+    ["self-hosted label sequence", "[self-hosted, linux, x64]"],
+    ["dynamic runner expression", "${{ inputs.runner }}"],
+    ["map-valued runner", "{ group: trusted }"],
+    ["null runner", "null"],
+  ])("fails closed on a %s", (_name, runsOn) => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      `    runs-on: ${runsOn}`,
       "    steps:",
       "      - uses: ./.github/actions/review",
     ].join("\n");
