@@ -41,6 +41,27 @@ const ALLOWLIST_KEYS = new Set([
   "allowed_bots",
   "allowed_non_write_users",
 ]);
+const GITHUB_TOKEN_PERMISSION_KEYS = new Set([
+  "actions",
+  "artifact-metadata",
+  "attestations",
+  "checks",
+  "code-quality",
+  "contents",
+  "deployments",
+  "discussions",
+  "id-token",
+  "issues",
+  "models",
+  "packages",
+  "pages",
+  "pull-requests",
+  "security-events",
+  "statuses",
+  "vulnerability-alerts",
+]);
+const CREDENTIAL_KEY_PATTERN =
+  /(?:^|[_-])(?:api[_-]?key|auth(?:entication|orization)?|credential|credentials|password|passphrase|pat|private[_-]?key|secret|secrets|ssh[_-]?key|token|tokens)(?:$|[_-])/i;
 
 type UnsafeAllowlistValue = {
   readonly node: Node;
@@ -53,6 +74,7 @@ type UnsafeAllowlistValue = {
 export interface WorkflowPinViolation {
   readonly kind:
     | "invalid-yaml"
+    | "privileged-local-action"
     | "unpinned-action"
     | "unsafe-local-action"
     | "wildcard-allowlist";
@@ -110,7 +132,298 @@ type LocalActionEntrypointInspection =
   | { readonly error: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
+
+function containsCredentialExpression(value: unknown): boolean {
+  if (typeof value === "string") {
+    return (
+      /\$\{\{[\s\S]*?\bsecrets\b[\s\S]*?\}\}/i.test(value) ||
+      /\$\{\{[\s\S]*?\bgithub\s*(?:\.|\[\s*["'])token\b[\s\S]*?\}\}/i.test(
+        value,
+      ) ||
+      /\$\{\{[\s\S]*?\b(?:steps|needs)\b[\s\S]*?\boutputs\b[\s\S]*?\}\}/i.test(
+        value,
+      ) ||
+      /\$\{\{[\s\S]*?\btoJSON\s*\(\s*(?:steps|needs)\s*\)[\s\S]*?\}\}/i.test(
+        value,
+      )
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.some(containsCredentialExpression);
+  }
+  return (
+    isRecord(value) &&
+    Object.values(value).some(containsCredentialExpression)
+  );
+}
+
+function containsCredentialNamedValue(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(containsCredentialNamedValue);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.entries(value).some(([key, nestedValue]) => {
+    const normalizedKey = key
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .toLowerCase();
+    if (key === "permissions") {
+      return false;
+    }
+    if (CREDENTIAL_KEY_PATTERN.test(normalizedKey)) {
+      if (
+        normalizedKey.replaceAll("_", "-") ===
+          "persist-credentials" &&
+        (nestedValue === false || nestedValue === "false")
+      ) {
+        return false;
+      }
+      if (
+        (normalizedKey === "credentials" ||
+          normalizedKey === "secrets") &&
+        isRecord(nestedValue) &&
+        Object.keys(nestedValue).length === 0
+      ) {
+        return false;
+      }
+      return true;
+    }
+    return containsCredentialNamedValue(nestedValue);
+  });
+}
+
+function permissionsCarryCredential(value: unknown): boolean {
+  if (value === undefined) {
+    // Repository defaults are mutable external state, so absence is unknown.
+    return true;
+  }
+  if (typeof value === "string") {
+    // Both supported scalar shorthands grant a token; every other scalar is
+    // an unknown form and therefore also fails closed.
+    return true;
+  }
+  if (!isRecord(value)) {
+    return true;
+  }
+  return Object.entries(value).some(
+    ([permissionKey, permission]) =>
+      !GITHUB_TOKEN_PERMISSION_KEYS.has(permissionKey) ||
+      permission !== "none",
+  );
+}
+
+function hasUnknownCredentialShape(
+  workflow: Record<string, unknown>,
+  job: Record<string, unknown>,
+): boolean {
+  return (
+    (Object.hasOwn(workflow, "env") && !isRecord(workflow.env)) ||
+    (Object.hasOwn(job, "env") && !isRecord(job.env)) ||
+    (Object.hasOwn(job, "steps") &&
+      (!Array.isArray(job.steps) ||
+        job.steps.some(
+          (step) =>
+            !isRecord(step) ||
+            (Object.hasOwn(step, "env") && !isRecord(step.env)) ||
+            (Object.hasOwn(step, "with") && !isRecord(step.with)),
+        ))) ||
+    (Object.hasOwn(job, "with") && !isRecord(job.with)) ||
+    (Object.hasOwn(job, "container") &&
+      typeof job.container !== "string" &&
+      !isRecord(job.container)) ||
+    (Object.hasOwn(job, "services") && !isRecord(job.services))
+  );
+}
+
+function jobCarriesCredential(
+  workflow: Record<string, unknown>,
+  job: Record<string, unknown>,
+): boolean {
+  const permissions = Object.hasOwn(job, "permissions")
+    ? job.permissions
+    : workflow.permissions;
+  if (permissionsCarryCredential(permissions)) {
+    return true;
+  }
+  if (
+    Object.hasOwn(job, "environment") ||
+    (Object.hasOwn(job, "with") &&
+      (!isRecord(job.with) || Object.keys(job.with).length > 0)) ||
+    hasUnknownCredentialShape(workflow, job) ||
+    containsCredentialExpression(workflow.env) ||
+    containsCredentialExpression(job) ||
+    containsCredentialNamedValue(workflow.env) ||
+    containsCredentialNamedValue(job)
+  ) {
+    return true;
+  }
+  if (!Object.hasOwn(job, "secrets")) {
+    return false;
+  }
+  const secrets = job.secrets;
+  return (
+    secrets === "inherit" ||
+    !isRecord(secrets) ||
+    Object.keys(secrets).length > 0
+  );
+}
+
+type LocalUsesReference = {
+  readonly display: string;
+  readonly unknown: boolean;
+};
+
+function localUsesReference(
+  value: unknown,
+): LocalUsesReference | undefined {
+  if (typeof value !== "string") {
+    return value === undefined
+      ? undefined
+      : { display: "<non-string uses value>", unknown: true };
+  }
+  const reference = value.trim();
+  if (reference.includes("${{")) {
+    return { display: reference, unknown: true };
+  }
+  return localActionRepositoryPath(reference) !== undefined
+    ? { display: reference, unknown: false }
+    : undefined;
+}
+
+function localUsesReferences(
+  job: Record<string, unknown>,
+): LocalUsesReference[] {
+  const references: LocalUsesReference[] = [];
+  const jobReference = localUsesReference(job.uses);
+  if (jobReference !== undefined) {
+    references.push(jobReference);
+  }
+  const steps = Array.isArray(job.steps)
+    ? job.steps
+    : [job.steps];
+  for (const step of steps) {
+    if (isRecord(step) && Object.hasOwn(step, "uses")) {
+      const reference = localUsesReference(step.uses);
+      if (reference !== undefined) {
+        references.push(reference);
+      }
+    }
+  }
+  return references.filter(
+    (reference, index) =>
+      references.findIndex(
+        (candidate) =>
+          candidate.display === reference.display &&
+          candidate.unknown === reference.unknown,
+      ) === index,
+  );
+}
+
+function workflowFieldLine(
+  document: ReturnType<typeof parseDocument>,
+  fieldName: string,
+  lineCounter: LineCounter,
+): number {
+  const resolveAlias = (node: Node): Node | undefined =>
+    isAlias(node) ? node.resolve(document) : node;
+  const root = isNode(document.contents)
+    ? resolveAlias(document.contents)
+    : undefined;
+  /* v8 ignore next -- a semantic object with `jobs` requires a mapping root. */
+  if (!isMap(root)) {
+    return 1;
+  }
+  const field = root.items.find(
+    (pair) => pairKey(pair, resolveAlias) === fieldName,
+  );
+  return field && isNode(field.value)
+    ? nodeLine(field.value, lineCounter)
+    : 1;
+}
+
+function workflowJobLine(
+  document: ReturnType<typeof parseDocument>,
+  jobName: string,
+  lineCounter: LineCounter,
+): number {
+  const resolveAlias = (node: Node): Node | undefined =>
+    isAlias(node) ? node.resolve(document) : node;
+  const root = isNode(document.contents)
+    ? resolveAlias(document.contents)
+    : undefined;
+  /* v8 ignore next -- a semantic object with `jobs` requires a mapping root. */
+  if (!isMap(root)) {
+    return 1;
+  }
+  const jobsPair = root.items.find(
+    (pair) => pairKey(pair, resolveAlias)?.toLowerCase() === "jobs",
+  );
+  const jobs =
+    jobsPair && isNode(jobsPair.value)
+      ? resolveAlias(jobsPair.value)
+      : undefined;
+  /* v8 ignore next -- semantic `jobs` is a record only for a mapping node. */
+  if (!isMap(jobs)) {
+    return 1;
+  }
+  const jobPair = jobs.items.find(
+    (pair) => pairKey(pair, resolveAlias) === jobName,
+  );
+  return jobPair && isNode(jobPair.value)
+    ? nodeLine(jobPair.value, lineCounter)
+    : 1;
+}
+
+function findPrivilegedLocalActionViolations(
+  manifest: unknown,
+  document: ReturnType<typeof parseDocument>,
+  lineCounter: LineCounter,
+): WorkflowPinViolation[] {
+  if (!isRecord(manifest) || !Object.hasOwn(manifest, "jobs")) {
+    return [];
+  }
+  if (!isRecord(manifest.jobs)) {
+    const malformedJobs = Array.isArray(manifest.jobs)
+      ? manifest.jobs
+      : [manifest.jobs];
+    const references = malformedJobs.flatMap((job) =>
+      isRecord(job) ? localUsesReferences(job) : [],
+    );
+    const line = workflowFieldLine(document, "jobs", lineCounter);
+    return references.map((reference) => ({
+      kind: "privileged-local-action" as const,
+      line,
+      detail: `workflow has malformed jobs and cannot prove local reference "${reference.display}" is credential-free`,
+    }));
+  }
+  return Object.entries(manifest.jobs).flatMap(([jobName, value]) => {
+    if (!isRecord(value)) {
+      const line = workflowJobLine(document, jobName, lineCounter);
+      return localUsesReferences({ steps: value }).map((reference) => ({
+        kind: "privileged-local-action" as const,
+        line,
+        detail: `malformed job "${jobName}" cannot prove local reference "${reference.display}" is credential-free`,
+      }));
+    }
+    if (!jobCarriesCredential(manifest, value)) {
+      return [];
+    }
+    const line = workflowJobLine(document, jobName, lineCounter);
+    return localUsesReferences(value).map((reference) => ({
+      kind: "privileged-local-action" as const,
+      line,
+      detail: reference.unknown
+        ? `credential-bearing job "${jobName}" has non-static uses value "${reference.display}" and cannot prove it is non-local`
+        : `credential-bearing job "${jobName}" must not invoke repository-local reference "${reference.display}"`,
+    }));
+  });
 }
 
 function inspectLocalActionEntrypoints(
@@ -381,6 +694,7 @@ function inspectWorkflowManifest(
   const document = parseDocument(fileContent, {
     lineCounter,
     logLevel: "silent",
+    merge: true,
     prettyErrors: true,
     strict: true,
     uniqueKeys: true,
@@ -395,8 +709,9 @@ function inspectWorkflowManifest(
     }));
   }
 
+  let manifest: unknown;
   try {
-    document.toJS({ maxAliasCount: 100 });
+    manifest = document.toJS({ maxAliasCount: 100 }) as unknown;
   } catch (error: unknown) {
     // yaml reports alias-expansion failures as Error subclasses.
     const detail = (error as Error).message;
@@ -409,7 +724,11 @@ function inspectWorkflowManifest(
     ];
   }
 
-  const violations: WorkflowPinViolation[] = [];
+  const violations = findPrivilegedLocalActionViolations(
+    manifest,
+    document,
+    lineCounter,
+  );
   const exactActionScalars = new Set<Node>();
   const resolveAlias = (node: Node): Node | undefined =>
     isAlias(node) ? node.resolve(document) : node;

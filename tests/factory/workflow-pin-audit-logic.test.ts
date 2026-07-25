@@ -18,7 +18,9 @@ import {
   isNode,
   isScalar,
   isSeq,
+  parse,
   parseDocument,
+  stringify,
   type Node,
 } from "yaml";
 import {
@@ -269,6 +271,503 @@ describe("isWorkflowPinAuditManifestPath (issue #102)", () => {
   });
 });
 
+describe("credential-bearing local reference policy (issue #120 slice 120a)", () => {
+  const privilegedFindings = (content: string) =>
+    findWorkflowPinViolations(content).filter(
+      (violation) => violation.kind === "privileged-local-action",
+    );
+
+  it.each(["read", "write"])(
+    "rejects a local action with an effective %s permission",
+    (permission) => {
+      const content = [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    permissions:",
+        `      contents: ${permission}`,
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ].join("\n");
+      expect(privilegedFindings(content)).toEqual([
+        expect.objectContaining({
+          kind: "privileged-local-action",
+          line: 4,
+          detail: expect.stringContaining('job "review"'),
+        }),
+      ]);
+    },
+  );
+
+  it.each(["read-all", "write-all"])(
+    "rejects a local action with job permissions %s",
+    (permissions) => {
+      const content = [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        `    permissions: ${permissions}`,
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ].join("\n");
+      expect(privilegedFindings(content)).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["null permission declaration", "permissions: null"],
+    ["unsupported scalar permission declaration", "permissions: none"],
+    [
+      "non-string permission value",
+      "permissions:\n  contents: true",
+    ],
+    [
+      "unknown permission scope",
+      "permissions:\n  frobnicate: none",
+    ],
+    ["sequence permission declaration", "permissions: []"],
+  ])("fails closed on a %s", (_name, permissions) => {
+    const content = [
+      "jobs:",
+      "  review:",
+      ...permissions.split("\n").map((line) => `    ${line}`),
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("inherits workflow permissions when the job does not override them", () => {
+    const content = [
+      "permissions:",
+      "  contents: read",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("honors an explicit empty job override of workflow permissions", () => {
+    const content = [
+      "permissions: write-all",
+      "jobs:",
+      "  review:",
+      "    permissions: {}",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it("fails closed when permissions are omitted and repository defaults are unknown", () => {
+    const content = [
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it.each([
+    ["empty permissions", "permissions: {}"],
+    [
+      "explicit none permissions",
+      "permissions:\n  contents: none\n  issues: none",
+    ],
+  ])(
+    "allows a local action with %s and no other credential source",
+    (_name, permissions) => {
+      const content = [
+        permissions,
+        "jobs:",
+        "  review:",
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ].join("\n");
+      expect(privilegedFindings(content)).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      "workflow env secret",
+      'env:\n  API_KEY: "${{ secrets.API_KEY }}"\npermissions: {}',
+      "",
+    ],
+    [
+      "job env github token",
+      "permissions: {}",
+      '    env:\n      GH_TOKEN: "${{ github[\'token\'] }}"',
+    ],
+    [
+      "runtime token output",
+      "permissions: {}",
+      '    env:\n      GH_TOKEN: "${{ steps.app.outputs.token }}"',
+    ],
+    [
+      "inherited runtime credential output",
+      "permissions: {}",
+      '    env:\n      API_KEY: "${{ needs.auth.outputs.access_token }}"',
+    ],
+    [
+      "opaque step output",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ steps.mint.outputs.value }}"',
+    ],
+    [
+      "opaque prerequisite output",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ needs.auth.outputs.result }}"',
+    ],
+    [
+      "serialized prerequisite outputs",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ toJSON(needs) }}"',
+    ],
+    [
+      "environment-scoped credential",
+      "permissions: {}",
+      "    environment: production",
+    ],
+    [
+      "dynamic secret index",
+      "permissions: {}",
+      '    env:\n      API_KEY: "${{ secrets[inputs.secret_name] }}"',
+    ],
+  ])(
+    "rejects a local action with a %s",
+    (_name, workflowPrefix, jobField) => {
+      const content = [
+        workflowPrefix,
+        "jobs:",
+        "  review:",
+        jobField,
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ]
+        .filter((line) => line !== "")
+        .join("\n");
+      expect(privilegedFindings(content)).toHaveLength(1);
+    },
+  );
+
+  it("rejects a local reusable workflow when mapped secrets are inherited", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    secrets: inherit",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining(
+          '"./.github/workflows/reusable.yml"',
+        ),
+      }),
+    ]);
+  });
+
+  it("rejects a local reusable workflow with a non-empty mapped secret contract", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    secrets:",
+      "      API_KEY: supplied-by-caller",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("allows an explicitly credential-free reusable workflow call", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    with: {}",
+      "    secrets: {}",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it("fails closed on a sequence-valued reusable secret contract", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    secrets: []",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      "job container credentials",
+      [
+        "    container:",
+        "      image: registry.example/image:latest",
+        "      credentials:",
+        "        username: bot",
+        '        password: "${{ inputs.password }}"',
+      ],
+    ],
+    [
+      "service container credentials",
+      [
+        "    services:",
+        "      database:",
+        "        image: database:latest",
+        "        credentials:",
+        "          username: bot",
+        "          password: literal-secret",
+      ],
+    ],
+  ])("rejects a local action with %s", (_name, jobFields) => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      ...jobFields,
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("rejects a local reusable workflow with a credential-shaped input", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    with:",
+      '      token: "${{ inputs.deployment_token }}"',
+      "    secrets: {}",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("fails closed on an opaque local reusable workflow input", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  reusable:",
+      "    uses: ./.github/workflows/reusable.yml",
+      "    with:",
+      '      payload: "${{ inputs.payload }}"',
+      "    secrets: {}",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("normalizes camel-case credential input names", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: remote/action@0123456789012345678901234567890123456789",
+      "        with:",
+      "          githubToken: supplied-at-runtime",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("rejects a local action after checkout persists a custom token", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+      "        with:",
+      '          token: "${{ inputs.checkout_token }}"',
+      "          persist-credentials: true",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("does not treat explicitly disabled checkout persistence as a credential", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+      "        with:",
+      "          persist-credentials: false",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it("does not reinterpret an action input named uses as executable", () => {
+    const content = [
+      "permissions: read-all",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: remote/action@0123456789012345678901234567890123456789",
+      "        with:",
+      "          uses: ./.github/actions/config-data",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it.each([
+    [
+      "workflow env sequence",
+      [
+        "env: []",
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ],
+    ],
+    [
+      "job env sequence",
+      [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    env: []",
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ],
+    ],
+    [
+      "map-valued steps",
+      [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    steps:",
+        "      uses: ./.github/actions/review",
+      ],
+    ],
+    [
+      "step env sequence",
+      [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    steps:",
+        "      - env: []",
+        "      - uses: ./.github/actions/review",
+      ],
+    ],
+    [
+      "sequence-valued jobs",
+      [
+        "permissions: {}",
+        "jobs:",
+        "  - steps:",
+        "      - uses: ./.github/actions/review",
+      ],
+    ],
+    [
+      "sequence-valued job",
+      [
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    - uses: ./.github/actions/review",
+      ],
+    ],
+  ])("fails closed on a malformed %s shape", (_name, lines) => {
+    expect(privilegedFindings(lines.join("\n"))).toHaveLength(1);
+  });
+
+  it("resolves merge keys and aliases before classifying the job", () => {
+    const content = [
+      "permissions: {}",
+      "privileged: &privileged",
+      "  permissions: read-all",
+      "  steps:",
+      "    - uses: ./.github/actions/review",
+      "jobs:",
+      "  review:",
+      "    <<: *privileged",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([
+      expect.objectContaining({
+        kind: "privileged-local-action",
+        line: 8,
+      }),
+    ]);
+  });
+
+  it("normalizes Windows separators before rejecting a local reference", () => {
+    const content = [
+      "permissions: read-all",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      String.raw`      - uses: .\.github\actions\review`,
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it.each([
+    ['"${{ inputs.action }}"', "${{ inputs.action }}"],
+    ["[not, static]", "<non-string uses value>"],
+  ])(
+    "fails closed on an unresolved credential-bearing uses value %s",
+    (uses, detail) => {
+      const content = [
+        "permissions: read-all",
+        "jobs:",
+        "  review:",
+        "    steps:",
+        `      - uses: ${uses}`,
+      ].join("\n");
+      expect(privilegedFindings(content)).toEqual([
+        expect.objectContaining({
+          detail: expect.stringContaining(detail),
+        }),
+      ]);
+    },
+  );
+
+  it("reports each distinct local reference once per credential-bearing job", () => {
+    const content = [
+      "permissions: read-all",
+      "jobs:",
+      "  review:",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+      "      - uses: ./.github/actions/review",
+      "      - uses: ./.github/actions/other",
+    ].join("\n");
+    expect(
+      privilegedFindings(content).map((violation) => violation.detail),
+    ).toEqual([
+      expect.stringContaining('"./.github/actions/review"'),
+      expect.stringContaining('"./.github/actions/other"'),
+    ]);
+  });
+
+  it("does not apply a job credential policy to a composite manifest", () => {
+    const content = [
+      "runs:",
+      "  using: composite",
+      "  steps:",
+      "    - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+});
+
 describe("local action policy (issue #114)", () => {
   it.each([
     "./.github/actions/review",
@@ -315,6 +814,7 @@ describe("local action policy (issue #114)", () => {
 
   it("rejects an outside-root action in an alias-backed steps sequence", () => {
     const content = [
+      "permissions: {}",
       "shared_steps: &shared-steps",
       "  - uses: ./actions/review",
       "jobs:",
@@ -324,13 +824,14 @@ describe("local action policy (issue #114)", () => {
     expect(findWorkflowPinViolations(content)).toEqual([
       expect.objectContaining({
         kind: "unsafe-local-action",
-        line: 2,
+        line: 3,
       }),
     ]);
   });
 
-  it("does not classify a job-level local reusable workflow as an action", () => {
+  it("allows a job-level local reusable workflow when the job has no credential", () => {
     const content = [
+      "permissions: {}",
       "jobs:",
       "  reusable:",
       "    uses: ./.github/workflows/reusable.yml",
@@ -1242,6 +1743,23 @@ describe("live audited manifests (issue #102)", () => {
   const auditedFiles = listFilesRecursively(GITHUB_DIR).filter((path) =>
     isWorkflowPinAuditManifestPath(repositoryRelativePath(path)),
   );
+  const credentialBearingJobs = [
+    ["ci.yml", "gates"],
+    ["ci.yml", "playwright"],
+    ["ci.yml", "snowflake-migrations"],
+    ["ci.yml", "mutation-testing"],
+    ["claude-code-review.yml", "claude-review"],
+    ["claude-code-review.yml", "spec-grounded-review"],
+    ["claude-code-review.yml", "publish-spec-grounding-review"],
+    ["codeql.yml", "analyze"],
+    ["dependency-review.yml", "dependency-review"],
+    ["dev-snowflake-contract.yml", "contract-check"],
+    ["implement-ready-issues.yml", "implement"],
+    ["implement-ready-issues.yml", "publish"],
+    ["triage-issues.yml", "seed"],
+    ["triage-issues.yml", "triage"],
+    ["triage-issues.yml", "apply"],
+  ] as const;
 
   it("discovers at least one real manifest and audits each structurally", () => {
     expect(auditedFiles.length).toBeGreaterThan(0);
@@ -1272,6 +1790,30 @@ describe("live audited manifests (issue #102)", () => {
       .sort();
     expect(auditedFiles.map(repositoryRelativePath).sort()).toEqual(expected);
   });
+
+  it.each(credentialBearingJobs)(
+    "classifies live credential-bearing job %s / %s",
+    (workflowName, jobName) => {
+      const workflowPath = join(WORKFLOWS_DIR, workflowName);
+      const manifest = parse(readFileSync(workflowPath, "utf8")) as {
+        jobs: Record<string, { steps?: unknown[] }>;
+      };
+      const job = manifest.jobs[jobName];
+      expect(job).toBeDefined();
+      job.steps = [
+        ...(Array.isArray(job.steps) ? job.steps : []),
+        { uses: "./.github/actions/classifier-probe" },
+      ];
+      const findings = findWorkflowPinViolations(
+        stringify(manifest),
+      ).filter(
+        (violation) =>
+          violation.kind === "privileged-local-action" &&
+          violation.detail.includes(`job "${jobName}"`),
+      );
+      expect(findings).toHaveLength(1);
+    },
+  );
 
   it("finds at least one real pinned Claude action invocation", () => {
     const actionUseFiles = auditedFiles
