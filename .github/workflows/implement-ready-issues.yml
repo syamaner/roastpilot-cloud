@@ -3,10 +3,10 @@ name: Implement Ready Issues
 # factory.md §3/§6: implement (read-only agent, broad edit access +
 # self-verification) -> publish (privileged, deterministic, validates
 # before ANY write). Stage 1 / dispatch-first (factory.md §3): a human
-# manually dispatches one issue at a time. That human dispatch IS the
-# authorization seam — this workflow does not (and must not, until the
-# §10 ratchet) trust a `ready-to-implement` label alone as authorization
-# to implement. The `issues: [labeled: ready-to-implement]` stage-2
+# manually dispatches one issue at a time. The dispatch selects the target,
+# while the exact bot-owned final triage generation plus the current
+# `ready-to-implement` label authorize implementation. The workflow never
+# trusts the label alone. The `issues: [labeled: ready-to-implement]` stage-2
 # trigger is NOT wired here on purpose; adding it is a conscious,
 # separately-reviewed decision gated on §10's criteria, not a flag flip.
 #
@@ -102,6 +102,8 @@ jobs:
     # selected.
     if: vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
     permissions:
       contents: read
       # Needed to fetch the target issue's title/body/labels:
@@ -212,6 +214,7 @@ jobs:
           persist-credentials: false
 
       - name: Fetch target issue, verify it is ready-to-implement, write context for the agent
+        id: issue-context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -248,6 +251,25 @@ jobs:
           echo "$issue_json" |
             jq -cj -f .claude/skills/triage/authorized-comments.jq \
               > issue-context/issue.json
+          triage_generation=$(jq -er '
+            [
+              .comments[]
+              | select(.kind == "factory_triage_history")
+            ] as $history
+            | if ($history | length) == 1 then
+                $history[0].triage_generation
+              else
+                error(
+                  "expected exactly one bot-owned terminal triage comment, found "
+                  + (($history | length) | tostring)
+                )
+              end
+          ' issue-context/issue.json)
+          if ! [[ "$triage_generation" =~ ^[1-9][0-9]*\.[1-9][0-9]*$ ]]; then
+            echo "Issue #$ISSUE_NUMBER has no current authorizing triage generation (found: $triage_generation) — refusing to implement."
+            exit 1
+          fi
+          echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"
 
       - name: Assert no Snowflake/Vercel secrets are present in this job's environment
         # Issue #6's verification note calls for this asserted, not just
@@ -948,8 +970,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Trusted issue number, from the workflow's own dispatch input —
           # never from the patch artifact (which has no issue-number field
-          # to begin with; the trust boundary here is job success, not a
-          # self-reported identifier).
+          # to begin with). Dispatch selects the target; the captured exact
+          # triage generation and job success authorize its patch.
           TRUSTED_ISSUE_NUMBER: ${{ inputs.issue_number }}
           # The `implement` step uploads its patch with `if: always()`, so
           # a well-formed, non-empty patch can exist even from a run that
@@ -959,6 +981,10 @@ jobs:
           # artifact at all — job success is a second, independent gate,
           # not implied by the patch merely existing.
           IMPLEMENT_JOB_RESULT: ${{ needs.implement.result }}
+          # Exact final generation captured while the issue was open and
+          # ready, before the agent ran. Publish re-checks the same canonical
+          # bot-owned terminal history under the shared issue lock.
+          EXPECTED_TRIAGE_GENERATION: ${{ needs.implement.outputs.triage_generation }}
           PATCH_PATH: patch-output/patch.diff
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Minimal PR-body provenance (Codex round 3, partial factory.md

@@ -81,6 +81,19 @@ export function buildTriageHoldGeneration(execution: string): string {
   return `hold:${execution}`;
 }
 
+/**
+ * Reports whether a generation can authorize implementation publication.
+ *
+ * Legacy numeric values and `hold:` values remain readable history but do
+ * not authorize an implementation run.
+ *
+ * @param generation - A parsed triage generation.
+ * @returns Whether it is an exact `<run_id>.<run_attempt>` execution.
+ */
+export function isAuthorizingTriageGeneration(generation: string): boolean {
+  return TRIAGE_EXECUTION_PATTERN.test(generation);
+}
+
 const READINESS_LABEL_SET = new Set<string>(READINESS_LABELS);
 
 /**
@@ -128,6 +141,23 @@ function isOwnedTerminalTriageComment(comment: ExistingComment): boolean {
     (comment.body === TRIAGE_COMMENT_MARKER ||
       comment.body.endsWith(`\n${TRIAGE_COMMENT_MARKER}`))
   );
+}
+
+/**
+ * Extracts generations from exact bot-owned terminal triage comments.
+ *
+ * `none` is retained for marker-only or malformed adjacent history so callers
+ * can fail closed rather than silently discarding an owned comment.
+ *
+ * @param comments - One or more issue comments.
+ * @returns Parsed generations in input order.
+ */
+export function extractOwnedTriageGenerations(
+  comments: readonly ExistingComment[],
+): string[] {
+  return comments
+    .filter(isOwnedTerminalTriageComment)
+    .map((comment) => extractTriageGeneration(comment.body));
 }
 
 /**

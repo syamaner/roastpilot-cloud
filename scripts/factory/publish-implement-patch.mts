@@ -107,15 +107,17 @@
  *   workflow hands it.
  * - `GITHUB_REPOSITORY` — `owner/repo`.
  * - `TRUSTED_ISSUE_NUMBER` — from the `workflow_dispatch` `issue_number`
- *   input. Trusted because dispatch-first means a human explicitly chose
- *   this issue for this run — the human dispatch IS the authorization
- *   seam (factory.md's staged-autonomy note); this is not read from
- *   anything agent-controlled.
+ *   input. Trusted because a human explicitly chose this target for the
+ *   run; this is not read from anything agent-controlled. Target selection
+ *   is separate from authorization, which also requires the captured exact
+ *   triage generation and current readiness.
  * - `IMPLEMENT_JOB_RESULT` — `needs.implement.result`. A patch artifact is
  *   only ever trusted when this is exactly `"success"` — same F1-S2
  *   lesson (FIX E) applied here: the `implement` step uploads its patch
  *   with `if: always()`, so a non-empty, well-formed patch can exist even
  *   from a run that did not succeed.
+ * - `EXPECTED_TRIAGE_GENERATION` — the authorizing
+ *   `<run_id>.<run_attempt>` captured before the implement agent started.
  * - `PATCH_PATH` — path to the downloaded patch artifact (may not exist).
  * - `RUN_URL` — link to the implement run, for the PR body / failure
  *   comment.
@@ -174,7 +176,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
-  hasBlockingTriageGeneration,
+  extractOwnedTriageGenerations,
+  isAuthorizingTriageGeneration,
   TRIAGE_COMMENT_AUTHOR_LOGIN,
   type ExistingComment as ExistingTriageComment,
 } from "./apply-triage-verdict-logic.mts";
@@ -810,18 +813,20 @@ function parseTriageCommentPage(response: unknown): {
 }
 
 /**
- * Checks every reachable issue-comment page for generation-era triage state.
+ * Reads the unique current exact-bot/terminal-marker triage generation.
  *
- * A blocking entry may short-circuit, but an allow requires a terminal page.
- * Reaching the scan cap is ambiguous and therefore rejects publication.
+ * A result requires complete bounded cursor exhaustion so a duplicate on a
+ * later page cannot be missed. Marker-only or malformed owned history returns
+ * `none`, which cannot match an authorizing expected generation.
  */
-async function hasGenerationEraTriageHistory(
+async function findCurrentTriageGeneration(
   token: string,
   owner: string,
   repo: string,
   issueNumber: number,
-): Promise<boolean> {
+): Promise<string> {
   let cursor: string | null = null;
+  const generations: string[] = [];
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const response = await githubRequest<unknown>(
       token,
@@ -833,16 +838,26 @@ async function hasGenerationEraTriageHistory(
       },
     );
     const parsed = parseTriageCommentPage(response);
-    if (hasBlockingTriageGeneration(parsed.comments)) {
-      return true;
+    generations.push(...extractOwnedTriageGenerations(parsed.comments));
+    if (generations.length > 1) {
+      throw new PublishRejection(
+        `target #${issueNumber} has multiple bot-owned terminal triage ` +
+          `comments; current generation is ambiguous`,
+      );
     }
     if (!parsed.hasNextPage) {
-      return false;
+      if (generations.length !== 1) {
+        throw new PublishRejection(
+          `target #${issueNumber} has no bot-owned terminal triage comment; ` +
+            `current generation cannot be verified`,
+        );
+      }
+      return generations[0] as string;
     }
     cursor = parsed.endCursor;
   }
   throw new PublishRejection(
-    `could not prove generation-free triage history within ` +
+    `could not determine the current triage generation within ` +
       `${MAX_COMMENT_PAGES * COMMENT_PAGE_SIZE} comments`,
   );
 }
@@ -1449,6 +1464,8 @@ export async function main(): Promise<void> {
     throw new Error(`TRUSTED_ISSUE_NUMBER exceeds JavaScript's safe integer range`);
   }
   const implementJobResult = requireEnv("IMPLEMENT_JOB_RESULT");
+  const expectedTriageGeneration =
+    process.env.EXPECTED_TRIAGE_GENERATION ?? "";
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
   // Provenance metadata only (Codex round-3 finding) — soft-defaulted,
@@ -1543,19 +1560,26 @@ export async function main(): Promise<void> {
       );
     }
 
+    if (!isAuthorizingTriageGeneration(expectedTriageGeneration)) {
+      throw new PublishRejection(
+        `implement job did not report an authorizing ` +
+          `<run_id>.<run_attempt> triage generation`,
+      );
+    }
+
     await assertPatchArtifactSize(patchPath);
 
-    if (
-      await hasGenerationEraTriageHistory(
-        token,
-        owner,
-        repo,
-        issueNumber,
-      )
-    ) {
+    const currentTriageGeneration = await findCurrentTriageGeneration(
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
+    if (currentTriageGeneration !== expectedTriageGeneration) {
       throw new PublishRejection(
-        `target #${issueNumber} carries generation-era triage history; ` +
-          `publication is disabled until exact-generation matching lands`,
+        `target #${issueNumber} triage generation changed from ` +
+          `${expectedTriageGeneration} to ${currentTriageGeneration}; ` +
+          `refusing stale branch/PR publish`,
       );
     }
 

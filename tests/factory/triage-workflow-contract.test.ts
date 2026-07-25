@@ -277,6 +277,57 @@ function runTargetValidation(
   }
 }
 
+function runImplementEligibility(
+  run: string,
+  issue: unknown,
+): {
+  readonly status: number | null;
+  readonly output: string;
+  readonly stdout: string;
+  readonly stderr: string;
+} {
+  const workdir = mkdtempSync(join(tmpdir(), "implement-eligibility-"));
+  const bin = join(workdir, "bin");
+  const filterDir = join(workdir, ".claude", "skills", "triage");
+  const issuePath = join(workdir, "issue.json");
+  const outputPath = join(workdir, "output");
+  const ghPath = join(bin, "gh");
+  try {
+    mkdirSync(bin);
+    mkdirSync(filterDir, { recursive: true });
+    writeFileSync(issuePath, JSON.stringify(issue));
+    writeFileSync(outputPath, "");
+    writeFileSync(
+      join(filterDir, "authorized-comments.jq"),
+      readFileSync(AUTHORIZED_COMMENTS_FILTER_PATH, "utf8"),
+    );
+    writeFileSync(ghPath, '#!/usr/bin/env bash\ncat "$ISSUE_JSON_PATH"\n');
+    chmodSync(ghPath, 0o755);
+
+    const result = spawnSync("bash", ["-c", run], {
+      cwd: workdir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        GH_TOKEN: "test-token",
+        GITHUB_OUTPUT: outputPath,
+        ISSUE_JSON_PATH: issuePath,
+        ISSUE_NUMBER: "51",
+        REPO: "syamaner/roastpilot-cloud",
+      },
+    });
+    return {
+      status: result.status,
+      output: readFileSync(outputPath, "utf8"),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
 function extractRunbookJqPrograms(backfill: string): readonly string[] {
   return [
     ...backfill.matchAll(
@@ -997,7 +1048,9 @@ describe("bounded triage context contract", () => {
           author: { login: "github-actions" },
           authorAssociation: "NONE",
           createdAt: "2026-07-24T10:13:00Z",
-          body: `Prior verdict\n${TRIAGE_COMMENT_MARKER}`,
+          body:
+            `Prior verdict\n${buildTriageGenerationMarker("123.1")}\n` +
+            TRIAGE_COMMENT_MARKER,
         },
         ...[
           `Embedded ${TRIAGE_COMMENT_MARKER} marker`,
@@ -1053,6 +1106,7 @@ describe("bounded triage context contract", () => {
         author: "github-actions",
         author_association: "NONE",
         created_at: "2026-07-24T10:12:00Z",
+        triage_generation: "none",
         body: TRIAGE_COMMENT_MARKER,
       },
       {
@@ -1060,7 +1114,10 @@ describe("bounded triage context contract", () => {
         author: "github-actions",
         author_association: "NONE",
         created_at: "2026-07-24T10:13:00Z",
-        body: `Prior verdict\n${TRIAGE_COMMENT_MARKER}`,
+        triage_generation: "123.1",
+        body:
+          `Prior verdict\n${buildTriageGenerationMarker("123.1")}\n` +
+          TRIAGE_COMMENT_MARKER,
       },
     ]);
   });
@@ -1086,6 +1143,77 @@ describe("bounded triage context contract", () => {
 
     expect(output.comments).toEqual([]);
   });
+
+  it.each([
+    ["123.1", "\n", "123.1"],
+    ["123", "\n", "123"],
+    ["hold:123.1", "\n", "hold:123.1"],
+    ["123.1", "\r\n", "123.1"],
+    ["hold:123", "\n", "none"],
+    ["malformed", "\n", "none"],
+  ])(
+    "extracts trusted generation %s with %j as %s",
+    (generation, newline, expected) => {
+      const output = JSON.parse(
+        runFilter({
+          number: 51,
+          author: { login: "issue-author" },
+          title: "Generation",
+          body: "Body",
+          state: "OPEN",
+          comments: [
+            {
+              author: { login: "github-actions" },
+              authorAssociation: "NONE",
+              createdAt: "2026-07-24T10:00:00Z",
+              body:
+                `Verdict\n<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->` +
+                newline +
+                TRIAGE_COMMENT_MARKER,
+            },
+          ],
+        }),
+      ) as {
+        readonly comments: readonly [
+          { readonly triage_generation: string },
+        ];
+      };
+
+      expect(output.comments[0].triage_generation).toBe(expected);
+    },
+  );
+
+  it.each(["\n", "\r\n"])(
+    "extracts a trusted generation at the start of the body with %j",
+    (newline) => {
+      const output = JSON.parse(
+        runFilter({
+          number: 51,
+          author: { login: "issue-author" },
+          title: "Generation",
+          body: "Body",
+          state: "OPEN",
+          comments: [
+            {
+              author: { login: "github-actions" },
+              authorAssociation: "NONE",
+              createdAt: "2026-07-24T10:00:00Z",
+              body:
+                buildTriageGenerationMarker("123.1") +
+                newline +
+                TRIAGE_COMMENT_MARKER,
+            },
+          ],
+        }),
+      ) as {
+        readonly comments: readonly [
+          { readonly triage_generation: string },
+        ];
+      };
+
+      expect(output.comments[0].triage_generation).toBe("123.1");
+    },
+  );
 
   it("fails closed above the exact count or serialized-byte limits", () => {
     const base = {
@@ -1151,8 +1279,18 @@ describe("bounded triage context contract", () => {
       "exit 1",
       "jq -cj -f .claude/skills/triage/authorized-comments.jq",
       "> issue-context/issue.json",
+      `] as $history`,
+      `if ($history | length) == 1 then`,
+      `$history[0].triage_generation`,
+      `if ! [[ "$triage_generation" =~ ^[1-9][0-9]*\\.[1-9][0-9]*$ ]]; then`,
+      "exit 1",
+      'echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"',
     ]);
-    expect(implement?.outputs).toBeUndefined();
+    expect(step.id).toBe("issue-context");
+    expect(asMapping(implement?.outputs)).toEqual({
+      triage_generation:
+        "${{ steps.issue-context.outputs.triage_generation }}",
+    });
     expect(
       stepIndex(implement, "Checkout roastpilot-cloud (read-only)"),
     ).toBeLessThan(
@@ -1181,8 +1319,59 @@ describe("bounded triage context contract", () => {
     expect(
       asMapping(
         namedStep(publish, "Validate and publish the implement patch").env,
-      ),
-    ).not.toHaveProperty("EXPECTED_TRIAGE_GENERATION");
+      )?.EXPECTED_TRIAGE_GENERATION,
+    ).toBe("${{ needs.implement.outputs.triage_generation }}");
+  });
+
+  it("captures only one exact final generation before the implement agent", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const implement = asMapping(asMapping(workflow.jobs)?.implement);
+    const eligibilityRun = String(
+      namedStep(
+        implement,
+        "Fetch target issue, verify it is ready-to-implement, write context for the agent",
+      ).run,
+    );
+    const issue = (generations: readonly string[]): unknown => ({
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Implement exact generation",
+      body: "Body",
+      state: "OPEN",
+      labels: [{ name: "ready-to-implement" }],
+      comments: generations.map((generation, index) => ({
+        author: { login: "github-actions" },
+        authorAssociation: "NONE",
+        createdAt: `2026-07-24T10:00:0${index}Z`,
+        body:
+          `Verdict\n<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->\n` +
+          TRIAGE_COMMENT_MARKER,
+      })),
+    });
+
+    expect(
+      runImplementEligibility(eligibilityRun, issue(["123.1"])),
+    ).toMatchObject({
+      status: 0,
+      output: "triage_generation=123.1\n",
+    });
+    for (const generations of [
+      [],
+      ["123"],
+      ["hold:123.1"],
+      ["malformed"],
+      ["123.1", "456.1"],
+    ]) {
+      const result = runImplementEligibility(
+        eligibilityRun,
+        issue(generations),
+      );
+      expect(
+        result.status,
+        `generations: ${generations.join(",")}`,
+      ).not.toBe(0);
+      expect(result.output).toBe("");
+    }
   });
 
   it("serializes only privileged issue mutations across both workflows", () => {
