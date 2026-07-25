@@ -178,7 +178,12 @@ migration or a workflow file being deleted and recreated.
 factory in a wrong state:**
 
 1. **Re-enable the workflows, if you disabled them** (§3) — otherwise
-   nothing runs at all regardless of the flag.
+   nothing runs at all regardless of the flag:
+
+   ```bash
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/enable
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/enable
+   ```
 2. **Set `FACTORY_PAUSED` back to `false`.** This is the step that
    actually restarts the factory — re-enabling the workflows alone does
    **not** resume anything, because every job's `if:` condition still
@@ -193,86 +198,122 @@ factory in a wrong state:**
    workflow state going back to normal does not retroactively process
    anything that was dropped while paused/disabled.
 
-**Why backfill is needed at all:** `triage-issues.yml` triggers on
-`issues: [opened]` — GitHub still fires and CONSUMES that event while the
-factory is paused, it just runs the `pause-notice` job instead of
-`seed`/`triage`/`apply`. GitHub does **not** replay a past event once you
-resume: any issue opened during the pause window never gets the
-`needs-triage` seed label, never gets judged, and silently drops out of
-the factory's inbox — it just sits there looking like any other
-unlabelled issue, with no error, no comment, nothing pointing at what
-happened.
+> **Staged generation rollout:** while the 51b-2b generation producer and
+> manual dispatch slices are deployed without the 51b-3 exact-generation
+> consumer, leave the factory paused. The prerequisite publisher fence
+> deliberately rejects every generation during that interval. Resume and
+> backfill only after the exact-generation consumer is deployed.
 
-**The only reliable backfill method is re-running the triage runs that
-fired (and did nothing) during the pause window** — not a manual label.
-`triage-issues.yml` triggers ONLY on `issues: [opened]` (no `labeled`
-trigger, no `workflow_dispatch`) — hand-adding the `needs-triage` label to
-an affected issue does not, and cannot, re-fire triage; the label just
-sits there with nothing left to react to it. Discovery should stay on the
-RUN side too, for the same reason: `.github/ISSUE_TEMPLATE/story.yml`
-applies `needs-triage` at creation time (part of the template itself), so
-a "find issues missing a readiness label" filter would incorrectly
-*exclude* exactly the template-filed issues you need to backfill — the
-run side has no such trap, since every `Triage Issues` run inside the
-exact pause window is, by definition, one that hit `pause-notice` instead
-of the real chain.
+**Why backfill is needed at all:** GitHub consumes `issues: [opened]`
+events while the factory is paused and creates no run while the workflow
+is disabled. It does not replay either missed event after resumption.
+`triage-issues.yml` therefore exposes a manual `workflow_dispatch` with a
+required `issue_number`; this re-runs the current workflow from `main`
+without changing issue lifecycle state or relying on label events.
 
-**This rerun-based backfill only covers the PAUSED window — it does NOT
-cover a DISABLED workflow.** A disabled workflow doesn't fire at all, for
-any trigger — no run is created, so there's nothing to rerun, and (as
-above) there's no `labeled`/`workflow_dispatch` trigger to fall back on
-either. Concretely: any issue opened while `triage-issues.yml` was
-disabled (§3) is **not auto-backfillable today** — it must be triaged
-manually until the workflow is re-enabled and a real event fires for it.
-Note the disable and re-enable timestamps as your window's exact
-boundaries when you check this (`gh api
-repos/syamaner/roastpilot-cloud/actions/workflows --jq '.workflows[] |
-{name, updated_at, state}'`), and handle anything opened between them by
-hand. **#51 tracks the actual fix** — adding a `workflow_dispatch` (or
-`reopened`) trigger to `triage-issues.yml` so both the paused-window and
-disabled-window cases become deterministically re-runnable; that's a
-code change, out of scope for this docs slice.
-
-**Step 1 — find every triage run that fired during the pause window**
-(replace `<PAUSE_START>`/`<PAUSE_END>` with the actual timestamps you
-paused/resumed at — `--created` accepts a GitHub search-style date range,
-verified against `gh run list --help`; `--limit`/`-L` defaults to 20 with
-no separate pagination flag, so pass a higher explicit limit — and for a
-pause window with more triage runs than that, raise `--limit` further
-rather than trust the default):
+**Step 1 — find every issue opened during the pause/disabled window.**
+Replace `<PAUSE_START>`/`<PAUSE_END>` with the exact UTC timestamps.
+Search by creation time, not readiness labels: the story template itself
+adds `needs-triage`, so a missing-label filter would exclude affected
+template-filed issues. `--limit` defaults to 30; raise it above the
+maximum possible issues in the window:
 
 ```bash
-gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml --limit 200 \
-  --created "<PAUSE_START>..<PAUSE_END>" --json databaseId,createdAt,event
+gh issue list --repo syamaner/roastpilot-cloud --state open --limit 200 \
+  --search "created:<PAUSE_START>..<PAUSE_END>" \
+  --json number,title,createdAt,state
 ```
 
-**Step 2 — rerun each one found, WITH THIS CAVEAT: `gh run rerun`
-re-executes the run's ORIGINAL workflow definition (the commit SHA that
-run was originally triggered from), not the current `main`.** If you
-paused *because* you were fixing faulty or unsafe pipeline behavior, do
-**not** use `gh run rerun` to backfill — it would re-run the old,
-still-broken code. In that case: merge the fix first, then re-trigger the
-affected issues through #51's mechanism once it exists (today, that means
-handling them manually, the same as the disabled-window gap above).
-
-When the pause was *not* about a workflow-code problem (e.g. a
-config/pace pause, or halting to look at unrelated infrastructure), `gh
-run rerun` with no flags reruns the ENTIRE run (verified against `gh run
-rerun --help`: `--failed` is a separate, opt-in flag for "only failed
-jobs" — the default reruns every job), and every job's `if:` condition is
-re-evaluated fresh against the CURRENT `vars.FACTORY_PAUSED` value at
-rerun time. Since you've already flipped the flag back to `false` (step 2
-of resuming, above) before backfilling, this correctly re-fires the real
-`seed` → `triage` → `apply` chain against the issue's still-current
-state:
+**Step 2 — dispatch and watch the current `main` workflow once per issue.**
+This fetches the issue's current title/body plus bounded,
+provenance-filtered clarifications and re-runs the full
+`seed` → `triage` → `apply` chain. Keep `--ref main` explicit: the
+workflow intentionally runs no job for a dispatch from another ref. Run
+issues serially so each result is attributable and a broken backfill does
+not fan out:
 
 ```bash
-gh run rerun <run-id> -R syamaner/roastpilot-cloud
+ISSUE_NUMBER=<ISSUE_NUMBER>
+DISPATCH_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run triage-issues.yml \
+  --repo syamaner/roastpilot-cloud \
+  --ref main \
+  -f issue_number="$ISSUE_NUMBER"
+
+run_id=""
+for _ in {1..12}; do
+  run_id=$(gh run list --repo syamaner/roastpilot-cloud \
+    --workflow triage-issues.yml --event workflow_dispatch --branch main \
+    --limit 100 --json databaseId,displayTitle,createdAt \
+    --jq "map(select(.displayTitle == \"Triage issue #$ISSUE_NUMBER\" and .createdAt >= \"$DISPATCH_STARTED\")) | sort_by(.createdAt) | last | .databaseId // empty")
+  [ -n "$run_id" ] && break
+  sleep 5
+done
+test -n "$run_id"
+gh run watch "$run_id" --repo syamaner/roastpilot-cloud --exit-status
 ```
 
-Do this for every run Step 1 found — there's no shortcut for a large
-backlog beyond scripting the loop yourself; don't leave a paused-window
-issue silently un-triaged.
+Do this for every open issue from Step 1. Closed issues are deliberately
+excluded and the workflow rejects them again before any write. Do not
+substitute a `reopened` or manual readiness-label change: neither is the
+backfill contract, and a label write intentionally does not trigger triage.
+
+**Step 3 — verify the issue state before counting that issue as
+backfilled.** A green workflow run is necessary but not the state contract.
+Require exactly one readiness label and exactly one bot-owned terminal
+triage comment with this run's dotted `<run_id>.<run_attempt>` generation;
+a `hold:` generation or duplicate bot comments is a failed backfill:
+
+```bash
+issue=$(gh api "repos/syamaner/roastpilot-cloud/issues/$ISSUE_NUMBER")
+comments=$(gh api --paginate \
+  "repos/syamaner/roastpilot-cloud/issues/$ISSUE_NUMBER/comments?per_page=100" \
+  --slurp)
+jq -e '
+  [.labels[].name
+   | select(IN(
+       "needs-triage", "ready-to-spec", "needs-info",
+       "ready-to-implement", "wait-to-implement", "wontfix"
+     ))]
+  | length == 1
+' <<< "$issue"
+jq -e --arg generation "$run_id.1" '
+  [
+    .[][]
+    | select(
+        .user.type == "Bot"
+        and .user.login == "github-actions[bot]"
+        and (
+          .body == "<!-- roastpilot-factory:triage-verdict:do-not-edit -->"
+          or (
+            .body
+            | endswith(
+                "\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->"
+              )
+          )
+        )
+      )
+  ] as $owned
+  | ($owned | length) == 1
+    and (
+      $owned[0].body
+      | endswith(
+          "<!-- roastpilot-factory:triage-generation:"
+          + $generation
+          + ":do-not-edit -->\n"
+          + "<!-- roastpilot-factory:triage-verdict:do-not-edit -->"
+        )
+    )
+' <<< "$comments"
+```
+
+If the run or either assertion fails, investigate it and start a fresh
+`workflow_dispatch` from Step 2 after the fault is corrected. Do not rerun
+the old backfill run: a partial rerun can preserve the seed's original
+generation while increasing the workflow attempt, and it no longer proves
+that the repaired workflow came from current `main`. Every accepted
+backfill therefore has a fresh run ID and the `.1` generation shown above.
+Do not dispatch the next issue until the current one passes both assertions.
 
 ## Cost/budget caps — N/A by billing model (D102)
 

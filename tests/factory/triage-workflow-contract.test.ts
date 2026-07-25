@@ -248,35 +248,129 @@ function writeCalls(calls: readonly string[]): readonly string[] {
   );
 }
 
+function runTargetValidation(
+  run: string,
+  issueNumber: string,
+): {
+  readonly status: number | null;
+  readonly output: string;
+} {
+  const workdir = mkdtempSync(join(tmpdir(), "triage-target-validation-"));
+  const outputPath = join(workdir, "output");
+  try {
+    writeFileSync(outputPath, "");
+    const result = spawnSync("bash", ["-c", run], {
+      cwd: workdir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: outputPath,
+        ISSUE_NUMBER: issueNumber,
+      },
+    });
+    return {
+      status: result.status,
+      output: readFileSync(outputPath, "utf8"),
+    };
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+function extractRunbookJqPrograms(backfill: string): readonly string[] {
+  return [
+    ...backfill.matchAll(
+      /jq -e(?: --arg generation "\$run_id\.1")? '([\s\S]*?)'\s+<<< "\$(?:issue|comments)"/g,
+    ),
+  ].map((match) => match[1] ?? "");
+}
+
+function runJqProgram(
+  program: string,
+  input: unknown,
+  args: readonly string[] = [],
+): number | null {
+  return spawnSync("jq", ["-e", ...args, program], {
+    encoding: "utf8",
+    input: JSON.stringify(input),
+  }).status;
+}
+
 describe("bounded triage context contract", () => {
-  it("retains the opened-only trigger while establishing the two-phase hold", () => {
+  it("keeps opened issues and adds only a required issue-number dispatch", () => {
     const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const on = asMapping(workflow.on);
+    const dispatch = asMapping(on?.workflow_dispatch);
+    const inputs = asMapping(dispatch?.inputs);
+    const issueNumber = asMapping(inputs?.issue_number);
+
+    expect(asMapping(on?.issues)?.types).toEqual(["opened"]);
+    expect(workflow["run-name"]).toBe(
+      "Triage issue #${{ github.event.issue.number || inputs.issue_number }}",
+    );
+    expect(Object.keys(on ?? {}).sort()).toEqual([
+      "issues",
+      "workflow_dispatch",
+    ]);
+    expect(Object.keys(inputs ?? {})).toEqual(["issue_number"]);
+    expect(issueNumber).toEqual({
+      description: "The issue number to triage or re-triage",
+      required: true,
+      type: "string",
+    });
+  });
+
+  it("normalizes one trusted target and establishes the two-phase hold", () => {
+    const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const jobs = asMapping(workflow.jobs);
     const seed = asMapping(jobs?.seed);
     const triage = asMapping(jobs?.triage);
     const apply = asMapping(jobs?.apply);
+    const targetExpression =
+      "${{ github.event.issue.number || inputs.issue_number }}";
 
-    expect(asMapping(on?.issues)?.types).toEqual(["opened"]);
-    expect(on).not.toHaveProperty("workflow_dispatch");
-    expect(workflow).not.toHaveProperty("run-name");
-    expect(workflow.concurrency).toEqual({
-      group: "triage-issue-${{ github.event.issue.number }}",
-      "cancel-in-progress": false,
-    });
+    expect(asMapping(workflow.env)?.TARGET_ISSUE_NUMBER).toBe(
+      targetExpression,
+    );
+    expect(workflow.concurrency).toBeUndefined();
     expect(asMapping(seed?.outputs)).toEqual({
+      target_issue_number:
+        "${{ steps.validate-target.outputs.issue_number }}",
       triage_comment_id: "${{ steps.establish-hold.outputs.comment_id }}",
       triage_execution:
         "${{ steps.establish-hold.outputs.triage_execution }}",
     });
     expect(asMapping(seed?.permissions)).toEqual({ issues: "write" });
 
+    const validation = namedStep(seed, "Validate target issue number");
+    expect(asMapping(validation.env)?.ISSUE_NUMBER).toBe(
+      "${{ env.TARGET_ISSUE_NUMBER }}",
+    );
+    expectOrdered(String(validation.run), [
+      'if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then',
+      "exit 1",
+      'echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"',
+    ]);
+    expect(stepIndex(seed, "Validate target issue number")).toBeLessThan(
+      stepIndex(seed, "Establish needs-triage seed or re-triage hold"),
+    );
+    expect(runTargetValidation(String(validation.run), "42")).toEqual({
+      status: 0,
+      output: "issue_number=42\n",
+    });
+    for (const invalid of ["0", "01", " 42", "+42", "-1", "issue"]) {
+      expect(
+        runTargetValidation(String(validation.run), invalid),
+        `invalid issue number: ${JSON.stringify(invalid)}`,
+      ).toEqual({ status: 1, output: "" });
+    }
+
     const hold = namedStep(
       seed,
       "Establish needs-triage seed or re-triage hold",
     );
     expect(asMapping(hold.env)).toMatchObject({
-      ISSUE_NUMBER: "${{ github.event.issue.number }}",
+      ISSUE_NUMBER: "${{ steps.validate-target.outputs.issue_number }}",
       TRIAGE_EXECUTION:
         "${{ format('{0}.{1}', github.run_id, github.run_attempt) }}",
     });
@@ -364,13 +458,26 @@ describe("bounded triage context contract", () => {
     expect(extractTriageGeneration(heldPriorVerdict)).toBe("hold:123.1");
 
     expect(triage?.needs).toBe("seed");
+    const context = namedStep(
+      triage,
+      "Write issue context for the triage skill",
+    );
+    expect(asMapping(context.env)?.ISSUE_NUMBER).toBe(
+      "${{ needs.seed.outputs.target_issue_number }}",
+    );
+    expect(
+      String(asMapping(namedStep(triage, "Run the triage skill").with)?.prompt),
+    ).toContain(
+      "issue #${{ needs.seed.outputs.target_issue_number }}",
+    );
     expect(apply?.needs).toEqual(["seed", "triage"]);
     expect(
       asMapping(
         namedStep(apply, "Validate and apply the triage verdict").env,
       ),
     ).toMatchObject({
-      TRUSTED_ISSUE_NUMBER: "${{ github.event.issue.number }}",
+      TRUSTED_ISSUE_NUMBER:
+        "${{ needs.seed.outputs.target_issue_number }}",
       TRUSTED_TRIAGE_COMMENT_ID:
         "${{ needs.seed.outputs.triage_comment_id }}",
       TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
@@ -452,11 +559,17 @@ describe("bounded triage context contract", () => {
     ).toBe(false);
   });
 
-  it("performs no mutation before issue-kind and open checks", () => {
+  it("performs no mutation before integer, issue-kind, and open checks", () => {
     const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const seed = asMapping(asMapping(workflow.jobs)?.seed);
+    const validationRun = String(
+      namedStep(seed, "Validate target issue number").run,
+    );
     const holdRun = String(
       namedStep(seed, "Establish needs-triage seed or re-triage hold").run,
+    );
+    expect(validationRun.slice(0, validationRun.indexOf("exit 1"))).not.toMatch(
+      /gh api|--method (?:POST|PATCH|PUT|DELETE)/,
     );
     for (const issue of [
       { state: "open", pull_request: { url: "https://example.invalid/pr" } },
@@ -799,7 +912,7 @@ describe("bounded triage context contract", () => {
     expect(environment).toMatchObject({
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
       REPO: "${{ github.repository }}",
-      ISSUE_NUMBER: "${{ github.event.issue.number }}",
+      ISSUE_NUMBER: "${{ needs.seed.outputs.target_issue_number }}",
     });
     expectOrdered(run, [
       'gh issue view "$ISSUE_NUMBER" --repo "$REPO"',
@@ -817,7 +930,7 @@ describe("bounded triage context contract", () => {
     ).toBeLessThan(stepIndex(triage, "Run the triage skill"));
     expect(namedStep(triage, "Run the triage skill").with).toMatchObject({
       prompt: expect.stringContaining(
-        "evaluate issue #${{ github.event.issue.number }}",
+        "evaluate issue #${{ needs.seed.outputs.target_issue_number }}",
       ),
     });
 
@@ -1078,42 +1191,143 @@ describe("bounded triage context contract", () => {
     const seed = asMapping(triageJobs?.seed);
     const triage = asMapping(triageJobs?.triage);
     const apply = asMapping(triageJobs?.apply);
-    const sharedGroup =
-      "factory-issue-privileged-${{ github.event.issue.number }}";
+    const seedConcurrency = asMapping(seed?.concurrency);
+    const seedGroup = String(seedConcurrency?.group);
 
-    expect(triageWorkflow.concurrency).toEqual({
-      group: "triage-issue-${{ github.event.issue.number }}",
-      "cancel-in-progress": false,
-    });
-    expect(asMapping(seed?.concurrency)).toEqual({
-      group: sharedGroup,
-      queue: "max",
-    });
+    expect(triageWorkflow.concurrency).toBeUndefined();
+    expect(seedGroup).toContain(
+      "format('factory-issue-privileged-{0}', github.event.issue.number || inputs.issue_number)",
+    );
+    expect(seedGroup).toContain(
+      "format('triage-rejected-{0}', github.run_id)",
+    );
+    expect(seedConcurrency?.queue).toBe("max");
     expect(triage?.concurrency).toBeUndefined();
     expect(asMapping(apply?.concurrency)).toEqual({
-      group: sharedGroup,
+      group:
+        "factory-issue-privileged-${{ needs.seed.outputs.target_issue_number }}",
       queue: "max",
     });
   });
 
-  it("preserves pause handling without activating manual dispatch", () => {
+  it("preserves pause handling and makes every dispatch job main-only", () => {
     const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const jobs = asMapping(workflow.jobs);
+    const mainOnly =
+      "(github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')";
 
     expect(asMapping(jobs?.["pause-notice"])?.if).toBe(
-      "vars.FACTORY_PAUSED == 'true'",
+      `${mainOnly} && vars.FACTORY_PAUSED == 'true'`,
     );
     expect(asMapping(jobs?.seed)?.if).toBe(
-      "vars.FACTORY_PAUSED != 'true'",
+      `${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
     );
     expect(asMapping(jobs?.triage)?.if).toBe(
-      "vars.FACTORY_PAUSED != 'true'",
+      `${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
     );
     expect(asMapping(jobs?.apply)?.if).toBe(
-      "always() && needs.seed.result == 'success' && vars.FACTORY_PAUSED != 'true'",
+      `always() && needs.seed.result == 'success' && ${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
     );
+  });
+
+  it("documents current-main dispatch instead of stale-run reruns", () => {
     const runbook = readFileSync(RUNBOOK_PATH, "utf8");
-    expect(runbook).not.toContain("gh workflow run triage-issues.yml");
+    const backfillStart = runbook.indexOf(
+      "## Resuming after a pause — clear the flag, then don't skip the backfill",
+    );
+    expect(backfillStart).toBeGreaterThanOrEqual(0);
+    const backfill = runbook.slice(backfillStart);
+
+    expect(backfill).toContain("gh workflow run triage-issues.yml");
+    expect(backfill).toContain("actions/workflows/315461463/enable");
+    expect(backfill).toContain("actions/workflows/315533067/enable");
+    expect(backfill).toContain(
+      "gh issue list --repo syamaner/roastpilot-cloud --state open --limit 200",
+    );
+    expect(backfill).toContain(
+      '--search "created:<PAUSE_START>..<PAUSE_END>"',
+    );
+    expect(backfill).toContain("--ref main");
+    expect(backfill).toContain('-f issue_number="$ISSUE_NUMBER"');
+    expect(backfill).toContain("gh run watch");
+    expect(backfill).toContain("--exit-status");
+    expect(backfill).toContain("databaseId,displayTitle,createdAt");
+    expect(backfill).toContain("exact-generation consumer is deployed");
+    expect(backfill).toContain(
+      "start a fresh\n`workflow_dispatch` from Step 2",
+    );
+    expect(backfill).toContain('.user.login == "github-actions[bot]"');
+    expect(backfill).toContain("length == 1");
+    expect(backfill).toContain(
+      "<!-- roastpilot-factory:triage-generation:",
+    );
+    expect(backfill).toContain("] as $owned");
+    expect(backfill).toContain("($owned | length) == 1");
+    expect(backfill).not.toContain("gh run rerun");
+    expect(backfill).not.toContain("--json attempt");
+    expect(backfill).not.toContain("--state all");
+  });
+
+  it("documents fail-closed backfill state verification", () => {
+    const runbook = readFileSync(RUNBOOK_PATH, "utf8");
+    const backfill = runbook.slice(
+      runbook.indexOf(
+        "## Resuming after a pause — clear the flag, then don't skip the backfill",
+      ),
+    );
+    const [readinessProgram, commentProgram] =
+      extractRunbookJqPrograms(backfill);
+    expect(readinessProgram).toBeTruthy();
+    expect(commentProgram).toBeTruthy();
+
+    const issueWithLabels = (labels: readonly string[]): unknown => ({
+      labels: labels.map((name) => ({ name })),
+    });
+    expect(
+      runJqProgram(readinessProgram ?? "", issueWithLabels(["needs-triage"])),
+    ).toBe(0);
+    for (const labels of [
+      [],
+      ["bug"],
+      ["needs-triage", "ready-to-implement"],
+    ]) {
+      expect(
+        runJqProgram(readinessProgram ?? "", issueWithLabels(labels)),
+        `readiness labels: ${labels.join(",")}`,
+      ).not.toBe(0);
+    }
+
+    const verdictMarker =
+      "<!-- roastpilot-factory:triage-verdict:do-not-edit -->";
+    const terminalBody = (generation: string): string =>
+      [
+        "triage verdict",
+        `<!-- roastpilot-factory:triage-generation:${generation}:do-not-edit -->`,
+        verdictMarker,
+      ].join("\n");
+    const ownedComment = (
+      generation: string,
+      login = "github-actions[bot]",
+    ): unknown => ({
+      body: terminalBody(generation),
+      user: { login, type: "Bot" },
+    });
+    const verifyComments = (comments: readonly unknown[]): number | null =>
+      runJqProgram(commentProgram ?? "", [comments], [
+        "--arg",
+        "generation",
+        "123.1",
+      ]);
+
+    expect(verifyComments([ownedComment("123.1")])).toBe(0);
+    for (const comments of [
+      [ownedComment("hold:123.1")],
+      [ownedComment("123.2")],
+      [ownedComment("123.1"), ownedComment("123.1")],
+      [ownedComment("123.1", "not-github-actions[bot]")],
+    ]) {
+      expect(verifyComments(comments)).not.toBe(0);
+    }
   });
 
   it("denies triage-sanitizer edits in the implementing agent", () => {
