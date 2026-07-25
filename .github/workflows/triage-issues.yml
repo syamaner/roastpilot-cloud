@@ -1,4 +1,5 @@
 name: Triage Issues
+run-name: "Triage issue #${{ github.event.issue.number || inputs.issue_number }}"
 
 # factory.md §3/§6: seed (dumb, always leaves a known inbox state) -> triage
 # (read-only agent, judges readiness) -> apply (privileged, deterministic,
@@ -8,10 +9,15 @@ name: Triage Issues
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "The issue number to triage or re-triage"
+        required: true
+        type: string
 
-concurrency:
-  group: triage-issue-${{ github.event.issue.number }}
-  cancel-in-progress: false
+env:
+  TARGET_ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
 
 # Default-deny; every job declares exactly the scopes it needs.
 permissions: {}
@@ -27,7 +33,7 @@ jobs:
   # "why nothing happened" instead of five silent "skipped" rows. ---
   pause-notice:
     name: Factory pause notice
-    if: vars.FACTORY_PAUSED == 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED == 'true'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -50,23 +56,39 @@ jobs:
     # this `if:` is the actual enforcement (a GitHub Actions job-level
     # condition, evaluated before any step runs, so the agent never even
     # starts — see `pause-notice` above for the paired observability half).
-    if: vars.FACTORY_PAUSED != 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     concurrency:
-      group: factory-issue-privileged-${{ github.event.issue.number }}
+      group: >-
+        ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+            && format('triage-rejected-{0}', github.run_id)
+            || format('factory-issue-privileged-{0}', github.event.issue.number || inputs.issue_number) }}
       queue: max
     permissions:
       issues: write
     outputs:
+      target_issue_number: ${{ steps.validate-target.outputs.issue_number }}
       triage_comment_id: ${{ steps.establish-hold.outputs.comment_id }}
       triage_execution: ${{ steps.establish-hold.outputs.triage_execution }}
     steps:
+      - name: Validate target issue number
+        id: validate-target
+        env:
+          ISSUE_NUMBER: ${{ env.TARGET_ISSUE_NUMBER }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::issue_number must be a positive decimal integer"
+            exit 1
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
       - name: Establish needs-triage seed or re-triage hold
         id: establish-hold
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ steps.validate-target.outputs.issue_number }}
           TRIAGE_EXECUTION: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}
         run: |
           set -euo pipefail
@@ -198,7 +220,7 @@ jobs:
   triage:
     name: Triage (read-only)
     needs: seed
-    if: vars.FACTORY_PAUSED != 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -260,11 +282,12 @@ jobs:
         #
         # The tracked jq program writes untrusted issue text as encoded data
         # rather than interpolating it into shell source, and removes comments
-        # without trusted provenance before the agent can see them.
+        # without trusted provenance before the agent can see them. Both event
+        # paths use the seed job's validated target.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ needs.seed.outputs.target_issue_number }}
         run: |
           set -euo pipefail
           mkdir -p issue-context
@@ -376,7 +399,7 @@ jobs:
           claude_args: '--allowedTools "Edit(triage-output/verdict.json)" --disallowedTools "Bash,Read(.git/**),Grep(.git/**)"'
           prompt: |
             Use the triage skill at .claude/skills/triage/SKILL.md to
-            evaluate issue #${{ github.event.issue.number }} in
+            evaluate issue #${{ needs.seed.outputs.target_issue_number }} in
             ${{ github.repository }}. Follow that file exactly, including
             its "what you must never do" section — you hold no writable
             GitHub token in this job, no Bash access, and no access to
@@ -414,10 +437,10 @@ jobs:
     # always() so a triage failure still reaches the fallback path (needs
     # -triage reset + explanatory comment); still gated on the pause flag,
     # since always() alone would otherwise ignore it.
-    if: always() && needs.seed.result == 'success' && vars.FACTORY_PAUSED != 'true'
+    if: always() && needs.seed.result == 'success' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     concurrency:
-      group: factory-issue-privileged-${{ github.event.issue.number }}
+      group: factory-issue-privileged-${{ needs.seed.outputs.target_issue_number }}
       queue: max
     permissions:
       contents: read
@@ -450,11 +473,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          # Trusted issue number, from the workflow's own event context —
-          # never from the verdict artifact itself.
+          # Trusted issue number, from normalized workflow event/input
+          # context — never from the verdict artifact itself.
           # apply-triage-verdict.mts rejects any verdict whose self-reported
           # issue_number disagrees.
-          TRUSTED_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          TRUSTED_ISSUE_NUMBER: ${{ needs.seed.outputs.target_issue_number }}
           TRUSTED_TRIAGE_COMMENT_ID: ${{ needs.seed.outputs.triage_comment_id }}
           # The `triage` step uploads its artifact with `if: always()`, so a
           # schema-valid verdict can exist even from a run that did NOT

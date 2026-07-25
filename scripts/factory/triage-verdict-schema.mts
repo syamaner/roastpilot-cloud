@@ -77,15 +77,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Validates a raw (untrusted, possibly prompt-injected) triage verdict
  * against the JSON contract described above.
  *
- * The `trustedIssueNumber` must come from the GitHub Actions event context
- * (`github.event.issue.number`), never from anywhere the agent could
- * influence. A verdict whose self-reported `issue_number` disagrees is
- * rejected outright — the agent's output must not be able to redirect a
- * label/comment write to a different issue.
+ * The `trustedIssueNumber` must come from the seed job's validated target:
+ * either the opened-issue event number or the required manual-dispatch input,
+ * never from anywhere the agent or verdict could influence. A verdict whose
+ * self-reported `issue_number` disagrees is rejected outright — the agent's
+ * output must not be able to redirect a label/comment write to a different
+ * issue.
  *
  * @param raw - The parsed JSON value read from the triage artifact.
- * @param trustedIssueNumber - The issue number from the trusted workflow
- *   event context.
+ * @param trustedIssueNumber - The seed-validated event or dispatch target.
  * @returns A discriminated result: `{ ok: true, verdict }` with a verdict
  *   safe to act on, or `{ ok: false, errors }` listing every violation
  *   found (validation does not stop at the first error, so the fallback
