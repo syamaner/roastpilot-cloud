@@ -14,7 +14,7 @@ const DATA_FORMATS = new Set(["coverage", "diff", "json", "patch", "review-verdi
 export const MAX_BOUNDARY_ARTIFACT_BYTES = 8_000_000;
 
 /**
- * Evidence that identifies the executable bytes used by one policy step.
+ * Evidence identifying executable bytes, including a pre-execution revision match.
  */
 export type ExecutionSourceEvidence =
   | {
@@ -29,6 +29,7 @@ export type ExecutionSourceEvidence =
       readonly expectedSha: string;
       readonly observedSha: string;
       readonly restoredObservedShas: readonly string[];
+      readonly bytesMatchRevisionAtExecution: boolean;
     }
   | {
       readonly kind: "trusted-main-snowflake";
@@ -37,6 +38,7 @@ export type ExecutionSourceEvidence =
       readonly expectedSha: string;
       readonly observedSha: string;
       readonly restoredObservedShas: readonly string[];
+      readonly bytesMatchRevisionAtExecution: boolean;
       readonly eventRef: string;
       readonly environmentApproved: boolean;
     }
@@ -57,7 +59,7 @@ export interface ExecutionPolicyStep {
 }
 
 /**
- * Evidence that an artifact is data rather than an executable/config channel.
+ * Evidence that an artifact excludes sensitive data and executable/config channels.
  */
 export interface BoundedDataContractEvidence {
   readonly kind: "bounded";
@@ -78,6 +80,7 @@ export interface BoundedDataContractEvidence {
   readonly rejectHooks: boolean;
   readonly rejectModules: boolean;
   readonly rejectExecutables: boolean;
+  readonly rejectSensitiveData: boolean;
 }
 
 /**
@@ -192,19 +195,20 @@ function assessSource(source: ExecutionSourceEvidence): SourceAssessment {
       source.expectedSha,
       source.observedSha,
       source.restoredObservedShas,
-    )
+    ) ||
+    source.bytesMatchRevisionAtExecution !== true
   ) {
     return invalidSource("checkout or restored source does not match the expected SHA");
   }
   if (source.kind === "protected-glue") {
-    return source.pathProtected
+    return source.pathProtected === true
       ? { valid: true, trusted: true }
       : invalidSource("protected-glue source lacks protected-path evidence");
   }
   if (
     !source.path.startsWith("snowflake/") ||
     source.eventRef !== "refs/heads/main" ||
-    !source.environmentApproved
+    source.environmentApproved !== true
   ) {
     return invalidSource(
       "Snowflake source requires snowflake/** on approved refs/heads/main",
@@ -245,6 +249,7 @@ function contractFailure(
     contract.rejectHooks,
     contract.rejectModules,
     contract.rejectExecutables,
+    contract.rejectSensitiveData,
   ];
   return requiredRejections.every((value) => value === true)
     ? undefined
@@ -267,7 +272,7 @@ export function analyzeExecutionPolicy(
   evidence: ExecutionPolicyEvidence,
 ): readonly ExecutionPolicyViolation[] {
   const violations: ExecutionPolicyViolation[] = [];
-  if (!evidence.graphComplete) {
+  if (evidence.graphComplete !== true) {
     violations.push({
       kind: "invalid-evidence",
       subject: "<execution-graph>",
@@ -283,6 +288,7 @@ export function analyzeExecutionPolicy(
       step.id.trim() !== step.id ||
       step.runnerId.length === 0 ||
       step.runnerId.trim() !== step.runnerId ||
+      typeof step.credentialReachable !== "boolean" ||
       stepById.has(step.id)
     ) {
       violations.push({

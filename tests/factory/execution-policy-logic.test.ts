@@ -32,6 +32,7 @@ function protectedGlue(
     expectedSha: SHA_A,
     observedSha: SHA_A,
     restoredObservedShas: [],
+    bytesMatchRevisionAtExecution: true,
     ...overrides,
   };
 }
@@ -46,6 +47,7 @@ function snowflakeSource(
     expectedSha: SHA_A,
     observedSha: SHA_A,
     restoredObservedShas: [],
+    bytesMatchRevisionAtExecution: true,
     eventRef: "refs/heads/main",
     environmentApproved: true,
     ...overrides,
@@ -68,6 +70,7 @@ function boundedContract(
     rejectHooks: true,
     rejectModules: true,
     rejectExecutables: true,
+    rejectSensitiveData: true,
     ...overrides,
   };
 }
@@ -146,6 +149,22 @@ describe("analyzeExecutionPolicy source provenance (issue #120 slice 120b)", () 
       "mismatched restored SHA",
       protectedGlue({ restoredObservedShas: [SHA_A, SHA_B] }),
     ],
+    [
+      "source bytes not verified immediately before execution",
+      protectedGlue({ bytesMatchRevisionAtExecution: false }),
+    ],
+    [
+      "non-boolean protected-path evidence",
+      protectedGlue({
+        pathProtected: "false" as unknown as boolean,
+      }),
+    ],
+    [
+      "non-boolean byte-match evidence",
+      protectedGlue({
+        bytesMatchRevisionAtExecution: "true" as unknown as boolean,
+      }),
+    ],
   ])("rejects protected glue with %s", (_name, source) => {
     expect(
       analyze([step("publish", "runner-publish", true, source)]),
@@ -209,6 +228,16 @@ describe("analyzeExecutionPolicy source provenance (issue #120 slice 120b)", () 
     [
       "restored source mismatch",
       snowflakeSource({ restoredObservedShas: [SHA_B] }),
+    ],
+    [
+      "source bytes not verified immediately before execution",
+      snowflakeSource({ bytesMatchRevisionAtExecution: false }),
+    ],
+    [
+      "non-boolean environment approval",
+      snowflakeSource({
+        environmentApproved: "false" as unknown as boolean,
+      }),
     ],
   ])("rejects Snowflake trust with %s", (_name, source) => {
     expect(
@@ -515,6 +544,34 @@ describe("analyzeExecutionPolicy data crossings (issue #120 slice 120b)", () => 
     ]);
   });
 
+  it("requires sensitive-data exclusion when credentials precede mutable execution", () => {
+    const steps = [
+      step(
+        "producer",
+        "runner-credential",
+        true,
+        protectedGlue(),
+      ),
+      step("consumer", "runner-data", false, {
+        kind: "mutable-repository",
+        path: "src/render-result.mts",
+      }),
+    ];
+    expect(
+      analyze(steps, [
+        crossing(boundedContract({ rejectSensitiveData: false })),
+      ]),
+    ).toEqual([
+      {
+        kind: "unbounded-data-crossing",
+        subject: "verdict",
+        detail:
+          "crossing contract accepts an executable or unbounded data channel",
+      },
+    ]);
+    expect(analyze(steps, [crossing(boundedContract())])).toEqual([]);
+  });
+
   it("allows unbounded data between runners when neither can reach credentials", () => {
     expect(
       analyze(
@@ -608,6 +665,7 @@ describe("analyzeExecutionPolicy data crossings (issue #120 slice 120b)", () => 
     "rejectHooks",
     "rejectModules",
     "rejectExecutables",
+    "rejectSensitiveData",
   ] as const)("requires contract control %s", (control) => {
     expect(
       analyze(
@@ -759,6 +817,32 @@ describe("analyzeExecutionPolicy graph integrity (issue #120 slice 120b)", () =>
         subject: "<execution-graph>",
         detail: "execution graph completeness has not been proven",
       },
+    ]);
+  });
+
+  it("rejects runtime values that merely look like security booleans", () => {
+    expect(
+      analyzeExecutionPolicy({
+        graphComplete: "false" as unknown as boolean,
+        steps: [
+          step(
+            "credential",
+            "runner",
+            "false" as unknown as boolean,
+            protectedGlue(),
+          ),
+        ],
+        crossings: [],
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "invalid-evidence",
+        subject: "<execution-graph>",
+      }),
+      expect.objectContaining({
+        kind: "invalid-evidence",
+        subject: "credential",
+      }),
     ]);
   });
 });
