@@ -346,7 +346,10 @@ export const FACTORY_TEST_LINE_LIMIT = 600;
 
 /** One path row from git's authoritative `--numstat -z` scratch-index diff. */
 export interface FactoryPatchLineStat {
+  /** Destination path, or the only path for a non-rename row. */
   readonly path: string;
+  /** Source path when git reports a rename/copy row. */
+  readonly sourcePath?: string;
   readonly additions: number | null;
   readonly deletions: number | null;
 }
@@ -363,34 +366,34 @@ const FACTORY_FIXTURE_FILE_EXTENSION =
  * logic for the publisher envelope; only files under configured test roots
  * receive the separate test-line allowance.
  *
- * @param normalizedPath - Repo-relative path after normalization.
+ * @param repoRelativePath - Exact repo-relative path reported by git.
  * @returns Whether the path is inside an executed test-source root.
  */
-export function isFactoryTestSourcePath(normalizedPath: string): boolean {
+export function isFactoryTestSourcePath(repoRelativePath: string): boolean {
   return TEST_PATH_PREFIXES.some((prefix) =>
-    normalizedPath.startsWith(prefix),
+    repoRelativePath.startsWith(prefix),
   );
 }
 
 /**
- * Reports whether a path is known non-executable documentation or fixture data.
+ * Reports whether a path is known non-executable fixture data.
  *
  * This classifier is an allowlist of this repo's inert roots and file shapes.
+ * No documentation root is currently allowlisted: both existing docs files
+ * (`docs/state/registry.md` and `docs/factory-runbook.md`) are operational.
  * Unknown files count as logic; migrations, lockfiles, configuration,
- * operational Markdown, executable source extensions, and paths that merely
- * contain names such as `data` or `generated` never become exempt.
+ * Markdown, executable source extensions, and paths that merely contain names
+ * such as `data` or `generated` never become exempt.
  *
- * @param normalizedPath - Repo-relative path after normalization.
+ * @param repoRelativePath - Exact repo-relative path reported by git.
  * @returns Whether the publisher may treat the path as data-only.
  */
-export function isFactoryDataOnlyPath(normalizedPath: string): boolean {
-  const isDocumentation =
-    normalizedPath.startsWith("docs/") && /\.mdx?$/i.test(normalizedPath);
-  const isFixture =
-    normalizedPath.startsWith("snowflake/fixtures/") &&
-    (FACTORY_FIXTURE_FILE_EXTENSION.test(normalizedPath) ||
-      normalizedPath === "snowflake/fixtures/.gitkeep");
-  return isDocumentation || isFixture;
+export function isFactoryDataOnlyPath(repoRelativePath: string): boolean {
+  return (
+    repoRelativePath.startsWith("snowflake/fixtures/") &&
+    (FACTORY_FIXTURE_FILE_EXTENSION.test(repoRelativePath) ||
+      repoRelativePath === "snowflake/fixtures/.gitkeep")
+  );
 }
 
 /**
@@ -414,9 +417,15 @@ export function findFactoryPatchEnvelopeViolations(
   let hasNonData = false;
 
   for (const stat of stats) {
-    const path = normalizePatchPath(stat.path);
+    // `parseNumstatZ` receives NUL-delimited repo-relative paths directly from
+    // git. They are already authoritative and unquoted: trimming or stripping
+    // an apparent `a/`/`b/` prefix here would change valid tracked path bytes.
+    const paths =
+      stat.sourcePath === undefined
+        ? [stat.path]
+        : [stat.sourcePath, stat.path];
     if (stat.additions === null || stat.deletions === null) {
-      binaryPaths.push(path);
+      binaryPaths.push(...paths);
       continue;
     }
     if (
@@ -425,18 +434,28 @@ export function findFactoryPatchEnvelopeViolations(
       stat.additions < 0 ||
       stat.deletions < 0
     ) {
-      violations.push(`invalid changed-line counts for ${path}`);
+      violations.push(`invalid changed-line counts for ${paths.join(" -> ")}`);
       continue;
     }
     const changedLines = stat.additions + stat.deletions;
-    if (isFactoryTestSourcePath(path)) {
-      hasNonData = true;
-      testLines += changedLines;
-    } else if (isFactoryDataOnlyPath(path)) {
-      hasData = true;
-    } else {
-      hasNonData = true;
+    const pathCategories = paths.map((path) =>
+      isFactoryTestSourcePath(path)
+        ? "test"
+        : isFactoryDataOnlyPath(path)
+          ? "data"
+          : "logic",
+    );
+    hasData ||= pathCategories.includes("data");
+    hasNonData ||= pathCategories.some((category) => category !== "data");
+    const strongestCategory = pathCategories.includes("logic")
+      ? "logic"
+      : pathCategories.includes("test")
+        ? "test"
+        : "data";
+    if (strongestCategory === "logic") {
       logicLines += changedLines;
+    } else if (strongestCategory === "test") {
+      testLines += changedLines;
     }
   }
 
@@ -1114,12 +1133,13 @@ export function parseNameStatusZ(nameStatusZOutput: string): string[] {
 }
 
 /**
- * Parses `git diff --cached --numstat -z --no-renames HEAD` output.
+ * Parses rename-aware `git diff --cached --numstat -z HEAD` output.
  *
  * The first two TABs delimit additions and deletions; the remaining bytes are
- * the unquoted path and may themselves contain TABs. Binary rows use `-` for
- * both counts. Malformed output throws so the privileged publisher fails
- * closed rather than guessing.
+ * the unquoted path and may themselves contain TABs. For rename/copy rows git
+ * leaves that path empty and emits the source and destination as the next two
+ * NUL records. Binary rows use `-` for both counts. Malformed output throws so
+ * the privileged publisher fails closed rather than guessing.
  *
  * @param numstatZOutput - Raw stdout from the scratch-index git query.
  * @returns Validated per-path changed-line rows.
@@ -1134,7 +1154,9 @@ export function parseNumstatZ(
   if (records.pop() !== "") {
     throw new Error("numstat output is not NUL-terminated");
   }
-  return records.map((record) => {
+  const stats: FactoryPatchLineStat[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] ?? "";
     const firstTab = record.indexOf("\t");
     const secondTab =
       firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
@@ -1143,29 +1165,46 @@ export function parseNumstatZ(
     }
     const additionsRaw = record.slice(0, firstTab);
     const deletionsRaw = record.slice(firstTab + 1, secondTab);
-    const path = record.slice(secondTab + 1);
+    let path = record.slice(secondTab + 1);
+    let sourcePath: string | undefined;
     if (path.length === 0) {
-      throw new Error("numstat output contains an empty path");
+      sourcePath = records[index + 1];
+      path = records[index + 2] ?? "";
+      if (!sourcePath || !path) {
+        throw new Error("numstat rename/copy row is truncated");
+      }
+      index += 2;
     }
+    let additions: number | null;
+    let deletions: number | null;
     if (additionsRaw === "-" || deletionsRaw === "-") {
       if (additionsRaw !== "-" || deletionsRaw !== "-") {
         throw new Error("numstat binary row has mismatched counts");
       }
-      return { path, additions: null, deletions: null };
+      additions = null;
+      deletions = null;
+    } else {
+      if (
+        !/^(?:0|[1-9][0-9]*)$/.test(additionsRaw) ||
+        !/^(?:0|[1-9][0-9]*)$/.test(deletionsRaw)
+      ) {
+        throw new Error("numstat output contains invalid changed-line counts");
+      }
+      additions = Number(additionsRaw);
+      deletions = Number(deletionsRaw);
+      if (!Number.isSafeInteger(additions) || !Number.isSafeInteger(deletions)) {
+        throw new Error(
+          "numstat changed-line count exceeds the safe integer range",
+        );
+      }
     }
-    if (
-      !/^(?:0|[1-9][0-9]*)$/.test(additionsRaw) ||
-      !/^(?:0|[1-9][0-9]*)$/.test(deletionsRaw)
-    ) {
-      throw new Error("numstat output contains invalid changed-line counts");
-    }
-    const additions = Number(additionsRaw);
-    const deletions = Number(deletionsRaw);
-    if (!Number.isSafeInteger(additions) || !Number.isSafeInteger(deletions)) {
-      throw new Error("numstat changed-line count exceeds the safe integer range");
-    }
-    return { path, additions, deletions };
-  });
+    stats.push(
+      sourcePath === undefined
+        ? { path, additions, deletions }
+        : { path, sourcePath, additions, deletions },
+    );
+  }
+  return stats;
 }
 
 /** Upper bound on how long a derived branch slug's title portion may be. */

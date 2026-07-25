@@ -117,9 +117,38 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
     expect(isFactoryDataOnlyPath(".claude/agents/qa.md")).toBe(false);
     expect(isFactoryDataOnlyPath("generated/roast.json")).toBe(false);
     expect(isFactoryDataOnlyPath("snowflake/fixtures/roast.json")).toBe(true);
-    expect(isFactoryDataOnlyPath("docs/factory.md")).toBe(true);
+    expect(isFactoryDataOnlyPath("docs/state/registry.md")).toBe(false);
+    expect(isFactoryDataOnlyPath("docs/factory-runbook.md")).toBe(false);
+    expect(isFactoryDataOnlyPath("docs/factory.md")).toBe(false);
     expect(isFactoryDataOnlyPath("docs/diagram.ts")).toBe(false);
     expect(isFactoryDataOnlyPath("package-lock.json")).toBe(false);
+  });
+
+  it("preserves authoritative path bytes instead of applying diff-header normalization", () => {
+    for (const path of [
+      "a/tests/payload.ts",
+      " tests/payload.ts",
+      "snowflake/fixtures/roast.json ",
+    ]) {
+      expect(
+        findFactoryPatchEnvelopeViolations([
+          {
+            path,
+            additions: FACTORY_LOGIC_LINE_LIMIT + 1,
+            deletions: 0,
+          },
+        ]),
+      ).toEqual([expect.stringContaining("logic churn is 401")]);
+    }
+  });
+
+  it("allows operational state Markdown alongside code as one logic unit", () => {
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        { path: "docs/state/registry.md", additions: 2, deletions: 1 },
+        { path: "lib/feature.ts", additions: 3, deletions: 0 },
+      ]),
+    ).toEqual([]);
   });
 
   it("uses only configured test roots for the separate test allowance", () => {
@@ -181,6 +210,44 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
       expect.stringContaining("mixed with logic or tests"),
     ]);
   });
+
+  it("charges rename churn once to the strongest source/destination category", () => {
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          sourcePath: "lib/large.ts",
+          path: "tests/large.ts",
+          additions: 401,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([expect.stringContaining("logic churn is 401")]);
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          sourcePath: "tests/roast.json",
+          path: "snowflake/fixtures/roast.json",
+          additions: 601,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([
+      expect.stringContaining("mixed with logic or tests"),
+      expect.stringContaining("test churn is 601"),
+    ]);
+    for (const path of ["lib/roast.json", "tests/roast.json"]) {
+      expect(
+        findFactoryPatchEnvelopeViolations([
+          {
+            sourcePath: "snowflake/fixtures/roast.json",
+            path,
+            additions: 0,
+            deletions: 0,
+          },
+        ]),
+      ).toEqual([expect.stringContaining("mixed with logic or tests")]);
+    }
+  });
 });
 
 describe("parseNumstatZ", () => {
@@ -200,9 +267,32 @@ describe("parseNumstatZ", () => {
     ]);
   });
 
+  it("parses rename/copy rows with source and destination paths", () => {
+    expect(
+      parseNumstatZ(
+        "0\t0\t\x00lib/old.ts\x00lib/new.ts\x00" +
+          "3\t2\t\x00tests/old.ts\x00lib/edited.ts\x00",
+      ),
+    ).toEqual([
+      {
+        sourcePath: "lib/old.ts",
+        path: "lib/new.ts",
+        additions: 0,
+        deletions: 0,
+      },
+      {
+        sourcePath: "tests/old.ts",
+        path: "lib/edited.ts",
+        additions: 3,
+        deletions: 2,
+      },
+    ]);
+  });
+
   it.each([
     "1\t0\tpath",
     "bad\x00",
+    "0\t0\t\x00old.ts\x00",
     "1\t-\tpath\x00",
     "01\t0\tpath\x00",
     "1\t0\t\x00",

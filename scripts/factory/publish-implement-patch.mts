@@ -379,6 +379,11 @@ interface AuthoritativePatchAnalysis {
  *    a copied/renamed file to serialize as a full addition instead, every
  *    line reported as `+` content, so a smuggled-in suppression is
  *    visible the same as if it had been typed fresh.
+ * 5. `git diff --cached --numstat -z -M HEAD` — measures changed lines
+ *    without turning a pure large rename into full deletion/addition churn.
+ *    Rename source and destination remain separate NUL records for conservative
+ *    category classification. Copy detection stays off: copied content is new
+ *    reviewable churn and must count as additions for this envelope.
  *
  * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
  * including against files the patch left otherwise UNTOUCHED — the exact
@@ -550,7 +555,7 @@ async function getAuthoritativePatchAnalysis(
           "--cached",
           "--numstat",
           "-z",
-          "--no-renames",
+          "-M",
           "HEAD",
         ],
         {

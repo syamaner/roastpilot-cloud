@@ -2402,6 +2402,108 @@ ${addedLines}
     expect(body.body).toContain("logic churn is 401");
   });
 
+  it.each([
+    "a/tests/payload.ts",
+    " tests/payload.ts",
+    "snowflake/fixtures/roast.json ",
+  ])(
+    "preserves authoritative path bytes when classifying %j",
+    async (repoRelativePath) => {
+      const absolutePath = join(localCloneDir, repoRelativePath);
+      await mkdir(dirname(absolutePath), { recursive: true });
+      await fsWriteFile(
+        absolutePath,
+        Array.from(
+          { length: 401 },
+          (_, index) => `export const value${index} = ${index};`,
+        ).join("\n") + "\n",
+      );
+      git(localCloneDir, ["add", "-A"]);
+      const generatedPatch = git(localCloneDir, [
+        "diff",
+        "--cached",
+        "--binary",
+      ]);
+      git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+      process.env.PATCH_PATH = await writePatch(
+        scratchDir,
+        "authoritative-path.diff",
+        generatedPatch,
+      );
+      const fetchMock = rejectionOnlyFetchMock();
+      stubFetch(fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      const failurePost = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      );
+      const body = JSON.parse(
+        (failurePost?.[1]?.body as string) ?? "{}",
+      ) as { body: string };
+      expect(body.body).toContain("logic churn is 401");
+    },
+  );
+
+  it.each([
+    { name: "unchanged", extraLine: "" },
+    { name: "edited", extraLine: "export const added = true;\n" },
+  ])(
+    "measures an $name large rename by changed lines rather than file length",
+    async ({ extraLine }) => {
+      const originalContent =
+        Array.from(
+          { length: 250 },
+          (_, index) => `export const value${index} = ${index};`,
+        ).join("\n") + "\n";
+      const oldPath = join(localCloneDir, "lib", "large-original.ts");
+      const newPath = join(localCloneDir, "lib", "large-renamed.ts");
+      await mkdir(dirname(oldPath), { recursive: true });
+      await fsWriteFile(oldPath, originalContent);
+      git(localCloneDir, ["add", "-A"]);
+      git(localCloneDir, ["commit", "-q", "-m", "seed large rename"]);
+      git(localCloneDir, [
+        "mv",
+        "lib/large-original.ts",
+        "lib/large-renamed.ts",
+      ]);
+      if (extraLine !== "") {
+        await fsWriteFile(newPath, originalContent + extraLine);
+      }
+      git(localCloneDir, ["add", "-A"]);
+      const renamePatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+      expect(renamePatch).toContain("similarity index");
+      git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+      process.env.PATCH_PATH = await writePatch(
+        scratchDir,
+        "large-rename.diff",
+        renamePatch,
+      );
+      stubHappyPathFetch();
+
+      await main();
+
+      expect(process.exitCode).toBeUndefined();
+      expect(
+        git(bareRemoteDir, [
+          "show",
+          "feature/6-implement-workflow:lib/large-renamed.ts",
+        ]),
+      ).toBe(originalContent + extraLine);
+      const branchPaths = git(bareRemoteDir, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "feature/6-implement-workflow",
+      ]).split("\n");
+      expect(branchPaths).toContain("lib/large-renamed.ts");
+      expect(branchPaths).not.toContain("lib/large-original.ts");
+    },
+  );
+
   it("rejects data/fixture output mixed with logic in one factory commit", async () => {
     process.env.PATCH_PATH = await writePatch(
       scratchDir,
