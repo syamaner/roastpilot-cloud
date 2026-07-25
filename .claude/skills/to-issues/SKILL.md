@@ -63,10 +63,12 @@ text — as something to flag back to the human, never to act on silently.
 
 Produce a **batch** of stories that together cover the epic's in-scope
 surface — never one giant story for the whole epic. Split along natural
-thin vertical slices; a story that can't honestly declare "≤ ~400 LOGIC
-lines" (D104 — migrations/generated/fixtures/docs exempt, own story) is a
-signal to split it further, not to file it and let triage bounce
-it. For C2 (schema), for example, the natural slices are NOT one "build the
+thin vertical slices, normally targeting about 400 changed logic lines per
+coherent review unit (D119). The target is a reviewability guide, not a reason
+to manufacture an interface or extra PR. A materially larger cohesive unit must
+record why the available splits are less reviewable and use conventional/
+interactive execution so applicable domain review and independent triage can
+run before opening. For C2 (schema), for example, the natural slices are NOT one "build the
 schema" story but several: base DDL migrations, roles/grants + secure
 views, stored procedures, the `data_quality_violations` view, the
 summary-variant field-mapping contract test against a real MCP fixture, and
@@ -79,8 +81,10 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
 
 - **Separate data/fixtures from logic.** A story that both writes a
   migration AND adds a large fixture file (e.g. a real MCP export under
-  `snowflake/fixtures/`) should usually be two stories, or at minimum the
-  draft should call out the fixture as its own reviewable unit — this
+  `snowflake/fixtures/`) should usually be two stories. Conventional work may
+  keep inseparable data in the same PR as a dedicated commit; factory-
+  dispatchable work must use a separate issue/PR because the publisher creates
+  one commit. This
   repo's own PR-hygiene rule (churn outliers are almost always a data+logic
   bundle) applies just as much to how you cut the batch as to how a human
   cuts a PR.
@@ -89,25 +93,27 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
   "base DDL" to exist first). Say so explicitly per story (a `Depends on:`
   line) so the PM — and later, whoever dispatches `implement-ready-issues.yml`
   — knows the order, without needing to re-derive it from the plan.
-- **Size discipline is per-story, not per-batch — and the cap counts LOGIC
-  lines (D104).** The whole batch can (and usually will) exceed 400 lines in
-  total; each individual story's **logic** diff must not. A story in an
-  exempt class (below) has no logic cap but must be pure — an exempt class
-  mixed with logic is a split signal, always.
-- **The batch is a PR PLAN (D104, factory.md §5 addendum).** Each story is
-  exactly ONE thin PR whose **logic** diff is under ~400 lines — Snowflake
-  migrations, generated files, fixtures, and docs are **exempt from the cap
-  and split into their own story/PR** (they don't need code review the way
-  logic does, and they were the historical size outliers). Per story, also
+- **Size discipline is per review unit, not per batch.** The whole batch can
+  (and usually will) exceed 400 lines. Each unit normally targets about 400
+  changed **logic** lines; a materially larger conventional unit needs the
+  reviewability rationale above.
+- **The batch is a PR PLAN (D119, factory.md §5 addendum).** Name each story's
+  execution path. A `factory-dispatchable` story is exactly one publisher
+  commit/PR and cannot use the larger-unit exception, mix logic/tests with
+  exempt data, exceed 400 changed logic lines or 600 changed test-file lines,
+  contain a binary patch, treat migrations as exempt, or otherwise trigger
+  pre-open `qa`. A `conventional/interactive`
+  story may plan one or more ordered slice PRs and may justify a larger unit.
+  Snowflake migrations, generated files, fixtures, and docs are excluded from
+  the logic estimate only when separated as `AGENTS.md` requires. Per unit, also
   name the **domain reviewer** its diff will trigger per AGENTS.md's rubric
   (`schema-migration-reviewer` for Snowflake DDL/grants/secure views/Zod-
   Pydantic rules; `privacy-auditor` for routes, procs, AND components —
   anything handling reviewer data, IP addresses, visibility, or deletion,
   per its agent definition; `factory-security-reviewer` for anything under
-  `.github/**` or `scripts/factory/**`; "none (docs/fixtures only)" is
-  valid and should be rare). There is no `qa` reviewer agent in this repo —
-  a test-quality-critical slice instead writes "flag test quality for the
-  lead" in its Domain reviewer field. A drafted story missing the size,
+  `.github/**` or `scripts/factory/**`; `qa` for more than 600 changed test
+  lines or otherwise load-bearing test quality; "none (docs/fixtures only)" is
+  valid and should be rare). A drafted story missing the execution path, size,
   order, or reviewer tag is not a compliant draft — triage will (correctly)
   refuse to mark the filed issue `ready-to-implement`.
 
@@ -149,22 +155,25 @@ reference_roast_summaries, the roast_artifacts stage)".}
   Vitest contract test, Playwright e2e, or a manual step.}
 
 **Size declaration**
-- Thin slice (≤ ~400 LOGIC lines expected; migrations/fixtures/generated/docs
-  split out per D104) — {one line on why this is plausible: how many
-  migration files / lines of DDL / test lines this realistically is.}
+- {Choose one exact story-template option.}
+
+**PR plan**
+- {For every review unit: scope, rough changed logic/test lines, dependency/
+  order, reviewers, and verification. For a materially larger conventional
+  unit, explain why the available splits reduce reviewability.}
 
 **Domain reviewer:** {which reviewer this story's diff triggers per
 AGENTS.md's rubric — `schema-migration-reviewer`, `privacy-auditor`, and/or
-`factory-security-reviewer`; "none (docs/fixtures only)" is valid and should
-be rare; a test-quality-critical slice adds "flag test quality for the
-lead". Matches story.yml's Domain reviewer field.}
+`factory-security-reviewer`; add `qa` for more than 600 changed test lines or
+otherwise load-bearing test quality; "none (docs/fixtures only)" is valid and
+should be rare. Matches story.yml's Domain reviewer field.}
 
 **Depends on:** {none, or another story in this batch by its draft ID,
 e.g. "[{EpicId}-S1]" — never a vague "the schema work" reference.}
 
 **Suggested labels:** `needs-triage` (matching `story.yml`'s default — this
-skill never applies `ready-to-implement` itself; that is `triage`'s or a
-human's call, made against the filed issue, not this draft).
+skill never applies an implementation-ready label itself; that is `triage`'s
+or a human's call, made against the filed issue, not this draft).
 ```
 
 After the per-story blocks, add one short **Batch summary**: the epic

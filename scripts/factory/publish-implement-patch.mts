@@ -197,6 +197,7 @@ import {
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
   findAddedRootPytestConfigSections,
+  findFactoryPatchEnvelopeViolations,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -210,7 +211,9 @@ import {
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
+  parseNumstatZ,
   type ExistingComment,
+  type FactoryPatchLineStat,
   type GamingFlag,
   type ProvenanceContext,
   type PublishStepSummaryContext,
@@ -323,6 +326,8 @@ interface AuthoritativePatchAnalysis {
    * own docstring, point 3.
    */
   readonly diffText: string;
+  /** Per-path changed-line rows from the same applied scratch index. */
+  readonly lineStats: FactoryPatchLineStat[];
 }
 
 /**
@@ -536,7 +541,44 @@ async function getAuthoritativePatchAnalysis(
         `could not read the scratch index's authoritative diff content: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return { changedPaths: parseNameStatusZ(nameStatusOutput), diffText };
+    let numstatOutput: string;
+    try {
+      numstatOutput = execFileSync(
+        "git",
+        [
+          "diff",
+          "--cached",
+          "--numstat",
+          "-z",
+          "--no-renames",
+          "HEAD",
+        ],
+        {
+          env,
+          encoding: "utf8",
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
+      );
+    } catch (err) {
+      throw new PublishRejection(
+        `could not read the scratch index's changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let lineStats: FactoryPatchLineStat[];
+    try {
+      lineStats = parseNumstatZ(numstatOutput);
+    } catch (err) {
+      throw new PublishRejection(
+        `git returned malformed changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return {
+      changedPaths: parseNameStatusZ(nameStatusOutput),
+      diffText,
+      lineStats,
+    };
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }
@@ -1583,7 +1625,11 @@ export async function main(): Promise<void> {
       );
     }
 
-    const { changedPaths, diffText } = await getAuthoritativePatchAnalysis(patchPath);
+    const {
+      changedPaths,
+      diffText,
+      lineStats,
+    } = await getAuthoritativePatchAnalysis(patchPath);
     if (changedPaths.length === 0) {
       // Not independently exercised by a unit test: every real-patch
       // shape tried empirically (including a mode-change-only diff,
@@ -1607,6 +1653,15 @@ export async function main(): Promise<void> {
       throw new PublishRejection(
         `patch touches pipeline-protected path(s), refusing to apply it: ` +
           forbidden.join(", "),
+      );
+    }
+
+    const envelopeViolations =
+      findFactoryPatchEnvelopeViolations(lineStats);
+    if (envelopeViolations.length > 0) {
+      throw new PublishRejection(
+        `patch exceeds the current factory publisher envelope: ` +
+          envelopeViolations.join("; "),
       );
     }
 

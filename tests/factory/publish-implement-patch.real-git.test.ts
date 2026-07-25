@@ -814,6 +814,13 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       options: { issueLabels: ["needs-triage"] },
       reason: "is not currently labelled ready-to-implement",
     },
+    {
+      name: "conventional-only readiness",
+      options: {
+        issueLabels: ["ready-for-conventional-implementation"],
+      },
+      reason: "is not currently labelled ready-to-implement",
+    },
   ])("rejects $name before branch or PR writes", async ({ options, reason }) => {
     const fetchMock = stubHappyPathFetch(options);
 
@@ -1611,7 +1618,7 @@ index 0000000..abc1234
     errorSpy.mockRestore();
   });
 
-  it("detects a coverage suppression delivered via a .gitattributes-forced GIT binary patch block (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3 — closes the raw-patch-text bypass class)", async () => {
+  it("rejects a .gitattributes-forced binary source patch before the anti-gaming scan", async () => {
     // The exploit this closes: a `.gitattributes` entry marking a source
     // file `binary` makes `git diff --binary` serialize its content as a
     // `GIT binary patch` block instead of textual `+`/`-` lines — hiding
@@ -1640,27 +1647,23 @@ index 0000000..abc1234
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary-suppression.diff", binaryPatch);
-    const fetchMock = stubHappyPathFetch();
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(1);
 
     const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
-    const applyLabelCall = calls.find(
-      ([url, init]) =>
-        String(url).includes("/issues/99/labels") && init?.method === "POST",
-    );
-    expect(applyLabelCall).toBeDefined();
-
     const commentCall = calls.find(
       ([url, init]) =>
-        String(url).includes("/issues/99/comments") && init?.method === "POST",
+        String(url).includes("/issues/6/comments") && init?.method === "POST",
     );
     expect(commentCall).toBeDefined();
     const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
       body: string;
     };
+    expect(commentBody.body).toContain("binary patch path");
     expect(commentBody.body).toContain("lib/sneaky.ts");
   });
 
@@ -2300,8 +2303,8 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
   });
 });
 
-describe("publish-implement-patch — Codex round 3: binary patches round-trip", () => {
-  it("applies and pushes a real binary file byte-for-byte when the capture step used --binary (round-trip proof)", async () => {
+describe("publish-implement-patch — factory envelope", () => {
+  it("rejects a real binary patch before any branch or PR write", async () => {
     // Reproduces exactly what the FIXED capture step
     // (`git diff --cached --binary`) produces for a real binary file —
     // not a hand-crafted patch, for the same reason the rename-exploit
@@ -2320,23 +2323,24 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary.diff", binaryDiff);
-    stubHappyPathFetch();
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
-
-    const verifyDir = join(scratchDir, "verify-binary");
-    execFileSync("git", [
-      "clone",
-      "-q",
-      "--branch",
-      "feature/6-implement-workflow",
-      bareRemoteDir,
-      verifyDir,
-    ]);
-    const roundTripped = await readFile(join(verifyDir, "asset.bin"));
-    expect(roundTripped.equals(binaryBytes)).toBe(true);
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("binary patch path");
   });
 
   it("REJECTS (git apply fails) the OLD non---binary form as a sanity check that this test would have caught the bug", async () => {
@@ -2362,6 +2366,77 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
     expect(process.exitCode).toBe(1);
     const assetExists = await readFile(join(localCloneDir, "asset.bin")).catch(() => null);
     expect(assetExists).toBeNull();
+  });
+
+  it("rejects an applied patch with 401 changed logic lines", async () => {
+    const addedLines = Array.from(
+      { length: 401 },
+      (_, index) => `+export const value${index} = ${index};`,
+    ).join("\n");
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "too-large.diff",
+      `diff --git a/lib/large.ts b/lib/large.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/lib/large.ts
+@@ -0,0 +1,401 @@
+${addedLines}
+`,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("logic churn is 401");
+  });
+
+  it("rejects data/fixture output mixed with logic in one factory commit", async () => {
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "mixed.diff",
+      `diff --git a/lib/parse.ts b/lib/parse.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/lib/parse.ts
+@@ -0,0 +1 @@
++export const parse = true;
+diff --git a/snowflake/fixtures/roast.json b/snowflake/fixtures/roast.json
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/snowflake/fixtures/roast.json
+@@ -0,0 +1 @@
++{"roast": true}
+`,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("mixed with logic or tests");
   });
 });
 

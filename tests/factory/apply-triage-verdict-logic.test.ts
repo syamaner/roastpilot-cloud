@@ -44,7 +44,15 @@ describe("computeNewLabelSet", () => {
       "ready-to-spec",
     );
     const readinessCount = result.filter((l) =>
-      ["needs-triage", "ready-to-implement", "ready-to-spec", "needs-info", "wait-to-implement", "wontfix"].includes(l),
+      [
+        "needs-triage",
+        "ready-to-implement",
+        "ready-for-conventional-implementation",
+        "ready-to-spec",
+        "needs-info",
+        "wait-to-implement",
+        "wontfix",
+      ].includes(l),
     ).length;
     expect(readinessCount).toBe(1);
     expect(result).toContain("ready-to-spec");

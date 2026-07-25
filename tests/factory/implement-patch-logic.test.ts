@@ -10,11 +10,14 @@ import {
   buildPublishSuccessStepSummary,
   deriveBranchName,
   extractModelIdFromTranscript,
+  FACTORY_LOGIC_LINE_LIMIT,
   FACTORY_PR_BASE_REF,
+  FACTORY_TEST_LINE_LIMIT,
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
   findAddedRootPytestConfigSections,
   findExistingImplementFailureCommentId,
+  findFactoryPatchEnvelopeViolations,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
   findTestFileEdits,
@@ -23,6 +26,8 @@ import {
   IMPLEMENT_FAILURE_COMMENT_MARKER,
   isLabelAlreadyExistsError,
   isLabelNotFoundOnIssueError,
+  isFactoryDataOnlyPath,
+  isFactoryTestSourcePath,
   isProtectedPath,
   isTestFilePath,
   NO_AUTO_CHAIN_LABEL,
@@ -31,6 +36,7 @@ import {
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   normalizePatchPath,
   parseNameStatusZ,
+  parseNumstatZ,
   sanitizeStepSummaryText,
   sanitizeStepSummaryUrl,
   type ExistingComment,
@@ -60,6 +66,127 @@ describe("normalizePatchPath", () => {
     expect(normalizePatchPath("a/../.github/workflows/evil.yml")).toBe(
       "../.github/workflows/evil.yml",
     );
+  });
+});
+
+describe("factory publisher envelope (D119 operational boundary)", () => {
+  it("accepts the exact logic and test ceilings together", () => {
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          path: "lib/logic.ts",
+          additions: FACTORY_LOGIC_LINE_LIMIT,
+          deletions: 0,
+        },
+        {
+          path: "tests/logic.test.ts",
+          additions: FACTORY_TEST_LINE_LIMIT,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("rejects logic or test churn above the exact factory ceilings", () => {
+    const violations = findFactoryPatchEnvelopeViolations([
+      {
+        path: "snowflake/migrations/V001__schema.sql",
+        additions: FACTORY_LOGIC_LINE_LIMIT + 1,
+        deletions: 0,
+      },
+      {
+        path: "tests/schema.test.ts",
+        additions: FACTORY_TEST_LINE_LIMIT + 1,
+        deletions: 0,
+      },
+    ]);
+    expect(violations).toEqual([
+      expect.stringContaining("logic churn is 401"),
+      expect.stringContaining("test churn is 601"),
+    ]);
+  });
+
+  it("counts executable and operational paths as logic despite data-like names", () => {
+    expect(isFactoryDataOnlyPath("snowflake/migrations/V001__schema.sql")).toBe(
+      false,
+    );
+    expect(isFactoryDataOnlyPath("app/generated/page.tsx")).toBe(false);
+    expect(isFactoryDataOnlyPath("lib/data/client.ts")).toBe(false);
+    expect(isFactoryDataOnlyPath("AGENTS.md")).toBe(false);
+    expect(isFactoryDataOnlyPath("CLAUDE.md")).toBe(false);
+    expect(isFactoryDataOnlyPath(".claude/agents/qa.md")).toBe(false);
+    expect(isFactoryDataOnlyPath("generated/roast.json")).toBe(false);
+    expect(isFactoryDataOnlyPath("snowflake/fixtures/roast.json")).toBe(true);
+    expect(isFactoryDataOnlyPath("docs/factory.md")).toBe(true);
+    expect(isFactoryDataOnlyPath("docs/diagram.ts")).toBe(false);
+    expect(isFactoryDataOnlyPath("package-lock.json")).toBe(false);
+  });
+
+  it("uses only configured test roots for the separate test allowance", () => {
+    expect(isFactoryTestSourcePath("tests/factory/envelope.test.ts")).toBe(true);
+    expect(isFactoryTestSourcePath("e2e/factory.spec.ts")).toBe(true);
+    expect(isFactoryTestSourcePath("snowflake/tests/conftest.py")).toBe(true);
+    expect(isFactoryTestSourcePath("vitest.config.ts")).toBe(false);
+    expect(isFactoryTestSourcePath("snowflake/check_mutation_score.py")).toBe(
+      false,
+    );
+    expect(isFactoryTestSourcePath("lib/feature.test.ts")).toBe(false);
+  });
+
+  it("rejects executable data/test-name bypasses above the logic ceiling", () => {
+    const bypassPaths = [
+      "app/generated/page.tsx",
+      "vitest.config.ts",
+      "snowflake/check_mutation_score.py",
+      "lib/feature.test.ts",
+      ".claude/agents/qa.md",
+    ];
+    for (const path of bypassPaths) {
+      expect(
+        findFactoryPatchEnvelopeViolations([
+          {
+            path,
+            additions: FACTORY_LOGIC_LINE_LIMIT + 1,
+            deletions: 0,
+          },
+        ]),
+      ).toEqual([expect.stringContaining("logic churn is 401")]);
+    }
+  });
+
+  it("rejects mixed data with logic/tests and every binary patch", () => {
+    const violations = findFactoryPatchEnvelopeViolations([
+      { path: "snowflake/fixtures/roast.json", additions: 10, deletions: 0 },
+      { path: "lib/parse.ts", additions: 1, deletions: 0 },
+      { path: "tests/blob.bin", additions: null, deletions: null },
+    ]);
+    expect(violations).toEqual([
+      expect.stringContaining("binary patch path"),
+      expect.stringContaining("mixed with logic or tests"),
+    ]);
+  });
+});
+
+describe("parseNumstatZ", () => {
+  it("parses text, binary, and TAB-containing paths without path quoting", () => {
+    expect(
+      parseNumstatZ(
+        "3\t2\tlib/a.ts\x00-\t-\tdata/a.bin\x001\t0\tweird\tname.ts\x00",
+      ),
+    ).toEqual([
+      { path: "lib/a.ts", additions: 3, deletions: 2 },
+      { path: "data/a.bin", additions: null, deletions: null },
+      { path: "weird\tname.ts", additions: 1, deletions: 0 },
+    ]);
+  });
+
+  it.each([
+    "1\t0\tpath",
+    "1\t-\tpath\x00",
+    "01\t0\tpath\x00",
+    "1\t0\t\x00",
+  ])("rejects malformed authoritative output: %j", (raw) => {
+    expect(() => parseNumstatZ(raw)).toThrow();
   });
 });
 

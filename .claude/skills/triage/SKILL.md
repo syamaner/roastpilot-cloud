@@ -61,20 +61,30 @@ and each is independently checkable:
 4. **Out-of-scope statement** — what this story deliberately does not do.
 5. **Verification notes** — which suite proves it (unit / contract vs
    `ROASTPILOT_DEV` / Playwright e2e / grants), plus any manual step.
-6. **Size declaration** — "thin slice" (≤ ~400 **logic** lines, per D104;
-   migrations / generated files / fixtures / docs are exempt from the cap but
-   must be their OWN story/PR — a story mixing an exempt class with logic
-   fails this). If the issue's own size declaration says "larger — needs
-   splitting," or your reading of the acceptance criteria suggests it clearly
-   is, this is disqualifying on its own.
-7. **PR plan (D104, factory.md §5 addendum)** — the story maps to exactly ONE
-   thin PR and states: its **dependency order** (a `Depends on:` value —
-   "none" is valid, absent is not) and its **domain reviewer** per AGENTS.md's
-   rubric (`schema-migration-reviewer` / `privacy-auditor` /
-   `factory-security-reviewer`, or an explicit "none (docs/fixtures only)").
-   "Build X" with no ordered, sized, reviewer-tagged plan is `ready-to-spec`,
-   not `ready-to-implement` — smallness and routing are decided at
-   decomposition, not discovered at review.
+6. **Execution path and size declaration** — the issue must choose
+   `factory-dispatchable` or `conventional/interactive`. Each coherent logic
+   unit normally targets about 400 changed lines (D119); the number is a
+   reviewability guide, not an automatic cutoff. A materially larger unit must
+   explain why the available splits are less reviewable.
+   - `factory-dispatchable` maps to exactly one publisher commit and PR today.
+     Its current exact technical envelope is at most 400 changed logic lines,
+     at most 600 changed test-file lines, no binary patch, no migrations treated
+     as exempt data, and no mix of data/fixtures/generated/docs with logic or
+     tests. It also cannot carry otherwise load-bearing test quality that
+     requires pre-open `qa`, because the publisher has no independent
+     pre-publish review stage or multi-commit support. Route any such plan to
+     `conventional/interactive` rather than approving it for factory dispatch.
+   - `conventional/interactive` may contain one or more ordered slice PRs, and
+     may use a justified cohesive larger unit after applicable domain review
+     and independent pre-open triage. Inseparable data may share a PR only in a
+     dedicated commit.
+7. **PR plan (D119, factory.md §5 addendum)** — every planned unit states its
+   **dependency order** (a `Depends on:` value; "none" is valid, absent is not)
+   and **domain reviewer** per `AGENTS.md` (`schema-migration-reviewer`,
+   `privacy-auditor`, `factory-security-reviewer`, `qa`, or an explicit
+   "none (docs/fixtures only)"). "Build X" with no ordered, sized,
+   reviewer-tagged plan is `ready-to-spec`, not `ready-to-implement` —
+   reviewability and execution routing are decided at decomposition.
 
 Also check, per the Architecture Invariants in this repo's `AGENTS.md`:
 anything that looks like it would grant to `PUBLIC`, widen `PUBLIC_WEB`'s
@@ -86,11 +96,12 @@ blocking it (that's the reviewer's job at PR time), but say so.
 ## Readiness decision
 
 Pick exactly one value, from this exact taxonomy (factory.md §4) — copy the
-string verbatim, these are the only 6 legal values:
+string verbatim, these are the only 7 legal values:
 
 | Value | When |
 |---|---|
-| `ready-to-implement` | Meets every item above. The factory may build it as-is. |
+| `ready-to-implement` | Meets every item above on the `factory-dispatchable` path. The factory may build it as-is. |
+| `ready-for-conventional-implementation` | Meets every item above on the `conventional/interactive` path. This is intentionally non-authorizing for the factory workflow. |
 | `ready-to-spec` | Sound idea, but needs decomposition or a spec pass before it's buildable (e.g. no acceptance criteria yet, or the size is clearly too large and needs splitting). |
 | `needs-info` | You cannot judge it without an answer from a human — a broken/missing plan link, a genuinely ambiguous scope call, a contradiction between the issue and the plan repo. Always pair this with at least one concrete question in `missing_info_questions`. |
 | `wait-to-implement` | Well-specced but explicitly blocked by a stated dependency or sequencing rule you can see in the issue or plan repo (e.g. it depends on another open story, or the plan repo says it's held). |
@@ -98,7 +109,8 @@ string verbatim, these are the only 6 legal values:
 | `needs-triage` | Reserve for a genuine internal failure to judge at all (you could not read the issue). Prefer `needs-info` for anything issue-content-related — `needs-triage` re-affirms the inbox state, it does not communicate anything to a human. |
 
 Default to the more conservative bucket when in doubt — `ready-to-spec` or
-`needs-info` over `ready-to-implement`. A false "ready" wastes an
+`needs-info` over either implementation-ready state. A false factory-ready
+wastes an
 implementation run and a review cycle; a false "needs-info" just costs one
 human read.
 
@@ -131,7 +143,7 @@ be rejected, so keep both in sync when either changes):
   GitHub's own event actually fired for and rejects the whole verdict on any
   mismatch — so if you're unsure which issue you're triaging, stop and don't
   guess.
-- `readiness` — one of the exact 6 strings in the taxonomy table above.
+- `readiness` — one of the exact 7 strings in the taxonomy table above.
   Case-sensitive, no synonyms, no extra words.
 - `reasoning` — non-empty string, ≤4000 characters. Plain text or simple
   Markdown (no need for headings); this becomes the body of a comment posted

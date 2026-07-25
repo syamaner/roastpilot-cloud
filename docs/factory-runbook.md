@@ -273,7 +273,8 @@ jq -e '
   [.labels[].name
    | select(IN(
        "needs-triage", "ready-to-spec", "needs-info",
-       "ready-to-implement", "wait-to-implement", "wontfix"
+       "ready-to-implement", "ready-for-conventional-implementation",
+       "wait-to-implement", "wontfix"
      ))]
   | length == 1
 ' <<< "$issue"
