@@ -325,6 +325,10 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "unknown permission scope",
       "permissions:\n  frobnicate: none",
     ],
+    [
+      "removed repository-projects permission scope",
+      "permissions:\n  repository-projects: none",
+    ],
     ["sequence permission declaration", "permissions: []"],
   ])("fails closed on a %s", (_name, permissions) => {
     const content = [
@@ -428,6 +432,31 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       '    env:\n      VALUE: "${{ toJSON(needs) }}"',
     ],
     [
+      "nested serialized prerequisite outputs",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ toJSON(needs.auth) }}"',
+    ],
+    [
+      "computed prerequisite outputs",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ needs.auth[format(\'out{0}\', \'puts\')].value }}"',
+    ],
+    [
+      "computed step outputs",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ steps.auth[format(\'out{0}\', \'puts\')].value }}"',
+    ],
+    [
+      "benign-looking prerequisite status",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ needs.build.result }}"',
+    ],
+    [
+      "benign-looking step status",
+      "permissions: {}",
+      '    env:\n      VALUE: "${{ steps.check.outcome }}"',
+    ],
+    [
       "environment-scoped credential",
       "permissions: {}",
       "    environment: production",
@@ -479,6 +508,75 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "    uses: ./.github/workflows/reusable.yml",
       "    secrets:",
       "      API_KEY: supplied-by-caller",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it.each(["workflow_dispatch", "workflow_call"])(
+    "rejects a local action receiving a %s workflow input under a neutral key",
+    (trigger) => {
+      const content = [
+        "on:",
+        `  ${trigger}:`,
+        "    inputs:",
+        "      api_key:",
+        "        type: string",
+        "permissions: {}",
+        "jobs:",
+        "  review:",
+        "    env:",
+        '      VALUE: "${{ inputs.api_key }}"',
+        "    steps:",
+        "      - uses: ./.github/actions/review",
+      ].join("\n");
+      expect(privilegedFindings(content)).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    '${{ inputs["payload"] }}',
+    "${{ github.event.inputs.payload }}",
+    "${{ github[format('to{0}', 'ken')] }}",
+    "${{ github.event[format('in{0}', 'puts')].api_key }}",
+    "${{ toJSON(github) }}",
+    "${{ fromJSON(toJSON(github)).token }}",
+    "${{ github }}",
+  ])("fails closed on runtime context expression %s", (expression) => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    env:",
+      "      VALUE: >-",
+      `        ${expression}`,
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toHaveLength(1);
+  });
+
+  it("does not treat context words outside an expression as credentials", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    env:",
+      "      VALUE: github inputs needs secrets steps",
+      "    steps:",
+      "      - uses: ./.github/actions/review",
+    ].join("\n");
+    expect(privilegedFindings(content)).toEqual([]);
+  });
+
+  it("defers static github context exceptions to the typed 120b policy", () => {
+    const content = [
+      "permissions: {}",
+      "jobs:",
+      "  review:",
+      "    env:",
+      '      VALUE: "${{ github.event_name }}"',
+      "    steps:",
+      "      - uses: ./.github/actions/review",
     ].join("\n");
     expect(privilegedFindings(content)).toHaveLength(1);
   });

@@ -143,13 +143,7 @@ function containsCredentialExpression(value: unknown): boolean {
   if (typeof value === "string") {
     return (
       /\$\{\{[\s\S]*?\bsecrets\b[\s\S]*?\}\}/i.test(value) ||
-      /\$\{\{[\s\S]*?\bgithub\s*(?:\.|\[\s*["'])token\b[\s\S]*?\}\}/i.test(
-        value,
-      ) ||
-      /\$\{\{[\s\S]*?\b(?:steps|needs)\b[\s\S]*?\boutputs\b[\s\S]*?\}\}/i.test(
-        value,
-      ) ||
-      /\$\{\{[\s\S]*?\btoJSON\s*\(\s*(?:steps|needs)\s*\)[\s\S]*?\}\}/i.test(
+      /\$\{\{[\s\S]*?\b(?:github|inputs|steps|needs)\b[\s\S]*?\}\}/i.test(
         value,
       )
     );
