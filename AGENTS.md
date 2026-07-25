@@ -141,12 +141,13 @@ is `ready-to-implement` until a human or the `triage` skill says so against
 the issue as actually filed.
 
 **Plan-small readiness bar (D104).** A story earns `ready-to-implement` only
-with an explicit **PR plan**: exactly ONE thin PR, **logic** diff under ~400
-lines (Snowflake migrations, generated files, fixtures, and docs are exempt
-and get their own issue/PR), dependencies/order named, and the **domain
-reviewer** its diff triggers tagged (rubric below). "Build X" without the
-ordered, sized, reviewer-tagged plan bounces back `ready-to-spec` — smallness
-is decided at decomposition, not discovered at review.
+with an explicit **PR plan**: one or more ordered coherent review units,
+normally targeting about 400 changed **logic** lines each (tests are excluded
+from the estimate), dependencies/order named, and the **domain reviewer** each
+diff triggers tagged (rubric below). A materially larger unit must explain why
+splitting would reduce reviewability. "Build X" without the ordered, sized,
+reviewer-tagged plan bounces back `ready-to-spec` — reviewability is decided at
+decomposition, not discovered at review.
 
 ## PR Merge Policy
 
@@ -188,11 +189,23 @@ exception. The load-bearing points:
 
 ## PR Hygiene
 
-- **Thin slices**: target ≤ ~400 changed lines; the story issue's size
-  declaration should already reflect this (factory.md §5 enforces it at
-  triage).
+- **Thin slices**: target about 400 changed logic lines. This is a planning and
+  reviewability guide, not an automatic pass/fail threshold. Slice by coherent
+  responsibility, security boundary, dependency order, and reviewer load; do
+  not manufacture interfaces or extra PRs merely to hit the target. A
+  materially larger diff must record in the story plan and PR body why it is
+  more reviewable than the available splits, and must pass applicable domain
+  review plus independent pre-open triage. A large unexplained diff is
+  replanned; a justified cohesive diff may proceed. `factory.md` §5 uses this
+  target during triage. Test files are excluded from the logic estimate, but a
+  test-file diff over 600 lines (exact threshold) requires a `qa` reviewer pass
+  pre-open. Measure from the branch's merge base with `origin/main`
+  (`git diff --stat origin/main...HEAD`), not the advancing branch tip or a net
+  line count.
 - **Separate data from logic**: fixtures, snapshots, and generated output go
-  in their own commit or PR, never bundled with review-worthy logic.
+  in their own PR when independently reviewable; otherwise they get at least a
+  dedicated commit, never a logic commit. Their exclusion from the logic-size
+  estimate applies only when separated this way.
 - **`Closes #N`** only for the issue a PR fully resolves; `Refs #N` / `Part
   of #N` otherwise, so an unfinished issue isn't auto-closed.
 - No post-open lint/format churn — run the gates before opening.
