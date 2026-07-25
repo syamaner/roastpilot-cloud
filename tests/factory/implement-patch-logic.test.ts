@@ -154,6 +154,22 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
     }
   });
 
+  it("rejects invalid authoritative line-count rows before summing them", () => {
+    for (const stat of [
+      { path: "lib/negative.ts", additions: -1, deletions: 0 },
+      { path: "lib/fractional.ts", additions: 1.5, deletions: 0 },
+      {
+        path: "lib/unsafe.ts",
+        additions: Number.MAX_SAFE_INTEGER + 1,
+        deletions: 0,
+      },
+    ]) {
+      expect(findFactoryPatchEnvelopeViolations([stat])).toEqual([
+        expect.stringContaining(`invalid changed-line counts for ${stat.path}`),
+      ]);
+    }
+  });
+
   it("rejects mixed data with logic/tests and every binary patch", () => {
     const violations = findFactoryPatchEnvelopeViolations([
       { path: "snowflake/fixtures/roast.json", additions: 10, deletions: 0 },
@@ -168,6 +184,10 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
 });
 
 describe("parseNumstatZ", () => {
+  it("accepts an empty authoritative diff", () => {
+    expect(parseNumstatZ("")).toEqual([]);
+  });
+
   it("parses text, binary, and TAB-containing paths without path quoting", () => {
     expect(
       parseNumstatZ(
@@ -182,9 +202,11 @@ describe("parseNumstatZ", () => {
 
   it.each([
     "1\t0\tpath",
+    "bad\x00",
     "1\t-\tpath\x00",
     "01\t0\tpath\x00",
     "1\t0\t\x00",
+    "9007199254740992\t0\tpath\x00",
   ])("rejects malformed authoritative output: %j", (raw) => {
     expect(() => parseNumstatZ(raw)).toThrow();
   });

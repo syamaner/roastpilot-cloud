@@ -560,6 +560,7 @@ async function getAuthoritativePatchAnalysis(
         },
       );
     } catch (err) {
+      /* v8 ignore next 3 -- defensive normalization after a proven-valid scratch index. */
       throw new PublishRejection(
         `could not read the scratch index's changed-line statistics: ` +
           `${err instanceof Error ? err.message : String(err)}`,
@@ -569,6 +570,7 @@ async function getAuthoritativePatchAnalysis(
     try {
       lineStats = parseNumstatZ(numstatOutput);
     } catch (err) {
+      /* v8 ignore next 3 -- real git output is structurally guaranteed; parser is unit tested separately. */
       throw new PublishRejection(
         `git returned malformed changed-line statistics: ` +
           `${err instanceof Error ? err.message : String(err)}`,
