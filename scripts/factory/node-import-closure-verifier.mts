@@ -694,6 +694,7 @@ function exactPropertyPath(
   let current = unwrappedExpression(expression);
   const names: string[] = [];
   while (ts.isPropertyAccessExpression(current)) {
+    /* v8 ignore next -- the exact source registry fixes the adapter's property paths. */
     if (current.questionDotToken !== undefined) return false;
     names.unshift(current.name.text);
     current = unwrappedExpression(current.expression);
@@ -708,22 +709,25 @@ function exactObjectProperties(
   expression: ts.Expression,
 ): Map<string, ts.Expression> | undefined {
   const unwrapped = unwrappedExpression(expression);
+  /* v8 ignore next -- the exact source registry fixes adapter option objects. */
   if (!ts.isObjectLiteralExpression(unwrapped)) return undefined;
   const properties = new Map<string, ts.Expression>();
   for (const property of unwrapped.properties) {
+    /* v8 ignore next -- the exact source registry fixes adapter property assignments. */
     if (
       !ts.isPropertyAssignment(property) ||
       ts.isComputedPropertyName(property.name)
     ) {
-      /* v8 ignore next -- the exact source registry rejects alternate adapter shapes first. */
       return undefined;
     }
+    /* v8 ignore next -- the exact source registry fixes adapter property-name syntax. */
     const name =
       ts.isIdentifier(property.name) ||
       ts.isStringLiteralLike(property.name) ||
       ts.isNumericLiteral(property.name)
         ? property.name.text
         : undefined;
+    /* v8 ignore next -- the exact source registry precludes missing or duplicate property names. */
     if (name === undefined || properties.has(name)) return undefined;
     properties.set(name, property.initializer);
   }
@@ -754,6 +758,7 @@ function exactAdapterEnvironment(expression: ts.Expression): boolean {
 
 function exactAdapterSpawnOptions(expression: ts.Expression): boolean {
   const properties = exactObjectProperties(expression);
+  /* v8 ignore next -- the exact source registry fixes the nine-option object shape. */
   if (properties === undefined || properties.size !== 9) return false;
   const cwd = properties.get("cwd");
   const encoding = properties.get("encoding");
@@ -950,11 +955,11 @@ function runtimeCapabilityViolations(
         node.parent.expression === node &&
         exactAdapterProcessCall(node.parent);
       if (directCall) adapterProcessCalls += 1;
+      /* v8 ignore next -- the exact source registry precludes alternate process-binding uses. */
       if (
         !importBinding &&
         (!directCall || adapterProcessCalls > 1)
       ) {
-        /* v8 ignore next -- the exact source registry rejects alternate process uses first. */
         reject(
           node,
           "the protected process binding may only be used by the one exact listTrackedPaths capability",
