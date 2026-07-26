@@ -5,6 +5,24 @@ Operational procedures for the `roastpilot-cloud` software factory
 factory.md §13 point 9). Grows as later F1-S10 slices and F1-S6's dry-run
 runbook land; this is not meant to be "finished" before it's useful.
 
+## Deployment prerequisite: readiness labels
+
+Provision the conventional-delivery readiness label before deploying a
+triage schema that can return it. GitHub does not create unknown repository
+labels when the apply job replaces an issue's label set. This is an explicit
+operator-owned deployment prerequisite rather than a write repeated by every
+triage run:
+
+```bash
+gh label create ready-for-conventional-implementation \
+  --repo syamaner/roastpilot-cloud \
+  --color 0E8A16 \
+  --description "Triaged for conventional delivery; does not authorize factory dispatch" \
+  --force
+gh api repos/syamaner/roastpilot-cloud/labels/ready-for-conventional-implementation \
+  --jq '{name, color, description}'
+```
+
 ## Kill-switch: stopping the factory
 
 **The pause flag is the primary halt mechanism for anything not yet

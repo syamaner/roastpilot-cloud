@@ -2553,6 +2553,58 @@ ${addedLines}
     },
   );
 
+  it("rejects a large test-to-logic rename even when rename detection reports zero churn", async () => {
+    const originalContent =
+      Array.from(
+        { length: 800 },
+        (_, index) => `export const value${index} = ${index};`,
+      ).join("\n") + "\n";
+    const oldPath = join(localCloneDir, "tests", "large-runtime.test.ts");
+    await mkdir(dirname(oldPath), { recursive: true });
+    await fsWriteFile(oldPath, originalContent);
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "seed large test module"]);
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    git(localCloneDir, [
+      "mv",
+      "tests/large-runtime.test.ts",
+      "lib/large-runtime.ts",
+    ]);
+    await fsWriteFile(
+      join(localCloneDir, "lib", "runtime-entry.ts"),
+      'export * from "./large-runtime.js";\n',
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const renamePatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+    expect(renamePatch).toContain("similarity index 100%");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "test-to-logic-rename.diff",
+      renamePatch,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") && init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("cross-category rename/copy");
+    expect(body.body).toContain(
+      "tests/large-runtime.test.ts -> lib/large-runtime.ts",
+    );
+    expect(git(bareRemoteDir, ["branch", "--list"])).not.toContain(
+      "feature/6-implement-workflow",
+    );
+  });
+
   it("rejects inert generated output mixed with logic in one factory commit", async () => {
     process.env.PATCH_PATH = await writePatch(
       scratchDir,

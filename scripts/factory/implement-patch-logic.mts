@@ -453,6 +453,16 @@ export function findFactoryPatchEnvelopeViolations(
           ? "data"
           : "logic",
     );
+    if (
+      stat.sourcePath !== undefined &&
+      pathCategories.includes("logic") &&
+      pathCategories.includes("test")
+    ) {
+      violations.push(
+        `cross-category rename/copy is not factory-dispatchable: ` +
+          `${stat.sourcePath} -> ${stat.path} (logic/test boundary)`,
+      );
+    }
     hasData ||= pathCategories.includes("data");
     hasNonData ||= pathCategories.some((category) => category !== "data");
     const strongestCategory = pathCategories.includes("logic")

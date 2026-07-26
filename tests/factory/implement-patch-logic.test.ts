@@ -339,7 +339,10 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
           deletions: 0,
         },
       ]),
-    ).toEqual([expect.stringContaining("logic/test churn is 401")]);
+    ).toEqual([
+      expect.stringContaining("cross-category rename/copy"),
+      expect.stringContaining("logic/test churn is 401"),
+    ]);
     expect(
       findFactoryPatchEnvelopeViolations([
         {
@@ -364,6 +367,23 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
           },
         ]),
       ).toEqual([expect.stringContaining("mixed with logic or tests")]);
+    }
+  });
+
+  it("rejects zero-churn renames across the logic/test boundary", () => {
+    for (const [sourcePath, path] of [
+      ["tests/large.test.ts", "lib/large.ts"],
+      ["lib/large.ts", "tests/large.test.ts"],
+    ]) {
+      expect(
+        findFactoryPatchEnvelopeViolations([
+          { sourcePath, path, additions: 0, deletions: 0 },
+        ]),
+      ).toEqual([
+        expect.stringContaining(
+          `${sourcePath} -> ${path} (logic/test boundary)`,
+        ),
+      ]);
     }
   });
 });

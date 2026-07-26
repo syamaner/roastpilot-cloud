@@ -104,8 +104,9 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
   binary patch, treat migrations as exempt, or otherwise trigger pre-open
   `qa`. A `conventional/interactive`
   story may plan one or more ordered slice PRs and may justify a larger unit.
-  Snowflake migrations, generated files, fixtures, and docs are excluded from
-  the logic estimate only when separated as `AGENTS.md` requires. Per unit, also
+  Generated files, fixtures, and docs are excluded from the logic estimate only
+  when separated as `AGENTS.md` requires. Snowflake migrations always count as
+  logic. Per unit, also
   name the **domain reviewer** its diff will trigger per AGENTS.md's rubric
   (`schema-migration-reviewer` for Snowflake DDL/grants/secure views/Zod-
   Pydantic rules; `privacy-auditor` for routes, procs, AND components —
