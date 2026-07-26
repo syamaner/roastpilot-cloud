@@ -38,10 +38,10 @@ function request(
 ): NodeImportClosureRequest {
   return {
     repositoryRoot,
-    trustedRoot: "trusted",
+    trustedRoot: "scripts/factory/trusted",
     trustedSourceClass: "protected-glue",
     rootsComplete: true,
-    entrypoints: ["trusted/entry.mts"],
+    entrypoints: ["scripts/factory/trusted/entry.mts"],
     externalModules: [],
     ...overrides,
   };
@@ -73,7 +73,7 @@ function paddedSource(prefix: string, size: number): string {
 
 beforeEach(async () => {
   repositoryRoot = await mkdtemp(join(tmpdir(), "node-import-closure-"));
-  await put("trusted/entry.mts", "export const ready = true;\n");
+  await put("scripts/factory/trusted/entry.mts", "export const ready = true;\n");
 });
 
 afterEach(async () => {
@@ -83,19 +83,19 @@ afterEach(async () => {
 describe("verifyNodeImportClosure traversal and runtime edges", () => {
   it("returns sorted canonical evidence for transitive roots and cycles", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import "./middle.mts";\nexport { value } from "./leaf.mts";\n',
     );
-    await put("trusted/middle.mts", 'import "./entry.mts";\n');
-    await put("trusted/leaf.mts", "export const value = 1;\n");
+    await put("scripts/factory/trusted/middle.mts", 'import "./entry.mts";\n');
+    await put("scripts/factory/trusted/leaf.mts", "export const value = 1;\n");
 
     const result = verifyNodeImportClosure(request());
 
     expect(result).toEqual({
       files: [
-        "trusted/entry.mts",
-        "trusted/leaf.mts",
-        "trusted/middle.mts",
+        "scripts/factory/trusted/entry.mts",
+        "scripts/factory/trusted/leaf.mts",
+        "scripts/factory/trusted/middle.mts",
       ],
       edgeCount: 3,
       sourceBytes:
@@ -109,22 +109,22 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
   });
 
   it("deduplicates shared dependencies across complete entrypoint roots", async () => {
-    await put("trusted/entry.mts", 'import "./shared.mts";\n');
-    await put("trusted/other.mts", 'import "./shared.mts";\n');
-    await put("trusted/shared.mts", "export const shared = true;\n");
+    await put("scripts/factory/trusted/entry.mts", 'import "./shared.mts";\n');
+    await put("scripts/factory/trusted/other.mts", 'import "./shared.mts";\n');
+    await put("scripts/factory/trusted/shared.mts", "export const shared = true;\n");
 
     expect(
       verifyNodeImportClosure(
         request({
-          entrypoints: ["trusted/other.mts", "trusted/entry.mts"],
+          entrypoints: ["scripts/factory/trusted/other.mts", "scripts/factory/trusted/entry.mts"],
         }),
       ),
     ).toEqual(
       expect.objectContaining({
         files: [
-          "trusted/entry.mts",
-          "trusted/other.mts",
-          "trusted/shared.mts",
+          "scripts/factory/trusted/entry.mts",
+          "scripts/factory/trusted/other.mts",
+          "scripts/factory/trusted/shared.mts",
         ],
         edgeCount: 2,
         violations: [],
@@ -134,14 +134,14 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
 
   it("deduplicates URL spellings that resolve to one canonical source", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import "./shared.mts";\nimport "./%73hared.mts";\n',
     );
-    await put("trusted/shared.mts", "export const shared = true;\n");
+    await put("scripts/factory/trusted/shared.mts", "export const shared = true;\n");
 
     expect(verifyNodeImportClosure(request())).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts", "trusted/shared.mts"],
+        files: ["scripts/factory/trusted/entry.mts", "scripts/factory/trusted/shared.mts"],
         edgeCount: 2,
         violations: [],
       }),
@@ -150,7 +150,7 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
 
   it("treats empty and inline-type clauses as runtime Node edges", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       [
         'import type { X } from "./erased-import.mts";',
         'export type { X } from "./erased-export.mts";',
@@ -169,7 +169,7 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
       "inline-import",
       "inline-export",
     ]) {
-      await put(`trusted/${name}.mts`, "export type X = string;\n");
+      await put(`scripts/factory/trusted/${name}.mts`, "export type X = string;\n");
     }
 
     const result = verifyNodeImportClosure(request());
@@ -177,17 +177,17 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
     expect(result.violations).toEqual([]);
     expect(result.edgeCount).toBe(4);
     expect(result.files).toEqual([
-      "trusted/empty-export.mts",
-      "trusted/empty-import.mts",
-      "trusted/entry.mts",
-      "trusted/inline-export.mts",
-      "trusted/inline-import.mts",
+      "scripts/factory/trusted/empty-export.mts",
+      "scripts/factory/trusted/empty-import.mts",
+      "scripts/factory/trusted/entry.mts",
+      "scripts/factory/trusted/inline-export.mts",
+      "scripts/factory/trusted/inline-import.mts",
     ]);
   });
 
   it("ignores declarations without a runtime module edge", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       [
         "import type { Local } from './types.mts';",
         "export type { Local } from './types.mts';",
@@ -196,11 +196,11 @@ describe("verifyNodeImportClosure traversal and runtime edges", () => {
         "",
       ].join("\n"),
     );
-    await put("trusted/types.mts", "export type Local = string;\n");
+    await put("scripts/factory/trusted/types.mts", "export type Local = string;\n");
 
     expect(verifyNodeImportClosure(request())).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts"],
+        files: ["scripts/factory/trusted/entry.mts"],
         edgeCount: 0,
         violations: [],
       }),
@@ -252,12 +252,14 @@ describe("verifyNodeImportClosure local path confinement", () => {
       "not an explicit .mts source",
     ],
   ])("fails closed for %s", async (_name, source, detail) => {
-    await put("trusted/entry.mts", source);
+    await put("scripts/factory/trusted/entry.mts", source);
     if (detail === "must be a regular file") {
-      await mkdir(join(repositoryRoot, "trusted", "directory.mts"));
+      await mkdir(
+        join(repositoryRoot, "scripts", "factory", "trusted", "directory.mts"),
+      );
     }
     await put("outside.mts", "export const outside = true;\n");
-    await put("trusted/dependency.mts", "export const value = true;\n");
+    await put("scripts/factory/trusted/dependency.mts", "export const value = true;\n");
 
     expectViolation(
       verifyNodeImportClosure(request()),
@@ -282,8 +284,8 @@ describe("verifyNodeImportClosure local path confinement", () => {
   });
 
   it.each([
-    ["trusted-root symlink", "trusted", "dir"],
-    ["source symlink", "trusted/entry.mts", "file"],
+    ["trusted-root symlink", "scripts/factory/trusted", "dir"],
+    ["source symlink", "scripts/factory/trusted/entry.mts", "file"],
   ] as const)("rejects a %s", async (_name, path, kind) => {
     const actual =
       kind === "dir"
@@ -308,8 +310,8 @@ describe("verifyNodeImportClosure local path confinement", () => {
     expectViolation(
       verifyNodeImportClosure(
         request({
-          trustedRoot: "missing",
-          entrypoints: ["missing/entry.mts"],
+          trustedRoot: "scripts/factory/missing",
+          entrypoints: ["scripts/factory/missing/entry.mts"],
         }),
       ),
       "unsafe-path",
@@ -321,7 +323,7 @@ describe("verifyNodeImportClosure local path confinement", () => {
 describe("verifyNodeImportClosure syntax and source bytes", () => {
   it("reports syntax errors with their source line", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       "export const first = true;\nexport const broken = ;\n",
     );
 
@@ -329,12 +331,12 @@ describe("verifyNodeImportClosure syntax and source bytes", () => {
 
     expectViolation(result, "parse-error", "Expression expected");
     expect(result.violations[0]).toEqual(
-      expect.objectContaining({ path: "trusted/entry.mts", line: 2 }),
+      expect.objectContaining({ path: "scripts/factory/trusted/entry.mts", line: 2 }),
     );
   });
 
   it("rejects invalid UTF-8 without returning partial evidence", async () => {
-    await put("trusted/entry.mts", new Uint8Array([0xff, 0xfe, 0xfd]));
+    await put("scripts/factory/trusted/entry.mts", new Uint8Array([0xff, 0xfe, 0xfd]));
 
     expectViolation(
       verifyNodeImportClosure(request()),
@@ -345,7 +347,7 @@ describe("verifyNodeImportClosure syntax and source bytes", () => {
 
   it("rejects import attributes as unsupported static resolution", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import data from "example" with { type: "json" };\nvoid data;\n',
     );
 
@@ -358,10 +360,10 @@ describe("verifyNodeImportClosure syntax and source bytes", () => {
 
   it("rejects an import defer phase unsupported by the pinned Node runtime", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import defer * as deferred from "./dependency.mts";\nvoid deferred;\n',
     );
-    await put("trusted/dependency.mts", "export const value = true;\n");
+    await put("scripts/factory/trusted/dependency.mts", "export const value = true;\n");
 
     expectViolation(
       verifyNodeImportClosure(request()),
@@ -372,7 +374,7 @@ describe("verifyNodeImportClosure syntax and source bytes", () => {
 
   it("sorts multiple findings deterministically and erases valid evidence", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import "z-package";\nimport "./missing.mts";\nimport "a-package";\n',
     );
 
@@ -384,7 +386,7 @@ describe("verifyNodeImportClosure syntax and source bytes", () => {
     expect(result.violations.map(({ detail }) => detail)).toEqual([
       'external module "z-package" has no exact reviewed resolution',
       'external module "a-package" has no exact reviewed resolution',
-      '"trusted/missing.mts" does not exist',
+      '"scripts/factory/trusted/missing.mts" does not exist',
     ]);
   });
 });
@@ -432,8 +434,11 @@ describe("verifyNodeImportClosure external provenance", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        files: ["scripts/factory/node-import-closure-verifier.mts"],
-        edgeCount: 5,
+        files: [
+          "scripts/factory/implement-patch-logic.mts",
+          "scripts/factory/node-import-closure-verifier.mts",
+        ],
+        edgeCount: 6,
         violations: [],
       }),
     );
@@ -441,7 +446,7 @@ describe("verifyNodeImportClosure external provenance", () => {
 
   it("accepts an exact reviewed Node builtin", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import { readFileSync } from "node:fs";\nvoid readFileSync;\n',
     );
 
@@ -459,7 +464,7 @@ describe("verifyNodeImportClosure external provenance", () => {
       ),
     ).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts"],
+        files: ["scripts/factory/trusted/entry.mts"],
         edgeCount: 1,
         violations: [],
       }),
@@ -473,7 +478,7 @@ describe("verifyNodeImportClosure external provenance", () => {
     );
     await put("node_modules/example/index.mjs", "export const value = 1;\n");
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       'import { value } from "example";\nvoid value;\n',
     );
 
@@ -491,7 +496,7 @@ describe("verifyNodeImportClosure external provenance", () => {
       ),
     ).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts"],
+        files: ["scripts/factory/trusted/entry.mts"],
         edgeCount: 1,
         violations: [],
       }),
@@ -504,7 +509,7 @@ describe("verifyNodeImportClosure external provenance", () => {
       '{"name":"example","type":"module","exports":"./index.mjs"}\n',
     );
     await put("node_modules/example/index.mjs", "export const value = 1;\n");
-    await put("trusted/entry.mts", 'import "example";\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "example";\n');
     const runnerPath = join(repositoryRoot, "runner.mts");
     await writeFile(
       runnerPath,
@@ -533,7 +538,7 @@ describe("verifyNodeImportClosure external provenance", () => {
 
     expect(result).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts"],
+        files: ["scripts/factory/trusted/entry.mts"],
         edgeCount: 1,
         violations: [],
       }),
@@ -575,7 +580,7 @@ describe("verifyNodeImportClosure external provenance", () => {
         : detail === "cannot be resolved"
           ? "missing-package"
           : "example";
-    await put("trusted/entry.mts", `import "${specifier}";\n`);
+    await put("scripts/factory/trusted/entry.mts", `import "${specifier}";\n`);
 
     expectViolation(
       verifyNodeImportClosure(
@@ -598,7 +603,7 @@ describe("verifyNodeImportClosure external provenance", () => {
     );
     await put("node_modules/example/index.mjs", "export const value = 1;\n");
     await put("node_modules/example/other.mjs", "export const value = 2;\n");
-    await put("trusted/entry.mts", 'import "example";\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "example";\n');
 
     expectViolation(
       verifyNodeImportClosure(
@@ -623,7 +628,7 @@ describe("verifyNodeImportClosure external provenance", () => {
       '{"name":"example","type":"module","exports":"./index.mjs?mode=alternate"}\n',
     );
     await put("node_modules/example/index.mjs", "export const value = 1;\n");
-    await put("trusted/entry.mts", 'import "example";\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "example";\n');
 
     expectViolation(
       verifyNodeImportClosure(
@@ -643,7 +648,7 @@ describe("verifyNodeImportClosure external provenance", () => {
   });
 
   it("rejects a locked-package rule that resolves to a builtin URL", async () => {
-    await put("trusted/entry.mts", 'import "fs";\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "fs";\n');
 
     expectViolation(
       verifyNodeImportClosure(
@@ -663,15 +668,15 @@ describe("verifyNodeImportClosure external provenance", () => {
   });
 
   it("rejects a package alias that resolves back into repository source", async () => {
-    await put("trusted/aliased.mjs", "export const value = 1;\n");
+    await put("scripts/factory/trusted/aliased.mjs", "export const value = 1;\n");
     await mkdir(join(repositoryRoot, "node_modules"), { recursive: true });
     await symlink(
-      join(repositoryRoot, "trusted"),
+      join(repositoryRoot, "scripts", "factory", "trusted"),
       join(repositoryRoot, "node_modules", "example"),
       "dir",
     );
-    await put("trusted/package.json", '{"exports":"./aliased.mjs"}\n');
-    await put("trusted/entry.mts", 'import "example";\n');
+    await put("scripts/factory/trusted/package.json", '{"exports":"./aliased.mjs"}\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "example";\n');
 
     expectViolation(
       verifyNodeImportClosure(
@@ -699,10 +704,10 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
         index + 1 < dependencyFiles
           ? `import "./file-${index + 1}.mts";\n`
           : "";
-      await put(`trusted/file-${index}.mts`, next);
+      await put(`scripts/factory/trusted/file-${index}.mts`, next);
     }
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       [
         'import "./file-0.mts";',
         ...Array.from(
@@ -723,13 +728,13 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
   it("rejects the 129th canonical source file", async () => {
     for (let index = 0; index < MAX_NODE_CLOSURE_FILES; index += 1) {
       await put(
-        `trusted/file-${index}.mts`,
+        `scripts/factory/trusted/file-${index}.mts`,
         index + 1 < MAX_NODE_CLOSURE_FILES
           ? `import "./file-${index + 1}.mts";\n`
           : "",
       );
     }
-    await put("trusted/entry.mts", 'import "./file-0.mts";\n');
+    await put("scripts/factory/trusted/entry.mts", 'import "./file-0.mts";\n');
 
     expectViolation(
       verifyNodeImportClosure(request()),
@@ -739,9 +744,9 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
   });
 
   it("rejects the 513th runtime static edge", async () => {
-    await put("trusted/dependency.mts", "export const value = 1;\n");
+    await put("scripts/factory/trusted/dependency.mts", "export const value = 1;\n");
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       `${'import "./dependency.mts";\n'.repeat(MAX_NODE_CLOSURE_EDGES + 1)}`,
     );
 
@@ -754,13 +759,13 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
 
   it("accepts exactly 1,000,000 bytes in one source", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       paddedSource("", MAX_NODE_SOURCE_BYTES),
     );
 
     expect(verifyNodeImportClosure(request())).toEqual(
       expect.objectContaining({
-        files: ["trusted/entry.mts"],
+        files: ["scripts/factory/trusted/entry.mts"],
         sourceBytes: MAX_NODE_SOURCE_BYTES,
         violations: [],
       }),
@@ -769,7 +774,7 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
 
   it("rejects 1,000,001 bytes in one source", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       paddedSource("", MAX_NODE_SOURCE_BYTES + 1),
     );
 
@@ -783,7 +788,7 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
   it("charges oversized roots to the aggregate budget before reading", async () => {
     const entrypoints = Array.from(
       { length: 8 },
-      (_, index) => `trusted/oversized-${index}.mts`,
+      (_, index) => `scripts/factory/trusted/oversized-${index}.mts`,
     );
     for (const path of entrypoints) {
       await put(path, paddedSource("", MAX_NODE_SOURCE_BYTES + 1));
@@ -811,13 +816,13 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
           ? `import "./large-${index + 1}.mts";\n`
           : "";
       await put(
-        `trusted/large-${index}.mts`,
+        `scripts/factory/trusted/large-${index}.mts`,
         paddedSource(prefix, MAX_NODE_SOURCE_BYTES),
       );
     }
 
     const result = verifyNodeImportClosure(
-      request({ entrypoints: ["trusted/large-0.mts"] }),
+      request({ entrypoints: ["scripts/factory/trusted/large-0.mts"] }),
     );
 
     expect(result.violations).toEqual([]);
@@ -832,15 +837,15 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
           ? `import "./large-${index + 1}.mts";\n`
           : 'import "./overflow.mts";\n';
       await put(
-        `trusted/large-${index}.mts`,
+        `scripts/factory/trusted/large-${index}.mts`,
         paddedSource(prefix, MAX_NODE_SOURCE_BYTES),
       );
     }
-    await put("trusted/overflow.mts", "\n");
+    await put("scripts/factory/trusted/overflow.mts", "\n");
 
     expectViolation(
       verifyNodeImportClosure(
-        request({ entrypoints: ["trusted/large-0.mts"] }),
+        request({ entrypoints: ["scripts/factory/trusted/large-0.mts"] }),
       ),
       "resource-limit",
       `exceeds ${MAX_NODE_CLOSURE_BYTES} source bytes`,
@@ -849,14 +854,14 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
 
   it("counts malformed canonical files toward the 128-file ceiling", async () => {
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       Array.from(
         { length: MAX_NODE_CLOSURE_FILES },
         (_, index) => `import "./invalid-${index}.mts";`,
       ).join("\n"),
     );
     for (let index = 0; index < MAX_NODE_CLOSURE_FILES; index += 1) {
-      await put(`trusted/invalid-${index}.mts`, "export const broken = ;\n");
+      await put(`scripts/factory/trusted/invalid-${index}.mts`, "export const broken = ;\n");
     }
 
     expectViolation(
@@ -869,14 +874,14 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
   it("counts invalid UTF-8 sources toward the 8 MB closure ceiling", async () => {
     const invalidBytes = new Uint8Array(900_000).fill(0xff);
     await put(
-      "trusted/entry.mts",
+      "scripts/factory/trusted/entry.mts",
       Array.from(
         { length: 9 },
         (_, index) => `import "./invalid-bytes-${index}.mts";`,
       ).join("\n"),
     );
     for (let index = 0; index < 9; index += 1) {
-      await put(`trusted/invalid-bytes-${index}.mts`, invalidBytes);
+      await put(`scripts/factory/trusted/invalid-bytes-${index}.mts`, invalidBytes);
     }
 
     expectViolation(
@@ -901,6 +906,26 @@ describe("verifyNodeImportClosure request contract", () => {
     },
   );
 
+  it.each(["entrypoints", "externalModules"] as const)(
+    "rejects a sparse %s array",
+    (field) => {
+      const sparse: unknown[] = [];
+      sparse.length = 1;
+
+      expectViolation(
+        verifyNodeImportClosure(
+          request({
+            [field]: sparse,
+          } as Partial<NodeImportClosureRequest>),
+        ),
+        "invalid-input",
+        field === "entrypoints"
+          ? "source-qualified roots"
+          : "external module rules",
+      );
+    },
+  );
+
   it.each([
     ["non-object external rule", { externalModules: [null] }],
     ["incomplete roots", { rootsComplete: false }],
@@ -909,7 +934,7 @@ describe("verifyNodeImportClosure request contract", () => {
     [
       "duplicate entrypoints",
       {
-        entrypoints: ["trusted/entry.mts", "trusted/entry.mts"],
+        entrypoints: ["scripts/factory/trusted/entry.mts", "scripts/factory/trusted/entry.mts"],
       },
     ],
     [
@@ -917,18 +942,25 @@ describe("verifyNodeImportClosure request contract", () => {
       {
         entrypoints: Array.from(
           { length: MAX_NODE_CLOSURE_FILES + 1 },
-          (_, index) => `trusted/entry-${index}.mts`,
+          (_, index) => `scripts/factory/trusted/entry-${index}.mts`,
         ),
       },
     ],
     ["unsafe trusted root", { trustedRoot: "../trusted" }],
     ["entrypoint outside root", { entrypoints: ["other/entry.mts"] }],
-    ["non-mts entrypoint", { entrypoints: ["trusted/entry.ts"] }],
+    ["non-mts entrypoint", { entrypoints: ["scripts/factory/trusted/entry.ts"] }],
+    [
+      "unprotected glue root",
+      {
+        trustedRoot: "app",
+        entrypoints: ["app/entry.mts"],
+      },
+    ],
     [
       "wrong Snowflake root",
       {
         trustedSourceClass: "trusted-main-snowflake",
-        trustedRoot: "trusted",
+        trustedRoot: "scripts/factory/trusted",
       },
     ],
     [

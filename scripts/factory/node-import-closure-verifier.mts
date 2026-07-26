@@ -16,6 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve as resolveImport } from "import-meta-resolve";
 import * as ts from "typescript";
 
+import { isProtectedPath } from "./implement-patch-logic.mts";
+
 /** Operator-approved D118 traversal ceilings. */
 export const MAX_NODE_CLOSURE_FILES = 128;
 export const MAX_NODE_CLOSURE_EDGES = 512;
@@ -190,6 +192,13 @@ function safeRelativePath(path: string): boolean {
   );
 }
 
+function denseArray(values: readonly unknown[]): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(values, index)) return false;
+  }
+  return true;
+}
+
 function containedBy(parent: string, candidate: string): boolean {
   const rel = relative(parent, candidate);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`));
@@ -356,6 +365,7 @@ function requestFailure(request: unknown): string | undefined {
   const entrypoints = value.entrypoints;
   if (
     !safeRelativePath(value.trustedRoot) ||
+    !denseArray(entrypoints) ||
     entrypoints.length === 0 ||
     entrypoints.length > MAX_NODE_CLOSURE_FILES ||
     entrypoints.some(
@@ -366,6 +376,8 @@ function requestFailure(request: unknown): string | undefined {
         !path.endsWith(".mts"),
     ) ||
     new Set(entrypoints).size !== entrypoints.length ||
+    (value.trustedSourceClass === "protected-glue" &&
+      !isProtectedPath(`${value.trustedRoot}/`)) ||
     (value.trustedSourceClass === "trusted-main-snowflake" &&
       !value.trustedRoot.startsWith("snowflake/"))
   ) {
@@ -373,6 +385,7 @@ function requestFailure(request: unknown): string | undefined {
   }
   const rules = value.externalModules;
   if (
+    !denseArray(rules) ||
     rules.length > MAX_NODE_CLOSURE_EDGES ||
     rules.some((rule) => !externalRule(rule)) ||
     new Set(
