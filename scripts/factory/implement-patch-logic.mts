@@ -338,6 +338,173 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
+/** Exact combined textual-line ceiling for the current factory publisher. */
+export const FACTORY_TEXT_LINE_LIMIT = 400;
+
+/** One path row from git's authoritative `--numstat -z` scratch-index diff. */
+export interface FactoryPatchLineStat {
+  /** Destination path, or the only path for a non-rename row. */
+  readonly path: string;
+  /** Source path when git reports a rename/copy row. */
+  readonly sourcePath?: string;
+  readonly additions: number | null;
+  readonly deletions: number | null;
+}
+
+const FACTORY_INERT_OUTPUT_PATHS = new Set([
+  "generated/schema.json",
+  "snowflake/fixtures/.gitkeep",
+]);
+const FACTORY_INERT_DOC_PATHS = new Set(["docs/design.md"]);
+const FACTORY_INERT_DOC_PREFIXES = ["docs/design/"] as const;
+
+/**
+ * Reports whether a path belongs to a test-source root this repo executes.
+ *
+ * This is intentionally narrower than {@link isTestFilePath}. That broader
+ * anti-gaming predicate also flags test configuration, mutation gates, and
+ * suffix-like files outside test roots for human review. Those files remain
+ * logic for the publisher envelope; files under configured test roots are
+ * reported as test churn but share the combined factory ceiling.
+ *
+ * @param repoRelativePath - Exact repo-relative path reported by git.
+ * @returns Whether the path is inside an executed test-source root.
+ */
+export function isFactoryTestSourcePath(repoRelativePath: string): boolean {
+  return TEST_PATH_PREFIXES.some((prefix) =>
+    repoRelativePath.startsWith(prefix),
+  );
+}
+
+/**
+ * Reports whether a path belongs to the separately delivered output category.
+ *
+ * This path-only classification is not a claim that the file is unreachable
+ * from production code. Every changed line still counts toward the universal
+ * textual ceiling. The category exists only so the one-commit publisher can
+ * reject allowlisted output mixed with logic/tests. Operational or future
+ * unknown output remains logic; migrations, lockfiles, configuration,
+ * executable source extensions, and paths that merely contain names such as
+ * `data`, `fixtures`, or `generated` never enter the separated-output category.
+ *
+ * @param repoRelativePath - Exact repo-relative path reported by git.
+ * @returns Whether the publisher may treat the path as data-only.
+ */
+export function isFactoryDataOnlyPath(repoRelativePath: string): boolean {
+  const inertDocumentation =
+    repoRelativePath.endsWith(".md") &&
+    (FACTORY_INERT_DOC_PATHS.has(repoRelativePath) ||
+      FACTORY_INERT_DOC_PREFIXES.some((prefix) =>
+        repoRelativePath.startsWith(prefix),
+      ));
+  return (
+    inertDocumentation || FACTORY_INERT_OUTPUT_PATHS.has(repoRelativePath)
+  );
+}
+
+/**
+ * Validates an applied patch against the current factory-only envelope.
+ *
+ * Conventional work uses the reviewability guide in D119. The automated
+ * publisher cannot run independent pre-open review or create separate commits,
+ * so it retains exact fail-closed limits until those capabilities exist.
+ * Every textual path category shares one ceiling because a test root or
+ * allowlisted output can become production-reachable through an import/read
+ * introduced by an earlier PR. The publisher cannot safely infer full-tree
+ * executable closure yet. Data categories remain distinct only to enforce the
+ * publisher's one-commit mixed-output prohibition.
+ *
+ * @param stats - Git-authored per-path changed-line rows.
+ * @returns Human-readable violations; empty means the patch fits the envelope.
+ */
+export function findFactoryPatchEnvelopeViolations(
+  stats: readonly FactoryPatchLineStat[],
+): string[] {
+  const violations: string[] = [];
+  const binaryPaths: string[] = [];
+  let logicLines = 0;
+  let testLines = 0;
+  let outputLines = 0;
+  let hasData = false;
+  let hasNonData = false;
+
+  for (const stat of stats) {
+    // `parseNumstatZ` receives NUL-delimited repo-relative paths directly from
+    // git. They are already authoritative and unquoted: trimming or stripping
+    // an apparent `a/`/`b/` prefix here would change valid tracked path bytes.
+    const paths =
+      stat.sourcePath === undefined
+        ? [stat.path]
+        : [stat.sourcePath, stat.path];
+    if (stat.additions === null || stat.deletions === null) {
+      binaryPaths.push(...paths);
+      continue;
+    }
+    if (
+      !Number.isSafeInteger(stat.additions) ||
+      !Number.isSafeInteger(stat.deletions) ||
+      stat.additions < 0 ||
+      stat.deletions < 0
+    ) {
+      violations.push(`invalid changed-line counts for ${paths.join(" -> ")}`);
+      continue;
+    }
+    const changedLines = stat.additions + stat.deletions;
+    const pathCategories = paths.map((path) =>
+      isFactoryTestSourcePath(path)
+        ? "test"
+        : isFactoryDataOnlyPath(path)
+          ? "data"
+          : "logic",
+    );
+    if (
+      stat.sourcePath !== undefined &&
+      pathCategories.includes("logic") &&
+      pathCategories.includes("test")
+    ) {
+      violations.push(
+        `cross-category rename/copy is not factory-dispatchable: ` +
+          `${stat.sourcePath} -> ${stat.path} (logic/test boundary)`,
+      );
+    }
+    hasData ||= pathCategories.includes("data");
+    hasNonData ||= pathCategories.some((category) => category !== "data");
+    const strongestCategory = pathCategories.includes("logic")
+      ? "logic"
+      : pathCategories.includes("test")
+        ? "test"
+        : "data";
+    if (strongestCategory === "logic") {
+      logicLines += changedLines;
+    } else if (strongestCategory === "test") {
+      testLines += changedLines;
+    } else {
+      outputLines += changedLines;
+    }
+  }
+
+  if (binaryPaths.length > 0) {
+    violations.push(
+      `binary patch path(s) require conventional execution: ${binaryPaths.sort().join(", ")}`,
+    );
+  }
+  if (hasData && hasNonData) {
+    violations.push(
+      "data/docs/fixtures/generated output is mixed with logic or tests; " +
+        "the one-commit factory publisher requires a separate issue/PR",
+    );
+  }
+  const textLines = logicLines + testLines + outputLines;
+  if (textLines > FACTORY_TEXT_LINE_LIMIT) {
+    violations.push(
+      `text churn is ${textLines} changed lines ` +
+        `(${logicLines} logic, ${testLines} test, ${outputLines} output), above ` +
+        `the combined factory limit of ${FACTORY_TEXT_LINE_LIMIT}; use conventional execution`,
+    );
+  }
+  return violations;
+}
+
 /** A single ADDED coverage- or mutation-suppression line {@link findAddedCoverageSuppressions} found. */
 export interface CoverageSuppressionMatch {
   /** The file the suppression comment was added in (normalized). */
@@ -983,6 +1150,81 @@ export function parseNameStatusZ(nameStatusZOutput: string): string[] {
     }
   }
   return paths;
+}
+
+/**
+ * Parses rename-aware `git diff --cached --numstat -z HEAD` output.
+ *
+ * The first two TABs delimit additions and deletions; the remaining bytes are
+ * the unquoted path and may themselves contain TABs. For rename/copy rows git
+ * leaves that path empty and emits the source and destination as the next two
+ * NUL records. Binary rows use `-` for both counts. Malformed output throws so
+ * the privileged publisher fails closed rather than guessing.
+ *
+ * @param numstatZOutput - Raw stdout from the scratch-index git query.
+ * @returns Validated per-path changed-line rows.
+ */
+export function parseNumstatZ(
+  numstatZOutput: string,
+): FactoryPatchLineStat[] {
+  if (numstatZOutput === "") {
+    return [];
+  }
+  const records = numstatZOutput.split("\0");
+  if (records.pop() !== "") {
+    throw new Error("numstat output is not NUL-terminated");
+  }
+  const stats: FactoryPatchLineStat[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] ?? "";
+    const firstTab = record.indexOf("\t");
+    const secondTab =
+      firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
+    if (firstTab <= 0 || secondTab <= firstTab + 1) {
+      throw new Error("numstat output contains a malformed record");
+    }
+    const additionsRaw = record.slice(0, firstTab);
+    const deletionsRaw = record.slice(firstTab + 1, secondTab);
+    let path = record.slice(secondTab + 1);
+    let sourcePath: string | undefined;
+    if (path.length === 0) {
+      sourcePath = records[index + 1];
+      path = records[index + 2] ?? "";
+      if (!sourcePath || !path) {
+        throw new Error("numstat rename/copy row is truncated");
+      }
+      index += 2;
+    }
+    let additions: number | null;
+    let deletions: number | null;
+    if (additionsRaw === "-" || deletionsRaw === "-") {
+      if (additionsRaw !== "-" || deletionsRaw !== "-") {
+        throw new Error("numstat binary row has mismatched counts");
+      }
+      additions = null;
+      deletions = null;
+    } else {
+      if (
+        !/^(?:0|[1-9][0-9]*)$/.test(additionsRaw) ||
+        !/^(?:0|[1-9][0-9]*)$/.test(deletionsRaw)
+      ) {
+        throw new Error("numstat output contains invalid changed-line counts");
+      }
+      additions = Number(additionsRaw);
+      deletions = Number(deletionsRaw);
+      if (!Number.isSafeInteger(additions) || !Number.isSafeInteger(deletions)) {
+        throw new Error(
+          "numstat changed-line count exceeds the safe integer range",
+        );
+      }
+    }
+    stats.push(
+      sourcePath === undefined
+        ? { path, additions, deletions }
+        : { path, sourcePath, additions, deletions },
+    );
+  }
+  return stats;
 }
 
 /** Upper bound on how long a derived branch slug's title portion may be. */

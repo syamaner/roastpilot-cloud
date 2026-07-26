@@ -21,6 +21,7 @@
 export const READINESS_LABELS = [
   "needs-triage",
   "ready-to-implement",
+  "ready-for-conventional-implementation",
   "ready-to-spec",
   "needs-info",
   "wait-to-implement",

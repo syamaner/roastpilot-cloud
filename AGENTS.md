@@ -140,13 +140,34 @@ it is not itself an authorization to build anything, and no story it drafts
 is `ready-to-implement` until a human or the `triage` skill says so against
 the issue as actually filed.
 
-**Plan-small readiness bar (D104).** A story earns `ready-to-implement` only
-with an explicit **PR plan**: exactly ONE thin PR, **logic** diff under ~400
-lines (Snowflake migrations, generated files, fixtures, and docs are exempt
-and get their own issue/PR), dependencies/order named, and the **domain
-reviewer** its diff triggers tagged (rubric below). "Build X" without the
-ordered, sized, reviewer-tagged plan bounces back `ready-to-spec` — smallness
-is decided at decomposition, not discovered at review.
+**Plan-small readiness bar (D104, revised by D119).** A story earns
+`ready-to-implement` only
+with an explicit **PR plan**: one or more ordered coherent review units,
+normally targeting about 400 changed **logic** lines each (tests are excluded
+from the estimate), dependencies/order named, and the **domain reviewer** each
+diff triggers tagged (rubric below). A materially larger unit must explain why
+splitting would reduce reviewability. "Build X" without the ordered, sized,
+reviewer-tagged plan bounces back `ready-to-spec` — reviewability is decided at
+decomposition, not discovered at review. The plan must also name its execution
+path:
+
+- **Factory-dispatchable** means one issue, one publisher commit, and one PR
+  today. Until the publisher has an independent pre-publish diff-review stage,
+  its technical envelope is exact and fail-closed: at most 400 combined changed
+  textual lines across every path category; a captured patch artifact no larger
+  than 2 MiB; no binary patch; and no mix of allowlisted inert
+  data/fixtures/generated/design-doc output with logic or tests. Allowlisted
+  output still counts toward the textual ceiling because path names cannot prove
+  runtime inertness. Migrations and operational or unknown documentation are
+  logic. The publisher classifies the captured patch encoding and applied
+  scratch-index diff before pushing. Route a materially larger, oversized,
+  mixed-output, or otherwise pre-open-`qa`-triggering shape to conventional
+  execution instead.
+- **Conventional/interactive** may plan multiple ordered slice PRs and may use a
+  justified materially-larger unit, because the lead can run the required
+  independent pre-open review and create separate commits. A triage-complete
+  conventional issue receives `ready-for-conventional-implementation`, never
+  the factory-authorizing `ready-to-implement` label.
 
 ## PR Merge Policy
 
@@ -188,11 +209,33 @@ exception. The load-bearing points:
 
 ## PR Hygiene
 
-- **Thin slices**: target ≤ ~400 changed lines; the story issue's size
-  declaration should already reflect this (factory.md §5 enforces it at
-  triage).
+- **Thin slices**: target about 400 changed logic lines. This is a planning and
+  reviewability guide, not an automatic pass/fail threshold. Slice by coherent
+  responsibility, security boundary, dependency order, and reviewer load; do
+  not manufacture interfaces or extra PRs merely to hit the target. A
+  materially larger diff must record in the story plan and PR body why it is
+  more reviewable than the available splits, and must pass applicable domain
+  review plus independent pre-open triage. That exception is available only on
+  the conventional/interactive path until the factory has an independent
+  pre-publish diff-review stage; route a factory candidate that needs it to
+  conventional execution. A large unexplained diff is replanned; a justified
+  cohesive diff may proceed. `factory.md` §5 uses this target during triage.
+  Test files are excluded from the logic estimate, but a test-file diff over
+  600 lines (exact threshold), or otherwise load-bearing test quality, requires
+  a `qa` reviewer pass pre-open. The factory's stricter combined 400-line
+  envelope routes such a candidate to conventional execution before that
+  trigger is reached.
+  Measure from the branch's merge base with
+  `origin/main`: use `git diff --numstat origin/main...HEAD` as the per-file
+  inventory, exclude test files and qualifying separately delivered data/
+  fixture/generated/doc files, then sum additions plus deletions for the
+  remaining logic rows. Do not use the advancing branch tip or net line count.
 - **Separate data from logic**: fixtures, snapshots, and generated output go
-  in their own commit or PR, never bundled with review-worthy logic.
+  in their own PR when independently reviewable. Conventional PRs may keep
+  inseparable data in the same PR only as a dedicated commit, never a logic
+  commit. Factory-authored work must use a separate issue/PR because its
+  publisher creates one commit. Their exclusion from the logic-size estimate
+  applies only when separated this way.
 - **`Closes #N`** only for the issue a PR fully resolves; `Refs #N` / `Part
   of #N` otherwise, so an unfinished issue isn't auto-closed.
 - No post-open lint/format churn — run the gates before opening.
@@ -276,6 +319,12 @@ inline.
   to assess. The F1-S3 implement workflow shipped an EXPLOITABLE pipeline-guard
   that only this lens caught, so a factory-pipeline diff without this pass is not
   ready to merge.
+- Any test-file diff over 600 lines, or a change whose acceptance criteria make
+  test quality unusually load-bearing → **`qa`**. It verifies behavioral
+  assertions, negative cases, acceptance-criterion coverage, and coverage
+  quality rather than relying on a line percentage. This pass is pre-open, so
+  factory candidates that trigger it route to conventional execution until the
+  publisher gains an independent pre-publish review stage.
 
 **Also verify**: tests assert real behavior, not a smoke check; new code is
 covered or carries a documented reason for an uncovered line.
@@ -339,7 +388,7 @@ already fully wired the moment this file changes.
 | Dependency review (`.github/workflows/dependency-review.yml`) | Blocking job on `pull_request` (fails on high-severity advisory or a denied license) | Supply-chain risk on any `package.json`/`package-lock.json` change |
 | Claude Code Review (`.github/workflows/claude-code-review.yml`) | **NOT** a required status check (fails by design on workflow-edit PRs, per the agent-repo lesson) | Inline findings tagged blocker/medium/low against this file's Code Review Rubric; the real gate is the inline threads + `required_conversation_resolution`, not the check |
 | Codex | Advisory-but-triaged, not a required check | Cross-family second opinion — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses; see the wait-for-verdict rule in PR Merge Policy above (already ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
-| Domain sub-agents (`schema-migration-reviewer`, `privacy-auditor`, `factory-security-reviewer`) | Rubric-routed, human/PM-invoked | The escalation lenses named in Code Review Rubric's routing table above; not auto-run on every factory PR yet (factory.md §13 decision (ii) — rubric-routed to start, automate later is a live option) |
+| Domain sub-agents (`schema-migration-reviewer`, `privacy-auditor`, `factory-security-reviewer`, `qa`) | Rubric-routed, human/PM-invoked | The escalation lenses named in Code Review Rubric's routing table above; not auto-run on every factory PR yet (factory.md §13 decision (ii) — rubric-routed to start, automate later is a live option) |
 
 ### Codex — operator decision (recorded 18 Jul 2026, updated 18 Jul 2026, F1-S4)
 

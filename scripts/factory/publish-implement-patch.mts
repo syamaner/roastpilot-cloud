@@ -197,6 +197,7 @@ import {
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
   findAddedRootPytestConfigSections,
+  findFactoryPatchEnvelopeViolations,
   findExistingImplementFailureCommentId,
   findForbiddenPatchPaths,
   findPrForIssueNumber,
@@ -210,7 +211,9 @@ import {
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
+  parseNumstatZ,
   type ExistingComment,
+  type FactoryPatchLineStat,
   type GamingFlag,
   type ProvenanceContext,
   type PublishStepSummaryContext,
@@ -323,6 +326,8 @@ interface AuthoritativePatchAnalysis {
    * own docstring, point 3.
    */
   readonly diffText: string;
+  /** Per-path changed-line rows from the same applied scratch index. */
+  readonly lineStats: FactoryPatchLineStat[];
 }
 
 /**
@@ -343,6 +348,12 @@ interface AuthoritativePatchAnalysis {
  *    index only. `--cached` never touches the working tree. If this
  *    fails, the patch is malformed/inapplicable — same fail-closed
  *    outcome the old `--numstat` failure produced.
+ *    Before application, `git apply --numstat -z <patch>` inspects the
+ *    CAPTURED patch's own encoding and rejects every binary row. This query
+ *    is deliberately separate from the applied-tree statistics below:
+ *    attributes present only in the implementer's ignored worktree can make
+ *    capture emit a `GIT binary patch`, then disappear before the publisher
+ *    regenerates an otherwise-textual scratch-tree diff.
  * 3. `git diff-index --cached --name-status -z -M -C --find-copies-harder
  *    HEAD` — asks git which PATHS differ between HEAD and the
  *    now-patched scratch index. This is git's own TREE comparison, not a
@@ -374,6 +385,11 @@ interface AuthoritativePatchAnalysis {
  *    a copied/renamed file to serialize as a full addition instead, every
  *    line reported as `+` content, so a smuggled-in suppression is
  *    visible the same as if it had been typed fresh.
+ * 5. `git diff --cached --numstat -z -M HEAD` — measures changed lines
+ *    without turning a pure large rename into full deletion/addition churn.
+ *    Rename source and destination remain separate NUL records for conservative
+ *    category classification. Copy detection stays off: copied content is new
+ *    reviewable churn and must count as additions for this envelope.
  *
  * `-M` (rename detection) and `-C --find-copies-harder` (copy detection,
  * including against files the patch left otherwise UNTOUCHED — the exact
@@ -412,6 +428,45 @@ async function getAuthoritativePatchAnalysis(
   const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
+    let capturedNumstatOutput: string;
+    try {
+      capturedNumstatOutput = execFileSync(
+        "git",
+        ["apply", "--numstat", "-z", patchPath],
+        {
+          encoding: "utf8",
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
+      );
+    } catch (err) {
+      throw new PublishRejection(
+        `could not inspect the captured patch encoding: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let capturedLineStats: FactoryPatchLineStat[];
+    try {
+      capturedLineStats = parseNumstatZ(capturedNumstatOutput);
+    } catch (err) {
+      throw new PublishRejection(
+        `captured patch returned malformed changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const capturedBinaryPaths = capturedLineStats
+      .filter((stat) => stat.additions === null || stat.deletions === null)
+      .flatMap((stat) =>
+        stat.sourcePath === undefined
+          ? [stat.path]
+          : [stat.sourcePath, stat.path],
+      )
+      .sort();
+    if (capturedBinaryPaths.length > 0) {
+      throw new PublishRejection(
+        `captured binary patch path(s) require conventional execution: ` +
+          capturedBinaryPaths.join(", "),
+      );
+    }
     try {
       execFileSync("git", ["read-tree", "HEAD"], {
         env,
@@ -536,7 +591,46 @@ async function getAuthoritativePatchAnalysis(
         `could not read the scratch index's authoritative diff content: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return { changedPaths: parseNameStatusZ(nameStatusOutput), diffText };
+    let numstatOutput: string;
+    try {
+      numstatOutput = execFileSync(
+        "git",
+        [
+          "diff",
+          "--cached",
+          "--numstat",
+          "-z",
+          "-M",
+          "HEAD",
+        ],
+        {
+          env,
+          encoding: "utf8",
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
+      );
+    } catch (err) {
+      /* v8 ignore next 3 -- defensive normalization after a proven-valid scratch index. */
+      throw new PublishRejection(
+        `could not read the scratch index's changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let lineStats: FactoryPatchLineStat[];
+    try {
+      lineStats = parseNumstatZ(numstatOutput);
+    } catch (err) {
+      /* v8 ignore next 3 -- real git output is structurally guaranteed; parser is unit tested separately. */
+      throw new PublishRejection(
+        `git returned malformed changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return {
+      changedPaths: parseNameStatusZ(nameStatusOutput),
+      diffText,
+      lineStats,
+    };
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }
@@ -1583,7 +1677,11 @@ export async function main(): Promise<void> {
       );
     }
 
-    const { changedPaths, diffText } = await getAuthoritativePatchAnalysis(patchPath);
+    const {
+      changedPaths,
+      diffText,
+      lineStats,
+    } = await getAuthoritativePatchAnalysis(patchPath);
     if (changedPaths.length === 0) {
       // Not independently exercised by a unit test: every real-patch
       // shape tried empirically (including a mode-change-only diff,
@@ -1607,6 +1705,15 @@ export async function main(): Promise<void> {
       throw new PublishRejection(
         `patch touches pipeline-protected path(s), refusing to apply it: ` +
           forbidden.join(", "),
+      );
+    }
+
+    const envelopeViolations =
+      findFactoryPatchEnvelopeViolations(lineStats);
+    if (envelopeViolations.length > 0) {
+      throw new PublishRejection(
+        `patch exceeds the current factory publisher envelope: ` +
+          envelopeViolations.join("; "),
       );
     }
 

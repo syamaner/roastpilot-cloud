@@ -814,6 +814,13 @@ describe("publish-implement-patch — real git plumbing (happy path)", () => {
       options: { issueLabels: ["needs-triage"] },
       reason: "is not currently labelled ready-to-implement",
     },
+    {
+      name: "conventional-only readiness",
+      options: {
+        issueLabels: ["ready-for-conventional-implementation"],
+      },
+      reason: "is not currently labelled ready-to-implement",
+    },
   ])("rejects $name before branch or PR writes", async ({ options, reason }) => {
     const fetchMock = stubHappyPathFetch(options);
 
@@ -1611,7 +1618,7 @@ index 0000000..abc1234
     errorSpy.mockRestore();
   });
 
-  it("detects a coverage suppression delivered via a .gitattributes-forced GIT binary patch block (independent Codex + claude-review finding, F1-S9 slice 1, issue #12, round 3 — closes the raw-patch-text bypass class)", async () => {
+  it("rejects a .gitattributes-forced binary source patch before the anti-gaming scan", async () => {
     // The exploit this closes: a `.gitattributes` entry marking a source
     // file `binary` makes `git diff --binary` serialize its content as a
     // `GIT binary patch` block instead of textual `+`/`-` lines — hiding
@@ -1640,27 +1647,23 @@ index 0000000..abc1234
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary-suppression.diff", binaryPatch);
-    const fetchMock = stubHappyPathFetch();
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(1);
 
     const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
-    const applyLabelCall = calls.find(
-      ([url, init]) =>
-        String(url).includes("/issues/99/labels") && init?.method === "POST",
-    );
-    expect(applyLabelCall).toBeDefined();
-
     const commentCall = calls.find(
       ([url, init]) =>
-        String(url).includes("/issues/99/comments") && init?.method === "POST",
+        String(url).includes("/issues/6/comments") && init?.method === "POST",
     );
     expect(commentCall).toBeDefined();
     const commentBody = JSON.parse((commentCall?.[1]?.body as string) ?? "{}") as {
       body: string;
     };
+    expect(commentBody.body).toContain("binary patch path");
     expect(commentBody.body).toContain("lib/sneaky.ts");
   });
 
@@ -2300,8 +2303,8 @@ describe("publish-implement-patch — $GITHUB_STEP_SUMMARY (observability fix, 1
   });
 });
 
-describe("publish-implement-patch — Codex round 3: binary patches round-trip", () => {
-  it("applies and pushes a real binary file byte-for-byte when the capture step used --binary (round-trip proof)", async () => {
+describe("publish-implement-patch — factory envelope", () => {
+  it("rejects a real binary patch before any branch or PR write", async () => {
     // Reproduces exactly what the FIXED capture step
     // (`git diff --cached --binary`) produces for a real binary file —
     // not a hand-crafted patch, for the same reason the rename-exploit
@@ -2320,23 +2323,73 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
     git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]); // undo before main() runs against the same checkout
 
     process.env.PATCH_PATH = await writePatch(scratchDir, "binary.diff", binaryDiff);
-    stubHappyPathFetch();
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
 
     await main();
 
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("binary patch path");
+  });
 
-    const verifyDir = join(scratchDir, "verify-binary");
-    execFileSync("git", [
-      "clone",
-      "-q",
-      "--branch",
-      "feature/6-implement-workflow",
-      bareRemoteDir,
-      verifyDir,
-    ]);
-    const roundTripped = await readFile(join(verifyDir, "asset.bin"));
-    expect(roundTripped.equals(binaryBytes)).toBe(true);
+  it("rejects a captured binary patch when ignored attributes are absent at publish time", async () => {
+    await fsWriteFile(join(localCloneDir, ".gitignore"), ".gitattributes\n");
+    git(localCloneDir, ["add", ".gitignore"]);
+    git(localCloneDir, ["commit", "-q", "-m", "ignore local attributes"]);
+    await fsWriteFile(
+      join(localCloneDir, ".gitattributes"),
+      "lib/captured-as-binary.ts binary\n",
+    );
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(
+      join(localCloneDir, "lib", "captured-as-binary.ts"),
+      "export const capturedAsBinary = true;\n",
+    );
+    git(localCloneDir, ["add", "lib/captured-as-binary.ts"]);
+    const binaryDiff = execFileSync(
+      "git",
+      ["diff", "--cached", "--binary"],
+      { cwd: localCloneDir, encoding: "utf8" },
+    );
+    expect(binaryDiff).toContain("GIT binary patch");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    await rm(join(localCloneDir, ".gitattributes"));
+
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "ignored-attributes-binary.diff",
+      binaryDiff,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("captured binary patch path");
+    expect(body.body).toContain("lib/captured-as-binary.ts");
   });
 
   it("REJECTS (git apply fails) the OLD non---binary form as a sanity check that this test would have caught the bug", async () => {
@@ -2362,6 +2415,280 @@ describe("publish-implement-patch — Codex round 3: binary patches round-trip",
     expect(process.exitCode).toBe(1);
     const assetExists = await readFile(join(localCloneDir, "asset.bin")).catch(() => null);
     expect(assetExists).toBeNull();
+  });
+
+  it("rejects an applied patch with 401 changed logic lines", async () => {
+    const addedLines = Array.from(
+      { length: 401 },
+      (_, index) => `+export const value${index} = ${index};`,
+    ).join("\n");
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "too-large.diff",
+      `diff --git a/lib/large.ts b/lib/large.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/lib/large.ts
+@@ -0,0 +1,401 @@
+${addedLines}
+`,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("text churn is 401");
+  });
+
+  it("rejects an oversized output-only patch after an earlier runtime import", async () => {
+    const schemaPath = join(localCloneDir, "generated", "schema.json");
+    const consumerPath = join(localCloneDir, "app", "page.tsx");
+    await mkdir(dirname(schemaPath), { recursive: true });
+    await mkdir(dirname(consumerPath), { recursive: true });
+    await fsWriteFile(schemaPath, '{"enabled":false}\n');
+    await fsWriteFile(
+      consumerPath,
+      'import schema from "../generated/schema.json";\n\n' +
+        "export default function Page() {\n" +
+        "  return String(schema.enabled);\n" +
+        "}\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "seed runtime schema consumer"]);
+    const largeSchema = Object.fromEntries(
+      Array.from({ length: 401 }, (_, index) => [`field${index}`, index]),
+    );
+    await fsWriteFile(schemaPath, `${JSON.stringify(largeSchema, null, 2)}\n`);
+    git(localCloneDir, ["add", "-A"]);
+    const outputPatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "runtime-output.diff",
+      outputPatch,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain(
+      "text churn is 404 changed lines (0 logic, 0 test, 404 output)",
+    );
+    expect(git(bareRemoteDir, ["branch", "--list"])).not.toContain(
+      "feature/6-implement-workflow",
+    );
+  });
+
+  it.each([
+    "a/tests/payload.ts",
+    " tests/payload.ts",
+    "snowflake/fixtures/roast.json ",
+  ])(
+    "preserves authoritative path bytes when classifying %j",
+    async (repoRelativePath) => {
+      const absolutePath = join(localCloneDir, repoRelativePath);
+      await mkdir(dirname(absolutePath), { recursive: true });
+      await fsWriteFile(
+        absolutePath,
+        Array.from(
+          { length: 401 },
+          (_, index) => `export const value${index} = ${index};`,
+        ).join("\n") + "\n",
+      );
+      git(localCloneDir, ["add", "-A"]);
+      const generatedPatch = git(localCloneDir, [
+        "diff",
+        "--cached",
+        "--binary",
+      ]);
+      git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+      process.env.PATCH_PATH = await writePatch(
+        scratchDir,
+        "authoritative-path.diff",
+        generatedPatch,
+      );
+      const fetchMock = rejectionOnlyFetchMock();
+      stubFetch(fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      const failurePost = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/issues/6/comments") &&
+          init?.method === "POST",
+      );
+      const body = JSON.parse(
+        (failurePost?.[1]?.body as string) ?? "{}",
+      ) as { body: string };
+      expect(body.body).toContain("text churn is 401");
+    },
+  );
+
+  it.each([
+    { name: "unchanged", extraLine: "" },
+    { name: "edited", extraLine: "export const added = true;\n" },
+  ])(
+    "measures an $name large rename by changed lines rather than file length",
+    async ({ extraLine }) => {
+      const originalContent =
+        Array.from(
+          { length: 250 },
+          (_, index) => `export const value${index} = ${index};`,
+        ).join("\n") + "\n";
+      const oldPath = join(localCloneDir, "lib", "large-original.ts");
+      const newPath = join(localCloneDir, "lib", "large-renamed.ts");
+      await mkdir(dirname(oldPath), { recursive: true });
+      await fsWriteFile(oldPath, originalContent);
+      git(localCloneDir, ["add", "-A"]);
+      git(localCloneDir, ["commit", "-q", "-m", "seed large rename"]);
+      git(localCloneDir, [
+        "mv",
+        "lib/large-original.ts",
+        "lib/large-renamed.ts",
+      ]);
+      if (extraLine !== "") {
+        await fsWriteFile(newPath, originalContent + extraLine);
+      }
+      git(localCloneDir, ["add", "-A"]);
+      const renamePatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+      expect(renamePatch).toContain("similarity index");
+      git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+      process.env.PATCH_PATH = await writePatch(
+        scratchDir,
+        "large-rename.diff",
+        renamePatch,
+      );
+      stubHappyPathFetch();
+
+      await main();
+
+      expect(process.exitCode).toBeUndefined();
+      expect(
+        git(bareRemoteDir, [
+          "show",
+          "feature/6-implement-workflow:lib/large-renamed.ts",
+        ]),
+      ).toBe(originalContent + extraLine);
+      const branchPaths = git(bareRemoteDir, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "feature/6-implement-workflow",
+      ]).split("\n");
+      expect(branchPaths).toContain("lib/large-renamed.ts");
+      expect(branchPaths).not.toContain("lib/large-original.ts");
+    },
+  );
+
+  it("rejects a large test-to-logic rename even when rename detection reports zero churn", async () => {
+    const originalContent =
+      Array.from(
+        { length: 800 },
+        (_, index) => `export const value${index} = ${index};`,
+      ).join("\n") + "\n";
+    const oldPath = join(localCloneDir, "tests", "large-runtime.test.ts");
+    await mkdir(dirname(oldPath), { recursive: true });
+    await fsWriteFile(oldPath, originalContent);
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "seed large test module"]);
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    git(localCloneDir, [
+      "mv",
+      "tests/large-runtime.test.ts",
+      "lib/large-runtime.ts",
+    ]);
+    await fsWriteFile(
+      join(localCloneDir, "lib", "runtime-entry.ts"),
+      'export * from "./large-runtime.js";\n',
+    );
+    git(localCloneDir, ["add", "-A"]);
+    const renamePatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+    expect(renamePatch).toContain("similarity index 100%");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "test-to-logic-rename.diff",
+      renamePatch,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") && init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("cross-category rename/copy");
+    expect(body.body).toContain(
+      "tests/large-runtime.test.ts -> lib/large-runtime.ts",
+    );
+    expect(git(bareRemoteDir, ["branch", "--list"])).not.toContain(
+      "feature/6-implement-workflow",
+    );
+  });
+
+  it("rejects inert generated output mixed with logic in one factory commit", async () => {
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "mixed.diff",
+      `diff --git a/lib/parse.ts b/lib/parse.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/lib/parse.ts
+@@ -0,0 +1 @@
++export const parse = true;
+diff --git a/generated/schema.json b/generated/schema.json
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/generated/schema.json
+@@ -0,0 +1 @@
++{"roast": true}
+`,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("mixed with logic or tests");
   });
 });
 

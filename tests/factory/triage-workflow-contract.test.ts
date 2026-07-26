@@ -449,7 +449,7 @@ describe("bounded triage context contract", () => {
       '"repos/$REPO/issues/$ISSUE_NUMBER/labels/ready-to-implement"',
       'gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/labels"',
       '-f "labels[]=needs-triage"',
-      "for label in ready-to-spec needs-info wait-to-implement wontfix",
+      "for label in ready-for-conventional-implementation ready-to-spec needs-info wait-to-implement wontfix",
       'held_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")',
       "re-triage readiness hold verification failed",
       "exit 1",

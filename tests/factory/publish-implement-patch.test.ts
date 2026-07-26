@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +9,9 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
 
-const { main } = await import("../../scripts/factory/publish-implement-patch.mts");
+const { main, MAX_PATCH_BYTES } = await import(
+  "../../scripts/factory/publish-implement-patch.mts"
+);
 
 /**
  * Covers only the rejection paths that happen BEFORE any `git` command is
@@ -281,9 +283,53 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     );
   });
 
-  it("rejects an oversized patch artifact before ever invoking git", async () => {
+  it("allows an exactly 2 MiB patch artifact to reach git validation", async () => {
     const patchPath = join(workdir, "patch.diff");
-    await writeFile(patchPath, "x".repeat(3 * 1024 * 1024));
+    await writeFile(patchPath, "");
+    await truncate(patchPath, MAX_PATCH_BYTES);
+    process.env.PATCH_PATH = patchPath;
+
+    const { fetchMock } = mockFetch({
+      "POST /graphql": () =>
+        jsonResponse({
+          data: {
+            repository: {
+              issue: {
+                comments: {
+                  nodes: [
+                    {
+                      body:
+                        "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                        TRIAGE_COMMENT_MARKER,
+                      author: {
+                        __typename: "Bot",
+                        login: "github-actions",
+                      },
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+        jsonResponse({}, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(execFileSync)).toHaveBeenCalled();
+  });
+
+  it("rejects a 2 MiB plus one byte patch artifact before invoking git", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, "");
+    await truncate(patchPath, MAX_PATCH_BYTES + 1);
     process.env.PATCH_PATH = patchPath;
 
     const { fetchMock, calls } = mockFetch({
