@@ -715,6 +715,7 @@ function exactObjectProperties(
       !ts.isPropertyAssignment(property) ||
       ts.isComputedPropertyName(property.name)
     ) {
+      /* v8 ignore next -- the exact source registry rejects alternate adapter shapes first. */
       return undefined;
     }
     const name =
@@ -791,6 +792,7 @@ function enclosingFunction(node: ts.Node): ts.SignatureDeclaration | undefined {
     if (ts.isFunctionLike(current)) return current;
     current = current.parent;
   }
+  /* v8 ignore next -- the exact source registry fixes the process call inside its function. */
   return undefined;
 }
 
@@ -952,6 +954,7 @@ function runtimeCapabilityViolations(
         !importBinding &&
         (!directCall || adapterProcessCalls > 1)
       ) {
+        /* v8 ignore next -- the exact source registry rejects alternate process uses first. */
         reject(
           node,
           "the protected process binding may only be used by the one exact listTrackedPaths capability",
