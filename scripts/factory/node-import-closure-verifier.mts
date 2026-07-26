@@ -166,6 +166,9 @@ export interface NodeImportClosureResult {
 type InspectedPath =
   | { readonly absolutePath: string; readonly stats: Stats }
   | { readonly error: string };
+type RequestSnapshot =
+  | { readonly request: NodeImportClosureRequest }
+  | { readonly error: string };
 type ViolationKind = NodeImportClosureViolation["kind"];
 
 function finding(
@@ -190,13 +193,6 @@ function safeRelativePath(path: string): boolean {
           segment.length > 0 && segment !== "." && segment !== "..",
       )
   );
-}
-
-function denseArray(values: readonly unknown[]): boolean {
-  for (let index = 0; index < values.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(values, index)) return false;
-  }
-  return true;
 }
 
 function containedBy(parent: string, candidate: string): boolean {
@@ -345,11 +341,7 @@ function externalRule(value: unknown): value is NodeExternalModuleRule {
   );
 }
 
-function requestFailure(request: unknown): string | undefined {
-  if (typeof request !== "object" || request === null) {
-    return "closure evidence has an invalid runtime shape";
-  }
-  const value = request as Record<string, unknown>;
+function requestFailure(value: Record<string, unknown>): string | undefined {
   if (
     typeof value.repositoryRoot !== "string" ||
     typeof value.trustedRoot !== "string" ||
@@ -365,9 +357,7 @@ function requestFailure(request: unknown): string | undefined {
   const entrypoints = value.entrypoints;
   if (
     !safeRelativePath(value.trustedRoot) ||
-    !denseArray(entrypoints) ||
     entrypoints.length === 0 ||
-    entrypoints.length > MAX_NODE_CLOSURE_FILES ||
     entrypoints.some(
       (path) =>
         typeof path !== "string" ||
@@ -385,8 +375,6 @@ function requestFailure(request: unknown): string | undefined {
   }
   const rules = value.externalModules;
   if (
-    !denseArray(rules) ||
-    rules.length > MAX_NODE_CLOSURE_EDGES ||
     rules.some((rule) => !externalRule(rule)) ||
     new Set(
       rules.map((rule) => (rule as NodeExternalModuleRule).specifier),
@@ -395,6 +383,119 @@ function requestFailure(request: unknown): string | undefined {
     return "external module rules must be unique exact safe resolutions";
   }
   return undefined;
+}
+
+function snapshotRequest(request: unknown): RequestSnapshot {
+  if (typeof request !== "object" || request === null) {
+    return { error: "closure evidence has an invalid runtime shape" };
+  }
+  let repositoryRoot: unknown;
+  let trustedRoot: unknown;
+  let trustedSourceClass: unknown;
+  let rootsComplete: unknown;
+  let entrypointValues: unknown;
+  let externalModuleValues: unknown;
+  try {
+    const value = request as Record<string, unknown>;
+    repositoryRoot = value.repositoryRoot;
+    trustedRoot = value.trustedRoot;
+    trustedSourceClass = value.trustedSourceClass;
+    rootsComplete = value.rootsComplete;
+    entrypointValues = value.entrypoints;
+    externalModuleValues = value.externalModules;
+  } catch {
+    return { error: "closure evidence has an invalid runtime shape" };
+  }
+  let arraysValid: boolean;
+  try {
+    arraysValid =
+      Array.isArray(entrypointValues) &&
+      Array.isArray(externalModuleValues);
+  } catch {
+    return { error: "closure evidence has an invalid runtime shape" };
+  }
+  if (!arraysValid) {
+    return { error: "closure evidence has an invalid runtime shape" };
+  }
+  const entrypointArray = entrypointValues as unknown[];
+  const externalModuleArray = externalModuleValues as unknown[];
+
+  let entrypoints: unknown[];
+  try {
+    const length: unknown = entrypointArray.length;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_NODE_CLOSURE_FILES
+    ) {
+      return {
+        error: "source-qualified roots must be unique safe .mts paths",
+      };
+    }
+    entrypoints = [];
+    for (let index = 0; index < length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(entrypointArray, index)) {
+        return {
+          error: "source-qualified roots must be unique safe .mts paths",
+        };
+      }
+      entrypoints.push(entrypointArray[index]);
+    }
+  } catch {
+    return { error: "source-qualified roots must be unique safe .mts paths" };
+  }
+
+  let externalModules: unknown[];
+  try {
+    const length: unknown = externalModuleArray.length;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_NODE_CLOSURE_EDGES
+    ) {
+      return {
+        error: "external module rules must be unique exact safe resolutions",
+      };
+    }
+    externalModules = [];
+    for (let index = 0; index < length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(externalModuleArray, index)) {
+        return {
+          error: "external module rules must be unique exact safe resolutions",
+        };
+      }
+      const candidate = externalModuleArray[index];
+      if (typeof candidate !== "object" || candidate === null) {
+        externalModules.push(candidate);
+        continue;
+      }
+      const rule = candidate as Record<string, unknown>;
+      externalModules.push({
+        kind: rule.kind,
+        specifier: rule.specifier,
+        resolvedTarget: rule.resolvedTarget,
+      });
+    }
+  } catch {
+    return {
+      error: "external module rules must be unique exact safe resolutions",
+    };
+  }
+
+  const value: Record<string, unknown> = {
+    repositoryRoot,
+    trustedRoot,
+    trustedSourceClass,
+    rootsComplete,
+    entrypoints,
+    externalModules,
+  };
+  const invalid = requestFailure(value);
+  return invalid === undefined
+    ? { request: value as unknown as NodeImportClosureRequest }
+    : { error: invalid };
 }
 
 function externalFailure(
@@ -500,12 +601,13 @@ function failedResult(
 export function verifyNodeImportClosure(
   request: NodeImportClosureRequest,
 ): NodeImportClosureResult {
-  const invalid = requestFailure(request);
-  if (invalid !== undefined) {
+  const snapshot = snapshotRequest(request);
+  if ("error" in snapshot) {
     return failedResult([
-      finding("invalid-input", "<node-import-closure>", invalid),
+      finding("invalid-input", "<node-import-closure>", snapshot.error),
     ]);
   }
+  request = snapshot.request;
   let repositoryRoot: string;
   try {
     const stats = lstatSync(request.repositoryRoot);

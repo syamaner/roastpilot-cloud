@@ -906,6 +906,359 @@ describe("verifyNodeImportClosure request contract", () => {
     },
   );
 
+  it("copies entrypoints by numeric index without invoking a caller iterator", () => {
+    const entrypoints = ["scripts/factory/trusted/entry.mts"];
+    Object.defineProperty(entrypoints, Symbol.iterator, {
+      value: function* hostileIterator() {
+        yield "app/evil.mts";
+      },
+    });
+
+    expect(
+      verifyNodeImportClosure(request({ entrypoints })),
+    ).toEqual(
+      expect.objectContaining({
+        files: ["scripts/factory/trusted/entry.mts"],
+        violations: [],
+      }),
+    );
+  });
+
+  it("reads each caller-owned entrypoint index exactly once", () => {
+    const entrypoints: string[] = [];
+    let reads = 0;
+    Object.defineProperty(entrypoints, 0, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads === 1
+          ? "scripts/factory/trusted/entry.mts"
+          : "app/evil.mts";
+      },
+    });
+    entrypoints.length = 1;
+
+    expect(
+      verifyNodeImportClosure(request({ entrypoints })),
+    ).toEqual(
+      expect.objectContaining({
+        files: ["scripts/factory/trusted/entry.mts"],
+        violations: [],
+      }),
+    );
+    expect(reads).toBe(1);
+  });
+
+  it("reads every top-level request field exactly once", () => {
+    const dynamic = request();
+    const reads: Record<string, number> = {};
+    const firstThen = (
+      field: string,
+      first: unknown,
+      later: unknown,
+    ): PropertyDescriptor => ({
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads[field] = (reads[field] ?? 0) + 1;
+        return reads[field] === 1 ? first : later;
+      },
+    });
+    Object.defineProperties(dynamic, {
+      repositoryRoot: firstThen("repositoryRoot", repositoryRoot, "/missing"),
+      trustedRoot: firstThen(
+        "trustedRoot",
+        "scripts/factory/trusted",
+        "app",
+      ),
+      trustedSourceClass: firstThen(
+        "trustedSourceClass",
+        "protected-glue",
+        "invalid",
+      ),
+      rootsComplete: firstThen("rootsComplete", true, false),
+      entrypoints: firstThen(
+        "entrypoints",
+        ["scripts/factory/trusted/entry.mts"],
+        ["app/evil.mts"],
+      ),
+      externalModules: firstThen("externalModules", [], [
+        {
+          kind: "node-builtin",
+          specifier: "node:child_process",
+          resolvedTarget: "node:child_process",
+        },
+      ]),
+    });
+
+    expect(verifyNodeImportClosure(dynamic)).toEqual(
+      expect.objectContaining({
+        files: ["scripts/factory/trusted/entry.mts"],
+        violations: [],
+      }),
+    );
+    expect(reads).toEqual({
+      repositoryRoot: 1,
+      trustedRoot: 1,
+      trustedSourceClass: 1,
+      rootsComplete: 1,
+      entrypoints: 1,
+      externalModules: 1,
+    });
+  });
+
+  it("reads each external rule field exactly once", async () => {
+    await put(
+      "scripts/factory/trusted/entry.mts",
+      'import { readFileSync } from "node:fs";\nvoid readFileSync;\n',
+    );
+    const reads: Record<string, number> = {};
+    const firstThen = (
+      field: string,
+      first: unknown,
+      later: unknown,
+    ): PropertyDescriptor => ({
+      enumerable: true,
+      get() {
+        reads[field] = (reads[field] ?? 0) + 1;
+        return reads[field] === 1 ? first : later;
+      },
+    });
+    const rule = Object.defineProperties({}, {
+      kind: firstThen("kind", "node-builtin", "locked-package"),
+      specifier: firstThen("specifier", "node:fs", "node:child_process"),
+      resolvedTarget: firstThen(
+        "resolvedTarget",
+        "node:fs",
+        "node:child_process",
+      ),
+    });
+
+    expect(
+      verifyNodeImportClosure(
+        request({
+          externalModules: [rule as NodeImportClosureRequest["externalModules"][number]],
+        }),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        files: ["scripts/factory/trusted/entry.mts"],
+        edgeCount: 1,
+        violations: [],
+      }),
+    );
+    expect(reads).toEqual({ kind: 1, specifier: 1, resolvedTarget: 1 });
+  });
+
+  it("reads each caller-owned external rule index exactly once", async () => {
+    await put(
+      "scripts/factory/trusted/entry.mts",
+      'import { readFileSync } from "node:fs";\nvoid readFileSync;\n',
+    );
+    const externalModules: NodeImportClosureRequest["externalModules"][number][] =
+      [];
+    let reads = 0;
+    Object.defineProperty(externalModules, 0, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads === 1
+          ? {
+              kind: "node-builtin",
+              specifier: "node:fs",
+              resolvedTarget: "node:fs",
+            }
+          : {
+              kind: "node-builtin",
+              specifier: "node:child_process",
+              resolvedTarget: "node:child_process",
+            };
+      },
+    });
+    externalModules.length = 1;
+
+    expect(
+      verifyNodeImportClosure(request({ externalModules })),
+    ).toEqual(
+      expect.objectContaining({
+        files: ["scripts/factory/trusted/entry.mts"],
+        edgeCount: 1,
+        violations: [],
+      }),
+    );
+    expect(reads).toBe(1);
+  });
+
+  it("fails closed when a top-level request accessor throws", () => {
+    const dynamic = request();
+    Object.defineProperty(dynamic, "trustedRoot", {
+      get() {
+        throw new Error("hostile getter");
+      },
+    });
+
+    expectViolation(
+      verifyNodeImportClosure(dynamic),
+      "invalid-input",
+      "invalid runtime shape",
+    );
+  });
+
+  it("fails closed when an entrypoint index accessor throws", () => {
+    const entrypoints = new Proxy(
+      ["scripts/factory/trusted/entry.mts"],
+      {
+        get(target, property, receiver) {
+          if (property === "0") throw new Error("hostile index");
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    expectViolation(
+      verifyNodeImportClosure(request({ entrypoints })),
+      "invalid-input",
+      "source-qualified roots",
+    );
+  });
+
+  it("fails closed when an external rule accessor throws", () => {
+    const rule = Object.defineProperty({}, "kind", {
+      get() {
+        throw new Error("hostile getter");
+      },
+    });
+
+    expectViolation(
+      verifyNodeImportClosure(
+        request({
+          externalModules: [rule as NodeImportClosureRequest["externalModules"][number]],
+        }),
+      ),
+      "invalid-input",
+      "external module rules",
+    );
+  });
+
+  it.each(["entrypoints", "externalModules"] as const)(
+    "rejects a non-array %s field",
+    (field) => {
+      expectViolation(
+        verifyNodeImportClosure(
+          request({
+            [field]: {},
+          } as Partial<NodeImportClosureRequest>),
+        ),
+        "invalid-input",
+        "invalid runtime shape",
+      );
+    },
+  );
+
+  it.each(["entrypoints", "externalModules"] as const)(
+    "fails closed when a revoked array proxy backs %s",
+    (field) => {
+      const { proxy, revoke } = Proxy.revocable([], {});
+      revoke();
+
+      expectViolation(
+        verifyNodeImportClosure(
+          request({
+            [field]: proxy,
+          } as Partial<NodeImportClosureRequest>),
+        ),
+        "invalid-input",
+        "invalid runtime shape",
+      );
+    },
+  );
+
+  it.each([
+    ["entrypoints", MAX_NODE_CLOSURE_FILES] as const,
+    ["externalModules", MAX_NODE_CLOSURE_EDGES] as const,
+  ])("checks the %s ceiling before reading an index", (field, limit) => {
+    let indexReads = 0;
+    const values = new Proxy(new Array<unknown>(limit + 1).fill(undefined), {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property)) {
+          indexReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expectViolation(
+      verifyNodeImportClosure(
+        request({
+          [field]: values,
+        } as Partial<NodeImportClosureRequest>),
+      ),
+      "invalid-input",
+      field === "entrypoints"
+        ? "source-qualified roots"
+        : "external module rules",
+    );
+    expect(indexReads).toBe(0);
+  });
+
+  it.each([
+    ["entrypoints", ["scripts/factory/trusted/entry.mts"], MAX_NODE_CLOSURE_FILES] as const,
+    ["externalModules", [], MAX_NODE_CLOSURE_EDGES] as const,
+  ])("reads the %s length exactly once", (field, target, limit) => {
+    let lengthReads = 0;
+    const values = new Proxy([...target], {
+      get(array, property, receiver) {
+        if (property === "length") {
+          lengthReads += 1;
+          return lengthReads === 1 ? array.length : limit + 1;
+        }
+        return Reflect.get(array, property, receiver);
+      },
+    });
+
+    expect(
+      verifyNodeImportClosure(
+        request({
+          [field]: values,
+        } as Partial<NodeImportClosureRequest>),
+      ),
+    ).toEqual(expect.objectContaining({ violations: [] }));
+    expect(lengthReads).toBe(1);
+  });
+
+  it.each([
+    ["entrypoints", "1"] as const,
+    ["externalModules", "1"] as const,
+    ["entrypoints", 1.5] as const,
+    ["entrypoints", -1] as const,
+  ])("rejects a non-bounded-integer %s length of %j", (field, length) => {
+    const target =
+      field === "entrypoints"
+        ? ["scripts/factory/trusted/entry.mts"]
+        : [];
+    const values = new Proxy(target, {
+      get(array, property, receiver) {
+        return property === "length"
+          ? length
+          : Reflect.get(array, property, receiver);
+      },
+    });
+
+    expectViolation(
+      verifyNodeImportClosure(
+        request({
+          [field]: values,
+        } as Partial<NodeImportClosureRequest>),
+      ),
+      "invalid-input",
+      field === "entrypoints"
+        ? "source-qualified roots"
+        : "external module rules",
+    );
+  });
+
   it.each(["entrypoints", "externalModules"] as const)(
     "rejects a sparse %s array",
     (field) => {
