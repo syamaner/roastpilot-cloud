@@ -7,7 +7,6 @@
  * catches local, uncommitted edits during preflight.
  */
 
-import { execFileSync } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -19,8 +18,8 @@ import {
 } from "node:fs";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { listTrackedPaths } from "./node-process-capability.mts";
 
-const MAX_TRACKED_PATH_LIST_BYTES = 16 * 1024 * 1024;
 const DISALLOWED_FORMAT_CHARACTER_PATTERN =
   /\p{Default_Ignorable_Code_Point}/gu;
 const LOG_UNSAFE_CHARACTER_PATTERN =
@@ -78,7 +77,7 @@ function advancePosition(
     const codePoint = text.codePointAt(index)!;
     const character = String.fromCodePoint(codePoint);
     if (character === "\r") {
-      index += text[index + 1] === "\n" ? 2 : 1;
+      index += text.charAt(index + 1) === "\n" ? 2 : 1;
       line += 1;
       column = 1;
     } else if (
@@ -171,7 +170,7 @@ export function scanTrackedPaths(
 
   for (const [index, path] of trackedPaths.entries()) {
     findings.push(...findInvisibleFormatCharacters(path, path, "path"));
-    const rawPath = rawTrackedPaths?.[index];
+    const rawPath = rawTrackedPaths?.at(index);
     const hasExactUtf8Name =
       rawPath === undefined || Buffer.from(path, "utf8").equals(rawPath);
     if (hasExactUtf8Name && allowlistedPaths.has(path)) {
@@ -288,12 +287,8 @@ export function loadTrackedWorkingTreeEntry(
 export function scanRepository(
   repositoryRoot: string,
 ): InvisibleFormatScanResult {
-  const resolvedRoot = resolve(repositoryRoot);
-  const trackedPathOutput = execFileSync("git", ["ls-files", "-z"], {
-    cwd: resolvedRoot,
-    maxBuffer: MAX_TRACKED_PATH_LIST_BYTES,
-  });
-  const rawTrackedPaths = trackedPathOutput
+  const trackedPathList = listTrackedPaths(repositoryRoot);
+  const rawTrackedPaths = trackedPathList.rawTrackedPaths
     .toString("latin1")
     .split("\0")
     .filter(Boolean)
@@ -303,9 +298,9 @@ export function scanRepository(
     trackedPaths,
     (path, index) =>
       loadTrackedWorkingTreeEntry(
-        resolvedRoot,
+        trackedPathList.repositoryRoot,
         path,
-        rawTrackedPaths[index],
+        rawTrackedPaths.at(index),
       ),
     ALLOWLISTED_TRACKED_PATHS,
     rawTrackedPaths,

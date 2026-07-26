@@ -1,8 +1,8 @@
 /**
  * Verify the bounded Node static module closure required by D117-D118.
  *
- * Slice 120c-2a also exposes a combined repository-runtime verifier. Neither
- * path activates or declares any live job compliant.
+ * The combined verifier admits only D126's exact protected adapter capability.
+ * Neither path activates or declares any live job compliant.
  */
 
 import {
@@ -11,6 +11,7 @@ import {
   realpathSync,
   type Stats,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve as resolveImport } from "import-meta-resolve";
@@ -246,6 +247,8 @@ const EXACT_CHILD_PROCESS_SPECIFIERS = new Set([
   '"node:child_process"',
   "'node:child_process'",
 ]);
+const NODE_PROCESS_CAPABILITY_ADAPTER_SOURCE_SHA256 =
+  "650b5a7ed5f7fc038b21962c0d9176e62f744958031842c62e34870ab7c210e4";
 
 function runtimeForbiddenModule(specifier: string): boolean {
   for (const forbidden of RUNTIME_FORBIDDEN_MODULES) {
@@ -649,6 +652,167 @@ function exactAdapterProcessImport(
   );
 }
 
+function adapterSourceSha256(source: ts.SourceFile): string {
+  return createHash("sha256").update(source.text, "utf8").digest("hex");
+}
+
+function exactString(expression: ts.Expression, value: string): boolean {
+  const unwrapped = unwrappedExpression(expression);
+  return ts.isStringLiteralLike(unwrapped) && unwrapped.text === value;
+}
+
+function exactNumber(expression: ts.Expression, value: number): boolean {
+  const unwrapped = unwrappedExpression(expression);
+  return ts.isNumericLiteral(unwrapped) && Number(unwrapped.text) === value;
+}
+
+function exactBoolean(expression: ts.Expression, value: boolean): boolean {
+  const unwrapped = unwrappedExpression(expression);
+  return unwrapped.kind ===
+    (value ? ts.SyntaxKind.TrueKeyword : ts.SyntaxKind.FalseKeyword);
+}
+
+function exactStringArray(
+  expression: ts.Expression,
+  values: readonly string[],
+): boolean {
+  const unwrapped = unwrappedExpression(expression);
+  return (
+    ts.isArrayLiteralExpression(unwrapped) &&
+    unwrapped.elements.length === values.length &&
+    unwrapped.elements.every(
+      (element, index) =>
+        ts.isExpression(element) && exactString(element, values[index]!),
+    )
+  );
+}
+
+function exactPropertyPath(
+  expression: ts.Expression,
+  path: readonly string[],
+): boolean {
+  let current = unwrappedExpression(expression);
+  const names: string[] = [];
+  while (ts.isPropertyAccessExpression(current)) {
+    if (current.questionDotToken !== undefined) return false;
+    names.unshift(current.name.text);
+    current = unwrappedExpression(current.expression);
+  }
+  return (
+    ts.isIdentifier(current) &&
+    [current.text, ...names].join(".") === path.join(".")
+  );
+}
+
+function exactObjectProperties(
+  expression: ts.Expression,
+): Map<string, ts.Expression> | undefined {
+  const unwrapped = unwrappedExpression(expression);
+  if (!ts.isObjectLiteralExpression(unwrapped)) return undefined;
+  const properties = new Map<string, ts.Expression>();
+  for (const property of unwrapped.properties) {
+    if (
+      !ts.isPropertyAssignment(property) ||
+      ts.isComputedPropertyName(property.name)
+    ) {
+      return undefined;
+    }
+    const name =
+      ts.isIdentifier(property.name) ||
+      ts.isStringLiteralLike(property.name) ||
+      ts.isNumericLiteral(property.name)
+        ? property.name.text
+        : undefined;
+    if (name === undefined || properties.has(name)) return undefined;
+    properties.set(name, property.initializer);
+  }
+  return properties;
+}
+
+function exactAdapterEnvironment(expression: ts.Expression): boolean {
+  const properties = exactObjectProperties(expression);
+  const expected = new Map([
+    ["GIT_CONFIG_COUNT", "1"],
+    ["GIT_CONFIG_GLOBAL", "/dev/null"],
+    ["GIT_CONFIG_KEY_0", "core.fsmonitor"],
+    ["GIT_CONFIG_NOSYSTEM", "1"],
+    ["GIT_CONFIG_VALUE_0", "false"],
+    ["GIT_OPTIONAL_LOCKS", "0"],
+    ["GIT_TERMINAL_PROMPT", "0"],
+    ["LC_ALL", "C"],
+  ]);
+  return (
+    properties !== undefined &&
+    properties.size === expected.size &&
+    [...expected].every(([name, value]) => {
+      const property = properties.get(name);
+      return property !== undefined && exactString(property, value);
+    })
+  );
+}
+
+function exactAdapterSpawnOptions(expression: ts.Expression): boolean {
+  const properties = exactObjectProperties(expression);
+  if (properties === undefined || properties.size !== 9) return false;
+  const cwd = properties.get("cwd");
+  const encoding = properties.get("encoding");
+  const environment = properties.get("env");
+  const killSignal = properties.get("killSignal");
+  const maxBuffer = properties.get("maxBuffer");
+  const shell = properties.get("shell");
+  const stdio = properties.get("stdio");
+  const timeout = properties.get("timeout");
+  const windowsHide = properties.get("windowsHide");
+  return (
+    cwd !== undefined &&
+    exactPropertyPath(cwd, ["rootIdentity", "canonicalPath"]) &&
+    encoding !== undefined &&
+    exactString(encoding, "buffer") &&
+    environment !== undefined &&
+    exactAdapterEnvironment(environment) &&
+    killSignal !== undefined &&
+    exactString(killSignal, "SIGKILL") &&
+    maxBuffer !== undefined &&
+    exactNumber(maxBuffer, 16_777_216) &&
+    shell !== undefined &&
+    exactBoolean(shell, false) &&
+    stdio !== undefined &&
+    exactStringArray(stdio, ["ignore", "pipe", "pipe"]) &&
+    timeout !== undefined &&
+    exactNumber(timeout, 30_000) &&
+    windowsHide !== undefined &&
+    exactBoolean(windowsHide, true)
+  );
+}
+
+function enclosingFunction(node: ts.Node): ts.SignatureDeclaration | undefined {
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionLike(current)) return current;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function exactAdapterProcessCall(node: ts.CallExpression): boolean {
+  const owner = enclosingFunction(node);
+  return (
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "spawnSync" &&
+    node.arguments.length === 3 &&
+    exactString(node.arguments[0]!, "/usr/bin/git") &&
+    exactStringArray(node.arguments[1]!, ["ls-files", "-z"]) &&
+    exactAdapterSpawnOptions(node.arguments[2]!) &&
+    owner !== undefined &&
+    ts.isFunctionDeclaration(owner) &&
+    owner.name?.text === "listTrackedPaths" &&
+    owner.parameters.length === 1 &&
+    ts.isIdentifier(owner.parameters[0]!.name) &&
+    owner.parameters[0]!.name.text === "repositoryRoot" &&
+    owner.parameters[0]!.type?.kind === ts.SyntaxKind.StringKeyword
+  );
+}
+
 function runtimeModuleSpecifier(
   node: ts.Node,
 ): ts.Expression | undefined {
@@ -668,6 +832,7 @@ function runtimeCapabilityViolations(
 ): NodeImportClosureViolation[] {
   const violations: NodeImportClosureViolation[] = [];
   const scopes = collectRuntimeScopes(source);
+  let adapterProcessCalls = 0;
 
   function reject(node: ts.Node, detail: string): void {
     if (violations.length > 0) return;
@@ -679,6 +844,18 @@ function runtimeCapabilityViolations(
         sourceLine(source, node),
       ),
     );
+  }
+
+  if (
+    path === NODE_PROCESS_CAPABILITY_ADAPTER_PATH &&
+    adapterSourceSha256(source) !==
+      NODE_PROCESS_CAPABILITY_ADAPTER_SOURCE_SHA256
+  ) {
+    reject(
+      source,
+      "the protected process adapter does not match the exact D126 source registry",
+    );
+    return violations;
   }
 
   const pending: ts.Node[] = [source];
@@ -766,10 +943,18 @@ function runtimeCapabilityViolations(
         ts.isImportSpecifier(node.parent) &&
         node.parent.name === node &&
         node.parent.propertyName === undefined;
-      if (!importBinding) {
+      const directCall =
+        ts.isCallExpression(node.parent) &&
+        node.parent.expression === node &&
+        exactAdapterProcessCall(node.parent);
+      if (directCall) adapterProcessCalls += 1;
+      if (
+        !importBinding &&
+        (!directCall || adapterProcessCalls > 1)
+      ) {
         reject(
           node,
-          "the protected process binding cannot be used before capability activation",
+          "the protected process binding may only be used by the one exact listTrackedPaths capability",
         );
       }
     }
@@ -1468,6 +1653,19 @@ function verifyNodeClosure(
         }
       }
     }
+    if (
+      mode === "executable" &&
+      canonicalPath === NODE_PROCESS_CAPABILITY_ADAPTER_PATH &&
+      adapterProcessImports !== 1
+    ) {
+      violations.push(
+        finding(
+          "unsafe-runtime-capability",
+          canonicalPath,
+          "the protected process adapter must have one exact child-process import",
+        ),
+      );
+    }
   }
 
   if (violations.length > 0) return failedResult(violations);
@@ -1498,8 +1696,8 @@ export function verifyNodeImportClosure(
  * Verify static provenance and repository runtime capabilities in one read.
  *
  * Both analyzers receive the same canonical path, stable source bytes, decoded
- * text, and TypeScript AST. This analyzer-only slice adds no callable process
- * adapter and activates no live workflow.
+ * text, and TypeScript AST. The only process capability is D126's exact
+ * protected `listTrackedPaths` adapter; no live workflow is activated.
  *
  * @param request - Complete roots and reviewed external resolutions.
  * @returns Canonical success-only closure evidence or deterministic findings.
