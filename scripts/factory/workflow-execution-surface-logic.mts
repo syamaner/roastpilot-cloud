@@ -30,6 +30,8 @@ export const MAX_WORKFLOW_IDENTIFIER_BYTES = 1_024;
 export const MAX_WORKFLOW_VIOLATIONS = 256;
 export const MAX_WORKFLOW_VIOLATION_BYTES = 1_048_576;
 
+const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 type BindingScope = "workflow" | "job" | "step";
 type ScalarValue = string | number | boolean;
 
@@ -415,11 +417,30 @@ function canonicalBindings(
     return undefined;
   }
   const bindings: WorkflowBindingEvidence[] = [];
+  const caseFoldedNames = new Set<string>();
   for (const name of Object.keys(value).sort()) {
+    const isPortableName = ENVIRONMENT_NAME_PATTERN.test(name);
+    const caseFoldedName = isPortableName
+      ? name.toUpperCase()
+      : undefined;
+    const hasCaseCollision =
+      caseFoldedName !== undefined &&
+      caseFoldedNames.has(caseFoldedName);
+    if (caseFoldedName !== undefined) {
+      caseFoldedNames.add(caseFoldedName);
+    }
+    if (!isPortableName || hasCaseCollision) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line,
+        subject,
+        detail:
+          "environment binding names must be portable ASCII and unique under case-insensitive runner semantics",
+      });
+      continue;
+    }
     const scalar = scalarValue(value[name]);
     if (
-      name.length === 0 ||
-      containsExpression(name) ||
       scalar === undefined ||
       (typeof scalar === "string" && containsExpression(scalar))
     ) {
@@ -682,17 +703,16 @@ export function canonicalizeWorkflowExecutionSurface(
       // yaml rejects when its weighted count reaches this exclusive bound.
       maxAliasCount: MAX_WORKFLOW_ALIASES + 1,
     }) as unknown;
-  } catch (error: unknown) {
-    return {
-      violations: [
-        {
-          kind: "resource-limit",
-          line: 1,
-          subject: "<workflow>",
-          detail: `workflow alias expansion is invalid: ${(error as Error).message}`,
-        },
-      ],
-    };
+  } catch {
+    const violations = createViolationAccumulator();
+    addViolation(violations, {
+      kind: "resource-limit",
+      line: 1,
+      subject: "<workflow>",
+      detail:
+        "workflow alias expansion is invalid or exceeds the bounded expansion limit",
+    });
+    return { violations: violations.entries };
   }
   if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
     return {

@@ -373,13 +373,13 @@ ${malformedSteps}
 on: push
 env:
   ? "${name}"
-  : value
+  : "${"$"}{{"
 jobs:
   verify:
     runs-on: ubuntu
     steps: []
 `;
-    const baseName = "${{";
+    const baseName = "A";
     const baseline = violations(source(baseName));
     const baselineBytes = Buffer.byteLength(
       JSON.stringify(baseline),
@@ -474,6 +474,99 @@ jobs:
         },
       ],
     });
+  });
+
+  it.each(["workflow", "job", "step"] as const)(
+    "rejects case-colliding %s environment names in either declaration order",
+    (scope) => {
+      const source = (bindings: readonly string[]): string => {
+        const environment = [
+          "env:",
+          ...bindings.map((binding) => `  ${binding}`),
+        ];
+        const workflowEnvironment =
+          scope === "workflow" ? environment : [];
+        const jobEnvironment =
+          scope === "job"
+            ? environment.map((line) => `    ${line}`)
+            : [];
+        const stepEnvironment =
+          scope === "step"
+            ? environment.map((line) => `        ${line}`)
+            : [];
+        return [
+          "on: push",
+          ...workflowEnvironment,
+          "jobs:",
+          "  verify:",
+          "    runs-on: windows-latest",
+          ...jobEnvironment,
+          "    steps:",
+          "      - shell: pwsh",
+          "        run: Write-Output $env:TOKEN",
+          ...stepEnvironment,
+        ].join("\n");
+      };
+
+      for (const bindings of [
+        ["TOKEN: upper", "token: lower"],
+        ["token: lower", "TOKEN: upper"],
+      ]) {
+        expect(violations(source(bindings))).toContainEqual(
+          expect.objectContaining({
+            kind: "unsupported-execution-shape",
+            detail: expect.stringContaining(
+              "unique under case-insensitive runner semantics",
+            ),
+          }),
+        );
+      }
+    },
+  );
+
+  it("accepts portable mixed-case environment names without collisions", () => {
+    expect(
+      evidence(`
+on: push
+env:
+  Mixed_Case1: static
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: Write-Output $env:Mixed_Case1
+`),
+    ).toMatchObject({
+      workflowEnvironment: [
+        {
+          name: "Mixed_Case1",
+          value: "static",
+          scope: "workflow",
+        },
+      ],
+    });
+  });
+
+  it("rejects non-portable environment names", () => {
+    expect(
+      violations(`
+on: push
+env:
+  NON-PORTABLE: static
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps: []
+`),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: "unsupported-execution-shape",
+        detail: expect.stringContaining(
+          "environment binding names must be portable ASCII",
+        ),
+      }),
+    );
   });
 
   it("retains workflow-default provenance when no override exists", () => {
@@ -1171,6 +1264,30 @@ describe("ordinary-run workflow resource ceilings", () => {
     expect(violations(source(MAX_WORKFLOW_ALIASES + 1))).toContainEqual(
       expect.objectContaining({ kind: "resource-limit" }),
     );
+  });
+
+  it("bounds unresolved-alias diagnostics at the source-size ceiling", () => {
+    const prefix = "on: push\njobs:\n  verify: *";
+    const aliasName = "a".repeat(
+      MAX_WORKFLOW_SOURCE_BYTES - Buffer.byteLength(prefix),
+    );
+    const source = `${prefix}${aliasName}`;
+    expect(Buffer.byteLength(source)).toBe(MAX_WORKFLOW_SOURCE_BYTES);
+
+    const result = violations(source);
+    expect(result).toEqual([
+      {
+        kind: "resource-limit",
+        line: 1,
+        subject: "<workflow>",
+        detail:
+          "workflow alias expansion is invalid or exceeds the bounded expansion limit",
+      },
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(
+      MAX_WORKFLOW_VIOLATION_BYTES,
+    );
+    expect(JSON.stringify(result)).not.toContain(aliasName.slice(0, 128));
   });
 
   it("rejects amplified nested aliases", () => {
