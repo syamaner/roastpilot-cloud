@@ -2343,6 +2343,55 @@ describe("publish-implement-patch — factory envelope", () => {
     expect(body.body).toContain("binary patch path");
   });
 
+  it("rejects a captured binary patch when ignored attributes are absent at publish time", async () => {
+    await fsWriteFile(join(localCloneDir, ".gitignore"), ".gitattributes\n");
+    git(localCloneDir, ["add", ".gitignore"]);
+    git(localCloneDir, ["commit", "-q", "-m", "ignore local attributes"]);
+    await fsWriteFile(
+      join(localCloneDir, ".gitattributes"),
+      "lib/captured-as-binary.ts binary\n",
+    );
+    await mkdir(join(localCloneDir, "lib"), { recursive: true });
+    await fsWriteFile(
+      join(localCloneDir, "lib", "captured-as-binary.ts"),
+      "export const capturedAsBinary = true;\n",
+    );
+    git(localCloneDir, ["add", "lib/captured-as-binary.ts"]);
+    const binaryDiff = execFileSync(
+      "git",
+      ["diff", "--cached", "--binary"],
+      { cwd: localCloneDir, encoding: "utf8" },
+    );
+    expect(binaryDiff).toContain("GIT binary patch");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    await rm(join(localCloneDir, ".gitattributes"));
+
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "ignored-attributes-binary.diff",
+      binaryDiff,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      git(bareRemoteDir, ["branch", "--list", "feature/6-implement-workflow"]),
+    ).toBe("");
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain("captured binary patch path");
+    expect(body.body).toContain("lib/captured-as-binary.ts");
+  });
+
   it("REJECTS (git apply fails) the OLD non---binary form as a sanity check that this test would have caught the bug", async () => {
     // Not testing our own code here — proving the counterfactual: the
     // PRE-fix `git diff --cached` (no --binary) form really does fail to
@@ -2399,7 +2448,7 @@ ${addedLines}
     const body = JSON.parse(
       (failurePost?.[1]?.body as string) ?? "{}",
     ) as { body: string };
-    expect(body.body).toContain("logic churn is 401");
+    expect(body.body).toContain("logic/test churn is 401");
   });
 
   it.each([
@@ -2444,7 +2493,7 @@ ${addedLines}
       const body = JSON.parse(
         (failurePost?.[1]?.body as string) ?? "{}",
       ) as { body: string };
-      expect(body.body).toContain("logic churn is 401");
+      expect(body.body).toContain("logic/test churn is 401");
     },
   );
 
@@ -2504,7 +2553,7 @@ ${addedLines}
     },
   );
 
-  it("rejects data/fixture output mixed with logic in one factory commit", async () => {
+  it("rejects inert generated output mixed with logic in one factory commit", async () => {
     process.env.PATCH_PATH = await writePatch(
       scratchDir,
       "mixed.diff",
@@ -2515,11 +2564,11 @@ index 0000000..1111111
 +++ b/lib/parse.ts
 @@ -0,0 +1 @@
 +export const parse = true;
-diff --git a/snowflake/fixtures/roast.json b/snowflake/fixtures/roast.json
+diff --git a/generated/schema.json b/generated/schema.json
 new file mode 100644
 index 0000000..2222222
 --- /dev/null
-+++ b/snowflake/fixtures/roast.json
++++ b/generated/schema.json
 @@ -0,0 +1 @@
 +{"roast": true}
 `,

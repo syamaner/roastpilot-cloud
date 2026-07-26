@@ -348,6 +348,12 @@ interface AuthoritativePatchAnalysis {
  *    index only. `--cached` never touches the working tree. If this
  *    fails, the patch is malformed/inapplicable — same fail-closed
  *    outcome the old `--numstat` failure produced.
+ *    Before application, `git apply --numstat -z <patch>` inspects the
+ *    CAPTURED patch's own encoding and rejects every binary row. This query
+ *    is deliberately separate from the applied-tree statistics below:
+ *    attributes present only in the implementer's ignored worktree can make
+ *    capture emit a `GIT binary patch`, then disappear before the publisher
+ *    regenerates an otherwise-textual scratch-tree diff.
  * 3. `git diff-index --cached --name-status -z -M -C --find-copies-harder
  *    HEAD` — asks git which PATHS differ between HEAD and the
  *    now-patched scratch index. This is git's own TREE comparison, not a
@@ -422,6 +428,45 @@ async function getAuthoritativePatchAnalysis(
   const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
+    let capturedNumstatOutput: string;
+    try {
+      capturedNumstatOutput = execFileSync(
+        "git",
+        ["apply", "--numstat", "-z", patchPath],
+        {
+          encoding: "utf8",
+          maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+        },
+      );
+    } catch (err) {
+      throw new PublishRejection(
+        `could not inspect the captured patch encoding: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let capturedLineStats: FactoryPatchLineStat[];
+    try {
+      capturedLineStats = parseNumstatZ(capturedNumstatOutput);
+    } catch (err) {
+      throw new PublishRejection(
+        `captured patch returned malformed changed-line statistics: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const capturedBinaryPaths = capturedLineStats
+      .filter((stat) => stat.additions === null || stat.deletions === null)
+      .flatMap((stat) =>
+        stat.sourcePath === undefined
+          ? [stat.path]
+          : [stat.sourcePath, stat.path],
+      )
+      .sort();
+    if (capturedBinaryPaths.length > 0) {
+      throw new PublishRejection(
+        `captured binary patch path(s) require conventional execution: ` +
+          capturedBinaryPaths.join(", "),
+      );
+    }
     try {
       execFileSync("git", ["read-tree", "HEAD"], {
         env,

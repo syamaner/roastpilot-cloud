@@ -153,12 +153,13 @@ path:
 
 - **Factory-dispatchable** means one issue, one publisher commit, and one PR
   today. Until the publisher has an independent pre-publish diff-review stage,
-  its technical envelope is exact and fail-closed: at most 400 changed logic
-  lines, at most 600 changed test lines, no binary patch, and no mix of
-  data/fixtures/generated/docs with logic or tests. Migrations are logic. The
-  publisher classifies the applied scratch-index diff before pushing. Route a
-  materially larger, mixed, or otherwise pre-open-`qa`-triggering shape to
-  conventional execution instead.
+  its technical envelope is exact and fail-closed: at most 400 combined
+  changed logic-and-test lines; no binary patch; and no mix of allowlisted inert
+  data/fixtures/generated/design-doc output with logic or tests. Migrations and
+  operational or unknown documentation are logic. The publisher classifies the
+  captured patch encoding and applied scratch-index diff before pushing. Route
+  a materially larger, mixed-output, or otherwise pre-open-`qa`-triggering
+  shape to conventional execution instead.
 - **Conventional/interactive** may plan multiple ordered slice PRs and may use a
   justified materially-larger unit, because the lead can run the required
   independent pre-open review and create separate commits. A triage-complete
@@ -218,8 +219,9 @@ exception. The load-bearing points:
   cohesive diff may proceed. `factory.md` §5 uses this target during triage.
   Test files are excluded from the logic estimate, but a test-file diff over
   600 lines (exact threshold), or otherwise load-bearing test quality, requires
-  a `qa` reviewer pass pre-open; because the factory cannot run that pass before
-  publishing today, route that candidate to conventional execution too.
+  a `qa` reviewer pass pre-open. The factory's stricter combined 400-line
+  envelope routes such a candidate to conventional execution before that
+  trigger is reached.
   Measure from the branch's merge base with
   `origin/main`: use `git diff --numstat origin/main...HEAD` as the per-file
   inventory, exclude test files and qualifying separately delivered data/

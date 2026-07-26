@@ -338,11 +338,8 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
-/** Exact changed-line ceiling for the current factory publisher's logic patch. */
-export const FACTORY_LOGIC_LINE_LIMIT = 400;
-
-/** Exact changed-line ceiling for the current factory publisher's test patch. */
-export const FACTORY_TEST_LINE_LIMIT = 600;
+/** Exact combined logic-and-test ceiling for the current factory publisher. */
+export const FACTORY_LOGIC_AND_TEST_LINE_LIMIT = 400;
 
 /** One path row from git's authoritative `--numstat -z` scratch-index diff. */
 export interface FactoryPatchLineStat {
@@ -354,8 +351,12 @@ export interface FactoryPatchLineStat {
   readonly deletions: number | null;
 }
 
-const FACTORY_FIXTURE_FILE_EXTENSION =
-  /\.(?:csv|json|jsonl|ndjson|snap|tsv|txt|xml|ya?ml)$/i;
+const FACTORY_INERT_OUTPUT_PATHS = new Set([
+  "generated/schema.json",
+  "snowflake/fixtures/.gitkeep",
+]);
+const FACTORY_INERT_DOC_PATHS = new Set(["docs/design.md"]);
+const FACTORY_INERT_DOC_PREFIXES = ["docs/design/"] as const;
 
 /**
  * Reports whether a path belongs to a test-source root this repo executes.
@@ -363,8 +364,8 @@ const FACTORY_FIXTURE_FILE_EXTENSION =
  * This is intentionally narrower than {@link isTestFilePath}. That broader
  * anti-gaming predicate also flags test configuration, mutation gates, and
  * suffix-like files outside test roots for human review. Those files remain
- * logic for the publisher envelope; only files under configured test roots
- * receive the separate test-line allowance.
+ * logic for the publisher envelope; files under configured test roots are
+ * reported as test churn but share the combined factory ceiling.
  *
  * @param repoRelativePath - Exact repo-relative path reported by git.
  * @returns Whether the path is inside an executed test-source root.
@@ -379,20 +380,24 @@ export function isFactoryTestSourcePath(repoRelativePath: string): boolean {
  * Reports whether a path is known non-executable fixture data.
  *
  * This classifier is an allowlist of this repo's inert roots and file shapes.
- * No documentation root is currently allowlisted: both existing docs files
- * (`docs/state/registry.md` and `docs/factory-runbook.md`) are operational.
- * Unknown files count as logic; migrations, lockfiles, configuration,
- * Markdown, executable source extensions, and paths that merely contain names
- * such as `data` or `generated` never become exempt.
+ * Only exact inert-output/doc allowlists and the design-doc namespace are
+ * separated by the one-commit factory envelope. Operational or future unknown
+ * output remains logic. Unknown files count as logic; migrations, lockfiles,
+ * configuration, executable source extensions, and paths that merely contain
+ * names such as `data`, `fixtures`, or `generated` never become exempt.
  *
  * @param repoRelativePath - Exact repo-relative path reported by git.
  * @returns Whether the publisher may treat the path as data-only.
  */
 export function isFactoryDataOnlyPath(repoRelativePath: string): boolean {
+  const inertDocumentation =
+    repoRelativePath.endsWith(".md") &&
+    (FACTORY_INERT_DOC_PATHS.has(repoRelativePath) ||
+      FACTORY_INERT_DOC_PREFIXES.some((prefix) =>
+        repoRelativePath.startsWith(prefix),
+      ));
   return (
-    repoRelativePath.startsWith("snowflake/fixtures/") &&
-    (FACTORY_FIXTURE_FILE_EXTENSION.test(repoRelativePath) ||
-      repoRelativePath === "snowflake/fixtures/.gitkeep")
+    inertDocumentation || FACTORY_INERT_OUTPUT_PATHS.has(repoRelativePath)
   );
 }
 
@@ -402,6 +407,9 @@ export function isFactoryDataOnlyPath(repoRelativePath: string): boolean {
  * Conventional work uses the reviewability guide in D119. The automated
  * publisher cannot run independent pre-open review or create separate commits,
  * so it retains exact fail-closed limits until those capabilities exist.
+ * Logic and test-source churn share one ceiling because a test-root source can
+ * become production-reachable through an import introduced by an earlier PR.
+ * The publisher cannot safely infer full-tree executable closure yet.
  *
  * @param stats - Git-authored per-path changed-line rows.
  * @returns Human-readable violations; empty means the patch fits the envelope.
@@ -470,16 +478,12 @@ export function findFactoryPatchEnvelopeViolations(
         "the one-commit factory publisher requires a separate issue/PR",
     );
   }
-  if (logicLines > FACTORY_LOGIC_LINE_LIMIT) {
+  const logicAndTestLines = logicLines + testLines;
+  if (logicAndTestLines > FACTORY_LOGIC_AND_TEST_LINE_LIMIT) {
     violations.push(
-      `logic churn is ${logicLines} changed lines, above the factory limit of ` +
-        `${FACTORY_LOGIC_LINE_LIMIT}; use conventional execution`,
-    );
-  }
-  if (testLines > FACTORY_TEST_LINE_LIMIT) {
-    violations.push(
-      `test churn is ${testLines} changed lines, above the factory limit of ` +
-        `${FACTORY_TEST_LINE_LIMIT}; use conventional execution with pre-open qa`,
+      `logic/test churn is ${logicAndTestLines} changed lines ` +
+        `(${logicLines} logic, ${testLines} test), above the combined factory ` +
+        `limit of ${FACTORY_LOGIC_AND_TEST_LINE_LIMIT}; use conventional execution`,
     );
   }
   return violations;

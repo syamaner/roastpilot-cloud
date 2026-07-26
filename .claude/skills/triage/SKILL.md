@@ -67,10 +67,11 @@ and each is independently checkable:
    reviewability guide, not an automatic cutoff. A materially larger unit must
    explain why the available splits are less reviewable.
    - `factory-dispatchable` maps to exactly one publisher commit and PR today.
-     Its current exact technical envelope is at most 400 changed logic lines,
-     at most 600 changed test-file lines, no binary patch, no migrations treated
-     as exempt data, and no mix of data/fixtures/generated/docs with logic or
-     tests. It also cannot carry otherwise load-bearing test quality that
+     Its current exact technical envelope is at most 400 combined changed
+     logic-and-test lines, no binary patch, no migrations treated as exempt
+     data, and no mix of allowlisted inert data/fixtures/generated/design-doc
+     output with logic or tests. It also cannot carry otherwise load-bearing
+     test quality that
      requires pre-open `qa`, because the publisher has no independent
      pre-publish review stage or multi-commit support. Route any such plan to
      `conventional/interactive` rather than approving it for factory dispatch.
