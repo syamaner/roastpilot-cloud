@@ -1,8 +1,8 @@
 /**
  * Verify the bounded Node static module closure required by D117-D118.
  *
- * Slice 120c-2 separately rejects dynamic loading and process capabilities.
- * This module alone does not activate or declare any live job compliant.
+ * Slice 120c-2a also exposes a combined repository-runtime verifier. Neither
+ * path activates or declares any live job compliant.
  */
 
 import {
@@ -23,6 +23,12 @@ export const MAX_NODE_CLOSURE_FILES = 128;
 export const MAX_NODE_CLOSURE_EDGES = 512;
 export const MAX_NODE_SOURCE_BYTES = 1_000_000;
 export const MAX_NODE_CLOSURE_BYTES = 8_000_000;
+/** Runtime-AST ceilings derived from the current factory corpus. */
+export const MAX_NODE_AST_NODES = 100_000;
+export const MAX_NODE_AST_DEPTH = 256;
+/** Exact future D123 process-adapter identity; no production adapter exists yet. */
+export const NODE_PROCESS_CAPABILITY_ADAPTER_PATH =
+  "scripts/factory/node-process-capability.mts";
 
 const FORBIDDEN_MODULES = new Set([
   "child_process",
@@ -143,7 +149,8 @@ export interface NodeImportClosureViolation {
     | "unsafe-path"
     | "parse-error"
     | "unsupported-import"
-    | "unapproved-external-module";
+    | "unapproved-external-module"
+    | "unsafe-runtime-capability";
   readonly path: string;
   /** 1-based source line, or zero for request/filesystem evidence. */
   readonly line: number;
@@ -170,6 +177,84 @@ type RequestSnapshot =
   | { readonly request: NodeImportClosureRequest }
   | { readonly error: string };
 type ViolationKind = NodeImportClosureViolation["kind"];
+type VerificationMode = "import-only" | "executable";
+
+interface RuntimeScope {
+  readonly parent: RuntimeScope | undefined;
+  readonly bindings: Set<string>;
+}
+
+const RUNTIME_FORBIDDEN_MODULES = new Set([
+  "bun",
+  "child_process",
+  "cluster",
+  "cross-spawn",
+  "execa",
+  "module",
+  "node:child_process",
+  "node:cluster",
+  "node:inspector",
+  "node:module",
+  "node:process",
+  "node:repl",
+  "node:sqlite",
+  "node:vm",
+  "node:wasi",
+  "node:worker_threads",
+  "repl",
+  "shelljs",
+  "vm",
+  "wasi",
+  "worker_threads",
+]);
+const DANGEROUS_GLOBALS = new Set([
+  "AsyncFunction",
+  "AsyncGeneratorFunction",
+  "Bun",
+  "Deno",
+  "Function",
+  "GeneratorFunction",
+  "Reflect",
+  "SharedWorker",
+  "WebAssembly",
+  "Worker",
+  "createRequire",
+  "eval",
+  "require",
+]);
+const SAFE_PROCESS_MEMBERS = new Set([
+  "argv",
+  "cwd",
+  "env",
+  "exitCode",
+]);
+const SAFE_OBJECT_MEMBERS = new Set([
+  "entries",
+  "hasOwn",
+  "keys",
+  "prototype",
+  "values",
+]);
+const SENSITIVE_GLOBAL_OBJECTS = new Set([
+  "Object",
+  "global",
+  "globalThis",
+  "module",
+  "process",
+]);
+const EXACT_CHILD_PROCESS_SPECIFIERS = new Set([
+  '"node:child_process"',
+  "'node:child_process'",
+]);
+
+function runtimeForbiddenModule(specifier: string): boolean {
+  for (const forbidden of RUNTIME_FORBIDDEN_MODULES) {
+    if (specifier === forbidden || specifier.startsWith(`${forbidden}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function finding(
   kind: ViolationKind,
@@ -251,6 +336,517 @@ function sameFile(left: Stats, right: Stats): boolean {
 
 function sourceLine(source: ts.SourceFile, node: ts.Node): number {
   return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+}
+
+function addBinding(scope: RuntimeScope, name: ts.BindingName): void {
+  const pending: ts.BindingName[] = [name];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (ts.isIdentifier(current)) {
+      scope.bindings.add(current.text);
+      continue;
+    }
+    for (const element of current.elements) {
+      if (!ts.isOmittedExpression(element)) pending.push(element.name);
+    }
+  }
+}
+
+function nodeChildren(node: ts.Node): ts.Node[] {
+  const children: ts.Node[] = [];
+  ts.forEachChild(node, (child) => {
+    children.push(child);
+  });
+  return children;
+}
+
+function hasDeclareModifier(node: ts.Node): boolean {
+  return (
+    ts.canHaveModifiers(node) &&
+    ts
+      .getModifiers(node)
+      ?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword) ===
+      true
+  );
+}
+
+function ambientVariable(node: ts.VariableDeclaration): boolean {
+  const statement = node.parent.parent;
+  return ts.isVariableStatement(statement) && hasDeclareModifier(statement);
+}
+
+function runtimeAstLimitFailure(source: ts.SourceFile): string | undefined {
+  const pending: { readonly node: ts.Node; readonly depth: number }[] = [
+    { node: source, depth: 1 },
+  ];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    nodes += 1;
+    if (nodes > MAX_NODE_AST_NODES) {
+      return `runtime AST exceeds ${MAX_NODE_AST_NODES} nodes`;
+    }
+    if (current.depth > MAX_NODE_AST_DEPTH) {
+      return `runtime AST exceeds depth ${MAX_NODE_AST_DEPTH}`;
+    }
+    for (const child of nodeChildren(current.node)) {
+      pending.push({ node: child, depth: current.depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+function runtimeScopeBoundary(node: ts.Node): boolean {
+  return (
+    ts.isSourceFile(node) ||
+    ts.isFunctionLike(node) ||
+    ts.isClassLike(node) ||
+    ts.isClassStaticBlockDeclaration(node) ||
+    ts.isBlock(node) ||
+    ts.isCaseBlock(node) ||
+    ts.isCatchClause(node) ||
+    ts.isForStatement(node) ||
+    ts.isForInStatement(node) ||
+    ts.isForOfStatement(node)
+  );
+}
+
+function runtimeFunctionBody(node: ts.Node): ts.ConciseBody | undefined {
+  if (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  ) {
+    return node.body;
+  }
+  return undefined;
+}
+
+function collectRuntimeScopes(source: ts.SourceFile): WeakMap<ts.Node, RuntimeScope> {
+  const scopes = new WeakMap<ts.Node, RuntimeScope>();
+  const root: RuntimeScope = { parent: undefined, bindings: new Set() };
+  const pending: {
+    readonly node: ts.Node;
+    readonly lexicalScope: RuntimeScope;
+    readonly functionScope: RuntimeScope;
+  }[] = nodeChildren(source)
+    .reverse()
+    .map((node) => ({
+      node,
+      lexicalScope: root,
+      functionScope: root,
+    }));
+
+  scopes.set(source, root);
+  while (pending.length > 0) {
+    const work = pending.pop()!;
+    const { node } = work;
+    let { lexicalScope, functionScope } = work;
+    if (
+      ((ts.isFunctionDeclaration(node) && node.body !== undefined) ||
+        ts.isClassDeclaration(node)) &&
+      node.name !== undefined &&
+      !hasDeclareModifier(node)
+    ) {
+      lexicalScope.bindings.add(node.name.text);
+    }
+
+    if (node !== source && runtimeScopeBoundary(node)) {
+      lexicalScope = { parent: lexicalScope, bindings: new Set() };
+      if (
+        ts.isFunctionLike(node) ||
+        ts.isClassStaticBlockDeclaration(node)
+      ) {
+        functionScope = lexicalScope;
+      }
+    }
+    scopes.set(node, lexicalScope);
+
+    if (ts.isImportDeclaration(node) && node.importClause?.isTypeOnly !== true) {
+      const clause = node.importClause;
+      if (clause?.name !== undefined) lexicalScope.bindings.add(clause.name.text);
+      if (clause?.namedBindings !== undefined) {
+        if (ts.isNamespaceImport(clause.namedBindings)) {
+          lexicalScope.bindings.add(clause.namedBindings.name.text);
+        } else {
+          for (const element of clause.namedBindings.elements) {
+            if (!element.isTypeOnly) lexicalScope.bindings.add(element.name.text);
+          }
+        }
+      }
+    } else if (ts.isVariableDeclaration(node) && !ambientVariable(node)) {
+      const declarationList = node.parent;
+      const target =
+        ts.isVariableDeclarationList(declarationList) &&
+        (declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0
+          ? functionScope
+          : lexicalScope;
+      addBinding(target, node.name);
+    } else if (ts.isParameter(node)) {
+      addBinding(functionScope, node.name);
+    } else if (
+      ts.isCatchClause(node) &&
+      node.variableDeclaration !== undefined
+    ) {
+      addBinding(lexicalScope, node.variableDeclaration.name);
+    } else if (
+      (ts.isFunctionExpression(node) || ts.isClassExpression(node)) &&
+      node.name !== undefined
+    ) {
+      lexicalScope.bindings.add(node.name.text);
+    }
+
+    const children = nodeChildren(node);
+    const functionBody = runtimeFunctionBody(node);
+    const functionBodyScope =
+      functionBody !== undefined &&
+      ts.isBlock(functionBody)
+        ? { parent: lexicalScope, bindings: new Set<string>() }
+        : undefined;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index]!;
+      const childIsFunctionBody =
+        functionBodyScope !== undefined &&
+        child === functionBody;
+      pending.push({
+        node: child,
+        lexicalScope: childIsFunctionBody
+          ? functionBodyScope
+          : lexicalScope,
+        functionScope: childIsFunctionBody
+          ? functionBodyScope
+          : functionScope,
+      });
+    }
+  }
+
+  return scopes;
+}
+
+function locallyBound(
+  name: string,
+  node: ts.Node,
+  scopes: WeakMap<ts.Node, RuntimeScope>,
+): boolean {
+  let scope = scopes.get(node);
+  while (scope !== undefined) {
+    if (scope.bindings.has(name)) return true;
+    scope = scope.parent;
+  }
+  return false;
+}
+
+function typeContext(node: ts.Node): boolean {
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isTypeNode(current)) return true;
+    if (ts.isExpression(current) || ts.isStatement(current)) return false;
+    current = current.parent;
+  }
+  /* v8 ignore next -- identifiers visited from a source file reach a type, expression, or statement ancestor. */
+  return false;
+}
+
+function valueIdentifier(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (typeContext(node)) return false;
+  if (
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isPropertyAssignment(parent) && parent.name === node) ||
+    (ts.isMethodDeclaration(parent) && parent.name === node) ||
+    (ts.isPropertyDeclaration(parent) && parent.name === node) ||
+    (ts.isPropertySignature(parent) && parent.name === node) ||
+    (ts.isMethodSignature(parent) && parent.name === node) ||
+    ts.isImportClause(parent) ||
+    ts.isImportSpecifier(parent) ||
+    ts.isNamespaceImport(parent) ||
+    ts.isExportSpecifier(parent) ||
+    ts.isLabeledStatement(parent) ||
+    ts.isBreakOrContinueStatement(parent)
+  ) {
+    return false;
+  }
+  return !(
+    "name" in parent &&
+    parent.name === node &&
+    (ts.isVariableDeclaration(parent) ||
+      ts.isParameter(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isClassDeclaration(parent) ||
+      ts.isClassExpression(parent) ||
+      ts.isInterfaceDeclaration(parent) ||
+      ts.isTypeAliasDeclaration(parent) ||
+      ts.isEnumDeclaration(parent) ||
+      ts.isModuleDeclaration(parent) ||
+      ts.isBindingElement(parent))
+  );
+}
+
+function unwrappedExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function directUnboundIdentifier(
+  expression: ts.Expression,
+  name: string,
+  scopes: WeakMap<ts.Node, RuntimeScope>,
+): boolean {
+  const unwrapped = unwrappedExpression(expression);
+  return (
+    ts.isIdentifier(unwrapped) &&
+    unwrapped.text === name &&
+    !locallyBound(name, unwrapped, scopes)
+  );
+}
+
+function memberName(
+  node: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+): string | undefined {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  const argument = node.argumentExpression;
+  return argument !== undefined &&
+    (ts.isStringLiteralLike(argument) || ts.isNumericLiteral(argument))
+    ? argument.text
+    : undefined;
+}
+
+function exactAdapterProcessImport(
+  statement: ts.Statement,
+  source: ts.SourceFile,
+): boolean {
+  if (!ts.isImportDeclaration(statement)) return false;
+  const clause = statement.importClause;
+  return (
+    EXACT_CHILD_PROCESS_SPECIFIERS.has(
+      statement.moduleSpecifier.getText(source),
+    ) &&
+    statement.attributes === undefined &&
+    clause !== undefined &&
+    clause.isTypeOnly !== true &&
+    clause.name === undefined &&
+    clause.phaseModifier === undefined &&
+    clause.namedBindings !== undefined &&
+    ts.isNamedImports(clause.namedBindings) &&
+    clause.namedBindings.elements.length === 1 &&
+    clause.namedBindings.elements[0]?.isTypeOnly !== true &&
+    clause.namedBindings.elements[0]?.propertyName === undefined &&
+    clause.namedBindings.elements[0]?.name.text === "spawnSync" &&
+    clause.namedBindings.elements[0]?.name.getText(source) === "spawnSync"
+  );
+}
+
+function runtimeModuleSpecifier(
+  node: ts.Node,
+): ts.Expression | undefined {
+  if (ts.isImportDeclaration(node)) {
+    return node.importClause?.isTypeOnly === true
+      ? undefined
+      : node.moduleSpecifier;
+  }
+  return ts.isExportDeclaration(node) && !node.isTypeOnly
+    ? node.moduleSpecifier
+    : undefined;
+}
+
+function runtimeCapabilityViolations(
+  path: string,
+  source: ts.SourceFile,
+): NodeImportClosureViolation[] {
+  const violations: NodeImportClosureViolation[] = [];
+  const scopes = collectRuntimeScopes(source);
+
+  function reject(node: ts.Node, detail: string): void {
+    if (violations.length > 0) return;
+    violations.push(
+      finding(
+        "unsafe-runtime-capability",
+        path,
+        detail,
+        sourceLine(source, node),
+      ),
+    );
+  }
+
+  const pending: ts.Node[] = [source];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    const moduleSpecifier = runtimeModuleSpecifier(node);
+    if (
+      ts.isEnumDeclaration(node) ||
+      ts.isModuleDeclaration(node) ||
+      ts.isImportEqualsDeclaration(node) ||
+      ts.isDecorator(node) ||
+      ts.isTypeAssertionExpression(node) ||
+      (ts.isFunctionDeclaration(node) && node.body === undefined) ||
+      hasDeclareModifier(node)
+    ) {
+      reject(node, "runtime source uses TypeScript syntax unsupported by Node type stripping");
+    }
+
+    if (
+      ts.isParameter(node) &&
+      node.modifiers?.some((modifier) =>
+        new Set([
+          ts.SyntaxKind.PrivateKeyword,
+          ts.SyntaxKind.ProtectedKeyword,
+          ts.SyntaxKind.PublicKeyword,
+          ts.SyntaxKind.ReadonlyKeyword,
+        ]).has(modifier.kind),
+      )
+    ) {
+      reject(node, "runtime source uses a TypeScript parameter property");
+    }
+
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      moduleSpecifier !== undefined &&
+      ts.isStringLiteralLike(moduleSpecifier) &&
+      runtimeForbiddenModule(moduleSpecifier.text) &&
+      !(
+        ts.isImportDeclaration(node) &&
+        path === NODE_PROCESS_CAPABILITY_ADAPTER_PATH &&
+        moduleSpecifier.text === "node:child_process" &&
+        exactAdapterProcessImport(node, source)
+      )
+    ) {
+      reject(
+        node,
+        `runtime module "${moduleSpecifier.text}" is outside the closed capability grammar`,
+      );
+    }
+
+    if (ts.isBindingElement(node)) {
+      const boundProperty = node.propertyName ?? node.name;
+      if (ts.isComputedPropertyName(boundProperty)) {
+        reject(
+          node,
+          "computed destructuring is outside the closed capability grammar",
+        );
+      }
+      if (
+        (ts.isIdentifier(boundProperty) ||
+          ts.isStringLiteralLike(boundProperty)) &&
+        boundProperty.text === "constructor"
+      ) {
+        reject(
+          node,
+          "runtime constructor extraction is outside the closed capability grammar",
+        );
+      }
+    }
+
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword
+    ) {
+      reject(node, "dynamic import is outside the closed capability grammar");
+    }
+
+    if (
+      path === NODE_PROCESS_CAPABILITY_ADAPTER_PATH &&
+      ts.isIdentifier(node) &&
+      node.text === "spawnSync" &&
+      locallyBound(node.text, node, scopes)
+    ) {
+      const importBinding =
+        ts.isImportSpecifier(node.parent) &&
+        node.parent.name === node &&
+        node.parent.propertyName === undefined;
+      if (!importBinding) {
+        reject(
+          node,
+          "the protected process binding cannot be used before capability activation",
+        );
+      }
+    }
+
+    if (ts.isIdentifier(node) && valueIdentifier(node)) {
+      if (
+        DANGEROUS_GLOBALS.has(node.text) &&
+        !locallyBound(node.text, node, scopes)
+      ) {
+        reject(node, `runtime global "${node.text}" is outside the closed capability grammar`);
+      }
+    }
+
+    if (
+      ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)
+    ) {
+      const name = memberName(node);
+      const receiver = node.expression;
+      if (name === "constructor") {
+        reject(node, "runtime constructor reflection is outside the closed capability grammar");
+      } else if (
+        directUnboundIdentifier(receiver, "process", scopes) &&
+        (!ts.isPropertyAccessExpression(node) ||
+          name === undefined ||
+          !SAFE_PROCESS_MEMBERS.has(name))
+      ) {
+        reject(node, "process access is outside the closed property grammar");
+      } else if (
+        directUnboundIdentifier(receiver, "module", scopes)
+      ) {
+        reject(node, "module access is outside the closed property grammar");
+      } else if (
+        directUnboundIdentifier(receiver, "Object", scopes) &&
+        (!ts.isPropertyAccessExpression(node) ||
+          name === undefined ||
+          !SAFE_OBJECT_MEMBERS.has(name))
+      ) {
+        reject(node, "Object access is outside the closed property grammar");
+      } else if (
+        (directUnboundIdentifier(receiver, "globalThis", scopes) ||
+          directUnboundIdentifier(receiver, "global", scopes))
+      ) {
+        reject(node, "global object access is outside the closed property grammar");
+      } else if (
+        ts.isElementAccessExpression(node) &&
+        name === undefined
+      ) {
+        reject(node, "non-literal computed member access is outside the closed capability grammar");
+      }
+    }
+
+    if (
+      ts.isIdentifier(node) &&
+      SENSITIVE_GLOBAL_OBJECTS.has(node.text) &&
+      valueIdentifier(node) &&
+      !locallyBound(node.text, node, scopes) &&
+      !(
+        (ts.isPropertyAccessExpression(node.parent) ||
+          ts.isElementAccessExpression(node.parent)) &&
+        node.parent.expression === node
+      )
+    ) {
+      reject(
+        node,
+        `the ${node.text} object may only be used through direct reviewed properties`,
+      );
+    }
+
+    const children = nodeChildren(node);
+    if (violations.length > 0) break;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]!);
+    }
+  }
+
+  return violations;
 }
 
 function runtimeStaticEdge(
@@ -592,14 +1188,9 @@ function failedResult(
   };
 }
 
-/**
- * Verify bounded trusted Node static imports and exact module provenance.
- *
- * @param request - Complete roots and reviewed external resolutions.
- * @returns Canonical success-only closure evidence or deterministic findings.
- */
-export function verifyNodeImportClosure(
+function verifyNodeClosure(
   request: NodeImportClosureRequest,
+  mode: VerificationMode,
 ): NodeImportClosureResult {
   const snapshot = snapshotRequest(request);
   if ("error" in snapshot) {
@@ -736,19 +1327,57 @@ export function verifyNodeImportClosure(
       );
       continue;
     }
-    const parseViolations = parseFailures(canonicalPath, sourceText);
+    let source: ts.SourceFile;
+    let parseViolations: NodeImportClosureViolation[];
+    try {
+      source = ts.createSourceFile(
+        canonicalPath,
+        sourceText,
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const astLimitFailure =
+        mode === "executable" ? runtimeAstLimitFailure(source) : undefined;
+      if (astLimitFailure !== undefined) {
+        violations.push(
+          finding("resource-limit", canonicalPath, astLimitFailure),
+        );
+        continue;
+      }
+      parseViolations = parseFailures(canonicalPath, sourceText);
+    } catch {
+      /* v8 ignore start -- explicit AST limits catch reproducible complexity before this parser fallback. */
+      violations.push(
+        finding(
+          "resource-limit",
+          canonicalPath,
+          "source exceeds supported AST complexity",
+        ),
+      );
+      continue;
+      /* v8 ignore stop */
+    }
     if (parseViolations.length > 0) {
       violations.push(...parseViolations);
       continue;
     }
 
     files.add(canonicalPath);
-    const source = ts.createSourceFile(
-      canonicalPath,
-      sourceText,
-      ts.ScriptTarget.Latest,
-      true,
-    );
+    if (mode === "executable") {
+      try {
+        violations.push(...runtimeCapabilityViolations(canonicalPath, source));
+      } catch {
+        /* v8 ignore next -- defensive analyzer failure must erase evidence. */
+        violations.push(
+          finding(
+            "unsafe-runtime-capability",
+            canonicalPath,
+            "runtime capability analysis failed closed",
+          ),
+        );
+      }
+    }
+    let adapterProcessImports = 0;
     for (const statement of source.statements) {
       const edge = runtimeStaticEdge(statement);
       if (edge === undefined) continue;
@@ -802,6 +1431,25 @@ export function verifyNodeImportClosure(
         pending.push(dependency);
         pending.sort().reverse();
       } else {
+        const adapterProcessImport =
+          mode === "executable" &&
+          canonicalPath === NODE_PROCESS_CAPABILITY_ADAPTER_PATH &&
+          specifier === "node:child_process" &&
+          exactAdapterProcessImport(statement, source);
+        if (adapterProcessImport) {
+          adapterProcessImports += 1;
+          if (adapterProcessImports > 1) {
+            violations.push(
+              finding(
+                "unsafe-runtime-capability",
+                canonicalPath,
+                "the protected process adapter must have one exact child-process import",
+                line,
+              ),
+            );
+          }
+          continue;
+        }
         const failure = externalFailure(
           rules.get(specifier),
           specifier,
@@ -829,4 +1477,35 @@ export function verifyNodeImportClosure(
     sourceBytes,
     violations: [],
   };
+}
+
+/**
+ * Verify bounded trusted Node static imports and exact module provenance.
+ *
+ * This import-only contract remains universally strict: it does not recognize
+ * the future process adapter exception used by the combined verifier.
+ *
+ * @param request - Complete roots and reviewed external resolutions.
+ * @returns Canonical success-only closure evidence or deterministic findings.
+ */
+export function verifyNodeImportClosure(
+  request: NodeImportClosureRequest,
+): NodeImportClosureResult {
+  return verifyNodeClosure(request, "import-only");
+}
+
+/**
+ * Verify static provenance and repository runtime capabilities in one read.
+ *
+ * Both analyzers receive the same canonical path, stable source bytes, decoded
+ * text, and TypeScript AST. This analyzer-only slice adds no callable process
+ * adapter and activates no live workflow.
+ *
+ * @param request - Complete roots and reviewed external resolutions.
+ * @returns Canonical success-only closure evidence or deterministic findings.
+ */
+export function verifyNodeExecutableClosure(
+  request: NodeImportClosureRequest,
+): NodeImportClosureResult {
+  return verifyNodeClosure(request, "executable");
 }
