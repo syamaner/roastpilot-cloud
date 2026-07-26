@@ -32,6 +32,12 @@ const ENTRYPOINT_PATH = join(
   "factory",
   "check-invisible-format-characters.mts",
 );
+const PROCESS_CAPABILITY_PATH = join(
+  REPOSITORY_ROOT,
+  "scripts",
+  "factory",
+  "node-process-capability.mts",
+);
 const CI_WORKFLOW_PATH = join(
   REPOSITORY_ROOT,
   ".github",
@@ -491,6 +497,10 @@ describe("scanner entrypoint", () => {
       );
       mkdirSync(dirname(specialPath), { recursive: true });
       writeFileSync(specialPath, readFileSync(ENTRYPOINT_PATH));
+      writeFileSync(
+        join(dirname(specialPath), "node-process-capability.mts"),
+        readFileSync(PROCESS_CAPABILITY_PATH),
+      );
 
       const result = runEntrypointAtPath(repositoryRoot, specialPath);
 

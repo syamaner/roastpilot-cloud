@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -14,6 +16,11 @@ import {
 } from "../../scripts/factory/node-import-closure-verifier.mts";
 
 let repositoryRoot: string;
+const ACTUAL_REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const PRODUCTION_ADAPTER_SOURCE = readFileSync(
+  join(ACTUAL_REPOSITORY_ROOT, NODE_PROCESS_CAPABILITY_ADAPTER_PATH),
+  "utf8",
+);
 
 async function put(path: string, content: string): Promise<void> {
   const absolute = join(repositoryRoot, path);
@@ -605,21 +612,32 @@ describe("verifyNodeExecutableClosure closed runtime grammar", () => {
   }, 15_000);
 });
 
-describe("verifyNodeExecutableClosure future adapter boundary", () => {
+describe("verifyNodeExecutableClosure D126 adapter boundary", () => {
   function adapterRequest(): NodeImportClosureRequest {
     return request({
       trustedRoot: "scripts/factory",
       entrypoints: [NODE_PROCESS_CAPABILITY_ADAPTER_PATH],
+      externalModules: ["node:fs", "node:path"].map((specifier) => ({
+        kind: "node-builtin" as const,
+        specifier,
+        resolvedTarget: specifier,
+      })),
     });
   }
 
-  it("recognizes one exact named spawnSync import only in combined mode", async () => {
-    const source = 'import { spawnSync } from "node:child_process";\n';
+  function exactAdapterSource(
+    mutate: (source: string) => string = (source) => source,
+  ): string {
+    return mutate(PRODUCTION_ADAPTER_SOURCE);
+  }
+
+  it("recognizes the one exact listTrackedPaths capability only in combined mode", async () => {
+    const source = exactAdapterSource();
     await put(NODE_PROCESS_CAPABILITY_ADAPTER_PATH, source);
 
     expect(verifyNodeExecutableClosure(adapterRequest())).toEqual({
       files: [NODE_PROCESS_CAPABILITY_ADAPTER_PATH],
-      edgeCount: 1,
+      edgeCount: 3,
       sourceBytes: Buffer.byteLength(source),
       violations: [],
     });
@@ -630,7 +648,39 @@ describe("verifyNodeExecutableClosure future adapter boundary", () => {
     );
   });
 
-  it("does not permit the future process binding to be called in analyzer-only 120c-2a", async () => {
+  it("accepts the migrated production scanner only through the protected adapter", () => {
+    const productionRequest: NodeImportClosureRequest = {
+      repositoryRoot: ACTUAL_REPOSITORY_ROOT,
+      trustedRoot: "scripts/factory",
+      trustedSourceClass: "protected-glue",
+      rootsComplete: true,
+      entrypoints: [
+        "scripts/factory/check-invisible-format-characters.mts",
+      ],
+      externalModules: ["node:fs", "node:path", "node:url"].map(
+        (specifier) => ({
+          kind: "node-builtin" as const,
+          specifier,
+          resolvedTarget: specifier,
+        }),
+      ),
+    };
+
+    const combined = verifyNodeExecutableClosure(productionRequest);
+
+    expect(combined.violations).toEqual([]);
+    expect(combined.files).toContain(
+      "scripts/factory/check-invisible-format-characters.mts",
+    );
+    expect(combined.files).toContain(NODE_PROCESS_CAPABILITY_ADAPTER_PATH);
+    expectViolation(
+      verifyNodeImportClosure(productionRequest),
+      "unapproved-external-module",
+      "no exact reviewed resolution",
+    );
+  });
+
+  it("rejects a raw process call outside the exact capability", async () => {
     await put(
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       [
@@ -647,7 +697,42 @@ describe("verifyNodeExecutableClosure future adapter boundary", () => {
     expectViolation(
       verifyNodeExecutableClosure(adapterRequest()),
       "unsafe-runtime-capability",
-      "cannot be used before capability activation",
+      "exact D126 source registry",
+    );
+  });
+
+  it("rejects an exact child-process import without the capability call", async () => {
+    await put(
+      NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
+      'import { spawnSync } from "node:child_process";\n',
+    );
+
+    expectViolation(
+      verifyNodeExecutableClosure(adapterRequest()),
+      "unsafe-runtime-capability",
+      "exact D126 source registry",
+    );
+  });
+
+  it("rejects a same-named spawn binding from a repository module", async () => {
+    await put(
+      NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
+      exactAdapterSource((source) =>
+        source.replace(
+          'from "node:child_process"',
+          'from "./fake.mts"',
+        ),
+      ),
+    );
+    await put(
+      "scripts/factory/fake.mts",
+      "export function spawnSync(): never { throw new Error('no'); }\n",
+    );
+
+    expectViolation(
+      verifyNodeExecutableClosure(adapterRequest()),
+      "unsafe-runtime-capability",
+      "exact D126 source registry",
     );
   });
 
@@ -655,86 +740,86 @@ describe("verifyNodeExecutableClosure future adapter boundary", () => {
     [
       "near path",
       "scripts/factory/node-process-capabilities.mts",
-      'import { spawnSync } from "node:child_process";\nspawnSync("/x");\n',
+      exactAdapterSource(),
       "runtime module",
     ],
     [
       "case variant",
       "scripts/factory/Node-process-capability.mts",
-      'import { spawnSync } from "node:child_process";\nspawnSync("/x");\n',
+      exactAdapterSource(),
       "runtime module",
     ],
     [
       "default import",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import childProcess from "node:child_process";\nvoid childProcess;\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "namespace import",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import * as childProcess from "node:child_process";\nchildProcess.spawnSync("/x");\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "aliased import",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync as run } from "node:child_process";\nrun("/x");\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "wrong named import",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawn } from "node:child_process";\nspawn("/x");\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "mixed named import",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawn, spawnSync } from "node:child_process";\nspawnSync("/x");\nvoid spawn;\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "escaped module spelling",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync } from "node:child\\u005fprocess";\nspawnSync("/x");\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "escaped binding spelling",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawn\\u0053ync } from "node:child_process";\nspawnSync("/x");\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "re-export",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'export { spawnSync } from "node:child_process";\n',
-      "runtime module",
+      "exact D126 source registry",
     ],
     [
       "binding escape",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync } from "node:child_process";\nconst run = spawnSync;\nvoid run;\n',
-      "protected process binding",
+      "exact D126 source registry",
     ],
     [
       "binding re-export",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync } from "node:child_process";\nexport { spawnSync };\n',
-      "protected process binding",
+      "exact D126 source registry",
     ],
     [
       "call indirection",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync } from "node:child_process";\nspawnSync.call(null, "/x");\n',
-      "protected process binding",
+      "exact D126 source registry",
     ],
     [
       "bind indirection",
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
       'import { spawnSync } from "node:child_process";\nvoid spawnSync.bind(null);\n',
-      "protected process binding",
+      "exact D126 source registry",
     ],
     [
       "duplicate import",
@@ -746,7 +831,7 @@ describe("verifyNodeExecutableClosure future adapter boundary", () => {
         'spawnSync2("/x");',
         "",
       ].join("\n"),
-      "runtime module",
+      "exact D126 source registry",
     ],
   ])("rejects adapter %s", async (_name, path, source, detail) => {
     await put(path, source);
@@ -760,21 +845,179 @@ describe("verifyNodeExecutableClosure future adapter boundary", () => {
     expectViolation(result, "unsafe-runtime-capability", detail);
   });
 
-  it("rejects more than one exact process import", async () => {
+  it.each([
+    ["executable", (source: string) => source.replace("/usr/bin/git", "/bin/git")],
+    ["subcommand", (source: string) => source.replace("ls-files", "status")],
+    ["argument count", (source: string) => source.replace(', "-z"', "")],
+    [
+      "cwd",
+      (source: string) =>
+        source.replace("rootIdentity.canonicalPath", "repositoryRoot"),
+    ],
+    [
+      "environment entry removed",
+      (source: string) =>
+        source.replace('      GIT_CONFIG_COUNT: "1",\n', ""),
+    ],
+    [
+      "environment entry renamed",
+      (source: string) =>
+        source.replace("GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1"),
+    ],
+    [
+      "computed environment entry",
+      (source: string) =>
+        source.replace("GIT_CONFIG_VALUE_0:", '["GIT_CONFIG_VALUE_0"]:'),
+    ],
+    [
+      "caller-derived environment",
+      (source: string) =>
+        source.replace(
+          'GIT_CONFIG_GLOBAL: "/dev/null"',
+          "GIT_CONFIG_GLOBAL: repositoryRoot",
+        ),
+    ],
+    [
+      "fsmonitor override",
+      (source: string) =>
+        source.replace("core.fsmonitor", "core.hooksPath"),
+    ],
+    [
+      "shell",
+      (source: string) => source.replace("shell: false", "shell: true"),
+    ],
+    [
+      "timeout",
+      (source: string) => source.replace("timeout: 30_000", "timeout: 0"),
+    ],
+    [
+      "kill signal",
+      (source: string) =>
+        source.replace('killSignal: "SIGKILL"', 'killSignal: "SIGTERM"'),
+    ],
+    [
+      "output bound",
+      (source: string) =>
+        source.replace("maxBuffer: 16_777_216", "maxBuffer: 16_777_217"),
+    ],
+    [
+      "stdio",
+      (source: string) =>
+        source.replace(
+          'stdio: ["ignore", "pipe", "pipe"]',
+          'stdio: ["inherit", "pipe", "pipe"]',
+        ),
+    ],
+    [
+      "window behavior",
+      (source: string) =>
+        source.replace("windowsHide: true", "windowsHide: false"),
+    ],
+    [
+      "capability name",
+      (source: string) =>
+        source.replace("function listTrackedPaths", "function runProcess"),
+    ],
+    [
+      "parameter name",
+      (source: string) =>
+        source.replace("repositoryRoot: string", "root: string"),
+    ],
+    [
+      "root inspection dataflow",
+      (source: string) =>
+        source.replace(
+          "inspectRepositoryRoot(repositoryRoot)",
+          'inspectRepositoryRoot("/tmp/attacker")',
+        ),
+    ],
+    [
+      "canonical-root return dataflow",
+      (source: string) =>
+        source.replace(
+          "repositoryRoot: rootIdentity.canonicalPath",
+          'repositoryRoot: "/tmp/attacker"',
+        ),
+    ],
+    [
+      "stdout return dataflow",
+      (source: string) =>
+        source.replace(
+          "rawTrackedPaths: Buffer.from(result.stdout)",
+          'rawTrackedPaths: Buffer.from("attacker")',
+        ),
+    ],
+    [
+      "line-terminator-sensitive return",
+      (source: string) =>
+        source.replace(
+          "return identity(canonicalPath, stats);",
+          "return\n    identity(canonicalPath, stats);",
+        ),
+    ],
+  ])("rejects a mutated exact adapter %s rule", async (_name, mutate) => {
     await put(
       NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
-      [
-        'import { spawnSync } from "node:child_process";',
-        'import { spawnSync } from "node:child_process";',
-        'spawnSync("/x");',
-        "",
-      ].join("\n"),
+      exactAdapterSource(mutate),
     );
 
     expectViolation(
       verifyNodeExecutableClosure(adapterRequest()),
       "unsafe-runtime-capability",
-      "must have one exact child-process import",
+      "exact D126 source registry",
+    );
+  });
+
+  it("rejects trivia changes until the exact source registry is reviewed", async () => {
+    const source = `// formatting-only review note\n\n${exactAdapterSource()}`;
+    await put(NODE_PROCESS_CAPABILITY_ADAPTER_PATH, source);
+
+    expectViolation(
+      verifyNodeExecutableClosure(adapterRequest()),
+      "unsafe-runtime-capability",
+      "exact D126 source registry",
+    );
+  });
+
+  it("rejects a duplicate exact capability call", async () => {
+    const source = exactAdapterSource((current) => {
+      const start = current.indexOf(
+        '  const result = spawnSync("/usr/bin/git"',
+      );
+      const end = current.indexOf("\n\n    if (", start);
+      const call = current.slice(start, end).replace(
+        "const result =",
+        "const duplicate =",
+      );
+      return `${current.slice(0, end)}\n${call}${current.slice(end)}`;
+    });
+    await put(NODE_PROCESS_CAPABILITY_ADAPTER_PATH, source);
+
+    expectViolation(
+      verifyNodeExecutableClosure(adapterRequest()),
+      "unsafe-runtime-capability",
+      "exact D126 source registry",
+    );
+  });
+
+  it("rejects more than one exact process import", async () => {
+    await put(
+      NODE_PROCESS_CAPABILITY_ADAPTER_PATH,
+      exactAdapterSource((source) =>
+        source.replace(
+          'import { spawnSync } from "node:child_process";',
+          [
+            'import { spawnSync } from "node:child_process";',
+            'import { spawnSync } from "node:child_process";',
+          ].join("\n"),
+        ),
+      ),
+    );
+
+    expectViolation(
+      verifyNodeExecutableClosure(adapterRequest()),
+      "unsafe-runtime-capability",
+      "exact D126 source registry",
     );
   });
 });

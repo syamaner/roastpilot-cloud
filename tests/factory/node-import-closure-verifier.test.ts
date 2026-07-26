@@ -407,6 +407,11 @@ describe("verifyNodeImportClosure external provenance", () => {
         externalModules: [
           {
             kind: "node-builtin",
+            specifier: "node:crypto",
+            resolvedTarget: "node:crypto",
+          },
+          {
+            kind: "node-builtin",
             specifier: "node:fs",
             resolvedTarget: "node:fs",
           },
@@ -438,7 +443,7 @@ describe("verifyNodeImportClosure external provenance", () => {
           "scripts/factory/implement-patch-logic.mts",
           "scripts/factory/node-import-closure-verifier.mts",
         ],
-        edgeCount: 6,
+        edgeCount: 7,
         violations: [],
       }),
     );
