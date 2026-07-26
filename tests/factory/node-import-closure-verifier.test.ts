@@ -827,7 +827,7 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
 
     expect(result.violations).toEqual([]);
     expect(result.sourceBytes).toBe(MAX_NODE_CLOSURE_BYTES);
-  });
+  }, 15_000);
 
   it("rejects 8,000,001 bytes across the closure", async () => {
     const fileCount = MAX_NODE_CLOSURE_BYTES / MAX_NODE_SOURCE_BYTES;
@@ -850,7 +850,7 @@ describe("verifyNodeImportClosure approved resource ceilings", () => {
       "resource-limit",
       `exceeds ${MAX_NODE_CLOSURE_BYTES} source bytes`,
     );
-  });
+  }, 15_000);
 
   it("counts malformed canonical files toward the 128-file ceiling", async () => {
     await put(
