@@ -26,6 +26,9 @@ export const MAX_WORKFLOW_ALIASES = 100;
 export const MAX_RUN_CHARACTERS = 21_000;
 export const MAX_CANONICAL_EVIDENCE_BYTES = 1_048_576;
 export const MAX_WORKFLOW_PATH_BYTES = 4_096;
+export const MAX_WORKFLOW_IDENTIFIER_BYTES = 1_024;
+export const MAX_WORKFLOW_VIOLATIONS = 256;
+export const MAX_WORKFLOW_VIOLATION_BYTES = 1_048_576;
 
 type BindingScope = "workflow" | "job" | "step";
 type ScalarValue = string | number | boolean;
@@ -115,6 +118,11 @@ type Defaults = {
 type SourceLocation = {
   readonly line: number;
   readonly stepLines: readonly number[];
+};
+type ViolationAccumulator = {
+  readonly entries: WorkflowExecutionSurfaceViolation[];
+  jsonBytes: number;
+  saturated: boolean;
 };
 
 const EXPRESSION_MARKER = "${{";
@@ -235,6 +243,56 @@ function boundedJsonByteLength(value: unknown, limit: number): number {
   return measure(value);
 }
 
+function createViolationAccumulator(): ViolationAccumulator {
+  return { entries: [], jsonBytes: 2, saturated: false };
+}
+
+function addViolation(
+  accumulator: ViolationAccumulator,
+  violation: WorkflowExecutionSurfaceViolation,
+): void {
+  if (accumulator.saturated) {
+    return;
+  }
+  const separatorBytes = accumulator.entries.length === 0 ? 0 : 1;
+  const remainingBytes =
+    MAX_WORKFLOW_VIOLATION_BYTES -
+    accumulator.jsonBytes -
+    separatorBytes;
+  const violationBytes =
+    remainingBytes < 0
+      ? remainingBytes + 1
+      : boundedJsonByteLength(violation, remainingBytes);
+  if (
+    accumulator.entries.length >= MAX_WORKFLOW_VIOLATIONS ||
+    violationBytes > remainingBytes
+  ) {
+    const marker: WorkflowExecutionSurfaceViolation = {
+      kind: "resource-limit",
+      line: 1,
+      subject: "<workflow>",
+      detail: "workflow violation diagnostics exceed the bounded output budget",
+    };
+    accumulator.entries.splice(0, accumulator.entries.length, marker);
+    accumulator.jsonBytes = boundedJsonByteLength(
+      accumulator.entries,
+      MAX_WORKFLOW_VIOLATION_BYTES,
+    );
+    accumulator.saturated = true;
+    return;
+  }
+  accumulator.entries.push(violation);
+  accumulator.jsonBytes += separatorBytes + violationBytes;
+}
+
+function isCanonicalIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    JOB_ID_PATTERN.test(value) &&
+    Buffer.byteLength(value, "utf8") <= MAX_WORKFLOW_IDENTIFIER_BYTES
+  );
+}
+
 function nodeLine(node: Node, lineCounter: LineCounter): number {
   /* v8 ignore next -- every parsed YAML node has a source range. */
   return lineCounter.linePos(node.range![0]).line;
@@ -342,13 +400,13 @@ function canonicalBindings(
   scope: BindingScope,
   subject: string,
   line: number,
-  violations: WorkflowExecutionSurfaceViolation[],
+  violations: ViolationAccumulator,
 ): readonly WorkflowBindingEvidence[] | undefined {
   if (value === undefined) {
     return [];
   }
   if (!isRecord(value)) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -365,7 +423,7 @@ function canonicalBindings(
       scalar === undefined ||
       (typeof scalar === "string" && containsExpression(scalar))
     ) {
-      violations.push({
+      addViolation(violations, {
         kind: "unsupported-execution-shape",
         line,
         subject,
@@ -409,13 +467,13 @@ function parseDefaults(
   value: unknown,
   subject: string,
   line: number,
-  violations: WorkflowExecutionSurfaceViolation[],
+  violations: ViolationAccumulator,
 ): Defaults | undefined {
   if (value === undefined) {
     return {};
   }
   if (!isRecord(value) || !isRecord(value.run)) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -429,7 +487,7 @@ function parseDefaults(
       (key) => key !== "shell" && key !== "working-directory",
     )
   ) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -449,7 +507,7 @@ function parseDefaults(
     (workingDirectory !== undefined &&
       canonicalWorkingDirectory === undefined)
   ) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -486,7 +544,7 @@ function runnerLabels(
   value: unknown,
   subject: string,
   line: number,
-  violations: WorkflowExecutionSurfaceViolation[],
+  violations: ViolationAccumulator,
 ): readonly string[] | undefined {
   const labels =
     typeof value === "string"
@@ -502,7 +560,7 @@ function runnerLabels(
       (label) => staticNonEmptyText(label) === undefined,
     )
   ) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -517,7 +575,7 @@ function optionalStepFields(
   step: Record<string, unknown>,
   subject: string,
   line: number,
-  violations: WorkflowExecutionSurfaceViolation[],
+  violations: ViolationAccumulator,
 ): Pick<
   WorkflowRunStepEvidence,
   "continueOnError" | "id" | "name" | "timeoutMinutes"
@@ -527,8 +585,7 @@ function optionalStepFields(
   const continueOnError = step["continue-on-error"];
   const timeoutMinutes = step["timeout-minutes"];
   if (
-    (id !== undefined &&
-      (typeof id !== "string" || !JOB_ID_PATTERN.test(id))) ||
+    (id !== undefined && !isCanonicalIdentifier(id)) ||
     (name !== undefined && typeof name !== "string") ||
     (continueOnError !== undefined &&
       typeof continueOnError !== "boolean") ||
@@ -537,7 +594,7 @@ function optionalStepFields(
         !Number.isSafeInteger(timeoutMinutes) ||
         timeoutMinutes <= 0))
   ) {
-    violations.push({
+    addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
@@ -607,14 +664,16 @@ export function canonicalizeWorkflowExecutionSurface(
     ...document.warnings,
   ];
   if (parseProblems.length > 0) {
-    return {
-      violations: parseProblems.map((error) => ({
+    const violations = createViolationAccumulator();
+    for (const error of parseProblems) {
+      addViolation(violations, {
         kind: "invalid-yaml",
         line: lineCounter.linePos(error.pos[0]).line,
         subject: "<workflow>",
         detail: `invalid YAML (${error.code}): ${error.message.split("\n")[0]}`,
-      })),
-    };
+      });
+    }
+    return { violations: violations.entries };
   }
 
   let workflow: unknown;
@@ -697,7 +756,7 @@ export function canonicalizeWorkflowExecutionSurface(
     };
   }
 
-  const violations: WorkflowExecutionSurfaceViolation[] = [];
+  const violations = createViolationAccumulator();
   const locations = sourceLocations(document, lineCounter);
   const workflowEnvironment =
     canonicalBindings(
@@ -726,7 +785,7 @@ export function canonicalizeWorkflowExecutionSurface(
     if (totalBindings <= MAX_WORKFLOW_BINDINGS) {
       return true;
     }
-    violations.push({
+    addViolation(violations, {
       kind: "resource-limit",
       line,
       subject,
@@ -735,38 +794,47 @@ export function canonicalizeWorkflowExecutionSurface(
     return false;
   };
   if (totalBindings > MAX_WORKFLOW_BINDINGS) {
+    addViolation(violations, {
+      kind: "resource-limit",
+      line: 1,
+      subject: "env",
+      detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment bindings`,
+    });
     return {
-      violations: [
-        ...violations,
-        {
-          kind: "resource-limit",
-          line: 1,
-          subject: "env",
-          detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment bindings`,
-        },
-      ],
+      violations: violations.entries,
     };
   }
 
   jobLoop: for (const id of jobIds) {
+    if (violations.saturated) {
+      break;
+    }
     const location = locations.get(id) ?? { line: 1, stepLines: [] };
-    const subject = `jobs.${id}`;
     const rawJob = workflow.jobs[id];
+    if (!isCanonicalIdentifier(id)) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line: location.line,
+        subject: "jobs",
+        detail: `job id must be canonical and at most ${MAX_WORKFLOW_IDENTIFIER_BYTES} UTF-8 bytes`,
+      });
+      continue;
+    }
+    const subject = `jobs.${id}`;
     if (
-      !JOB_ID_PATTERN.test(id) ||
       !isRecord(rawJob) ||
       (rawJob.name !== undefined && typeof rawJob.name !== "string")
     ) {
-      violations.push({
+      addViolation(violations, {
         kind: "unsupported-execution-shape",
         line: location.line,
         subject,
-        detail: "job id and job value must use canonical mapping syntax",
+        detail: "job value must use canonical mapping syntax",
       });
       continue;
     }
     if (Object.keys(rawJob).some((key) => !JOB_KEYS.has(key))) {
-      violations.push({
+      addViolation(violations, {
         kind: "unsupported-execution-shape",
         line: location.line,
         subject,
@@ -775,7 +843,7 @@ export function canonicalizeWorkflowExecutionSurface(
       continue;
     }
     if (!Array.isArray(rawJob.steps)) {
-      violations.push({
+      addViolation(violations, {
         kind: "unsupported-execution-shape",
         line: location.line,
         subject,
@@ -791,7 +859,7 @@ export function canonicalizeWorkflowExecutionSurface(
     );
     totalSteps += rawJob.steps.length;
     if (totalSteps > MAX_WORKFLOW_STEPS) {
-      violations.push({
+      addViolation(violations, {
         kind: "resource-limit",
         line: location.line,
         subject,
@@ -831,6 +899,9 @@ export function canonicalizeWorkflowExecutionSurface(
 
     const steps: WorkflowRunStepEvidence[] = [];
     for (const [index, rawStep] of rawJob.steps.entries()) {
+      if (violations.saturated) {
+        break jobLoop;
+      }
       const line = location.stepLines[index] ?? location.line;
       const stepSubject = `${subject}.steps[${index}]`;
       if (
@@ -838,7 +909,7 @@ export function canonicalizeWorkflowExecutionSurface(
         Object.keys(rawStep).some((key) => !STEP_KEYS.has(key)) ||
         !Object.hasOwn(rawStep, "run")
       ) {
-        violations.push({
+        addViolation(violations, {
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
@@ -870,7 +941,7 @@ export function canonicalizeWorkflowExecutionSurface(
       }
       const run = staticNonEmptyText(rawStep.run);
       if (run === undefined) {
-        violations.push({
+        addViolation(violations, {
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
@@ -879,7 +950,7 @@ export function canonicalizeWorkflowExecutionSurface(
         continue;
       }
       if ([...run].length > MAX_RUN_CHARACTERS) {
-        violations.push({
+        addViolation(violations, {
           kind: "resource-limit",
           line,
           subject: stepSubject,
@@ -898,7 +969,7 @@ export function canonicalizeWorkflowExecutionSurface(
         workflowDefaults.workingDirectory,
       );
       if (!shell || !workingDirectory) {
-        violations.push({
+        addViolation(violations, {
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
@@ -928,8 +999,8 @@ export function canonicalizeWorkflowExecutionSurface(
     });
   }
 
-  if (violations.length > 0) {
-    return { violations };
+  if (violations.entries.length > 0) {
+    return { violations: violations.entries };
   }
   const evidence: WorkflowExecutionSurfaceEvidence = {
     workflowPath,

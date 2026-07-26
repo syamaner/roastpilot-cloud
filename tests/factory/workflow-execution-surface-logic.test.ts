@@ -8,10 +8,13 @@ import {
   MAX_RUN_CHARACTERS,
   MAX_WORKFLOW_ALIASES,
   MAX_WORKFLOW_BINDINGS,
+  MAX_WORKFLOW_IDENTIFIER_BYTES,
   MAX_WORKFLOW_JOBS,
   MAX_WORKFLOW_PATH_BYTES,
   MAX_WORKFLOW_SOURCE_BYTES,
   MAX_WORKFLOW_STEPS,
+  MAX_WORKFLOW_VIOLATION_BYTES,
+  MAX_WORKFLOW_VIOLATIONS,
   canonicalizeWorkflowExecutionSurface,
   type WorkflowExecutionSurfaceEvidence,
 } from "../../scripts/factory/workflow-execution-surface-logic.mts";
@@ -256,6 +259,163 @@ describe("ordinary-run workflow evidence (issue #120 slice 120d-1a)", () => {
         detail: expect.stringContaining("canonical evidence exceeds"),
       }),
     );
+  });
+
+  it("accepts and rejects exact job and step identifier boundaries", () => {
+    const atLimit = "x".repeat(MAX_WORKFLOW_IDENTIFIER_BYTES);
+    const overLimit = `${atLimit}x`;
+    const jobSource = (id: string): string => `
+on: push
+jobs:
+  ? ${id}
+  : runs-on: ubuntu
+    steps: []
+`;
+
+    expect(evidence(jobSource(atLimit)).jobs[0]?.id).toBe(atLimit);
+    expect(violations(jobSource(overLimit))).toEqual([
+      expect.objectContaining({
+        subject: "jobs",
+        detail: expect.stringContaining("job id must be canonical"),
+      }),
+    ]);
+    expect(
+      evidence(
+        workflow(
+          `runs-on: ubuntu\nsteps:\n  - id: ${atLimit}\n    run: echo`,
+        ),
+      ).jobs[0]?.steps[0]?.id,
+    ).toBe(atLimit);
+    expect(
+      violations(
+        workflow(
+          `runs-on: ubuntu\nsteps:\n  - id: ${overLimit}\n    run: echo`,
+        ),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        detail: expect.stringContaining("step id"),
+      }),
+    );
+  });
+
+  it("does not repeat an oversized explicit job id in step violations", () => {
+    const id = "x".repeat(100_000);
+    const malformedSteps = Array.from(
+      { length: MAX_WORKFLOW_STEPS },
+      () => "      - malformed",
+    ).join("\n");
+    const result = violations(`
+on: push
+jobs:
+  ? ${id}
+  : runs-on: ubuntu
+    steps:
+${malformedSteps}
+`);
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        kind: "unsupported-execution-shape",
+        subject: "jobs",
+      }),
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(
+      1_024,
+    );
+  });
+
+  it("caps aggregate violation count before retaining repeated output", () => {
+    const source = (count: number): string =>
+      workflow(
+        `runs-on: ubuntu\nsteps:\n${Array.from(
+          { length: count },
+          () => "  - malformed",
+        ).join("\n")}`,
+      );
+
+    expect(violations(source(MAX_WORKFLOW_VIOLATIONS))).toHaveLength(
+      MAX_WORKFLOW_VIOLATIONS,
+    );
+    for (const count of [
+      MAX_WORKFLOW_VIOLATIONS + 1,
+      MAX_WORKFLOW_VIOLATIONS + 2,
+    ]) {
+      expect(violations(source(count))).toEqual([
+        expect.objectContaining({
+          kind: "resource-limit",
+          detail: expect.stringContaining(
+            "violation diagnostics exceed",
+          ),
+        }),
+      ]);
+    }
+  });
+
+  it("caps aggregate YAML parser diagnostics", () => {
+    const duplicateJobs = Array.from(
+      { length: MAX_WORKFLOW_VIOLATIONS + 44 },
+      () => "  duplicate: {}",
+    ).join("\n");
+
+    expect(violations(`on: push\njobs:\n${duplicateJobs}`)).toEqual([
+      expect.objectContaining({
+        kind: "resource-limit",
+        detail: expect.stringContaining(
+          "violation diagnostics exceed",
+        ),
+      }),
+    ]);
+  });
+
+  it("enforces the aggregate violation JSON byte ceiling exactly", () => {
+    const source = (name: string): string => `
+on: push
+env:
+  ? "${name}"
+  : value
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`;
+    const baseName = "${{";
+    const baseline = violations(source(baseName));
+    const baselineBytes = Buffer.byteLength(
+      JSON.stringify(baseline),
+      "utf8",
+    );
+    const atLimitName = `${baseName}${"x".repeat(
+      MAX_WORKFLOW_VIOLATION_BYTES - baselineBytes,
+    )}`;
+    const atLimit = violations(source(atLimitName));
+
+    expect(Buffer.byteLength(JSON.stringify(atLimit), "utf8")).toBe(
+      MAX_WORKFLOW_VIOLATION_BYTES,
+    );
+    expect(
+      violations(
+        source(atLimitName).replace(
+          "jobs:",
+          "defaults: malformed\njobs:",
+        ),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "resource-limit",
+        detail: expect.stringContaining(
+          "violation diagnostics exceed",
+        ),
+      }),
+    ]);
+    expect(violations(source(`${atLimitName}x`))).toEqual([
+      expect.objectContaining({
+        kind: "resource-limit",
+        detail: expect.stringContaining(
+          "violation diagnostics exceed",
+        ),
+      }),
+    ]);
   });
 
   it("resolves defaults and environment precedence exactly", () => {
