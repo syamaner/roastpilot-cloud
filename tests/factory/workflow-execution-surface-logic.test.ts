@@ -569,6 +569,102 @@ jobs:
     );
   });
 
+  it.each([
+    ["workflow", "job"],
+    ["workflow", "step"],
+    ["job", "step"],
+  ] as const)(
+    "rejects case-colliding environment names across %s and %s scopes",
+    (outerScope, innerScope) => {
+      const source = (
+        outerName: string,
+        innerName: string,
+      ): string => {
+        const bindings = new Map([
+          [outerScope, `${outerName}: outer`],
+          [innerScope, `${innerName}: inner`],
+        ]);
+        return [
+          "on: push",
+          ...(bindings.has("workflow")
+            ? ["env:", `  ${bindings.get("workflow")}`]
+            : []),
+          "jobs:",
+          "  verify:",
+          "    runs-on: windows-latest",
+          ...(bindings.has("job")
+            ? ["    env:", `      ${bindings.get("job")}`]
+            : []),
+          "    steps:",
+          "      - shell: pwsh",
+          "        run: Write-Output $env:TOKEN",
+          ...(bindings.has("step")
+            ? ["        env:", `          ${bindings.get("step")}`]
+            : []),
+        ].join("\n");
+      };
+
+      for (const [outerName, innerName] of [
+        ["TOKEN", "token"],
+        ["token", "TOKEN"],
+      ]) {
+        expect(violations(source(outerName, innerName))).toContainEqual(
+          expect.objectContaining({
+            kind: "unsupported-execution-shape",
+            detail: expect.stringContaining(
+              "effective environment binding names must be unique",
+            ),
+          }),
+        );
+      }
+    },
+  );
+
+  it("preserves exact-name environment overrides across scopes", () => {
+    const result = evidence(`
+on: push
+env:
+  TOKEN: workflow
+jobs:
+  verify:
+    runs-on: windows-latest
+    env:
+      TOKEN: job
+    steps:
+      - shell: pwsh
+        run: Write-Output $env:TOKEN
+        env:
+          TOKEN: step
+`);
+    expect(result.jobs[0]?.environment).toEqual([
+      { name: "TOKEN", value: "job", scope: "job" },
+    ]);
+    expect(result.jobs[0]?.steps[0]?.environment).toEqual([
+      { name: "TOKEN", value: "step", scope: "step" },
+    ]);
+  });
+
+  it("keeps case-equivalent environment names independent across jobs", () => {
+    const result = evidence(`
+on: push
+jobs:
+  first:
+    runs-on: windows-latest
+    env:
+      TOKEN: first
+    steps: []
+  second:
+    runs-on: windows-latest
+    env:
+      token: second
+    steps: []
+`);
+    expect(result.jobs.map((job) => job.environment)).toEqual([
+      [{ name: "TOKEN", value: "first", scope: "job" }],
+      [{ name: "token", value: "second", scope: "job" }],
+    ]);
+  });
+
   it("retains workflow-default provenance when no override exists", () => {
     const result = evidence(`
 on: workflow_dispatch

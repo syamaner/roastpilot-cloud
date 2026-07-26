@@ -458,13 +458,32 @@ function canonicalBindings(
 }
 
 function mergeEnvironment(
+  line: number,
+  subject: string,
+  violations: ViolationAccumulator,
   ...levels: readonly (readonly WorkflowBindingEvidence[])[]
-): readonly WorkflowBindingEvidence[] {
+): readonly WorkflowBindingEvidence[] | undefined {
   const effective = new Map<string, WorkflowBindingEvidence>();
   for (const bindings of levels) {
     for (const binding of bindings) {
       effective.set(binding.name, binding);
     }
+  }
+  const namesByCaseFold = new Map<string, string>();
+  for (const name of effective.keys()) {
+    const caseFoldedName = name.toUpperCase();
+    const priorName = namesByCaseFold.get(caseFoldedName);
+    if (priorName !== undefined && priorName !== name) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line,
+        subject,
+        detail:
+          "effective environment binding names must be unique under case-insensitive runner semantics",
+      });
+      return undefined;
+    }
+    namesByCaseFold.set(caseFoldedName, name);
   }
   return [...effective.values()].sort((left, right) => {
     /* v8 ignore next -- Map keys are unique, so equal names cannot be compared. */
@@ -896,10 +915,14 @@ export function canonicalizeWorkflowExecutionSurface(
         location.line,
         violations,
       ) ?? [];
-    const effectiveJobEnvironment = mergeEnvironment(
-      workflowEnvironment,
-      jobEnvironment,
-    );
+    const effectiveJobEnvironment =
+      mergeEnvironment(
+        location.line,
+        `${subject}.env`,
+        violations,
+        workflowEnvironment,
+        jobEnvironment,
+      ) ?? [];
     const jobDefaults =
       parseDefaults(
         rawJob.defaults,
@@ -951,11 +974,14 @@ export function canonicalizeWorkflowExecutionSurface(
           line,
           violations,
         ) ?? [];
-      const environment = mergeEnvironment(
-        workflowEnvironment,
-        jobEnvironment,
-        stepEnvironment,
-      );
+      const environment =
+        mergeEnvironment(
+          line,
+          `${stepSubject}.env`,
+          violations,
+          effectiveJobEnvironment,
+          stepEnvironment,
+        ) ?? [];
       if (!recordBindings(environment.length, line, stepSubject)) {
         break jobLoop;
       }
