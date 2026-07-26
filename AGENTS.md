@@ -153,13 +153,16 @@ path:
 
 - **Factory-dispatchable** means one issue, one publisher commit, and one PR
   today. Until the publisher has an independent pre-publish diff-review stage,
-  its technical envelope is exact and fail-closed: at most 400 combined
-  changed logic-and-test lines; no binary patch; and no mix of allowlisted inert
-  data/fixtures/generated/design-doc output with logic or tests. Migrations and
-  operational or unknown documentation are logic. The publisher classifies the
-  captured patch encoding and applied scratch-index diff before pushing. Route
-  a materially larger, mixed-output, or otherwise pre-open-`qa`-triggering
-  shape to conventional execution instead.
+  its technical envelope is exact and fail-closed: at most 400 combined changed
+  textual lines across every path category; a captured patch artifact no larger
+  than 2 MiB; no binary patch; and no mix of allowlisted inert
+  data/fixtures/generated/design-doc output with logic or tests. Allowlisted
+  output still counts toward the textual ceiling because path names cannot prove
+  runtime inertness. Migrations and operational or unknown documentation are
+  logic. The publisher classifies the captured patch encoding and applied
+  scratch-index diff before pushing. Route a materially larger, oversized,
+  mixed-output, or otherwise pre-open-`qa`-triggering shape to conventional
+  execution instead.
 - **Conventional/interactive** may plan multiple ordered slice PRs and may use a
   justified materially-larger unit, because the lead can run the required
   independent pre-open review and create separate commits. A triage-complete

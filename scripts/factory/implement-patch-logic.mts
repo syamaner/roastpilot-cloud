@@ -338,8 +338,8 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
   return Array.from(edits).sort();
 }
 
-/** Exact combined logic-and-test ceiling for the current factory publisher. */
-export const FACTORY_LOGIC_AND_TEST_LINE_LIMIT = 400;
+/** Exact combined textual-line ceiling for the current factory publisher. */
+export const FACTORY_TEXT_LINE_LIMIT = 400;
 
 /** One path row from git's authoritative `--numstat -z` scratch-index diff. */
 export interface FactoryPatchLineStat {
@@ -377,14 +377,15 @@ export function isFactoryTestSourcePath(repoRelativePath: string): boolean {
 }
 
 /**
- * Reports whether a path is known non-executable fixture data.
+ * Reports whether a path belongs to the separately delivered output category.
  *
- * This classifier is an allowlist of this repo's inert roots and file shapes.
- * Only exact inert-output/doc allowlists and the design-doc namespace are
- * separated by the one-commit factory envelope. Operational or future unknown
- * output remains logic. Unknown files count as logic; migrations, lockfiles,
- * configuration, executable source extensions, and paths that merely contain
- * names such as `data`, `fixtures`, or `generated` never become exempt.
+ * This path-only classification is not a claim that the file is unreachable
+ * from production code. Every changed line still counts toward the universal
+ * textual ceiling. The category exists only so the one-commit publisher can
+ * reject allowlisted output mixed with logic/tests. Operational or future
+ * unknown output remains logic; migrations, lockfiles, configuration,
+ * executable source extensions, and paths that merely contain names such as
+ * `data`, `fixtures`, or `generated` never enter the separated-output category.
  *
  * @param repoRelativePath - Exact repo-relative path reported by git.
  * @returns Whether the publisher may treat the path as data-only.
@@ -407,9 +408,11 @@ export function isFactoryDataOnlyPath(repoRelativePath: string): boolean {
  * Conventional work uses the reviewability guide in D119. The automated
  * publisher cannot run independent pre-open review or create separate commits,
  * so it retains exact fail-closed limits until those capabilities exist.
- * Logic and test-source churn share one ceiling because a test-root source can
- * become production-reachable through an import introduced by an earlier PR.
- * The publisher cannot safely infer full-tree executable closure yet.
+ * Every textual path category shares one ceiling because a test root or
+ * allowlisted output can become production-reachable through an import/read
+ * introduced by an earlier PR. The publisher cannot safely infer full-tree
+ * executable closure yet. Data categories remain distinct only to enforce the
+ * publisher's one-commit mixed-output prohibition.
  *
  * @param stats - Git-authored per-path changed-line rows.
  * @returns Human-readable violations; empty means the patch fits the envelope.
@@ -421,6 +424,7 @@ export function findFactoryPatchEnvelopeViolations(
   const binaryPaths: string[] = [];
   let logicLines = 0;
   let testLines = 0;
+  let outputLines = 0;
   let hasData = false;
   let hasNonData = false;
 
@@ -474,6 +478,8 @@ export function findFactoryPatchEnvelopeViolations(
       logicLines += changedLines;
     } else if (strongestCategory === "test") {
       testLines += changedLines;
+    } else {
+      outputLines += changedLines;
     }
   }
 
@@ -488,12 +494,12 @@ export function findFactoryPatchEnvelopeViolations(
         "the one-commit factory publisher requires a separate issue/PR",
     );
   }
-  const logicAndTestLines = logicLines + testLines;
-  if (logicAndTestLines > FACTORY_LOGIC_AND_TEST_LINE_LIMIT) {
+  const textLines = logicLines + testLines + outputLines;
+  if (textLines > FACTORY_TEXT_LINE_LIMIT) {
     violations.push(
-      `logic/test churn is ${logicAndTestLines} changed lines ` +
-        `(${logicLines} logic, ${testLines} test), above the combined factory ` +
-        `limit of ${FACTORY_LOGIC_AND_TEST_LINE_LIMIT}; use conventional execution`,
+      `text churn is ${textLines} changed lines ` +
+        `(${logicLines} logic, ${testLines} test, ${outputLines} output), above ` +
+        `the combined factory limit of ${FACTORY_TEXT_LINE_LIMIT}; use conventional execution`,
     );
   }
   return violations;

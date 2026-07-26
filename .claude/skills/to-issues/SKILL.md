@@ -100,9 +100,11 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
 - **The batch is a PR PLAN (D119, factory.md §5 addendum).** Name each story's
   execution path. A `factory-dispatchable` story is exactly one publisher
   commit/PR and cannot use the larger-unit exception, mix logic/tests with
-  exempt data, exceed 400 combined changed logic-and-test lines, contain a
-  binary patch, treat migrations as exempt, or otherwise trigger pre-open
-  `qa`. A `conventional/interactive`
+  exempt data, exceed 400 combined changed textual lines across any path
+  category, produce a captured patch artifact larger than 2 MiB, contain a
+  binary patch, treat migrations as exempt, or otherwise trigger pre-open `qa`.
+  Allowlisted output still counts toward the textual ceiling. A
+  `conventional/interactive`
   story may plan one or more ordered slice PRs and may justify a larger unit.
   Generated files, fixtures, and docs are excluded from the logic estimate only
   when separated as `AGENTS.md` requires. Snowflake migrations always count as

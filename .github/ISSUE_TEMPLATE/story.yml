@@ -46,10 +46,10 @@ body:
     id: size
     attributes:
       label: Size declaration
-      description: Choose the execution path and review-unit shape (D119-D121). About 400 changed logic lines is a guide for conventional work. The current factory publisher's exact technical envelope is one issue/commit/PR, at most 400 combined changed logic-and-test lines, no binary patch, and no mixed inert output plus logic/tests. Any otherwise pre-open-QA-triggering work uses conventional execution.
+      description: Choose the execution path and review-unit shape (D119-D122). About 400 changed logic lines is a guide for conventional work. The current factory publisher's exact technical envelope is one issue/commit/PR, at most 400 combined changed textual lines across every path category, a captured patch artifact no larger than 2 MiB, no binary patch, and no mixed inert output plus logic/tests. Any oversized or otherwise pre-open-QA-triggering work uses conventional execution.
       options:
-        - "Factory-dispatchable — one coherent publisher PR, normally ~400 logic lines"
-        - "Factory-dispatchable exempt class — data / generated / fixtures / docs only"
+        - "Factory-dispatchable — within the universal 400 textual-line and 2 MiB envelope"
+        - "Factory-dispatchable output-only — data / generated / fixtures / docs, within 400 text lines and 2 MiB"
         - "Conventional/interactive — one or more coherent PR units, normally ~400 logic lines each"
         - "Conventional/interactive — justified materially larger cohesive unit"
     validations:

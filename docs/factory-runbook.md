@@ -23,6 +23,16 @@ gh api repos/syamaner/roastpilot-cloud/labels/ready-for-conventional-implementat
   --jq '{name, color, description}'
 ```
 
+## Factory dispatch eligibility limits
+
+Factory-dispatchable work must fit one issue, one publisher commit, and one PR;
+at most 400 combined changed textual lines across every path category; and a
+captured patch artifact no larger than 2 MiB. It may not contain a binary patch
+or mix allowlisted output with logic/tests. Allowlisted output still counts
+toward the textual ceiling because a repository path does not prove the file is
+unreachable from production code. Route any expected line- or byte-limit
+overage to conventional execution before dispatch.
+
 ## Kill-switch: stopping the factory
 
 **The pause flag is the primary halt mechanism for anything not yet

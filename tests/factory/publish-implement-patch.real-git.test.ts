@@ -2448,7 +2448,56 @@ ${addedLines}
     const body = JSON.parse(
       (failurePost?.[1]?.body as string) ?? "{}",
     ) as { body: string };
-    expect(body.body).toContain("logic/test churn is 401");
+    expect(body.body).toContain("text churn is 401");
+  });
+
+  it("rejects an oversized output-only patch after an earlier runtime import", async () => {
+    const schemaPath = join(localCloneDir, "generated", "schema.json");
+    const consumerPath = join(localCloneDir, "app", "page.tsx");
+    await mkdir(dirname(schemaPath), { recursive: true });
+    await mkdir(dirname(consumerPath), { recursive: true });
+    await fsWriteFile(schemaPath, '{"enabled":false}\n');
+    await fsWriteFile(
+      consumerPath,
+      'import schema from "../generated/schema.json";\n\n' +
+        "export default function Page() {\n" +
+        "  return String(schema.enabled);\n" +
+        "}\n",
+    );
+    git(localCloneDir, ["add", "-A"]);
+    git(localCloneDir, ["commit", "-q", "-m", "seed runtime schema consumer"]);
+    const largeSchema = Object.fromEntries(
+      Array.from({ length: 401 }, (_, index) => [`field${index}`, index]),
+    );
+    await fsWriteFile(schemaPath, `${JSON.stringify(largeSchema, null, 2)}\n`);
+    git(localCloneDir, ["add", "-A"]);
+    const outputPatch = git(localCloneDir, ["diff", "--cached", "--binary"]);
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "runtime-output.diff",
+      outputPatch,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const failurePost = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/issues/6/comments") &&
+        init?.method === "POST",
+    );
+    const body = JSON.parse(
+      (failurePost?.[1]?.body as string) ?? "{}",
+    ) as { body: string };
+    expect(body.body).toContain(
+      "text churn is 404 changed lines (0 logic, 0 test, 404 output)",
+    );
+    expect(git(bareRemoteDir, ["branch", "--list"])).not.toContain(
+      "feature/6-implement-workflow",
+    );
   });
 
   it.each([
@@ -2493,7 +2542,7 @@ ${addedLines}
       const body = JSON.parse(
         (failurePost?.[1]?.body as string) ?? "{}",
       ) as { body: string };
-      expect(body.body).toContain("logic/test churn is 401");
+      expect(body.body).toContain("text churn is 401");
     },
   );
 

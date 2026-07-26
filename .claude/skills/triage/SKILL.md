@@ -68,10 +68,12 @@ and each is independently checkable:
    explain why the available splits are less reviewable.
    - `factory-dispatchable` maps to exactly one publisher commit and PR today.
      Its current exact technical envelope is at most 400 combined changed
-     logic-and-test lines, no binary patch, no migrations treated as exempt
-     data, and no mix of allowlisted inert data/fixtures/generated/design-doc
-     output with logic or tests. It also cannot carry otherwise load-bearing
-     test quality that
+     textual lines across every path category, a captured patch artifact no
+     larger than 2 MiB, no binary patch, no migrations treated as exempt data,
+     and no mix of allowlisted inert data/fixtures/generated/design-doc output
+     with logic or tests. Allowlisted output still counts toward the textual
+     ceiling because a path alone cannot prove production unreachability. It
+     also cannot carry otherwise load-bearing test quality that
      requires pre-open `qa`, because the publisher has no independent
      pre-publish review stage or multi-commit support. Route any such plan to
      `conventional/interactive` rather than approving it for factory dispatch.

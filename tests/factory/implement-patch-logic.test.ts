@@ -10,7 +10,7 @@ import {
   buildPublishSuccessStepSummary,
   deriveBranchName,
   extractModelIdFromTranscript,
-  FACTORY_LOGIC_AND_TEST_LINE_LIMIT,
+  FACTORY_TEXT_LINE_LIMIT,
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
@@ -74,55 +74,74 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
       findFactoryPatchEnvelopeViolations([
         {
           path: "lib/logic.ts",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT,
+          additions: FACTORY_TEXT_LINE_LIMIT,
           deletions: 0,
         },
       ]),
     ).toEqual([]);
   });
 
-  it("accepts the exact pure-test ceiling", () => {
-    expect(
-      findFactoryPatchEnvelopeViolations([
-        {
-          path: "tests/logic.test.ts",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT,
-          deletions: 0,
-        },
-      ]),
-    ).toEqual([]);
+  it("accepts the exact ceiling for every textual path category", () => {
+    for (const path of [
+      "lib/logic.ts",
+      "tests/logic.test.ts",
+      "generated/schema.json",
+    ]) {
+      expect(
+        findFactoryPatchEnvelopeViolations([
+          {
+            path,
+            additions: FACTORY_TEXT_LINE_LIMIT,
+            deletions: 0,
+          },
+        ]),
+      ).toEqual([]);
+    }
   });
 
-  it("rejects pure logic or pure test churn above the combined ceiling", () => {
+  it("rejects pure logic, test, or output churn above the combined ceiling", () => {
     expect(
       findFactoryPatchEnvelopeViolations([
         {
           path: "snowflake/migrations/V001__schema.sql",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT + 1,
+          additions: FACTORY_TEXT_LINE_LIMIT + 1,
           deletions: 0,
         },
       ]),
     ).toEqual([
       expect.stringContaining(
-        "logic/test churn is 401 changed lines (401 logic, 0 test)",
+        "text churn is 401 changed lines (401 logic, 0 test, 0 output)",
       ),
     ]);
     expect(
       findFactoryPatchEnvelopeViolations([
         {
           path: "tests/schema.test.ts",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT + 1,
+          additions: FACTORY_TEXT_LINE_LIMIT + 1,
           deletions: 0,
         },
       ]),
     ).toEqual([
       expect.stringContaining(
-        "logic/test churn is 401 changed lines (0 logic, 401 test)",
+        "text churn is 401 changed lines (0 logic, 401 test, 0 output)",
+      ),
+    ]);
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          path: "generated/schema.json",
+          additions: FACTORY_TEXT_LINE_LIMIT + 1,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([
+      expect.stringContaining(
+        "text churn is 401 changed lines (0 logic, 0 test, 401 output)",
       ),
     ]);
   });
 
-  it("allows mixed logic-and-test churn at the combined logic ceiling", () => {
+  it("allows mixed logic-and-test churn at the combined text ceiling", () => {
     expect(
       findFactoryPatchEnvelopeViolations([
         {
@@ -132,14 +151,14 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
         },
         {
           path: "tests/feature.test.ts",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT - 1,
+          additions: FACTORY_TEXT_LINE_LIMIT - 1,
           deletions: 0,
         },
       ]),
     ).toEqual([]);
   });
 
-  it("rejects mixed logic-and-test churn above the combined logic ceiling", () => {
+  it("rejects mixed logic-and-test churn above the combined text ceiling", () => {
     expect(
       findFactoryPatchEnvelopeViolations([
         {
@@ -149,13 +168,13 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
         },
         {
           path: "tests/runtime-payload.ts",
-          additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT,
+          additions: FACTORY_TEXT_LINE_LIMIT,
           deletions: 0,
         },
       ]),
     ).toEqual([
       expect.stringContaining(
-        "logic/test churn is 401 changed lines (1 logic, 400 test)",
+        "text churn is 401 changed lines (1 logic, 400 test, 0 output)",
       ),
     ]);
   });
@@ -180,7 +199,32 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
       ]),
     ).toEqual([
       expect.stringContaining(
-        "logic/test churn is 600 changed lines (0 logic, 600 test)",
+        "text churn is 600 changed lines (0 logic, 600 test, 0 output)",
+      ),
+    ]);
+  });
+
+  it("blocks the cross-PR production-import bypass at the later output-only patch", () => {
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          path: "app/page.tsx",
+          additions: 1,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([]);
+    expect(
+      findFactoryPatchEnvelopeViolations([
+        {
+          path: "generated/schema.json",
+          additions: 600,
+          deletions: 0,
+        },
+      ]),
+    ).toEqual([
+      expect.stringContaining(
+        "text churn is 600 changed lines (0 logic, 0 test, 600 output)",
       ),
     ]);
   });
@@ -237,11 +281,11 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
         findFactoryPatchEnvelopeViolations([
           {
             path,
-            additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT + 1,
+            additions: FACTORY_TEXT_LINE_LIMIT + 1,
             deletions: 0,
           },
         ]),
-      ).toEqual([expect.stringContaining("logic/test churn is 401")]);
+      ).toEqual([expect.stringContaining("text churn is 401")]);
     }
   });
 
@@ -278,11 +322,11 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
         findFactoryPatchEnvelopeViolations([
           {
             path,
-            additions: FACTORY_LOGIC_AND_TEST_LINE_LIMIT + 1,
+            additions: FACTORY_TEXT_LINE_LIMIT + 1,
             deletions: 0,
           },
         ]),
-      ).toEqual([expect.stringContaining("logic/test churn is 401")]);
+      ).toEqual([expect.stringContaining("text churn is 401")]);
     }
   });
 
@@ -341,7 +385,7 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
       ]),
     ).toEqual([
       expect.stringContaining("cross-category rename/copy"),
-      expect.stringContaining("logic/test churn is 401"),
+      expect.stringContaining("text churn is 401"),
     ]);
     expect(
       findFactoryPatchEnvelopeViolations([
@@ -354,7 +398,7 @@ describe("factory publisher envelope (D119 operational boundary)", () => {
       ]),
     ).toEqual([
       expect.stringContaining("mixed with logic or tests"),
-      expect.stringContaining("logic/test churn is 601"),
+      expect.stringContaining("text churn is 601"),
     ]);
     for (const path of ["lib/roast.json", "tests/roast.json"]) {
       expect(
