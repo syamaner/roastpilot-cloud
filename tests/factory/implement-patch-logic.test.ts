@@ -2106,11 +2106,20 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("triggered normally");
     expect(summary).not.toContain("**Suppressed**");
     // Adjudicated fix (Codex P2, #46 reshape): must not imply the
-    // Codex-wait rule is already satisfied just because it auto-reviewed.
+    // Codex-wait rule needs no wait at all. REVISED by D142 and Codex P1
+    // on #155: a factory PR is created READY, so it emits `opened` and
+    // never `ready_for_review`, and that automatic review IS its valid
+    // first verdict. Telling the operator to re-trigger manually on an
+    // unchanged head caused a duplicate review and a needless delay. The
+    // wait itself is still asserted, and so is the manual re-trigger for
+    // the one case that genuinely needs it, a later push moving the head.
     expect(summary).toContain("Codex auto-reviewed at creation");
-    expect(summary).toContain("must still manually");
-    expect(summary).toContain("@codex review");
-    expect(summary).toContain("NOT satisfied automatically");
+    expect(summary).toContain("IS the valid first verdict");
+    expect(summary).toContain("`opened`");
+    expect(summary).toContain("Wait for that verdict on this exact head");
+    expect(summary).toContain("ONLY if a later push moves the head");
+    expect(summary).not.toContain("must still manually");
+    expect(summary).not.toContain("NOT satisfied automatically");
     // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
     // Review must NOT be reported as part of "triggered normally" — it
     // does not actually run on a factory-minted PR until #47 lands.

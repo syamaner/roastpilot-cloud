@@ -2035,9 +2035,11 @@ export function buildPublishSuccessStepSummary(
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
       "a manual review pass is required before merging."
     : "✅ CI, CodeQL, and dependency review triggered normally. Codex auto-reviewed " +
-      "at creation, but the operator must still manually `@codex review` the FINAL " +
-      "commit and wait for its verdict before merging (AGENTS.md's Codex-wait rule) " +
-      "— this is NOT satisfied automatically. ⚠\uFE0F **Claude Code Review does NOT yet " +
+      "at creation, and for a PR created ready (every factory PR) that automatic " +
+      "review IS the valid first verdict: its boundary event is `opened`, since such " +
+      "a PR never emits `ready_for_review`. Wait for that verdict on this exact head " +
+      "before merging (AGENTS.md's Codex-wait rule); a manual `@codex review` is " +
+      "required ONLY if a later push moves the head. ⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +

@@ -242,23 +242,37 @@ exception. The load-bearing points:
   reactions API returns each reaction's `user.login`); one polling only reviews +
   reactions is also blind to the comment channel entirely. A **posted
   `pull_request_review` with inline threads** = findings.
-  The signal must correspond to the current head AND postdate the
-  `ready_for_review` transition (or, after a later push, the fresh re-trigger
-  on that new final commit). Head-match alone is NOT enough, and this is a
-  real hole rather than a theoretical one (Codex P1 on the agent repo's copy
-  of this rule, #682): a manually requested review on the DRAFT posts findings
-  against the very same sha, so if nothing needed changing before marking
-  ready, a head-match-only rule would let that pre-ready verdict satisfy the
-  wait while the automatic review the ready transition just started is still
-  in flight. A comment or review naming an earlier commit sha does not satisfy
-  the wait either, and a 👍 reaction carries no sha, so it is valid only while
-  the head stays unchanged since it was left. Do not arm auto-merge on green
-  CI alone. **The draft phase is not a Codex carve-out** (D103 below has the
-  full rationale): Codex does not review a draft at all, so there is nothing
-  to converge there while a PR sits in draft. The once-on-final discipline
-  governs the single automatic trigger at ready; only a later push needs a
-  manual re-trigger, once, on its new final commit. (Factory-authored PRs
-  open non-draft and are reviewed post-open, #62.)
+  The signal must correspond to the current head AND postdate **the event that
+  started the automatic review for this PR's shape**, which is not the same
+  event in both cases (Codex P1, #155):
+  - a PR **created ready** (every factory-authored PR, #62) emits `opened` and
+    NEVER emits `ready_for_review`, so `opened` is its boundary. Requiring a
+    `ready_for_review` timestamp here would be unsatisfiable and would block
+    every untouched factory PR permanently;
+  - a **draft marked ready** emits `ready_for_review`, and that is its
+    boundary;
+  - after any later push, the boundary becomes the fresh single re-trigger on
+    that new final commit.
+
+  Head-match alone is NOT enough, and that is a real hole rather than a
+  theoretical one (Codex P1 on the agent repo's copy, #682): a manually
+  requested review on the DRAFT posts findings against the very same sha, so
+  if nothing needed changing before marking ready, a head-match-only rule
+  would let that pre-ready verdict satisfy the wait while the automatic review
+  the ready transition just started is still in flight. A comment or review
+  naming an earlier commit sha does not satisfy the wait either, and a 👍
+  reaction carries no sha, so it is valid only while the head stays unchanged
+  since it was left. Do not arm auto-merge on green CI alone.
+
+  **What the draft phase is and is not.** The AUTOMATIC trigger does not fire
+  on a draft, so a draft cannot converge the review roster on its own. But a
+  manual `@codex review` on a draft is NOT inert (Codex P1, #155; D105): it
+  runs and posts findings against the draft head, and those findings are real
+  and worth folding. What it cannot do is complete the clean-verdict flow, so
+  a draft waiting for a clean signal waits forever. Both facts hold because
+  they describe different mechanisms. The once-on-final discipline governs the
+  single automatic trigger at ready; only a later push needs a manual
+  re-trigger, once, on its new final commit.
 - **`pr-triage` adjudicates independently of the author.** Under the factory,
   the author is always an agent; it never self-triages its own PR's review
   comments (D23). The lead (or the `pr-triage` sub-agent) decides what counts
