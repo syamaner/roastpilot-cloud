@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_WORKFLOW_CANONICAL_VALUES,
+} from "../../scripts/factory/workflow-canonical-value-logic.mts";
+import {
   MAX_CANONICAL_EVIDENCE_BYTES,
   MAX_RUN_CHARACTERS,
   MAX_WORKFLOW_ALIASES,
@@ -81,14 +84,34 @@ describe("ordinary-run workflow evidence (issue #120 slice 120d-1a)", () => {
       ),
     ).toEqual({
       workflowPath: DEFAULT_WORKFLOW_PATH,
-      trigger: "workflow_dispatch",
+      trigger: {
+        kind: "mapping",
+        entries: [
+          {
+            key: "workflow_dispatch",
+            value: { kind: "null" },
+          },
+        ],
+      },
       workflowName: "test",
+      runName: null,
       workflowEnvironment: [],
+      canonicalValueCount: 5,
+      canonicalValueDepth: 2,
       jobs: [
         {
           id: "verify",
           line: 5,
-          runnerLabels: ["ubuntu-latest"],
+          name: null,
+          runner: {
+            kind: "sequence",
+            items: [{ kind: "string", value: "ubuntu-latest" }],
+          },
+          permissions: {
+            githubTokenMaterialPresent: true,
+            declaredCapability: "unresolved-default",
+            declaration: { kind: "unresolved-default" },
+          },
           environment: [],
           steps: [
             {
@@ -196,6 +219,49 @@ describe("ordinary-run workflow evidence (issue #120 slice 120d-1a)", () => {
       );
     },
   );
+
+  it("pins 1b1 runner equivalence while 120a conservatively diverges", () => {
+    const source = (runner: string) => `
+on: push
+jobs:
+  verify:
+    runs-on: ${runner}
+    steps: []
+`;
+    const scalar = evidence(source("ubuntu-latest"));
+    const singleLabelList = evidence(
+      source("[ubuntu-latest]"),
+    );
+
+    expect(singleLabelList).toEqual(scalar);
+    expect(singleLabelList.canonicalValueCount).toBe(
+      scalar.canonicalValueCount,
+    );
+  });
+
+  it("normalizes workflow concurrency scalar/map and fixed-false spellings", () => {
+    const source = (concurrency: string) => `
+on: push
+concurrency: ${concurrency}
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`;
+    const scalar = evidence(source("serial"));
+    const groupMap = evidence(source("{group: serial}"));
+    const fixedFalse = evidence(
+      source(
+        "{group: serial, cancel-in-progress: false}",
+      ),
+    );
+
+    expect(groupMap).toEqual(scalar);
+    expect(fixedFalse).toEqual(scalar);
+    expect(fixedFalse.canonicalValueCount).toBe(
+      scalar.canonicalValueCount,
+    );
+  });
 
   it("enforces the canonical evidence byte ceiling exactly", () => {
     const source = workflow(
@@ -373,7 +439,7 @@ ${malformedSteps}
 on: push
 env:
   ? "${name}"
-  : "${"$"}{{"
+  : 1.5
 jobs:
   verify:
     runs-on: ubuntu
@@ -446,13 +512,22 @@ jobs:
           D: static
 `);
 
-    expect(result.trigger).toBe("push");
+    expect(result.trigger).toEqual({
+      kind: "mapping",
+      entries: [{ key: "push", value: { kind: "null" } }],
+    });
     expect(result.workflowEnvironment).toEqual([
       { name: "A", value: "workflow", scope: "workflow" },
       { name: "B", value: "workflow", scope: "workflow" },
     ]);
     expect(result.jobs[0]).toMatchObject({
-      runnerLabels: ["self-hosted", "linux"],
+      runner: {
+        kind: "sequence",
+        items: [
+          { kind: "string", value: "self-hosted" },
+          { kind: "string", value: "linux" },
+        ],
+      },
       environment: [
         { name: "A", value: "workflow", scope: "workflow" },
         { name: "B", value: "job", scope: "job" },
@@ -714,14 +789,14 @@ jobs:
       - id: allowed_id
         name: Static step
         continue-on-error: false
-        timeout-minutes: 5
+        timeout-minutes: 360
         run: echo ok
 `);
     expect(result.jobs[0]?.steps[0]).toMatchObject({
       id: "allowed_id",
       name: "Static step",
-      continueOnError: false,
-      timeoutMinutes: 5,
+      continueOnError: { kind: "boolean", value: false },
+      timeoutMinutes: { kind: "integer", value: 360 },
     });
   });
 
@@ -793,23 +868,667 @@ jobs:
   });
 });
 
-describe("deferred execution/context surfaces fail closed", () => {
-  it.each([
-    ["action step", `uses: actions/checkout@${"a".repeat(40)}`],
-    ["action inputs", "run: echo\nwith: {script: hidden}"],
-    ["step condition", "run: echo\nif: always()"],
-  ])("rejects delegated step form: %s", (_name, step) => {
-    const source = workflow(
-      [
-        "runs-on: ubuntu-latest",
-        "steps:",
-        "  - " + step.split("\n").join("\n    "),
-      ].join("\n"),
+describe("ordinary context evidence (issue #120 slice 120d-1b1)", () => {
+  it("canonicalizes the complete closed ordinary-run context surface", () => {
+    const result = evidence(`
+name: Context
+run-name: "Run \${{ github.run_id }}"
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: "workflow-\${{ github.ref }}"
+  cancel-in-progress: false
+env:
+  SHA: "\${{ github.sha }}"
+jobs:
+  verify:
+    name: Verify
+    needs: prepare
+    if: success()
+    permissions:
+      issues: write
+    concurrency:
+      group: "job-\${{ matrix.os }}"
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            experimental: false
+    runs-on: "\${{ matrix.os }}"
+    outputs:
+      digest: "\${{ steps.hash.outputs.digest }}"
+    environment:
+      name: production
+      url: "\${{ steps.deploy.outputs.url }}"
+    continue-on-error: "\${{ matrix.experimental }}"
+    timeout-minutes: "\${{ vars.TIMEOUT }}"
+    steps:
+      - id: hash
+        name: Hash
+        if: "\${{ github.ref == 'refs/heads/main' }}"
+        env:
+          VALUE: "prefix-\${{ matrix.os }}"
+        continue-on-error: false
+        timeout-minutes: 5
+        shell: "\${{ matrix.shell }}"
+        working-directory: "work/\${{ matrix.os }}"
+        run: "echo \${{ github.sha }}"
+`);
+
+    expect(result.runName).toBe("Run ${{ github.run_id }}");
+    expect(result.concurrency).toEqual({
+      kind: "mapping",
+      entries: [
+        {
+          key: "group",
+          value: {
+            kind: "string",
+            value: "workflow-${{ github.ref }}",
+          },
+        },
+      ],
+    });
+    expect(result.jobs[0]).toMatchObject({
+      name: "Verify",
+      concurrency: {
+        kind: "mapping",
+        entries: [
+          {
+            key: "group",
+            value: {
+              kind: "string",
+              value: "job-${{ matrix.os }}",
+            },
+          },
+          {
+            key: "cancel-in-progress",
+            value: { kind: "boolean", value: true },
+          },
+        ],
+      },
+      needs: {
+        kind: "sequence",
+        items: [{ kind: "string", value: "prepare" }],
+      },
+      permissions: {
+        githubTokenMaterialPresent: true,
+        declaredCapability: "write",
+      },
+      condition: {
+        kind: "string",
+        spelling: "bare",
+        value: "success()",
+      },
+      continueOnError: {
+        kind: "string",
+        spelling: "wrapped",
+        value: "${{ matrix.experimental }}",
+      },
+      timeoutMinutes: {
+        kind: "string",
+        spelling: "wrapped",
+        value: "${{ vars.TIMEOUT }}",
+      },
+      outputs: {
+        kind: "mapping",
+        entries: [
+          {
+            key: "digest",
+            value: {
+              kind: "string",
+              value: "${{ steps.hash.outputs.digest }}",
+            },
+          },
+        ],
+      },
+      deploymentEnvironment: {
+        kind: "mapping",
+        entries: [
+          {
+            key: "name",
+            value: { kind: "string", value: "production" },
+          },
+          {
+            key: "url",
+            value: {
+              kind: "string",
+              value: "${{ steps.deploy.outputs.url }}",
+            },
+          },
+        ],
+      },
+    });
+    expect(result.jobs[0]?.steps[0]).toMatchObject({
+      condition: {
+        kind: "string",
+        spelling: "wrapped",
+        value: "${{ github.ref == 'refs/heads/main' }}",
+      },
+      run: "echo ${{ github.sha }}",
+      shell: {
+        source: "step",
+        value: "${{ matrix.shell }}",
+      },
+      workingDirectory: {
+        source: "step",
+        value: "work/${{ matrix.os }}",
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /"trusted"|"authorized"|"executes"/,
     );
-    expect(violations(source)).toContainEqual(
+  });
+
+  it("normalizes equivalent trigger spellings with identical counts", () => {
+    const body =
+      "jobs:\n  verify:\n    runs-on: ubuntu\n    steps: []";
+    const scalarSequence = evidence(
+      `on: [push, pull_request]\n${body}`,
+    );
+    const nullMapping = evidence(
+      `on:\n  push:\n  pull_request:\n${body}`,
+    );
+    const emptyMapping = evidence(
+      `on:\n  pull_request: {}\n  push: {}\n${body}`,
+    );
+
+    expect(scalarSequence.trigger).toEqual(nullMapping.trigger);
+    expect(emptyMapping.trigger).toEqual(nullMapping.trigger);
+    expect(scalarSequence.canonicalValueCount).toBe(
+      nullMapping.canonicalValueCount,
+    );
+    expect(emptyMapping.canonicalValueCount).toBe(
+      nullMapping.canonicalValueCount,
+    );
+  });
+
+  it("captures ordered schedule declarations with the documented timezone field", () => {
+    const source = (schedule: string) => `
+on:
+  schedule:
+${schedule}
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`;
+    const first = evidence(
+      source(
+        '    - cron: "17 3 * * 2"\n      timezone: Europe/London\n    - cron: "5 4 * * 3"',
+      ),
+    );
+    const reversed = evidence(
+      source(
+        '    - cron: "5 4 * * 3"\n    - cron: "17 3 * * 2"\n      timezone: Europe/London',
+      ),
+    );
+
+    expect(first.trigger).toMatchObject({
+      kind: "mapping",
+      entries: [
+        {
+          key: "schedule",
+          value: {
+            kind: "sequence",
+            items: [
+              {
+                kind: "mapping",
+                entries: [
+                  {
+                    key: "cron",
+                    value: {
+                      kind: "string",
+                      value: "17 3 * * 2",
+                    },
+                  },
+                  {
+                    key: "timezone",
+                    value: {
+                      kind: "string",
+                      value: "Europe/London",
+                    },
+                  },
+                ],
+              },
+              {
+                kind: "mapping",
+                entries: [
+                  {
+                    key: "cron",
+                    value: {
+                      kind: "string",
+                      value: "5 4 * * 3",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(first)).not.toBe(
+      JSON.stringify(reversed),
+    );
+  });
+
+  it("captures image-version name and version filters injectively", () => {
+    const source = (version: string) => `
+on:
+  image_version:
+    names: [ubuntu]
+    versions: ["${version}"]
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`;
+    const current = evidence(source("24.*"));
+    const next = evidence(source("25.*"));
+
+    expect(current.trigger).toMatchObject({
+      kind: "mapping",
+      entries: [
+        {
+          key: "image_version",
+          value: {
+            kind: "mapping",
+            entries: [
+              {
+                key: "names",
+                value: {
+                  kind: "sequence",
+                  items: [
+                    { kind: "string", value: "ubuntu" },
+                  ],
+                },
+              },
+              {
+                key: "versions",
+                value: {
+                  kind: "sequence",
+                  items: [
+                    { kind: "string", value: "24.*" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(current)).not.toBe(JSON.stringify(next));
+  });
+
+  it.each([
+    [
+      "needs scalar/list",
+      "needs: prepare",
+      "needs: [prepare]",
+    ],
+    [
+      "runner scalar/single-label list",
+      "runs-on: ubuntu-latest",
+      "runs-on: [ubuntu-latest]",
+    ],
+    [
+      "environment scalar/name map",
+      "environment: production",
+      "environment: {name: production}",
+    ],
+    [
+      "concurrency scalar/group map",
+      "concurrency: serial",
+      "concurrency: {group: serial}",
+    ],
+    [
+      "explicit fixed false concurrency default",
+      "concurrency: {group: serial}",
+      "concurrency: {group: serial, cancel-in-progress: false}",
+    ],
+  ])(
+    "normalizes equivalent %s evidence and counts",
+    (_name, leftControl, rightControl) => {
+      const source = (control: string) =>
+        [
+          "on: push",
+          "jobs:",
+          "  prepare:",
+          "    runs-on: ubuntu",
+          "    steps: []",
+          "  verify:",
+          `    ${control}`,
+          ...(control.startsWith("runs-on:")
+            ? []
+            : ["    runs-on: ubuntu"]),
+          "    steps: []",
+          "",
+        ].join("\n");
+      const left = evidence(source(leftControl));
+      const right = evidence(source(rightControl));
+
+      expect(left).toEqual(right);
+      expect(left.canonicalValueCount).toBe(
+        right.canonicalValueCount,
+      );
+    },
+  );
+
+  it("keeps all owned control near misses injectively distinct", () => {
+    const source = (
+      runName: string,
+      workflowConcurrency: string,
+      jobConcurrency: string,
+      needs: string,
+      output: string,
+      deploymentEnvironment: string,
+    ) => `
+run-name: ${runName}
+on: push
+concurrency: {group: ${workflowConcurrency}}
+jobs:
+  alternate:
+    runs-on: ubuntu
+    steps: []
+  prepare:
+    runs-on: ubuntu
+    steps: []
+  verify:
+    concurrency: {group: ${jobConcurrency}}
+    needs: ${needs}
+    outputs: {digest: "${output}"}
+    environment: ${deploymentEnvironment}
+    runs-on: ubuntu
+    steps: []
+`;
+    const baselineArguments = [
+      "baseline",
+      "workflow-a",
+      "job-a",
+      "prepare",
+      "${{ github.sha }}",
+      "production",
+    ] as const;
+    const baseline = evidence(source(...baselineArguments));
+    const variants = [
+      source(
+        "other",
+        "workflow-a",
+        "job-a",
+        "prepare",
+        "${{ github.sha }}",
+        "production",
+      ),
+      source(
+        "baseline",
+        "workflow-b",
+        "job-a",
+        "prepare",
+        "${{ github.sha }}",
+        "production",
+      ),
+      source(
+        "baseline",
+        "workflow-a",
+        "job-b",
+        "prepare",
+        "${{ github.sha }}",
+        "production",
+      ),
+      source(
+        "baseline",
+        "workflow-a",
+        "job-a",
+        "alternate",
+        "${{ github.sha }}",
+        "production",
+      ),
+      source(
+        "baseline",
+        "workflow-a",
+        "job-a",
+        "prepare",
+        "${{ github.ref }}",
+        "production",
+      ),
+      source(
+        "baseline",
+        "workflow-a",
+        "job-a",
+        "prepare",
+        "${{ github.sha }}",
+        '{name: production, url: "${{ github.ref }}"}',
+      ),
+    ].map((variant) => evidence(variant));
+
+    for (const variant of variants) {
+      expect(JSON.stringify(variant)).not.toBe(
+        JSON.stringify(baseline),
+      );
+    }
+  });
+
+  it("canonicalizes scalar concurrency and runners to richer mappings and sequences", () => {
+    const result = evidence(`
+on: push
+concurrency: singleton
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps: []
+`);
+
+    expect(result.concurrency).toEqual({
+      kind: "mapping",
+      entries: [
+        {
+          key: "group",
+          value: { kind: "string", value: "singleton" },
+        },
+      ],
+    });
+    expect(result.jobs[0]?.runner).toEqual({
+      kind: "sequence",
+      items: [
+        { kind: "string", value: "ubuntu-latest" },
+      ],
+    });
+  });
+
+  it("keeps absent, empty, read, and write permissions injectively distinct", () => {
+    const variant = (permissions: string): WorkflowExecutionSurfaceEvidence =>
+      evidence(`
+on: push
+${permissions}
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`);
+    const absent = variant("");
+    const empty = variant("permissions: {}");
+    const read = variant("permissions: {contents: read}");
+    const write = variant("permissions: {contents: write}");
+
+    expect(absent.jobs[0]?.permissions).not.toEqual(
+      empty.jobs[0]?.permissions,
+    );
+    expect(empty.jobs[0]?.permissions).not.toEqual(
+      read.jobs[0]?.permissions,
+    );
+    expect(read.jobs[0]?.permissions).not.toEqual(
+      write.jobs[0]?.permissions,
+    );
+    expect(read.jobs[0]?.permissions.githubTokenMaterialPresent).toBe(
+      true,
+    );
+  });
+
+  it("preserves condition spelling and scalar types without pruning steps", () => {
+    const variant = (condition: string): WorkflowExecutionSurfaceEvidence =>
+      evidence(
+        workflow(
+          `runs-on: ubuntu\nsteps:\n  - if: ${condition}\n    run: echo`,
+        ),
+      );
+    const bare = variant("success()");
+    const wrapped = variant('"${{ success() }}"');
+    const boolean = variant("false");
+    const stringBoolean = variant('"false"');
+    const integer = variant("1");
+    const stringInteger = variant('"1"');
+    const template = variant(
+      '"prefix-${{ github.ref }}-suffix"',
+    );
+    const multiExpressionTemplate = variant(
+      '"${{ success() }}-x-${{ failure() }}"',
+    );
+    const attackerContext = variant(
+      "github.event.pull_request.head.repo.fork == false",
+    );
+
+    expect(bare.jobs[0]?.steps[0]?.condition).toMatchObject({
+      spelling: "bare",
+      value: "success()",
+    });
+    expect(wrapped.jobs[0]?.steps[0]?.condition).toMatchObject({
+      spelling: "wrapped",
+      value: "${{ success() }}",
+    });
+    expect(boolean.jobs[0]?.steps[0]?.condition).toEqual({
+      kind: "boolean",
+      value: false,
+    });
+    expect(stringBoolean.jobs[0]?.steps[0]?.condition).toEqual({
+      kind: "string",
+      spelling: "bare",
+      value: "false",
+    });
+    expect(integer.jobs[0]?.steps[0]?.condition).toEqual({
+      kind: "integer",
+      value: 1,
+    });
+    expect(stringInteger.jobs[0]?.steps[0]?.condition).toEqual({
+      kind: "string",
+      spelling: "bare",
+      value: "1",
+    });
+    expect(template.jobs[0]?.steps[0]?.condition).toEqual({
+      kind: "string",
+      spelling: "template",
+      value: "prefix-${{ github.ref }}-suffix",
+    });
+    expect(
+      multiExpressionTemplate.jobs[0]?.steps[0]?.condition,
+    ).toEqual({
+      kind: "string",
+      spelling: "template",
+      value: "${{ success() }}-x-${{ failure() }}",
+    });
+    expect(JSON.stringify(bare)).not.toBe(JSON.stringify(wrapped));
+    expect(JSON.stringify(boolean)).not.toBe(
+      JSON.stringify(stringBoolean),
+    );
+    expect(JSON.stringify(integer)).not.toBe(
+      JSON.stringify(stringInteger),
+    );
+    for (const accepted of [boolean, attackerContext]) {
+      expect(accepted.jobs[0]?.steps).toHaveLength(1);
+      expect(
+        Object.hasOwn(accepted.jobs[0]?.steps[0] ?? {}, "executes"),
+      ).toBe(false);
+    }
+  });
+
+  it("distinguishes matrix payload, key order, and ordered filters", () => {
+    const variant = (matrix: string): WorkflowExecutionSurfaceEvidence =>
+      evidence(`
+on: push
+jobs:
+  verify:
+    strategy:
+      matrix:
+${matrix}
+    runs-on: "\${{ matrix.os }}"
+    steps:
+      - run: "echo \${{ matrix.payload }}"
+`);
+    const harmless = variant(
+      "        os: [ubuntu]\n        payload: [safe]",
+    );
+    const executable = variant(
+      '        os: [ubuntu]\n        payload: ["$(id)"]',
+    );
+    const reordered = variant(
+      "        payload: [safe]\n        os: [ubuntu]",
+    );
+    const reversedInclude = variant(
+      "        os: [ubuntu]\n        include: [{os: ubuntu}, {os: windows}]",
+    );
+    const includeOrder = variant(
+      "        os: [ubuntu]\n        include: [{os: windows}, {os: ubuntu}]",
+    );
+
+    expect(JSON.stringify(harmless)).not.toBe(
+      JSON.stringify(executable),
+    );
+    expect(JSON.stringify(harmless)).not.toBe(
+      JSON.stringify(reordered),
+    );
+    expect(JSON.stringify(reversedInclude)).not.toBe(
+      JSON.stringify(includeOrder),
+    );
+  });
+
+  it("rejects malformed permissions with no partial evidence", () => {
+    expect(
+      violations(`
+on: push
+permissions:
+  frobnicate: none
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps: []
+`),
+    ).toContainEqual(
       expect.objectContaining({
         kind: "unsupported-execution-shape",
+        subject: "permissions",
       }),
+    );
+  });
+});
+
+describe("delegated/container surfaces remain fail closed", () => {
+  it.each([
+    ["action step", `uses: actions/checkout@${"a".repeat(40)}`],
+    ["local action", "uses: ./.github/actions/review"],
+    ["dynamic action", 'uses: "owner/action@${{ inputs.ref }}"'],
+    ["action inputs", "run: echo\nwith: {script: hidden}"],
+  ])("rejects delegated step form: %s", (_name, step) => {
+    expect(
+      violations(
+        workflow(
+          [
+            "runs-on: ubuntu-latest",
+            "steps:",
+            "  - " + step.split("\n").join("\n    "),
+          ].join("\n"),
+        ),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({ kind: "unsupported-execution-shape" }),
     );
   });
 
@@ -818,27 +1537,21 @@ describe("deferred execution/context surfaces fail closed", () => {
       "reusable workflow",
       `uses: owner/repo/.github/workflows/a.yml@${"a".repeat(40)}`,
     ],
-    ["strategy/matrix", "strategy: {matrix: {value: [safe]}}"],
-    ["job condition", "if: always()"],
-    ["outputs", "outputs: {value: hidden}"],
-    ["needs", "needs: earlier"],
-    ["environment", "environment: production"],
-    ["continue-on-error", "continue-on-error: false"],
-    ["timeout", "timeout-minutes: 5"],
-    ["permissions", "permissions: {contents: read}"],
+    ["local reusable workflow", "uses: ./.github/workflows/a.yml"],
+    [
+      "dynamic reusable workflow",
+      'uses: "owner/repo/.github/workflows/a.yml@${{ inputs.ref }}"',
+    ],
     ["container", "container: node:24"],
     ["services", "services: {redis: {image: redis}}"],
-    ["concurrency", "concurrency: singleton"],
-  ])("rejects delegated or unmodeled job form: %s", (_name, field) => {
-    const source = workflow(
-      [
-        "runs-on: ubuntu-latest",
-        field,
-        "steps:",
-        "  - run: echo ok",
-      ].join("\n"),
-    );
-    expect(violations(source)).toContainEqual(
+  ])("rejects deferred job form: %s", (_name, field) => {
+    expect(
+      violations(
+        workflow(
+          `runs-on: ubuntu-latest\n${field}\nsteps:\n  - run: echo`,
+        ),
+      ),
+    ).toContainEqual(
       expect.objectContaining({
         subject: "jobs.verify",
         kind: "unsupported-execution-shape",
@@ -846,100 +1559,28 @@ describe("deferred execution/context surfaces fail closed", () => {
     );
   });
 
-  it("closes the reproduced matrix-to-action evidence collision", () => {
-    const variant = (payload: string): string => `
+  it("keeps matrix evidence unavailable when the step is an action", () => {
+    const result = canonicalizeWorkflowExecutionSurface(
+      DEFAULT_WORKFLOW_PATH,
+      `
 on: workflow_dispatch
 jobs:
   verify:
     strategy:
       matrix:
-        payload:
-          - ${payload}
+        payload: [safe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@${"a".repeat(40)}
         with:
           script: "\${{ matrix.payload }}"
-`;
-    const harmless = canonicalizeWorkflowExecutionSurface(
-      DEFAULT_WORKFLOW_PATH,
-      variant("core.info()"),
+`,
     );
-    const executable = canonicalizeWorkflowExecutionSurface(
-      DEFAULT_WORKFLOW_PATH,
-      variant('require("child_process").execSync("id")'),
-    );
-    expect(harmless.evidence).toBeUndefined();
-    expect(executable.evidence).toBeUndefined();
-    expect(harmless.violations).not.toEqual([]);
-    expect(executable.violations).not.toEqual([]);
+    expect(result.evidence).toBeUndefined();
+    expect(result.violations).not.toEqual([]);
   });
 
-  it.each([
-    ["run", "run: echo \u0024{{ github.sha }}"],
-    ["shell", "run: echo\nshell: \u0024{{ matrix.shell }}"],
-    [
-      "working directory",
-      "run: echo\nworking-directory: \u0024{{ matrix.cwd }}",
-    ],
-    [
-      "step environment",
-      'run: echo\nenv: {VALUE: "\u0024{{ github.sha }}"}',
-    ],
-  ])("rejects dynamic step %s", (_name, step) => {
-    const source = workflow(
-      [
-        "runs-on: ubuntu-latest",
-        "steps:",
-        "  - " + step.split("\n").join("\n    "),
-      ].join("\n"),
-    );
-    expect(violations(source)).toContainEqual(
-      expect.objectContaining({
-        kind: "unsupported-execution-shape",
-      }),
-    );
-  });
-
-  it.each([
-    ["runner", "\u0024{{ matrix.runner }}"],
-    ["runner list", "[ubuntu-latest, '\u0024{{ matrix.runner }}']"],
-  ])("rejects dynamic %s labels", (_name, runsOn) => {
-    expect(
-      violations(
-        workflow(
-          `runs-on: ${runsOn}\nsteps:\n  - run: echo ok`,
-        ),
-      ),
-    ).toContainEqual(
-      expect.objectContaining({
-        kind: "unsupported-execution-shape",
-      }),
-    );
-  });
-
-  it.each([
-    ["workflow environment", "env:\n  VALUE: \u0024{{ github.sha }}"],
-    [
-      "workflow default",
-      "defaults:\n  run:\n    shell: \u0024{{ matrix.shell }}",
-    ],
-  ])("rejects dynamic %s", (_name, prefix) => {
-    expect(
-      violations(
-        workflow(
-          "runs-on: ubuntu-latest\nsteps:\n  - run: echo ok",
-          prefix,
-        ),
-      ),
-    ).toContainEqual(
-      expect.objectContaining({
-        kind: "unsupported-execution-shape",
-      }),
-    );
-  });
-
-  it("rejects every live workflow until 120d-1b models delegation", () => {
+  it("rejects every live workflow until delegation is modeled", () => {
     const names = readdirSync(WORKFLOW_DIRECTORY)
       .filter((name) => /\.ya?ml$/i.test(name))
       .sort();
@@ -971,6 +1612,7 @@ describe("ordinary-run workflow fail-closed grammar", () => {
   });
 
   it.each([
+    ["empty workflow", ""],
     ["scalar workflow", "not-a-map"],
     ["missing jobs", "on: push"],
     ["scalar jobs", "on: push\njobs: no"],
@@ -992,6 +1634,22 @@ describe("ordinary-run workflow fail-closed grammar", () => {
       "scalar workflow environment",
       "on: push\nenv: nope\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
     ],
+    [
+      "held single queue workflow control",
+      "on: push\nconcurrency:\n  group: one\n  queue: single\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "held max queue job control",
+      "on: push\njobs:\n  verify:\n    concurrency:\n      group: one\n      queue: max\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "ordered-map permissions",
+      "on: push\npermissions: !!omap []\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "set permissions",
+      "on: push\npermissions: !!set {}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
   ])("rejects root shape: %s", (_name, source) => {
     expect(violations(source).length).toBeGreaterThan(0);
   });
@@ -999,12 +1657,72 @@ describe("ordinary-run workflow fail-closed grammar", () => {
   it.each([
     ["missing", "jobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []"],
     [
-      "mapping",
-      "on: {workflow_dispatch: {}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+      "event sequence body",
+      "on: {workflow_dispatch: []}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
     ],
     [
-      "sequence",
-      "on: [push, pull_request]\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+      "empty event sequence",
+      "on: []\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "empty event map",
+      "on: {}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "empty schedule",
+      "on: {schedule: []}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "schedule missing cron",
+      "on: {schedule: [{timezone: UTC}]}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "schedule unknown field",
+      "on: {schedule: [{cron: '5 4 * * 3', hidden: true}]}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "unknown static event",
+      "on: frobnicate\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "scalar image version",
+      "on: image_version\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "null image version",
+      "on: {image_version: null}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "empty image version",
+      "on: {image_version: {}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version missing names",
+      "on: {image_version: {versions: ['24.*']}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version missing versions",
+      "on: {image_version: {names: [ubuntu]}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version unknown filter",
+      "on: {image_version: {names: [ubuntu], versions: ['24.*'], hidden: true}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version empty names",
+      "on: {image_version: {names: [], versions: ['24.*']}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version numeric name",
+      "on: {image_version: {names: [24], versions: ['24.*']}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "image version empty version",
+      "on: {image_version: {names: [ubuntu], versions: ['']}}\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
+    ],
+    [
+      "duplicate sequence event",
+      "on: [push, push]\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps: []",
     ],
     [
       "dynamic",
@@ -1050,6 +1768,46 @@ describe("ordinary-run workflow fail-closed grammar", () => {
       "numeric name",
       "on: push\njobs:\n  verify:\n    name: 7\n    runs-on: ubuntu\n    steps: []",
     ],
+    [
+      "empty needs sequence",
+      "on: push\njobs:\n  verify:\n    needs: []\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "concurrency without group",
+      "on: push\njobs:\n  verify:\n    concurrency: {cancel-in-progress: false}\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "malformed concurrency cancellation",
+      "on: push\njobs:\n  verify:\n    concurrency: {group: one, cancel-in-progress: never}\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "strategy without matrix",
+      "on: push\njobs:\n  verify:\n    strategy: {fail-fast: false}\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "environment without name",
+      "on: push\njobs:\n  verify:\n    environment: {url: https://example.test}\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "malformed environment URL",
+      "on: push\njobs:\n  verify:\n    environment: {name: production, url: 7}\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "runner mapping without group",
+      "on: push\njobs:\n  verify:\n    runs-on: {labels: ubuntu}\n    steps: []",
+    ],
+    [
+      "runner group mapping is deferred",
+      "on: push\njobs:\n  verify:\n    runs-on: {group: trusted, labels: ubuntu}\n    steps: []",
+    ],
+    [
+      "non-portable deployment environment",
+      "on: push\njobs:\n  verify:\n    environment: prod-east\n    runs-on: ubuntu\n    steps: []",
+    ],
+    [
+      "case-colliding deployment environments",
+      "on: push\njobs:\n  first:\n    environment: Production\n    runs-on: ubuntu\n    steps: []\n  second:\n    environment: production\n    runs-on: ubuntu\n    steps: []",
+    ],
   ])("rejects malformed job: %s", (_name, source) => {
     expect(violations(source).length).toBeGreaterThan(0);
   });
@@ -1081,8 +1839,16 @@ describe("ordinary-run workflow fail-closed grammar", () => {
       "unsafe timeout",
       `runs-on: ubuntu\nsteps:\n  - timeout-minutes: ${Number.MAX_SAFE_INTEGER + 1}\n    run: echo`,
     ],
+    [
+      "timeout over documented step maximum",
+      "runs-on: ubuntu\nsteps:\n  - timeout-minutes: 361\n    run: echo",
+    ],
     ['empty run', 'runs-on: ubuntu\nsteps:\n  - run: ""'],
     ["numeric run", "runs-on: ubuntu\nsteps:\n  - run: 7"],
+    [
+      "null condition",
+      "runs-on: ubuntu\nsteps:\n  - if: null\n    run: echo",
+    ],
     [
       "empty shell",
       'runs-on: ubuntu\nsteps:\n  - run: echo\n    shell: ""',
@@ -1157,7 +1923,7 @@ jobs:
       - run: echo valid
   invalid:
     runs-on: ubuntu
-    strategy: {matrix: {x: [1]}}
+    container: node:24
     steps:
       - run: echo invalid
 `,
@@ -1289,9 +2055,9 @@ describe("ordinary-run workflow resource ceilings", () => {
           rejectedBindings,
         ].join("\n"),
       ),
-    ).toContainEqual(
+    ).toEqual([
       expect.objectContaining({ kind: "resource-limit" }),
-    );
+    ]);
   });
 
   it("stops at the job binding expansion boundary", () => {
@@ -1338,6 +2104,70 @@ describe("ordinary-run workflow resource ceilings", () => {
     );
   });
 
+  it(
+    "accepts and rejects the exact per-workflow canonical-value boundary",
+    () => {
+      const source = (branchCount: number): string => {
+        const branches = Array.from(
+          { length: branchCount },
+          (_, index) => `      - branch_${index}`,
+        ).join("\n");
+        return [
+          "on:",
+          "  push:",
+          "    branches:",
+          branches,
+          "jobs:",
+          "  verify:",
+          "    runs-on: ubuntu",
+          "    steps: []",
+        ].join("\n");
+      };
+      const accepted = evidence(source(16_377));
+      expect(accepted.canonicalValueCount).toBe(
+        MAX_WORKFLOW_CANONICAL_VALUES,
+      );
+
+      const rejected = canonicalizeWorkflowExecutionSurface(
+        DEFAULT_WORKFLOW_PATH,
+        source(16_378),
+      );
+      expect(rejected.evidence).toBeUndefined();
+      expect(rejected.violations).toEqual([
+        expect.objectContaining({ kind: "resource-limit" }),
+      ]);
+    },
+    15_000,
+  );
+
+  it("charges each expanded alias occurrence to canonical evidence", () => {
+    const source = (matrixEntries: string): string => `
+on: push
+jobs:
+  verify:
+    strategy:
+      matrix:
+        value: &values [one, two]
+        include:
+${matrixEntries}
+    runs-on: ubuntu
+    steps: []
+`;
+    const once = evidence(source("          - value: *values"));
+    const twice = evidence(
+      source(
+        "          - value: *values\n          - value: *values",
+      ),
+    );
+
+    expect(twice.canonicalValueCount).toBeGreaterThan(
+      once.canonicalValueCount,
+    );
+    expect(twice.jobs[0]?.strategy).not.toEqual(
+      once.jobs[0]?.strategy,
+    );
+  });
+
   it("accepts 100 direct aliases and rejects 101", () => {
     const source = (count: number): string => {
       const aliases = Array.from(
@@ -1377,7 +2207,7 @@ describe("ordinary-run workflow resource ceilings", () => {
         line: 1,
         subject: "<workflow>",
         detail:
-          "workflow alias expansion is invalid or exceeds the bounded expansion limit",
+          "expanded YAML exceeds the bounded pre-canonicalization budget",
       },
     ]);
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(
@@ -1385,6 +2215,32 @@ describe("ordinary-run workflow resource ceilings", () => {
     );
     expect(JSON.stringify(result)).not.toContain(aliasName.slice(0, 128));
   });
+
+  it(
+    "stops expanded YAML before conversion amplification",
+    () => {
+      const events = Array.from(
+        { length: 65_536 },
+        () => "push",
+      ).join(", ");
+      const result = canonicalizeWorkflowExecutionSurface(
+        DEFAULT_WORKFLOW_PATH,
+        `on: [${events}]\njobs: {}`,
+      );
+
+      expect(result.evidence).toBeUndefined();
+      expect(result.violations).toEqual([
+        {
+          kind: "resource-limit",
+          line: 1,
+          subject: "<workflow>",
+          detail:
+            "expanded YAML exceeds the bounded pre-canonicalization budget",
+        },
+      ]);
+    },
+    15_000,
+  );
 
   it("rejects amplified nested aliases", () => {
     const aliases = (anchor: string): string =>

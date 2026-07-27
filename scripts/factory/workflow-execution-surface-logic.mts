@@ -1,9 +1,9 @@
 /**
- * Bounded ordinary-run workflow canonicalization for factory issue #120.
+ * Bounded ordinary-run workflow/context canonicalization for issue #120.
  *
- * This module describes static shell execution only. Delegated actions,
- * reusable workflows, expression producers, and containers fail closed until
- * slice 120d-1b models them. This module never authorizes execution.
+ * This module describes ordinary run steps and their exact context producers.
+ * Delegated actions, reusable workflows, and containers fail closed until
+ * later 120d-1b slices model them. This module never authorizes execution.
  */
 
 import {
@@ -18,6 +18,15 @@ import {
   type Pair,
 } from "yaml";
 
+import {
+  WorkflowCanonicalValueBuilder,
+  type WorkflowCanonicalValue,
+} from "./workflow-canonical-value-logic.mts";
+import {
+  resolveEffectiveWorkflowPermissions,
+  type EffectiveWorkflowPermissionsEvidence,
+} from "./workflow-permissions-logic.mts";
+
 export const MAX_WORKFLOW_SOURCE_BYTES = 1_048_576;
 export const MAX_WORKFLOW_JOBS = 256;
 export const MAX_WORKFLOW_STEPS = 2_048;
@@ -31,12 +40,26 @@ export const MAX_WORKFLOW_VIOLATIONS = 256;
 export const MAX_WORKFLOW_VIOLATION_BYTES = 1_048_576;
 
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_EXPANDED_YAML_PREFLIGHT_NODES = 65_536;
+const MAX_EXPANDED_YAML_PREFLIGHT_DEPTH = 64;
 
 type BindingScope = "workflow" | "job" | "step";
 type ScalarValue = string | number | boolean;
 
 /**
- * One canonical static environment binding.
+ * Exact opaque condition evidence. It never proves a step cannot execute.
+ */
+export type WorkflowConditionEvidence =
+  | { readonly kind: "boolean"; readonly value: boolean }
+  | { readonly kind: "integer"; readonly value: number }
+  | {
+      readonly kind: "string";
+      readonly spelling: "bare" | "template" | "wrapped";
+      readonly value: string;
+    };
+
+/**
+ * One canonical environment binding with exact opaque scalar content.
  */
 export interface WorkflowBindingEvidence {
   readonly name: string;
@@ -55,15 +78,16 @@ export type WorkflowEffectiveField =
     };
 
 /**
- * Canonical static ordinary-run step evidence.
+ * Canonical ordinary-run step evidence.
  */
 export interface WorkflowRunStepEvidence {
   readonly index: number;
   readonly line: number;
   readonly id?: string;
   readonly name?: string;
-  readonly continueOnError?: boolean;
-  readonly timeoutMinutes?: number;
+  readonly condition?: WorkflowConditionEvidence;
+  readonly continueOnError?: WorkflowConditionEvidence;
+  readonly timeoutMinutes?: WorkflowConditionEvidence;
   readonly environment: readonly WorkflowBindingEvidence[];
   readonly run: string;
   readonly shell: WorkflowEffectiveField;
@@ -71,24 +95,38 @@ export interface WorkflowRunStepEvidence {
 }
 
 /**
- * Canonical static ordinary-run job evidence.
+ * Canonical ordinary-run job/context evidence.
  */
 export interface WorkflowRunJobEvidence {
   readonly id: string;
   readonly line: number;
-  readonly runnerLabels: readonly string[];
+  readonly name: string | null;
+  readonly runner: WorkflowCanonicalValue;
+  readonly permissions: EffectiveWorkflowPermissionsEvidence;
+  readonly concurrency?: WorkflowCanonicalValue;
+  readonly needs?: WorkflowCanonicalValue;
+  readonly condition?: WorkflowConditionEvidence;
+  readonly strategy?: WorkflowCanonicalValue;
+  readonly outputs?: WorkflowCanonicalValue;
+  readonly deploymentEnvironment?: WorkflowCanonicalValue;
+  readonly continueOnError?: WorkflowConditionEvidence;
+  readonly timeoutMinutes?: WorkflowConditionEvidence;
   readonly environment: readonly WorkflowBindingEvidence[];
   readonly steps: readonly WorkflowRunStepEvidence[];
 }
 
 /**
- * Complete canonical ordinary-run surface for one workflow.
+ * Complete canonical ordinary-run/context surface for one workflow.
  */
 export interface WorkflowExecutionSurfaceEvidence {
   readonly workflowPath: string;
-  readonly trigger: string;
+  readonly trigger: WorkflowCanonicalValue;
   readonly workflowName: string | null;
+  readonly runName: string | null;
+  readonly concurrency?: WorkflowCanonicalValue;
   readonly workflowEnvironment: readonly WorkflowBindingEvidence[];
+  readonly canonicalValueCount: number;
+  readonly canonicalValueDepth: number;
   readonly jobs: readonly WorkflowRunJobEvidence[];
 }
 
@@ -131,30 +169,80 @@ const EXPRESSION_MARKER = "${{";
 const WORKFLOW_PATH_PREFIX = ".github/workflows/";
 const JOB_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const WORKFLOW_KEYS = new Set([
+  "concurrency",
   "defaults",
   "env",
   "jobs",
   "name",
   "on",
+  "permissions",
   "run-name",
 ]);
 const JOB_KEYS = new Set([
+  "concurrency",
+  "continue-on-error",
   "defaults",
   "env",
+  "environment",
+  "if",
   "name",
+  "needs",
+  "outputs",
+  "permissions",
   "runs-on",
   "steps",
+  "strategy",
+  "timeout-minutes",
 ]);
 const STEP_KEYS = new Set([
   "continue-on-error",
   "env",
   "id",
+  "if",
   "name",
   "run",
   "shell",
   "timeout-minutes",
   "working-directory",
 ]);
+const TRIGGER_EVENTS_WITH_OPTIONAL_CONFIGURATION = new Set([
+  "branch_protection_rule",
+  "check_run",
+  "check_suite",
+  "create",
+  "delete",
+  "deployment",
+  "deployment_status",
+  "discussion",
+  "discussion_comment",
+  "fork",
+  "gollum",
+  "issue_comment",
+  "issues",
+  "label",
+  "merge_group",
+  "milestone",
+  "page_build",
+  "project",
+  "project_card",
+  "project_column",
+  "public",
+  "pull_request",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "pull_request_target",
+  "push",
+  "registry_package",
+  "release",
+  "repository_dispatch",
+  "status",
+  "watch",
+  "workflow_call",
+  "workflow_dispatch",
+  "workflow_run",
+]);
+const IMAGE_VERSION_KEYS = new Set(["names", "versions"]);
+const SCHEDULE_KEYS = new Set(["cron", "timezone"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -162,6 +250,405 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     value !== null &&
     !Array.isArray(value)
   );
+}
+
+function isStringKeyedMap(value: unknown): value is Map<string, unknown> {
+  return (
+    value instanceof Map &&
+    [...value.keys()].every((key) => typeof key === "string")
+  );
+}
+
+function exactNonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0
+    ? value
+    : undefined;
+}
+
+function conditionEvidence(
+  value: unknown,
+): WorkflowConditionEvidence | undefined {
+  if (typeof value === "boolean") {
+    return { kind: "boolean", value };
+  }
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    Number.isFinite(value) &&
+    !Object.is(value, -0)
+  ) {
+    return { kind: "integer", value };
+  }
+  const text = exactNonEmptyText(value);
+  if (text === undefined) {
+    return undefined;
+  }
+  const trimmed = text.trim();
+  const closingMarker = trimmed.indexOf("}}");
+  const wrapped =
+    trimmed.startsWith(EXPRESSION_MARKER) &&
+    trimmed.endsWith("}}") &&
+    trimmed.indexOf(EXPRESSION_MARKER, EXPRESSION_MARKER.length) ===
+      -1 &&
+    closingMarker >= 0 &&
+    closingMarker === trimmed.length - 2;
+  return {
+    kind: "string",
+    spelling: wrapped
+      ? "wrapped"
+      : text.includes(EXPRESSION_MARKER)
+        ? "template"
+        : "bare",
+    value: text,
+  };
+}
+
+function booleanExpressionEvidence(
+  value: unknown,
+): WorkflowConditionEvidence | undefined {
+  const evidence = conditionEvidence(value);
+  return evidence?.kind === "boolean" ||
+    (evidence?.kind === "string" &&
+      evidence.spelling !== "bare")
+    ? evidence
+    : undefined;
+}
+
+function timeoutEvidence(
+  value: unknown,
+): WorkflowConditionEvidence | undefined {
+  const evidence = conditionEvidence(value);
+  return evidence?.kind === "integer" && evidence.value > 0
+    ? evidence
+    : evidence?.kind === "string" &&
+        evidence.spelling !== "bare"
+      ? evidence
+      : undefined;
+}
+
+function stepTimeoutEvidence(
+  value: unknown,
+): WorkflowConditionEvidence | undefined {
+  const evidence = timeoutEvidence(value);
+  return evidence?.kind === "integer" && evidence.value > 360
+    ? undefined
+    : evidence;
+}
+
+function canonicalContextValue(
+  value: unknown,
+  subject: string,
+  line: number,
+  builder: WorkflowCanonicalValueBuilder,
+  violations: ViolationAccumulator,
+): WorkflowCanonicalValue | undefined {
+  const result = builder.canonicalize(value);
+  if (result.kind !== "canonical") {
+    addViolation(violations, {
+      kind:
+        result.kind === "resource-limit"
+          ? "resource-limit"
+          : "unsupported-execution-shape",
+      line,
+      subject,
+      detail: result.detail,
+    });
+    if (result.kind === "resource-limit") {
+      violations.saturated = true;
+    }
+    return undefined;
+  }
+  return result.value;
+}
+
+function canonicalConditionEvidence(
+  value: unknown,
+  subject: string,
+  line: number,
+  builder: WorkflowCanonicalValueBuilder,
+  violations: ViolationAccumulator,
+  parser: (input: unknown) => WorkflowConditionEvidence | undefined,
+): WorkflowConditionEvidence | undefined {
+  const violationCount = violations.entries.length;
+  if (
+    canonicalContextValue(
+      value,
+      subject,
+      line,
+      builder,
+      violations,
+    ) === undefined
+  ) {
+    return undefined;
+  }
+  const evidence = parser(value);
+  if (
+    evidence === undefined &&
+    violations.entries.length === violationCount
+  ) {
+    addViolation(violations, {
+      kind: "unsupported-execution-shape",
+      line,
+      subject,
+      detail: "context scalar has an unsupported shape",
+    });
+  }
+  return evidence;
+}
+
+function hasOnlyMapKeys(
+  value: Map<string, unknown>,
+  keys: ReadonlySet<string>,
+): boolean {
+  return [...value.keys()].every((key) => keys.has(key));
+}
+
+function normalizedTrigger(
+  value: unknown,
+): Map<string, unknown> | undefined {
+  const events = new Map<string, unknown>();
+  const addEvent = (event: unknown, configuration: unknown): boolean => {
+    const name = staticNonEmptyText(event);
+    if (
+      name === undefined ||
+      events.has(name) ||
+      (name !== "image_version" &&
+        name !== "schedule" &&
+        !TRIGGER_EVENTS_WITH_OPTIONAL_CONFIGURATION.has(name))
+    ) {
+      return false;
+    }
+    if (name === "image_version") {
+      if (
+        !isStringKeyedMap(configuration) ||
+        !hasOnlyMapKeys(configuration, IMAGE_VERSION_KEYS) ||
+        !configuration.has("names") ||
+        !configuration.has("versions") ||
+        !["names", "versions"].every((key) => {
+          const filters = configuration.get(key);
+          return (
+            Array.isArray(filters) &&
+            filters.length > 0 &&
+            filters.every(
+              (filter) =>
+                staticNonEmptyText(filter) !== undefined,
+            )
+          );
+        })
+      ) {
+        return false;
+      }
+      events.set(name, configuration);
+      return true;
+    }
+    if (name === "schedule") {
+      if (
+        !Array.isArray(configuration) ||
+        configuration.length === 0 ||
+        !configuration.every(
+          (entry) =>
+            isStringKeyedMap(entry) &&
+            hasOnlyMapKeys(entry, SCHEDULE_KEYS) &&
+            exactNonEmptyText(entry.get("cron")) !== undefined &&
+            (entry.get("timezone") === undefined ||
+              exactNonEmptyText(entry.get("timezone")) !==
+                undefined),
+        )
+      ) {
+        return false;
+      }
+      events.set(name, configuration);
+      return true;
+    }
+    if (
+      configuration !== null &&
+      !isStringKeyedMap(configuration)
+    ) {
+      return false;
+    }
+    events.set(
+      name,
+      configuration instanceof Map && configuration.size === 0
+        ? null
+        : configuration,
+    );
+    return true;
+  };
+  if (typeof value === "string") {
+    if (!addEvent(value, null)) {
+      return undefined;
+    }
+  } else if (Array.isArray(value)) {
+    for (const event of value) {
+      if (!addEvent(event, null)) {
+        return undefined;
+      }
+    }
+  } else if (isStringKeyedMap(value)) {
+    for (const [event, configuration] of value) {
+      if (!addEvent(event, configuration)) {
+        return undefined;
+      }
+    }
+  } else {
+    return undefined;
+  }
+  if (events.size === 0) {
+    return undefined;
+  }
+  return new Map(
+    [...events.entries()].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ),
+  );
+}
+
+const CONCURRENCY_KEYS = new Set([
+  "cancel-in-progress",
+  "group",
+]);
+const STRATEGY_KEYS = new Set([
+  "fail-fast",
+  "matrix",
+  "max-parallel",
+]);
+const DEPLOYMENT_ENVIRONMENT_KEYS = new Set([
+  "deployment",
+  "name",
+  "url",
+]);
+
+function normalizedConcurrency(
+  value: unknown,
+): Map<string, unknown> | undefined {
+  const scalarGroup = exactNonEmptyText(value);
+  if (scalarGroup !== undefined) {
+    return new Map([["group", scalarGroup]]);
+  }
+  if (
+    !isStringKeyedMap(value) ||
+    !hasOnlyMapKeys(value, CONCURRENCY_KEYS) ||
+    exactNonEmptyText(value.get("group")) === undefined
+  ) {
+    return undefined;
+  }
+  const cancel = value.get("cancel-in-progress");
+  if (
+    cancel !== undefined &&
+    booleanExpressionEvidence(cancel) === undefined
+  ) {
+    return undefined;
+  }
+  return new Map([
+    ["group", value.get("group")],
+    ...(cancel === undefined || cancel === false
+      ? []
+      : [["cancel-in-progress", cancel] as const]),
+  ]);
+}
+
+function normalizedRunner(
+  value: unknown,
+): readonly unknown[] | undefined {
+  // 120a deliberately treats every non-string runner spelling as
+  // credential-bearing; this evidence-only normalizer instead follows D133.
+  const scalarLabel = exactNonEmptyText(value);
+  if (scalarLabel !== undefined) {
+    return [scalarLabel];
+  }
+  if (Array.isArray(value)) {
+    return (
+      value.length > 0 &&
+      value.every((label) => exactNonEmptyText(label) !== undefined)
+    )
+      ? value
+      : undefined;
+  }
+  return undefined;
+}
+
+function normalizedNeeds(
+  value: unknown,
+): readonly string[] | undefined {
+  if (isCanonicalIdentifier(value)) {
+    return [value];
+  }
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(isCanonicalIdentifier)
+    ? value
+    : undefined;
+}
+
+function validStrategy(value: unknown): boolean {
+  if (
+    !isStringKeyedMap(value) ||
+    !hasOnlyMapKeys(value, STRATEGY_KEYS) ||
+    !value.has("matrix")
+  ) {
+    return false;
+  }
+  const matrix = value.get("matrix");
+  const failFast = value.get("fail-fast");
+  const maxParallel = value.get("max-parallel");
+  return (
+    (isStringKeyedMap(matrix) ||
+      exactNonEmptyText(matrix) !== undefined) &&
+    (failFast === undefined ||
+      booleanExpressionEvidence(failFast) !== undefined) &&
+    (maxParallel === undefined ||
+      timeoutEvidence(maxParallel) !== undefined)
+  );
+}
+
+function validOutputs(value: unknown): boolean {
+  return (
+    isStringKeyedMap(value) &&
+    [...value.entries()].every(
+      ([name, output]) =>
+        isCanonicalIdentifier(name) &&
+        exactNonEmptyText(output) !== undefined,
+    )
+  );
+}
+
+function normalizedDeploymentEnvironment(
+  value: unknown,
+): Map<string, unknown> | undefined {
+  const scalarName = exactNonEmptyText(value);
+  if (scalarName !== undefined) {
+    return ENVIRONMENT_NAME_PATTERN.test(scalarName)
+      ? new Map([["name", scalarName]])
+      : undefined;
+  }
+  if (
+    !isStringKeyedMap(value) ||
+    !hasOnlyMapKeys(value, DEPLOYMENT_ENVIRONMENT_KEYS) ||
+    exactNonEmptyText(value.get("name")) === undefined ||
+    !ENVIRONMENT_NAME_PATTERN.test(
+      exactNonEmptyText(value.get("name"))!,
+    )
+  ) {
+    return undefined;
+  }
+  const url = value.get("url");
+  const deployment = value.get("deployment");
+  if (
+    (url === undefined || exactNonEmptyText(url) !== undefined) &&
+    (deployment === undefined ||
+      booleanExpressionEvidence(deployment) !== undefined)
+  ) {
+    return new Map([
+      ["name", value.get("name")],
+      ...(url === undefined
+        ? []
+        : [["url", url] as const]),
+      ...(deployment === undefined
+        ? []
+        : [["deployment", deployment] as const]),
+    ]);
+  }
+  return undefined;
 }
 
 function isWorkflowPath(value: unknown): value is string {
@@ -298,6 +785,65 @@ function isCanonicalIdentifier(value: unknown): value is string {
 function nodeLine(node: Node, lineCounter: LineCounter): number {
   /* v8 ignore next -- every parsed YAML node has a source range. */
   return lineCounter.linePos(node.range![0]).line;
+}
+
+function expandedYamlPreflight(
+  document: ReturnType<typeof parseDocument>,
+): boolean {
+  if (!isNode(document.contents)) {
+    return true;
+  }
+  const stack: { readonly depth: number; readonly node: Node }[] = [
+    { depth: 1, node: document.contents },
+  ];
+  let count = 0;
+  try {
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      count += 1;
+      if (
+        count > MAX_EXPANDED_YAML_PREFLIGHT_NODES ||
+        current.depth > MAX_EXPANDED_YAML_PREFLIGHT_DEPTH
+      ) {
+        return false;
+      }
+      if (isAlias(current.node)) {
+        const resolved = current.node.resolve(document);
+        if (!isNode(resolved)) {
+          return false;
+        }
+        stack.push({ depth: current.depth, node: resolved });
+      } else if (isMap(current.node)) {
+        for (const pair of current.node.items) {
+          if (isNode(pair.value)) {
+            stack.push({
+              depth: current.depth + 1,
+              node: pair.value,
+            });
+          }
+          if (isNode(pair.key)) {
+            stack.push({
+              depth: current.depth + 1,
+              node: pair.key,
+            });
+          }
+        }
+      } else if (isSeq(current.node)) {
+        for (const item of current.node.items) {
+          if (isNode(item)) {
+            stack.push({
+              depth: current.depth + 1,
+              node: item,
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    /* v8 ignore next -- traversal uses only parser-owned Node accessors. */
+    return false;
+  }
+  return true;
 }
 
 function pairKey(
@@ -440,15 +986,12 @@ function canonicalBindings(
       continue;
     }
     const scalar = scalarValue(value[name]);
-    if (
-      scalar === undefined ||
-      (typeof scalar === "string" && containsExpression(scalar))
-    ) {
+    if (scalar === undefined) {
       addViolation(violations, {
         kind: "unsupported-execution-shape",
         line,
         subject,
-        detail: `binding ${JSON.stringify(name)} must have a static, injective scalar value`,
+        detail: `binding ${JSON.stringify(name)} must have an injective scalar value`,
       });
       continue;
     }
@@ -567,7 +1110,7 @@ function effectiveField(
   workflowValue: string | undefined,
 ): WorkflowEffectiveField | undefined {
   if (stepValue !== undefined) {
-    const value = staticNonEmptyText(stepValue);
+    const value = exactNonEmptyText(stepValue);
     return value === undefined
       ? undefined
       : { source: "step", value };
@@ -580,78 +1123,88 @@ function effectiveField(
     : { source: "workflow-default", value: workflowValue };
 }
 
-function runnerLabels(
-  value: unknown,
-  subject: string,
-  line: number,
-  violations: ViolationAccumulator,
-): readonly string[] | undefined {
-  const labels =
-    typeof value === "string"
-      ? [value]
-      : Array.isArray(value) &&
-          value.every((label) => typeof label === "string")
-        ? value
-        : undefined;
-  if (
-    labels === undefined ||
-    labels.length === 0 ||
-    labels.some(
-      (label) => staticNonEmptyText(label) === undefined,
-    )
-  ) {
-    addViolation(violations, {
-      kind: "unsupported-execution-shape",
-      line,
-      subject,
-      detail: "runs-on must contain only static non-empty labels",
-    });
-    return undefined;
-  }
-  return [...labels];
-}
-
 function optionalStepFields(
   step: Record<string, unknown>,
   subject: string,
   line: number,
+  canonicalValues: WorkflowCanonicalValueBuilder,
   violations: ViolationAccumulator,
 ): Pick<
   WorkflowRunStepEvidence,
-  "continueOnError" | "id" | "name" | "timeoutMinutes"
+  | "condition"
+  | "continueOnError"
+  | "id"
+  | "name"
+  | "timeoutMinutes"
 > | undefined {
   const id = step.id;
   const name = step.name;
+  const condition =
+    step.if === undefined
+      ? undefined
+      : canonicalConditionEvidence(
+          step.if,
+          `${subject}.if`,
+          line,
+          canonicalValues,
+          violations,
+          conditionEvidence,
+        );
   const continueOnError = step["continue-on-error"];
   const timeoutMinutes = step["timeout-minutes"];
+  const canonicalContinueOnError =
+    continueOnError === undefined
+      ? undefined
+      : canonicalConditionEvidence(
+          continueOnError,
+          `${subject}.continue-on-error`,
+          line,
+          canonicalValues,
+          violations,
+          booleanExpressionEvidence,
+        );
+  const canonicalTimeout =
+    timeoutMinutes === undefined
+      ? undefined
+      : canonicalConditionEvidence(
+          timeoutMinutes,
+          `${subject}.timeout-minutes`,
+          line,
+          canonicalValues,
+          violations,
+          stepTimeoutEvidence,
+        );
   if (
     (id !== undefined && !isCanonicalIdentifier(id)) ||
     (name !== undefined && typeof name !== "string") ||
+    (step.if !== undefined && condition === undefined) ||
     (continueOnError !== undefined &&
-      typeof continueOnError !== "boolean") ||
-    (timeoutMinutes !== undefined &&
-      (typeof timeoutMinutes !== "number" ||
-        !Number.isSafeInteger(timeoutMinutes) ||
-        timeoutMinutes <= 0))
+      canonicalContinueOnError === undefined) ||
+    (timeoutMinutes !== undefined && canonicalTimeout === undefined)
   ) {
     addViolation(violations, {
       kind: "unsupported-execution-shape",
       line,
       subject,
-      detail: "step id, name, continue-on-error, or timeout-minutes has an unsupported shape",
+      detail: "step id, name, if, continue-on-error, or timeout-minutes has an unsupported shape",
     });
     return undefined;
   }
   return {
     ...(id === undefined ? {} : { id }),
     ...(name === undefined ? {} : { name }),
-    ...(continueOnError === undefined ? {} : { continueOnError }),
-    ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
+    ...(condition === undefined ? {} : { condition }),
+    ...(canonicalContinueOnError === undefined
+      ? {}
+      : { continueOnError: canonicalContinueOnError }),
+    ...(canonicalTimeout === undefined
+      ? {}
+      : { timeoutMinutes: canonicalTimeout }),
   };
 }
 
 /**
- * Canonicalize one workflow's static ordinary-run execution surface.
+ * Canonicalize one workflow's ordinary-run execution/context surface.
  *
  * @param workflowPath - Repository-relative path directly under `.github/workflows/`.
  * @param fileContent - Exact UTF-8 workflow source text.
@@ -715,11 +1268,29 @@ export function canonicalizeWorkflowExecutionSurface(
     }
     return { violations: violations.entries };
   }
+  if (!expandedYamlPreflight(document)) {
+    return {
+      violations: [
+        {
+          kind: "resource-limit",
+          line: 1,
+          subject: "<workflow>",
+          detail:
+            "expanded YAML exceeds the bounded pre-canonicalization budget",
+        },
+      ],
+    };
+  }
 
   let workflow: unknown;
+  let structuredWorkflow: unknown;
   try {
     workflow = document.toJS({
       // yaml rejects when its weighted count reaches this exclusive bound.
+      maxAliasCount: MAX_WORKFLOW_ALIASES + 1,
+    }) as unknown;
+    structuredWorkflow = document.toJS({
+      mapAsMap: true,
       maxAliasCount: MAX_WORKFLOW_ALIASES + 1,
     }) as unknown;
   } catch {
@@ -733,7 +1304,19 @@ export function canonicalizeWorkflowExecutionSurface(
     });
     return { violations: violations.entries };
   }
-  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+  let structuredJobs: Map<string, unknown> | undefined;
+  if (isStringKeyedMap(structuredWorkflow)) {
+    const jobs = structuredWorkflow.get("jobs");
+    if (isStringKeyedMap(jobs)) {
+      structuredJobs = jobs;
+    }
+  }
+  if (
+    !isRecord(workflow) ||
+    !isRecord(workflow.jobs) ||
+    !isStringKeyedMap(structuredWorkflow) ||
+    structuredJobs === undefined
+  ) {
     return {
       violations: [
         {
@@ -762,21 +1345,80 @@ export function canonicalizeWorkflowExecutionSurface(
       ],
     };
   }
-  const trigger = staticNonEmptyText(workflow.on);
+  const violations = createViolationAccumulator();
+  const canonicalValues = new WorkflowCanonicalValueBuilder();
+  const triggerInput = normalizedTrigger(structuredWorkflow.get("on"));
+  const trigger =
+    triggerInput === undefined
+      ? undefined
+      : canonicalContextValue(
+          triggerInput,
+          "on",
+          1,
+          canonicalValues,
+          violations,
+        );
   if (trigger === undefined) {
+    if (violations.entries.length === 0) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line: 1,
+        subject: "on",
+        detail:
+          "trigger must be a non-empty documented event declaration, including the closed schedule sequence grammar",
+      });
+    }
     return {
-      violations: [
-        {
-          kind: "unsupported-execution-shape",
-          line: 1,
-          subject: "on",
-          detail: "120d-1a supports exactly one static scalar trigger",
-        },
-      ],
+      violations: violations.entries,
     };
   }
   const workflowName =
     typeof workflow.name === "string" ? workflow.name : null;
+  const runName =
+    typeof workflow["run-name"] === "string"
+      ? workflow["run-name"]
+      : null;
+  const normalizedWorkflowConcurrency =
+    workflow.concurrency === undefined
+      ? undefined
+      : normalizedConcurrency(
+          structuredWorkflow.get("concurrency"),
+        );
+  const workflowConcurrency =
+    normalizedWorkflowConcurrency === undefined
+      ? undefined
+      : canonicalContextValue(
+            normalizedWorkflowConcurrency,
+            "concurrency",
+            1,
+            canonicalValues,
+            violations,
+          );
+  if (
+    workflow.concurrency !== undefined &&
+    workflowConcurrency === undefined &&
+    violations.entries.length === 0
+  ) {
+    addViolation(violations, {
+      kind: "unsupported-execution-shape",
+      line: 1,
+      subject: "concurrency",
+      detail: "workflow concurrency has an unsupported shape",
+    });
+  }
+  const workflowPermissionResolution =
+    resolveEffectiveWorkflowPermissions(
+      workflow.permissions,
+      { present: false },
+    );
+  if (workflowPermissionResolution.kind === "unanalyzable") {
+    addViolation(violations, {
+      kind: "unsupported-execution-shape",
+      line: 1,
+      subject: "permissions",
+      detail: workflowPermissionResolution.detail,
+    });
+  }
 
   const jobIds = Object.keys(workflow.jobs).sort();
   if (jobIds.length === 0 || jobIds.length > MAX_WORKFLOW_JOBS) {
@@ -795,7 +1437,6 @@ export function canonicalizeWorkflowExecutionSurface(
     };
   }
 
-  const violations = createViolationAccumulator();
   const locations = sourceLocations(document, lineCounter);
   const workflowEnvironment =
     canonicalBindings(
@@ -813,6 +1454,7 @@ export function canonicalizeWorkflowExecutionSurface(
       violations,
     ) ?? {};
   const jobs: WorkflowRunJobEvidence[] = [];
+  const deploymentNamesByCaseFold = new Map<string, string>();
   let totalSteps = 0;
   let totalBindings = workflowEnvironment.length;
   const recordBindings = (
@@ -850,6 +1492,7 @@ export function canonicalizeWorkflowExecutionSurface(
     }
     const location = locations.get(id) ?? { line: 1, stepLines: [] };
     const rawJob = workflow.jobs[id];
+    const structuredJob = structuredJobs.get(id);
     if (!isCanonicalIdentifier(id)) {
       addViolation(violations, {
         kind: "unsupported-execution-shape",
@@ -862,6 +1505,7 @@ export function canonicalizeWorkflowExecutionSurface(
     const subject = `jobs.${id}`;
     if (
       !isRecord(rawJob) ||
+      !isStringKeyedMap(structuredJob) ||
       (rawJob.name !== undefined && typeof rawJob.name !== "string")
     ) {
       addViolation(violations, {
@@ -877,11 +1521,16 @@ export function canonicalizeWorkflowExecutionSurface(
         kind: "unsupported-execution-shape",
         line: location.line,
         subject,
-        detail: "120d-1a rejects delegated or unmodeled job execution fields",
+        detail: "120d-1b1 rejects delegated or unmodeled job execution fields",
       });
       continue;
     }
-    if (!Array.isArray(rawJob.steps)) {
+    const structuredSteps = structuredJob.get("steps");
+    if (
+      !Array.isArray(rawJob.steps) ||
+      !Array.isArray(structuredSteps) ||
+      structuredSteps.length !== rawJob.steps.length
+    ) {
       addViolation(violations, {
         kind: "unsupported-execution-shape",
         line: location.line,
@@ -890,12 +1539,195 @@ export function canonicalizeWorkflowExecutionSurface(
       });
       continue;
     }
-    const labels = runnerLabels(
-      rawJob["runs-on"],
-      `${subject}.runs-on`,
-      location.line,
-      violations,
+    const normalizedJobRunner = normalizedRunner(
+      structuredJob.get("runs-on"),
     );
+    const runner =
+      normalizedJobRunner === undefined
+        ? undefined
+        : canonicalContextValue(
+            normalizedJobRunner,
+            `${subject}.runs-on`,
+            location.line,
+            canonicalValues,
+            violations,
+          );
+    if (runner === undefined && violations.entries.length === 0) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line: location.line,
+        subject: `${subject}.runs-on`,
+        detail: "runs-on has an unsupported runner shape",
+      });
+    }
+    const permissionResolution = resolveEffectiveWorkflowPermissions(
+      workflow.permissions,
+      Object.hasOwn(rawJob, "permissions")
+        ? { present: true, value: rawJob.permissions }
+        : { present: false },
+    );
+    if (permissionResolution.kind === "unanalyzable") {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line: location.line,
+        subject: `${subject}.permissions`,
+        detail: permissionResolution.detail,
+      });
+    }
+
+    const jobControlViolationCount = violations.entries.length;
+    const normalizedJobConcurrency =
+      rawJob.concurrency === undefined
+        ? undefined
+        : normalizedConcurrency(
+            structuredJob.get("concurrency"),
+          );
+    const jobConcurrency =
+      normalizedJobConcurrency === undefined
+        ? undefined
+        : canonicalContextValue(
+              normalizedJobConcurrency,
+              `${subject}.concurrency`,
+              location.line,
+              canonicalValues,
+              violations,
+            );
+    const normalizedJobNeeds =
+      rawJob.needs === undefined
+        ? undefined
+        : normalizedNeeds(structuredJob.get("needs"));
+    const needs =
+      normalizedJobNeeds === undefined
+        ? undefined
+        : canonicalContextValue(
+              normalizedJobNeeds,
+              `${subject}.needs`,
+              location.line,
+              canonicalValues,
+              violations,
+            );
+    const condition =
+      rawJob.if === undefined
+        ? undefined
+        : canonicalConditionEvidence(
+            rawJob.if,
+            `${subject}.if`,
+            location.line,
+            canonicalValues,
+            violations,
+            conditionEvidence,
+          );
+    const strategy =
+      rawJob.strategy === undefined
+        ? undefined
+        : validStrategy(structuredJob.get("strategy"))
+          ? canonicalContextValue(
+              structuredJob.get("strategy"),
+              `${subject}.strategy`,
+              location.line,
+              canonicalValues,
+              violations,
+            )
+          : undefined;
+    const outputs =
+      rawJob.outputs === undefined
+        ? undefined
+        : validOutputs(structuredJob.get("outputs"))
+          ? canonicalContextValue(
+              structuredJob.get("outputs"),
+              `${subject}.outputs`,
+              location.line,
+              canonicalValues,
+              violations,
+            )
+          : undefined;
+    const normalizedJobDeploymentEnvironment =
+      rawJob.environment === undefined
+        ? undefined
+        : normalizedDeploymentEnvironment(
+            structuredJob.get("environment"),
+          );
+    const deploymentEnvironment =
+      normalizedJobDeploymentEnvironment === undefined
+        ? undefined
+        : canonicalContextValue(
+              normalizedJobDeploymentEnvironment,
+              `${subject}.environment`,
+              location.line,
+              canonicalValues,
+              violations,
+            );
+    if (normalizedJobDeploymentEnvironment !== undefined) {
+      const deploymentName = normalizedJobDeploymentEnvironment.get(
+        "name",
+      ) as string;
+      const caseFoldedName = deploymentName.toUpperCase();
+      const priorName =
+        deploymentNamesByCaseFold.get(caseFoldedName);
+      if (
+        priorName !== undefined &&
+        priorName !== deploymentName
+      ) {
+        addViolation(violations, {
+          kind: "unsupported-execution-shape",
+          line: location.line,
+          subject: `${subject}.environment`,
+          detail:
+            "deployment environment names must be unique under case-insensitive runner semantics",
+        });
+      } else {
+        deploymentNamesByCaseFold.set(
+          caseFoldedName,
+          deploymentName,
+        );
+      }
+    }
+    const continueOnError =
+      rawJob["continue-on-error"] === undefined
+        ? undefined
+        : canonicalConditionEvidence(
+            rawJob["continue-on-error"],
+            `${subject}.continue-on-error`,
+            location.line,
+            canonicalValues,
+            violations,
+            booleanExpressionEvidence,
+          );
+    const timeoutMinutes =
+      rawJob["timeout-minutes"] === undefined
+        ? undefined
+        : canonicalConditionEvidence(
+            rawJob["timeout-minutes"],
+            `${subject}.timeout-minutes`,
+            location.line,
+            canonicalValues,
+            violations,
+            timeoutEvidence,
+          );
+    const invalidJobControls = [
+      [rawJob.concurrency, jobConcurrency],
+      [rawJob.needs, needs],
+      [rawJob.if, condition],
+      [rawJob.strategy, strategy],
+      [rawJob.outputs, outputs],
+      [rawJob.environment, deploymentEnvironment],
+      [rawJob["continue-on-error"], continueOnError],
+      [rawJob["timeout-minutes"], timeoutMinutes],
+    ].some(
+      ([declared, canonical]) =>
+        declared !== undefined && canonical === undefined,
+    );
+    if (
+      invalidJobControls &&
+      violations.entries.length === jobControlViolationCount
+    ) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line: location.line,
+        subject,
+        detail: "ordinary job context or lifecycle field has an unsupported shape",
+      });
+    }
     totalSteps += rawJob.steps.length;
     if (totalSteps > MAX_WORKFLOW_STEPS) {
       addViolation(violations, {
@@ -947,8 +1779,10 @@ export function canonicalizeWorkflowExecutionSurface(
       }
       const line = location.stepLines[index] ?? location.line;
       const stepSubject = `${subject}.steps[${index}]`;
+      const structuredStep = structuredSteps[index];
       if (
         !isRecord(rawStep) ||
+        !isStringKeyedMap(structuredStep) ||
         Object.keys(rawStep).some((key) => !STEP_KEYS.has(key)) ||
         !Object.hasOwn(rawStep, "run")
       ) {
@@ -956,7 +1790,7 @@ export function canonicalizeWorkflowExecutionSurface(
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
-          detail: "120d-1a supports only closed ordinary run-step fields",
+          detail: "120d-1b1 supports only the closed ordinary run-step field set",
         });
         continue;
       }
@@ -964,6 +1798,7 @@ export function canonicalizeWorkflowExecutionSurface(
         rawStep,
         stepSubject,
         line,
+        canonicalValues,
         violations,
       );
       const stepEnvironment =
@@ -985,13 +1820,13 @@ export function canonicalizeWorkflowExecutionSurface(
       if (!recordBindings(environment.length, line, stepSubject)) {
         break jobLoop;
       }
-      const run = staticNonEmptyText(rawStep.run);
+      const run = exactNonEmptyText(rawStep.run);
       if (run === undefined) {
         addViolation(violations, {
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
-          detail: "run must be a static non-empty string",
+          detail: "run must be an exact non-empty string",
         });
         continue;
       }
@@ -1036,10 +1871,34 @@ export function canonicalizeWorkflowExecutionSurface(
         ...optional,
       });
     }
+    if (
+      runner === undefined ||
+      permissionResolution.kind !== "resolved"
+    ) {
+      continue;
+    }
     jobs.push({
       id,
       line: location.line,
-      runnerLabels: labels ?? [],
+      name: typeof rawJob.name === "string" ? rawJob.name : null,
+      runner,
+      permissions: permissionResolution.evidence,
+      ...(jobConcurrency === undefined
+        ? {}
+        : { concurrency: jobConcurrency }),
+      ...(needs === undefined ? {} : { needs }),
+      ...(condition === undefined ? {} : { condition }),
+      ...(strategy === undefined ? {} : { strategy }),
+      ...(outputs === undefined ? {} : { outputs }),
+      ...(deploymentEnvironment === undefined
+        ? {}
+        : { deploymentEnvironment }),
+      ...(continueOnError === undefined
+        ? {}
+        : { continueOnError }),
+      ...(timeoutMinutes === undefined
+        ? {}
+        : { timeoutMinutes }),
       environment: effectiveJobEnvironment,
       steps,
     });
@@ -1052,7 +1911,13 @@ export function canonicalizeWorkflowExecutionSurface(
     workflowPath,
     trigger,
     workflowName,
+    runName,
+    ...(workflowConcurrency === undefined
+      ? {}
+      : { concurrency: workflowConcurrency }),
     workflowEnvironment,
+    canonicalValueCount: canonicalValues.emittedValues,
+    canonicalValueDepth: canonicalValues.deepestEmission,
     jobs,
   };
   if (

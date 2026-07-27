@@ -23,6 +23,8 @@ import {
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { posix, resolve, win32 } from "node:path";
 
+import { resolveEffectiveWorkflowPermissions } from "./workflow-permissions-logic.mts";
+
 /**
  * The reviewed `claude-code-action` commit used by every audited manifest.
  *
@@ -43,25 +45,6 @@ const ALLOWLIST_KEYS = new Set([
 ]);
 const APPROVED_GITHUB_HOSTED_RUNNER_LABELS = new Set([
   "ubuntu-latest",
-]);
-const GITHUB_TOKEN_PERMISSION_KEYS = new Set([
-  "actions",
-  "artifact-metadata",
-  "attestations",
-  "checks",
-  "code-quality",
-  "contents",
-  "deployments",
-  "discussions",
-  "id-token",
-  "issues",
-  "models",
-  "packages",
-  "pages",
-  "pull-requests",
-  "security-events",
-  "statuses",
-  "vulnerability-alerts",
 ]);
 const CREDENTIAL_KEY_PATTERN =
   /(?:^|[_-])(?:api[_-]?key|auth(?:entication|orization)?|credential|credentials|password|passphrase|pat|private[_-]?key|secret|secrets|ssh[_-]?key|token|tokens)(?:$|[_-])/i;
@@ -196,26 +179,6 @@ function containsCredentialNamedValue(value: unknown): boolean {
   });
 }
 
-function permissionsCarryCredential(value: unknown): boolean {
-  if (value === undefined) {
-    // Repository defaults are mutable external state, so absence is unknown.
-    return true;
-  }
-  if (typeof value === "string") {
-    // Both supported scalar shorthands grant a token; every other scalar is
-    // an unknown form and therefore also fails closed.
-    return true;
-  }
-  if (!isRecord(value)) {
-    return true;
-  }
-  return Object.entries(value).some(
-    ([permissionKey, permission]) =>
-      !GITHUB_TOKEN_PERMISSION_KEYS.has(permissionKey) ||
-      permission !== "none",
-  );
-}
-
 function runnerCarriesCredential(value: unknown): boolean {
   return (
     typeof value !== "string" ||
@@ -250,10 +213,16 @@ function jobCarriesCredential(
   workflow: Record<string, unknown>,
   job: Record<string, unknown>,
 ): boolean {
-  const permissions = Object.hasOwn(job, "permissions")
-    ? job.permissions
-    : workflow.permissions;
-  if (permissionsCarryCredential(permissions)) {
+  const permissions = resolveEffectiveWorkflowPermissions(
+    workflow.permissions,
+    Object.hasOwn(job, "permissions")
+      ? { present: true, value: job.permissions }
+      : { present: false },
+  );
+  if (
+    permissions.kind === "unanalyzable" ||
+    permissions.evidence.declaredCapability !== "none"
+  ) {
     return true;
   }
   if (
