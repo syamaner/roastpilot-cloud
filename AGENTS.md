@@ -509,8 +509,11 @@ operator decision, not a cost argument. Monitor and re-evaluate with evidence.
 Codex is available locally (`codex mcp-server`; `codex review --base <branch>`)
 and draws on a **separate, weekly-capped subscription**.
 
-- **Decisions, contracts, adjudication, ambiguous design → the interactive
-  agent.** Codex burns its budget on *ambiguity, not volume*: it ships settled
+- **Decisions, contracts, and ambiguous design → the interactive agent.**
+  **Excluding adjudication of review feedback on a PR the interactive agent
+  itself authored** — that always goes to a human or the `pr-triage` role, even
+  for a finding that looks trivially correct or clearly a false positive (D23).
+  The author's job ends at producing the diff and folding the fixes. Codex burns its budget on *ambiguity, not volume*: it ships settled
   contracts efficiently, while an unsettled one costs a full design round every
   time. Every decision settled before delegating converts an expensive round
   into a cheap one. This is the main budget lever.
