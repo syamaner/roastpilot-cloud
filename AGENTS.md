@@ -169,6 +169,48 @@ path:
   conventional issue receives `ready-for-conventional-implementation`, never
   the factory-authorizing `ready-to-implement` label.
 
+## Rigour Calibration
+
+Security rigor is mandatory; implementation depth is proportional to the live
+exposure and failure direction (factory.md D139):
+
+- **Run the direction test.** Distinguish unsafe admission (false negative),
+  safe work rejected (false positive), and pure availability loss. Treat a
+  failure as availability-only only after proving it cannot skip or bypass an
+  authoritative gate. Unknown execution, provenance, credential/identity/
+  permission, persisted-state, or data-crossing forms fail closed.
+- **Reject what is not used.** Measure the live corpus first. A zero-instance
+  execution class stays rejected until the change introducing its first real
+  use owns the reviewed contract and adversarial tests.
+- **Prefer static constraints.** Use a simpler base-controlled platform or
+  structural constraint when it provides the property. Do not build a computed
+  policy producer before its enforcing consumer has a ratified contract; if
+  there is no consumer, do not build the producer yet. An Environment-only
+  named secret is durably withheld when `environment:` is removed, but the
+  built-in `GITHUB_TOKEN` is not.
+- **Assess both blast-radius axes.** Record data confidentiality, integrity,
+  and sensitivity separately from principal scope, lifetime, revocability, and
+  capability. Credential-reachable does not make read-only public data
+  equivalent to a publisher key or write-capable identity.
+- **Stop kickoff structurally.** Record the base/head SHA, deterministic corpus
+  query or source paths, observed counts, and cited closed key/form table.
+  Decide that boundary once, then stop; revalidate at final head after a rebase
+  or relevant surface change.
+- **Triage by failure direction, not finding count.** One credible fail-open or
+  credential-identity finding outweighs many availability findings. Counts do
+  not replace mechanism and consequence analysis.
+- **Trip on scope creep.** A new execution class, consumer, credential,
+  identity, operator action, or other zero-instance surface stops the slice for
+  re-scoping. Adjacent hardening is not folded merely because it is nearby.
+
+For every newly admitted or claimed-compliant path, the floor does not move:
+unknowns fail closed; evidence/state is never silently dropped or truncated;
+credentials do not cross into unreviewed mutable execution; a human merges;
+applicable full gates and domain reviews run; and tests assert real behavior.
+Current OAuth, Codecov, and built-in-token paths recorded on #120 are held
+residuals, not proof that the live corpus meets that admission floor. D139 does
+not authorize, retire, or schedule the separately held 120d-2 decision.
+
 ## PR Merge Policy
 
 Full policy: `factory.md` §9, identical to the agent repo's, no factory
@@ -342,12 +384,16 @@ say so; N review rounds over one class is the failure mode this rule removes
 implementing-agent patch** — a manually-dispatched stage-1 run or an
 F1-stage-2 chained `ready-to-implement` run alike, i.e. anything the
 privileged publisher pushes on an agent's behalf — must never touch
-`.github/**`, CODEOWNERS, branch-protection config, **or the privileged
-glue/publisher scripts** (the label-write, branch-push, PR-create, and
-comment-post logic the factory's privileged jobs run — per factory.md's
-read-only-agent/privileged-publisher split, these scripts may live outside
-`.github/**`). That diff is a review blocker on any such PR, full stop. This
-does **not** ban these paths from changing in general: F1 itself (building
+`.github/**`, CODEOWNERS, branch-protection config, **the privileged
+glue/publisher scripts**, any recognized agent instruction/configuration
+basename at any depth (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`,
+`CLAUDE.local.md`, `.claudeignore`, `.mcp.json`, `.npmrc`), `.claude/**`,
+`.codex/**`, or `docs/state/registry.md`. That diff is a review blocker on any
+such PR, full stop. The applied-tree guard, not a prompt instruction, enforces
+the repository paths. The registry may enter a factory PR only through trusted
+deterministic transition logic or a conventional human-directed amendment in
+that same PR; without one, the slice may not land because D135 is not waived.
+This does **not** ban these paths from changing in general: F1 itself (building
 the factory workflows and glue scripts) and any human-directed
 branch-protection or CI change are conventional, human-reviewed work and are
 expected to touch them. The invariant is "a factory implementing agent can't

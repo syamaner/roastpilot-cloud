@@ -503,6 +503,43 @@ describe("isProtectedPath", () => {
     expect(isProtectedPath("docs/CODEOWNERS")).toBe(true);
   });
 
+  it.each([
+    ".claude",
+    "nested/.codex",
+    "AGENTS.md",
+    "nested/AGENTS.md",
+    "nested/AGENTS.override.md",
+    "CLAUDE.md",
+    "nested/CLAUDE.local.md",
+    ".claudeignore",
+    "nested/.mcp.json",
+    ".npmrc",
+    "docs/state/registry.md",
+    ".claude/settings.json",
+    ".claude/skills/other/SKILL.md",
+    ".codex/config.toml",
+  ])("protects agent runtime instruction, configuration, and state path %s", (path) => {
+    expect(isProtectedPath(path)).toBe(true);
+  });
+
+  it.each([
+    ".claude-link",
+    ".codex-config",
+    "AGENTS.md.bak",
+    "nested/AGENTS.override.md.example",
+    "CLAUDE.md.example",
+    ".claudeignore.example",
+    ".mcp.json.bak",
+    ".npmrc.local",
+    "docs/state/registry.md.bak",
+    "docs/state/other.md",
+    "agents.md",
+    ".claude-archive/settings.json",
+    ".codex-notes/config.toml",
+  ])("does not overmatch near-miss runtime path %s", (path) => {
+    expect(isProtectedPath(path)).toBe(false);
+  });
+
   it("protects everything under .claude/skills/spec-grounded-review/ (F1-S9 issue #12, PR #81 review completion: claude-code-review.yml's restore step reapplies this path unconditionally from PR-head, same as scripts/factory/, so an implementing agent's own patch must never be able to reach it either)", () => {
     expect(
       isProtectedPath(".claude/skills/spec-grounded-review/SKILL.md"),
@@ -529,17 +566,11 @@ describe("isProtectedPath", () => {
     expect(isProtectedPath("/etc/passwd")).toBe(true);
   });
 
-  it("does NOT false-positive on a path that merely starts with a similar prefix (.github-like/ or scripts/factory-like/ or a sibling skill directory)", () => {
+  it("does NOT false-positive on a path that merely starts with a similar prefix", () => {
     // Guards against an overly loose prefix check (e.g. a plain substring
     // match) that would over-block legitimate paths.
     expect(isProtectedPath(".github-archive/notes.md")).toBe(false);
     expect(isProtectedPath("scripts/factory-notes/readme.md")).toBe(false);
-    // A DIFFERENT skill directory is not protected -- only
-    // spec-grounded-review's own path is, since that's the only one
-    // claude-code-review.yml's restore step reapplies unconditionally.
-    expect(isProtectedPath(".claude/skills/some-other-skill/SKILL.md")).toBe(
-      false,
-    );
   });
 });
 
@@ -571,6 +602,35 @@ describe("findForbiddenPatchPaths", () => {
       "b/scripts/factory/publish-implement-patch.mts",
     ]);
     expect(forbidden).toEqual(["scripts/factory/publish-implement-patch.mts"]);
+  });
+
+  it("flags normalized runtime instruction/configuration and state paths", () => {
+    const forbidden = findForbiddenPatchPaths([
+      "a/AGENTS.md",
+      "b/docs/state/registry.md",
+      "nested/../nested/CLAUDE.md",
+      "./.claude/settings.json",
+      ".codex/config.toml",
+      "AGENTS.md",
+    ]);
+    expect(forbidden).toEqual([
+      ".claude/settings.json",
+      ".codex/config.toml",
+      "AGENTS.md",
+      "docs/state/registry.md",
+      "nested/CLAUDE.md",
+    ]);
+  });
+
+  it("flags both sides of a rename crossing runtime instruction and configuration boundaries", () => {
+    expect(
+      findForbiddenPatchPaths([
+        "a/nested/CLAUDE.md",
+        "b/lib/renamed-notes.md",
+        "a/lib/replacement.md",
+        "b/.codex/config.toml",
+      ]),
+    ).toEqual([".codex/config.toml", "nested/CLAUDE.md"]);
   });
 
   it("flags the spec-grounded-review skill even though it lives outside .github/** and scripts/factory/ (F1-S9 issue #12, PR #81 review completion: unconditionally PR-head-reapplied by claude-code-review.yml's restore step, so an implementing agent's patch must never be able to tamper with it)", () => {
