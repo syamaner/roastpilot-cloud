@@ -19,22 +19,13 @@
  * are conventional, human-reviewed work and go through a normal PR, not
  * through this guard.
  *
- * `.claude/skills/spec-grounded-review/` (F1-S9 issue #12, PR #81 review,
- * completing the P1 fix in the same PR): `claude-code-review.yml`'s
- * restore step re-applies this path UNCONDITIONALLY from PR-head — the
- * same treatment as `scripts/factory/`, and safe for the identical
- * reason: it must be guard-protected here too, so an implementing
- * agent's own patch can never reach it, exactly as it can never reach
- * `scripts/factory/`. Without this entry, the equivalence the restore
- * step's PR-head-reapply relies on ("this path only ever changes via
- * human-reviewed PR, never via an implementing agent's own patch") would
- * hold for `scripts/factory/` but not for the skill — today harmless
- * only because the implement/publish pipeline (#47) that would let an
- * agent's patch reach an unguarded path isn't enabled yet. Add any
- * future PR-head-reapplied path here in the same commit that adds it to
- * the workflow's restore step — the two lists must stay in lockstep.
- * `.claude/skills/triage/` is also protected because both agent workflows
- * execute its deterministic input sanitizer before model exposure.
+ * D139 also protects recognized agent instruction/configuration basenames
+ * at every repository depth, plus `.claude/` and `.codex/` wholesale.
+ * Protecting only root `AGENTS.md` would be bypassable through a nested
+ * instruction or the root `CLAUDE.md` alias. The live state registry is an
+ * exact protected path: untrusted agent output cannot rewrite the source
+ * of truth, while trusted deterministic transition logic or a conventional
+ * same-PR amendment may still satisfy D135.
  *
  * Branch-protection config has no file-level guard here — it's a GitHub
  * API/settings-level control, not a repo path, so a file-diff guard
@@ -43,10 +34,26 @@
 const PROTECTED_PATH_PREFIXES = [
   ".github/",
   "scripts/factory/",
-  ".claude/skills/spec-grounded-review/",
-  ".claude/skills/triage/",
+  ".claude/",
+  ".codex/",
 ] as const;
-const PROTECTED_EXACT_PATHS = ["CODEOWNERS", "docs/CODEOWNERS"] as const;
+const PROTECTED_EXACT_PATHS = [
+  "CODEOWNERS",
+  "docs/CODEOWNERS",
+  "AGENTS.md",
+  "docs/state/registry.md",
+] as const;
+const PROTECTED_BASENAMES = [
+  ".claude",
+  ".codex",
+  "AGENTS.md",
+  "AGENTS.override.md",
+  "CLAUDE.md",
+  "CLAUDE.local.md",
+  ".claudeignore",
+  ".mcp.json",
+  ".npmrc",
+] as const;
 
 /**
  * Normalizes a diff-reported path for comparison: strips a leading `a/`
@@ -106,6 +113,12 @@ export function isProtectedPath(normalizedPath: string): boolean {
   if (
     (PROTECTED_EXACT_PATHS as readonly string[]).includes(normalizedPath)
   ) {
+    return true;
+  }
+  const basename = normalizedPath.slice(
+    normalizedPath.lastIndexOf("/") + 1,
+  );
+  if ((PROTECTED_BASENAMES as readonly string[]).includes(basename)) {
     return true;
   }
   return PROTECTED_PATH_PREFIXES.some((prefix) =>

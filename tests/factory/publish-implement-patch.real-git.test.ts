@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile as fsWriteFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  lstat,
+  readFile,
+  rm,
+  symlink,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -3428,6 +3436,57 @@ index abc1234..def5678 100644
     expect(process.exitCode).toBe(1);
     const content = await readFile(join(localCloneDir, "docs", "CODEOWNERS"), "utf8");
     expect(content).toBe("* @syamaner\n");
+  });
+
+  it("rejects a symlink introduced at an exact protected configuration directory entry", async () => {
+    await mkdir(join(localCloneDir, "lib", "codex-config"), {
+      recursive: true,
+    });
+    await fsWriteFile(
+      join(localCloneDir, "lib", "codex-config", "config.toml"),
+      "model = 'attacker-controlled'\n",
+    );
+    await symlink("lib/codex-config", join(localCloneDir, ".codex"));
+    git(localCloneDir, ["add", "-A"]);
+    const diff = git(localCloneDir, ["diff", "--cached"]);
+    expect(diff).toContain("b/.codex");
+    git(localCloneDir, ["reset", "--hard", "-q", "HEAD"]);
+    await rm(join(localCloneDir, ".codex"), { force: true });
+    await rm(join(localCloneDir, "lib", "codex-config"), {
+      recursive: true,
+      force: true,
+    });
+
+    process.env.PATCH_PATH = await writePatch(
+      scratchDir,
+      "protected-codex-symlink.diff",
+      diff,
+    );
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const postCall = fetchMock.mock.calls.find(
+      ([, callInit]) =>
+        (callInit as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCall).toBeDefined();
+    const [, init] = postCall!;
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(body.body).toContain(
+      "patch touches pipeline-protected path(s), refusing to apply it: .codex",
+    );
+    expect(body.body).not.toContain("unexpected error");
+
+    const linkEntry = await lstat(join(localCloneDir, ".codex")).catch(
+      () => null,
+    );
+    expect(linkEntry).toBeNull();
   });
 
   it("rejects a COPY (not just a rename) INTO scripts/factory/** (hand-crafted — our own capture step's git diff --cached never detects copies without -C, so this is defensive coverage)", async () => {
