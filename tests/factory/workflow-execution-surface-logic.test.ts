@@ -2042,7 +2042,7 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 26,
+      runSteps: 27,
       actionSteps: 27,
       inputs: 66,
     });
@@ -2090,7 +2090,7 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      runSteps: 50,
+      runSteps: 51,
       actionSteps: 46,
       inputs: 117,
     });
