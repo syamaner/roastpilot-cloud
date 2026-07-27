@@ -1482,12 +1482,19 @@ describe("local action policy (issue #114)", () => {
 });
 
 describe("findUnpinnedActionReferences (issue #102)", () => {
-  it("accepts the expected action pin and its case-insensitive equivalent", () => {
+  it("matches 120d-1b2a owner, repository, and SHA case normalization", () => {
     const upperSha = EXPECTED_CLAUDE_CODE_ACTION_SHA.toUpperCase();
     const content = [
       "steps:",
       `  - uses: anthropics/claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
       `  - uses: Anthropics/Claude-Code-Action@${upperSha}`,
+    ].join("\n");
+    expect(findUnpinnedActionReferences(content)).toEqual([]);
+  });
+
+  it("pins 120a separator acceptance where 120d-1b2a rejects fail closed", () => {
+    const content = [
+      "steps:",
       String.raw`  - uses: anthropics\claude-code-action@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
       `  - uses: anthropics//claude-code-action/@${EXPECTED_CLAUDE_CODE_ACTION_SHA}`,
     ].join("\n");
