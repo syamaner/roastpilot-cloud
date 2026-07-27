@@ -314,9 +314,17 @@ jobs:
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          # `umask 077` FIRST, before mktemp (#58's L2). It used to sit after
+          # the mktemp call, where it protected nothing at all: mktemp had
+          # already created the file, and redirecting onto an ALREADY-EXISTING
+          # file does not re-apply the umask to its mode. mktemp's own 0600 is
+          # what actually held the key private, so this was dead defense, not
+          # a live second layer. Ordered correctly it becomes the real second
+          # layer it was meant to be, and it now also covers anything else
+          # this step creates rather than the key file alone.
+          umask 077
           KEY_FILE="$(mktemp)"
           trap 'rm -f "$KEY_FILE"' EXIT
-          umask 077
           printf '%s' "$SNOWFLAKE_DEV_PRIVATE_KEY" > "$KEY_FILE"
           export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
           python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
