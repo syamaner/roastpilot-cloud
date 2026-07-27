@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
+  lstat,
   readFile,
   rm,
   symlink,
@@ -3467,11 +3468,25 @@ index abc1234..def5678 100644
     await main();
 
     expect(process.exitCode).toBe(1);
-    const linkTarget = await readFile(
-      join(localCloneDir, ".codex", "config.toml"),
-      "utf8",
-    ).catch(() => null);
-    expect(linkTarget).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const postCall = fetchMock.mock.calls.find(
+      ([, callInit]) =>
+        (callInit as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCall).toBeDefined();
+    const [, init] = postCall!;
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      body: string;
+    };
+    expect(body.body).toContain(
+      "patch touches pipeline-protected path(s), refusing to apply it: .codex",
+    );
+    expect(body.body).not.toContain("unexpected error");
+
+    const linkEntry = await lstat(join(localCloneDir, ".codex")).catch(
+      () => null,
+    );
+    expect(linkEntry).toBeNull();
   });
 
   it("rejects a COPY (not just a rename) INTO scripts/factory/** (hand-crafted — our own capture step's git diff --cached never detects copies without -C, so this is defensive coverage)", async () => {
