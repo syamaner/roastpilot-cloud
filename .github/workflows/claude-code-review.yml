@@ -133,6 +133,42 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Claude Code reserves the marketplace name `claude-code-plugins` for
+      # official Anthropic marketplaces and admits it ONLY from a GitHub
+      # source in the `anthropics` org. The pinned manifest declares exactly
+      # that name, so adding this immutable LOCAL checkout by path is
+      # rejected outright ("Failed to add marketplace"). Renaming the local
+      # copy is the compliant fix: it stops the pinned tree claiming the
+      # reserved official name, and it keeps the #41 immutability property
+      # (a fixed upstream SHA, never a runtime fetch of a mutable ref).
+      #
+      # Fail closed on any drift. The manifest is pinned by SHA, so its
+      # bytes cannot legitimately change; a hash mismatch means the tree is
+      # not the one that was source-reviewed, and rewriting it blind would
+      # be exactly the silent substitution this whole step exists to
+      # prevent. `sed` is safe here only BECAUSE the hash gate already
+      # proved the exact bytes — the name line is known to occur once.
+      - name: Rename pinned marketplace to a non-reserved name
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="${GITHUB_WORKSPACE:?}/.claude-marketplace/.claude-plugin/marketplace.json"
+          expected_sha256='663c1abf7f7661453bd5ce2b1ddcd2827b6ef7cad1b0b11f648c9ea08273c6e5'
+          actual_sha256="$(sha256sum -- "$manifest" | cut -d' ' -f1)"
+          if [ "$actual_sha256" != "$expected_sha256" ]; then
+            echo "::error::Pinned marketplace manifest does not match the source-reviewed bytes (expected ${expected_sha256}, got ${actual_sha256})."
+            exit 1
+          fi
+          sed -i 's/^  "name": "claude-code-plugins",$/  "name": "roastpilot-pinned-plugins",/' -- "$manifest"
+          if ! grep -qx '  "name": "roastpilot-pinned-plugins",' -- "$manifest"; then
+            echo "::error::Marketplace rename did not apply."
+            exit 1
+          fi
+          if grep -q 'claude-code-plugins' -- "$manifest"; then
+            echo "::error::Reserved marketplace name still present after rename."
+            exit 1
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
@@ -222,7 +258,7 @@ jobs:
           allowed_non_write_users: ""
           show_full_output: false
           plugin_marketplaces: './.claude-marketplace'
-          plugins: 'code-review@claude-code-plugins'
+          plugins: 'code-review@roastpilot-pinned-plugins'
           # Always post a visible tracking comment, even when the review
           # has no findings — a clean review must be distinguishable from a
           # silently failed one.

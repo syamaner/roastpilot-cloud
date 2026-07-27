@@ -17,6 +17,20 @@ const CHECKOUT_ACTION =
 const MARKETPLACE_REPOSITORY = "anthropics/claude-code";
 const MARKETPLACE_SHA = "2982f951552e94f38cd972764ae94c1d90c41da3";
 const MARKETPLACE_PATH = ".claude-marketplace";
+// Claude Code reserves `claude-code-plugins` for official Anthropic
+// marketplaces added from an `anthropics` GitHub source, so the immutable
+// local checkout must be renamed before it can be added by path.
+const RESERVED_MARKETPLACE_NAME = "claude-code-plugins";
+const LOCAL_MARKETPLACE_NAME = "roastpilot-pinned-plugins";
+const MANIFEST_SHA256 =
+  "663c1abf7f7661453bd5ce2b1ddcd2827b6ef7cad1b0b11f648c9ea08273c6e5";
+const RENAME_STEP_NAME = "Rename pinned marketplace to a non-reserved name";
+// The exact rewrite, asserted verbatim: the step also greps for the new
+// name afterwards, so a looser substring check would still pass if the
+// rewrite itself were retargeted.
+const RENAME_COMMAND =
+  `sed -i 's/^  "name": "${RESERVED_MARKETPLACE_NAME}",$/` +
+  `  "name": "${LOCAL_MARKETPLACE_NAME}",/'`;
 
 type Mapping = Record<string, unknown>;
 
@@ -58,9 +72,11 @@ function validateMarketplacePin(workflow: string): string[] {
     steps,
     "Checkout Claude Code plugin marketplace",
   );
+  const renameSteps = findNamedSteps(steps, RENAME_STEP_NAME);
   const reviewSteps = findNamedSteps(steps, "Run Claude Code Review");
   const cleanupStep = cleanupSteps[0];
   const marketplaceStep = marketplaceSteps[0];
+  const renameStep = renameSteps[0];
   const reviewStep = reviewSteps[0];
   const marketplaceWith = asMapping(marketplaceStep?.with);
   const reviewWith = asMapping(reviewStep?.with);
@@ -69,6 +85,7 @@ function validateMarketplacePin(workflow: string): string[] {
   if (
     cleanupSteps.length !== 1 ||
     marketplaceSteps.length !== 1 ||
+    renameSteps.length !== 1 ||
     reviewSteps.length !== 1
   ) {
     failures.push("cleanup, marketplace checkout, and review steps must be unique");
@@ -84,9 +101,23 @@ function validateMarketplacePin(workflow: string): string[] {
   if (
     hasExecutionOverride(cleanupStep) ||
     hasExecutionOverride(marketplaceStep) ||
+    hasExecutionOverride(renameStep) ||
     hasExecutionOverride(reviewStep)
   ) {
     failures.push("marketplace setup and review steps must always execute");
+  }
+  const renameRun =
+    typeof renameStep?.run === "string" ? renameStep.run : undefined;
+  if (renameStep?.shell !== "bash" || renameRun === undefined) {
+    failures.push("marketplace rename must be an explicit bash step");
+  }
+  if (renameRun !== undefined && !renameRun.includes(MANIFEST_SHA256)) {
+    failures.push(
+      "marketplace rename must verify the source-reviewed manifest hash",
+    );
+  }
+  if (renameRun !== undefined && !renameRun.includes(RENAME_COMMAND)) {
+    failures.push("marketplace rename must apply the non-reserved local name");
   }
   if (marketplaceStep?.uses !== CHECKOUT_ACTION) {
     failures.push("marketplace checkout must use the pinned checkout action");
@@ -113,13 +144,22 @@ function validateMarketplacePin(workflow: string): string[] {
   if (reviewWith?.plugin_marketplaces !== `./${MARKETPLACE_PATH}`) {
     failures.push("Claude review must load only the local marketplace");
   }
-  if (reviewWith?.plugins !== "code-review@claude-code-plugins") {
+  if (reviewWith?.plugins !== `code-review@${LOCAL_MARKETPLACE_NAME}`) {
     failures.push("Claude review must load the reviewed code-review plugin");
+  }
+  if (
+    typeof reviewWith?.plugins === "string" &&
+    reviewWith.plugins.includes(RESERVED_MARKETPLACE_NAME)
+  ) {
+    failures.push(
+      "Claude review must not reference the reserved marketplace name",
+    );
   }
   if (
     steps.indexOf(cleanupStep) < 0 ||
     steps.indexOf(marketplaceStep) !== steps.indexOf(cleanupStep) + 1 ||
-    steps.indexOf(reviewStep) !== steps.indexOf(marketplaceStep) + 1
+    steps.indexOf(renameStep) !== steps.indexOf(marketplaceStep) + 1 ||
+    steps.indexOf(reviewStep) !== steps.indexOf(renameStep) + 1
   ) {
     failures.push("cleanup, marketplace checkout, and review must be adjacent");
   }
@@ -164,6 +204,25 @@ describe("Claude code-review marketplace pin (issue #41)", () => {
       "load only the local marketplace",
     ],
     [
+      "reserved marketplace name in the plugin reference",
+      `plugins: 'code-review@${LOCAL_MARKETPLACE_NAME}'`,
+      `plugins: 'code-review@${RESERVED_MARKETPLACE_NAME}'`,
+      "reviewed code-review plugin",
+    ],
+    [
+      "rename that skips the manifest hash gate",
+      `expected_sha256='${MANIFEST_SHA256}'`,
+      "expected_sha256=\"$(sha256sum -- \"$manifest\" | cut -d' ' -f1)\"",
+      "source-reviewed manifest hash",
+    ],
+    [
+      "rename to a different name than the review step loads",
+      RENAME_COMMAND,
+      `sed -i 's/^  "name": "${RESERVED_MARKETPLACE_NAME}",$/` +
+        `  "name": "attacker-marketplace",/'`,
+      "non-reserved local name",
+    ],
+    [
       "missing credential hardening",
       [
         `          path: ${MARKETPLACE_PATH}`,
@@ -190,22 +249,38 @@ describe("Claude code-review marketplace pin (issue #41)", () => {
     },
   );
 
-  it.each(["if: false", "continue-on-error: true"])(
-    "rejects a checkout with the execution override %s",
-    (override) => {
-      const mutatedWorkflow = WORKFLOW_CONTENT.replace(
-        "      - name: Checkout Claude Code plugin marketplace\n",
-        [
-          "      - name: Checkout Claude Code plugin marketplace",
-          `        ${override}`,
-          "",
-        ].join("\n"),
-      );
-      expect(validateMarketplacePin(mutatedWorkflow)).toContain(
-        "marketplace setup and review steps must always execute",
-      );
-    },
-  );
+  it.each([
+    ["Checkout Claude Code plugin marketplace", "if: false"],
+    ["Checkout Claude Code plugin marketplace", "continue-on-error: true"],
+    [RENAME_STEP_NAME, "if: false"],
+    [RENAME_STEP_NAME, "continue-on-error: true"],
+  ])("rejects %s with the execution override %s", (stepName, override) => {
+    const mutatedWorkflow = WORKFLOW_CONTENT.replace(
+      `      - name: ${stepName}\n`,
+      [`      - name: ${stepName}`, `        ${override}`, ""].join("\n"),
+    );
+    expect(mutatedWorkflow).not.toBe(WORKFLOW_CONTENT);
+    expect(validateMarketplacePin(mutatedWorkflow)).toContain(
+      "marketplace setup and review steps must always execute",
+    );
+  });
+
+  it("rejects a workflow with the rename step removed entirely", () => {
+    const renameBlockStart = WORKFLOW_CONTENT.indexOf(
+      `      - name: ${RENAME_STEP_NAME}`,
+    );
+    const reviewBlockStart = WORKFLOW_CONTENT.indexOf(
+      "      - name: Run Claude Code Review",
+    );
+    expect(renameBlockStart).toBeGreaterThan(-1);
+    expect(reviewBlockStart).toBeGreaterThan(renameBlockStart);
+    const mutatedWorkflow =
+      WORKFLOW_CONTENT.slice(0, renameBlockStart) +
+      WORKFLOW_CONTENT.slice(reviewBlockStart);
+    expect(validateMarketplacePin(mutatedWorkflow)).toContainEqual(
+      expect.stringContaining("must be unique"),
+    );
+  });
 
   it("rejects an intervening step that can overwrite the local marketplace", () => {
     const mutatedWorkflow = WORKFLOW_CONTENT.replace(
