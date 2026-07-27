@@ -524,7 +524,11 @@ and draws on a **separate, weekly-capped subscription**.
 - **Routine review (`qa`, `privacy-auditor`, `pr-triage`) → Claude sub-agents.**
   Cheap, and they do not touch the Codex quota at all.
 - A local `codex review` **never** satisfies the Codex merge wait — that needs a
-  bot-authored verdict on the PR naming the exact head sha.
+  bot-authored signal on the PR itself, validated per channel exactly as the PR
+  Merge Policy above defines it (a commit-naming review or clean comment, or a
+  👍 reaction, which carries no sha and is valid only while the head is
+  unchanged). Do not collapse that into a blanket "must name the head sha";
+  the reaction channel cannot carry one.
 - **Budget stop rule:** check the remaining Codex allowance before delegating.
   Below roughly 20%, stop delegating implementation entirely and reserve the
   remainder for pre-open review on boundary-touching slices; review is the
