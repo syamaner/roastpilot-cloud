@@ -63,6 +63,11 @@ class TestLoadPrivateKeyDer:
 _DEV_DB = "ROASTPILOT_DEV"
 _DEV_WH = "DEV_CI_WH"
 _DEV_ROLE = "ROASTPILOT_DEV_CI_ROLE"
+# Hoisted here from further down the file (it used to sit just above
+# TestFindDefaultSecondaryRolesViolation) so it reads alongside the other
+# three identity constants, now that TestAssertSqlIdentifierSafe above also
+# needs it.
+_CI_USER = "ROASTPILOT_DEV_CI"
 
 
 class TestAssertBoundaryVarsNotDrifted:
@@ -91,6 +96,102 @@ class TestAssertBoundaryVarsNotDrifted:
         except SystemExit as exc:
             assert "SNOWFLAKE_DEV_WAREHOUSE" in str(exc)
             assert "SOME_OTHER_WH" in str(exc)
+
+
+class TestAssertSqlIdentifierSafe:
+    """#58's L3: the role and the CI user are interpolated into four `SHOW`
+    statements (Snowflake accepts no bind parameter in that position), so
+    both are refused up front unless they're bare unquoted identifiers.
+
+    A hostile value already failed closed WITHOUT this check, via the
+    connector's num_statements default, Snowflake syntax errors, and the
+    exact-name post-filter -- these tests cover the check that makes that
+    property asserted rather than emergent. See the function's docstring.
+    """
+
+    def test_accepts_the_real_dev_role_and_ci_user(self) -> None:
+        # The values actually held by vars.SNOWFLAKE_DEV_ROLE/_USER -- this
+        # check must never reject the live configuration.
+        assert_dev_ci_grants.assert_sql_identifier_safe(_DEV_ROLE, "SNOWFLAKE_DEV_ROLE")
+        assert_dev_ci_grants.assert_sql_identifier_safe(_CI_USER, "SNOWFLAKE_DEV_USER")
+
+    def test_accepts_a_leading_underscore_and_dollar_sign(self) -> None:
+        # Both are legal in Snowflake's unquoted-identifier grammar; the
+        # check enforces that grammar, not a narrower house style.
+        assert_dev_ci_grants.assert_sql_identifier_safe("_ROLE$1", "SNOWFLAKE_DEV_ROLE")
+
+    def test_accepts_a_lowercase_identifier(self) -> None:
+        # Case is NOT this check's job: a lowercase unquoted identifier is
+        # grammatically fine (Snowflake folds it), and it still fails the
+        # downstream identifiers_match boundary compares if it's wrong.
+        assert_dev_ci_grants.assert_sql_identifier_safe("roastpilot_dev_ci_role", "SNOWFLAKE_DEV_ROLE")
+
+    def _assert_refused(self, value: str) -> None:
+        try:
+            assert_dev_ci_grants.assert_sql_identifier_safe(value, "SNOWFLAKE_DEV_ROLE")
+            raise AssertionError(f"expected SystemExit for {value!r}")
+        except SystemExit as exc:
+            # Anchored prefix rather than two `in` checks: a substring
+            # assertion passes against a corrupted variable name or a
+            # corrupted value echo that merely CONTAINS the expected text.
+            assert str(exc).startswith(f"error: SNOWFLAKE_DEV_ROLE is {value!r}, ")
+
+    def test_refuses_a_statement_separator(self) -> None:
+        self._assert_refused(f"{_DEV_ROLE}; DROP TABLE T")
+
+    def test_refuses_a_single_quote(self) -> None:
+        # The `SHOW USERS LIKE '<user>'` site is the one quoted-string
+        # context, so a quote is the escape that matters there.
+        self._assert_refused("ROASTPILOT_DEV_CI' --")
+
+    def test_refuses_a_comment_marker(self) -> None:
+        self._assert_refused(f"{_DEV_ROLE} -- ")
+
+    def test_refuses_embedded_whitespace(self) -> None:
+        self._assert_refused("ROASTPILOT DEV CI ROLE")
+
+    def test_refuses_a_trailing_newline(self) -> None:
+        # Specifically covers `fullmatch` over an `^...$` pattern: `$` also
+        # matches just before a trailing newline, so an `^...$` version of
+        # this check would ADMIT this value.
+        self._assert_refused(f"{_DEV_ROLE}\n")
+
+    def test_refuses_a_leading_newline(self) -> None:
+        self._assert_refused(f"\n{_DEV_ROLE}")
+
+    def test_refuses_an_empty_value(self) -> None:
+        self._assert_refused("")
+
+    def test_refuses_a_leading_digit(self) -> None:
+        self._assert_refused("1ROLE")
+
+    def test_refuses_a_quoted_identifier(self) -> None:
+        # Deliberately refused rather than escaped: this repo's tooling only
+        # ever creates unquoted identifiers (see the function's docstring).
+        self._assert_refused('"ROASTPILOT_DEV_CI_ROLE"')
+
+    def test_refuses_a_qualified_name(self) -> None:
+        self._assert_refused("ROASTPILOT_DEV.PUBLIC")
+
+    def test_reports_the_whole_operator_facing_diagnostic(self) -> None:
+        # Asserted in FULL, not by substring. This message is the entire
+        # operator-facing output of a fail-closed check on a credentialed
+        # job: it has to name WHICH of the two variables was rejected (both
+        # call sites share this one function), echo the offending value, and
+        # state the grammar that was actually applied -- otherwise the
+        # operator sees a refusal with no way to tell what to fix.
+        # A substring assertion is specifically NOT enough here: it still
+        # passes against a message whose tail has been corrupted around an
+        # intact fragment.
+        try:
+            assert_dev_ci_grants.assert_sql_identifier_safe("bad value", "SNOWFLAKE_DEV_USER")
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert str(exc) == (
+                "error: SNOWFLAKE_DEV_USER is 'bad value', which is not a bare Snowflake "
+                "unquoted identifier ([A-Za-z_][A-Za-z0-9_$]*) -- refusing to interpolate "
+                "it into a SHOW statement"
+            )
 
 
 class TestIdentifiersMatch:
@@ -474,9 +575,6 @@ class TestFindUnexpectedUserRoleGrants:
         assert result == ["ACCOUNTADMIN"]
 
 
-_CI_USER = "ROASTPILOT_DEV_CI"
-
-
 _LOOKALIKE_USER = "ROASTPILOT0DEV0CI"  # matches ROASTPILOT_DEV_CI under LIKE's `_` wildcard
 
 
@@ -647,6 +745,44 @@ class TestMain:
         assert connect_kwargs["role"] == "ROASTPILOT_DEV_CI_ROLE"
         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
         mock_conn.close.assert_called_once()
+
+    def test_refuses_a_role_that_is_not_a_bare_identifier_before_connecting(self, monkeypatch) -> None:
+        # #58's L3. Position matters as much as the check: it must run
+        # BEFORE connect(), so a hostile value never reaches a statement and
+        # never opens a credentialed session in the first place.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setenv("SNOWFLAKE_DEV_ROLE", f"{_DEV_ROLE}; DROP TABLE T")
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
+            try:
+                assert_dev_ci_grants.main()
+                raise AssertionError("expected SystemExit")
+            except SystemExit as exc:
+                # `startswith`, not `in`: a substring assertion still passes
+                # against a CORRUPTED variable name that merely CONTAINS the
+                # real one (e.g. "XXSNOWFLAKE_DEV_ROLEXX"), so it would not
+                # actually pin which variable main() passed at this call
+                # site. The message's full text is pinned once, in
+                # TestAssertSqlIdentifierSafe -- here we only need the name.
+                assert str(exc).startswith("error: SNOWFLAKE_DEV_ROLE is ")
+
+        mock_connect.assert_not_called()
+
+    def test_refuses_a_user_that_is_not_a_bare_identifier_before_connecting(self, monkeypatch) -> None:
+        # The user is checked as well as the role -- it reaches both `SHOW
+        # GRANTS TO USER <user>` and the quoted `SHOW USERS LIKE '<user>'`.
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setenv("SNOWFLAKE_DEV_USER", "ROASTPILOT_DEV_CI' --")
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
+            try:
+                assert_dev_ci_grants.main()
+                raise AssertionError("expected SystemExit")
+            except SystemExit as exc:
+                # Exact prefix, same reasoning as the role test above.
+                assert str(exc).startswith("error: SNOWFLAKE_DEV_USER is ")
+
+        mock_connect.assert_not_called()
 
     def test_disables_secondary_roles_via_a_real_sql_statement_codex_p1_round2(self, monkeypatch) -> None:
         # The exact bug this closes (Codex P1, PR #57, round 2): an earlier

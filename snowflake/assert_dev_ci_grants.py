@@ -145,6 +145,13 @@ Deliberately fails CLOSED: an unrecognized object type (a Snowflake
 privilege/object kind this allowlist doesn't know about) is treated as a
 VIOLATION, never silently permitted — see `is_allowed_grant`.
 
+The role and CI user are interpolated into four `SHOW` statements below
+(Snowflake takes an identifier there, in a position that accepts no bind
+parameter). `main()` refuses either value up front unless it is a bare
+unquoted identifier — see `assert_sql_identifier_safe` for why that check
+exists even though a hostile value already fails closed without it (#58's
+L3).
+
 Every identifier comparison (database, warehouse, role, and object name)
 routes through ONE function, `identifiers_match` — a categorical fix
 (Codex P1, PR #57, round 3), replacing three independently-patched bugs
@@ -231,6 +238,7 @@ than trusting it happened.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import snowflake.connector
@@ -267,6 +275,12 @@ _DATABASE_SCOPED_OBJECT_TYPES = frozenset(
 # See assert_boundary_vars_not_drifted.
 _EXPECTED_DATABASE = "ROASTPILOT_DEV"
 _EXPECTED_WAREHOUSE = "DEV_CI_WH"
+
+# Snowflake's own unquoted-identifier grammar: a letter or underscore, then
+# any number of letters, digits, underscores, or dollar signs. The only two
+# values this script interpolates into SQL text (the role and the CI user)
+# must match it exactly -- see assert_sql_identifier_safe.
+_UNQUOTED_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
 def require_env(name: str) -> str:
@@ -307,6 +321,95 @@ def assert_boundary_vars_not_drifted(database: str, warehouse: str) -> None:
             f"error: SNOWFLAKE_DEV_WAREHOUSE is {warehouse!r}, expected "
             f"{_EXPECTED_WAREHOUSE!r} -- refusing to audit a boundary that "
             "may have silently drifted from the known-correct DEV warehouse"
+        )
+
+
+def assert_sql_identifier_safe(value: str, var_name: str) -> None:
+    """Fails CLOSED unless `value` is a bare Snowflake unquoted identifier,
+    before it is ever interpolated into a SQL statement (#58's L3).
+
+    Four statements in `main()` are built by string interpolation -- `SHOW
+    GRANTS TO ROLE <role>`, `SHOW GRANTS TO USER <user>`, `SHOW FUTURE
+    GRANTS TO ROLE <role>`, and `SHOW USERS LIKE '<user>'`. That is not a
+    missed parameterization: Snowflake's `SHOW` commands take an identifier
+    in a position that accepts no bind parameter, so there is no
+    parameterized form to use instead.
+
+    Both values come from operator-controlled repository variables
+    (`vars.SNOWFLAKE_DEV_ROLE`/`vars.SNOWFLAKE_DEV_USER`, see
+    `dev-snowflake-contract.yml`), which no agent-authored patch can reach.
+    A hostile value ALREADY fails closed today -- but only EMERGENTLY, via
+    three mechanisms this repo does not itself assert:
+
+    (i) Only one statement per `execute()` runs. Note this is NOT the
+        connector pinning it, which an earlier version of this docstring
+        claimed (factory-security review, #58): `cursor.execute`'s
+        `num_statements` defaults to `None`, so snowflake-connector-python
+        sends NO `MULTI_STATEMENT_COUNT` at all. The restriction is
+        Snowflake's own SERVER-side session-parameter default of 1, which
+        an account-, user-, or session-level `ALTER ... SET
+        MULTI_STATEMENT_COUNT = 0` moves. So this leg is mutable Snowflake
+        account state -- the same category as `DEFAULT_SECONDARY_ROLES`,
+        which check #8 verifies rather than assumes, and which nothing
+        verifies here.
+    (ii) Snowflake's own syntax errors on a malformed statement.
+    (iii) `find_default_secondary_roles_violation`'s exact-name post-filter.
+
+    Leg (i) being account state rather than a pinned dependency is the
+    strongest argument FOR this guard, not against it. The check turns an
+    emergent property into an asserted one, the same "anchor the assumption
+    rather than trust the environment to hold the right value" discipline
+    `assert_boundary_vars_not_drifted` already applies to the
+    database/warehouse boundary.
+
+    Deliberately NOT a general Snowflake identifier parser or a quoting
+    helper (explicitly out of scope on #58): this repo's own tooling only
+    ever creates unquoted identifiers, so anything outside that grammar --
+    a quote, semicolon, whitespace, comment marker, trailing newline, or
+    empty value -- is REFUSED rather than escaped. The failure direction is
+    availability only: a legitimate but exotic (quoted) identifier would be
+    rejected loudly, never silently admitted.
+
+    NOT an exhaustive model of Snowflake's identifier rules, and does not
+    claim to be: it does not encode Snowflake's 255-character limit, and it
+    admits reserved words (including `PUBLIC` as a role name). Both fail
+    closed downstream rather than here -- an over-long name is a Snowflake
+    error, and `PUBLIC` still meets the unconditional zero-grants standard
+    `find_public_grants`/`find_public_future_grants` apply. This guard's one
+    job is that the interpolated text cannot carry a quote, backslash,
+    semicolon, whitespace, or comment marker.
+
+    Only `role` and `user` are checked, because they are the only two values
+    that reach SQL text this module composes. This is NOT an exhaustive
+    account of the module's inputs (factory-security review, #58):
+    - `database`/`warehouse` reach `connect()` as parameters, never
+      statement text, and are separately pinned to exact literals by
+      `assert_boundary_vars_not_drifted` -- strictly stronger than a
+      grammar check.
+    - `SNOWFLAKE_ACCOUNT` reaches `connect(account=...)` and is neither
+      pinned nor grammar-checked, despite deciding WHERE the private key's
+      JWT is sent. It is bounded operationally rather than in this module,
+      by the workflow's `egress-policy: block` allowlist
+      (`*.snowflakecomputing.com:443`) and by repository-variable writes
+      needing admin. Out of #58's scope; tracked separately rather than
+      widened into here.
+
+    Deliberately does NOT use `re.IGNORECASE`: that flag would admit the
+    Kelvin sign (U+212A), dotless i (U+0131), long s (U+017F), and U+0130
+    into an otherwise pure-ASCII grammar.
+
+    @param value: The identifier as the environment actually holds it.
+    @param var_name: The environment variable's name, for the error message.
+    @raises SystemExit: If `value` is not a bare unquoted identifier.
+    """
+    # `fullmatch`, not `match`/`search` -- and deliberately not an `^...$`
+    # pattern, since `$` also matches just before a TRAILING NEWLINE, which
+    # would admit `"ROASTPILOT_DEV_CI_ROLE\n"` as if it were clean.
+    if not _UNQUOTED_IDENTIFIER.fullmatch(value):
+        raise SystemExit(
+            f"error: {var_name} is {value!r}, which is not a bare Snowflake unquoted "
+            "identifier ([A-Za-z_][A-Za-z0-9_$]*) -- refusing to interpolate it into a "
+            "SHOW statement"
         )
 
 
@@ -698,6 +801,12 @@ def main() -> int:
     passphrase = os.environ.get("SNOWFLAKE_DEV_PRIVATE_KEY_PASSPHRASE") or None
 
     assert_boundary_vars_not_drifted(database, warehouse)
+    # #58 L3 -- the role and the CI user are the only two values this script
+    # interpolates into SQL text; refuse anything outside Snowflake's
+    # unquoted-identifier grammar before building a statement from it, and
+    # before the private key is even loaded. See assert_sql_identifier_safe.
+    assert_sql_identifier_safe(role, "SNOWFLAKE_DEV_ROLE")
+    assert_sql_identifier_safe(user, "SNOWFLAKE_DEV_USER")
 
     private_key_der = load_private_key_der(private_key_pem, passphrase)
 
