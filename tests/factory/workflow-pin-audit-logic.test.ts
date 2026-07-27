@@ -330,6 +330,8 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
       "permissions:\n  repository-projects: none",
     ],
     ["sequence permission declaration", "permissions: []"],
+    ["ordered-map permission declaration", "permissions: !!omap []"],
+    ["set permission declaration", "permissions: !!set {}"],
   ])("fails closed on a %s", (_name, permissions) => {
     const content = [
       "jobs:",
@@ -600,6 +602,10 @@ describe("credential-bearing local reference policy (issue #120 slice 120a)", ()
   it.each([
     ["self-hosted scalar", "self-hosted"],
     ["custom runner label", "corp-runner"],
+    [
+      "approved label in a one-element sequence",
+      "[ubuntu-latest]",
+    ],
     ["self-hosted label sequence", "[self-hosted, linux, x64]"],
     ["dynamic runner expression", "${{ inputs.runner }}"],
     ["map-valued runner", "{ group: trusted }"],
