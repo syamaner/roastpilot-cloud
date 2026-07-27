@@ -33,6 +33,16 @@ toward the textual ceiling because a repository path does not prove the file is
 unreachable from production code. Route any expected line- or byte-limit
 overage to conventional execution before dispatch.
 
+## Interpreting local factory test output
+
+The factory integration tests intentionally exercise rejected and failing
+subprocess paths. A successful `npm run test -- --coverage` may therefore print
+temporary-repository warnings such as `You appear to have cloned an empty
+repository`, deliberate `jq` errors, or `No valid patches in input`. Treat that
+stderr as expected only when the enclosing Vitest assertion and the final test
+command both pass. Do not suppress it globally or infer success from a familiar
+warning: a non-zero command exit still fails the gate.
+
 ## Kill-switch: stopping the factory
 
 **The pause flag is the primary halt mechanism for anything not yet
