@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_WORKFLOW_CANONICAL_VALUES,
+  type WorkflowCanonicalValue,
 } from "../../scripts/factory/workflow-canonical-value-logic.mts";
 import {
   MAX_CANONICAL_EVIDENCE_BYTES,
@@ -20,6 +21,7 @@ import {
   MAX_WORKFLOW_VIOLATIONS,
   canonicalizeWorkflowExecutionSurface,
   type WorkflowExecutionSurfaceEvidence,
+  type WorkflowRepositoryActionStepEvidence,
 } from "../../scripts/factory/workflow-execution-surface-logic.mts";
 
 const WORKFLOW_DIRECTORY = resolve(process.cwd(), ".github/workflows");
@@ -61,6 +63,77 @@ function violations(source: string, workflowPath = DEFAULT_WORKFLOW_PATH) {
   return result.violations;
 }
 
+function repositoryActionStep(
+  source: string,
+): WorkflowRepositoryActionStepEvidence {
+  const step = evidence(source).jobs[0]?.steps[0];
+  expect(step?.kind).toBe("repository-action");
+  if (step?.kind !== "repository-action") {
+    throw new Error("expected repository-action evidence");
+  }
+  return step;
+}
+
+function canonicalValueCount(value: WorkflowCanonicalValue): number {
+  if (value.kind === "sequence") {
+    return (
+      1 +
+      value.items.reduce(
+        (total, item) => total + canonicalValueCount(item),
+        0,
+      )
+    );
+  }
+  if (value.kind === "mapping") {
+    return (
+      1 +
+      value.entries.reduce(
+        (total, entry) =>
+          total + 1 + canonicalValueCount(entry.value),
+        0,
+      )
+    );
+  }
+  return 1;
+}
+
+function sourceDerivedCanonicalValueCount(
+  surface: WorkflowExecutionSurfaceEvidence,
+): number {
+  let total = canonicalValueCount(surface.trigger);
+  if (surface.concurrency !== undefined) {
+    total += canonicalValueCount(surface.concurrency);
+  }
+  for (const job of surface.jobs) {
+    total += canonicalValueCount(job.runner);
+    for (const value of [
+      job.concurrency,
+      job.needs,
+      job.strategy,
+      job.outputs,
+      job.deploymentEnvironment,
+    ]) {
+      if (value !== undefined) {
+        total += canonicalValueCount(value);
+      }
+    }
+    total +=
+      Number(job.condition !== undefined) +
+      Number(job.continueOnError !== undefined) +
+      Number(job.timeoutMinutes !== undefined);
+    for (const step of job.steps) {
+      total +=
+        Number(step.condition !== undefined) +
+        Number(step.continueOnError !== undefined) +
+        Number(step.timeoutMinutes !== undefined);
+      if (step.kind === "repository-action") {
+        total += canonicalValueCount(step.declaredInputs);
+      }
+    }
+  }
+  return total;
+}
+
 function yamlBindings(count: number, indentation: string): string {
   return Array.from(
     { length: count },
@@ -100,6 +173,7 @@ describe("ordinary-run workflow evidence (issue #120 slice 120d-1a)", () => {
       canonicalValueDepth: 2,
       jobs: [
         {
+          kind: "ordinary",
           id: "verify",
           line: 5,
           name: null,
@@ -115,6 +189,7 @@ describe("ordinary-run workflow evidence (issue #120 slice 120d-1a)", () => {
           environment: [],
           steps: [
             {
+              kind: "run",
               index: 0,
               line: 7,
               id: "verify",
@@ -774,7 +849,9 @@ jobs:
           set -euo pipefail
           printf 'coffee ☕\\n'
 `);
-    expect(result.jobs[0]?.steps[0]?.run).toBe(
+    const step = result.jobs[0]?.steps[0];
+    expect(step?.kind).toBe("run");
+    expect(step?.kind === "run" ? step.run : undefined).toBe(
       "set -euo pipefail\nprintf 'coffee ☕\\n'\n",
     );
   });
@@ -1510,13 +1587,235 @@ jobs:
   });
 });
 
-describe("delegated/container surfaces remain fail closed", () => {
+describe("repository-action evidence (issue #120 slice 120d-1b2a)", () => {
+  const SHA = "a".repeat(40);
+
+  it("emits the closed action union and conservative capability markers", () => {
+    const step = repositoryActionStep(`
+on: workflow_dispatch
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - id: invoke
+        name: Invoke
+        if: success()
+        continue-on-error: false
+        timeout-minutes: 30
+        env:
+          STEP_VALUE: exact
+        uses: Owner/Repository/Path/Action@${SHA.toUpperCase()}
+        with:
+          zeta: ""
+          nothing:
+          flag: true
+          count: 7
+          alpha: value
+`);
+    expect(step).toEqual({
+      kind: "repository-action",
+      index: 0,
+      line: 8,
+      id: "invoke",
+      name: "Invoke",
+      condition: {
+        kind: "string",
+        spelling: "bare",
+        value: "success()",
+      },
+      continueOnError: { kind: "boolean", value: false },
+      timeoutMinutes: { kind: "integer", value: 30 },
+      environment: [
+        { name: "STEP_VALUE", value: "exact", scope: "step" },
+      ],
+      target: {
+        owner: "owner",
+        repository: "repository",
+        actionPath: ["Path", "Action"],
+        commitSha: SHA,
+      },
+      declaredInputs: {
+        kind: "mapping",
+        entries: [
+          { key: "alpha", value: { kind: "string", value: "value" } },
+          { key: "count", value: { kind: "integer", value: 7 } },
+          { key: "flag", value: { kind: "boolean", value: true } },
+          { key: "nothing", value: { kind: "null" } },
+          { key: "zeta", value: { kind: "string", value: "" } },
+        ],
+      },
+      workspaceCapability: "read-write",
+      githubTokenMaterialAccessible: true,
+    });
+  });
+
+  it("normalizes absent and empty input maps with equal counts", () => {
+    const source = (withBlock: string) => `
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps:
+      - uses: owner/action@${SHA}
+${withBlock}`;
+    const absent = evidence(source(""));
+    const empty = evidence(source("        with: {}"));
+
+    expect(empty).toEqual(absent);
+    expect(empty.canonicalValueCount).toBe(
+      absent.canonicalValueCount,
+    );
+  });
+
+  it("sorts input names by code unit while preserving typed values", () => {
+    const source = (inputs: string) => `
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps:
+      - uses: owner/action@${SHA}
+        with:
+${inputs}`;
+    const reversed = evidence(
+      source("          alpha: 2\n          Zed: true"),
+    );
+    const ordered = evidence(
+      source("          Zed: true\n          alpha: 2"),
+    );
+
+    expect(reversed).toEqual(ordered);
+    const step = reversed.jobs[0]?.steps[0];
+    expect(
+      step?.kind === "repository-action" &&
+        step.declaredInputs.kind === "mapping"
+        ? step.declaredInputs.entries.map(({ key }) => key)
+        : undefined,
+    ).toEqual(["Zed", "alpha"]);
+    expect(
+      violations(
+        source("          Value: one\n          value: two"),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: "unsupported-execution-shape",
+        subject: "jobs.verify.steps[0].with",
+      }),
+    );
+  });
+
+  it("keeps null, empty, and secret-referencing inputs injective", () => {
+    const source = (input: string) => evidence(`
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps:
+      - uses: owner/action@${SHA}
+${input}`);
+    const absent = source("");
+    const nullValue = source("        with: {token: null}");
+    const empty = source('        with: {token: ""}');
+    const firstSecret = source(
+      '        with: {token: "${{ secrets.FIRST }}"}',
+    );
+    const secondSecret = source(
+      '        with: {token: "${{ secrets.SECOND }}"}',
+    );
+
+    expect(JSON.stringify(nullValue)).not.toBe(JSON.stringify(empty));
+    expect(JSON.stringify(firstSecret)).not.toBe(
+      JSON.stringify(absent),
+    );
+    expect(JSON.stringify(firstSecret)).not.toBe(
+      JSON.stringify(secondSecret),
+    );
+  });
+
+  it("normalizes identity case but preserves security-relevant target fields", () => {
+    const source = (target: string) => evidence(`
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps:
+      - uses: ${target}
+`);
+    const canonical = source(`owner/repo/Path@${SHA}`);
+    const caseVariant = source(
+      `OWNER/REPO/Path@${SHA.toUpperCase()}`,
+    );
+
+    expect(caseVariant).toEqual(canonical);
+    for (const target of [
+      `other/repo/Path@${SHA}`,
+      `owner/other/Path@${SHA}`,
+      `owner/repo/path@${SHA}`,
+      `owner/repo/Path@${"b".repeat(40)}`,
+    ]) {
+      expect(JSON.stringify(source(target))).not.toBe(
+        JSON.stringify(canonical),
+      );
+    }
+  });
+
+  it("accepts a leading-dot repository identity", () => {
+    expect(
+      repositoryActionStep(`
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu
+    steps:
+      - uses: GitHub/.GitHub/Action@${SHA.toUpperCase()}
+`).target,
+    ).toEqual({
+      owner: "github",
+      repository: ".github",
+      actionPath: ["Action"],
+      commitSha: SHA,
+    });
+  });
+
   it.each([
-    ["action step", `uses: actions/checkout@${"a".repeat(40)}`],
-    ["local action", "uses: ./.github/actions/review"],
-    ["dynamic action", 'uses: "owner/action@${{ inputs.ref }}"'],
-    ["action inputs", "run: echo\nwith: {script: hidden}"],
-  ])("rejects delegated step form: %s", (_name, step) => {
+    ["short SHA", `owner/repo@${"a".repeat(39)}`],
+    ["long SHA", `owner/repo@${"a".repeat(41)}`],
+    ["non-hex SHA", `owner/repo@${"g".repeat(40)}`],
+    ["mutable ref", "owner/repo@main"],
+    ["local action", "./.github/actions/review"],
+    ["Docker action", "docker://alpine:3.22"],
+    ["dynamic action", 'owner/repo@${{ inputs.ref }}'],
+    ["traversal", `owner/repo/../action@${SHA}`],
+    ["dot segment", `owner/repo/./action@${SHA}`],
+    ["backslash", String.raw`owner\repo@${SHA}`],
+    ["repeated separator", `owner//repo@${SHA}`],
+    ["extra at", `owner/repo@extra@${SHA}`],
+  ])("rejects malformed action target: %s", (_name, target) => {
+    expect(
+      violations(
+        workflow(
+          `runs-on: ubuntu\nsteps:\n  - uses: ${JSON.stringify(target)}`,
+        ),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: "unsupported-execution-shape",
+        subject: "jobs.verify.steps[0].uses",
+      }),
+    );
+  });
+
+  it.each([
+    ["both execution keys", `run: echo\nuses: owner/repo@${SHA}`],
+    ["neither execution key", "name: no-op"],
+    ["run-only shell", `uses: owner/repo@${SHA}\nshell: bash`],
+    [
+      "run-only working directory",
+      `uses: owner/repo@${SHA}\nworking-directory: scripts`,
+    ],
+    ["unknown field", `uses: owner/repo@${SHA}\nsecrets: inherit`],
+  ])("rejects action step outside the closed grammar: %s", (_name, step) => {
     expect(
       violations(
         workflow(
@@ -1533,18 +1832,302 @@ describe("delegated/container surfaces remain fail closed", () => {
   });
 
   it.each([
+    ["null mapping", "with: null"],
+    ["fraction", "with: {value: 1.5}"],
+    ["unsafe integer", "with: {value: 9007199254740992}"],
+    ["sequence", "with: {value: [one]}"],
+    ["nested mapping", "with: {value: {nested: true}}"],
+    ["malformed key", "with: {bad.key: value}"],
+  ])("rejects malformed action inputs: %s", (_name, withBlock) => {
+    expect(
+      violations(
+        workflow(
+          [
+            "runs-on: ubuntu",
+            "steps:",
+            `  - uses: owner/repo@${SHA}`,
+            `    ${withBlock}`,
+          ].join("\n"),
+        ),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({ kind: "unsupported-execution-shape" }),
+    );
+  });
+
+  it("accepts and rejects the exact action input identifier boundary", () => {
+    const source = (name: string) => workflow(
+      [
+        "runs-on: ubuntu",
+        "steps:",
+        `  - uses: owner/repo@${SHA}`,
+        "    with:",
+        `      ? ${name}`,
+        "      : value",
+      ].join("\n"),
+    );
+    const atLimit =
+      "A" + "a".repeat(MAX_WORKFLOW_IDENTIFIER_BYTES - 1);
+
+    expect(
+      repositoryActionStep(source(atLimit)).declaredInputs,
+    ).toMatchObject({
+      kind: "mapping",
+      entries: [
+        expect.objectContaining({ key: atLimit }),
+      ],
+    });
+    expect(
+      violations(source(`${atLimit}a`)),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: "unsupported-execution-shape",
+        subject: "jobs.verify.steps[0].with",
+      }),
+    );
+  });
+
+  it("inherits and overrides environment without treating conditions as exculpatory", () => {
+    const result = evidence(`
+on: push
+env:
+  LEVEL: workflow
+  ROOT: root
+jobs:
+  verify:
+    runs-on: ubuntu
+    env:
+      LEVEL: job
+    steps:
+      - if: false
+        uses: owner/repo@${SHA}
+        env:
+          LEVEL: step
+`);
+    const step = result.jobs[0]?.steps[0];
+    expect(step).toMatchObject({
+      kind: "repository-action",
+      condition: { kind: "boolean", value: false },
+      environment: [
+        { name: "LEVEL", value: "step", scope: "step" },
+        { name: "ROOT", value: "root", scope: "workflow" },
+      ],
+    });
+    expect(result.jobs[0]?.steps).toHaveLength(1);
+  });
+
+  it("erases earlier valid action evidence after a later invalid step", () => {
+    const result = canonicalizeWorkflowExecutionSurface(
+      DEFAULT_WORKFLOW_PATH,
+      workflow(
+        [
+          "runs-on: ubuntu",
+          "steps:",
+          `  - uses: owner/repo@${SHA}`,
+          "  - uses: owner/repo@main",
+        ].join("\n"),
+      ),
+    );
+    expect(result.evidence).toBeUndefined();
+    expect(result.violations).not.toEqual([]);
+  });
+
+  it("accepts and rejects the shared binding boundary through action inputs", () => {
+    const source = (count: number) => workflow(
+      [
+        "runs-on: ubuntu",
+        "steps:",
+        `  - uses: owner/repo@${SHA}`,
+        "    with:",
+        ...Array.from(
+          { length: count },
+          (_, index) => `      INPUT_${index}: ${index}`,
+        ),
+      ].join("\n"),
+    );
+
+    expect(
+      evidence(source(MAX_WORKFLOW_BINDINGS)).jobs[0]?.steps,
+    ).toHaveLength(1);
+    expect(
+      violations(source(MAX_WORKFLOW_BINDINGS + 1)),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "resource-limit",
+        subject: "jobs.verify.steps[0].with",
+      }),
+    ]);
+  });
+
+  it("keeps matrix inputs injective now that action evidence is admitted", () => {
+    const variant = (payload: string) => evidence(`
+on: workflow_dispatch
+jobs:
+  verify:
+    strategy:
+      matrix:
+        payload: [${payload}]
+    runs-on: "\${{ matrix.os }}"
+    steps:
+      - uses: actions/github-script@${SHA}
+        with:
+          script: "\${{ matrix.payload }}"
+`);
+    const harmless = variant("safe");
+    const executable = variant('"$(id)"');
+
+    expect(JSON.stringify(harmless)).not.toBe(
+      JSON.stringify(executable),
+    );
+  });
+
+  it("preserves live-corpus verdicts and source-only accounting", () => {
+    const names = readdirSync(WORKFLOW_DIRECTORY)
+      .filter((name) => /\.ya?ml$/i.test(name))
+      .sort();
+    let jobs = 0;
+    let runSteps = 0;
+    let actionSteps = 0;
+    let inputs = 0;
+    expect(names).toHaveLength(7);
+    for (const name of names) {
+      const source = readFileSync(
+        resolve(WORKFLOW_DIRECTORY, name),
+        "utf8",
+      );
+      const analysis = canonicalizeWorkflowExecutionSurface(
+        `.github/workflows/${name}`,
+        source,
+      );
+      if (
+        [
+          "dev-snowflake-contract.yml",
+          "implement-ready-issues.yml",
+          "triage-issues.yml",
+        ].includes(name)
+      ) {
+        expect(analysis.evidence).toBeUndefined();
+        expect(analysis.violations).toContainEqual(
+          expect.objectContaining({
+            kind: "unsupported-execution-shape",
+          }),
+        );
+        continue;
+      }
+      expect(analysis.violations, name).toEqual([]);
+      expect(analysis.evidence, name).toBeDefined();
+      const result = analysis.evidence!;
+      expect(result.canonicalValueCount, name).toBe(
+        sourceDerivedCanonicalValueCount(result),
+      );
+      jobs += result.jobs.length;
+      for (const job of result.jobs) {
+        expect(job.kind).toBe("ordinary");
+        for (const step of job.steps) {
+          if (step.kind === "run") {
+            runSteps += 1;
+          } else {
+            actionSteps += 1;
+            inputs += step.declaredInputs.kind === "mapping"
+              ? step.declaredInputs.entries.length
+              : 0;
+            expect(step.workspaceCapability).toBe("read-write");
+            expect(step.githubTokenMaterialAccessible).toBe(true);
+            expect(step).not.toHaveProperty("trusted");
+            expect(step).not.toHaveProperty("safe");
+            expect(step).not.toHaveProperty("authorized");
+          }
+        }
+      }
+    }
+    expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
+      jobs: 9,
+      runSteps: 26,
+      actionSteps: 27,
+      inputs: 66,
+    });
+  });
+
+  it("covers all live action steps without bypassing b1 environment admission", () => {
+    const names = readdirSync(WORKFLOW_DIRECTORY)
+      .filter((name) => /\.ya?ml$/i.test(name))
+      .sort();
+    let jobs = 0;
+    let runSteps = 0;
+    let actionSteps = 0;
+    let inputs = 0;
+    for (const name of names) {
+      const source = readFileSync(
+        resolve(WORKFLOW_DIRECTORY, name),
+        "utf8",
+      );
+      const admittedSource = source
+        .replace(
+          /^    environment: dev-snowflake-ci$/mu,
+          "    environment: dev_snowflake_ci",
+        )
+        .replace(/^[ \t]+queue: max[ \t]*$/gmu, "");
+      const result = evidence(
+        admittedSource,
+        `.github/workflows/${name}`,
+      );
+      expect(result.canonicalValueCount, name).toBe(
+        sourceDerivedCanonicalValueCount(result),
+      );
+      jobs += result.jobs.length;
+      for (const job of result.jobs) {
+        for (const step of job.steps) {
+          if (step.kind === "run") {
+            runSteps += 1;
+          } else {
+            actionSteps += 1;
+            inputs += step.declaredInputs.kind === "mapping"
+              ? step.declaredInputs.entries.length
+              : 0;
+          }
+        }
+      }
+    }
+    expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
+      jobs: 17,
+      runSteps: 50,
+      actionSteps: 46,
+      inputs: 117,
+    });
+  });
+});
+
+describe("reusable/container surfaces remain fail closed", () => {
+  it.each([
     [
       "reusable workflow",
-      `uses: owner/repo/.github/workflows/a.yml@${"a".repeat(40)}`,
+      `owner/repo/.github/workflows/a.yml@${"a".repeat(40)}`,
     ],
-    ["local reusable workflow", "uses: ./.github/workflows/a.yml"],
+    ["local reusable workflow", "./.github/workflows/a.yml"],
     [
       "dynamic reusable workflow",
-      'uses: "owner/repo/.github/workflows/a.yml@${{ inputs.ref }}"',
+      '"owner/repo/.github/workflows/a.yml@${{ inputs.ref }}"',
     ],
+  ])("rejects canonical reusable-only job form: %s", (_name, target) => {
+    expect(
+      violations(`
+on: push
+jobs:
+  verify:
+    uses: ${target}
+`),
+    ).toContainEqual(
+      expect.objectContaining({
+        subject: "jobs.verify",
+        kind: "unsupported-execution-shape",
+      }),
+    );
+  });
+
+  it.each([
     ["container", "container: node:24"],
     ["services", "services: {redis: {image: redis}}"],
-  ])("rejects deferred job form: %s", (_name, field) => {
+  ])("rejects deferred ordinary-job form: %s", (_name, field) => {
     expect(
       violations(
         workflow(
@@ -1557,42 +2140,6 @@ describe("delegated/container surfaces remain fail closed", () => {
         kind: "unsupported-execution-shape",
       }),
     );
-  });
-
-  it("keeps matrix evidence unavailable when the step is an action", () => {
-    const result = canonicalizeWorkflowExecutionSurface(
-      DEFAULT_WORKFLOW_PATH,
-      `
-on: workflow_dispatch
-jobs:
-  verify:
-    strategy:
-      matrix:
-        payload: [safe]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/github-script@${"a".repeat(40)}
-        with:
-          script: "\${{ matrix.payload }}"
-`,
-    );
-    expect(result.evidence).toBeUndefined();
-    expect(result.violations).not.toEqual([]);
-  });
-
-  it("rejects every live workflow until delegation is modeled", () => {
-    const names = readdirSync(WORKFLOW_DIRECTORY)
-      .filter((name) => /\.ya?ml$/i.test(name))
-      .sort();
-    expect(names).toHaveLength(7);
-    for (const name of names) {
-      const result = canonicalizeWorkflowExecutionSurface(
-        `.github/workflows/${name}`,
-        readFileSync(resolve(WORKFLOW_DIRECTORY, name), "utf8"),
-      );
-      expect(result.evidence, name).toBeUndefined();
-      expect(result.violations.length, name).toBeGreaterThan(0);
-    }
   });
 });
 
@@ -1960,12 +2507,14 @@ describe("ordinary-run workflow resource ceilings", () => {
 
   it("accepts and rejects the exact Unicode run boundary", () => {
     const accepted = "☕".repeat(MAX_RUN_CHARACTERS);
+    const acceptedStep = evidence(
+      workflow(
+        `runs-on: ubuntu\nsteps:\n  - run: ${JSON.stringify(accepted)}`,
+      ),
+    ).jobs[0]?.steps[0];
+    expect(acceptedStep?.kind).toBe("run");
     expect(
-      evidence(
-        workflow(
-          `runs-on: ubuntu\nsteps:\n  - run: ${JSON.stringify(accepted)}`,
-        ),
-      ).jobs[0]?.steps[0]?.run,
+      acceptedStep?.kind === "run" ? acceptedStep.run : undefined,
     ).toBe(accepted);
 
     const rejected = "☕".repeat(MAX_RUN_CHARACTERS + 1);

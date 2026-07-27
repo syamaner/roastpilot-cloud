@@ -1,9 +1,10 @@
 /**
- * Bounded ordinary-run workflow/context canonicalization for issue #120.
+ * Bounded workflow execution/context canonicalization for issue #120.
  *
- * This module describes ordinary run steps and their exact context producers.
- * Delegated actions, reusable workflows, and containers fail closed until
- * later 120d-1b slices model them. This module never authorizes execution.
+ * This module describes ordinary run steps, full-SHA repository-action steps,
+ * and their exact context producers. Reusable workflows remain unconditionally
+ * rejected until a real caller owns its evidence slice; containers also fail
+ * closed until their later 120d slice. This module never authorizes execution.
  */
 
 import {
@@ -45,6 +46,7 @@ const MAX_EXPANDED_YAML_PREFLIGHT_DEPTH = 64;
 
 type BindingScope = "workflow" | "job" | "step";
 type ScalarValue = string | number | boolean;
+type ActionInputValue = ScalarValue | null;
 
 /**
  * Exact opaque condition evidence. It never proves a step cannot execute.
@@ -81,6 +83,7 @@ export type WorkflowEffectiveField =
  * Canonical ordinary-run step evidence.
  */
 export interface WorkflowRunStepEvidence {
+  readonly kind: "run";
   readonly index: number;
   readonly line: number;
   readonly id?: string;
@@ -95,9 +98,50 @@ export interface WorkflowRunStepEvidence {
 }
 
 /**
- * Canonical ordinary-run job/context evidence.
+ * One immutable repository-action target.
  */
-export interface WorkflowRunJobEvidence {
+export interface WorkflowRepositoryActionTargetEvidence {
+  readonly owner: string;
+  readonly repository: string;
+  readonly actionPath: readonly string[];
+  readonly commitSha: string;
+}
+
+/**
+ * Canonical repository-action step evidence.
+ *
+ * The capability fields are conservative over-approximations. They do not
+ * assert that the action actually reads or writes the workspace or explicitly
+ * binds the token.
+ */
+export interface WorkflowRepositoryActionStepEvidence {
+  readonly kind: "repository-action";
+  readonly index: number;
+  readonly line: number;
+  readonly id?: string;
+  readonly name?: string;
+  readonly condition?: WorkflowConditionEvidence;
+  readonly continueOnError?: WorkflowConditionEvidence;
+  readonly timeoutMinutes?: WorkflowConditionEvidence;
+  readonly environment: readonly WorkflowBindingEvidence[];
+  readonly target: WorkflowRepositoryActionTargetEvidence;
+  readonly declaredInputs: WorkflowCanonicalValue;
+  readonly workspaceCapability: "read-write";
+  readonly githubTokenMaterialAccessible: true;
+}
+
+/**
+ * One accepted step variant.
+ */
+export type WorkflowStepEvidence =
+  | WorkflowRunStepEvidence
+  | WorkflowRepositoryActionStepEvidence;
+
+/**
+ * Canonical ordinary runner-job/context evidence.
+ */
+export interface WorkflowOrdinaryJobEvidence {
+  readonly kind: "ordinary";
   readonly id: string;
   readonly line: number;
   readonly name: string | null;
@@ -112,11 +156,16 @@ export interface WorkflowRunJobEvidence {
   readonly continueOnError?: WorkflowConditionEvidence;
   readonly timeoutMinutes?: WorkflowConditionEvidence;
   readonly environment: readonly WorkflowBindingEvidence[];
-  readonly steps: readonly WorkflowRunStepEvidence[];
+  readonly steps: readonly WorkflowStepEvidence[];
 }
 
 /**
- * Complete canonical ordinary-run/context surface for one workflow.
+ * One accepted job variant.
+ */
+export type WorkflowJobEvidence = WorkflowOrdinaryJobEvidence;
+
+/**
+ * Complete canonical workflow/context surface for one workflow.
  */
 export interface WorkflowExecutionSurfaceEvidence {
   readonly workflowPath: string;
@@ -127,7 +176,7 @@ export interface WorkflowExecutionSurfaceEvidence {
   readonly workflowEnvironment: readonly WorkflowBindingEvidence[];
   readonly canonicalValueCount: number;
   readonly canonicalValueDepth: number;
-  readonly jobs: readonly WorkflowRunJobEvidence[];
+  readonly jobs: readonly WorkflowJobEvidence[];
 }
 
 /**
@@ -194,7 +243,7 @@ const JOB_KEYS = new Set([
   "strategy",
   "timeout-minutes",
 ]);
-const STEP_KEYS = new Set([
+const RUN_STEP_KEYS = new Set([
   "continue-on-error",
   "env",
   "id",
@@ -204,6 +253,16 @@ const STEP_KEYS = new Set([
   "shell",
   "timeout-minutes",
   "working-directory",
+]);
+const ACTION_STEP_KEYS = new Set([
+  "continue-on-error",
+  "env",
+  "id",
+  "if",
+  "name",
+  "timeout-minutes",
+  "uses",
+  "with",
 ]);
 const TRIGGER_EVENTS_WITH_OPTIONAL_CONFIGURATION = new Set([
   "branch_protection_rule",
@@ -943,6 +1002,125 @@ function containsExpression(value: string): boolean {
   return value.includes(EXPRESSION_MARKER);
 }
 
+function repositoryActionTarget(
+  value: unknown,
+): WorkflowRepositoryActionTargetEvidence | undefined {
+  if (
+    typeof value !== "string" ||
+    containsExpression(value) ||
+    value.includes("\\") ||
+    value.includes("//")
+  ) {
+    return undefined;
+  }
+  const separator = value.indexOf("@");
+  if (
+    separator <= 0 ||
+    separator !== value.lastIndexOf("@")
+  ) {
+    return undefined;
+  }
+  const target = value.slice(0, separator);
+  const commitSha = value.slice(separator + 1);
+  if (!/^[0-9A-Fa-f]{40}$/.test(commitSha)) {
+    return undefined;
+  }
+  const segments = target.split("/");
+  if (
+    segments.length < 2 ||
+    segments.some(
+      (segment) =>
+        segment.length === 0 ||
+        segment === "." ||
+        segment === "..",
+    ) ||
+    !/^[A-Za-z0-9._-]+$/.test(segments[0]) ||
+    !/^[A-Za-z0-9._-]+$/.test(segments[1])
+  ) {
+    return undefined;
+  }
+  return {
+    owner: segments[0].toLowerCase(),
+    repository: segments[1].toLowerCase(),
+    actionPath: segments.slice(2),
+    commitSha: commitSha.toLowerCase(),
+  };
+}
+
+type CanonicalActionInputs = {
+  readonly evidence: WorkflowCanonicalValue;
+  readonly bindingCount: number;
+};
+
+function canonicalActionInputs(
+  value: unknown,
+  subject: string,
+  line: number,
+  canonicalValues: WorkflowCanonicalValueBuilder,
+  violations: ViolationAccumulator,
+): CanonicalActionInputs | undefined {
+  const inputs =
+    value === undefined
+      ? new Map<string, ActionInputValue>()
+      : isStringKeyedMap(value)
+        ? value
+        : undefined;
+  if (inputs === undefined) {
+    addViolation(violations, {
+      kind: "unsupported-execution-shape",
+      line,
+      subject,
+      detail: "action with must be a string-keyed mapping",
+    });
+    return undefined;
+  }
+  const namesByCaseFold = new Set<string>();
+  const entries: [string, ActionInputValue][] = [];
+  for (const [name, input] of inputs) {
+    const caseFoldedName = name.toUpperCase();
+    if (
+      !JOB_ID_PATTERN.test(name) ||
+      Buffer.byteLength(name, "utf8") >
+        MAX_WORKFLOW_IDENTIFIER_BYTES ||
+      namesByCaseFold.has(caseFoldedName)
+    ) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line,
+        subject,
+        detail:
+          "action input names must be portable ASCII identifiers and unique under case-insensitive runner semantics",
+      });
+      return undefined;
+    }
+    namesByCaseFold.add(caseFoldedName);
+    const scalar = input === null ? null : scalarValue(input);
+    if (scalar === undefined) {
+      addViolation(violations, {
+        kind: "unsupported-execution-shape",
+        line,
+        subject,
+        detail: `action input ${JSON.stringify(name)} must have an injective scalar or null value`,
+      });
+      return undefined;
+    }
+    entries.push([name, scalar]);
+  }
+  entries.sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+  const evidence = canonicalContextValue(
+    new Map(entries),
+    subject,
+    line,
+    canonicalValues,
+    violations,
+  );
+  return evidence === undefined
+    ? undefined
+    : { evidence, bindingCount: entries.length };
+}
+
 function canonicalBindings(
   value: unknown,
   scope: BindingScope,
@@ -1204,7 +1382,7 @@ function optionalStepFields(
 }
 
 /**
- * Canonicalize one workflow's ordinary-run execution/context surface.
+ * Canonicalize one workflow's run and repository-action execution surface.
  *
  * @param workflowPath - Repository-relative path directly under `.github/workflows/`.
  * @param fileContent - Exact UTF-8 workflow source text.
@@ -1453,7 +1631,7 @@ export function canonicalizeWorkflowExecutionSurface(
       1,
       violations,
     ) ?? {};
-  const jobs: WorkflowRunJobEvidence[] = [];
+  const jobs: WorkflowOrdinaryJobEvidence[] = [];
   const deploymentNamesByCaseFold = new Map<string, string>();
   let totalSteps = 0;
   let totalBindings = workflowEnvironment.length;
@@ -1470,7 +1648,7 @@ export function canonicalizeWorkflowExecutionSurface(
       kind: "resource-limit",
       line,
       subject,
-      detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment bindings`,
+      detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment or action-input bindings`,
     });
     return false;
   };
@@ -1479,7 +1657,7 @@ export function canonicalizeWorkflowExecutionSurface(
       kind: "resource-limit",
       line: 1,
       subject: "env",
-      detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment bindings`,
+      detail: `canonical evidence exceeds ${MAX_WORKFLOW_BINDINGS} effective environment or action-input bindings`,
     });
     return {
       violations: violations.entries,
@@ -1521,7 +1699,8 @@ export function canonicalizeWorkflowExecutionSurface(
         kind: "unsupported-execution-shape",
         line: location.line,
         subject,
-        detail: "120d-1b1 rejects delegated or unmodeled job execution fields",
+        detail:
+          "delegated or unmodeled job execution fields are rejected",
       });
       continue;
     }
@@ -1772,7 +1951,7 @@ export function canonicalizeWorkflowExecutionSurface(
       break;
     }
 
-    const steps: WorkflowRunStepEvidence[] = [];
+    const steps: WorkflowStepEvidence[] = [];
     for (const [index, rawStep] of rawJob.steps.entries()) {
       if (violations.saturated) {
         break jobLoop;
@@ -1782,15 +1961,36 @@ export function canonicalizeWorkflowExecutionSurface(
       const structuredStep = structuredSteps[index];
       if (
         !isRecord(rawStep) ||
-        !isStringKeyedMap(structuredStep) ||
-        Object.keys(rawStep).some((key) => !STEP_KEYS.has(key)) ||
-        !Object.hasOwn(rawStep, "run")
+        !isStringKeyedMap(structuredStep)
       ) {
         addViolation(violations, {
           kind: "unsupported-execution-shape",
           line,
           subject: stepSubject,
-          detail: "120d-1b1 supports only the closed ordinary run-step field set",
+          detail: "step must use canonical mapping syntax",
+        });
+        continue;
+      }
+      const hasRun = Object.hasOwn(rawStep, "run");
+      const hasAction = Object.hasOwn(rawStep, "uses");
+      const acceptedKeys =
+        hasRun !== hasAction
+          ? hasRun
+            ? RUN_STEP_KEYS
+            : ACTION_STEP_KEYS
+          : undefined;
+      if (
+        acceptedKeys === undefined ||
+        Object.keys(rawStep).some(
+          (key) => !acceptedKeys.has(key),
+        )
+      ) {
+        addViolation(violations, {
+          kind: "unsupported-execution-shape",
+          line,
+          subject: stepSubject,
+          detail:
+            "step must use exactly one closed run or repository-action field set",
         });
         continue;
       }
@@ -1819,6 +2019,54 @@ export function canonicalizeWorkflowExecutionSurface(
         ) ?? [];
       if (!recordBindings(environment.length, line, stepSubject)) {
         break jobLoop;
+      }
+      if (hasAction) {
+        const target = repositoryActionTarget(rawStep.uses);
+        if (target === undefined) {
+          addViolation(violations, {
+            kind: "unsupported-execution-shape",
+            line,
+            subject: `${stepSubject}.uses`,
+            detail:
+              "uses must be one exact full-SHA remote repository-action reference",
+          });
+        }
+        const inputs = canonicalActionInputs(
+          structuredStep.get("with"),
+          `${stepSubject}.with`,
+          line,
+          canonicalValues,
+          violations,
+        );
+        if (
+          inputs !== undefined &&
+          !recordBindings(
+            inputs.bindingCount,
+            line,
+            `${stepSubject}.with`,
+          )
+        ) {
+          break jobLoop;
+        }
+        if (
+          target === undefined ||
+          inputs === undefined ||
+          optional === undefined
+        ) {
+          continue;
+        }
+        steps.push({
+          kind: "repository-action",
+          index,
+          line,
+          environment,
+          target,
+          declaredInputs: inputs.evidence,
+          workspaceCapability: "read-write",
+          githubTokenMaterialAccessible: true,
+          ...optional,
+        });
+        continue;
       }
       const run = exactNonEmptyText(rawStep.run);
       if (run === undefined) {
@@ -1862,6 +2110,7 @@ export function canonicalizeWorkflowExecutionSurface(
         continue;
       }
       steps.push({
+        kind: "run",
         index,
         line,
         environment,
@@ -1878,6 +2127,7 @@ export function canonicalizeWorkflowExecutionSurface(
       continue;
     }
     jobs.push({
+      kind: "ordinary",
       id,
       line: location.line,
       name: typeof rawJob.name === "string" ? rawJob.name : null,
