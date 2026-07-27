@@ -319,10 +319,14 @@ The build's rework used to be dominated by review findings landing *after* a
 PR was marked ready, F1-S8 alone took **5 Codex rounds, ~15 real P1s, all
 post-open**, on a security keystone that two Opus `safety-reviewer` passes
 called clean. This section originally justified opening as a draft by
-iterating with Codex there before marking it ready; that mechanism does not
-exist, confirmed against PR #150 (27 Jul 2026): Codex does not review a
-draft PR at all, so a draft cannot converge a diverse-lens loop even in
-principle. The corrected mechanism, and the reason draft is still the right
+iterating with Codex there before marking it ready; that AUTOMATIC mechanism
+does not exist, confirmed against PR #150 (27 Jul 2026): Codex's automatic
+trigger does not fire on a draft, so a draft cannot converge the review
+roster's automatic pass on its own. A manual `@codex review` posted while
+still in draft is a different thing and is NOT inert: per D105 it runs and
+posts real, foldable findings, and only the clean-verdict flow is
+unavailable there. Do not read this paragraph as licence to disregard
+findings from a manual draft review. The corrected mechanism, and the reason draft is still the right
 phase, is a clean split observed directly on PR #150:
 
 - **Draft.** Only the build/correctness gates run (CI lint/typecheck/unit,

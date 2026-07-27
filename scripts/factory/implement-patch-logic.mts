@@ -2034,12 +2034,24 @@ export function buildPublishSuccessStepSummary(
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
       "a manual review pass is required before merging."
-    : "✅ CI, CodeQL, and dependency review triggered normally. Codex auto-reviewed " +
-      "at creation, and for a PR created ready (every factory PR) that automatic " +
-      "review IS the valid first verdict: its boundary event is `opened`, since such " +
-      "a PR never emits `ready_for_review`. Wait for that verdict on this exact head " +
-      "before merging (AGENTS.md's Codex-wait rule); a manual `@codex review` is " +
-      "required ONLY if a later push moves the head. ⚠\uFE0F **Claude Code Review does NOT yet " +
+    : "✅ CI, CodeQL, and dependency review triggered normally. " +
+      (context.wasRefresh
+        // Codex P1, #155: this summary is ALSO produced by the
+        // existing-PR refresh path, where applyPatchAndPush has already
+        // moved the head. The creation-time automatic review describes a
+        // superseded commit, so presenting it as valid here would let an
+        // operator merge a refreshed head on a stale verdict.
+        ? "This PR was REFRESHED, so its head has moved since creation and Codex's " +
+          "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
+          "satisfy the wait. Re-trigger with a single `@codex review` on this final " +
+          "commit and wait for a bot-authored verdict naming it. "
+        : "Codex auto-reviewed at creation, and for a PR created ready (every " +
+          "factory PR) that automatic review IS the valid first verdict: its " +
+          "boundary event is `opened`, since such a PR never emits " +
+          "`ready_for_review`. You must still WAIT for that verdict on this exact " +
+          "head before merging (AGENTS.md's Codex-wait rule); what changes is that " +
+          "no manual re-trigger is needed unless a later push moves the head. ") +
+      "⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
