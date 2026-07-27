@@ -370,6 +370,13 @@ jobs:
         # step's REAL pass/fail result. Never a reason to fail the job on
         # its own — if: always() runs this regardless of what came before.
         if: always()
+        # Bind repository variables as data rather than interpolating them
+        # textually before shell parsing, where `$(...)` in a value would
+        # execute as command substitution (issue #151).
+        env:
+          SUMMARY_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
+          SUMMARY_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+          SUMMARY_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
         run: |
           {
             echo "## DEV Snowflake contract check"
@@ -378,7 +385,7 @@ jobs:
             echo "- **Grants stay within DEV (pre-deploy):** ${{ steps.grants.outcome }}"
             echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
             echo "- **Grants stay within DEV (post-deploy):** ${{ steps.grants-post.outcome }}"
-            echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
-            echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
-            echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"
+            echo "- **Database:** \`${SUMMARY_DATABASE}\`"
+            echo "- **Role:** \`${SUMMARY_ROLE}\`"
+            echo "- **Warehouse:** \`${SUMMARY_WAREHOUSE}\`"
           } >> "$GITHUB_STEP_SUMMARY"
