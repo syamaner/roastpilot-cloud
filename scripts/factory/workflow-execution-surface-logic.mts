@@ -284,12 +284,14 @@ function conditionEvidence(
     return undefined;
   }
   const trimmed = text.trim();
+  const closingMarker = trimmed.indexOf("}}");
   const wrapped =
     trimmed.startsWith(EXPRESSION_MARKER) &&
     trimmed.endsWith("}}") &&
     trimmed.indexOf(EXPRESSION_MARKER, EXPRESSION_MARKER.length) ===
       -1 &&
-    trimmed.indexOf("}}") === trimmed.length - 2;
+    closingMarker >= 0 &&
+    closingMarker === trimmed.length - 2;
   return {
     kind: "string",
     spelling: wrapped
