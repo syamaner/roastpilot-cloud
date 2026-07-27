@@ -18,22 +18,21 @@ Verify every claim against the API rather than the author's account of it.
   `--paginate`d. An un-paginated read, or reading only one channel, makes a
   posted finding look like silence.
 - Claude's review posts as `claude[bot]` or `claude` — filter for both.
-- A Codex signal counts only when it is authored by
-  `chatgpt-codex-connector[bot]` and postdates the final-commit trigger. Beyond
-  that, keep the three channels distinct — they do not mean the same thing and
-  they are not tested the same way:
-  - a posted `pull_request_review` with inline threads is **always findings,
-    never a clean verdict**, however well its `Reviewed commit:` line matches.
-    It ends the wait; it does not clear the PR. After one, `MERGEABLE` requires
-    every finding triaged on its merits and every thread resolved;
-  - a top-level "didn't find any major issues" comment is a clean verdict, and
-    its `Reviewed commit:` line must equal the current head;
-  - a 👍 reaction is a clean verdict that carries no commit line at all, so it
-    is valid only while the head is unchanged since the trigger it answers. Do
-    not demand a sha from a channel that cannot carry one — that rejects a
-    legitimate clean verdict and strands the PR.
-  A bot-authored 👀 with no verdict means the review is still running, not that
-  it is clean.
+- Codex signals. **Two invariants apply to every channel**, so check them once
+  and never make a channel-specific exception to either: the signal must be
+  authored by `chatgpt-codex-connector[bot]`, and it must be tied to the
+  **current head** — by its `Reviewed commit:` / `commit_id` where the channel
+  carries one, and by the head being unchanged since the trigger it answers
+  where the channel carries none. A signal about an earlier commit can arrive
+  *after* your final trigger, because a request already in flight keeps running
+  across a push; triage it on its merits, but it never ends the wait.
+
+  | Channel | Carries a sha? | Meaning |
+  |---|---|---|
+  | `pull_request_review` with inline threads | yes — must equal current head | Findings. **Ends the wait, never clears the PR.** `MERGEABLE` then needs every finding triaged and every thread resolved. |
+  | Top-level "didn't find any major issues" comment | yes — must equal current head | Clean verdict. |
+  | 👍 reaction | no — so require the head unchanged since that trigger | Clean verdict. Do not demand a sha a reaction cannot carry; that strands the PR. |
+  | 👀 reaction alone | n/a | Still running. Not a verdict, not silence. |
 - `claude-review` reporting SUCCESS on a workflow-edit PR means the action
   **skipped**. Read that green as "no review ran", never "reviewed and clean".
 - Green CI is necessary and never sufficient.
