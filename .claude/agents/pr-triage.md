@@ -76,8 +76,9 @@ Return one verdict:
   specific change.
 - `ESCALATE`: the disagreement is a design or policy decision for the operator,
   a finding contradicts a recorded decision, or the Codex wait cannot be
-  satisfied (silent or stalled) and merging needs the operator's call under the
-  bounded-fallback rule.
+  satisfied — no valid signal long after green CI, or a 👀 that never resolves —
+  so that whether to merge without it becomes the operator's call rather than
+  yours.
 
 Do not edit code, resolve threads, or merge. Adjudicate and hand the verdict
 back.

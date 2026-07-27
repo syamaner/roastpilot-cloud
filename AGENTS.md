@@ -480,7 +480,7 @@ one breath — never topology first and model as an afterthought.
 
 | Agent | Model | Fires on |
 |---|---|---|
-| `factory-security-reviewer` | `opus` | `.github/workflows/**`, `scripts/factory/**`, CODEOWNERS, branch protection. Its job is to BREAK the pipeline, not assess it. |
+| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative**; do not read this cell as a narrower restatement of it. That surface is all of `.github/**` (workflows **and** composite actions), `scripts/factory/**`, any privileged glue or publisher script wherever it lives, CODEOWNERS, and branch-protection config. Its job is to BREAK the pipeline, not assess it. |
 | `schema-migration-reviewer` | `opus` | `snowflake/migrations/**`, grants, secure views, and the Zod/Pydantic validation standing in for constraints Snowflake will not enforce. |
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
