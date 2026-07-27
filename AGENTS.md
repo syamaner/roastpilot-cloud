@@ -221,27 +221,44 @@ exception. The load-bearing points:
 - **Every inline review thread must be resolved** (branch protection:
   `required_conversation_resolution`). Fix it, or state in-thread why it's
   not being actioned.
-- **Codex is advisory-but-triaged, not a required check.** Trigger it once
-  on the final commit (`@codex review`). A 👀 reaction means the review is
-  **in progress — keep waiting** (bounded ~30 min from the 👀); it does
-  **not** clear the merge by itself. A CLEAN verdict — **in either channel, and
-  ONLY when authored by the Codex bot identity (`chatgpt-codex-connector[bot]`)** —
+- **Codex is advisory-but-triaged, not a required check.** Codex reviews
+  automatically the moment a PR is opened ready-for-review, or the moment a
+  draft is marked ready; it does not trigger on opening a draft (confirmed
+  against PR #150, 27 Jul 2026, and part of a wider pattern, see D103 below:
+  the whole review roster, not just Codex, is suppressed while a PR sits in
+  draft and fires together at ready). A manual `@codex review` comment is
+  not needed for that first review; it remains the way to re-trigger a
+  review on a new head after the automatic one, once, on the final commit,
+  never on intermediate pushes. A 👀 reaction means the review is **in
+  progress, keep waiting** (bounded ~30 min from the 👀); it does **not**
+  clear the merge by itself. A CLEAN verdict, **in either channel, and ONLY
+  when authored by the Codex bot identity (`chatgpt-codex-connector[bot]`)**,
   is either a **👍 reaction (after the 👀)** OR a **top-level "Codex Review: Didn't
   find any major issues" comment carrying a `Reviewed commit: <sha>` line** whose
   sha matches the PR head. The repo is public, so anyone can add a 👍 reaction OR
-  post a comment copying that title + the visible head sha; **bot-authorship is
-  required on BOTH channels — a reaction or comment content alone is spoofable.**
+  post a comment copying that title plus the visible head sha; **bot-authorship is
+  required on BOTH channels: a reaction or comment content alone is spoofable.**
   A watcher MUST verify the reaction's / comment's author is the Codex bot (the
   reactions API returns each reaction's `user.login`); one polling only reviews +
   reactions is also blind to the comment channel entirely. A **posted
   `pull_request_review` with inline threads** = findings.
-  The signal must postdate the final-commit trigger. Do not arm auto-merge on
-  green CI alone. **Carve-out (D103 draft-first, interactive PRs):** while a PR
-  is a **draft**, re-triggering `@codex review` on each new post-fold head to
-  converge the diverse lens is allowed — that's the shift-left mechanism, not the
-  cross-push re-litigation the once-on-final rule targets; once-on-final governs
-  the **ready** PR and resumes when it's marked ready. (Factory-authored PRs open
-  non-draft and are reviewed post-open — #62.)
+  The signal must correspond to the current head AND postdate the
+  `ready_for_review` transition (or, after a later push, the fresh re-trigger
+  on that new final commit). Head-match alone is NOT enough, and this is a
+  real hole rather than a theoretical one (Codex P1 on the agent repo's copy
+  of this rule, #682): a manually requested review on the DRAFT posts findings
+  against the very same sha, so if nothing needed changing before marking
+  ready, a head-match-only rule would let that pre-ready verdict satisfy the
+  wait while the automatic review the ready transition just started is still
+  in flight. A comment or review naming an earlier commit sha does not satisfy
+  the wait either, and a 👍 reaction carries no sha, so it is valid only while
+  the head stays unchanged since it was left. Do not arm auto-merge on green
+  CI alone. **The draft phase is not a Codex carve-out** (D103 below has the
+  full rationale): Codex does not review a draft at all, so there is nothing
+  to converge there while a PR sits in draft. The once-on-final discipline
+  governs the single automatic trigger at ready; only a later push needs a
+  manual re-trigger, once, on its new final commit. (Factory-authored PRs
+  open non-draft and are reviewed post-open, #62.)
 - **`pr-triage` adjudicates independently of the author.** Under the factory,
   the author is always an agent; it never self-triages its own PR's review
   comments (D23). The lead (or the `pr-triage` sub-agent) decides what counts
@@ -282,30 +299,61 @@ exception. The load-bearing points:
   of #N` otherwise, so an unfinished issue isn't auto-closed.
 - No post-open lint/format churn — run the gates before opening.
 
-### Shift-left: fold the diverse lens BEFORE "ready" (D103)
+### Shift-left: fold runner-gate findings before the review roster fires (D103)
 
-The build's rework is dominated by review findings landing *after* a PR is
-marked ready — F1-S8 alone took **5 Codex rounds, ~15 real P1s, all post-open**,
-on a security keystone that two Opus `safety-reviewer` passes called clean. The
-fix is to move the lens that catches them to before the merge gate ever sees the
-PR.
+The build's rework used to be dominated by review findings landing *after* a
+PR was marked ready, F1-S8 alone took **5 Codex rounds, ~15 real P1s, all
+post-open**, on a security keystone that two Opus `safety-reviewer` passes
+called clean. This section originally justified opening as a draft by
+iterating with Codex there before marking it ready; that mechanism does not
+exist, confirmed against PR #150 (27 Jul 2026): Codex does not review a
+draft PR at all, so a draft cannot converge a diverse-lens loop even in
+principle. The corrected mechanism, and the reason draft is still the right
+phase, is a clean split observed directly on PR #150:
 
-- **Diverse-lens pre-open loop (the flagship, interactive/human-authored PRs).**
-  Open a review-worthy PR as a **draft**, trigger `@codex review` on it, fold
-  every real finding, and only then mark it **ready**. Codex is a *different
-  model family* from the Claude authoring/review lenses, and same-family lenses
-  co-accept a bug the author has already rationalised — that is the exact ~15-P1
-  gap F1-S8 exposed. A finding folded on the draft is not rework; the identical
-  finding after "ready" is. Wait for the verdict per the **Codex-wait rule in
-  the Merge Policy** (its single source of truth) before flipping to ready —
-  don't restate that rule here. **Factory-authored PRs** don't use this
-  draft loop: the read-only implementing agent can't drive an open→ready
-  transition, so the privileged publisher opens the PR and the *same* diverse
-  lens runs **post-open** by design (the App-identity wiring exists precisely so
-  CI + Codex + Claude Code Review fire on the opened PR), with the human merge as
-  the gate the draft→ready step would otherwise be. Whether the publisher should
-  open factory PRs as drafts and have `pr-triage` mark them ready post-fold is a
-  factory-design question tracked separately, not this rule.
+- **Draft.** Only the build/correctness gates run (CI lint/typecheck/unit,
+  Playwright, Snowflake migrations offline, CodeQL, dependency review,
+  codecov, mutation testing); every review lens (Codex, Claude Code Review,
+  spec-grounded review) is suppressed. On PR #150's draft phase,
+  `claude-review`, `Spec-grounded review (read-only)`, and `Publish
+  spec-grounded review (privileged)` all reported SKIPPED, and Codex did
+  not review.
+- **Ready.** Marking the PR ready fires the whole review roster on that
+  head in one step, not just Codex. On PR #150, marking it ready started a
+  new Claude Code Review run, ran spec-grounded review to SUCCESS, started
+  the privileged publish step, and made Codex's automatic review due.
+
+So the draft phase is the window to fold runner-only findings without
+spending any review lens; mark ready only once the head is expected to
+hold, because that transition commits the entire roster to it. PR #150's
+own mutation-gate failure is the proof case: the baseline was
+environment-dependent (a mutant on `shutil.which("schemachange")` is
+behaviourally invisible on the runner, because pip installs the console
+script exactly where the code's fallback looks), so five identical local
+runs still produced the wrong number and only CI could reveal it; it was
+found and fixed on the draft before any review lens had been spent.
+
+The Codex-spend count is a supporting illustration, not the rule: opening
+ready immediately would have had Codex review head `07f1802`, then CI
+failed the mutation gate, forcing a push to `4d26670` and stranding the
+verdict on a dead head, needing a manual re-trigger (2 spends). Opening as
+a draft let CI fail first, folded the fix there, and Codex reviewed only
+`4d26670` once ready (1 spend). A local `codex review --base main` (Axis A
+below) still provides the cross-family lens earliest of all, before the
+branch is even pushed; it does not replace the roster's own automatic pass
+on the ready PR.
+
+Wait for the verdict per the **Codex-wait rule in the Merge Policy** (its
+single source of truth) before treating the PR as reviewed; don't restate
+that rule here. **Factory-authored PRs** don't use the draft phase for this
+purpose: the read-only implementing agent can't drive an open→ready
+transition, so the privileged publisher opens the PR non-draft and the
+*same* review roster runs **post-open** by design (the App-identity wiring
+exists precisely so CI + Codex + Claude Code Review fire on the opened
+PR), with the human merge as the gate the draft→ready step would otherwise
+be. Whether the publisher should open factory PRs as drafts and have
+`pr-triage` mark them ready post-fold is a factory-design question tracked
+separately, not this rule.
 - **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance
   of a class (a sanitizer that misses one escape, one un-byte-compared
   identifier, one un-audited grant target), fix the class in one place and
