@@ -470,3 +470,94 @@ answer to `factory.md` §13's headline finding: the automation that authors a
 PR must not also be the thing that decides the PR is fine. See `factory.md`
 §13 for the full incident (`#34`'s CI-stall / Codex-skip / CCR-skip failure
 mode) this rule is a structural fix for, not a courtesy.
+
+## Agent Topology and Model Selection
+
+Every delegation decision has **three axes**, and they are chosen together, in
+one breath — never topology first and model as an afterthought.
+
+### The roster (`.claude/agents/`)
+
+| Agent | Model | Fires on |
+|---|---|---|
+| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative**; do not read this cell as a narrower restatement of it. That surface is all of `.github/**` (workflows **and** composite actions), `scripts/factory/**`, any privileged glue or publisher script wherever it lives, CODEOWNERS, and branch-protection config. Its job is to BREAK the pipeline, not assess it. |
+| `schema-migration-reviewer` | `opus` | `snowflake/migrations/**`, grants, secure views, and the Zod/Pydantic validation standing in for constraints Snowflake will not enforce. |
+| `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
+| `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
+| `pr-triage` | `sonnet` | independent adjudication of review feedback, so the author never self-triages (D23). |
+
+**Pins are mandatory and enforced.** An agent with no `model:` **inherits the
+parent**, so an unpinned definition spawned from an Opus main loop silently runs
+Opus across a whole fan-out. `tests/factory/agent-model-pin.test.ts` asserts
+every definition carries an explicit `model:` from the allowed set, that the two
+adversarial security reviewers stay on `opus`, and that an empty roster fails
+rather than passing vacuously. A documented default that nothing enforces is not
+a default.
+
+**Two tiers only — `opus` and `sonnet`.** No Haiku tier: nothing here is both
+high-volume and correctness-insensitive, and mechanical extraction is better
+served by `gh`/`grep` than by a third model to get wrong.
+
+**The Opus triggers are not narrowed to save budget** (operator, 27 Jul 2026).
+Both adversarial reviewers fire on S6's first slice, and that is accepted:
+quality and safety lead. Narrowing a security trigger is a *permissive* scope
+change under the Rigour Calibration direction test, so it needs an explicit
+operator decision, not a cost argument. Monitor and re-evaluate with evidence.
+
+### Axis A — which harness
+
+Codex is available locally (`codex mcp-server`; `codex review --base <branch>`)
+and draws on a **separate, weekly-capped subscription**.
+
+- **Decisions, contracts, and ambiguous design → the interactive agent.**
+  **Excluding adjudication of review feedback on a PR the interactive agent
+  itself authored** — that always goes to a human or the `pr-triage` role, even
+  for a finding that looks trivially correct or clearly a false positive (D23).
+  The author's job ends at producing the diff and folding the fixes. Codex burns its budget on *ambiguity, not volume*: it ships settled
+  contracts efficiently, while an unsettled one costs a full design round every
+  time. Every decision settled before delegating converts an expensive round
+  into a cheap one. This is the main budget lever.
+- **Fully-specified implementation → Codex**, when the acceptance criteria,
+  tests, closed grammar, and fail-closed behaviour are already written down.
+- **Pre-open adversarial review → `codex review --base main`**, on diffs
+  touching the credential or pipeline boundary. This is cheaper than the same
+  findings arriving post-open as merge-blocking threads that need stale
+  re-posts hand-resolved. Do **not** run it on docs or registry PRs; it draws
+  the same quota.
+- **Routine review (`qa`, `privacy-auditor`, `pr-triage`) → Claude sub-agents.**
+  Cheap, and they do not touch the Codex quota at all.
+- A local `codex review` **never** satisfies the Codex merge wait — that needs a
+  bot-authored signal on the PR itself, validated per channel exactly as the PR
+  Merge Policy above defines it (a commit-naming review or clean comment, or a
+  👍 reaction, which carries no sha and is valid only while the head is
+  unchanged). Do not collapse that into a blanket "must name the head sha";
+  the reaction channel cannot carry one.
+- **Budget stop rule:** check the remaining Codex allowance before delegating.
+  Below roughly 20%, stop delegating implementation entirely and reserve the
+  remainder for pre-open review on boundary-touching slices; review is the
+  higher-value-per-token use, and the interactive agent can absorb the
+  implementation.
+
+### Axis B — which topology
+
+- **Inline on the main loop** when the judgment *is* the work — which is most F1
+  slices. They are small and security-dense, so a sub-agent costs a context
+  handoff the slice cannot amortise.
+- **Sub-agent** for bounded, well-specified, or read-only fan-out work:
+  inventories, corpus sweeps, multi-file searches, the review lenses above.
+- **Never fan out for its own sake.** Parallelism is justified by separable
+  work, not by the size of the task list.
+- Give each delegated implementation its **own git worktree**, so a bad
+  delegation is `git worktree remove` rather than a mess in the root. Each fresh
+  worktree needs its own `npm ci --ignore-scripts`; sharing only `.bin` breaks
+  ESM resolution.
+
+### Axis C — which model
+
+- **`opus`** for adversarial security reasoning and hard adjudication, where a
+  miss is the expensive failure.
+- **`sonnet`** for scoped implementation, routine review, test-quality judgment,
+  triage, and inventories.
+
+When unsure, pick `sonnet` and escalate a specific spawn to `opus` with a stated
+reason — never leave the model unset to "let it decide".
