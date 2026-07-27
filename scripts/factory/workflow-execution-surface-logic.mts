@@ -3,8 +3,10 @@
  *
  * This module describes ordinary run steps, full-SHA repository-action steps,
  * and their exact context producers. Reusable workflows remain unconditionally
- * rejected until a real caller owns its evidence slice; containers also fail
- * closed until their later 120d slice. This module never authorizes execution.
+ * rejected until a real caller owns its evidence slice. Under D138, containers
+ * and services remain unconditionally rejected and may be revisited only through
+ * a new reviewed evidence contract when a real job is introduced. This module
+ * never authorizes execution.
  */
 
 import {
