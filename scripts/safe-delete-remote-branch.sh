@@ -49,7 +49,14 @@ export GIT_NO_REPLACE_OBJECTS=1
 # still honoured, so refuse outright rather than try to reason around them.
 # `core.graftsFile` can relocate the file, so ask git where it is rather than
 # assuming the default path.
-grafts_file="$(git config --get core.graftsFile || true)"
+# `--type=path`, not a bare `--get` (Codex P1, PR #156): git supports `~/x`
+# pathname syntax here and EXPANDS it when honouring the file, while `--get`
+# returns the literal unexpanded string. Testing that raw value checks a path
+# that does not exist while the real graft file is quietly in force — the guard
+# would report clean and the deletion would proceed on rewritten history.
+# Verified: with `core.graftsFile = ~/somegrafts`, `--get` returns `~/somegrafts`
+# and `--type=path --get` returns the expanded absolute path.
+grafts_file="$(git config --type=path --get core.graftsFile || true)"
 [ -n "$grafts_file" ] || grafts_file="$(git rev-parse --git-path info/grafts)"
 [ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$grafts_file'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
 

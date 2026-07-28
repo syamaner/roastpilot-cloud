@@ -340,6 +340,31 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(grafted).toBe("0");
   });
 
+  // Codex P1, #156: git expands `~` in `core.graftsFile` when honouring it, but
+  // `git config --get` returns the literal string, so checking the raw value
+  // tests a path that does not exist while the real graft file is in force.
+  it("finds a graft file configured with an unexpanded ~ path", () => {
+    const graftDir = mkdtempSync(join(tmpdir(), "graft-home-"));
+    const graftPath = join(graftDir, "grafts");
+    const uniqueTip = git(clone, "rev-parse", "unique-branch").trim();
+    const mainSha = git(clone, "rev-parse", "main").trim();
+    writeFileSync(graftPath, `${mainSha} ${uniqueTip}\n`);
+    // Point core.graftsFile at it via `~`, with HOME set so `~` resolves there.
+    git(clone, "config", "core.graftsFile", "~/grafts");
+
+    const result = spawnSync("bash", [SCRIPT, "unique-branch", "--delete"], {
+      cwd: clone,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: graftDir },
+    });
+    const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(result.status).not.toBe(0);
+    expect(out).toContain("a graft file exists");
+    expect(remoteHasBranch("unique-branch")).toBe(true);
+    rmSync(graftDir, { recursive: true, force: true });
+  });
+
   // Codex P2, #156, reproduced: with push.followTags set, the deletion push
   // also publishes local annotated tags reachable from the main commit it
   // carries — a tool that promises only to remove a branch silently creating
