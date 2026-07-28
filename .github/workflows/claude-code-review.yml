@@ -443,10 +443,23 @@ jobs:
         # run's `[View job]` link and a fresh `updated_at`. No field this step
         # reads (author, body, link, timestamp) can distinguish that forgery
         # from genuine completion. A step-B-side guard would be theatre and
-        # would create false assurance, so none is added: the root fix is #157
-        # (make the write-capable token unreachable from the Bash tool).
-        # Until #157 lands, treat step-B green as benign-truncation-sound, not
-        # as adversarially-authenticated review completion.
+        # would create false assurance, so none is added.
+        #
+        # The model's Bash grant is exactly `Bash(gh pr comment:*)` /
+        # `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no
+        # `gh api`), and `gh pr comment --edit-last` is a legal invocation
+        # under the `gh pr comment:*` wildcard -- that is the specific
+        # mechanism that lets an injected review rewrite the tracker in place.
+        # So there are TWO future close paths, and step 3 owns the specific
+        # one: (a) #157, the root env-scrub that makes the write-capable token
+        # unreachable from the Bash tool at all; and (b) narrowing the
+        # `gh pr comment` grant itself -- the deliberately-deferred step-3
+        # allowlist work. (b) needs its own evidence-gated security review
+        # because `gh pr comment` is REAL needed functionality (the skill's
+        # summary comment for nits/praise/questions, per the Code Review
+        # Rubric), so it cannot simply be revoked. Until one of those lands,
+        # treat step-B green as benign-truncation-sound, not as
+        # adversarially-authenticated review completion.
         #
         # This assertion reads only: it needs no write scope, and its
         # `GH_TOKEN` is wired to the read-only `secrets.GITHUB_TOKEN`
