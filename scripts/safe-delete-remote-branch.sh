@@ -63,11 +63,26 @@ do_delete="${2:-}"
 # `git remote set-url --push` is an explicitly supported configuration in
 # which fetch and push target different URLs, so verifying one and deleting
 # on the other proves nothing (Codex P1, PR #156).
+# `--all`, not the default: a remote may configure MULTIPLE `pushurl` entries,
+# and `git remote get-url --push` returns only the first, so a matching first
+# entry would hide a divergent second one (Codex P1, PR #156). Every push URL
+# must match the fetch URL, or the delete could land somewhere the check never
+# inspected.
+#
+# URLs are REDACTED before being printed: a remote URL may carry inline
+# credentials (`https://user:token@host/...`), and this refusal path would
+# otherwise print them straight into a terminal or CI log (Codex P1, PR #156).
+redact_url() { printf '%s' "$1" | sed -E 's#(://)[^/@]*@#\1<redacted>@#'; }
+
 fetch_url="$(git remote get-url "$REMOTE")"
-push_url="$(git remote get-url --push "$REMOTE")"
-[ "$fetch_url" = "$push_url" ] || die "\
-${REMOTE} fetches from '$fetch_url' but pushes to '$push_url'.
+while IFS= read -r push_url; do
+  [ -n "$push_url" ] || continue
+  [ "$fetch_url" = "$push_url" ] || die "\
+${REMOTE} fetches from '$(redact_url "$fetch_url")' but has a push URL '$(redact_url "$push_url")'.
 The safety check would inspect one remote and delete on another. Refusing."
+done <<EOF
+$(git remote get-url --push --all "$REMOTE")
+EOF
 
 for p in "${PROTECTED[@]}"; do
   [ "$branch" = "$p" ] && die "'$branch' is on the protected list in docs/state/registry.md"
@@ -112,8 +127,17 @@ main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
 git fetch --no-tags "$REMOTE" "+refs/heads/main:refs/remotes/${REMOTE}/main" >/dev/null 2>&1 \
   || die "could not re-verify main before deleting"
 main_sha_now="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
-[ "$main_sha_at_check" = "$main_sha_now" ] \
-  || die "main moved from ${main_sha_at_check:0:12} to ${main_sha_now:0:12} during the check; the reachability result is stale. Re-run."
+# A truly atomic pin across fetch-then-push is not available in git, so bound
+# the hazard precisely instead (Codex P1, PR #156). Reachability can only ever
+# GROW when main fast-forwards, so an advanced main cannot turn a safe answer
+# into an unsafe one. The dangerous case is main being REWOUND or rewritten,
+# which can strand commits that were reachable when we counted. Accept the
+# former, refuse the latter.
+if [ "$main_sha_at_check" != "$main_sha_now" ]; then
+  git merge-base --is-ancestor "$main_sha_at_check" "$main_sha_now" 2>/dev/null \
+    || die "main was rewritten (${main_sha_at_check:0:12} is not an ancestor of ${main_sha_now:0:12}); the reachability result may be stale. Re-run."
+  echo "note: main fast-forwarded ${main_sha_at_check:0:12} -> ${main_sha_now:0:12}; reachability can only have grown, continuing"
+fi
 
 # (5) Lease the delete to the branch sha we actually checked, so a concurrent
 # push to the branch fails the delete rather than being clobbered.
