@@ -82,10 +82,38 @@ PROTECTED=(
   "feature/12-spec-grounded-publish-90-5-kind-aware-revalidation"
 )
 
+# Untrusted branch data reaches the terminal through `git log --oneline`, so a
+# commit subject carrying ANSI/OSC escapes or a carriage return could clear,
+# overwrite or forge the safety evidence and the refusal message the operator
+# reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
+# C1 control bytes, keeping tab and newline.
+strip_control_bytes() {
+  # Keeps ONLY tab (\011) and newline (\012). An earlier range kept \015 too,
+  # which is the carriage return an attacker uses to return to column zero and
+  # overwrite the line just printed — the single most useful byte for forging
+  # this report, left in by a range that looked deliberate.
+  # `$'...'` so the C1 range is LITERAL BYTES in the pattern. BSD/macOS sed does
+  # not interpret `\xNN` escapes and silently matches nothing, so the version
+  # written with them stripped C0 correctly and left every C1 byte intact —
+  # which is precisely the class git actually permits in a ref name.
+  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed -E $'s/\xc2[\x80-\x9f]//g'
+}
+
 die() { echo "REFUSE: $*" >&2; exit 1; }
+
+# Git permits control bytes in REF NAMES, and a remotely-created branch is
+# attacker-controllable input to this report (Codex P2, PR #156). The commit
+# evidence and push output were already sanitised; the branch name itself was
+# not, so `evil<U+009B>2J` could clear or forge the SAFE/REFUSE/DELETED lines
+# the operator reads. `$branch` stays RAW for every git operation — sanitising
+# what we act on would be a correctness bug — and `$branch_display` is used for
+# every human-facing message.
+branch_display_of() { printf '%s' "$1" | strip_control_bytes; }
 
 branch="${1:-}"
 [ -n "$branch" ] || die "usage: $0 <branch> [--delete]"
+# RAW `$branch` for every git operation; `$branch_display` for every message.
+branch_display="$(branch_display_of "$branch")"
 do_delete="${2:-}"
 # Only two arguments are meaningful, and anything past the second was being
 # silently ignored (Codex P2, PR #156). On a destructive tool that is a real
@@ -134,8 +162,17 @@ case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$
 # What the operator still gets is what they actually need for this refusal: a
 # stable fingerprint per URL, so "fetch and push differ" is provable and two
 # runs are comparable, without the value ever being printed.
+# Salted PER RUN, and that salt is the point (Codex P2, PR #156). An unsalted
+# digest of a credential-bearing URL is an offline verification oracle: an
+# observer who knows the repository's URL template can hash candidate
+# credentials until the prefix matches, so a "safe" fingerprint printed into a
+# CI log would leak a low-entropy password to anyone who kept the log. The salt
+# is random per invocation, so equal URLs still produce equal labels WITHIN a
+# run — which is what the duplicate-target and mismatch checks need — while
+# nothing carries across runs to attack.
+RUN_SALT="$(head -c 32 /dev/urandom | shasum -a 256 | cut -c1-32)"
 url_fingerprint() {
-  printf 'url#%s' "$(printf '%s' "$1" | shasum -a 256 | cut -c1-12)"
+  printf 'url#%s' "$(printf '%s\n%s' "$RUN_SALT" "$1" | shasum -a 256 | cut -c1-12)"
 }
 
 # Replaces every known remote URL in text with its fingerprint. Used on git's
@@ -153,18 +190,6 @@ EOF
   printf '%s' "$text"
 }
 
-# Untrusted branch data reaches the terminal through `git log --oneline`, so a
-# commit subject carrying ANSI/OSC escapes or a carriage return could clear,
-# overwrite or forge the safety evidence and the refusal message the operator
-# reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
-# C1 control bytes, keeping tab and newline.
-strip_control_bytes() {
-  # Keeps ONLY tab (\011) and newline (\012). An earlier range kept \015 too,
-  # which is the carriage return an attacker uses to return to column zero and
-  # overwrite the line just printed — the single most useful byte for forging
-  # this report, left in by a range that looked deliberate.
-  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed -E 's/\xc2[\x80-\x9f]//g'
-}
 
 fetch_url="$(git remote get-url "$REMOTE")"
 KNOWN_URLS="$fetch_url"
@@ -189,19 +214,19 @@ $(git remote get-url --push --all "$REMOTE")
 EOF
 
 for p in "${PROTECTED[@]}"; do
-  [ "$branch" = "$p" ] && die "'$branch' is on the protected list in docs/state/registry.md"
+  [ "$branch" = "$p" ] && die "'$branch_display' is on the protected list in docs/state/registry.md"
 done
 
 # (1) Fetch the exact refs rather than trusting the clone's refspec.
 git fetch --no-tags "$REMOTE" \
   "+refs/heads/${branch}:refs/remotes/${REMOTE}/${branch}" \
   "+refs/heads/main:refs/remotes/${REMOTE}/main" >/dev/null 2>&1 \
-  || die "could not fetch refs/heads/${branch} from ${REMOTE} (does it exist?)"
+  || die "could not fetch refs/heads/${branch_display} from ${REMOTE} (does it exist?)"
 
 # (2) Resolve only fully qualified remote-tracking refs.
 branch_ref="refs/remotes/${REMOTE}/${branch}"
 git show-ref --verify --quiet "$branch_ref" \
-  || die "$branch_ref is absent after an explicit fetch"
+  || die "refs/remotes/${REMOTE}/${branch_display} is absent after an explicit fetch"
 git show-ref --verify --quiet "$MAIN_REF" \
   || die "$MAIN_REF is absent after an explicit fetch"
 
@@ -212,17 +237,17 @@ sha="$(git rev-parse --verify "${branch_ref}^{commit}")"
 # deletion is leased to it below so the answer cannot go stale under us.
 main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
 unique="$(git rev-list --count "${MAIN_REF}..${branch_ref}")"
-echo "branch:  $branch"
+echo "branch:  $branch_display"
 echo "sha:     ${sha:0:12}"
 echo "unique:  $unique commit(s) not reachable from ${MAIN_REF}"
 
 if [ "$unique" -ne 0 ]; then
   echo
   git log --oneline "${MAIN_REF}..${branch_ref}" | strip_control_bytes | sed 's/^/    /'
-  die "$unique commit(s) exist only on '$branch'"
+  die "$unique commit(s) exist only on '$branch_display'"
 fi
 
-echo "SAFE: every commit on '$branch' is reachable from main"
+echo "SAFE: every commit on '$branch_display' is reachable from main"
 [ "$do_delete" = "--delete" ] || { echo "(report only; pass --delete to remove it)"; exit 0; }
 
 # (4) Close the race properly, with ONE atomic leased push (Codex P1, PR
@@ -293,6 +318,30 @@ if [ -n "$push_output" ]; then
   { scrub_known_urls "$push_output" | strip_control_bytes; echo; } >&2
 fi
 if [ "$push_status" -ne 0 ]; then
-  die "atomic delete rejected: '$branch' or 'main' moved since the check. Nothing was deleted. Re-run."
+  # A nonzero push does NOT prove the remote is unchanged (Codex P2, PR #156).
+  # If the server applied the transaction and the connection dropped before the
+  # acknowledgement came back, git exits nonzero with the branch already
+  # deleted — so the old message ("Nothing was deleted. Re-run.") asserted a
+  # remote state it had not checked, on the one path where being wrong means
+  # telling an operator their commits are safe when they are gone.
+  #
+  # So ask the remote instead of assuming. Three outcomes, and the unknown one
+  # is reported as unknown rather than folded into either certainty.
+  # `git ls-remote --exit-code` distinguishes the three states precisely, and
+  # the exit codes are easy to get backwards: 0 = the ref EXISTS, 2 = the query
+  # SUCCEEDED and found no such ref (so the branch is gone), anything else = the
+  # query itself failed and the state is genuinely unknown. An earlier version
+  # of this block read 2 as "unknown", which would have reported a successful
+  # deletion as indeterminate.
+  # Capture with `|| probe=$?`: under `set -e` an unguarded non-zero exit here
+  # terminates the script, so the exit-2 (branch absent) case never reached the
+  # dispatch below and the operator got no message at all.
+  probe=0
+  git ls-remote --exit-code --heads "$REMOTE" "refs/heads/${branch}" >/dev/null 2>&1 || probe=$?
+  case "$probe" in
+    0) die "atomic delete rejected: '$branch_display' or 'main' moved since the check. Re-queried the remote: '$branch_display' is STILL PRESENT, so nothing was deleted. Re-run." ;;
+    2) die "the push reported failure, but a re-query shows '$branch_display' is ABSENT from ${REMOTE}: the deletion was APPLIED and its acknowledgement lost in transit. Do not re-run assuming it failed." ;;
+    *) die "the push failed AND the remote could not be re-queried, so the state of '$branch_display' is UNKNOWN — it may have been deleted with the acknowledgement lost. Check the remote before doing anything else." ;;
+  esac
 fi
-echo "DELETED: $branch at ${sha:0:12} (leased against main ${main_sha_at_check:0:12})"
+echo "DELETED: $branch_display at ${sha:0:12} (leased against main ${main_sha_at_check:0:12})"

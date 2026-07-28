@@ -379,6 +379,71 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(remoteHasBranch("ansi-branch")).toBe(true);
   });
 
+  // Codex P2, #156: git permits control bytes in REF names, so a
+  // remotely-created branch is attacker-controllable input to this report. The
+  // commit evidence and push output were sanitised; the branch name was not.
+  it("sanitises control bytes in the branch name before printing it", () => {
+    // C1, not C0, and that distinction is the finding: git REJECTS C0 bytes
+    // (ESC, CR) in a ref name, so a test using those proves nothing — it fails
+    // at branch creation. Git does accept UTF-8-encoded C1 controls, and
+    // U+009B is CSI, the single-byte equivalent of `ESC [`, which a terminal
+    // recognising C1 will act on exactly like an escape sequence.
+    const evil = "evil\u009b2Jcleared-OVERWRITTEN";
+    git(clone, "branch", evil, "main");
+    git(clone, "push", "-q", "origin", `refs/heads/${evil}:refs/heads/${evil}`);
+
+    const { out } = runScript([evil, "--delete"]);
+    expect(out).not.toContain("\u009b");
+    // Sanitised, not dropped — the operator still learns which branch it was.
+    expect(out).toContain("OVERWRITTEN");
+  });
+
+  // Codex P2, #156: a nonzero push does not prove the remote is unchanged. If
+  // the server applies the transaction and the acknowledgement is lost, git
+  // exits nonzero with the branch already deleted — and the old message told
+  // the operator nothing had been deleted, which is the one direction where
+  // being wrong means calling destroyed commits safe.
+  it("reports an applied-but-unacknowledged delete as applied, not as a no-op", () => {
+    const shimDir = join(root, "shim-lostack");
+    mkdirSync(shimDir);
+    writeFileSync(
+      join(shimDir, "git"),
+      [
+        "#!/bin/sh",
+        // Complete the REAL push, then report failure — the lost-ack case.
+        'if [ "$1" = "push" ]; then',
+        `  "${REAL_GIT}" "$@" >/dev/null 2>&1`,
+        "  exit 1",
+        "fi",
+        `exec "${REAL_GIT}" "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const { code, out } = runScript(["merged-branch", "--delete"], { pathPrefix: shimDir });
+    expect(code).not.toBe(0);
+    // The branch really is gone, so the report must say so.
+    expect(remoteHasBranch("merged-branch")).toBe(false);
+    expect(out).toContain("the deletion was APPLIED");
+    expect(out).not.toContain("Nothing was deleted");
+  });
+
+  // Codex P2, #156: an UNSALTED digest of a credential-bearing URL is an
+  // offline verification oracle — an observer who knows the URL template can
+  // hash candidate credentials until the printed prefix matches. This fix of
+  // mine introduced that, so the salt is per run.
+  it("does not emit a fingerprint that is stable across runs", () => {
+    git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git");
+    const first = runScript(["merged-branch", "--delete"]).out;
+    const second = runScript(["merged-branch", "--delete"]).out;
+    const fp = (out: string) => out.match(/url#([0-9a-f]{12})/)?.[1];
+    expect(fp(first)).toBeDefined();
+    expect(fp(second)).toBeDefined();
+    // Same URL, different runs, different label: nothing to attack offline.
+    expect(fp(first)).not.toBe(fp(second));
+  });
+
   // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not
   // disable a legacy graft file, so a graft could make a branch-only commit
   // look reachable from main and authorise a deletion. Grafts are deprecated
