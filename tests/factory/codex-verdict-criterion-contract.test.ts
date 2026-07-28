@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  buildPublishSuccessStepSummary,
   CODEX_TRIGGER_PHRASE,
   CODEX_VERDICT_CRITERION,
   renderTriggerPhraseInertly,
@@ -199,6 +200,31 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
   it("is a substantial operator-facing paragraph, not a stub", () => {
     expect(CODEX_VERDICT_CRITERION.length).toBeGreaterThan(800);
     expect(CONDITIONS.length).toBeGreaterThanOrEqual(10);
+  });
+});
+
+describe("the look-first instruction cannot be satisfied by a stranger", () => {
+  // Codex P2, #155. The verdict rule already required bot authorship; the
+  // look-first instruction added later did not, and it is the same class in
+  // the opposite direction — a stranger's 👀 makes the operator WAIT for a
+  // review that never started, rather than accept one that did not happen.
+  it("requires the look-first signal to be bot-authored", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 1,
+      prNumber: 2,
+      prUrl: "https://example.invalid/pr/2",
+      runUrl: "https://example.invalid/run/1",
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      fallbackReason: "app-not-configured",
+      gamingFlagged: false,
+      gamingLabelApplied: undefined,
+      gamingAnnotationPosted: undefined,
+      gamingLabelRemoved: undefined,
+      wasRefresh: false,
+    } as Parameters<typeof buildPublishSuccessStepSummary>[0]);
+    expect(summary).toContain("only a signal from `chatgpt-codex-connector[bot]` counts");
+    expect(summary).toContain("BOT-AUTHORED 👀 or review");
   });
 });
 

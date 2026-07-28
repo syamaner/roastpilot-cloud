@@ -1676,7 +1676,7 @@ function buildFallbackRefreshCommentBodyRaw(runUrl: string): string {
  * validation 422 misread as "label already exists").
  */
 export const NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION =
-  "Opened via GITHUB_TOKEN fallback — no review automation ran; needs a manual review before merging.";
+  "Opened via GITHUB_TOKEN fallback — workflow review automation did not run; needs manual review.";
 
 /**
  * True only when `err` represents GitHub's specific "label already
@@ -2203,9 +2203,13 @@ export function buildPublishSuccessStepSummary(
       "workflow, so whether it auto-reviews here is UNVERIFIED (Codex P2, #155 — this " +
       `line used to assert flatly that it does not). ${labelLine} — ` +
       "a manual review pass is required before merging, and it must include a Codex " +
-      "review of this head. LOOK FIRST rather than assuming either way: if a 👀 or a " +
-      "review is already on this head then it started without you and you are in the " +
-      "wait; if nothing has appeared within the documented timeout, post `@codex " +
+      "review of this head. LOOK FIRST rather than assuming either way — but only a " +
+      "signal from `chatgpt-codex-connector[bot]` counts (Codex P2, #155): this " +
+      "repository is public, so anyone can add a 👀 or post a review, and treating " +
+      "an unrelated one as proof that Codex started would leave you waiting out the " +
+      "timeout for a review that never began. If a BOT-AUTHORED 👀 or review is " +
+      "already on this head then it started without you and you are in the wait; if " +
+      "nothing bot-authored has appeared within the documented timeout, post `@codex " +
       "review` once yourself. " + CODEX_VERDICT_CRITERION
     : "✅ CI, CodeQL, and dependency review triggered normally. " +
       (context.wasRefresh
