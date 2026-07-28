@@ -437,8 +437,21 @@ describe("safe-delete-remote-branch.sh", () => {
   // emitted `<U+FFFD><U+009B>` — so it was reverted.
   it("escapes a C1 control in the commit evidence rather than deleting it", () => {
     git(clone, "checkout", "-q", "-b", "raw-c1", "main");
+    // The identity env MUST be passed here. This shells out through `bash`
+    // rather than the `git()` helper (to get a raw byte past Node's UTF-8
+    // argument encoding), and in doing so it skipped the helper's
+    // GIT_AUTHOR_*/GIT_COMMITTER_* vars — which is invisible locally, where a
+    // global identity exists, and fails on a runner with "Author identity
+    // unknown". Green locally, red on CI: the environment-dependent class.
     execFileSync("bash", ["-c", `git commit -q --allow-empty -m "$(printf 'evil\\x9b2Jx subject')"`], {
       cwd: clone,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
     });
     git(clone, "push", "-q", "origin", "raw-c1");
     git(clone, "checkout", "-q", "main");
