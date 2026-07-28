@@ -1183,7 +1183,16 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // the other persistent operator-facing text on a fallback PR, and it was
     // equally unasserted.
     expect(commentBody.body).toContain("`@codex review`");
-    expect(commentBody.body).toContain("nothing else will start it on this path");
+    // Codex P2, #155: this used to assert "nothing else will start it on this
+    // path", which the comment itself falsifies — it quotes the trigger phrase,
+    // and the connector matches that phrase inside posted comment bodies
+    // (observed on roastpilot-agent#682). The notice can therefore start the
+    // review it claims nothing will start, which would make the operator's
+    // instructed trigger a forbidden second one. Assert the corrected
+    // look-before-you-post instruction instead.
+    expect(commentBody.body).not.toContain("nothing else will start it on this path");
+    expect(commentBody.body).toContain("LOOK FIRST");
+    expect(commentBody.body).toContain("posting it may have started a review by itself");
     // Same shared criterion, sibling site (Codex P1, #155): bot-authorship was
     // missing from every fallback notice.
     expect(commentBody.body).toContain("chatgpt-codex-connector[bot]");

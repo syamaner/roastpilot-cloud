@@ -2128,8 +2128,14 @@ describe("buildPublishSuccessStepSummary", () => {
     // unchanged head caused a duplicate review and a needless delay. The
     // wait itself is still asserted, and so is the manual re-trigger for
     // the one case that genuinely needs it, a later push moving the head.
-    expect(summary).toContain("Codex auto-reviewed at creation");
-    expect(summary).toContain("IS the valid first verdict");
+    // Codex P2, #155: this used to assert "Codex auto-reviewed at creation",
+    // stating as completed fact something AGENTS.md records as never yet
+    // observed on a bot-authored factory PR. That reads as a status the
+    // operator can rely on, so the summary now says the review is DUE and this
+    // asserts the corrected framing rather than the old claim.
+    expect(summary).toContain("automatic review is DUE on this PR, not known to have happened");
+    expect(summary).not.toContain("Codex auto-reviewed at creation");
+    expect(summary).toContain("IS the valid first verdict WHEN IT ARRIVES");
     expect(summary).toContain("`opened`");
     // The wait itself is still asserted (Codex P3, #155): what D142
     // changed is how the wait STARTS, never whether it applies.

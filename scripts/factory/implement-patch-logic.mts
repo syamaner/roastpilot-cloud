@@ -1562,8 +1562,13 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
       "suppression rule does not govern it, and its behaviour on a bot-authored PR has not " +
       "been observed here. Treat it as unreviewed, which is the fail-closed reading: the " +
       `cost of being wrong is one redundant trigger. **Do not merge without a manual review pass on the latest ` +
-      `commit(s), and that pass must include posting \`@codex review\` on this PR ` +
-      `yourself — nothing else will start it on this path.** ${CODEX_VERDICT_CRITERION} ` +
+      `commit(s), and that pass must include a Codex review of this head.** It is ` +
+      "NOT safe to assume one is already running, and NOT safe to assume one is " +
+      "not: this very comment quotes the trigger phrase, and the connector matches " +
+      "that phrase inside posted comment bodies, so posting it may have started a " +
+      "review by itself. So LOOK FIRST — if a 👀 or a review on this head is " +
+      "already there, you are in the wait; if nothing has appeared within the " +
+      `documented timeout below, post \`@codex review\` once yourself. ${CODEX_VERDICT_CRITERION} ` +
       `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
     "",
     `[Run output](${runUrl}).`,
@@ -2112,12 +2117,18 @@ export function buildPublishSuccessStepSummary(
           "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
           "satisfy the wait. Re-trigger with a single `@codex review` on this final " +
           "commit. " + CODEX_VERDICT_CRITERION + " "
-        : "Codex auto-reviewed at creation, and for a PR created ready (every " +
-          "factory PR) that automatic review IS the valid first verdict: its " +
-          "boundary event is `opened`, since such a PR never emits " +
-          "`ready_for_review`. You must still WAIT for it (AGENTS.md's Codex-wait " +
-          "rule); what changes is only that no manual trigger is needed to START " +
-          "the review. " + CODEX_VERDICT_CRITERION + " ") +
+        : "Codex's automatic review is DUE on this PR, not known to have happened " +
+          "(Codex P2, #155: this line used to assert it had auto-reviewed, which " +
+          "reads as a completed status the operator can rely on). For a PR created " +
+          "ready — every factory PR — the boundary event is `opened`, since such a " +
+          "PR never emits `ready_for_review`, and that automatic review IS the " +
+          "valid first verdict WHEN IT ARRIVES. It has not yet been observed on a " +
+          "bot-authored factory PR, where a sibling review lens is known to refuse " +
+          "the publisher identity until #47 lands, so treat its arrival as expected " +
+          "rather than done. You must WAIT for it (AGENTS.md's Codex-wait rule); " +
+          "what changes on this path is only that no manual trigger is needed to " +
+          "START the review, and the timeout clause below is what catches the case " +
+          "where it never begins. " + CODEX_VERDICT_CRITERION + " ") +
       "⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
