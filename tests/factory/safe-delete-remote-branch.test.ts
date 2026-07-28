@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,26 +50,29 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /**
- * Runs the script; returns its exit code and combined output.
+ * Runs the script; returns its exit code and combined stdout+stderr.
  *
- * `pathPrefix` prepends a directory to PATH, which is how the lease test gets
+ * `spawnSync`, not `execFileSync`, and deliberately: `execFileSync` returns
+ * only STDOUT on success and exposes stderr solely through the thrown error,
+ * so on the success path every assertion here was blind to stderr. That hid a
+ * real leak — the script's redacted `git push` output goes to stderr, and the
+ * delete SUCCEEDS, so a test asserting on it saw nothing at all and failed for
+ * a reason unrelated to the property it was checking. spawnSync returns both
+ * streams whatever the exit code.
+ *
+ * `pathPrefix` prepends a directory to PATH, which is how the race test gets
  * a shimmed `git` in front of the real one so it can mutate the remote at an
  * exact point inside the script's run.
  */
 function runScript(args: string[], opts: { pathPrefix?: string } = {}): { code: number; out: string } {
   const env = opts.pathPrefix ? { ...process.env, PATH: `${opts.pathPrefix}:${process.env.PATH ?? ""}` } : process.env;
-  try {
-    const out = execFileSync("bash", [SCRIPT, ...args], {
-      cwd: clone,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env,
-    });
-    return { code: 0, out };
-  } catch (error) {
-    const err = error as { status?: number; stdout?: string; stderr?: string };
-    return { code: err.status ?? 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
-  }
+  const result = spawnSync("bash", [SCRIPT, ...args], {
+    cwd: clone,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+  });
+  return { code: result.status ?? 1, out: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
 
 /** The remote's current `main` sha, read straight from the bare repo. */
@@ -235,6 +238,34 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain(key);
   });
 
+  // Codex P1, #156: every message the script writes itself was redacted, but
+  // git writes its OWN push output ("To <url>", and the error text on failure)
+  // and that never passed through redact_url. Verified against real git rather
+  // than assumed: pushing to `https://host/x.git?access_token=CANARY` prints
+  // the token verbatim. The mismatch guard does not save this case, because it
+  // only fires when fetch and push URLs DIFFER — when they match and both
+  // carry a credential, the script runs all the way to the push.
+  //
+  // Reproducing that without a real HTTPS server: a local bare repo whose
+  // PATH contains a query-shaped credential. Fetch and push both succeed, so
+  // the script reaches the push and git prints the path in its own output,
+  // which is exactly the leak channel under test.
+  it("redacts credentials from git's own push output", () => {
+    const leakRemote = join(root, "leak.git?access_token=CANARY123");
+    git(root, "init", "--bare", "--initial-branch=main", leakRemote);
+    git(clone, "push", leakRemote, "main:main", "merged-branch:merged-branch");
+    git(clone, "remote", "set-url", "origin", leakRemote);
+
+    const { code, out } = runScript(["merged-branch", "--delete"]);
+    // The delete SUCCEEDS here; this is the success path's output being the
+    // leak channel, not a refusal.
+    expect(code).toBe(0);
+    expect(out).toContain("DELETED");
+    // The property under test.
+    expect(out).not.toContain("CANARY123");
+    expect(out).toContain("<redacted>");
+  });
+
   // Codex P2, #156: a repeated push URL means the delete would be attempted
   // against the same target twice.
   it("refuses a duplicated push URL before mutating anything", () => {
@@ -335,6 +366,35 @@ describe("safe-delete-remote-branch.sh", () => {
   // actually stops this case. Recorded rather than asserted, because a comment
   // claiming this test covers the lease would be the same "passes for the wrong
   // reason" defect that produced this round in the first place.
+
+  // Codex P2, #156: the script's PROTECTED array and the registry's "Protected
+  // branches" table are two independently maintained copies of one destructive
+  // safeguard. Drift is silent and one-directional — a branch added to the
+  // registry but not to the script is reported SAFE and deleted, which is the
+  // accident this list exists to prevent and which has already happened once.
+  // The script keeps its literal list (it must refuse correctly even from a
+  // partial checkout, where parsing the registry could fail open), so the drift
+  // is caught here instead: adding a branch to only one artifact reddens CI.
+  it("keeps the script's protected list identical to the registry's", () => {
+    const registry = readFileSync(
+      fileURLToPath(new URL("../../docs/state/registry.md", import.meta.url)),
+      "utf8",
+    );
+    const section = registry.split(/^## Protected branches/m)[1];
+    expect(section, "registry.md has no 'Protected branches' section").toBeDefined();
+    // Table rows look like: | `branch-name` | `sha` | why |
+    const fromRegistry = [...section.split(/^## /m)[0].matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((m) => m[1]).sort();
+
+    const script = readFileSync(SCRIPT, "utf8");
+    const arrayBody = script.match(/PROTECTED=\(([\s\S]*?)\)/)?.[1];
+    expect(arrayBody, "script has no PROTECTED array").toBeDefined();
+    const fromScript = [...(arrayBody as string).matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+
+    // Guards against the comparison passing vacuously if either parse breaks.
+    expect(fromRegistry.length).toBeGreaterThan(0);
+    expect(fromScript.length).toBeGreaterThan(0);
+    expect(fromScript).toEqual(fromRegistry);
+  });
 
   it("refuses a branch on the protected list", () => {
     git(clone, "branch", "feature/12-spec-grounded-publish-90-1-base-sha", "main");

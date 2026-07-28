@@ -47,6 +47,19 @@ REMOTE="origin"
 MAIN_REF="refs/remotes/${REMOTE}/main"
 
 # Kept in sync with docs/state/registry.md's "Protected branches" section.
+#
+# Two copies of a destructive safeguard can drift, and the drift is silent and
+# one-directional: a branch added to the registry but not here is reported SAFE
+# and deleted, which is the exact accident this list exists to prevent and which
+# has already happened once (Codex P2, PR #156).
+#
+# The list stays literal here rather than being parsed out of the registry at
+# runtime, because this script must refuse correctly even when run from a
+# different cwd, a partial checkout, or a clone where that file is absent or
+# malformed — a safeguard that depends on parsing prose can fail open. Instead
+# the drift itself is made a test failure: `safe-delete-remote-branch.test.ts`
+# parses the registry table and asserts the two agree exactly, so adding a
+# branch to the registry alone reddens CI rather than silently disarming this.
 PROTECTED=(
   "feature/12-spec-grounded-publish-90-1-base-sha"
   "feature/12-spec-grounded-publish-90-5-kind-aware-revalidation"
@@ -186,11 +199,24 @@ echo "SAFE: every commit on '$branch' is reachable from main"
 # is deliberate for a destructive tool: the cost is one re-run, and the
 # alternative is reasoning about which movements are safe while a delete is in
 # flight.
-if ! git push --atomic "$REMOTE" \
+# git prints the remote URL in its own push output, on success ("To <url>")
+# and on failure alike, and that output does NOT go through redact_url. When
+# fetch and push URLs match, this script proceeds all the way to here, so a
+# credential carried in the URL leaks through git's output even though every
+# message this script writes itself is redacted (Codex P1, PR #156).
+# Confirmed against real git rather than assumed: a push to
+# `https://host/x.git?access_token=CANARY` prints the token verbatim.
+# So the push output is captured and redacted before anything is shown.
+push_status=0
+push_output="$(git push --atomic "$REMOTE" \
   --force-with-lease="refs/heads/${branch}:${sha}" \
   --force-with-lease="refs/heads/main:${main_sha_at_check}" \
   ":refs/heads/${branch}" \
-  "${main_sha_at_check}:refs/heads/main"; then
+  "${main_sha_at_check}:refs/heads/main" 2>&1)" || push_status=$?
+if [ -n "$push_output" ]; then
+  { redact_url "$push_output"; echo; } >&2
+fi
+if [ "$push_status" -ne 0 ]; then
   die "atomic delete rejected: '$branch' or 'main' moved since the check. Nothing was deleted. Re-run."
 fi
 echo "DELETED: $branch at ${sha:0:12} (leased against main ${main_sha_at_check:0:12})"
