@@ -250,8 +250,11 @@ function runStepB(options: {
   }
 }
 
-function claudeComment(body: string): Comment {
-  return { login: "claude[bot]", body };
+function completionComment(body: string): Comment {
+  // Since #157 the genuine tracking comment is authored by the job's own
+  // GITHUB_TOKEN identity (github-actions[bot]), not the minted-App identity
+  // (claude[bot]) that no longer exists in this job.
+  return { login: "github-actions[bot]", body };
 }
 
 // A tracking comment carrying this run's `/actions/runs/<id>` link plus a
@@ -273,7 +276,9 @@ function trackingComment(options: {
     `- [${box}] Gather context`,
     `- [${box}] Post findings`,
   ].join("\n");
-  return { login: options.login ?? "claude[bot]", body };
+  // Defaults to the genuine post-#157 tracking-comment author, the job's own
+  // GITHUB_TOKEN identity; `login` overrides it to exercise the author binding.
+  return { login: options.login ?? "github-actions[bot]", body };
 }
 
 describe("claude-review denial-evidence step (step A)", () => {
@@ -549,7 +554,7 @@ describe("claude-review denial-evidence step (step A)", () => {
 describe("claude-review completion-assertion step (step B)", () => {
   it("B-T1: healthy #152 tracking comment on a successful run passes", () => {
     const result = runStepB({
-      pages: [[claudeComment(PR152_COMPLETE)]],
+      pages: [[completionComment(PR152_COMPLETE)]],
       runId: PR152_RUN_ID,
     });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -560,7 +565,7 @@ describe("claude-review completion-assertion step (step B)", () => {
 
   it("B-T2: truncated #150 tracking comment fails on unticked boxes", () => {
     const result = runStepB({
-      pages: [[claudeComment(PR150_TRUNCATED)]],
+      pages: [[completionComment(PR150_TRUNCATED)]],
       runId: PR150_RUN_ID,
     });
     expect(result.status).toBe(1);
@@ -578,7 +583,7 @@ describe("claude-review completion-assertion step (step B)", () => {
     "B-T3: %s outcome/conclusion fails before inspecting any comment",
     (_label, outcome, conclusion) => {
       const result = runStepB({
-        pages: [[claudeComment(PR152_COMPLETE)]],
+        pages: [[completionComment(PR152_COMPLETE)]],
         runId: PR152_RUN_ID,
         outcome,
         conclusion,
@@ -622,23 +627,33 @@ describe("claude-review completion-assertion step (step B)", () => {
     expect(other.stdout).toContain("posted no tracking comment");
   });
 
-  it("B-T6: a non-claude author cannot supply this run's completion evidence", () => {
-    // mallory posts an otherwise-healthy comment carrying this run's link. The
-    // author binding rejects it (no claude[bot] comment exists), so dropping
-    // the author filter would let this spoof pass.
-    const result = runStepB({
-      pages: [
-        [
-          {
-            login: "mallory",
-            body: trackingComment({ runId: PR152_RUN_ID, ticked: true }).body,
-          },
-        ],
-      ],
+  it("T-7: only a github-actions[bot] author supplies completion evidence; every other author fails closed", () => {
+    // Since #157 the genuine tracker is authored by github-actions[bot] (the
+    // job's own GITHUB_TOKEN posts it), and step B's author binding accepts
+    // exactly that login. The prior claude[bot] identity (the minted App token
+    // that no longer exists in this job), an arbitrary human/other bot, and any
+    // other name all fail closed. Deleting the author filter would let the
+    // mallory spoof pass (G5); reverting the literal to claude[bot] would both
+    // reject the genuine github-actions[bot] tracker and admit the claude[bot]
+    // spoof (G5').
+    const healthy = (login: string): Comment =>
+      trackingComment({ runId: PR152_RUN_ID, ticked: true, login });
+
+    const passes = runStepB({
+      pages: [[healthy("github-actions[bot]")]],
       runId: PR152_RUN_ID,
     });
-    expect(result.status).toBe(1);
-    expect(result.stdout).toContain("posted no tracking comment");
+    expect(passes.status, `${passes.stdout}\n${passes.stderr}`).toBe(0);
+    expect(passes.stdout).toContain("confirmed:");
+
+    for (const login of ["claude[bot]", "mallory", "roastpilot-factory[bot]"]) {
+      const rejected = runStepB({
+        pages: [[healthy(login)]],
+        runId: PR152_RUN_ID,
+      });
+      expect(rejected.status, login).toBe(1);
+      expect(rejected.stdout, login).toContain("posted no tracking comment");
+    }
   });
 
   it("B-T7: a matching comment with no checklist fails closed", () => {
@@ -648,7 +663,7 @@ describe("claude-review completion-assertion step (step B)", () => {
       "Some prose with no task list at all.",
     ].join("\n");
     const result = runStepB({
-      pages: [[claudeComment(body)]],
+      pages: [[completionComment(body)]],
       runId: PR152_RUN_ID,
     });
     expect(result.status).toBe(1);
@@ -686,7 +701,7 @@ describe("claude-review completion-assertion step (step B)", () => {
       "- [ ] a criterion the PR has not met yet",
     ].join("\n");
     const result = runStepB({
-      pages: [[claudeComment(body)]],
+      pages: [[completionComment(body)]],
       runId: PR152_RUN_ID,
     });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -695,7 +710,7 @@ describe("claude-review completion-assertion step (step B)", () => {
 
   it("B-T10: a non-zero gh keeps the pipeline fail-closed", () => {
     const result = runStepB({
-      pages: [[claudeComment(PR152_COMPLETE)]],
+      pages: [[completionComment(PR152_COMPLETE)]],
       runId: PR152_RUN_ID,
       ghFails: true,
     });
@@ -750,7 +765,7 @@ describe("claude-review completion-assertion step (step B)", () => {
       `Findings: I compared against /actions/runs/${thisRun} earlier and it looked fine.`,
     ].join("\n");
     const result = runStepB({
-      pages: [[claudeComment(body)]],
+      pages: [[completionComment(body)]],
       runId: thisRun,
     });
     expect(result.status).toBe(1);
@@ -820,6 +835,32 @@ describe("claude-review completion-assertion step (step B)", () => {
       runId: PR152_RUN_ID,
       runAttempt: "2",
       attemptStartedAt: attemptStart,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("posted no tracking comment");
+  });
+
+  it("T-8: a same-run github-actions[bot] sibling with no [View job] link does not satisfy step B", () => {
+    // #157 made the genuine tracker's author github-actions[bot] -- the SAME
+    // identity the spec-grounded-review publisher posts its verdict under, in
+    // the SAME run_id. What still discriminates the two is the run-id header
+    // link (fsr LOW-2): the genuine tracker carries a `[View job](.../actions/
+    // runs/<id>)` header link, the sibling verdict does not. This sibling body
+    // is otherwise a perfectly healthy completion signal (github-actions[bot]
+    // author, a fully-ticked checklist under a non-in-progress heading, and it
+    // even names this run id in prose), so ONLY the missing header link keeps
+    // it out. Deleting the header-link predicate (G5") would admit it and pass.
+    const siblingBody = [
+      "## Spec-grounded review",
+      "",
+      `Checked the acceptance criteria for run ${PR152_RUN_ID}; all satisfied.`,
+      "",
+      "- [x] criterion one",
+      "- [x] criterion two",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[{ login: "github-actions[bot]", body: siblingBody }]],
+      runId: PR152_RUN_ID,
     });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("posted no tracking comment");
