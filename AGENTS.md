@@ -626,7 +626,7 @@ recorded in the plan repo.
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
 | `pr-triage` | `sonnet` | independent adjudication of review feedback, so the author never self-triages (D23). |
-| `story-planner` | `fable` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). It never edits files or writes to GitHub — its Bash is for read-only `git`/`gh` queries, and the orchestrator posts the contract; under-specification is the expensive failure this pin exists for. |
+| `story-planner` | `fable` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). Read-only **by construction** — no shell, no write tools (Read/Grep/Glob + retrieval only), so untrusted retrieval content cannot reach operator credentials through it; the orchestrator supplies the story text and posts the contract. Under-specification is the expensive failure this pin exists for. |
 | `implementer` | `opus` | specced implementation that is security-adjacent, touches a protected path, or runs while the Codex quota is in reserve (Axis A). Own worktree, gates before hand-back, never adjudicates findings on its own PR (D23). |
 
 **Pins are mandatory and enforced.** An agent with no `model:` **inherits the
