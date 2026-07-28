@@ -1588,7 +1588,22 @@ export function assertLabelDescriptionWithinLimit(
  * @returns The Markdown comment body.
  */
 export function buildFallbackRefreshCommentBody(runUrl: string): string {
-  return renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl));
+  // The shared criterion warns that a notice quoting the trigger phrase may
+  // itself have started a review. True of the PR body, which keeps the literal
+  // phrase — and FALSE of this comment, precisely because it is rendered inert
+  // below (Codex P2, #155). Leaving the generic warning unqualified here would
+  // send the operator into a needless timeout wait for a review that this
+  // comment cannot have started, so the exception is stated explicitly rather
+  // than left to be inferred.
+  return [
+    renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl)),
+    "",
+    "> **About the trigger wording above:** unlike the PR body, THIS comment is " +
+      "deliberately rendered unable to start a Codex review — the trigger phrase is " +
+      "described rather than quoted, because the publisher posts this automatically " +
+      "onto a PR that may still be a draft. So this comment has NOT started a review, " +
+      "and the general warning that a notice may have triggered one does not apply to it.",
+  ].join("\n");
 }
 
 /**

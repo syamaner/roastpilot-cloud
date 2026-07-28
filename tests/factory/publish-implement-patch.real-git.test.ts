@@ -1190,6 +1190,10 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // property under test is the INVERSE of what this used to assert.
     expect(commentBody.body).not.toContain("@codex review");
     expect(commentBody.body).toContain("the Codex review trigger comment");
+    // Codex P2, #155: having made this comment inert, the criterion's generic
+    // "this notice may have started a review" warning became false FOR THIS
+    // comment, which would cost the operator a needless timeout wait.
+    expect(commentBody.body).toContain("has NOT started a review");
     // Codex P2, #155: this used to assert "nothing else will start it on this
     // path", which the comment itself falsifies — it quotes the trigger phrase,
     // and the connector matches that phrase inside posted comment bodies
