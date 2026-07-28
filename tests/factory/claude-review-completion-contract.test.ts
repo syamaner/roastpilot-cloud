@@ -369,6 +369,31 @@ describe("claude-review denial-evidence step (step A)", () => {
     expect(result.summary).not.toContain("ghp_");
     expect(result.summary).not.toContain("sk-ant-");
   });
+
+  it("A-T10: control and bidi characters in a tool_name are neutralised (fsr LOW-1)", () => {
+    // A model-controlled tool_name reaches the PUBLIC step summary. A newline
+    // would forge a markdown heading or a fake checklist row; a bidi override
+    // reorders the displayed text. `safe_string` must reject both, matching
+    // `safe_key`'s posture. String.fromCharCode keeps this source pure ASCII.
+    const newline = String.fromCharCode(10);
+    const bidiRlo = String.fromCharCode(0x202e);
+    const evilName = `evilTool${newline}## injected heading${newline}- [x] done`;
+    const bidiName = `mcp__evil__${bidiRlo}cc.exe`;
+    const result = runStepAWith([
+      {
+        type: "result",
+        permission_denials: [{ tool_name: evilName }, { tool_name: bidiName }],
+      },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("[redacted control characters]");
+    // The newline no longer forges a heading or a checklist row, and the bidi
+    // override is gone, on both stdout and the public step summary.
+    expect(result.stdout).not.toContain("## injected heading");
+    expect(result.stdout).not.toContain(bidiRlo);
+    expect(result.summary).not.toContain("## injected heading");
+    expect(result.summary).not.toContain(bidiRlo);
+  });
 });
 
 describe("claude-review completion-assertion step (step B)", () => {
@@ -419,13 +444,20 @@ describe("claude-review completion-assertion step (step B)", () => {
     expect(result.stdout).toContain("posted no tracking comment");
   });
 
-  it("B-T5: a run-id that only prefix-matches the comment's run link is rejected", () => {
-    // The comment links run 30304076291; RUN_ID is a 10-digit prefix of it.
-    // The old substring `contains(...)` matched; the boundary-anchored `test`
-    // must not.
-    const prefixRunId = PR150_RUN_ID.slice(0, -1);
+  it("B-T5: a run id that byte-prefixes a longer linked run id is rejected", () => {
+    // A GENUINE byte-prefix collision: the comment links run 301234567890 and
+    // is otherwise HEALTHY, so the pre-fix substring `contains(...)` would
+    // SELECT it (and pass) when RUN_ID is a true prefix of that longer id.
+    // The boundary-anchored predicate requires a non-digit or end-of-string
+    // after the id, so the prefix no longer matches and the run is correctly
+    // treated as having no tracking comment. (The earlier version of this test
+    // was mutation-blind: it paired PR152's link, run 30306271323, with a
+    // prefix of PR150's id, so no prefix relationship existed and reverting
+    // the code to `contains(...)` still passed.)
+    const longerRunId = "301234567890";
+    const prefixRunId = "30123456789"; // a true byte-prefix of longerRunId
     const result = runStepB({
-      pages: [[claudeComment(PR152_COMPLETE)]],
+      pages: [[trackingComment({ runId: longerRunId, ticked: true })]],
       runId: prefixRunId,
     });
     expect(result.status).toBe(1);
@@ -433,7 +465,7 @@ describe("claude-review completion-assertion step (step B)", () => {
 
     // A wholly different run id is likewise unbound.
     const other = runStepB({
-      pages: [[claudeComment(PR152_COMPLETE)]],
+      pages: [[trackingComment({ runId: longerRunId, ticked: true })]],
       runId: "99999999999",
     });
     expect(other.status).toBe(1);
@@ -547,5 +579,31 @@ describe("claude-review completion-assertion step (step B)", () => {
       runId: PR152_RUN_ID,
     });
     expect(fails.status).toBe(1);
+  });
+
+  it("B-T12: a run id quoted in review prose does not satisfy the header binding (fsr LOW-2)", () => {
+    // The comment's own [View job] header link references a DIFFERENT run;
+    // this run's id appears only in later review prose. The binding is
+    // anchored to the [View job](.../actions/runs/<id>) header link, so the
+    // prose mention must not bind. A whole-body match would (wrongly) select
+    // this healthy comment and pass.
+    const headerRun = "40000000001";
+    const thisRun = "40000000002";
+    const body = [
+      `**Claude finished** [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${headerRun})`,
+      "",
+      "### Code review",
+      "",
+      "- [x] Gather context",
+      "- [x] Post findings",
+      "",
+      `Findings: I compared against /actions/runs/${thisRun} earlier and it looked fine.`,
+    ].join("\n");
+    const result = runStepB({
+      pages: [[claudeComment(body)]],
+      runId: thisRun,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("posted no tracking comment");
   });
 });

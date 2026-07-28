@@ -336,7 +336,18 @@ jobs:
             def messages: [ .[] | if type == "array" then .[] else . end ];
             def safe_string:
               tostring[:200]
-              | if test("secret|token|password|credential|api.?key"; "i")
+              # A model-controlled tool_name reaches the PUBLIC step summary,
+              # so it must not carry structure-forging bytes: a newline forges
+              # a markdown heading or a fake checklist row, a bidi override
+              # reorders the displayed text (fsr LOW-1). safe_key already
+              # blocks this via its anchored allowlist; give safe_string the
+              # same reject posture for C0/C1 controls, zero-width/bidi/format
+              # controls, and the BOM, before the sensitive-word check. The
+              # class is written with \uXXXX escapes so the source stays
+              # pure ASCII; jq resolves them to the actual code points.
+              | if test("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]")
+                then "[redacted control characters]"
+                elif test("secret|token|password|credential|api.?key"; "i")
                 then "[redacted sensitive-looking string]"
                 else . end;
             def safe_key:
@@ -455,17 +466,26 @@ jobs:
 
           # Select across all pages, and bind evidence to this exact run.
           # `github.run_id` is a GitHub-guaranteed positive integer, so the
-          # run-id fragment carries no regex metacharacters. The binding
-          # must be boundary-anchored, not a substring: `contains(...)`
-          # matched run 123 inside `/actions/runs/1234`, letting an
-          # UNRELATED newer run's tracking comment satisfy this run's
-          # completion check (issue #146 G2). The left side is anchored by
-          # the literal `/actions/runs/` prefix; the right side requires a
-          # non-digit or end-of-string immediately after the id, so a
-          # shorter id can no longer prefix-match a longer one.
+          # run-id fragment carries no regex metacharacters. Three anchors,
+          # all fail-closed:
+          #   - boundary, not substring (G2): a bare `contains(...)` matched
+          #     run 123 inside `/actions/runs/1234`, letting an UNRELATED
+          #     newer run's tracking comment satisfy this run's check. The
+          #     `([^0-9]|$)` requires a non-digit or end-of-string after the
+          #     id, so a shorter id can no longer prefix-match a longer one.
+          #   - the run id must sit inside the action's own header
+          #     `[View job](.../actions/runs/<id>)` link, not anywhere in the
+          #     body (fsr LOW-2): a run id merely QUOTED in later review prose
+          #     can no longer satisfy the binding. `[^)\n]*` keeps the match
+          #     on the single link line. This is part of the same action
+          #     wording contract the checklist parsing depends on (see the
+          #     pin-coupling note below); if the action renames "View job"
+          #     the binding stops matching and this step fails closed rather
+          #     than passing an unbound comment.
+          #   - `claude[bot]` author + `last` across all pages are unchanged.
           BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
             | jq -r --arg run_id "$RUN_ID" \
-              'add | [.[] | select(.user.login == "claude[bot]") | select(.body | test("/actions/runs/" + $run_id + "([^0-9]|$)"))] | last | .body // ""')"
+              'add | [.[] | select(.user.login == "claude[bot]") | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))] | last | .body // ""')"
 
           if [ -z "$BODY" ]; then
             echo "::error::this run posted no tracking comment, so no review ran (issue #146)"
