@@ -139,6 +139,13 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
   it("scopes the silent-fallback trigger to a head with no trigger yet", () => {
     expect(CODEX_VERDICT_CRITERION).toMatch(/If NO trigger\s+has yet been posted for this head/);
     expect(CODEX_VERDICT_CRITERION).toMatch(/roughly 30 minutes/);
+    // Codex P2, #155: the criterion is shared by notices that can land on a
+    // DRAFT PR, so an unconditional "post the trigger" instruction contradicts
+    // the draft rule wherever it is reused. A manual review on a draft can
+    // never complete the clean-verdict flow, so the instruction must be gated
+    // on the PR being ready — at the source, not per consumer.
+    expect(CODEX_VERDICT_CRITERION).toMatch(/ONLY IF THIS PR IS\s+READY/);
+    expect(CODEX_VERDICT_CRITERION).toMatch(/Marking the draft ready is what starts\s+the automatic review/);
   });
 
   // This constant is embedded in content the publisher POSTS to GitHub — a PR
