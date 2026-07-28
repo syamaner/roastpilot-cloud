@@ -408,6 +408,36 @@ export const CODEX_VERDICT_CRITERION =
   "this head first; if one is there, this comment started it and you are in " +
   "the wait, not before it.";
 
+/** The literal phrase that starts a Codex review when it appears in a comment. */
+export const CODEX_TRIGGER_PHRASE = "@codex review";
+
+/**
+ * Renders text so the publisher can POST it without the act of posting
+ * starting a Codex review.
+ *
+ * The connector matches the trigger phrase inside comment bodies, backticks
+ * included (observed on roastpilot-agent#682). That is harmless in a step
+ * summary, which is not a comment, and harmless in a PR body, since factory
+ * PRs are created ready. It is NOT harmless in the fallback refresh comment:
+ * the publisher posts that automatically onto an EXISTING PR, which may be a
+ * draft, and a review started on a draft posts findings but can never complete
+ * the clean-verdict flow (D105) — so the notice would create exactly the
+ * unsatisfiable wait the same notice tells the operator to avoid (Codex P2,
+ * #155).
+ *
+ * The alternative was to plumb the PR's draft state through
+ * findExistingPrForIssue and branch on it. This is preferred because it is a
+ * static property of the emitted text rather than a runtime condition that can
+ * be wrong: a notice that cannot trigger a review is draft-safe whatever the
+ * PR's state turns out to be, and needs no new API field to stay correct.
+ */
+export function renderTriggerPhraseInertly(text: string): string {
+  return text.split(CODEX_TRIGGER_PHRASE).join(
+    "the Codex review trigger comment (its exact text is in AGENTS.md's PR Merge Policy — " +
+      "it is deliberately not quoted here, because quoting it in a posted comment starts a review)",
+  );
+}
+
 export const FACTORY_TEXT_LINE_LIMIT = 400;
 
 /** One path row from git's authoritative `--numstat -z` scratch-index diff. */
@@ -1552,6 +1582,15 @@ export function assertLabelDescriptionWithinLimit(
  * @returns The Markdown comment body.
  */
 export function buildFallbackRefreshCommentBody(runUrl: string): string {
+  return renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl));
+}
+
+/**
+ * The refresh notice before it is made draft-safe. Split out so the inert
+ * rendering is applied at exactly one place and cannot be forgotten by a later
+ * edit to the body text.
+ */
+function buildFallbackRefreshCommentBodyRaw(runUrl: string): string {
   return [
     "> ⚠\uFE0F **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
       "workflows did NOT run against the new commit(s).**",

@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CODEX_VERDICT_CRITERION } from "../../scripts/factory/implement-patch-logic.mts";
+import {
+  CODEX_TRIGGER_PHRASE,
+  CODEX_VERDICT_CRITERION,
+  renderTriggerPhraseInertly,
+} from "../../scripts/factory/implement-patch-logic.mts";
 
 /**
  * Contract tests for `CODEX_VERDICT_CRITERION`.
@@ -167,5 +171,27 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
   it("is a substantial operator-facing paragraph, not a stub", () => {
     expect(CODEX_VERDICT_CRITERION.length).toBeGreaterThan(800);
     expect(CONDITIONS.length).toBeGreaterThanOrEqual(10);
+  });
+});
+
+describe("posted content cannot start the review it describes", () => {
+  it("renders the trigger phrase inertly", () => {
+    const rendered = renderTriggerPhraseInertly(`please post ${CODEX_TRIGGER_PHRASE} once`);
+    expect(rendered).not.toContain(CODEX_TRIGGER_PHRASE);
+    expect(rendered).toContain("the Codex review trigger comment");
+  });
+
+  it("strips EVERY occurrence, not just the first", () => {
+    // The criterion quotes the phrase several times, so a first-match-only
+    // implementation would still post a live trigger.
+    const rendered = renderTriggerPhraseInertly(CODEX_VERDICT_CRITERION);
+    expect(rendered).not.toContain(CODEX_TRIGGER_PHRASE);
+    // Guard against passing vacuously if the criterion stops quoting it.
+    expect(CODEX_VERDICT_CRITERION).toContain(CODEX_TRIGGER_PHRASE);
+  });
+
+  it("leaves text with no trigger phrase untouched", () => {
+    const plain = "nothing to neutralise here";
+    expect(renderTriggerPhraseInertly(plain)).toBe(plain);
   });
 });

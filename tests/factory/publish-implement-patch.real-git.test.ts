@@ -1182,7 +1182,14 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // Same instruction, sibling site (pr-triage on #155): the refresh notice is
     // the other persistent operator-facing text on a fallback PR, and it was
     // equally unasserted.
-    expect(commentBody.body).toContain("`@codex review`");
+// Codex P2, #155: this comment is posted AUTOMATICALLY onto an existing PR
+    // that may be a draft, and the connector matches the trigger phrase inside
+    // comment bodies. Containing the phrase would start a review on a draft,
+    // which can never complete the clean-verdict flow (D105) — the exact
+    // unsatisfiable wait this same notice warns the operator about. So the
+    // property under test is the INVERSE of what this used to assert.
+    expect(commentBody.body).not.toContain("@codex review");
+    expect(commentBody.body).toContain("the Codex review trigger comment");
     // Codex P2, #155: this used to assert "nothing else will start it on this
     // path", which the comment itself falsifies — it quotes the trigger phrase,
     // and the connector matches that phrase inside posted comment bodies
