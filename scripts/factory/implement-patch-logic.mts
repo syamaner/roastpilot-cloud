@@ -384,10 +384,12 @@ export const CODEX_VERDICT_CRITERION =
   "the wait while the review the ready transition just started is still in " +
   "flight. A review carrying findings is " +
   "NOT clean, even as a top-level comment with no inline threads that nothing " +
-  "blocks on: fold it, push, and re-trigger once on the new head. If neither a " +
-  "verdict nor a 👀 appears within roughly 30 minutes, post `@codex review` " +
-  "once on the unchanged head; that is a first review that never started, not " +
-  "the re-litigation the once-on-final rule forbids.";
+  "blocks on: fold it, push, and re-trigger once on the new head. If NO trigger " +
+  "has yet been posted for this head, and neither a verdict nor a 👀 appears " +
+  "within roughly 30 minutes, post `@codex review` once; that is a first review " +
+  "that never started, not the re-litigation the once-on-final rule forbids. " +
+  "Where a trigger has already been posted, do not post a second one: wait, and " +
+  "escalate rather than re-trigger.";
 
 export const FACTORY_TEXT_LINE_LIMIT = 400;
 
