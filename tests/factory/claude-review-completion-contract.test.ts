@@ -394,6 +394,28 @@ describe("claude-review denial-evidence step (step A)", () => {
     expect(result.summary).not.toContain("## injected heading");
     expect(result.summary).not.toContain(bidiRlo);
   });
+
+  it("A-T11: bidi ISOLATES and the Arabic Letter Mark are also rejected (fsr LOW-3)", () => {
+    // The newer half of the Trojan-Source set: bidi isolates LRI/RLI/FSI/PDI
+    // (U+2066-U+2069) and the Arabic Letter Mark (U+061C). The class must
+    // cover them too, not only the overrides/embeddings A-T10 exercises.
+    const lri = String.fromCharCode(0x2066);
+    const alm = String.fromCharCode(0x061c);
+    const isolateName = `mcp__evil__${lri}masked`;
+    const almName = `arab${alm}mark`;
+    const result = runStepAWith([
+      {
+        type: "result",
+        permission_denials: [{ tool_name: isolateName }, { tool_name: almName }],
+      },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("[redacted control characters]");
+    expect(result.stdout).not.toContain(lri);
+    expect(result.stdout).not.toContain(alm);
+    expect(result.summary).not.toContain(lri);
+    expect(result.summary).not.toContain(alm);
+  });
 });
 
 describe("claude-review completion-assertion step (step B)", () => {
