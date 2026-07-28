@@ -429,6 +429,21 @@ jobs:
         # simply flag any run with denials, which would have failed the
         # healthy case.
         #
+        # SCOPE (F1, codex P1): a PASS here is sound only against BENIGN /
+        # accidental truncation or skip -- the PR #150 mode this step targets.
+        # It is NOT adversarially authenticated. A prompt-injected review holds
+        # the co-resident write-capable App token and the allowlisted
+        # `Bash(gh pr comment:*)` (see the confinement note below), so it can
+        # forge a fully-checked `claude[bot]` tracking comment -- post a fresh
+        # one, or edit the genuine truncated tracker in place -- carrying THIS
+        # run's `[View job]` link and a fresh `updated_at`. No field this step
+        # reads (author, body, link, timestamp) can distinguish that forgery
+        # from genuine completion. A step-B-side guard would be theatre and
+        # would create false assurance, so none is added: the root fix is #157
+        # (make the write-capable token unreachable from the Bash tool).
+        # Until #157 lands, treat step-B green as benign-truncation-sound, not
+        # as adversarially-authenticated review completion.
+        #
         # This assertion reads only: it needs no write scope, and its
         # `GH_TOKEN` is wired to the read-only `secrets.GITHUB_TOKEN`
         # (`pull-requests: read`, `issues: read`, and `actions: read` for the
