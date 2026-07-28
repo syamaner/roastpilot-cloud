@@ -89,51 +89,49 @@ recorded here instead.
 Neither may be deleted until someone confirms its content is genuinely
 superseded and records that confirmation here.
 
-**Before deleting any remote branch**, run:
+**Before deleting any remote branch**, work through this by hand. There is no
+script: one was written on PR #156 and removed before merge (operator decision,
+28 Jul 2026). It is worth recording why, because the reason is the useful part.
 
-```bash
-scripts/safe-delete-remote-branch.sh <branch>   # reports; never deletes
-```
+The check itself is easy to state and hard to automate safely. Twelve rounds of
+adversarial review found real defects at a steady rate, and once the script was
+scoped to report-only, essentially every remaining finding was about the gap
+between what it VERIFIED and what the operator would then MUTATE — transport
+overrides that route a push elsewhere (`receivepack`, `uploadpack`,
+`core.sshCommand`, `GIT_SSH_COMMAND`, `ext::` helpers expanding `%S`
+differently for fetch and push), symbolic refs on the remote and local sides,
+protocol versions that do not advertise arbitrary symrefs, shallow boundaries,
+graft files, replacement refs, and terminal-control injection through branch
+names, commit subjects and config paths. Each was genuine. The list did not
+converge.
 
-The script REPORTS ONLY and never deletes (operator decision, 28 Jul 2026).
-Deletion is a manual operator step: `git push origin --delete <branch>`.
+It also failed the one real case it was used on: asked about a squash-merged
+branch, it reported 30 unique commits and refused, because squash-merging
+breaks ancestry — the very limitation documented in its own header.
 
-It was scoped that way deliberately. While the script could delete, review
-kept finding real ways the DELETE could land somewhere the CHECK had not
-looked — a lease git silently omitted from the push transaction, a
-`receivepack` override redirecting the push to another repository, a lost
-acknowledgement making a successful delete look failed, and a symbolic ref
-that dereferenced to `main` on both sides. Those all live in the gap between
-what is verified and what is mutated; removing the mutation removes the gap.
+So the durable protection is this list of protected branches and a human
+reading the evidence, not a tool that looks authoritative:
 
-This does not eliminate the time-of-check/time-of-use race, it MOVES it to
-the operator: the report describes the remote as of that moment, so re-run it
-immediately before deleting.
+1. **Check the protected list above first.** Those are refused outright.
+2. **Get the authoritative merge signal from GitHub, not from ancestry.**
+   `gh pr list --head <branch> --state all --json state,mergedAt,mergeCommit`.
+   A squash-merged branch's commits are NOT reachable from `main`, so a
+   reachability check will wrongly report them as unique. GitHub saying
+   `MERGED` with a merge commit is the reliable evidence.
+3. **If it was never merged, count what would be lost.** Fetch the exact refs
+   rather than trusting the clone's refspec — a `--single-branch` clone never
+   fetches the branch, making any count meaningless — then
+   `git rev-list --count refs/remotes/origin/main..refs/remotes/origin/<branch>`.
+   Use the fully qualified remote-tracking ref: a bare `<branch>` resolves
+   through local refs first per gitrevisions, and even `origin/<branch>` loses
+   to a local branch literally named that. Anything non-zero means deleting
+   destroys commits. `git branch --merged` is actively misleading here.
+4. **Look at what the count is computed against.** A graft file, a
+   `refs/replace/*` entry, a shallow clone, or a symbolic ref on either side
+   will all silently give you a wrong answer. If the repository is not an
+   ordinary full clone, do not trust the count.
+5. **Time-of-check/time-of-use is yours.** Someone can push between your check
+   and your delete, and `git push origin --delete` carries no lease. Check
+   immediately before deleting, and not while anything else might be pushing.
 
-Use the script rather than doing this by hand. The prose version of this check
-was written four times and was wrong every time, each in a way that looked
-correct and would have destroyed commits (Codex P1 x4 on PR #156). A checklist
-that a careful reader gets wrong four times is the wrong medium, so it is
-executable now. What it refuses on, and why each matters:
-
-1. **A narrowed fetch refspec.** In a `--single-branch` clone,
-   `git fetch origin --prune` never fetches the branch at all, so any count
-   against it is meaningless. The script fetches the exact refs and fails if
-   that does not produce them.
-2. **Ambiguous revisions.** A bare `<branch>` resolves through local refs
-   first, per gitrevisions' disambiguation order, and even `origin/<branch>`
-   loses to a local branch literally named `origin/<branch>`. Only the fully
-   qualified `refs/remotes/origin/<branch>` is unambiguous.
-3. **Unique commits.** Anything not reachable from `refs/remotes/origin/main`
-   dies with the branch. Merged-PR evidence alone is not sufficient, and
-   `git branch --merged` is actively misleading, because squash merges break
-   ancestry in both directions.
-4. **Time-of-check/time-of-use — NOT closed, and owned by you.** Someone can
-   push between the report and your manual delete, and the printed
-   `git push origin --delete -- <branch>` carries no lease, so it would remove
-   those commits without complaint. An earlier version of this list said the
-   delete was leased to the checked sha; that was true of the script while it
-   still deleted, and is false now that deletion is a manual step (Codex P2,
-   PR #156). Re-run the report immediately before deleting, and avoid doing it
-   while anything else might be pushing.
-5. **The protected list above**, which it refuses outright.
+Deleting: `git push origin --delete <branch>`.
