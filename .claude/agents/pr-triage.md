@@ -33,7 +33,18 @@ worked before trusting an empty result:
 - read inline review threads AND top-level comments, both `--paginate`d;
   querying one channel, or an un-paginated page, makes a posted finding look
   like silence;
-- Claude's review posts as `claude[bot]` **or** `claude` — filter for both;
+- since #157, claude-review's findings post under `github-actions[bot]`, not
+  `claude[bot]`/`claude`. But `github-actions[bot]` is a SHARED identity here
+  (the triage-verdict and spec-grounding publishers post under it too), so do
+  NOT filter the review's findings by author alone. Disambiguate by CHANNEL
+  (the inline review threads are the merge-blocking findings, gated by
+  `required_conversation_resolution`) and by content: filtering by author alone
+  both misses the findings (if you still look for `claude[bot]`) and
+  over-matches other publishers' comments (if you naively swap to
+  `github-actions[bot]`). This is the same shared-identity hazard
+  `scripts/factory/publish-spec-grounding-verdict-logic.mts:349-363` documents
+  and closes with a structural whole-line match rather than an
+  author-plus-substring one;
 - code-scanning alerts are their own channel: they are not comments and CodeQL
   is not a required check, so query the PR's alerts explicitly rather than
   inferring from a green tick;
