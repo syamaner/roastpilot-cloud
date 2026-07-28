@@ -2044,7 +2044,9 @@ export function buildPublishSuccessStepSummary(
         ? "This PR was REFRESHED, so its head has moved since creation and Codex's " +
           "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
           "satisfy the wait. Re-trigger with a single `@codex review` on this final " +
-          "commit and wait for a bot-authored verdict naming it. "
+          "commit, then accept EITHER channel: a bot-authored review or comment " +
+          "naming this head sha, OR the bot's 👍 reaction, which carries no sha and " +
+          "is therefore valid only while the head stays unchanged. "
         : "Codex auto-reviewed at creation, and for a PR created ready (every " +
           "factory PR) that automatic review IS the valid first verdict: its " +
           "boundary event is `opened`, since such a PR never emits " +

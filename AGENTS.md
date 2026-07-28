@@ -248,7 +248,13 @@ exception. The load-bearing points:
   - a PR **created ready** (every factory-authored PR, #62) emits `opened` and
     NEVER emits `ready_for_review`, so `opened` is its boundary. Requiring a
     `ready_for_review` timestamp here would be unsatisfiable and would block
-    every untouched factory PR permanently;
+    every untouched factory PR permanently. EXCEPTION (Codex P2, #155): a PR
+    the publisher had to open on the **fallback** path, with `GITHUB_TOKEN`
+    because App minting failed, gets NO downstream workflow triggers at all
+    (factory.md §13), so Codex does not auto-review it either. There is no
+    automatic verdict to wait for on that path; a manual `@codex review` and
+    a full manual review pass are required, exactly as the publisher's own
+    fallback summary already states;
   - a **draft marked ready** emits `ready_for_review`, and that is its
     boundary;
   - after any later push, the boundary becomes the fresh single re-trigger on
