@@ -72,3 +72,28 @@ Full pipeline, security model, and label taxonomy:
    table in the same PR — file state and GitHub state must never drift.
 6. Full rules, stack conventions, PR hygiene, and the review rubric:
    [`AGENTS.md`](../../AGENTS.md).
+
+## Protected branches (never delete)
+
+These carry commits that exist nowhere else. Both were swept from the remote
+by mistake on 27 Jul 2026 and restored from a local clone the same day,
+verified sha-for-sha. The reason they were protected had only ever been
+recorded in session context, which is why the sweep looked routine. It is
+recorded here instead.
+
+| Branch | Head | Why protected |
+|---|---|---|
+| `feature/12-spec-grounded-publish-90-1-base-sha` | `4b089ed` | [PR #92](https://github.com/syamaner/roastpilot-cloud/pull/92) was **closed, not merged**; carries 1 commit not in `main`. |
+| `feature/12-spec-grounded-publish-90-5-kind-aware-revalidation` | `a7d278d` | Never had a PR at all; carries 1 commit not in `main`. |
+
+Neither may be deleted until someone confirms its content is genuinely
+superseded and records that confirmation here.
+
+**Before deleting any remote branch:**
+
+1. Prove it is merged from **merged-PR evidence**, never from `git branch
+   --merged` — squash merges break ancestry, so a squash-merged branch looks
+   unmerged and an unmerged branch can look reachable.
+2. Check `git rev-list --count origin/main..<branch>`. A non-zero count means
+   unique commits exist and the branch is **not** safe to delete, whatever a
+   PR says about it.
