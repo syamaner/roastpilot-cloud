@@ -376,7 +376,13 @@ export const CODEX_VERDICT_CRITERION =
   "spoofable and does not count — and it must be CLEAN: a bot-authored clean " +
   "comment naming this exact head, or the bot's 👍 AFTER its own 👀 — a 👍 " +
   "with no preceding 👀 is not a completed review, and the 👍 carries no sha, " +
-  "so it holds only while the head is unchanged. A review carrying findings is " +
+  "so it holds only while the head is unchanged. Matching the head is NOT " +
+  "sufficient on its own: the signal must also POSTDATE the event that started " +
+  "this PR's review (`opened` for a PR created ready, `ready_for_review` for a " +
+  "draft marked ready, or the fresh re-trigger after any later push), because a " +
+  "review left on the draft names the very same sha and would otherwise close " +
+  "the wait while the review the ready transition just started is still in " +
+  "flight. A review carrying findings is " +
   "NOT clean, even as a top-level comment with no inline threads that nothing " +
   "blocks on: fold it, push, and re-trigger once on the new head. If neither a " +
   "verdict nor a 👀 appears within roughly 30 minutes, post `@codex review` " +
