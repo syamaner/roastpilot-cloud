@@ -92,9 +92,23 @@ superseded and records that confirmation here.
 **Before deleting any remote branch**, run:
 
 ```bash
-scripts/safe-delete-remote-branch.sh <branch>            # report only
-scripts/safe-delete-remote-branch.sh <branch> --delete   # delete if safe
+scripts/safe-delete-remote-branch.sh <branch>   # reports; never deletes
 ```
+
+The script REPORTS ONLY and never deletes (operator decision, 28 Jul 2026).
+Deletion is a manual operator step: `git push origin --delete <branch>`.
+
+It was scoped that way deliberately. While the script could delete, review
+kept finding real ways the DELETE could land somewhere the CHECK had not
+looked — a lease git silently omitted from the push transaction, a
+`receivepack` override redirecting the push to another repository, a lost
+acknowledgement making a successful delete look failed, and a symbolic ref
+that dereferenced to `main` on both sides. Those all live in the gap between
+what is verified and what is mutated; removing the mutation removes the gap.
+
+This does not eliminate the time-of-check/time-of-use race, it MOVES it to
+the operator: the report describes the remote as of that moment, so re-run it
+immediately before deleting.
 
 Use the script rather than doing this by hand. The prose version of this check
 was written four times and was wrong every time, each in a way that looked
@@ -114,7 +128,12 @@ executable now. What it refuses on, and why each matters:
    dies with the branch. Merged-PR evidence alone is not sufficient, and
    `git branch --merged` is actively misleading, because squash merges break
    ancestry in both directions.
-4. **Time-of-check/time-of-use.** Someone can push between the count and the
-   delete, so the delete is leased to the exact sha that was checked and fails
-   rather than silently clobbering a concurrent push.
+4. **Time-of-check/time-of-use — NOT closed, and owned by you.** Someone can
+   push between the report and your manual delete, and the printed
+   `git push origin --delete -- <branch>` carries no lease, so it would remove
+   those commits without complaint. An earlier version of this list said the
+   delete was leased to the checked sha; that was true of the script while it
+   still deleted, and is false now that deletion is a manual step (Codex P2,
+   PR #156). Re-run the report immediately before deleting, and avoid doing it
+   while anything else might be pushing.
 5. **The protected list above**, which it refuses outright.

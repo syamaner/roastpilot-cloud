@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,12 +24,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  */
 
 const SCRIPT = fileURLToPath(new URL("../../scripts/safe-delete-remote-branch.sh", import.meta.url));
-
-/**
- * Absolute path to the real git, resolved BEFORE any test puts a shim on PATH,
- * so a shim can delegate to it without recursing into itself.
- */
-const REAL_GIT = execFileSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).trim();
 
 let root: string;
 let remote: string;
@@ -59,13 +53,10 @@ function git(cwd: string, ...args: string[]): string {
  * delete SUCCEEDS, so a test asserting on it saw nothing at all and failed for
  * a reason unrelated to the property it was checking. spawnSync returns both
  * streams whatever the exit code.
- *
- * `pathPrefix` prepends a directory to PATH, which is how the race test gets
- * a shimmed `git` in front of the real one so it can mutate the remote at an
- * exact point inside the script's run.
+
  */
-function runScript(args: string[], opts: { pathPrefix?: string } = {}): { code: number; out: string } {
-  const env = opts.pathPrefix ? { ...process.env, PATH: `${opts.pathPrefix}:${process.env.PATH ?? ""}` } : process.env;
+function runScript(args: string[]): { code: number; out: string } {
+  const env = process.env;
   const result = spawnSync("bash", [SCRIPT, ...args], {
     cwd: clone,
     encoding: "utf8",
@@ -73,11 +64,6 @@ function runScript(args: string[], opts: { pathPrefix?: string } = {}): { code: 
     env,
   });
   return { code: result.status ?? 1, out: `${result.stdout ?? ""}${result.stderr ?? ""}` };
-}
-
-/** The remote's current `main` sha, read straight from the bare repo. */
-function remoteMainSha(): string {
-  return git(remote, "rev-parse", "refs/heads/main").trim();
 }
 
 function remoteHasBranch(branch: string): boolean {
@@ -113,25 +99,21 @@ afterEach(() => {
 });
 
 describe("safe-delete-remote-branch.sh", () => {
-  it("deletes a branch whose commits are all reachable from main", () => {
-    expect(remoteHasBranch("merged-branch")).toBe(true);
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).toBe(0);
-    expect(out).toContain("DELETED");
-    expect(remoteHasBranch("merged-branch")).toBe(false);
-  });
 
-  it("reports without deleting when --delete is omitted", () => {
+  it("reports and never deletes, which is now the only mode", () => {
     const { code, out } = runScript(["merged-branch"]);
     expect(code).toBe(0);
-    expect(out).toContain("SAFE");
-    expect(out).toContain("report only");
+    expect(out).toContain("VERDICT: SAFE TO DELETE");
+    expect(out).toContain("This tool does NOT delete");
+    // The window is named rather than implied — report-only relocates the
+    // race to the operator, it does not remove it.
+    expect(out).toContain("between this report and your delete");
     // The load-bearing assertion: reporting must not mutate the remote.
     expect(remoteHasBranch("merged-branch")).toBe(true);
   });
 
   it("refuses a branch carrying commits that exist nowhere else", () => {
-    const { code, out } = runScript(["unique-branch", "--delete"]);
+    const { code, out } = runScript(["unique-branch"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(out).toContain("exist only on");
@@ -160,7 +142,7 @@ describe("safe-delete-remote-branch.sh", () => {
   // is rebuilt so that removing the check causes a real deletion rather than an
   // incidental error.
   it("refuses main by the main-guard specifically, and main survives", () => {
-    const { code, out } = runScript(["main", "--delete"]);
+    const { code, out } = runScript(["main"]);
     expect(code).not.toBe(0);
     expect(out).toContain("'main' is the comparison branch; deleting it is never safe here");
     // It must refuse BEFORE ever concluding main is safe: this is the exact
@@ -171,7 +153,7 @@ describe("safe-delete-remote-branch.sh", () => {
   });
 
   it("refuses the symbolic ref HEAD by the HEAD-guard specifically", () => {
-    const { code, out } = runScript(["HEAD", "--delete"]);
+    const { code, out } = runScript(["HEAD"]);
     expect(code).not.toBe(0);
     expect(out).toContain("refusing the symbolic ref 'HEAD'");
     // Not the fetch failure that masked this guard's absence before.
@@ -179,30 +161,9 @@ describe("safe-delete-remote-branch.sh", () => {
   });
 
   it("refuses a branch that does not exist on the remote", () => {
-    const { code, out } = runScript(["no-such-branch", "--delete"]);
+    const { code, out } = runScript(["no-such-branch"]);
     expect(code).not.toBe(0);
     expect(out).toContain("could not fetch refs/heads/no-such-branch");
-  });
-
-  // Rebuilt (qa review, #156). The push URL now points at a REAL second bare
-  // repo that genuinely contains the branch, so if the mismatch check were
-  // removed the push would SUCCEED and delete from a remote the safety check
-  // never inspected — which is the actual hazard. Pointing at a nonexistent
-  // path, as this test used to, proves only that git cannot push to nowhere.
-  it("refuses when a push URL diverges from the fetch URL, and the other remote is untouched", () => {
-    const elsewhere = join(root, "elsewhere.git");
-    git(root, "init", "--bare", "--initial-branch=main", elsewhere);
-    git(clone, "push", elsewhere, "main:main", "merged-branch:merged-branch");
-    git(clone, "remote", "set-url", "--push", "origin", elsewhere);
-
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toContain("The safety check would inspect one remote and delete on another");
-    // Both remotes keep the branch: the one that was checked, and the one that
-    // would have been deleted from.
-    expect(remoteHasBranch("merged-branch")).toBe(true);
-    const elsewhereRefs = git(elsewhere, "for-each-ref", "--format=%(refname:short)", "refs/heads/");
-    expect(elsewhereRefs).toContain("merged-branch");
   });
 
   it("refuses with a usage message when no branch is given", () => {
@@ -211,151 +172,14 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("usage:");
   });
 
-  // ACCEPTED AS UNTESTED, recorded rather than dropped (qa review, #156): the
-  // two "absent after an explicit fetch" refusals have no test under their own
-  // trigger. They are backstops for a state the preceding fetch-failure check
-  // should already have caught, so provoking them means simulating a git that
-  // reports a successful fetch without producing the ref. The qa pass confirmed
-  // the backstop does fire when the fetch-failure die is neutralised, so they
-  // are live rather than dead code — but that is defence in depth, not a
-  // covered path, and this comment is here so the next reader knows which.
-  //
-  // Also recorded: the five credential-redaction tests above pass through
-  // BOTH the mismatch refusal's own redaction and the later push-output
-  // redaction, so each alone would satisfy them. The qa pass verified they
-  // fail when the mismatch path's own `redact_url` calls are stripped, so they
-  // do bind that path; they simply are not isolated to it.
-
-  // A remote may configure several pushurl entries; `get-url --push` returns
-  // only the first, so a matching first entry must not mask a divergent later
-  // one (Codex P1, PR #156).
-  it("refuses when a LATER push URL diverges, not just the first", () => {
-    git(clone, "remote", "set-url", "--push", "origin", remote);
-    git(clone, "remote", "set-url", "--push", "--add", "origin", join(root, "elsewhere.git"));
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
-    expect(remoteHasBranch("merged-branch")).toBe(true);
-  });
-
-  it("redacts inline credentials from a URL mismatch refusal", () => {
-    git(clone, "remote", "set-url", "--push", "origin", "https://user:supersecrettoken@example.invalid/x.git");
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-    // The whole point: the token must never reach a terminal or CI log.
-    expect(out).not.toContain("supersecrettoken");
-  });
-
   // Codex P2, #156: anything past the second argument was silently ignored,
   // so a typo'd or reordered invocation could look accepted while the flag the
   // operator meant went unread. On a destructive tool that is a real hazard.
   it("refuses extra arguments rather than ignoring them", () => {
-    const { code, out } = runScript(["merged-branch", "--delete", "--oops"]);
+    const { code, out } = runScript(["merged-branch", "--oops"]);
     expect(code).not.toBe(0);
     expect(out).toContain("too many arguments");
     expect(remoteHasBranch("merged-branch")).toBe(true);
-  });
-
-  it("refuses an unrecognised second argument", () => {
-    const { code, out } = runScript(["merged-branch", "--force"]);
-    expect(code).not.toBe(0);
-    expect(out).toContain("unrecognised second argument");
-    expect(remoteHasBranch("merged-branch")).toBe(true);
-  });
-
-  // Codex P1, #156: the first redaction handled `scheme://user:pass@host`
-  // only, so a credential carried in a query parameter printed in full.
-  it("redacts a credential carried in a query parameter", () => {
-    git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git?access_token=querysecret123");
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-    expect(out).not.toContain("querysecret123");
-  });
-
-  // Codex P1, #156 round 3: the query-parameter fix above was an ALLOWLIST of
-  // credential key names, so a compound key like `client_secret` missed it and
-  // printed in full. The redaction no longer enumerates key names at all, so
-  // this asserts the property that replaced the list: a value is redacted
-  // because it is a query-parameter value, whatever its key is called. These
-  // keys are deliberately ones no allowlist contained.
-  it.each([
-    ["client_secret", "compoundsecret1"],
-    ["refresh_token", "compoundsecret2"],
-    ["auth_token", "compoundsecret3"],
-    ["x-totally-unforeseen-credential", "compoundsecret4"],
-  ])("redacts a credential under the unlisted query key %s", (key, secret) => {
-    git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git?${key}=${secret}`);
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-    expect(out).not.toContain(secret);
-    // The key name is redacted too, and that is the CURRENT contract rather
-    // than the original one. v3 redacted `?k=v` values and kept key names for
-    // diagnosis; Codex then broke v3 with an opaque, keyless query credential
-    // (`?<token>`, or a bare segment after `&`), which contains no `=` and so
-    // matched nothing (P1, #156, reproduced against a real push). Preserving
-    // key names is a nicety; failing open on a credential is not. So the whole
-    // query component goes, and host/path — the part that identifies which
-    // remote mismatched — is what remains.
-    expect(out).not.toContain(key);
-  });
-
-  // The keyless case that broke the k=v redaction (Codex P1, #156).
-  it.each([
-    ["opaque query with no key at all", "?sk_live_opaquecanary"],
-    ["bare segment after an ampersand", "?a=1&barecanary"],
-  ])("redacts %s", (_name, query) => {
-    git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git${query}`);
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-    expect(out).not.toContain("opaquecanary");
-    expect(out).not.toContain("barecanary");
-  });
-
-  // Codex P1 [blocker], #156, round 4 on this one behaviour. A credential can
-  // sit in the PATH (`https://host/auth/TOKEN/repo.git`) or in a remote-helper
-  // address — neither userinfo nor query — so every position-enumerating
-  // redaction lost the same way. Nothing is pattern-matched now: the KNOWN
-  // remote URL strings are replaced wherever they appear, and no URL is
-  // rendered for display at all.
-  it.each([
-    ["path-based credential", "https://example.invalid/auth/PATHCANARY/x.git"],
-    ["userinfo credential", "https://u:USERCANARY@example.invalid/x.git"],
-    ["opaque query credential", "https://example.invalid/x.git?QUERYCANARY"],
-  ])("never prints the remote URL for a %s", (_name, url) => {
-    git(clone, "remote", "set-url", "--push", "origin", url);
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-    for (const canary of ["PATHCANARY", "USERCANARY", "QUERYCANARY"]) {
-      expect(out).not.toContain(canary);
-    }
-    // The URL itself must not appear in any form, credential-bearing or not.
-    expect(out).not.toContain("example.invalid");
-  });
-
-  // The test above refuses at the URL-MISMATCH check, so it never reaches the
-  // push and therefore never exercises the scrubbing of git's OWN output —
-  // which is what the P1 was actually about. Verified by mutation: neutralising
-  // `scrub_known_urls` leaves it green. This one makes fetch and push the SAME
-  // credential-bearing URL, so the script proceeds all the way to a successful
-  // delete and git prints the address itself.
-  it("scrubs the remote URL out of git's own push output", () => {
-    const leakRemote = join(root, "auth-PATHCANARY-remote.git");
-    git(root, "init", "--bare", "--initial-branch=main", leakRemote);
-    git(clone, "push", leakRemote, "main:main", "merged-branch:merged-branch");
-    git(clone, "remote", "set-url", "origin", leakRemote);
-
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    // The delete SUCCEEDS here; the success path is the leak channel.
-    expect(code).toBe(0);
-    expect(out).toContain("DELETED");
-    expect(out).not.toContain("PATHCANARY");
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
   });
 
   // Codex P2, #156: the refusal prints `git log --oneline` for the commits that
@@ -369,7 +193,7 @@ describe("safe-delete-remote-branch.sh", () => {
     git(clone, "push", "-q", "origin", "ansi-branch");
     git(clone, "checkout", "-q", "main");
 
-    const { code, out } = runScript(["ansi-branch", "--delete"]);
+    const { code, out } = runScript(["ansi-branch"]);
     expect(code).not.toBe(0);
     // The raw control bytes must not survive to the terminal.
     expect(out).not.toContain("\u001b");
@@ -392,10 +216,30 @@ describe("safe-delete-remote-branch.sh", () => {
     git(clone, "branch", evil, "main");
     git(clone, "push", "-q", "origin", `refs/heads/${evil}:refs/heads/${evil}`);
 
-    const { out } = runScript([evil, "--delete"]);
+    const { out } = runScript([evil]);
     expect(out).not.toContain("\u009b");
     // Sanitised, not dropped — the operator still learns which branch it was.
     expect(out).toContain("OVERWRITTEN");
+  });
+
+  // Codex P1, #156, and a hazard the report-only rescope INTRODUCED: the
+  // output now prints a copy-pasteable shell command, and git permits shell
+  // metacharacters in ref names. A raw interpolation turns a safety report
+  // into command injection at exactly the moment the operator is told to run
+  // something destructive.
+  it("shell-quotes the branch in the suggested delete command", () => {
+    const evil = "merged;touch${IFS}/tmp/pwned-canary";
+    git(clone, "branch", evil, "main");
+    git(clone, "push", "-q", "origin", `refs/heads/${evil}:refs/heads/${evil}`);
+
+    const { out } = runScript([evil]);
+    const line = out.split("\n").find((l) => l.includes("git push"));
+    expect(line).toBeDefined();
+    // The metacharacters must be escaped, not present as live shell syntax.
+    expect(line).not.toContain(";touch$");
+    expect(line).toContain("\\;");
+    // `--` so a leading-dash branch name cannot be read as an option.
+    expect(line).toContain("--delete --");
   });
 
   // Codex P1, #156, reproduced by the reviewer: a symbolic remote ref
@@ -404,7 +248,7 @@ describe("safe-delete-remote-branch.sh", () => {
   // literal name guard never sees it.
   it("refuses a symbolic remote ref that dereferences to main", () => {
     git(remote, "symbolic-ref", "refs/heads/alias", "refs/heads/main");
-    const { code, out } = runScript(["alias", "--delete"]);
+    const { code, out } = runScript(["alias"]);
     expect(code).not.toBe(0);
     expect(out).toContain("is a SYMBOLIC ref");
     // The load-bearing assertion: main must survive.
@@ -415,9 +259,10 @@ describe("safe-delete-remote-branch.sh", () => {
   // Codex P1, #156, reproduced: with a configured transport command, equal
   // fetch/push URLs do not prove the push reaches the inspected repository —
   // git runs the configured command and the URL becomes advisory.
-  it.each([["receivepack"], ["uploadpack"]])("refuses when remote.origin.%s is configured", (key) => {
+  it("refuses when remote.origin.uploadpack is configured", () => {
+    const key = "uploadpack";
     git(clone, "config", `remote.origin.${key}`, "/bin/true");
-    const { code, out } = runScript(["merged-branch", "--delete"]);
+    const { code, out } = runScript(["merged-branch"]);
     expect(code).not.toBe(0);
     expect(out).toContain(`remote.origin.${key} is set`);
     expect(remoteHasBranch("merged-branch")).toBe(true);
@@ -433,57 +278,11 @@ describe("safe-delete-remote-branch.sh", () => {
       encoding: "binary",
     });
 
-    const result = spawnSync("bash", [SCRIPT, raw, "--delete"], { cwd: clone, encoding: "binary" });
+    const result = spawnSync("bash", [SCRIPT, raw], { cwd: clone, encoding: "binary" });
     const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     // The raw C1 byte must not reach the terminal in any line.
     expect(out).not.toContain("\u009b");
     expect(Buffer.from(out, "binary").includes(0x9b)).toBe(false);
-  });
-
-  // Codex P2, #156: a nonzero push does not prove the remote is unchanged. If
-  // the server applies the transaction and the acknowledgement is lost, git
-  // exits nonzero with the branch already deleted — and the old message told
-  // the operator nothing had been deleted, which is the one direction where
-  // being wrong means calling destroyed commits safe.
-  it("reports an applied-but-unacknowledged delete as applied, not as a no-op", () => {
-    const shimDir = join(root, "shim-lostack");
-    mkdirSync(shimDir);
-    writeFileSync(
-      join(shimDir, "git"),
-      [
-        "#!/bin/sh",
-        // Complete the REAL push, then report failure — the lost-ack case.
-        'if [ "$1" = "push" ]; then',
-        `  "${REAL_GIT}" "$@" >/dev/null 2>&1`,
-        "  exit 1",
-        "fi",
-        `exec "${REAL_GIT}" "$@"`,
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-
-    const { code, out } = runScript(["merged-branch", "--delete"], { pathPrefix: shimDir });
-    expect(code).not.toBe(0);
-    // The branch really is gone, so the report must say so.
-    expect(remoteHasBranch("merged-branch")).toBe(false);
-    expect(out).toContain("the deletion was APPLIED");
-    expect(out).not.toContain("Nothing was deleted");
-  });
-
-  // Codex P2, #156: an UNSALTED digest of a credential-bearing URL is an
-  // offline verification oracle — an observer who knows the URL template can
-  // hash candidate credentials until the printed prefix matches. This fix of
-  // mine introduced that, so the salt is per run.
-  it("does not emit a fingerprint that is stable across runs", () => {
-    git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git");
-    const first = runScript(["merged-branch", "--delete"]).out;
-    const second = runScript(["merged-branch", "--delete"]).out;
-    const fp = (out: string) => out.match(/url#([0-9a-f]{12})/)?.[1];
-    expect(fp(first)).toBeDefined();
-    expect(fp(second)).toBeDefined();
-    // Same URL, different runs, different label: nothing to attack offline.
-    expect(fp(first)).not.toBe(fp(second));
   });
 
   // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not
@@ -499,7 +298,7 @@ describe("safe-delete-remote-branch.sh", () => {
     // since that is already its parent.
     writeFileSync(graftPath, `${mainSha} ${uniqueTip}\n`);
 
-    const { code, out } = runScript(["unique-branch", "--delete"]);
+    const { code, out } = runScript(["unique-branch"]);
     expect(code).not.toBe(0);
     expect(out).toContain("a graft file exists");
     expect(remoteHasBranch("unique-branch")).toBe(true);
@@ -522,7 +321,7 @@ describe("safe-delete-remote-branch.sh", () => {
     // Point core.graftsFile at it via `~`, with HOME set so `~` resolves there.
     git(clone, "config", "core.graftsFile", "~/grafts");
 
-    const result = spawnSync("bash", [SCRIPT, "unique-branch", "--delete"], {
+    const result = spawnSync("bash", [SCRIPT, "unique-branch"], {
       cwd: clone,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -533,59 +332,6 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("a graft file exists");
     expect(remoteHasBranch("unique-branch")).toBe(true);
     rmSync(graftDir, { recursive: true, force: true });
-  });
-
-  // Codex P2, #156, reproduced: with push.followTags set, the deletion push
-  // also publishes local annotated tags reachable from the main commit it
-  // carries — a tool that promises only to remove a branch silently creating
-  // remote tags.
-  it("does not publish local tags when push.followTags is set", () => {
-    git(clone, "config", "push.followTags", "true");
-    git(clone, "tag", "-a", "v-local-only", "-m", "should not cross");
-
-    const { code } = runScript(["merged-branch", "--delete"]);
-    expect(code).toBe(0);
-    const remoteTags = git(remote, "for-each-ref", "--format=%(refname:short)", "refs/tags/");
-    expect(remoteTags).not.toContain("v-local-only");
-  });
-
-  // Codex P1, #156: every message the script writes itself was redacted, but
-  // git writes its OWN push output ("To <url>", and the error text on failure)
-  // and that never passed through redact_url. Verified against real git rather
-  // than assumed: pushing to `https://host/x.git?access_token=CANARY` prints
-  // the token verbatim. The mismatch guard does not save this case, because it
-  // only fires when fetch and push URLs DIFFER — when they match and both
-  // carry a credential, the script runs all the way to the push.
-  //
-  // Reproducing that without a real HTTPS server: a local bare repo whose
-  // PATH contains a query-shaped credential. Fetch and push both succeed, so
-  // the script reaches the push and git prints the path in its own output,
-  // which is exactly the leak channel under test.
-  it("redacts credentials from git's own push output", () => {
-    const leakRemote = join(root, "leak.git?access_token=CANARY123");
-    git(root, "init", "--bare", "--initial-branch=main", leakRemote);
-    git(clone, "push", leakRemote, "main:main", "merged-branch:merged-branch");
-    git(clone, "remote", "set-url", "origin", leakRemote);
-
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    // The delete SUCCEEDS here; this is the success path's output being the
-    // leak channel, not a refusal.
-    expect(code).toBe(0);
-    expect(out).toContain("DELETED");
-    // The property under test.
-    expect(out).not.toContain("CANARY123");
-    expect(out).toMatch(/url#[0-9a-f]{12}/);
-  });
-
-  // Codex P2, #156: a repeated push URL means the delete would be attempted
-  // against the same target twice.
-  it("refuses a duplicated push URL before mutating anything", () => {
-    git(clone, "remote", "set-url", "--push", "origin", remote);
-    git(clone, "remote", "set-url", "--push", "--add", "origin", remote);
-    const { code, out } = runScript(["merged-branch", "--delete"]);
-    expect(code).not.toBe(0);
-    expect(out).toContain("more than once");
-    expect(remoteHasBranch("merged-branch")).toBe(true);
   });
 
   // Codex P1, #156, and a correction to my own note (qa review, #156).
@@ -630,7 +376,7 @@ describe("safe-delete-remote-branch.sh", () => {
     const distorted = git(clone, "rev-list", "--count", `main..replace-branch`).trim();
     expect(distorted).toBe("2");
 
-    const { code, out } = runScript(["replace-branch", "--delete"]);
+    const { code, out } = runScript(["replace-branch"]);
     expect(code).not.toBe(0);
     // The guard's actual job: the real count, and the full evidence.
     expect(out).toContain("unique:  3 commit(s)");
@@ -638,102 +384,6 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("3 commit(s) exist only on 'replace-branch'");
     expect(remoteHasBranch("replace-branch")).toBe(true);
   });
-
-  // Codex P1, #156, twice, in opposite directions — worth stating because the
-  // conclusion moved and the evidence is what should be trusted, not me.
-  //
-  // First I said git offered no atomic fetch-then-push, so this race could only
-  // be bounded. That was wrong: `git push --atomic` carries several refspecs
-  // and several leases. Then I said that closed the race. That was ALSO wrong.
-  // Verified with a pre-receive hook on a real remote: when main is unchanged at
-  // advertisement time git treats its refspec as up to date and omits it from
-  // the transaction, so main's lease does not participate at all.
-  //
-  // What this test proves is therefore narrower than its old name suggested: if
-  // main has ALREADY moved when the push starts, the delete is refused and the
-  // branch survives. It does not prove anything about a rewrite landing inside
-  // the push itself, which remains a documented residual in the script.
-  //
-  // Codex P2, #156 round 4: the first version of this test rewrote main BEFORE
-  // invoking the script, so the script's own fetch observed the rewrite and
-  // refused at the unique-commit check. The leased push was never reached, and
-  // `toMatch(/REFUSE|rejected/)` accepted that unrelated refusal, so the test
-  // passed with the lease removed entirely — it proved nothing about the race
-  // it was named for. The window is between the script's fetch and its push,
-  // so the rewrite has to land INSIDE that window.
-  //
-  // A `git` shim on PATH does exactly that: it delegates every call to the real
-  // git, except that on the `push` invocation it first force-rewrites main on
-  // the remote. By then the fetch and the reachability count have already run
-  // against the old main, so the lease is genuinely the only thing left that
-  // can refuse.
-  it("refuses to delete when main moves between the reachability check and the push", () => {
-    const rewriter = join(root, "rewriter");
-    git(root, "clone", remote, rewriter);
-    git(rewriter, "commit", "--allow-empty", "--amend", "-m", "rewritten main");
-
-    const shimDir = join(root, "shim");
-    mkdirSync(shimDir);
-    const marker = join(root, "rewrite-fired");
-    writeFileSync(
-      join(shimDir, "git"),
-      [
-        "#!/bin/sh",
-        `if [ "$1" = "push" ] && [ ! -e "${marker}" ]; then`,
-        `  : > "${marker}"`,
-        `  "${REAL_GIT}" -C "${rewriter}" push --force --quiet origin HEAD:main`,
-        "fi",
-        `exec "${REAL_GIT}" "$@"`,
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-
-    const mainBefore = remoteMainSha();
-    const { code, out } = runScript(["merged-branch", "--delete"], { pathPrefix: shimDir });
-
-    // The specific refusal, not any refusal: this must be the lease rejecting
-    // the push, not the reachability check declining to get that far.
-    expect(out).toContain("atomic delete rejected");
-    expect(code).not.toBe(0);
-    // The branch survives, which is the property the whole script exists for.
-    expect(remoteHasBranch("merged-branch")).toBe(true);
-
-    // Guards against the test quietly reverting to proving nothing: the shim
-    // must actually have fired, and main must actually have moved. Without
-    // these, a shim that silently failed to run would leave a green test.
-    expect(existsSync(marker)).toBe(true);
-    expect(remoteMainSha()).not.toBe(mainBefore);
-    // The script reached the push stage, so it had already decided the branch
-    // was safe to delete — the refusal came from the push, not from an earlier
-    // check declining to get that far.
-    expect(out).toContain("SAFE: every commit on 'merged-branch' is reachable from main");
-  });
-
-  // What the test above proves, precisely, and what it does NOT — established
-  // by deleting each part and re-running, not by reading the code:
-  //
-  //   - Remove the `main` REFSPEC from the atomic push and the test FAILS: the
-  //     branch is deleted even though main moved. So carrying main in the push
-  //     is the load-bearing part.
-  //   - Remove only `--force-with-lease` on main and the test still PASSES,
-  //     because pushing the checked main sha back over a moved main is a rewind
-  //     and git rejects it as non-fast-forward regardless of any lease.
-  //
-  // So the main LEASE is defence in depth here — it would carry the refusal if
-  // that refspec were ever forced — and the non-fast-forward rejection is what
-  // actually stops this case. Recorded rather than asserted, because a comment
-  // claiming this test covers the lease would be the same "passes for the wrong
-  // reason" defect that produced this round in the first place.
-
-  // Codex P2, #156: the script's PROTECTED array and the registry's "Protected
-  // branches" table are two independently maintained copies of one destructive
-  // safeguard. Drift is silent and one-directional — a branch added to the
-  // registry but not to the script is reported SAFE and deleted, which is the
-  // accident this list exists to prevent and which has already happened once.
-  // The script keeps its literal list (it must refuse correctly even from a
-  // partial checkout, where parsing the registry could fail open), so the drift
-  // is caught here instead: adding a branch to only one artifact reddens CI.
   it("keeps the script's protected list identical to the registry's", () => {
     const registry = readFileSync(
       fileURLToPath(new URL("../../docs/state/registry.md", import.meta.url)),
@@ -758,7 +408,7 @@ describe("safe-delete-remote-branch.sh", () => {
   it("refuses a branch on the protected list", () => {
     git(clone, "branch", "feature/12-spec-grounded-publish-90-1-base-sha", "main");
     git(clone, "push", "-q", "origin", "feature/12-spec-grounded-publish-90-1-base-sha");
-    const { code, out } = runScript(["feature/12-spec-grounded-publish-90-1-base-sha", "--delete"]);
+    const { code, out } = runScript(["feature/12-spec-grounded-publish-90-1-base-sha"]);
     expect(code).not.toBe(0);
     expect(out).toContain("protected list");
     expect(remoteHasBranch("feature/12-spec-grounded-publish-90-1-base-sha")).toBe(true);
@@ -775,7 +425,7 @@ describe("safe-delete-remote-branch.sh", () => {
     git(other, "commit", "--allow-empty", "-m", "remote-only commit");
     git(other, "push", "-q", "origin", "merged-branch");
 
-    const { code, out } = runScript(["merged-branch", "--delete"]);
+    const { code, out } = runScript(["merged-branch"]);
     expect(code).not.toBe(0);
     expect(out).toContain("exist only on");
     expect(remoteHasBranch("merged-branch")).toBe(true);

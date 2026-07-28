@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 #
-# Safely delete a remote branch, or refuse.
+# Report whether a remote branch is safe to delete. NEVER deletes.
 #
-# This exists because the prose version of this check was wrong four separate
-# times (Codex P1 x4 on PR #156), each time in a way that would have destroyed
-# commits while looking correct. Two protected branches had already been swept
-# by mistake once. A checklist a careful reader gets wrong four times is the
-# wrong medium, so the check is executable instead.
+# Scope decision (operator, 28 Jul 2026): this tool answers the reachability
+# question and stops. Deletion is a manual operator step.
+#
+# That narrowing is deliberate and the reason is worth keeping. While this
+# script could delete, review kept finding real ways the DELETE could land
+# somewhere the CHECK had not looked: a leased push whose lease git silently
+# omitted from the transaction, a `receivepack` override sending the push to a
+# different repository entirely, a lost acknowledgement making a successful
+# delete look like a failure, credentials leaking through git's own push
+# output, and a symbolic ref that dereferenced to `main` on both sides. Every
+# one of those lives in the gap between what was verified and what was mutated.
+# Removing the mutation removes the gap, and keeps the part that was genuinely
+# hard and genuinely valuable: computing the reachability answer correctly,
+# against real objects.
+#
+# It does NOT make the race disappear. It moves it into the operator's hands,
+# between this report and their delete, where a human owns it rather than a
+# script asserting it is closed. The output says so explicitly.
 #
 # Usage:
-#   scripts/safe-delete-remote-branch.sh <branch> [--delete]
-#
-# Without --delete it only reports. With --delete it deletes ONLY if every
-# check passes, using a lease so a concurrent push cannot be clobbered.
+#   scripts/safe-delete-remote-branch.sh <branch>
 #
 # What it refuses on, and why each matters:
 #
@@ -29,9 +39,10 @@
 #      evidence is not sufficient on its own, and `git branch --merged` is
 #      actively misleading because squash merges break ancestry in both
 #      directions.
-#   4. Time-of-check/time-of-use. Between the count and the delete, someone
-#      can push. The delete is therefore leased to the exact sha that was
-#      checked, so a concurrent push makes it fail rather than silently win.
+#   4. Time-of-check/time-of-use. Between this report and a manual delete
+#      someone can push. This tool cannot close that window because it does
+#      not perform the delete, so it NAMES the window in its output rather
+#      than leaving a reader to assume the answer stays true.
 #   5. The protected list. Branches recorded in docs/state/registry.md as
 #      never-delete are refused outright, regardless of everything above.
 #
@@ -116,16 +127,13 @@ die() { echo "REFUSE: $*" >&2; exit 1; }
 branch_display_of() { printf '%s' "$1" | strip_control_bytes; }
 
 branch="${1:-}"
-[ -n "$branch" ] || die "usage: $0 <branch> [--delete]"
+[ -n "$branch" ] || die "usage: $0 <branch>   (reports only; never deletes)"
 # RAW `$branch` for every git operation; `$branch_display` for every message.
 branch_display="$(branch_display_of "$branch")"
-do_delete="${2:-}"
-# Only two arguments are meaningful, and anything past the second was being
-# silently ignored (Codex P2, PR #156). On a destructive tool that is a real
-# hazard: a typo'd or reordered invocation could look accepted while the flag
-# the operator intended went unread.
-[ "$#" -le 2 ] || die "too many arguments; usage: $0 <branch> [--delete]"
-case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$do_delete'; only --delete is accepted" ;; esac
+# Exactly one argument now: the branch to REPORT ON. The `--delete` flag is
+# gone rather than deprecated, so an old invocation fails loudly instead of
+# silently doing less than the caller expects.
+[ "$#" -le 1 ] || die "too many arguments; usage: $0 <branch>   (this tool reports only and never deletes)"
 
 # (0) Never the comparison branch itself. Without this, `main` compares to
 # itself, reports zero unique commits, and deletes the default branch
@@ -134,100 +142,14 @@ case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$
 [ "$branch" = "main" ] && die "'main' is the comparison branch; deleting it is never safe here"
 [ "$branch" = "HEAD" ] && die "refusing the symbolic ref 'HEAD'"
 
-# (0b) The safety check must bind to the ref the DELETE will actually hit.
-# `git remote set-url --push` is an explicitly supported configuration in
-# which fetch and push target different URLs, so verifying one and deleting
-# on the other proves nothing (Codex P1, PR #156).
-# `--all`, not the default: a remote may configure MULTIPLE `pushurl` entries,
-# and `git remote get-url --push` returns only the first, so a matching first
-# entry would hide a divergent second one (Codex P1, PR #156). Every push URL
-# must match the fetch URL, or the delete could land somewhere the check never
-# inspected.
-#
-# URLs are never printed, and this took FOUR rounds to get right, each one a
-# narrower guess at where a credential might sit (Codex P1 x4, PR #156):
-#
-#   v1  redacted `scheme://userinfo@host`.
-#   v2  added an allowlist of credential query-parameter NAMES. Broken by
-#       `client_secret`, which no short exact list contained.
-#   v3  redacted every `?k=v` VALUE regardless of key. Broken by an opaque
-#       keyless credential (`?<token>`), which contains no `=`.
-#   v4  redacted the whole query component. Broken by a PATH-based credential
-#       (`https://host/auth/TOKEN/repo.git`) and by secret-bearing remote-helper
-#       addresses, which are in neither userinfo nor query.
-#
-# Git remote addresses are not a restricted grammar, so a credential can sit
-# anywhere in one, and every version above lost the same way: it enumerated
-# positions and the next reviewer found a position not enumerated. The fix is
-# to stop guessing where the secret is. We KNOW the exact credential-bearing
-# strings — they are the configured remote URLs themselves — so nothing is
-# pattern-matched: the literal known values are replaced wherever they appear,
-# and a URL is never rendered for display at all.
-#
-# What the operator still gets is what they actually need for this refusal: a
-# stable fingerprint per URL, so "fetch and push differ" is provable and two
-# runs are comparable, without the value ever being printed.
-# Salted PER RUN, and that salt is the point (Codex P2, PR #156). An unsalted
-# digest of a credential-bearing URL is an offline verification oracle: an
-# observer who knows the repository's URL template can hash candidate
-# credentials until the prefix matches, so a "safe" fingerprint printed into a
-# CI log would leak a low-entropy password to anyone who kept the log. The salt
-# is random per invocation, so equal URLs still produce equal labels WITHIN a
-# run — which is what the duplicate-target and mismatch checks need — while
-# nothing carries across runs to attack.
-RUN_SALT="$(head -c 32 /dev/urandom | shasum -a 256 | cut -c1-32)"
-url_fingerprint() {
-  printf 'url#%s' "$(printf '%s\n%s' "$RUN_SALT" "$1" | shasum -a 256 | cut -c1-12)"
-}
+# (0b) `uploadpack` is still refused, and `receivepack` is not, and the
+# difference is the whole point of this rescope: a configured upload-pack
+# command decides what the FETCH returns, so it can falsify the reachability
+# answer this tool exists to produce. A receive-pack override could only
+# misdirect a push, and there is no longer a push.
+uploadpack_val="$(git config --get "remote.${REMOTE}.uploadpack" || true)"
+[ -z "$uploadpack_val" ] || die "remote.${REMOTE}.uploadpack is set; a configured transport command decides what the fetch returns, so the reachability answer below could describe a repository other than ${REMOTE}"
 
-# Replaces every known remote URL in text with its fingerprint. Used on git's
-# OWN output, which prints the remote address on both success and failure and
-# does not go through anything above (Codex P1, PR #156).
-KNOWN_URLS=""
-scrub_known_urls() {
-  local text="$1" url
-  while IFS= read -r url; do
-    [ -n "$url" ] || continue
-    text="${text//"$url"/$(url_fingerprint "$url")}"
-  done <<EOF
-$KNOWN_URLS
-EOF
-  printf '%s' "$text"
-}
-
-
-# (0c) Matching URLs do NOT prove the push reaches the inspected repository if
-# the transport command itself is overridden (Codex P1, PR #156, reproduced:
-# with a `receivepack` wrapper the script inspected repo A and deleted the
-# branch from repo B, returning success). Git runs the configured command for
-# the push, so the URL becomes advisory. Refuse any non-default transport
-# command rather than trying to validate one.
-for transport_key in "remote.${REMOTE}.receivepack" "remote.${REMOTE}.uploadpack"; do
-  transport_val="$(git config --get "$transport_key" || true)"
-  [ -z "$transport_val" ] || die "$transport_key is set; a configured transport command means the URL does not determine which repository this push reaches, so the safety check cannot bind to the delete"
-done
-
-fetch_url="$(git remote get-url "$REMOTE")"
-KNOWN_URLS="$fetch_url"
-seen_push_urls=""
-while IFS= read -r push_url; do
-  [ -n "$push_url" ] || continue
-  # A repeated push URL means the delete would be attempted against the same
-  # target more than once (Codex P2, PR #156). Refuse before mutating anything
-  # rather than discovering it half-way through.
-  case "$seen_push_urls" in
-    *"|${push_url}|"*) die "'${REMOTE}' lists the push URL $(url_fingerprint "$push_url") more than once; refusing to delete against a duplicated target" ;;
-  esac
-  seen_push_urls="${seen_push_urls}|${push_url}|"
-  KNOWN_URLS="${KNOWN_URLS}
-${push_url}"
-  [ "$fetch_url" = "$push_url" ] || die "\
-${REMOTE} fetches from $(url_fingerprint "$fetch_url") but has a push URL $(url_fingerprint "$push_url").
-(URLs are fingerprinted, never printed: a remote address can carry a credential anywhere in it.)
-The safety check would inspect one remote and delete on another. Refusing."
-done <<EOF
-$(git remote get-url --push --all "$REMOTE")
-EOF
 
 # (0d) A SYMBOLIC remote ref is not caught by comparing names (Codex P1, PR
 # #156, reproduced: `refs/heads/alias -> refs/heads/main` reported zero unique
@@ -274,101 +196,27 @@ if [ "$unique" -ne 0 ]; then
   die "$unique commit(s) exist only on '$branch_display'"
 fi
 
-echo "SAFE: every commit on '$branch_display' is reachable from main"
-[ "$do_delete" = "--delete" ] || { echo "(report only; pass --delete to remove it)"; exit 0; }
 
-# (4) Close the race properly, with ONE atomic leased push (Codex P1, PR
-# #156). An earlier version of this script re-fetched main, compared it, and
-# claimed git offered no atomic fetch-then-push so the hazard could only be
-# bounded. That was wrong. `git push --atomic` carries several refspecs and
-# several `--force-with-lease` options, and either all succeed or none do, so
-# the deletion can be leased to BOTH the branch sha and the main sha that the
-# reachability count was actually computed against.
+echo
+echo "VERDICT: SAFE TO DELETE — every commit on '$branch_display' is reachable from main."
+echo
+echo "This tool does NOT delete. It answers the reachability question and stops"
+echo "(operator decision, 28 Jul 2026). Deletion is a manual operator step:"
+echo
+# `printf %q` and an option terminator (Codex P1, PR #156). This line is
+# COPY-PASTEABLE, and the branch name is attacker-controlled: git permits shell
+# metacharacters in ref names, so `merged;touch${IFS}/tmp/pwned` printed raw
+# turns a safety report into a command-injection vector at the exact moment the
+# operator is being told to run something destructive. `--` stops a
+# leading-dash name being read as an option.
 #
-# WHAT THIS DOES AND DOES NOT CLOSE (corrected, Codex P1 PR #156, after I
-# claimed the race was closed rather than narrowed — twice, in opposite
-# directions, so the evidence is recorded here rather than the conclusion).
-#
-# Verified with a pre-receive hook on a real remote: when main still equals
-# `main_sha_at_check` at the moment git reads the remote advertisement, git
-# treats that refspec as ALREADY UP TO DATE and omits it from the transaction
-# entirely. The hook sees only the branch deletion. So on the ordinary path
-# main's lease does NOT participate, and cannot detect a rewrite that lands
-# between the advertisement and the deletion.
-#
-# What still holds: the BRANCH lease does participate, because the branch is
-# being deleted, so a concurrent push to the branch is caught. And when main
-# HAS already moved by advertisement time, the refspec is a rewind, so the
-# push is rejected and nothing is deleted.
-#
-# The residual window is therefore narrow and specific: a force-rewrite of main
-# landing after the advertisement but before the deletion, which would have to
-# make the branch's commits unreachable. On this repo main is protected against
-# exactly that. This is a documented residual, NOT a closed race — the earlier
-# claim that `--atomic` plus two leases closed it was wrong, and a reader acting
-# on that claim would over-trust this tool.
-#
-# The main refspec is a no-op update of main to the value we already checked.
-# Verified empirically both ways, by a real-git regression test that rewrites
-# main from inside the script's own run (a `git` shim that mutates the remote
-# on the push call, so the rewrite lands after the fetch and reachability
-# count): with main unchanged the delete succeeds, and with main rewritten
-# mid-run the whole push is rejected and the branch survives.
-#
-# Which part does that work is worth stating exactly, since an earlier comment
-# here overclaimed. Deleting each piece and re-running the test shows the
-# REFSPEC is load-bearing: without it the branch is deleted despite main having
-# moved. The main LEASE is defence in depth — pushing the checked main sha back
-# over a moved main is a rewind, so git rejects it as non-fast-forward with or
-# without the lease. The lease would carry the refusal if this refspec were
-# ever forced, which is why it stays.
-#
-# Any movement of main fails this push, including a benign fast-forward. That
-# is deliberate for a destructive tool: the cost is one re-run, and the
-# alternative is reasoning about which movements are safe while a delete is in
-# flight.
-# git prints the remote URL in its own push output, on success ("To <url>")
-# and on failure alike, and that output is not otherwise scrubbed. When
-# fetch and push URLs match, this script proceeds all the way to here, so a
-# credential carried in the URL leaks through git's output even though every
-# message this script writes itself is redacted (Codex P1, PR #156).
-# Confirmed against real git rather than assumed: a push to
-# `https://host/x.git?access_token=CANARY` prints the token verbatim.
-# So the push output is captured and redacted before anything is shown.
-push_status=0
-push_output="$(git push --atomic --no-follow-tags "$REMOTE" \
-  --force-with-lease="refs/heads/${branch}:${sha}" \
-  --force-with-lease="refs/heads/main:${main_sha_at_check}" \
-  ":refs/heads/${branch}" \
-  "${main_sha_at_check}:refs/heads/main" 2>&1)" || push_status=$?
-if [ -n "$push_output" ]; then
-  { scrub_known_urls "$push_output" | strip_control_bytes; echo; } >&2
-fi
-if [ "$push_status" -ne 0 ]; then
-  # A nonzero push does NOT prove the remote is unchanged (Codex P2, PR #156).
-  # If the server applied the transaction and the connection dropped before the
-  # acknowledgement came back, git exits nonzero with the branch already
-  # deleted — so the old message ("Nothing was deleted. Re-run.") asserted a
-  # remote state it had not checked, on the one path where being wrong means
-  # telling an operator their commits are safe when they are gone.
-  #
-  # So ask the remote instead of assuming. Three outcomes, and the unknown one
-  # is reported as unknown rather than folded into either certainty.
-  # `git ls-remote --exit-code` distinguishes the three states precisely, and
-  # the exit codes are easy to get backwards: 0 = the ref EXISTS, 2 = the query
-  # SUCCEEDED and found no such ref (so the branch is gone), anything else = the
-  # query itself failed and the state is genuinely unknown. An earlier version
-  # of this block read 2 as "unknown", which would have reported a successful
-  # deletion as indeterminate.
-  # Capture with `|| probe=$?`: under `set -e` an unguarded non-zero exit here
-  # terminates the script, so the exit-2 (branch absent) case never reached the
-  # dispatch below and the operator got no message at all.
-  probe=0
-  git ls-remote --exit-code --heads "$REMOTE" "refs/heads/${branch}" >/dev/null 2>&1 || probe=$?
-  case "$probe" in
-    0) die "atomic delete rejected: '$branch_display' or 'main' moved since the check. Re-queried the remote: '$branch_display' is STILL PRESENT, so nothing was deleted. Re-run." ;;
-    2) die "the push reported failure, but a re-query shows '$branch_display' is ABSENT from ${REMOTE}: the deletion was APPLIED and its acknowledgement lost in transit. Do not re-run assuming it failed." ;;
-    *) die "the push failed AND the remote could not be re-queried, so the state of '$branch_display' is UNKNOWN — it may have been deleted with the acknowledgement lost. Check the remote before doing anything else." ;;
-  esac
-fi
-echo "DELETED: $branch_display at ${sha:0:12} (leased against main ${main_sha_at_check:0:12})"
+# Note this prints the RAW branch, shell-quoted, not `$branch_display`: the
+# display form has had control bytes stripped for safety, so pasting it could
+# act on a DIFFERENT ref than the one checked, or on none.
+printf '    git push %q --delete -- %q\n' "$REMOTE" "$branch"
+echo
+echo "Note the window this leaves, because it is real and it is now yours: the"
+echo "answer above describes the remote AS OF NOW. If someone pushes to"
+echo "'$branch_display' between this report and your delete, the delete removes"
+echo "commits this check never saw. Re-run immediately before deleting, and"
+echo "prefer doing both while nothing else is pushing."
