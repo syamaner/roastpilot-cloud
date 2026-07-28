@@ -138,34 +138,93 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(remoteHasBranch("unique-branch")).toBe(true);
   });
 
-  // The worst defect this script ever had: `main` compares to itself, reports
-  // zero unique commits, and deletes the default branch.
-  it("refuses main, and main survives", () => {
+  // A bare `toContain("REFUSE")` is not enough on this script, and that is not
+  // a style point (qa review, #156). Every refusal prints "REFUSE", so the
+  // assertion is satisfied by ANY of them — including one that fires for a
+  // reason unrelated to the guard the test is named after. Three tests here
+  // were verified by mutation to pass with their named guard deleted outright:
+  //
+  //   - "refuses main" passed because with the guard gone the script reaches
+  //     the atomic push, which then fails on an incidental git error
+  //     ("dst ref refs/heads/main receives from more than one src", since the
+  //     push targets main twice when branch == main). An accidental collision,
+  //     not the guard, was doing the work — and it disappears the moment the
+  //     refspec construction changes;
+  //   - "refuses HEAD" passed because the script instead failed fetching a
+  //     nonexistent `refs/heads/HEAD`;
+  //   - the push-URL mismatch test passed because its push URL pointed at a
+  //     path that does not exist, so the push failed at transport level whether
+  //     or not the check ran.
+  //
+  // So each now asserts the SPECIFIC die message, and the mismatch test below
+  // is rebuilt so that removing the check causes a real deletion rather than an
+  // incidental error.
+  it("refuses main by the main-guard specifically, and main survives", () => {
     const { code, out } = runScript(["main", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
+    expect(out).toContain("'main' is the comparison branch; deleting it is never safe here");
+    // It must refuse BEFORE ever concluding main is safe: this is the exact
+    // historical catastrophe, where main compares to itself and reports zero
+    // unique commits.
+    expect(out).not.toContain("SAFE");
     expect(remoteHasBranch("main")).toBe(true);
   });
 
-  it("refuses the symbolic ref HEAD", () => {
+  it("refuses the symbolic ref HEAD by the HEAD-guard specifically", () => {
     const { code, out } = runScript(["HEAD", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
+    expect(out).toContain("refusing the symbolic ref 'HEAD'");
+    // Not the fetch failure that masked this guard's absence before.
+    expect(out).not.toContain("could not fetch");
   });
 
   it("refuses a branch that does not exist on the remote", () => {
     const { code, out } = runScript(["no-such-branch", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
+    expect(out).toContain("could not fetch refs/heads/no-such-branch");
   });
 
-  it("refuses when a push URL diverges from the fetch URL", () => {
-    git(clone, "remote", "set-url", "--push", "origin", join(root, "elsewhere.git"));
+  // Rebuilt (qa review, #156). The push URL now points at a REAL second bare
+  // repo that genuinely contains the branch, so if the mismatch check were
+  // removed the push would SUCCEED and delete from a remote the safety check
+  // never inspected — which is the actual hazard. Pointing at a nonexistent
+  // path, as this test used to, proves only that git cannot push to nowhere.
+  it("refuses when a push URL diverges from the fetch URL, and the other remote is untouched", () => {
+    const elsewhere = join(root, "elsewhere.git");
+    git(root, "init", "--bare", "--initial-branch=main", elsewhere);
+    git(clone, "push", elsewhere, "main:main", "merged-branch:merged-branch");
+    git(clone, "remote", "set-url", "--push", "origin", elsewhere);
+
     const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("REFUSE");
+    expect(out).toContain("The safety check would inspect one remote and delete on another");
+    // Both remotes keep the branch: the one that was checked, and the one that
+    // would have been deleted from.
     expect(remoteHasBranch("merged-branch")).toBe(true);
+    const elsewhereRefs = git(elsewhere, "for-each-ref", "--format=%(refname:short)", "refs/heads/");
+    expect(elsewhereRefs).toContain("merged-branch");
   });
+
+  it("refuses with a usage message when no branch is given", () => {
+    const { code, out } = runScript([]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("usage:");
+  });
+
+  // ACCEPTED AS UNTESTED, recorded rather than dropped (qa review, #156): the
+  // two "absent after an explicit fetch" refusals have no test under their own
+  // trigger. They are backstops for a state the preceding fetch-failure check
+  // should already have caught, so provoking them means simulating a git that
+  // reports a successful fetch without producing the ref. The qa pass confirmed
+  // the backstop does fire when the fetch-failure die is neutralised, so they
+  // are live rather than dead code — but that is defence in depth, not a
+  // covered path, and this comment is here so the next reader knows which.
+  //
+  // Also recorded: the five credential-redaction tests above pass through
+  // BOTH the mismatch refusal's own redaction and the later push-output
+  // redaction, so each alone would satisfy them. The qa pass verified they
+  // fail when the mismatch path's own `redact_url` calls are stripped, so they
+  // do bind that path; they simply are not isolated to it.
 
   // A remote may configure several pushurl entries; `get-url --push` returns
   // only the first, so a matching first entry must not mask a divergent later
@@ -277,17 +336,56 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(remoteHasBranch("merged-branch")).toBe(true);
   });
 
-  // NOT TESTED, deliberately, and recorded rather than quietly dropped: Codex
-  // raised a P1 that a local `refs/replace/*` entry would make `git rev-list`
-  // answer reachability about a substituted graph. The script sets
-  // `GIT_NO_REPLACE_OBJECTS=1` as cheap defence in depth, but I could not
-  // construct the distortion to prove it matters: replacing the branch tip
-  // with main's tip, and replacing main's commit with the branch tip, both
-  // left `rev-list --count main..branch` unchanged at 1, with and without the
-  // env var. Either replacement refs do not affect a symmetric-range count
-  // this way, or the construction needs a shape I did not find. Shipping a
-  // test that passes for the wrong reason would be worse than none, so the
-  // guard stays and the claim that it is load-bearing does not.
+  // Codex P1, #156, and a correction to my own note (qa review, #156).
+  //
+  // I originally recorded this guard as UNTESTABLE, having failed to construct
+  // the distortion: replacing the branch TIP with main's tip, and replacing
+  // main's commit with the branch tip, both left `rev-list --count main..branch`
+  // unchanged. That conclusion was wrong, and wrong in the direction that
+  // matters — it claimed a security guard could not be shown to do anything.
+  //
+  // The construction needs an INTERMEDIATE commit, not the tip. Replacing a
+  // middle commit with a fabricated one whose sole parent is `main` truncates
+  // the ancestry behind it, so the count drops and the commits before the
+  // replacement vanish from BOTH the number and the printed evidence. The tip
+  // itself cannot be hidden this way, because git preserves the original
+  // commit's sha identity through a replacement — which is why the count can be
+  // falsified but never driven to zero, and why this is an evidence-integrity
+  // defect rather than a path to an unwanted delete.
+  //
+  // That distinction is worth keeping: the operator reads that count and that
+  // log to decide whether the refusal is correct, so a silently truncated
+  // history is a real defect even though it cannot itself cause a deletion.
+  it("counts against real objects, not a local replacement graph", () => {
+    // Three unique commits on a branch: base -> c1 -> c2 -> c3(tip).
+    git(clone, "checkout", "-q", "-b", "replace-branch", "main");
+    for (const message of ["c1", "c2", "c3"]) {
+      git(clone, "commit", "--allow-empty", "-m", message);
+    }
+    git(clone, "push", "-q", "origin", "replace-branch");
+    git(clone, "checkout", "-q", "main");
+
+    const mainSha = git(clone, "rev-parse", "main").trim();
+    const c2 = git(clone, "rev-parse", "replace-branch~1").trim();
+    // A stand-in for c2 whose only parent is main, which detaches c1 from the
+    // branch's history for any traversal that honours the replacement.
+    const fabricated = git(clone, "commit-tree", `${c2}^{tree}`, "-p", mainSha, "-m", "fabricated c2").trim();
+    git(clone, "replace", c2, fabricated);
+
+    // Sanity check the construction itself, so this test cannot quietly stop
+    // exercising anything if git's behaviour changes: the replacement MUST
+    // distort an unguarded traversal, or there is nothing here to defend.
+    const distorted = git(clone, "rev-list", "--count", `main..replace-branch`).trim();
+    expect(distorted).toBe("2");
+
+    const { code, out } = runScript(["replace-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    // The guard's actual job: the real count, and the full evidence.
+    expect(out).toContain("unique:  3 commit(s)");
+    expect(out).toContain("c1");
+    expect(out).toContain("3 commit(s) exist only on 'replace-branch'");
+    expect(remoteHasBranch("replace-branch")).toBe(true);
+  });
 
   // Codex P1, #156, and a correction to an earlier claim of mine: I had said
   // git offers no atomic fetch-then-push so this race could only be bounded.
