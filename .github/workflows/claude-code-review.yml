@@ -378,6 +378,32 @@ jobs:
           fi
           exit 0
 
+      - name: Upload the review run's execution transcript (diagnostic artifact)
+        # Issue #146 G4. Step A surfaces denied tool NAMES only, so a Bash
+        # denial reads as "Bash" x N -- not enough to justify a specific
+        # read-only allowlist addition when step 3 designs the fix. This
+        # uploads the same execution file step A reads, as a run/repo-access
+        # gated artifact rather than into the PUBLIC Actions log, so the
+        # `show_full_output: false` posture is preserved. It is the identical
+        # trade-off implement-ready-issues.yml already makes for its own
+        # agent transcript.
+        #
+        # Confidentiality: this job never git-authenticates -- the action's
+        # `use_commit_signing: true` above skips configureGitAuth(), so no
+        # token is embedded in `.git/config`, and this file is the tool-use
+        # stream, not a credential store. The artifact is reachable only to
+        # those with Actions access to this run, not to anyone who can read
+        # the log. Full code-path reasoning and precedent:
+        # implement-ready-issues.yml's "Upload the implement agent's
+        # execution transcript" step.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-review-transcript
+          path: ${{ steps.claude-review.outputs.execution_file }}
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Assert the review actually completed
         # Issue #146, step 2 of 3, and the load-bearing one. Observed on PR
         # #150: this job exited ZERO after four permission denials, having

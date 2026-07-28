@@ -2040,16 +2040,22 @@ jobs:
         }
       }
     }
-      // Counter moved 27 -> 29 and 51 -> 53 by issue #146: the claude-review
-      // job gained two `run:` steps (denial evidence, completion assertion).
-      // These counters are D140 drift-detection evidence, so noticing this is
-      // exactly their job; the update is deliberate and the delta is accounted
-      // for. Do not update them to match a run without knowing which steps moved.
+      // Issue #146 moved these counters, in two accounted-for steps:
+      //   runSteps 27 -> 29: the claude-review job gained two `run:` steps
+      //     (denial evidence + completion assertion).
+      //   actionSteps 27 -> 28, inputs 66 -> 70: it also gained one
+      //     `actions/upload-artifact` step (the transcript diagnostic, G4)
+      //     whose four `with:` entries (name/path/if-no-files-found/
+      //     retention-days) are the +4 inputs.
+      // These counters are D140 drift-detection evidence, so noticing a change
+      // is exactly their job; the deltas above are deliberate. Do not update
+      // them to match a run without knowing which steps moved. If G4 is later
+      // dropped, revert actionSteps to 27 and inputs to 66.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
       runSteps: 29,
-      actionSteps: 27,
-      inputs: 66,
+      actionSteps: 28,
+      inputs: 70,
     });
   });
 
@@ -2095,10 +2101,13 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      // Same +2 from issue #146's two new claude-review run steps.
+      // Same #146 deltas as the corpus test above: +2 run steps (denial
+      // evidence + completion assertion) and +1 upload-artifact action step
+      // with four `with:` inputs (G4). Revert actionSteps to 46 and inputs to
+      // 117 if G4 is dropped.
       runSteps: 53,
-      actionSteps: 46,
-      inputs: 117,
+      actionSteps: 47,
+      inputs: 121,
     });
   });
 });
