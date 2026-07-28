@@ -2033,7 +2033,9 @@ export function buildPublishSuccessStepSummary(
     ? "⚠\uFE0F **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
-      "a manual review pass is required before merging."
+      "a manual review pass is required before merging, and it must include posting " +
+      "`@codex review` on this PR yourself: nothing else will start that review on " +
+      "this path (Codex P2, #155)."
     : "✅ CI, CodeQL, and dependency review triggered normally. " +
       (context.wasRefresh
         // Codex P1, #155: this summary is ALSO produced by the
@@ -2044,9 +2046,11 @@ export function buildPublishSuccessStepSummary(
         ? "This PR was REFRESHED, so its head has moved since creation and Codex's " +
           "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
           "satisfy the wait. Re-trigger with a single `@codex review` on this final " +
-          "commit, then accept EITHER channel: a bot-authored review or comment " +
-          "naming this head sha, OR the bot's 👍 reaction, which carries no sha and " +
-          "is therefore valid only while the head stays unchanged. "
+          "commit, then wait for a CLEAN verdict on either accepted channel: a " +
+          "bot-authored clean comment naming this head sha, OR the bot's 👍 " +
+          "reaction, which carries no sha and is therefore valid only while the " +
+          "head stays unchanged. A posted review with inline findings is NOT a " +
+          "clean verdict: fold it, push, and re-trigger once on the new head. "
         : "Codex auto-reviewed at creation, and for a PR created ready (every " +
           "factory PR) that automatic review IS the valid first verdict: its " +
           "boundary event is `opened`, since such a PR never emits " +

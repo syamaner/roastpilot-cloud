@@ -2225,6 +2225,34 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("does NOT " + "satisfy the wait");
     expect(summary).toContain("Re-trigger with a single `@codex review`");
     expect(summary).not.toContain("IS the valid first verdict");
+    // Codex P2 + claude-review should-fix, #155: BOTH accepted clean channels
+    // must be named, because the 👍 carries no sha and would otherwise be
+    // unsatisfiable, and a findings-review must NOT read as satisfying the
+    // wait. Asserted here because the wording was previously changed without
+    // any test touching it.
+    expect(summary).toContain("CLEAN verdict on either accepted channel");
+    expect(summary).toContain("clean comment naming this head sha");
+    expect(summary).toContain("👍");
+    expect(summary).toContain("valid only while the head stays unchanged");
+    expect(summary).toContain("A posted review with inline findings is NOT a clean verdict");
+  });
+
+  // Codex P2, #155: on the App-mint fallback path nothing starts a Codex
+  // review at all, so the summary must name the trigger the operator has to
+  // post rather than asking vaguely for "a manual review pass".
+  it("tells the operator to post @codex review on the fallback path", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 51,
+      prUrl: "https://github.com/o/r/pull/51",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("**Suppressed**");
+    expect(summary).toContain("Codex does NOT auto-trigger either");
+    expect(summary).toContain("posting `@codex review` on this PR yourself");
+    expect(summary).not.toContain("IS the valid first verdict");
   });
 
   it("reports the anti-gaming classifier as clean when gamingFlagged is false/omitted", () => {

@@ -252,9 +252,12 @@ exception. The load-bearing points:
     the publisher had to open on the **fallback** path, with `GITHUB_TOKEN`
     because App minting failed, gets NO downstream workflow triggers at all
     (factory.md §13), so Codex does not auto-review it either. There is no
-    automatic verdict to wait for on that path; a manual `@codex review` and
-    a full manual review pass are required, exactly as the publisher's own
-    fallback summary already states;
+    automatic verdict to wait for on that path. The operator must post
+    `@codex review` themselves and run a full manual review pass; nothing
+    else will start a review there. The publisher's fallback summary now
+    names that trigger explicitly (Codex P2, #155: it previously asked only
+    for "a manual review pass", so an operator could complete it without
+    ever starting the diverse lens);
   - a **draft marked ready** emits `ready_for_review`, and that is its
     boundary;
   - after any later push, the boundary becomes the fresh single re-trigger on
