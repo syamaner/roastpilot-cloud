@@ -72,3 +72,57 @@ Full pipeline, security model, and label taxonomy:
    table in the same PR — file state and GitHub state must never drift.
 6. Full rules, stack conventions, PR hygiene, and the review rubric:
    [`AGENTS.md`](../../AGENTS.md).
+
+## Protected branches (never delete)
+
+These carry commits that exist nowhere else. Both were swept from the remote
+by mistake on 27 Jul 2026 and restored from a local clone the same day,
+verified sha-for-sha. The reason they were protected had only ever been
+recorded in session context, which is why the sweep looked routine. It is
+recorded here instead.
+
+| Branch | Head | Why protected |
+|---|---|---|
+| `feature/12-spec-grounded-publish-90-1-base-sha` | `4b089ed` | [PR #92](https://github.com/syamaner/roastpilot-cloud/pull/92) was **closed, not merged**; carries 1 commit not in `main`. |
+| `feature/12-spec-grounded-publish-90-5-kind-aware-revalidation` | `a7d278d` | Never had a PR at all; carries 1 commit not in `main`. |
+
+Neither may be deleted until someone confirms its content is genuinely
+superseded and records that confirmation here.
+
+**Before deleting any remote branch**, treat it as a manual, careful operator
+action. There is deliberately no script and no copy-pasteable recipe here, and
+that is the conclusion of PR #156 rather than an omission.
+
+Two attempts were made to make this safe and repeatable. The first was an
+executable check; it took twelve rounds of adversarial review, found real
+defects at a steady rate, never converged, and failed the one live case it was
+used on — asked about a squash-merged branch it reported 30 unique commits and
+refused, because squash-merging breaks ancestry. The second was a documented
+shell procedure replacing it; adversarial review found three issues, then
+seven, then nine, several of them re-treads of hazards the script had already
+fixed. Removing the script had not removed the hazards, because they live in
+git rather than in the tool, and a copy-pasteable recipe is executed as
+literally as a script while being reviewed less.
+
+The hazards are real and worth knowing before you delete anything:
+
+- **A squash-merged branch's commits are not reachable from `main`**, so a
+  reachability count calls them unique. GitHub's merge state is the signal —
+  but a merged branch can be reused, and the historical PR still reports
+  `MERGED` while the new commits exist nowhere else.
+- **The evidence you gather describes the FETCH repository; the delete acts on
+  the PUSH one.** Divergent or multiple push URLs, `receivepack`/`uploadpack`
+  overrides, `core.sshCommand`, `GIT_SSH_COMMAND`, and `ext::` helpers can each
+  make those two different repositories.
+- **Several repository states silently falsify the count**: graft files,
+  `refs/replace/*` entries, shallow boundaries, and symbolic refs on either the
+  remote or the local side. An alias to `main` reports zero unique commits, and
+  deleting it takes main's target with it.
+- **Nothing binds your check to your delete** unless you lease it, and a branch
+  name or commit subject is untrusted input to whatever terminal you read the
+  evidence in.
+
+Each of those has a worked reproduction in **PR #156's review history**. Read
+it before deleting anything you are not certain about, and prefer asking to
+guessing — the two branches above were deleted by mistake exactly once, by a
+sweep that looked routine.
