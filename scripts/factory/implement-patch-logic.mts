@@ -374,8 +374,9 @@ export const CODEX_VERDICT_CRITERION =
   "The verdict must be AUTHORED BY `chatgpt-codex-connector[bot]` — this " +
   "repository is public, so a comment or reaction from anyone else is " +
   "spoofable and does not count — and it must be CLEAN: a bot-authored clean " +
-  "comment naming this exact head, or the bot's 👍, which carries no sha and " +
-  "so holds only while the head is unchanged. A review carrying findings is " +
+  "comment naming this exact head, or the bot's 👍 AFTER its own 👀 — a 👍 " +
+  "with no preceding 👀 is not a completed review, and the 👍 carries no sha, " +
+  "so it holds only while the head is unchanged. A review carrying findings is " +
   "NOT clean, even as a top-level comment with no inline threads that nothing " +
   "blocks on: fold it, push, and re-trigger once on the new head. If neither a " +
   "verdict nor a 👀 appears within roughly 30 minutes, post `@codex review` " +
