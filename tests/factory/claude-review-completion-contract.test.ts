@@ -442,7 +442,9 @@ describe("claude-review denial-evidence step (step A)", () => {
       },
     ]);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("[redacted control characters]");
+    // Redacted by the F4 allowlist (control/bidi bytes are outside the
+    // tool-name grammar), reported as a non-conforming name.
+    expect(result.stdout).toContain("[redacted non-conforming tool name]");
     // The newline no longer forges a heading or a checklist row, and the bidi
     // override is gone, on both stdout and the public step summary.
     expect(result.stdout).not.toContain("## injected heading");
@@ -453,8 +455,9 @@ describe("claude-review denial-evidence step (step A)", () => {
 
   it("A-T11: bidi ISOLATES and the Arabic Letter Mark are also rejected (fsr LOW-3)", () => {
     // The newer half of the Trojan-Source set: bidi isolates LRI/RLI/FSI/PDI
-    // (U+2066-U+2069) and the Arabic Letter Mark (U+061C). The class must
-    // cover them too, not only the overrides/embeddings A-T10 exercises.
+    // (U+2066-U+2069) and the Arabic Letter Mark (U+061C). The F4 allowlist
+    // covers them (as it covers every non-tool-name byte), not just the
+    // overrides/embeddings A-T10 exercises.
     const lri = String.fromCharCode(0x2066);
     const alm = String.fromCharCode(0x061c);
     const isolateName = `mcp__evil__${lri}masked`;
@@ -466,11 +469,80 @@ describe("claude-review denial-evidence step (step A)", () => {
       },
     ]);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("[redacted control characters]");
+    expect(result.stdout).toContain("[redacted non-conforming tool name]");
     expect(result.stdout).not.toContain(lri);
     expect(result.stdout).not.toContain(alm);
     expect(result.summary).not.toContain(lri);
     expect(result.summary).not.toContain(alm);
+  });
+
+  it("A-T12: the allowlist passes real names and redacts the whole Cf class (F4)", () => {
+    // Positive allowlist (mirrors safe_key): only ^[A-Za-z0-9_-]{1,200}$
+    // passes, so every invisible-format codepoint -- INCLUDING U+206A-206F,
+    // which the growing \\uXXXX blacklist never covered -- is redacted, while
+    // the four real denied names pass through. Reverting to any blacklist that
+    // misses these reddens this test.
+    const cfA = String.fromCharCode(0x206a);
+    const cfB = String.fromCharCode(0x206c);
+    const cfC = String.fromCharCode(0x206f);
+    const result = runStepAWith([
+      {
+        type: "result",
+        permission_denials: [
+          { tool_name: `evil${cfA}${cfB}${cfC}name` },
+          { tool_name: "Bash" },
+          { tool_name: "WebFetch" },
+          { tool_name: "mcp__github__get_pull_request" },
+          { tool_name: "Read" },
+        ],
+      },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("[redacted non-conforming tool name]");
+    for (const cf of [cfA, cfB, cfC]) {
+      expect(result.stdout).not.toContain(cf);
+      expect(result.summary).not.toContain(cf);
+    }
+    for (const name of ["Bash", "WebFetch", "mcp__github__get_pull_request", "Read"]) {
+      expect(result.stdout).toContain(name);
+    }
+  });
+
+  it("A-T13: nested model content cannot fabricate the diagnostic (F5 schema-bind)", () => {
+    // Counts/denied-names/invocations are read off the trusted TOP-LEVEL SDK
+    // envelopes (`result` / `assistant`), not a recursive `.. | objects` scan.
+    // A tool_use `input` (model-controlled) carrying a fake denial count, a
+    // fake denied tool name, and a nested tool_use must all be ignored.
+    const result = runStepAWith([
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_evil",
+              name: "Bash",
+              input: {
+                permission_denials_count: 999,
+                denied: { tool_name: "FAKE_INJECTED_TOOL" },
+                nested: { type: "tool_use" },
+              },
+            },
+          ],
+        },
+      },
+      { type: "result", permission_denials_count: 0 },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    // Count and denied names come only from the top-level result record.
+    expect(result.stdout).toContain("permission_denials_count: 0");
+    expect(result.stdout).not.toContain("999");
+    expect(result.stdout).not.toContain("FAKE_INJECTED_TOOL");
+    expect(result.stdout).toContain(
+      "denied tool names (0): no denial records found in this document",
+    );
+    // Only the one real tool_use block counts; the nested one in `input` does not.
+    expect(result.stdout).toContain("tool invocations seen (NOT necessarily denied): 1");
   });
 });
 

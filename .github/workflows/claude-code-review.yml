@@ -339,30 +339,33 @@ jobs:
           # array of SDK messages (base-action `writeExecutionFile()` ->
           # `JSON.stringify(messages, null, 2)`; `.json`, not `.jsonl`), so
           # `jq -s` slurps ONE value and wraps it: the outer `.[]` yields
-          # the message array itself, not the messages. The recursive
-          # `.. | objects` extractions below see through that regardless,
-          # but a plain `.[] | select(type == "object")` does not, so the
-          # top-level-keys line read `none` on every real transcript (issue
-          # #146 G6, settled empirically against a captured 4-denial
-          # transcript). Normalising each slurped element -- descend one
-          # level when it is itself an array -- restores the schema readout
-          # and is a no-op for the single-object or newline-delimited
-          # shapes, so it is correct whichever way the action serialises.
+          # the message array itself, not the messages. The `messages` def
+          # normalises that -- descend one level when a slurped element is
+          # itself an array -- so every extraction below iterates the flat
+          # top-level message stream (issue #146 G6, settled empirically
+          # against a captured 4-denial transcript; without it the schema
+          # readout was `none`). It is a no-op for the single-object or
+          # newline-delimited shapes, so it is correct whichever way the
+          # action serialises, and the schema-bound extractions (F5) rely on
+          # it to read `.type` off each real SDK message envelope.
           if jq -sr '
             def messages: [ .[] | if type == "array" then .[] else . end ];
             def safe_string:
               tostring[:200]
               # A model-controlled tool_name reaches the PUBLIC step summary,
-              # so it must not carry structure-forging bytes: a newline forges
-              # a markdown heading or a fake checklist row, a bidi override
-              # reorders the displayed text (fsr LOW-1). safe_key already
-              # blocks this via its anchored allowlist; give safe_string the
-              # same reject posture for C0/C1 controls, zero-width/bidi/format
-              # controls, and the BOM, before the sensitive-word check. The
-              # class is written with \uXXXX escapes so the source stays
-              # pure ASCII; jq resolves them to the actual code points.
-              | if test("[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
-                then "[redacted control characters]"
+              # so it must not carry structure-forging bytes. Use a POSITIVE
+              # allowlist (mirroring safe_key), not a blacklist: a \uXXXX
+              # blacklist kept missing invisible-Cf codepoints (LOW-1, then
+              # LOW-3, then U+206A-206F), so per the fix-the-class rule the
+              # mechanism changes to an allowlist (F4). Anthropic tool names
+              # are ^[a-zA-Z0-9_-]{1,64}$ and MCP names (mcp__server__tool)
+              # match, so anything outside [A-Za-z0-9_-] -- every control,
+              # bidi and format codepoint, space, paren, etc. -- is redacted
+              # without ever chasing a new escape. The secret-word check
+              # stays as a second branch (a conforming name may still say
+              # "token").
+              | if (test("^[A-Za-z0-9_-]{1,200}$") | not)
+                then "[redacted non-conforming tool name]"
                 elif test("secret|token|password|credential|api.?key"; "i")
                 then "[redacted sensitive-looking string]"
                 else . end;
@@ -373,22 +376,29 @@ jobs:
                 then .
                 else "[redacted unsafe key]" end;
             ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
-            | ([ .[] | .. | objects
-                | to_entries[]
-                | select(.key | test("permission_denials?_count"; "i"))
-                | select(.value | type == "number")
-                | "\(.key | safe_key): \(.value)" ] | unique) as $counts
-            | ([ .[] | [paths][] as $p | select($p[-1] | tostring | test("denial|denied"; "i"))
-                | getpath($p) | .. | objects
-                | select(has("tool_name"))
+            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # message stream, not a recursive `.. | objects` scan (F5). The
+            # model owns message CONTENT (text, tool_use inputs) but not the
+            # envelope `.type`, so a tool_use `input` carrying a nested
+            # `permission_denials_count` / `denied:{tool_name}` /
+            # `{type:"tool_use"}` can no longer fabricate this public
+            # diagnostic. Denials and their count sit on the `result` record;
+            # invocations are `tool_use` blocks in `assistant` content.
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials_count
+                | select(type == "number")
+                | "permission_denials_count: \(.)" ] | unique) as $counts
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials[]?
                 | .tool_name
                 | select(type == "string")
                 | safe_string ] | unique | sort) as $tools
-            # Real tool invocations are assistant `tool_use` content blocks
-            # (schema: `{type:"tool_use", name:...}`); `tool_name` appears only
-            # on `permission_denials[]` records, so counting `has("tool_name")`
-            # counted DENIALS, not invocations (F3). Count `type == "tool_use"`.
-            | ([ .[] | .. | objects | select(.type == "tool_use") ] | length) as $invocations
+            | ([ messages[]
+                | select(.type == "assistant")
+                | .message.content[]?
+                | select(.type == "tool_use") ] | length) as $invocations
             | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
               + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
