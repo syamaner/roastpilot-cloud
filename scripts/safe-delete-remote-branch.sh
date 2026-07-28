@@ -111,30 +111,63 @@ case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$
 # must match the fetch URL, or the delete could land somewhere the check never
 # inspected.
 #
-# URLs are REDACTED before being printed: a remote URL may carry inline
-# credentials (`https://user:token@host/...`), and this refusal path would
-# otherwise print them straight into a terminal or CI log (Codex P1, PR #156).
+# URLs are never printed, and this took FOUR rounds to get right, each one a
+# narrower guess at where a credential might sit (Codex P1 x4, PR #156):
 #
-# This redaction took three rounds, and the first two were the same mistake
-# twice: v1 handled only `scheme://userinfo@host`; v2 added an ALLOWLIST of
-# credential parameter names (`access_token`, `token`, `secret`, ...), which
-# Codex then broke again with `client_secret` — the name is anchored to `[?&]`,
-# so a compound key simply misses the list (Codex P1, PR #156, round 3).
+#   v1  redacted `scheme://userinfo@host`.
+#   v2  added an allowlist of credential query-parameter NAMES. Broken by
+#       `client_secret`, which no short exact list contained.
+#   v3  redacted every `?k=v` VALUE regardless of key. Broken by an opaque
+#       keyless credential (`?<token>`), which contains no `=`.
+#   v4  redacted the whole query component. Broken by a PATH-based credential
+#       (`https://host/auth/TOKEN/repo.git`) and by secret-bearing remote-helper
+#       addresses, which are in neither userinfo nor query.
 #
-# Enumerating credential-bearing key names cannot be finished: every new name
-# is a fresh leak, and the failure is silent and unrecoverable, because a token
-# printed into a CI log is disclosed before anyone notices the list was short.
-# So this no longer enumerates. EVERY query-parameter VALUE is redacted
-# regardless of its key, which fails closed by construction. Key names survive
-# for diagnosis, and host/path — the only part that identifies which remote
-# mismatched — is untouched.
-redact_url() {
-  printf '%s' "$1" \
-    | sed -E 's#(://)[^/@]*@#\1<redacted>@#' \
-    | sed -E 's#\?[^#[:space:]]*#?<redacted>#g'
+# Git remote addresses are not a restricted grammar, so a credential can sit
+# anywhere in one, and every version above lost the same way: it enumerated
+# positions and the next reviewer found a position not enumerated. The fix is
+# to stop guessing where the secret is. We KNOW the exact credential-bearing
+# strings — they are the configured remote URLs themselves — so nothing is
+# pattern-matched: the literal known values are replaced wherever they appear,
+# and a URL is never rendered for display at all.
+#
+# What the operator still gets is what they actually need for this refusal: a
+# stable fingerprint per URL, so "fetch and push differ" is provable and two
+# runs are comparable, without the value ever being printed.
+url_fingerprint() {
+  printf 'url#%s' "$(printf '%s' "$1" | shasum -a 256 | cut -c1-12)"
+}
+
+# Replaces every known remote URL in text with its fingerprint. Used on git's
+# OWN output, which prints the remote address on both success and failure and
+# does not go through anything above (Codex P1, PR #156).
+KNOWN_URLS=""
+scrub_known_urls() {
+  local text="$1" url
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    text="${text//"$url"/$(url_fingerprint "$url")}"
+  done <<EOF
+$KNOWN_URLS
+EOF
+  printf '%s' "$text"
+}
+
+# Untrusted branch data reaches the terminal through `git log --oneline`, so a
+# commit subject carrying ANSI/OSC escapes or a carriage return could clear,
+# overwrite or forge the safety evidence and the refusal message the operator
+# reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
+# C1 control bytes, keeping tab and newline.
+strip_control_bytes() {
+  # Keeps ONLY tab (\011) and newline (\012). An earlier range kept \015 too,
+  # which is the carriage return an attacker uses to return to column zero and
+  # overwrite the line just printed — the single most useful byte for forging
+  # this report, left in by a range that looked deliberate.
+  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed -E 's/\xc2[\x80-\x9f]//g'
 }
 
 fetch_url="$(git remote get-url "$REMOTE")"
+KNOWN_URLS="$fetch_url"
 seen_push_urls=""
 while IFS= read -r push_url; do
   [ -n "$push_url" ] || continue
@@ -142,11 +175,14 @@ while IFS= read -r push_url; do
   # target more than once (Codex P2, PR #156). Refuse before mutating anything
   # rather than discovering it half-way through.
   case "$seen_push_urls" in
-    *"|${push_url}|"*) die "'${REMOTE}' lists the push URL '$(redact_url "$push_url")' more than once; refusing to delete against a duplicated target" ;;
+    *"|${push_url}|"*) die "'${REMOTE}' lists the push URL $(url_fingerprint "$push_url") more than once; refusing to delete against a duplicated target" ;;
   esac
   seen_push_urls="${seen_push_urls}|${push_url}|"
+  KNOWN_URLS="${KNOWN_URLS}
+${push_url}"
   [ "$fetch_url" = "$push_url" ] || die "\
-${REMOTE} fetches from '$(redact_url "$fetch_url")' but has a push URL '$(redact_url "$push_url")'.
+${REMOTE} fetches from $(url_fingerprint "$fetch_url") but has a push URL $(url_fingerprint "$push_url").
+(URLs are fingerprinted, never printed: a remote address can carry a credential anywhere in it.)
 The safety check would inspect one remote and delete on another. Refusing."
 done <<EOF
 $(git remote get-url --push --all "$REMOTE")
@@ -182,7 +218,7 @@ echo "unique:  $unique commit(s) not reachable from ${MAIN_REF}"
 
 if [ "$unique" -ne 0 ]; then
   echo
-  git log --oneline "${MAIN_REF}..${branch_ref}" | sed 's/^/    /'
+  git log --oneline "${MAIN_REF}..${branch_ref}" | strip_control_bytes | sed 's/^/    /'
   die "$unique commit(s) exist only on '$branch'"
 fi
 
@@ -240,7 +276,7 @@ echo "SAFE: every commit on '$branch' is reachable from main"
 # alternative is reasoning about which movements are safe while a delete is in
 # flight.
 # git prints the remote URL in its own push output, on success ("To <url>")
-# and on failure alike, and that output does NOT go through redact_url. When
+# and on failure alike, and that output is not otherwise scrubbed. When
 # fetch and push URLs match, this script proceeds all the way to here, so a
 # credential carried in the URL leaks through git's output even though every
 # message this script writes itself is redacted (Codex P1, PR #156).
@@ -254,7 +290,7 @@ push_output="$(git push --atomic --no-follow-tags "$REMOTE" \
   ":refs/heads/${branch}" \
   "${main_sha_at_check}:refs/heads/main" 2>&1)" || push_status=$?
 if [ -n "$push_output" ]; then
-  { redact_url "$push_output"; echo; } >&2
+  { scrub_known_urls "$push_output" | strip_control_bytes; echo; } >&2
 fi
 if [ "$push_status" -ne 0 ]; then
   die "atomic delete rejected: '$branch' or 'main' moved since the check. Nothing was deleted. Re-run."

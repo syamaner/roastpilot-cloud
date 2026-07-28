@@ -243,7 +243,7 @@ describe("safe-delete-remote-branch.sh", () => {
     const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
-    expect(out).toContain("<redacted>@");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
     // The whole point: the token must never reach a terminal or CI log.
     expect(out).not.toContain("supersecrettoken");
   });
@@ -271,7 +271,7 @@ describe("safe-delete-remote-branch.sh", () => {
     git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git?access_token=querysecret123");
     const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("<redacted>");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
     expect(out).not.toContain("querysecret123");
   });
 
@@ -290,7 +290,7 @@ describe("safe-delete-remote-branch.sh", () => {
     git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git?${key}=${secret}`);
     const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("<redacted>");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
     expect(out).not.toContain(secret);
     // The key name is redacted too, and that is the CURRENT contract rather
     // than the original one. v3 redacted `?k=v` values and kept key names for
@@ -311,9 +311,72 @@ describe("safe-delete-remote-branch.sh", () => {
     git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git${query}`);
     const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
-    expect(out).toContain("<redacted>");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
     expect(out).not.toContain("opaquecanary");
     expect(out).not.toContain("barecanary");
+  });
+
+  // Codex P1 [blocker], #156, round 4 on this one behaviour. A credential can
+  // sit in the PATH (`https://host/auth/TOKEN/repo.git`) or in a remote-helper
+  // address — neither userinfo nor query — so every position-enumerating
+  // redaction lost the same way. Nothing is pattern-matched now: the KNOWN
+  // remote URL strings are replaced wherever they appear, and no URL is
+  // rendered for display at all.
+  it.each([
+    ["path-based credential", "https://example.invalid/auth/PATHCANARY/x.git"],
+    ["userinfo credential", "https://u:USERCANARY@example.invalid/x.git"],
+    ["opaque query credential", "https://example.invalid/x.git?QUERYCANARY"],
+  ])("never prints the remote URL for a %s", (_name, url) => {
+    git(clone, "remote", "set-url", "--push", "origin", url);
+    const { code, out } = runScript(["merged-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
+    for (const canary of ["PATHCANARY", "USERCANARY", "QUERYCANARY"]) {
+      expect(out).not.toContain(canary);
+    }
+    // The URL itself must not appear in any form, credential-bearing or not.
+    expect(out).not.toContain("example.invalid");
+  });
+
+  // The test above refuses at the URL-MISMATCH check, so it never reaches the
+  // push and therefore never exercises the scrubbing of git's OWN output —
+  // which is what the P1 was actually about. Verified by mutation: neutralising
+  // `scrub_known_urls` leaves it green. This one makes fetch and push the SAME
+  // credential-bearing URL, so the script proceeds all the way to a successful
+  // delete and git prints the address itself.
+  it("scrubs the remote URL out of git's own push output", () => {
+    const leakRemote = join(root, "auth-PATHCANARY-remote.git");
+    git(root, "init", "--bare", "--initial-branch=main", leakRemote);
+    git(clone, "push", leakRemote, "main:main", "merged-branch:merged-branch");
+    git(clone, "remote", "set-url", "origin", leakRemote);
+
+    const { code, out } = runScript(["merged-branch", "--delete"]);
+    // The delete SUCCEEDS here; the success path is the leak channel.
+    expect(code).toBe(0);
+    expect(out).toContain("DELETED");
+    expect(out).not.toContain("PATHCANARY");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
+  });
+
+  // Codex P2, #156: the refusal prints `git log --oneline` for the commits that
+  // exist only on the branch, and a commit subject is untrusted data. Control
+  // bytes there could clear the screen or overwrite the very evidence the
+  // operator reads to decide whether the refusal is correct.
+  it("strips terminal control bytes from the commit evidence", () => {
+    git(clone, "checkout", "-q", "-b", "ansi-branch", "main");
+    // ESC[2J clears the screen; \r returns to column zero to overwrite.
+    git(clone, "commit", "--allow-empty", "-m", "\u001b[2Jcleared\rOVERWRITTEN evidence");
+    git(clone, "push", "-q", "origin", "ansi-branch");
+    git(clone, "checkout", "-q", "main");
+
+    const { code, out } = runScript(["ansi-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    // The raw control bytes must not survive to the terminal.
+    expect(out).not.toContain("\u001b");
+    expect(out).not.toContain("\r");
+    // The readable text still does, so the evidence is not simply dropped.
+    expect(out).toContain("OVERWRITTEN evidence");
+    expect(remoteHasBranch("ansi-branch")).toBe(true);
   });
 
   // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not
@@ -404,7 +467,7 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("DELETED");
     // The property under test.
     expect(out).not.toContain("CANARY123");
-    expect(out).toContain("<redacted>");
+    expect(out).toMatch(/url#[0-9a-f]{12}/);
   });
 
   // Codex P2, #156: a repeated push URL means the delete would be attempted
