@@ -1179,6 +1179,11 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     expect(commentBody.body).toContain("GITHUB_TOKEN fallback");
     expect(commentBody.body).toContain("no-review-automation");
     expect(commentBody.body).toContain("just refreshed");
+    // Same instruction, sibling site (pr-triage on #155): the refresh notice is
+    // the other persistent operator-facing text on a fallback PR, and it was
+    // equally unasserted.
+    expect(commentBody.body).toContain("`@codex review`");
+    expect(commentBody.body).toContain("nothing else will start it on this path");
   });
 
   it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK unset applies NO label and posts NO fallback-refresh comment", async () => {

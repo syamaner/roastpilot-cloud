@@ -1834,6 +1834,12 @@ describe("buildImplementPrBody", () => {
     expect(body).toContain("⚠\uFE0F");
     expect(body).toContain("GITHUB_TOKEN fallback");
     expect(body).toContain("Do not merge without a manual review pass");
+    // Codex P1 (#155 round 5) + pr-triage: on the fallback path NOTHING starts
+    // a Codex review, so this banner must name the trigger the operator has to
+    // post by hand. It took two rounds to land in every sibling site, and had
+    // no assertion anywhere, so an edit could have silently dropped it again.
+    expect(body).toContain("`@codex review`");
+    expect(body).toContain("nothing else will start it on this path");
     expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
     // The warning must lead the body, not be buried below the fold —
     // asserted structurally (its position precedes "## Story"), not just
