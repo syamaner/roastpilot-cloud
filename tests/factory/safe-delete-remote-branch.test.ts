@@ -111,6 +111,16 @@ describe("safe-delete-remote-branch.sh", () => {
     const { code, out } = runScript(["merged-branch"]);
     expect(code).toBe(0);
     expect(out).toContain("VERDICT: SAFE TO DELETE");
+    // Codex P2, #156: converting these lines from `echo` to `printf` for the
+    // xpg_echo fix left `\\n` in the format strings, so the whole report
+    // collapsed onto one line with literal backslash-n between fields. Every
+    // existing assertion here is a substring check, and substring checks are
+    // blind to layout — so nothing failed. Assert the structure, not just the
+    // presence of words.
+    expect(out).not.toContain("\\n");
+    expect(out.split("\n").some((l) => l.startsWith("branch:  "))).toBe(true);
+    expect(out.split("\n").some((l) => l.startsWith("sha:     "))).toBe(true);
+    expect(out.split("\n").some((l) => l.startsWith("unique:  "))).toBe(true);
     expect(out).toContain("This tool does NOT delete");
     // The window is named rather than implied — report-only relocates the
     // race to the operator, it does not remove it.

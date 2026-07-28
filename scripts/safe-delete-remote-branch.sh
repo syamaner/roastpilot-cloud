@@ -111,7 +111,14 @@ strip_control_bytes() {
     | perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/([\x{0}-\x{8}\x{b}-\x{1f}\x{7f}-\x{9f}])/sprintf("<U+%04X>",ord($1))/ge; $_=encode("UTF-8",$_)'
 }
 
-die() { echo "REFUSE: $*" >&2; exit 1; }
+# `printf`, not `echo` (Codex P2, PR #156). With `xpg_echo` inherited — an
+# exported `BASHOPTS` is enough — `echo` INTERPRETS backslash escapes, so a
+# path or ref containing the printable text `\033[2J` is turned back into a
+# raw terminal escape by the very call that reports it. The sanitiser is
+# correct to leave printable text alone; the bug is re-interpreting it on the
+# way out. Every refusal flows through here, so this is the one place to fix
+# it — and `%s` also stops a leading `-` in the message being read as a flag.
+die() { printf 'REFUSE: %s\n' "$*" >&2; exit 1; }
 
 # Git permits control bytes in REF NAMES, and a remotely-created branch is
 # attacker-controllable input to this report (Codex P2, PR #156). The commit
@@ -146,7 +153,7 @@ grafts_file="$(git config --type=path --get core.graftsFile || true)"
 # The PATH is attacker-influenced too (Codex P2, PR #156): a graft filename or
 # repository path containing ESC/CR writes those bytes straight to the terminal
 # from inside the refusal itself.
-[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$(printf '%s' "$grafts_file" | strip_control_bytes)'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
+[ -e "$grafts_file" ] && { printf 'REFUSE: a graft file exists at %s; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this.\n' "'$(printf '%s' "$grafts_file" | strip_control_bytes)'" >&2; exit 1; }
 
 branch="${1:-}"
 [ -n "$branch" ] || die "usage: $0 <branch>   (reports only; never deletes)"
@@ -294,9 +301,9 @@ main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
   || die "'$branch_display' resolves to exactly the same commit as main. That is what an alias to main looks like, and this check cannot distinguish an alias from a coincidence without symref data the remote may not advertise. Refusing: deleting an alias would take main's target with it"
 
 unique="$(git rev-list --count "${MAIN_REF}..${branch_ref}")"
-echo "branch:  $branch_display"
-echo "sha:     ${sha:0:12}"
-echo "unique:  $unique commit(s) not reachable from ${MAIN_REF}"
+printf 'branch:  %s\n' "$branch_display"
+printf "sha:     %s\n" "${sha:0:12}"
+printf 'unique:  %s commit(s) not reachable from %s\n' "$unique" "${MAIN_REF}"
 
 if [ "$unique" -ne 0 ]; then
   echo
@@ -306,7 +313,7 @@ fi
 
 
 echo
-echo "VERDICT: SAFE TO DELETE — every commit on '$branch_display' is reachable from main."
+printf "VERDICT: SAFE TO DELETE — every commit on '%s' is reachable from main.\n" "$branch_display"
 echo
 echo "This tool does NOT delete. It answers the reachability question and stops"
 echo "(operator decision, 28 Jul 2026). Deletion is a manual operator step:"
@@ -325,6 +332,6 @@ printf '    git push %q --delete -- %q\n' "$REMOTE" "$branch"
 echo
 echo "Note the window this leaves, because it is real and it is now yours: the"
 echo "answer above describes the remote AS OF NOW. If someone pushes to"
-echo "'$branch_display' between this report and your delete, the delete removes"
+printf "'%s' between this report and your delete, the delete removes\n" "$branch_display"
 echo "commits this check never saw. Re-run immediately before deleting, and"
 echo "prefer doing both while nothing else is pushing."
