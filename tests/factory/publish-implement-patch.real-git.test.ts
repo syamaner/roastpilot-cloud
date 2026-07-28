@@ -1208,7 +1208,12 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // look-before-you-post instruction instead.
     expect(commentBody.body).not.toContain("nothing else will start it on this path");
     expect(commentBody.body).toContain("LOOK FIRST");
-    expect(commentBody.body).toContain("posting it may have started a review by itself");
+    // Codex P2, #155: this comment is rendered inert, so it cannot have started
+    // a review, and every claim that it might have is now gone rather than
+    // contradicted. The look-first instruction stays — a review may still have
+    // started from the PR body or another trigger.
+    expect(commentBody.body).not.toContain("may have started a review by itself");
+    expect(commentBody.body).toContain("LOOK FIRST");
     // Same shared criterion, sibling site (Codex P1, #155): bot-authorship was
     // missing from every fallback notice.
     expect(commentBody.body).toContain("chatgpt-codex-connector[bot]");

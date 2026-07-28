@@ -1657,9 +1657,7 @@ function buildFallbackRefreshCommentBodyRaw(runUrl: string): string {
       `cost of being wrong is one redundant trigger. **Do not merge without a manual review pass on the latest ` +
       `commit(s), and that pass must include a Codex review of this head.** It is ` +
       "NOT safe to assume one is already running, and NOT safe to assume one is " +
-      "not: this very comment quotes the trigger phrase, and the connector matches " +
-      "that phrase inside posted comment bodies, so posting it may have started a " +
-      "review by itself. So LOOK FIRST — if a 👀 or a review on this head is " +
+      "not. LOOK FIRST — if a 👀 or a review on this head is " +
       "already there, you are in the wait; if nothing has appeared within the " +
       `documented timeout below, post \`@codex review\` once yourself. ${CODEX_VERDICT_CRITERION} ` +
       `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
