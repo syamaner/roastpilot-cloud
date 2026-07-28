@@ -319,7 +319,21 @@ jobs:
             exit 0
           fi
           evidence="$(mktemp)"
+          # The action writes this file as a single pretty-printed JSON
+          # array of SDK messages (base-action `writeExecutionFile()` ->
+          # `JSON.stringify(messages, null, 2)`; `.json`, not `.jsonl`), so
+          # `jq -s` slurps ONE value and wraps it: the outer `.[]` yields
+          # the message array itself, not the messages. The recursive
+          # `.. | objects` extractions below see through that regardless,
+          # but a plain `.[] | select(type == "object")` does not, so the
+          # top-level-keys line read `none` on every real transcript (issue
+          # #146 G6, settled empirically against a captured 4-denial
+          # transcript). Normalising each slurped element -- descend one
+          # level when it is itself an array -- restores the schema readout
+          # and is a no-op for the single-object or newline-delimited
+          # shapes, so it is correct whichever way the action serialises.
           if jq -sr '
+            def messages: [ .[] | if type == "array" then .[] else . end ];
             def safe_string:
               tostring[:200]
               | if test("secret|token|password|credential|api.?key"; "i")
@@ -331,7 +345,7 @@ jobs:
                    and (test("secret|token|password|credential|api.?key"; "i") | not)
                 then .
                 else "[redacted unsafe key]" end;
-            ([ .[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
+            ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
             | ([ .[] | .. | objects
                 | to_entries[]
                 | select(.key | test("permission_denials?_count"; "i"))
@@ -414,15 +428,37 @@ jobs:
           fi
 
           # Select across all pages, and bind evidence to this exact run.
+          # `github.run_id` is a GitHub-guaranteed positive integer, so the
+          # run-id fragment carries no regex metacharacters. The binding
+          # must be boundary-anchored, not a substring: `contains(...)`
+          # matched run 123 inside `/actions/runs/1234`, letting an
+          # UNRELATED newer run's tracking comment satisfy this run's
+          # completion check (issue #146 G2). The left side is anchored by
+          # the literal `/actions/runs/` prefix; the right side requires a
+          # non-digit or end-of-string immediately after the id, so a
+          # shorter id can no longer prefix-match a longer one.
           BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
             | jq -r --arg run_id "$RUN_ID" \
-              'add | [.[] | select(.user.login == "claude[bot]") | select(.body | contains("/actions/runs/" + $run_id))] | last | .body // ""')"
+              'add | [.[] | select(.user.login == "claude[bot]") | select(.body | test("/actions/runs/" + $run_id + "([^0-9]|$)"))] | last | .body // ""')"
 
           if [ -z "$BODY" ]; then
             echo "::error::this run posted no tracking comment, so no review ran (issue #146)"
             exit 1
           fi
 
+          # The signals below (a `- [ ]` checklist box and a "review in
+          # progress" heading) are the shape of the action's OWN
+          # `track_progress: true` tracking comment, verified against the
+          # captured PR #150 (truncated) and PR #152 (healthy) comments at
+          # the pinned action SHA. That wording is the action's, not ours,
+          # and the test fixtures cannot see a FUTURE version's wording:
+          # bumping the `anthropics/claude-code-action` pin above requires
+          # re-validating this tracking-comment wording contract (re-capture
+          # a real tracking comment and update
+          # tests/factory/claude-review-completion-contract.test.ts), or a
+          # reworded checklist will silently stop matching and this gate
+          # will pass a truncated review.
+          #
           # Inspect only the first contiguous task-list block. This is the
           # action's tracking checklist, and excludes later review prose
           # that may legitimately quote unticked acceptance criteria or say
