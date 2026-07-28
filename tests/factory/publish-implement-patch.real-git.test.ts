@@ -1179,6 +1179,44 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     expect(commentBody.body).toContain("GITHUB_TOKEN fallback");
     expect(commentBody.body).toContain("no-review-automation");
     expect(commentBody.body).toContain("just refreshed");
+    // Same instruction, sibling site (pr-triage on #155): the refresh notice is
+    // the other persistent operator-facing text on a fallback PR, and it was
+    // equally unasserted.
+// Codex P2, #155: this comment is posted AUTOMATICALLY onto an existing PR
+    // that may be a draft, and the connector matches the trigger phrase inside
+    // comment bodies. Containing the phrase would start a review on a draft,
+    // which can never complete the clean-verdict flow (D105) — the exact
+    // unsatisfiable wait this same notice warns the operator about. So the
+    // property under test is the INVERSE of what this used to assert.
+    expect(commentBody.body).not.toContain("@codex review");
+    expect(commentBody.body).toContain("the Codex review trigger comment");
+    // Codex P2, #155: having made this comment inert, the criterion's generic
+    // "this notice may have started a review" warning became false FOR THIS
+    // comment, which would cost the operator a needless timeout wait.
+    // The warning about a notice possibly self-triggering must be REPLACED for
+    // this comment, not contradicted by an appended footer (Codex P2, #155):
+    // the phrase is inert here, so the warning is false, and carrying both gave
+    // the operator two mutually exclusive instructions in one comment.
+    expect(commentBody.body).toContain("cannot have started a review");
+    expect(commentBody.body).not.toContain("this notice may already have triggered");
+    // Codex P2, #155: this used to assert "nothing else will start it on this
+    // path", which the comment itself falsifies — it quotes the trigger phrase,
+    // and the connector matches that phrase inside posted comment bodies
+    // (observed on roastpilot-agent#682). The notice can therefore start the
+    // review it claims nothing will start, which would make the operator's
+    // instructed trigger a forbidden second one. Assert the corrected
+    // look-before-you-post instruction instead.
+    expect(commentBody.body).not.toContain("nothing else will start it on this path");
+    expect(commentBody.body).toContain("LOOK FIRST");
+    // Codex P2, #155: this comment is rendered inert, so it cannot have started
+    // a review, and every claim that it might have is now gone rather than
+    // contradicted. The look-first instruction stays — a review may still have
+    // started from the PR body or another trigger.
+    expect(commentBody.body).not.toContain("may have started a review by itself");
+    expect(commentBody.body).toContain("LOOK FIRST");
+    // Same shared criterion, sibling site (Codex P1, #155): bot-authorship was
+    // missing from every fallback notice.
+    expect(commentBody.body).toContain("chatgpt-codex-connector[bot]");
   });
 
   it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK unset applies NO label and posts NO fallback-refresh comment", async () => {

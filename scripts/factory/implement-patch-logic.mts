@@ -352,6 +352,141 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
 }
 
 /** Exact combined textual-line ceiling for the current factory publisher. */
+/**
+ * The self-trigger warning inside {@link CODEX_VERDICT_CRITERION}, factored out
+ * so {@link renderTriggerPhraseInertly} can replace it by identity rather than
+ * by a second copy of the wording that could drift from it.
+ */
+export const TRIGGER_SELF_START_WARNING =
+  "CHECK BEFORE YOU POST. A GitHub COMMENT that quotes the trigger phrase can " +
+  "start the review by itself: the connector matches that phrase inside posted " +
+  "comment bodies, backticks included — observed on roastpilot-agent#682 " +
+  "(28 Jul 2026), where an inline reply quoting it in a code span drew a " +
+  "connector response 11 seconds later in that same thread. So look for an " +
+  "existing 👀 or review on this head first, and count ONLY one authored by " +
+  "`chatgpt-codex-connector[bot]`: this repository is public, so anyone can " +
+  "leave a 👀 or post a review, and treating a stranger's as proof that Codex " +
+  "started leaves you waiting out the timeout for a review that never began. " +
+  "If a bot-authored signal is already there, it started without you and you " +
+  "are in the wait, not before it.";
+
+/** What replaces the warning above once the phrase has been rendered inert. */
+export const INERT_SELF_START_NOTE =
+  "CHECK BEFORE YOU POST — though not because of THIS comment, which cannot " +
+  "have started a review: the trigger phrase above is described rather than " +
+  "quoted, deliberately, because the publisher posts this automatically onto a " +
+  "PR that may still be a draft, where a review posts findings but never " +
+  "completes the clean-verdict flow (D105). A review may still have started " +
+  "from the PR body or someone else's trigger, so look for an existing 👀 or " +
+  "review on this head, counting ONLY one authored by " +
+  "`chatgpt-codex-connector[bot]` — this repository is public, so a stranger's " +
+  "would leave you waiting for a review that never began.";
+
+/**
+ * The ONE statement of what satisfies the Codex wait, appended verbatim to
+ * every operator-facing notice.
+ *
+ * Introduced because restating it per site is what kept going wrong. Across
+ * this rule's review history the criterion was restated at five sites and
+ * drifted at nearly every round: one site would learn that a findings-review
+ * is not clean while another still implied it was, one would name the trigger
+ * while another asked only for "a manual review pass", and the
+ * bot-authorship requirement reached none of them. Each fix landed where it
+ * was reported and not at its siblings, which is precisely the per-symptom
+ * patching AGENTS.md's rubric forbids. One constant makes the next correction
+ * land everywhere by construction.
+ *
+ * `AGENTS.md`'s PR Merge Policy remains the source of truth for the full
+ * rule, including the channel definitions and the in-progress bound; this is
+ * the operator-facing short form of it, not a competing copy.
+ */
+export const CODEX_VERDICT_CRITERION =
+  "The verdict must be AUTHORED BY `chatgpt-codex-connector[bot]` — this " +
+  "repository is public, so a comment or reaction from anyone else is " +
+  "spoofable and does not count — and it must be CLEAN, which means one of " +
+  "exactly two signals. Either a bot-authored TOP-LEVEL comment titled " +
+  '"Codex Review: Didn\'t find any major issues" carrying a ' +
+  "`Reviewed commit: <sha>` line whose sha matches this exact head — match " +
+  "that title and that line, not your own reading of whether some other " +
+  "comment sounds clean, because the connector also posts bot-authored " +
+  "head-naming comments that are not verdicts at all (queued, skipped, or " +
+  "unable-to-review notices) and none of those satisfies the wait. Or the " +
+  "bot's 👍 AFTER its own 👀 — a 👍 " +
+  "with no preceding 👀 is not a completed review, and the 👍 carries no sha, " +
+  "so it holds only while the head is unchanged. Matching the head is NOT " +
+  "sufficient on its own: the signal must also POSTDATE the event that started " +
+  "this PR's review (`opened` for a PR created ready, `ready_for_review` for a " +
+  "draft marked ready, or the fresh re-trigger after any later push), because a " +
+  "review left on the draft names the very same sha and would otherwise close " +
+  "the wait while the review the ready transition just started is still in " +
+  "flight. A review carrying findings is " +
+  "NOT clean, even as a top-level comment with no inline threads that nothing " +
+  "blocks on: fold it, push, and re-trigger once on the new head. If NO trigger " +
+  "has yet been posted for this head, and neither a verdict nor a 👀 appears " +
+  "within roughly 30 minutes, post `@codex review` once — but ONLY IF THIS PR IS " +
+  "READY. On a DRAFT there is nothing to wait for and nothing to trigger: a " +
+  "manual review on a draft posts findings yet can never complete the " +
+  "clean-verdict flow (D105), so triggering one there buys findings worth " +
+  "folding and a wait that cannot end. Marking the draft ready is what starts " +
+  "the automatic review; wait on that instead. Where the PR is ready, that " +
+  "trigger is a first review " +
+  "that never started, not the re-litigation the once-on-final rule forbids. " +
+  "Where a trigger has already been posted FOR THIS HEAD, do not post a second " +
+  "one: wait, and escalate rather than re-trigger. Two kinds of trigger do NOT " +
+  "count as already-posted, and both name a sha that can look current. A " +
+  "trigger on an EARLIER head does not count: the head moved, so that review " +
+  "describes a superseded commit. And a trigger posted BEFORE this PR's " +
+  "boundary event does not count either — typically one posted while the PR " +
+  "was still a draft, which leaves the sha unchanged through " +
+  "`ready_for_review` and so looks current by head alone (Codex P2, #155). " +
+  "That draft review can never supply a post-boundary clean verdict, so " +
+  "counting it would forbid the timeout re-trigger and leave the operator " +
+  "waiting on a verdict that cannot arrive. Match the trigger to the boundary, " +
+  "not merely to the sha. " +
+  TRIGGER_SELF_START_WARNING;
+
+/** The literal phrase that starts a Codex review when it appears in a comment. */
+export const CODEX_TRIGGER_PHRASE = "@codex review";
+
+
+/**
+ * Renders text so the publisher can POST it without the act of posting
+ * starting a Codex review.
+ *
+ * The connector matches the trigger phrase inside comment bodies, backticks
+ * included (observed on roastpilot-agent#682). That is harmless in a step
+ * summary, which is not a comment, and harmless in a PR body, since factory
+ * PRs are created ready. It is NOT harmless in the fallback refresh comment:
+ * the publisher posts that automatically onto an EXISTING PR, which may be a
+ * draft, and a review started on a draft posts findings but can never complete
+ * the clean-verdict flow (D105) — so the notice would create exactly the
+ * unsatisfiable wait the same notice tells the operator to avoid (Codex P2,
+ * #155).
+ *
+ * The alternative was to plumb the PR's draft state through
+ * findExistingPrForIssue and branch on it. This is preferred because it is a
+ * static property of the emitted text rather than a runtime condition that can
+ * be wrong: a notice that cannot trigger a review is draft-safe whatever the
+ * PR's state turns out to be, and needs no new API field to stay correct.
+ */
+export function renderTriggerPhraseInertly(text: string): string {
+  const described = text.split(CODEX_TRIGGER_PHRASE).join(
+    "the Codex review trigger comment (its exact text is in AGENTS.md's PR Merge Policy — " +
+      "it is deliberately not quoted here, because quoting it in a posted comment starts a review)",
+  );
+  // The criterion's self-trigger warning exists ONLY because the text quotes
+  // the phrase. Once the phrase is described rather than quoted, that warning
+  // is false for this text, and leaving it produced two mutually exclusive
+  // instructions in the same comment — look-first-because-this-may-have-
+  // triggered, next to a footer saying it cannot have (Codex P2, #155).
+  //
+  // Both transformations are tied to the same fact, so they belong at one seam
+  // rather than in two places that can disagree. An earlier fix bolted the
+  // correction on as a trailing note, which left the contradiction in the body
+  // and merely appended a denial of it.
+  return described.split(TRIGGER_SELF_START_WARNING).join(INERT_SELF_START_NOTE);
+}
+
 export const FACTORY_TEXT_LINE_LIMIT = 400;
 
 /** One path row from git's authoritative `--numstat -z` scratch-index diff. */
@@ -1406,10 +1541,13 @@ export interface ProvenanceContext {
  *
  * `publishedViaFallback` — true when this PR was opened using the built-in
  * `GITHUB_TOKEN` because no factory App token was minted (factory.md
- * §13's publisher-identity switch). GitHub suppresses downstream workflow
+ * §13's publisher-identity switch). GitHub suppresses downstream WORKFLOW
  * triggers for `GITHUB_TOKEN`-authored PR events, so a PR opened this way
- * got NO review-automation coverage at all (CodeQL, Codex, Claude Code
- * Review never ran) — a fact the workflow's own `::warning::` annotation
+ * got no workflow review-automation coverage (CodeQL and Claude Code Review
+ * never ran). Codex is NOT covered by that rule — it is an installed GitHub
+ * App receiving webhooks rather than an Actions workflow, so its behaviour
+ * here is unverified in both directions (Codex P2, #155) — a fact the
+ * workflow's own `::warning::` annotation
  * (adjudicated F2, #40 rework) only surfaced in the Actions log, which the
  * human merging the PR doesn't read. This field makes
  * {@link buildImplementPrBody} put that same signal ON the PR itself.
@@ -1493,15 +1631,45 @@ export function assertLabelDescriptionWithinLimit(
  * @returns The Markdown comment body.
  */
 export function buildFallbackRefreshCommentBody(runUrl: string): string {
+  // The shared criterion warns that a notice quoting the trigger phrase may
+  // itself have started a review. True of the PR body, which keeps the literal
+  // phrase — and FALSE of this comment, precisely because it is rendered inert
+  // below (Codex P2, #155). Leaving the generic warning unqualified here would
+  // send the operator into a needless timeout wait for a review that this
+  // comment cannot have started, so the exception is stated explicitly rather
+  // than left to be inferred.
+  return renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl));
+}
+
+/**
+ * The refresh notice before it is made draft-safe. Split out so the inert
+ * rendering is applied at exactly one place and cannot be forgotten by a later
+ * edit to the body text.
+ */
+function buildFallbackRefreshCommentBodyRaw(runUrl: string): string {
   return [
     "> ⚠\uFE0F **This PR was just refreshed via the GITHUB_TOKEN fallback — review-automation " +
       "workflows did NOT run against the new commit(s).**",
     "",
     "No factory App token was minted for this run (the App wasn't configured, or minting " +
-      "failed), so CodeQL, Codex, and Claude Code Review never triggered on the refreshed " +
-      "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
-      `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
-      `commit(s).** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+      "failed), so CodeQL and Claude Code Review never triggered on the refreshed " +
+      "branch: GitHub suppresses downstream WORKFLOW triggers for GITHUB_TOKEN-authored " +
+      "events (factory.md §13). Codex is assumed not to have reviewed either, but that " +
+      "rests on a different and UNVERIFIED mechanism — the Codex connector is an installed " +
+      "GitHub App receiving webhooks, not an Actions workflow, so the GITHUB_TOKEN " +
+      "suppression rule does not govern it, and its behaviour on a bot-authored PR has not " +
+      "been observed here. Treat it as unreviewed, which is the fail-closed reading: the " +
+      `cost of being wrong is one redundant trigger. **Do not merge without a manual review pass on the latest ` +
+      `commit(s), and that pass must include a Codex review of this head.** It is ` +
+      "NOT safe to assume one is already running, and NOT safe to assume one is " +
+      "not. LOOK FIRST — if a 👀 or a review on this head is " +
+      "already there, you are in the wait; if nothing has appeared within the " +
+      "documented timeout below, AND THIS PR IS READY, post `@codex review` once " +
+      "yourself. If it is still a DRAFT, do not: a review started on a draft " +
+      "posts findings but can never complete the clean-verdict flow (D105), so " +
+      "it spends a review and begins a wait that cannot end. Mark it ready, " +
+      `which starts the automatic review, and wait on that. ${CODEX_VERDICT_CRITERION} ` +
+      `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
     "",
     `[Run output](${runUrl}).`,
   ].join("\n");
@@ -1517,7 +1685,7 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
  * validation 422 misread as "label already exists").
  */
 export const NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION =
-  "Opened via GITHUB_TOKEN fallback — no review automation ran; needs a manual review before merging.";
+  "Opened via GITHUB_TOKEN fallback — workflow review automation did not run; needs manual review.";
 
 /**
  * True only when `err` represents GitHub's specific "label already
@@ -1620,10 +1788,19 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
     ? [
         "> ⚠\uFE0F **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
           "NOT run on this PR.** No factory App token was minted when this PR was " +
-          "published (the App wasn't configured, or minting failed), so CodeQL, " +
-          "Codex, and Claude Code Review never triggered (GitHub suppresses " +
-          "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
-          "factory.md §13). **Do not merge without a manual review pass.** " +
+          "published (the App wasn't configured, or minting failed), so CodeQL and " +
+          "Claude Code Review never triggered: GitHub suppresses downstream WORKFLOW " +
+          "triggers for GITHUB_TOKEN-authored PR events (factory.md §13). Codex is a " +
+          "DIFFERENT mechanism and that rule does not govern it — the connector is an " +
+          "installed GitHub App receiving webhooks, not an Actions workflow — so " +
+          "whether it auto-reviewed here is UNVERIFIED (Codex P2, #155). **Do not " +
+          "merge without a manual review pass, and that pass must include a Codex " +
+          "review of this head.** LOOK FIRST rather than assuming either way: if a 👀 " +
+          "or a review is already on this head then it started without you and you " +
+          "are in the wait; if nothing has appeared within the documented timeout, " +
+          "post `@codex review` once yourself — but ONLY if this PR is READY; on " +
+          "a draft, mark it ready instead, because a review started there can " +
+          "never complete the clean-verdict flow. " + CODEX_VERDICT_CRITERION + " " +
           `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
@@ -2032,12 +2209,47 @@ export function buildPublishSuccessStepSummary(
   const reviewAutomationLine = context.publishedViaFallback
     ? "⚠\uFE0F **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
-      `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
-      "a manual review pass is required before merging."
-    : "✅ CI, CodeQL, and dependency review triggered normally. Codex auto-reviewed " +
-      "at creation, but the operator must still manually `@codex review` the FINAL " +
-      "commit and wait for its verdict before merging (AGENTS.md's Codex-wait rule) " +
-      "— this is NOT satisfied automatically. ⚠\uFE0F **Claude Code Review does NOT yet " +
+      "(factory.md §13). Codex is a DIFFERENT mechanism and that rule does not govern " +
+      "it: the connector is an installed GitHub App receiving webhooks, not an Actions " +
+      "workflow, so whether it auto-reviews here is UNVERIFIED (Codex P2, #155 — this " +
+      `line used to assert flatly that it does not). ${labelLine} — ` +
+      "a manual review pass is required before merging, and it must include a Codex " +
+      "review of this head. LOOK FIRST rather than assuming either way — but only a " +
+      "signal from `chatgpt-codex-connector[bot]` counts (Codex P2, #155): this " +
+      "repository is public, so anyone can add a 👀 or post a review, and treating " +
+      "an unrelated one as proof that Codex started would leave you waiting out the " +
+      "timeout for a review that never began. If a BOT-AUTHORED 👀 or review is " +
+      "already on this head then it started without you and you are in the wait; if " +
+      "nothing bot-authored has appeared within the documented timeout, post `@codex " +
+      "review` once yourself. " + CODEX_VERDICT_CRITERION
+    : "✅ CI, CodeQL, and dependency review triggered normally. " +
+      (context.wasRefresh
+        // Codex P1, #155: this summary is ALSO produced by the
+        // existing-PR refresh path, where applyPatchAndPush has already
+        // moved the head. The creation-time automatic review describes a
+        // superseded commit, so presenting it as valid here would let an
+        // operator merge a refreshed head on a stale verdict.
+        ? "This PR was REFRESHED, so its head has moved since creation and Codex's " +
+          "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
+          "satisfy the wait. **CHECK WHETHER THIS PR IS A DRAFT FIRST** (Codex P2, " +
+          "#155). If it is, do NOT post a trigger: a manual review on a draft posts " +
+          "findings but can never complete the clean-verdict flow (D105), so waiting " +
+          "for one there waits forever. Marking it ready is what starts the automatic " +
+          "review; wait on that instead. Only if it is already ready, re-trigger with " +
+          "a single `@codex review` on this final commit. " + CODEX_VERDICT_CRITERION + " "
+        : "Codex's automatic review is DUE on this PR, not known to have happened " +
+          "(Codex P2, #155: this line used to assert it had auto-reviewed, which " +
+          "reads as a completed status the operator can rely on). For a PR created " +
+          "ready — every factory PR — the boundary event is `opened`, since such a " +
+          "PR never emits `ready_for_review`, and that automatic review IS the " +
+          "valid first verdict WHEN IT ARRIVES. It has not yet been observed on a " +
+          "bot-authored factory PR, where a sibling review lens is known to refuse " +
+          "the publisher identity until #47 lands, so treat its arrival as expected " +
+          "rather than done. You must WAIT for it (AGENTS.md's Codex-wait rule); " +
+          "what changes on this path is only that no manual trigger is needed to " +
+          "START the review, and the timeout clause below is what catches the case " +
+          "where it never begins. " + CODEX_VERDICT_CRITERION + " ") +
+      "⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
       `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +

@@ -825,10 +825,13 @@ jobs:
       issues: write
     steps:
       # factory.md §13's headline finding, confirmed live on #34: GitHub
-      # suppresses downstream workflow triggers (CI, Codex, Claude Code
+      # suppresses downstream WORKFLOW triggers (CI, CodeQL, Claude Code
       # Review) for events authored by the built-in GITHUB_TOKEN, so a PR
-      # opened with it sails past the entire review apparatus with nobody
-      # the wiser. The fix (operator decision, 18 Jul 2026): mint a
+      # opened with it sails past that apparatus with nobody the wiser.
+      # Codex was listed here too and should not have been (Codex P2, #155):
+      # the connector is an installed GitHub App receiving webhooks, not an
+      # Actions workflow, so the suppression rule does not govern it and its
+      # behaviour on such a PR is unverified in both directions. The fix (operator decision, 18 Jul 2026): mint a
       # short-lived installation token for a dedicated GitHub App —
       # NOT a long-lived PAT (an earlier design used
       # `FACTORY_PUBLISHER_TOKEN`, a fine-grained PAT on the owner's
@@ -905,7 +908,7 @@ jobs:
               REASON="the mint step failed (outcome=$MINT_OUTCOME) — check its own step logs for the real error"
             fi
             echo "fallback_reason=$REASON" >> "$GITHUB_OUTPUT"
-            echo "::warning::No factory App token was minted ($REASON) — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code Review) for GITHUB_TOKEN-authored PR events, so the PR this run opens will NOT be reviewed automatically. See factory.md §13 for the fix."
+            echo "::warning::No factory App token was minted ($REASON) — publishing with the built-in GITHUB_TOKEN. GitHub suppresses downstream WORKFLOW triggers (CI, CodeQL, Claude Code Review) for GITHUB_TOKEN-authored PR events, so those will NOT run on the PR this run opens. Codex is a different mechanism and that rule does not govern it (the connector is an installed GitHub App receiving webhooks, not an Actions workflow), so whether it auto-reviews is UNVERIFIED — look for a 👀 or an existing review on the head before posting a trigger yourself. See factory.md §13."
           else
             echo "Confirmed: minted a short-lived factory App installation token — publishing with a workflow-triggering identity."
           fi

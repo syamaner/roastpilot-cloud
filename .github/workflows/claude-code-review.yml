@@ -76,10 +76,19 @@ jobs:
     # simply not running. `head.repo.full_name == repository` is false for
     # any fork (true only when the PR's source branch lives in this same
     # repo), so this skips exactly the cases with no secret to work with.
-    # Skip DRAFT PRs (D103 draft-first): the diverse-lens loop opens a PR as a
-    # draft to converge Codex before "ready". Running claude-review on the draft
-    # too would double its runs and land findings pre-ready; it fires on
-    # ready_for_review once the PR is out of draft. (Factory PRs open non-draft.)
+    # Skip DRAFT PRs (D103 draft-first, rationale corrected by D142). The draft
+    # phase is NOT where Codex converges: its automatic trigger does not fire on
+    # a draft at all, so the pre-ready diverse lens is a LOCAL
+    # `codex review --base origin/main` before the branch is pushed. What the
+    # draft phase is actually for is the runner-only gates, and skipping
+    # claude-review here keeps a review lens from being spent on a head that is
+    # still expected to move; it fires on ready_for_review once the PR is out of
+    # draft. (Factory PRs open non-draft, so this `if` admits them from `opened`.
+    # That is NOT the same as their being reviewed: the action still rejects
+    # the publisher bot, which is deliberately absent from `allowed_bots`
+    # until #47 allowlists it. Codex, #155: an earlier version of this line
+    # claimed factory PRs "are reviewed from `opened`", which this same file
+    # contradicts twice.)
     #
     # Excludes `edited` entirely (Codex finding, PR #76 review, L316): this
     # job reviews the DIFF, which a body edit never changes — reacting to

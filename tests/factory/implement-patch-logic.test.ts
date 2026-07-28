@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
+  CODEX_VERDICT_CRITERION,
   buildGamingBothLostReviewBody,
   buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
@@ -1834,6 +1835,22 @@ describe("buildImplementPrBody", () => {
     expect(body).toContain("⚠\uFE0F");
     expect(body).toContain("GITHUB_TOKEN fallback");
     expect(body).toContain("Do not merge without a manual review pass");
+    // Codex P1 (#155 round 5) + pr-triage: on the fallback path NOTHING starts
+    // a Codex review, so this banner must name the trigger the operator has to
+    // post by hand. It took two rounds to land in every sibling site, and had
+    // no assertion anywhere, so an edit could have silently dropped it again.
+    expect(body).toContain("`@codex review`");
+    // Codex P2, #155: the PR body no longer claims nothing else can start the
+    // review — it quotes the trigger phrase, and the connector matches that
+    // phrase inside posted comment bodies, so the body itself may start one.
+    expect(body).not.toContain("nothing else will start it on this path");
+    expect(body).toContain("whether it auto-reviewed here is UNVERIFIED");
+    expect(body).toContain("LOOK FIRST rather than assuming either way");
+    // Codex P1, #155: the fallback notices rejected findings-reviews but never
+    // required the clean signal be BOT-AUTHORED, and this repository is public,
+    // so an unauthored comment is spoofable. The shared constant carries that
+    // requirement to every site at once.
+    expect(body).toContain(CODEX_VERDICT_CRITERION);
     expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
     // The warning must lead the body, not be buried below the fold —
     // asserted structurally (its position precedes "## Story"), not just
@@ -2106,11 +2123,40 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("triggered normally");
     expect(summary).not.toContain("**Suppressed**");
     // Adjudicated fix (Codex P2, #46 reshape): must not imply the
-    // Codex-wait rule is already satisfied just because it auto-reviewed.
-    expect(summary).toContain("Codex auto-reviewed at creation");
-    expect(summary).toContain("must still manually");
-    expect(summary).toContain("@codex review");
-    expect(summary).toContain("NOT satisfied automatically");
+    // Codex-wait rule is already satisfied. The WAIT still applies in
+    // full; what D142 changed is only how the wait is STARTED (Codex P3,
+    // #155 -- an earlier revision of this comment said "needs no wait at
+    // all", which contradicted the assertions directly below it).
+    // REVISED by D142 and Codex P1 on #155: a factory PR is created READY, so it emits `opened` and
+    // never `ready_for_review`, and that automatic review IS its valid
+    // first verdict. Telling the operator to re-trigger manually on an
+    // unchanged head caused a duplicate review and a needless delay. The
+    // wait itself is still asserted, and so is the manual re-trigger for
+    // the one case that genuinely needs it, a later push moving the head.
+    // Codex P2, #155: this used to assert "Codex auto-reviewed at creation",
+    // stating as completed fact something AGENTS.md records as never yet
+    // observed on a bot-authored factory PR. That reads as a status the
+    // operator can rely on, so the summary now says the review is DUE and this
+    // asserts the corrected framing rather than the old claim.
+    expect(summary).toContain("automatic review is DUE on this PR, not known to have happened");
+    expect(summary).not.toContain("Codex auto-reviewed at creation");
+    expect(summary).toContain("IS the valid first verdict WHEN IT ARRIVES");
+    expect(summary).toContain("`opened`");
+    // The wait itself is still asserted (Codex P3, #155): what D142
+    // changed is how the wait STARTS, never whether it applies.
+    // Codex P1, #155 round 5: the creation path must require a CLEAN
+    // verdict too. A posted review carrying findings is not clean, and the
+    // earlier wording called the automatic review a valid first verdict
+    // without saying so, which let findings read as a pass.
+    // Assert the SHARED constant, not a per-site restatement. Restating it
+    // per site is what drifted at nearly every review round; asserting the
+    // constant means a test cannot silently diverge from the text either.
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
+    expect(summary).toContain("WAIT for it");
+    expect(summary).not.toContain("REFRESHED");
+    expect(summary).toContain("no manual trigger is needed to START the review");
+    expect(summary).not.toContain("must still manually");
+    expect(summary).not.toContain("NOT satisfied automatically");
     // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
     // Review must NOT be reported as part of "triggered normally" — it
     // does not actually run on a factory-minted PR until #47 lands.
@@ -2133,7 +2179,12 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("`FACTORY_PUBLISHER_APP_ID is not configured`");
     expect(summary).toContain("⚠\uFE0F **Suppressed**");
     expect(summary).toContain("no-review-automation");
-    expect(summary).toContain("Codex does NOT auto-trigger either");
+    // Codex P2, #155: the summary no longer asserts Codex is suppressed. The
+    // GITHUB_TOKEN workflow-suppression rule governs Actions workflows, not the
+    // installed Codex App, so the honest state is UNVERIFIED and the operator is
+    // told to look before posting rather than to assume either way.
+    expect(summary).toContain("whether it auto-reviews here is UNVERIFIED");
+    expect(summary).not.toContain("Codex does NOT auto-trigger either");
   });
 
   it("reports the label as applied when labelApplied is true or omitted (undefined = not attempted, treated as the default success wording)", () => {
@@ -2188,6 +2239,89 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: true,
     });
     expect(summary).toContain("(refreshed, not newly opened)");
+  });
+
+  // Codex P1, #155. This summary is shared with the existing-PR refresh
+  // path, where applyPatchAndPush has ALREADY moved the head. Telling the
+  // operator that the creation-time automatic review is a valid verdict
+  // would let them merge a refreshed head on a superseded one, which is the
+  // exact stale-verdict failure the wait rule exists to prevent. The
+  // newly-opened wording must therefore never appear on a refresh.
+  it("tells the operator a refreshed head needs a fresh Codex re-trigger", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      prNumber: 50,
+      prUrl: "https://github.com/o/r/pull/50",
+      wasRefresh: true,
+    });
+    expect(summary).toContain("REFRESHED");
+    expect(summary).toContain("SUPERSEDED");
+    expect(summary).toContain("does NOT " + "satisfy the wait");
+    // Codex P2, #155: the refresh notice now gates the re-trigger on the PR not
+    // being a draft. A manual review on a draft posts findings but can never
+    // complete the clean-verdict flow (D105), so directing a trigger there sends
+    // the operator into a wait that cannot end.
+    expect(summary).toContain("CHECK WHETHER THIS PR IS A DRAFT FIRST");
+    expect(summary).toContain("Marking it ready is what starts the automatic review");
+    expect(summary).toContain("re-trigger with a single `@codex review`");
+    expect(summary).not.toContain("IS the valid first verdict");
+    // Codex P2 + claude-review should-fix, #155: BOTH accepted clean channels
+    // must be named, because the 👍 carries no sha and would otherwise be
+    // unsatisfiable, and a findings-review must NOT read as satisfying the
+    // wait. Asserted here because the wording was previously changed without
+    // any test touching it.
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
+  });
+
+  // Codex P2, #155: on the App-mint fallback path nothing starts a Codex
+  // review at all, so the summary must name the trigger the operator has to
+  // post rather than asking vaguely for "a manual review pass".
+  it("tells the operator to post @codex review on the fallback path", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 51,
+      prUrl: "https://github.com/o/r/pull/51",
+      wasRefresh: false,
+    });
+    expect(summary).toContain("**Suppressed**");
+    // Codex P2, #155: the summary no longer asserts Codex is suppressed. The
+    // GITHUB_TOKEN workflow-suppression rule governs Actions workflows, not the
+    // installed Codex App, so the honest state is UNVERIFIED and the operator is
+    // told to look before posting rather than to assume either way.
+    expect(summary).toContain("whether it auto-reviews here is UNVERIFIED");
+    expect(summary).not.toContain("Codex does NOT auto-trigger either");
+    expect(summary).toContain("LOOK FIRST rather than assuming either way");
+    expect(summary).toContain("post `@codex review` once yourself");
+    expect(summary).not.toContain("IS the valid first verdict");
+    // Codex, #155: "no automatic verdict to wait for" must not read as "no
+    // wait". The acceptance criterion is the same on this path, and a
+    // findings-carrying review is not clean even with no inline threads.
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
+  });
+
+  // Codex F5, #155: publishedViaFallback + wasRefresh is reachable (the
+  // publisher passes wasRefresh: true through the same summary context), and
+  // no test covered the combination. It must stay on the Suppressed branch:
+  // the refresh branch asserts an automatic review at creation that a
+  // fallback-opened PR never had.
+  it("keeps a refreshed FALLBACK publish on the suppressed branch", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 52,
+      prUrl: "https://github.com/o/r/pull/52",
+      wasRefresh: true,
+    });
+    expect(summary).toContain("**Suppressed**");
+    expect(summary).toContain("LOOK FIRST rather than assuming either way");
+    expect(summary).toContain("post `@codex review` once yourself");
+    expect(summary).not.toContain("REFRESHED, so its head has moved");
+    expect(summary).not.toContain("IS the valid first verdict");
   });
 
   it("reports the anti-gaming classifier as clean when gamingFlagged is false/omitted", () => {
