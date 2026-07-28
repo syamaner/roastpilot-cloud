@@ -76,7 +76,12 @@ const CONDITIONS = [
     /👍 AFTER its own 👀/,
     // NOT a bare /👀/: that matches the emoji anywhere in the file, so the
     // ordering condition could be deleted outright and this would still pass.
-    /\*\*👍 reaction \(after the 👀\)\*\*/,
+    // Must require the preceding 👀 to be the BOT'S OWN. The earlier matcher
+    // accepted any "👍 reaction (after the 👀)" wording, so AGENTS.md could
+    // stay weaker than the constant while this contract reported the two as
+    // aligned — and on a public repo a third party can supply that 👀
+    // (Codex P2, #155).
+    /👍 reaction \(after the bot's OWN 👀[\s\S]{0,200}must itself be\s+bot-authored/,
   ],
   [
     "records that a bare 👍 with no preceding 👀 is not a completed review",
