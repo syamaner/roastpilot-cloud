@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("../../scripts/safe-delete-remote-branch.sh", import.meta.url));
 
+/**
+ * Absolute path to the real git, resolved BEFORE any test puts a shim on PATH,
+ * so a shim can delegate to it without recursing into itself.
+ */
+const REAL_GIT = execFileSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+
 let root: string;
 let remote: string;
 let clone: string;
@@ -43,19 +49,32 @@ function git(cwd: string, ...args: string[]): string {
   });
 }
 
-/** Runs the script; returns its exit code and combined output. */
-function runScript(...args: string[]): { code: number; out: string } {
+/**
+ * Runs the script; returns its exit code and combined output.
+ *
+ * `pathPrefix` prepends a directory to PATH, which is how the lease test gets
+ * a shimmed `git` in front of the real one so it can mutate the remote at an
+ * exact point inside the script's run.
+ */
+function runScript(args: string[], opts: { pathPrefix?: string } = {}): { code: number; out: string } {
+  const env = opts.pathPrefix ? { ...process.env, PATH: `${opts.pathPrefix}:${process.env.PATH ?? ""}` } : process.env;
   try {
     const out = execFileSync("bash", [SCRIPT, ...args], {
       cwd: clone,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env,
     });
     return { code: 0, out };
   } catch (error) {
     const err = error as { status?: number; stdout?: string; stderr?: string };
     return { code: err.status ?? 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
   }
+}
+
+/** The remote's current `main` sha, read straight from the bare repo. */
+function remoteMainSha(): string {
+  return git(remote, "rev-parse", "refs/heads/main").trim();
 }
 
 function remoteHasBranch(branch: string): boolean {
@@ -93,14 +112,14 @@ afterEach(() => {
 describe("safe-delete-remote-branch.sh", () => {
   it("deletes a branch whose commits are all reachable from main", () => {
     expect(remoteHasBranch("merged-branch")).toBe(true);
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).toBe(0);
     expect(out).toContain("DELETED");
     expect(remoteHasBranch("merged-branch")).toBe(false);
   });
 
   it("reports without deleting when --delete is omitted", () => {
-    const { code, out } = runScript("merged-branch");
+    const { code, out } = runScript(["merged-branch"]);
     expect(code).toBe(0);
     expect(out).toContain("SAFE");
     expect(out).toContain("report only");
@@ -109,7 +128,7 @@ describe("safe-delete-remote-branch.sh", () => {
   });
 
   it("refuses a branch carrying commits that exist nowhere else", () => {
-    const { code, out } = runScript("unique-branch", "--delete");
+    const { code, out } = runScript(["unique-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(out).toContain("exist only on");
@@ -119,27 +138,27 @@ describe("safe-delete-remote-branch.sh", () => {
   // The worst defect this script ever had: `main` compares to itself, reports
   // zero unique commits, and deletes the default branch.
   it("refuses main, and main survives", () => {
-    const { code, out } = runScript("main", "--delete");
+    const { code, out } = runScript(["main", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(remoteHasBranch("main")).toBe(true);
   });
 
   it("refuses the symbolic ref HEAD", () => {
-    const { code, out } = runScript("HEAD", "--delete");
+    const { code, out } = runScript(["HEAD", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
   });
 
   it("refuses a branch that does not exist on the remote", () => {
-    const { code, out } = runScript("no-such-branch", "--delete");
+    const { code, out } = runScript(["no-such-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
   });
 
   it("refuses when a push URL diverges from the fetch URL", () => {
     git(clone, "remote", "set-url", "--push", "origin", join(root, "elsewhere.git"));
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(remoteHasBranch("merged-branch")).toBe(true);
@@ -151,7 +170,7 @@ describe("safe-delete-remote-branch.sh", () => {
   it("refuses when a LATER push URL diverges, not just the first", () => {
     git(clone, "remote", "set-url", "--push", "origin", remote);
     git(clone, "remote", "set-url", "--push", "--add", "origin", join(root, "elsewhere.git"));
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(remoteHasBranch("merged-branch")).toBe(true);
@@ -159,7 +178,7 @@ describe("safe-delete-remote-branch.sh", () => {
 
   it("redacts inline credentials from a URL mismatch refusal", () => {
     git(clone, "remote", "set-url", "--push", "origin", "https://user:supersecrettoken@example.invalid/x.git");
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("REFUSE");
     expect(out).toContain("<redacted>@");
@@ -171,14 +190,14 @@ describe("safe-delete-remote-branch.sh", () => {
   // so a typo'd or reordered invocation could look accepted while the flag the
   // operator meant went unread. On a destructive tool that is a real hazard.
   it("refuses extra arguments rather than ignoring them", () => {
-    const { code, out } = runScript("merged-branch", "--delete", "--oops");
+    const { code, out } = runScript(["merged-branch", "--delete", "--oops"]);
     expect(code).not.toBe(0);
     expect(out).toContain("too many arguments");
     expect(remoteHasBranch("merged-branch")).toBe(true);
   });
 
   it("refuses an unrecognised second argument", () => {
-    const { code, out } = runScript("merged-branch", "--force");
+    const { code, out } = runScript(["merged-branch", "--force"]);
     expect(code).not.toBe(0);
     expect(out).toContain("unrecognised second argument");
     expect(remoteHasBranch("merged-branch")).toBe(true);
@@ -188,7 +207,7 @@ describe("safe-delete-remote-branch.sh", () => {
   // only, so a credential carried in a query parameter printed in full.
   it("redacts a credential carried in a query parameter", () => {
     git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git?access_token=querysecret123");
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("<redacted>");
     expect(out).not.toContain("querysecret123");
@@ -207,7 +226,7 @@ describe("safe-delete-remote-branch.sh", () => {
     ["x-totally-unforeseen-credential", "compoundsecret4"],
   ])("redacts a credential under the unlisted query key %s", (key, secret) => {
     git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git?${key}=${secret}`);
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("<redacted>");
     expect(out).not.toContain(secret);
@@ -221,7 +240,7 @@ describe("safe-delete-remote-branch.sh", () => {
   it("refuses a duplicated push URL before mutating anything", () => {
     git(clone, "remote", "set-url", "--push", "origin", remote);
     git(clone, "remote", "set-url", "--push", "--add", "origin", remote);
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("more than once");
     expect(remoteHasBranch("merged-branch")).toBe(true);
@@ -243,28 +262,84 @@ describe("safe-delete-remote-branch.sh", () => {
   // git offers no atomic fetch-then-push so this race could only be bounded.
   // That was wrong. `git push --atomic` carries several refspecs and several
   // leases, so the delete can be leased to the main sha the reachability count
-  // was computed against. This proves the race is closed rather than narrowed:
-  // main is rewritten behind the script's back, and the branch survives.
-  it("refuses to delete when main is rewritten during the check", () => {
-    // Make the delete pause long enough to rewrite main underneath it, by
-    // pointing the script at a remote whose main moves between fetch and push.
-    const other = join(root, "rewriter");
-    git(root, "clone", remote, other);
-    git(other, "commit", "--allow-empty", "--amend", "-m", "rewritten main");
-    git(other, "push", "--force", "origin", "HEAD:main");
+  // was computed against.
+  //
+  // Codex P2, #156 round 4: the first version of this test rewrote main BEFORE
+  // invoking the script, so the script's own fetch observed the rewrite and
+  // refused at the unique-commit check. The leased push was never reached, and
+  // `toMatch(/REFUSE|rejected/)` accepted that unrelated refusal, so the test
+  // passed with the lease removed entirely — it proved nothing about the race
+  // it was named for. The window is between the script's fetch and its push,
+  // so the rewrite has to land INSIDE that window.
+  //
+  // A `git` shim on PATH does exactly that: it delegates every call to the real
+  // git, except that on the `push` invocation it first force-rewrites main on
+  // the remote. By then the fetch and the reachability count have already run
+  // against the old main, so the lease is genuinely the only thing left that
+  // can refuse.
+  it("refuses to delete when main moves between the reachability check and the push", () => {
+    const rewriter = join(root, "rewriter");
+    git(root, "clone", remote, rewriter);
+    git(rewriter, "commit", "--allow-empty", "--amend", "-m", "rewritten main");
 
-    // The clone's view of main is now stale, which is exactly the state the
-    // lease must catch: it counted against a main that no longer exists.
-    const { code, out } = runScript("merged-branch", "--delete");
+    const shimDir = join(root, "shim");
+    mkdirSync(shimDir);
+    const marker = join(root, "rewrite-fired");
+    writeFileSync(
+      join(shimDir, "git"),
+      [
+        "#!/bin/sh",
+        `if [ "$1" = "push" ] && [ ! -e "${marker}" ]; then`,
+        `  : > "${marker}"`,
+        `  "${REAL_GIT}" -C "${rewriter}" push --force --quiet origin HEAD:main`,
+        "fi",
+        `exec "${REAL_GIT}" "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const mainBefore = remoteMainSha();
+    const { code, out } = runScript(["merged-branch", "--delete"], { pathPrefix: shimDir });
+
+    // The specific refusal, not any refusal: this must be the lease rejecting
+    // the push, not the reachability check declining to get that far.
+    expect(out).toContain("atomic delete rejected");
     expect(code).not.toBe(0);
+    // The branch survives, which is the property the whole script exists for.
     expect(remoteHasBranch("merged-branch")).toBe(true);
-    expect(out).toMatch(/REFUSE|rejected/);
+
+    // Guards against the test quietly reverting to proving nothing: the shim
+    // must actually have fired, and main must actually have moved. Without
+    // these, a shim that silently failed to run would leave a green test.
+    expect(existsSync(marker)).toBe(true);
+    expect(remoteMainSha()).not.toBe(mainBefore);
+    // The script reached the push stage, so it had already decided the branch
+    // was safe to delete — the refusal came from the push, not from an earlier
+    // check declining to get that far.
+    expect(out).toContain("SAFE: every commit on 'merged-branch' is reachable from main");
   });
+
+  // What the test above proves, precisely, and what it does NOT — established
+  // by deleting each part and re-running, not by reading the code:
+  //
+  //   - Remove the `main` REFSPEC from the atomic push and the test FAILS: the
+  //     branch is deleted even though main moved. So carrying main in the push
+  //     is the load-bearing part.
+  //   - Remove only `--force-with-lease` on main and the test still PASSES,
+  //     because pushing the checked main sha back over a moved main is a rewind
+  //     and git rejects it as non-fast-forward regardless of any lease.
+  //
+  // So the main LEASE is defence in depth here — it would carry the refusal if
+  // that refspec were ever forced — and the non-fast-forward rejection is what
+  // actually stops this case. Recorded rather than asserted, because a comment
+  // claiming this test covers the lease would be the same "passes for the wrong
+  // reason" defect that produced this round in the first place.
 
   it("refuses a branch on the protected list", () => {
     git(clone, "branch", "feature/12-spec-grounded-publish-90-1-base-sha", "main");
     git(clone, "push", "-q", "origin", "feature/12-spec-grounded-publish-90-1-base-sha");
-    const { code, out } = runScript("feature/12-spec-grounded-publish-90-1-base-sha", "--delete");
+    const { code, out } = runScript(["feature/12-spec-grounded-publish-90-1-base-sha", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("protected list");
     expect(remoteHasBranch("feature/12-spec-grounded-publish-90-1-base-sha")).toBe(true);
@@ -281,7 +356,7 @@ describe("safe-delete-remote-branch.sh", () => {
     git(other, "commit", "--allow-empty", "-m", "remote-only commit");
     git(other, "push", "-q", "origin", "merged-branch");
 
-    const { code, out } = runScript("merged-branch", "--delete");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
     expect(code).not.toBe(0);
     expect(out).toContain("exist only on");
     expect(remoteHasBranch("merged-branch")).toBe(true);

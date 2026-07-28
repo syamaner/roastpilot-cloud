@@ -167,11 +167,20 @@ echo "SAFE: every commit on '$branch' is reachable from main"
 # the deletion can be leased to BOTH the branch sha and the main sha that the
 # reachability count was actually computed against.
 #
-# The main refspec is a no-op update of main to the value we already checked;
-# it exists purely to carry the lease. Verified empirically both ways: with
-# main unchanged the delete succeeds, and with main force-rewritten between
-# the check and the push the whole push is rejected ("stale info") and the
-# branch survives.
+# The main refspec is a no-op update of main to the value we already checked.
+# Verified empirically both ways, by a real-git regression test that rewrites
+# main from inside the script's own run (a `git` shim that mutates the remote
+# on the push call, so the rewrite lands after the fetch and reachability
+# count): with main unchanged the delete succeeds, and with main rewritten
+# mid-run the whole push is rejected and the branch survives.
+#
+# Which part does that work is worth stating exactly, since an earlier comment
+# here overclaimed. Deleting each piece and re-running the test shows the
+# REFSPEC is load-bearing: without it the branch is deleted despite main having
+# moved. The main LEASE is defence in depth — pushing the checked main sha back
+# over a moved main is a rewind, so git rejects it as non-fast-forward with or
+# without the lease. The lease would carry the refusal if this refspec were
+# ever forced, which is why it stays.
 #
 # Any movement of main fails this push, including a benign fast-forward. That
 # is deliberate for a destructive tool: the cost is one re-run, and the
