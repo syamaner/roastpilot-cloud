@@ -2040,9 +2040,14 @@ jobs:
         }
       }
     }
+      // Counter moved 27 -> 29 and 51 -> 53 by issue #146: the claude-review
+      // job gained two `run:` steps (denial evidence, completion assertion).
+      // These counters are D140 drift-detection evidence, so noticing this is
+      // exactly their job; the update is deliberate and the delta is accounted
+      // for. Do not update them to match a run without knowing which steps moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 27,
+      runSteps: 29,
       actionSteps: 27,
       inputs: 66,
     });
@@ -2090,7 +2095,8 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      runSteps: 51,
+      // Same +2 from issue #146's two new claude-review run steps.
+      runSteps: 53,
       actionSteps: 46,
       inputs: 117,
     });
