@@ -13,7 +13,16 @@ const AGENTS_DIRECTORY = join(REPOSITORY_ROOT, ".claude", "agents");
  * main loop silently runs Opus across a whole fan-out — the cost failure this
  * test exists to make impossible rather than merely documented.
  */
-const ALLOWED_MODELS = new Set(["opus", "sonnet"]);
+const ALLOWED_MODELS = new Set(["fable", "opus", "sonnet"]);
+
+/**
+ * `fable` is admitted for exactly one role, the `story-planner` spec tier
+ * (topology v2, issue #159). The validator itself rejects a fable pin on any
+ * other definition — a describe-block assertion on the planner alone would
+ * pin story-planner → fable but not fable → story-planner, leaving every
+ * other agent free to adopt the tier silently.
+ */
+const FABLE_ONLY_AGENT = "story-planner";
 
 /**
  * The adversarial security lenses stay on Opus (operator, 27 Jul 2026). A
@@ -31,7 +40,10 @@ interface AgentFile {
 }
 
 function readAgentFiles(): AgentFile[] {
-  return readdirSync(AGENTS_DIRECTORY)
+  // Recursive, so a definition hidden in a subdirectory reaches the validator
+  // (which rejects nesting outright) instead of being silently skipped.
+  return readdirSync(AGENTS_DIRECTORY, { recursive: true })
+    .map((entry) => entry.toString())
     .filter((fileName) => fileName.endsWith(".md"))
     .sort()
     .map((fileName) => ({
@@ -74,6 +86,12 @@ export function validateAgentModelPins(files: AgentFile[]): string[] {
   }
 
   for (const { fileName, content } of files) {
+    if (fileName.includes("/") || fileName.includes("\\")) {
+      failures.push(
+        `${fileName}: agent definitions must live at the roster's top level`,
+      );
+      continue;
+    }
     const frontMatter = parseFrontMatter(content);
     if (frontMatter === undefined) {
       failures.push(`${fileName}: front matter must parse as a YAML mapping`);
@@ -94,6 +112,9 @@ export function validateAgentModelPins(files: AgentFile[]): string[] {
       failures.push(
         `${fileName}: model must be one of ${[...ALLOWED_MODELS].sort().join(", ")}`,
       );
+    }
+    if (model === "fable" && name !== FABLE_ONLY_AGENT) {
+      failures.push(`${fileName}: fable is role-scoped to ${FABLE_ONLY_AGENT}`);
     }
     if (typeof name === "string" && REQUIRED_OPUS_AGENTS.has(name) && model !== "opus") {
       failures.push(`${fileName}: adversarial security reviewers must stay on opus`);
@@ -122,6 +143,22 @@ describe("sub-agent model pins (issue #148)", () => {
     expect(parseFrontMatter(triage!.content)?.model).toBe("sonnet");
   });
 
+  it("pins the story planner to fable, so the spec tier cannot silently downgrade (issue #159)", () => {
+    const planner = readAgentFiles().find(
+      ({ fileName }) => fileName === "story-planner.md",
+    );
+    expect(planner).toBeDefined();
+    expect(parseFrontMatter(planner!.content)?.model).toBe("fable");
+  });
+
+  it("pins the implementer to opus (issue #159)", () => {
+    const implementer = readAgentFiles().find(
+      ({ fileName }) => fileName === "implementer.md",
+    );
+    expect(implementer).toBeDefined();
+    expect(parseFrontMatter(implementer!.content)?.model).toBe("opus");
+  });
+
   it.each([
     [
       "an unpinned agent",
@@ -137,6 +174,11 @@ describe("sub-agent model pins (issue #148)", () => {
       "a name that does not match its file",
       "---\nname: mismatched\nmodel: sonnet\n---\n",
       "name must match the file name",
+    ],
+    [
+      "a fable pin outside the planner role",
+      "---\nname: example\nmodel: fable\n---\n",
+      "fable is role-scoped to story-planner",
     ],
     [
       "front matter that is not a mapping",
@@ -157,6 +199,28 @@ describe("sub-agent model pins (issue #148)", () => {
     expect(
       validateAgentModelPins([{ fileName: "example.md", content }]),
     ).toContainEqual(expect.stringContaining(expectedFailure));
+  });
+
+  it("rejects widening fable beyond the planner role, on the live roster", () => {
+    const widened = readAgentFiles().map(({ fileName, content }) =>
+      fileName === "qa.md"
+        ? { fileName, content: content.replace("model: sonnet", "model: fable") }
+        : { fileName, content },
+    );
+    expect(validateAgentModelPins(widened)).toContainEqual(
+      expect.stringContaining("fable is role-scoped to story-planner"),
+    );
+  });
+
+  it("rejects a nested agent definition rather than skipping it", () => {
+    expect(
+      validateAgentModelPins([
+        {
+          fileName: "nested/sneaky.md",
+          content: "---\nname: sneaky\nmodel: sonnet\n---\n",
+        },
+      ]),
+    ).toContainEqual(expect.stringContaining("roster's top level"));
   });
 
   it("rejects downgrading an adversarial security reviewer to sonnet", () => {
