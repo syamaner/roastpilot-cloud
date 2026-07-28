@@ -2040,23 +2040,20 @@ jobs:
         }
       }
     }
-      // Issue #146 moved these counters, in accounted-for steps:
-      //   runSteps 27 -> 30: the claude-review job gained three `run:` steps
-      //     (denial evidence + completion assertion + the G4 transcript-path
-      //     resolve step, codex P2).
-      //   actionSteps 27 -> 28, inputs 66 -> 70: it also gained one
-      //     `actions/upload-artifact` step (the transcript diagnostic, G4)
-      //     whose four `with:` entries (name/path/if-no-files-found/
-      //     retention-days) are the +4 inputs.
-      // These counters are D140 drift-detection evidence, so noticing a change
-      // is exactly their job; the deltas above are deliberate. Do not update
-      // them to match a run without knowing which steps moved. If G4 is later
-      // dropped, revert runSteps to 29, actionSteps to 27, and inputs to 66.
+      // Issue #146 moved runSteps 27 -> 29: the claude-review job gained
+      // exactly two `run:` steps -- the denial-evidence surface (step A) and
+      // the completion assertion (step B). actionSteps and inputs are back to
+      // baseline: the transcript-upload machinery (an upload-artifact action
+      // step and its resolve-transcript run step) was dropped as a public-repo
+      // credential-exposure risk with no ratified step-3 consumer (codex round
+      // 4, Rigour Calibration D139). These counters are D140 drift-detection
+      // evidence, so noticing a change is exactly their job; the delta above is
+      // deliberate. Do not update them without knowing which steps moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 30,
-      actionSteps: 28,
-      inputs: 70,
+      runSteps: 29,
+      actionSteps: 27,
+      inputs: 66,
     });
   });
 
@@ -2102,14 +2099,13 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      // Same #146 deltas as the corpus test above: +3 run steps (denial
-      // evidence + completion assertion + the G4 transcript-path resolve step)
-      // and +1 upload-artifact action step with four `with:` inputs (G4).
-      // Revert runSteps to 53, actionSteps to 46, inputs to 117 if G4 is
-      // dropped.
-      runSteps: 54,
-      actionSteps: 47,
-      inputs: 121,
+      // Same #146 delta as the corpus test above: +2 run steps (the
+      // denial-evidence and completion-assertion steps A+B). No action-step or
+      // input change -- the transcript-upload machinery was dropped (codex
+      // round 4 / D139).
+      runSteps: 53,
+      actionSteps: 46,
+      inputs: 117,
     });
   });
 });

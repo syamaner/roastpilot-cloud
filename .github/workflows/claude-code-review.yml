@@ -118,8 +118,17 @@ jobs:
       # "Assert the review actually completed" step reads
       # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
       # reject a prior attempt's stale tracking comment (a re-run fail-open,
-      # codex P2). It grants no write and, on this public repo, exposes only
-      # run metadata already visible to any reader.
+      # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
+      # never leaks it. Note this token is NOT confined from the LLM: the
+      # claude-code-action step runs the model's Bash tool with this
+      # `GITHUB_TOKEN` present in its subprocess env (there is no env-scrub,
+      # and `allowed_non_write_users` is empty), so `actions: read` is
+      # reachable under the accepted `Bash(gh pr comment:*)` exfil residual.
+      # Acceptable because it is read-only, public-repo (it exposes only run
+      # metadata any reader can already see), short-lived, and strictly
+      # dominated by the co-resident WRITE-capable minted App token tracked in
+      # #157 -- any injection that exfils this job token already yields the
+      # stronger App token, so `actions: read` adds no meaningful blast radius.
       actions: read
       id-token: write
 
@@ -396,65 +405,6 @@ jobs:
           fi
           exit 0
 
-      - name: Resolve the execution transcript path for upload
-        # Issue #146 G4 (codex P2). The action sets `execution_file` only on a
-        # normal exit; on an EARLY exit it may still have written the
-        # runner-temp fallback. Uploading `steps.claude-review.outputs.execution_file`
-        # directly would hand the upload an EMPTY path in exactly the
-        # early-exit case this artifact exists to diagnose, and upload-artifact
-        # silently warns rather than uploading the fallback that IS on disk.
-        # Resolve the same way step A does and publish the path only when the
-        # file actually exists, so the upload sees either a real file or
-        # nothing (the genuine no-file case, still handled by
-        # `if-no-files-found: warn`).
-        if: always()
-        id: resolve-transcript
-        env:
-          ACTION_EXECUTION_OUTPUT: ${{ steps.claude-review.outputs.execution_file }}
-          FALLBACK_EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
-        run: |
-          set -uo pipefail
-          EXECUTION_OUTPUT="${ACTION_EXECUTION_OUTPUT:-$FALLBACK_EXECUTION_OUTPUT}"
-          if [ -f "$EXECUTION_OUTPUT" ]; then
-            echo "path=$EXECUTION_OUTPUT" >> "$GITHUB_OUTPUT"
-          else
-            echo "note: no execution transcript on disk to upload (checked $EXECUTION_OUTPUT)"
-          fi
-
-      - name: Upload the review run's execution transcript (diagnostic artifact)
-        # Issue #146 G4. Step A surfaces denied tool NAMES only, so a Bash
-        # denial reads as "Bash" x N -- not enough to justify a specific
-        # read-only allowlist addition when step 3 designs the fix. This
-        # uploads the same execution file step A reads, as a run/repo-access
-        # gated artifact rather than into the PUBLIC Actions log, so the
-        # `show_full_output: false` posture is preserved. It is the identical
-        # trade-off implement-ready-issues.yml already makes for its own
-        # agent transcript. The path comes from the resolve step above so the
-        # runner-temp fallback is uploaded too, not just the action output.
-        #
-        # Confidentiality: this job never git-authenticates -- the action's
-        # `use_commit_signing: true` above skips configureGitAuth(), so no
-        # token is embedded in `.git/config`, and this file is the tool-use
-        # stream, not a credential store. The artifact is reachable only to
-        # those with Actions access to this run, not to anyone who can read
-        # the log. Full code-path reasoning and precedent:
-        # implement-ready-issues.yml's "Upload the implement agent's
-        # execution transcript" step.
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          # Per run ATTEMPT: upload-artifact names are immutable within a run,
-          # so a re-run (same run_id, incremented run_attempt) would collide
-          # with the prior attempt's artifact and FAIL this step, reddening a
-          # job whose review + completion assertion actually succeeded --
-          # muddying the exact red/green signal this slice establishes.
-          # Suffixing run_attempt keeps each attempt's transcript for step-3
-          # diagnosis, without an overwrite/delete-then-upload race (codex P2).
-          name: claude-review-transcript-${{ github.run_attempt }}
-          path: ${{ steps.resolve-transcript.outputs.path }}
-          if-no-files-found: warn
-          retention-days: 30
-
       - name: Assert the review actually completed
         # Issue #146, step 2 of 3, and the load-bearing one. Observed on PR
         # #150: this job exited ZERO after four permission denials, having
@@ -479,11 +429,18 @@ jobs:
         # simply flag any run with denials, which would have failed the
         # healthy case.
         #
-        # Reads only. This step's GH_TOKEN has `pull-requests: read`,
-        # `issues: read`, and (added for the per-attempt binding below)
-        # `actions: read`; the job also declares `id-token: write`, and the
-        # action mints its own write-capable App token. Nothing in this
-        # assertion needs write scope.
+        # This assertion reads only: it needs no write scope, and its
+        # `GH_TOKEN` is wired to the read-only `secrets.GITHUB_TOKEN`
+        # (`pull-requests: read`, `issues: read`, and `actions: read` for the
+        # per-attempt binding below). That token is NOT, however, confined to
+        # this step -- the claude-code-action step earlier in this job runs the
+        # model's Bash tool with the same `GITHUB_TOKEN` in its subprocess env
+        # (no env-scrub; `allowed_non_write_users` empty), and the action also
+        # mints its own WRITE-capable App token that co-resides there. So a
+        # prompt injection reaching `Bash(gh pr comment:*)` can already reach
+        # both; the read-only job token is strictly dominated by that App token
+        # (#157). This deterministic step is not the exposure and does not leak
+        # the token; it just reuses the same read-only material.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this
