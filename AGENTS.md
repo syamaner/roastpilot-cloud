@@ -250,11 +250,21 @@ exception. The load-bearing points:
     `ready_for_review` timestamp here would be unsatisfiable and would block
     every untouched factory PR permanently. EXCEPTION (Codex P2, #155): a PR
     the publisher had to open on the **fallback** path, with `GITHUB_TOKEN`
-    because App minting failed, gets NO downstream workflow triggers at all
-    (factory.md §13), so Codex does not auto-review it either. There is no
-    automatic verdict to wait for on that path. The operator must post
-    `@codex review` themselves and run a full manual review pass; nothing
-    else will start a review there. **The ACCEPTANCE criterion is unchanged**
+    because App minting failed, gets NO downstream WORKFLOW triggers
+    (factory.md §13), so CI, CodeQL and Claude Code Review genuinely do not
+    run. **Codex is not governed by that rule** (Codex P2, #155, corrected):
+    the connector is an installed GitHub App receiving webhooks, not an
+    Actions workflow, so whether it auto-reviews a fallback PR is UNVERIFIED
+    in both directions — and the publisher's own fallback notice quotes the
+    trigger phrase, which the connector has been observed matching inside
+    posted comment bodies (roastpilot-agent#682, 28 Jul 2026), so that notice
+    may itself have started a review. So LOOK FIRST rather than assuming
+    either way: if a 👀 or a review is already on the head, you are in the
+    wait; only if nothing has appeared within the timeout below does the
+    operator post `@codex review` themselves. This is the same look-first
+    guidance the generated notices carry, and it must stay the same — an
+    operator following a policy that says "nothing else will start it" posts
+    the duplicate the once-per-head rule forbids. **The ACCEPTANCE criterion is unchanged**
     (Codex, #155): "no automatic verdict to wait for" does not mean no wait.
     The manually triggered review must still come back CLEAN on an accepted
     channel, and a review carrying findings is not clean even when posted as
