@@ -407,15 +407,20 @@ purpose: the read-only implementing agent can't drive an open→ready
 transition, so the privileged publisher opens the PR non-draft and the
 *same* review roster runs **post-open** by design (the App-identity wiring
 exists precisely so CI and Codex fire on the opened PR), with the human
-merge as the gate the draft→ready step would otherwise be. **Claude Code
-Review is NOT part of that roster on an App-minted factory PR yet** (Codex
-P2, #155): `claude-code-review.yml` sets `allowed_bots: 'claude,claude[bot]'`,
-which does not include the publisher identity, so the action rejects it
-outright until #47 lands. `buildPublishSuccessStepSummary` already warns
-the operator of exactly this. Listing it here as one of the lenses that
-"fires on the opened PR" would let a reviewer relying on this policy read a
-missing lens as a completed one, which is the same false-completeness this
-file elsewhere treats as a merge hazard. Whether the publisher should open factory PRs as drafts and have
+merge as the gate the draft→ready step would otherwise be. **BOTH Claude
+lenses are missing from that roster on an App-minted factory PR** (Codex P2
+then P1, #155 — the first correction named only one of them, which was the
+same false-completeness one level down). `claude-code-review.yml` sets
+`allowed_bots: 'claude,claude[bot]'` at BOTH invocations — the `claude-review`
+job AND the `spec-grounded-review` job — and neither list contains the
+publisher identity, so the action rejects a factory-authored PR outright in
+both cases until #47 lands. That exclusion is deliberate sequencing, not an
+oversight: the workflow's own comment records that widening the allowlist
+before #47 closes the exfil path would be the wrong order. So the roster
+that actually runs on an opened factory PR is CI and Codex. Listing either
+Claude lens here as one that "fires on the opened PR" would let a reviewer
+relying on this policy read a missing lens as a completed one, which is the
+same false-completeness this file elsewhere treats as a merge hazard. Whether the publisher should open factory PRs as drafts and have
 `pr-triage` mark them ready post-fold is a factory-design question tracked
 separately, not this rule.
 - **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance

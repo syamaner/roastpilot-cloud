@@ -353,6 +353,31 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
 
 /** Exact combined textual-line ceiling for the current factory publisher. */
 /**
+ * The self-trigger warning inside {@link CODEX_VERDICT_CRITERION}, factored out
+ * so {@link renderTriggerPhraseInertly} can replace it by identity rather than
+ * by a second copy of the wording that could drift from it.
+ */
+export const TRIGGER_SELF_START_WARNING =
+  "CHECK BEFORE YOU POST, because this notice may already have triggered the " +
+  "review itself: the connector matches the trigger phrase inside posted " +
+  "comment bodies, including within backticks, and this text quotes that " +
+  "phrase. Observed directly on roastpilot-agent#682 (28 Jul 2026), where an " +
+  "inline reply quoting the phrase in a code span drew a connector response 11 " +
+  "seconds later, in that same thread. So look for an existing 👀 or review on " +
+  "this head first; if one is there, this comment started it and you are in " +
+  "the wait, not before it.";
+
+/** What replaces the warning above once the phrase has been rendered inert. */
+export const INERT_SELF_START_NOTE =
+  "NOTE: this particular notice cannot have started a review — the trigger " +
+  "phrase above is described rather than quoted, deliberately, because the " +
+  "publisher posts this automatically onto a PR that may still be a draft, " +
+  "where a review can post findings but never complete the clean-verdict flow " +
+  "(D105). So no review has begun on account of this comment. Still look " +
+  "before you post: one may have started from the PR body or from someone " +
+  "else's trigger.";
+
+/**
  * The ONE statement of what satisfies the Codex wait, appended verbatim to
  * every operator-facing notice.
  *
@@ -413,17 +438,11 @@ export const CODEX_VERDICT_CRITERION =
   "counting it would forbid the timeout re-trigger and leave the operator " +
   "waiting on a verdict that cannot arrive. Match the trigger to the boundary, " +
   "not merely to the sha. " +
-  "CHECK BEFORE YOU POST, because this notice may already have triggered the " +
-  "review itself: the connector matches the trigger phrase inside posted " +
-  "comment bodies, including within backticks, and this text quotes that " +
-  "phrase. Observed directly on roastpilot-agent#682 (28 Jul 2026), where an " +
-  "inline reply quoting the phrase in a code span drew a connector response 11 " +
-  "seconds later, in that same thread. So look for an existing 👀 or review on " +
-  "this head first; if one is there, this comment started it and you are in " +
-  "the wait, not before it.";
+  TRIGGER_SELF_START_WARNING;
 
 /** The literal phrase that starts a Codex review when it appears in a comment. */
 export const CODEX_TRIGGER_PHRASE = "@codex review";
+
 
 /**
  * Renders text so the publisher can POST it without the act of posting
@@ -446,10 +465,21 @@ export const CODEX_TRIGGER_PHRASE = "@codex review";
  * PR's state turns out to be, and needs no new API field to stay correct.
  */
 export function renderTriggerPhraseInertly(text: string): string {
-  return text.split(CODEX_TRIGGER_PHRASE).join(
+  const described = text.split(CODEX_TRIGGER_PHRASE).join(
     "the Codex review trigger comment (its exact text is in AGENTS.md's PR Merge Policy — " +
       "it is deliberately not quoted here, because quoting it in a posted comment starts a review)",
   );
+  // The criterion's self-trigger warning exists ONLY because the text quotes
+  // the phrase. Once the phrase is described rather than quoted, that warning
+  // is false for this text, and leaving it produced two mutually exclusive
+  // instructions in the same comment — look-first-because-this-may-have-
+  // triggered, next to a footer saying it cannot have (Codex P2, #155).
+  //
+  // Both transformations are tied to the same fact, so they belong at one seam
+  // rather than in two places that can disagree. An earlier fix bolted the
+  // correction on as a trailing note, which left the contradiction in the body
+  // and merely appended a denial of it.
+  return described.split(TRIGGER_SELF_START_WARNING).join(INERT_SELF_START_NOTE);
 }
 
 export const FACTORY_TEXT_LINE_LIMIT = 400;
@@ -1603,15 +1633,7 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
   // send the operator into a needless timeout wait for a review that this
   // comment cannot have started, so the exception is stated explicitly rather
   // than left to be inferred.
-  return [
-    renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl)),
-    "",
-    "> **About the trigger wording above:** unlike the PR body, THIS comment is " +
-      "deliberately rendered unable to start a Codex review — the trigger phrase is " +
-      "described rather than quoted, because the publisher posts this automatically " +
-      "onto a PR that may still be a draft. So this comment has NOT started a review, " +
-      "and the general warning that a notice may have triggered one does not apply to it.",
-  ].join("\n");
+  return renderTriggerPhraseInertly(buildFallbackRefreshCommentBodyRaw(runUrl));
 }
 
 /**

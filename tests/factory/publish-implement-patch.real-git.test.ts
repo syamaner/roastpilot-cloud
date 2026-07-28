@@ -1193,7 +1193,12 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // Codex P2, #155: having made this comment inert, the criterion's generic
     // "this notice may have started a review" warning became false FOR THIS
     // comment, which would cost the operator a needless timeout wait.
-    expect(commentBody.body).toContain("has NOT started a review");
+    // The warning about a notice possibly self-triggering must be REPLACED for
+    // this comment, not contradicted by an appended footer (Codex P2, #155):
+    // the phrase is inert here, so the warning is false, and carrying both gave
+    // the operator two mutually exclusive instructions in one comment.
+    expect(commentBody.body).toContain("cannot have started a review");
+    expect(commentBody.body).not.toContain("this notice may already have triggered");
     // Codex P2, #155: this used to assert "nothing else will start it on this
     // path", which the comment itself falsifies — it quotes the trigger phrase,
     // and the connector matches that phrase inside posted comment bodies
