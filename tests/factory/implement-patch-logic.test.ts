@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertLabelDescriptionWithinLimit,
   buildCommitTrailer,
+  CODEX_VERDICT_CRITERION,
   buildGamingBothLostReviewBody,
   buildGamingFlagAnnotation,
   buildImplementFailureCommentBody,
@@ -1840,6 +1841,11 @@ describe("buildImplementPrBody", () => {
     // no assertion anywhere, so an edit could have silently dropped it again.
     expect(body).toContain("`@codex review`");
     expect(body).toContain("nothing else will start it on this path");
+    // Codex P1, #155: the fallback notices rejected findings-reviews but never
+    // required the clean signal be BOT-AUTHORED, and this repository is public,
+    // so an unauthored comment is spoofable. The shared constant carries that
+    // requirement to every site at once.
+    expect(body).toContain(CODEX_VERDICT_CRITERION);
     expect(body).toContain(NO_REVIEW_AUTOMATION_LABEL);
     // The warning must lead the body, not be buried below the fold —
     // asserted structurally (its position precedes "## Story"), not just
@@ -2131,8 +2137,11 @@ describe("buildPublishSuccessStepSummary", () => {
     // verdict too. A posted review carrying findings is not clean, and the
     // earlier wording called the automatic review a valid first verdict
     // without saying so, which let findings read as a pass.
-    expect(summary).toContain("WAIT for a CLEAN verdict on this exact head");
-    expect(summary).toContain("A posted review with inline findings is NOT clean");
+    // Assert the SHARED constant, not a per-site restatement. Restating it
+    // per site is what drifted at nearly every review round; asserting the
+    // constant means a test cannot silently diverge from the text either.
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
+    expect(summary).toContain("WAIT for it");
     expect(summary).not.toContain("REFRESHED");
     expect(summary).toContain("no manual trigger is needed to START the review");
     expect(summary).not.toContain("must still manually");
@@ -2241,11 +2250,7 @@ describe("buildPublishSuccessStepSummary", () => {
     // unsatisfiable, and a findings-review must NOT read as satisfying the
     // wait. Asserted here because the wording was previously changed without
     // any test touching it.
-    expect(summary).toContain("CLEAN verdict on either accepted channel");
-    expect(summary).toContain("clean comment naming this head sha");
-    expect(summary).toContain("👍");
-    expect(summary).toContain("valid only while the head stays unchanged");
-    expect(summary).toContain("A posted review with inline findings is NOT a clean verdict");
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
   });
 
   // Codex P2, #155: on the App-mint fallback path nothing starts a Codex
@@ -2267,7 +2272,7 @@ describe("buildPublishSuccessStepSummary", () => {
     // Codex, #155: "no automatic verdict to wait for" must not read as "no
     // wait". The acceptance criterion is the same on this path, and a
     // findings-carrying review is not clean even with no inline threads.
-    expect(summary).toContain("A posted review carrying findings is NOT clean");
+    expect(summary).toContain(CODEX_VERDICT_CRITERION);
   });
 
   // Codex F5, #155: publishedViaFallback + wasRefresh is reachable (the

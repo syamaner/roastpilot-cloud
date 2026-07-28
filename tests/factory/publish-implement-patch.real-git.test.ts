@@ -1184,6 +1184,9 @@ describe("publish-implement-patch — adjudicated F2 (#40 rework): GITHUB_TOKEN 
     // equally unasserted.
     expect(commentBody.body).toContain("`@codex review`");
     expect(commentBody.body).toContain("nothing else will start it on this path");
+    // Same shared criterion, sibling site (Codex P1, #155): bot-authorship was
+    // missing from every fallback notice.
+    expect(commentBody.body).toContain("chatgpt-codex-connector[bot]");
   });
 
   it("refresh path (existingPr): PUBLISHED_VIA_FALLBACK unset applies NO label and posts NO fallback-refresh comment", async () => {
