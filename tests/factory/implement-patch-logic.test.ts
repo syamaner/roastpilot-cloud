@@ -2264,6 +2264,30 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("Codex does NOT auto-trigger either");
     expect(summary).toContain("posting `@codex review` on this PR yourself");
     expect(summary).not.toContain("IS the valid first verdict");
+    // Codex, #155: "no automatic verdict to wait for" must not read as "no
+    // wait". The acceptance criterion is the same on this path, and a
+    // findings-carrying review is not clean even with no inline threads.
+    expect(summary).toContain("A posted review carrying findings is NOT clean");
+  });
+
+  // Codex F5, #155: publishedViaFallback + wasRefresh is reachable (the
+  // publisher passes wasRefresh: true through the same summary context), and
+  // no test covered the combination. It must stay on the Suppressed branch:
+  // the refresh branch asserts an automatic review at creation that a
+  // fallback-opened PR never had.
+  it("keeps a refreshed FALLBACK publish on the suppressed branch", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "github-actions[bot]",
+      publishedViaFallback: true,
+      prNumber: 52,
+      prUrl: "https://github.com/o/r/pull/52",
+      wasRefresh: true,
+    });
+    expect(summary).toContain("**Suppressed**");
+    expect(summary).toContain("posting `@codex review` on this PR yourself");
+    expect(summary).not.toContain("REFRESHED, so its head has moved");
+    expect(summary).not.toContain("IS the valid first verdict");
   });
 
   it("reports the anti-gaming classifier as clean when gamingFlagged is false/omitted", () => {

@@ -83,7 +83,12 @@ jobs:
     # draft phase is actually for is the runner-only gates, and skipping
     # claude-review here keeps a review lens from being spent on a head that is
     # still expected to move; it fires on ready_for_review once the PR is out of
-    # draft. (Factory PRs open non-draft, so they are reviewed from `opened`.)
+    # draft. (Factory PRs open non-draft, so this `if` admits them from `opened`.
+    # That is NOT the same as their being reviewed: the action still rejects
+    # the publisher bot, which is deliberately absent from `allowed_bots`
+    # until #47 allowlists it. Codex, #155: an earlier version of this line
+    # claimed factory PRs "are reviewed from `opened`", which this same file
+    # contradicts twice.)
     #
     # Excludes `edited` entirely (Codex finding, PR #76 review, L316): this
     # job reviews the DIFF, which a body edit never changes — reacting to

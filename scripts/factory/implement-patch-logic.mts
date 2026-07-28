@@ -1502,7 +1502,9 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
       "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
       `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
       `commit(s), and that pass must include posting \`@codex review\` on this PR ` +
-      `yourself — nothing else will start it on this path.** ` +
+      `yourself — nothing else will start it on this path.** A review carrying ` +
+      `findings is NOT a clean verdict, even as a top-level comment with no inline ` +
+      `threads; fold it, push, and re-trigger once on the new head. ` +
       `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
     "",
     `[Run output](${runUrl}).`,
@@ -1627,7 +1629,9 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
           "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
           "factory.md §13). **Do not merge without a manual review pass, and that " +
           "pass must include posting `@codex review` on this PR yourself — nothing " +
-          "else will start it on this path.** " +
+          "else will start it on this path.** A review that comes back carrying " +
+          "findings is NOT a clean verdict, even as a top-level comment with no " +
+          "inline threads; fold it, push, and re-trigger once on the new head. " +
           `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
@@ -2039,7 +2043,11 @@ export function buildPublishSuccessStepSummary(
       `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
       "a manual review pass is required before merging, and it must include posting " +
       "`@codex review` on this PR yourself: nothing else will start that review on " +
-      "this path (Codex P2, #155)."
+      "this path (Codex P2, #155). The verdict you then wait for is the SAME one as " +
+      "everywhere else: a bot-authored clean comment naming this head, or the bot's " +
+      "👍 while the head is unchanged. A posted review carrying findings is NOT clean, " +
+      "even as a top-level comment with no inline threads: fold it, push, and " +
+      "re-trigger once on the new head."
     : "✅ CI, CodeQL, and dependency review triggered normally. " +
       (context.wasRefresh
         // Codex P1, #155: this summary is ALSO produced by the

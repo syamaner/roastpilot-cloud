@@ -254,7 +254,12 @@ exception. The load-bearing points:
     (factory.md §13), so Codex does not auto-review it either. There is no
     automatic verdict to wait for on that path. The operator must post
     `@codex review` themselves and run a full manual review pass; nothing
-    else will start a review there. The publisher's fallback summary now
+    else will start a review there. **The ACCEPTANCE criterion is unchanged**
+    (Codex, #155): "no automatic verdict to wait for" does not mean no wait.
+    The manually triggered review must still come back CLEAN on an accepted
+    channel, and a review carrying findings is not clean even when posted as
+    a top-level comment with no inline threads, so nothing blocks merge
+    mechanically and the operator is the only check. The publisher's fallback summary now
     names that trigger explicitly (Codex P2, #155: it previously asked only
     for "a manual review pass", so an operator could complete it without
     ever starting the diverse lens);
@@ -262,6 +267,19 @@ exception. The load-bearing points:
     boundary;
   - after any later push, the boundary becomes the fresh single re-trigger on
     that new final commit.
+
+  **If the automatic review never arrives**, post `@codex review` once on the
+  unchanged head after roughly 30 minutes from the boundary event, and treat
+  that as the trigger from then on. This is NOT the re-litigation the
+  once-on-final rule forbids: that rule targets re-triggering across pushes,
+  and this is a first review that did not start. The 👀 in-progress bound
+  below only exists once a review has begun, so without this clause the
+  automatic path has no timeout at all and the documented state is "wait
+  indefinitely" (Codex, #155). Worth knowing when you rely on it: the
+  automatic trigger has been OBSERVED on human-authored PRs (#150, #155,
+  #156, agent #682) and has NOT yet been observed on a bot-authored factory
+  PR, where a sibling review lens is known to refuse the publisher identity
+  until #47 lands.
 
   Head-match alone is NOT enough, and that is a real hole rather than a
   theoretical one (Codex P1 on the agent repo's copy, #682): a manually
