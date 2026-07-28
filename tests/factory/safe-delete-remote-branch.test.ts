@@ -222,6 +222,41 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("OVERWRITTEN");
   });
 
+  // Codex P1, #156, reproduced: a LOCAL tracking ref can be symbolic, and the
+  // fetch writes through the indirection — so the branch's tracking ref gets
+  // overwritten with main and the count compares main to itself.
+  it("refuses when a local tracking ref is symbolic", () => {
+    git(clone, "checkout", "-q", "-b", "ahead", "main");
+    git(clone, "commit", "--allow-empty", "-m", "genuinely ahead");
+    git(clone, "push", "-q", "origin", "ahead");
+    git(clone, "checkout", "-q", "main");
+    git(clone, "fetch", "-q", "origin");
+    git(clone, "symbolic-ref", "refs/remotes/origin/main", "refs/remotes/origin/ahead");
+
+    const { code, out } = runScript(["ahead"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("is SYMBOLIC");
+    // The branch really is ahead, so a SAFE verdict here would be destructive.
+    expect(out).not.toContain("SAFE TO DELETE");
+  });
+
+  // Codex P1, #156: the report prints a copy-pasteable `git push --delete`, so
+  // a divergent push URL means that advice acts on a repository this check
+  // never inspected. I removed this guard during the report-only rescope
+  // ("there is no push") and the rescope reintroduced its premise in another
+  // form — the script now tells a HUMAN to push.
+  it("refuses when the push URL diverges from the inspected fetch URL", () => {
+    const elsewhere = join(root, "elsewhere.git");
+    git(root, "init", "--bare", "--initial-branch=main", elsewhere);
+    git(clone, "push", elsewhere, "main:main", "merged-branch:merged-branch");
+    git(clone, "remote", "set-url", "--push", "origin", elsewhere);
+
+    const { code, out } = runScript(["merged-branch"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("fetches from one URL and pushes to another");
+    expect(out).not.toContain("SAFE TO DELETE");
+  });
+
   // Codex P1, #156, reproduced: `main` itself can be a symbolic ref pointing
   // AT the branch under test. Both explicit fetches then resolve to the same
   // sha, the unique count is zero, and the report calls the branch safe —
@@ -313,21 +348,37 @@ describe("safe-delete-remote-branch.sh", () => {
 
   // Codex P2, #156: the C1 strip handled only the UTF-8 encoding, so a RAW
   // single-byte 0x9b — equally valid in a ref name — survived into the report.
-  it("neutralises a RAW single-byte C1 control, not just its UTF-8 form", () => {
-    const raw = Buffer.from([0x65, 0x76, 0x69, 0x6c, 0x9b, 0x32, 0x4a, 0x78]).toString("binary");
-    execFileSync("git", ["branch", raw, "main"], { cwd: clone, encoding: "binary" });
-    execFileSync("git", ["push", "-q", "origin", `refs/heads/${raw}:refs/heads/${raw}`], {
+  // Codex P2, #156. Asserts the case that EXISTS: a C1 control reaching the
+  // evidence display, escaped rather than deleted so two refs differing only by
+  // it cannot render alike.
+  //
+  // Recorded rather than tested, because I could not construct it: a RAW
+  // single-byte C1 reaches this output through no path I could find. Git
+  // refuses one in a ref name ("Illegal byte sequence"), and a commit subject
+  // containing one comes back out of `git log` as the encoded pair `c2 9b`
+  // (byte-dumped to confirm, after an earlier check of mine matched the second
+  // byte of that pair and wrongly showed a surviving raw byte). The byte-wise
+  // pre-pass added for that case corrupted valid input — it split `c2 9b` and
+  // emitted `<U+FFFD><U+009B>` — so it was reverted.
+  it("escapes a C1 control in the commit evidence rather than deleting it", () => {
+    git(clone, "checkout", "-q", "-b", "raw-c1", "main");
+    execFileSync("bash", ["-c", `git commit -q --allow-empty -m "$(printf 'evil\\x9b2Jx subject')"`], {
       cwd: clone,
-      encoding: "binary",
     });
+    git(clone, "push", "-q", "origin", "raw-c1");
+    git(clone, "checkout", "-q", "main");
 
-    const result = spawnSync("bash", [SCRIPT, raw], { cwd: clone, encoding: "binary" });
+    const result = spawnSync("bash", [SCRIPT, "raw-c1"], { cwd: clone, encoding: "binary" });
     const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-    // The raw C1 byte must not reach the terminal in any line...
+    expect(result.status).not.toBe(0);
+    // No control byte reaches the terminal...
     expect(Buffer.from(out, "binary").includes(0x9b)).toBe(false);
-    // ...and it must be ESCAPED rather than deleted, so two refs differing
-    // only by a control byte cannot render as the same name (Codex P2, #156).
-    expect(out).toMatch(/<U\+[0-9A-F]{4}>/);
+    // ...it is escaped as that exact codepoint...
+    expect(out).toContain("<U+009B>");
+    // ...and valid input is NOT corrupted: no stray replacement character,
+    // which is what the reverted two-pass version produced here.
+    expect(out).not.toContain("<U+FFFD>");
+    expect(Buffer.from(out, "binary").includes(0xfd)).toBe(false);
   });
 
   // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not

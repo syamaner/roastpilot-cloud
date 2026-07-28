@@ -69,7 +69,10 @@ export GIT_NO_REPLACE_OBJECTS=1
 # and `--type=path --get` returns the expanded absolute path.
 grafts_file="$(git config --type=path --get core.graftsFile || true)"
 [ -n "$grafts_file" ] || grafts_file="$(git rev-parse --git-path info/grafts)"
-[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$grafts_file'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
+# The PATH is attacker-influenced too (Codex P2, PR #156): a graft filename or
+# repository path containing ESC/CR writes those bytes straight to the terminal
+# from inside the refusal itself.
+[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$(printf '%s' "$grafts_file" | strip_control_bytes)'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
 
 REMOTE="origin"
 MAIN_REF="refs/remotes/${REMOTE}/main"
@@ -99,17 +102,26 @@ PROTECTED=(
 # reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
 # C1 control bytes, keeping tab and newline.
 strip_control_bytes() {
-  # ESCAPES rather than deletes (Codex P2, PR #156). Deleting the codepoint
-  # made `victim` and `victim<U+009B>` — two genuinely different remote refs —
-  # render as the same name, so the evidence could not distinguish the ref that
-  # was checked from another one. On a report whose entire job is telling an
-  # operator which ref they are about to act on, silently collapsing two
-  # identifiers is worse than the terminal-control problem it was fixing.
+  # ESCAPES rather than deletes (Codex P2, PR #156): deleting the codepoint made
+  # `victim` and `victim<U+009B>` — two genuinely different refs — render as the
+  # same name, and this report's whole job is telling an operator which ref they
+  # are about to act on.
   #
-  # Decoding first still distinguishes a raw C1 (malformed UTF-8 -> U+FFFD)
-  # from an encoded one, and valid multi-byte characters pass through intact.
-  # Tab and newline are kept; everything else in C0, DEL and C1 is rendered
-  # visibly and inertly as `<U+XXXX>`.
+  # ONE pass, deliberately, after trying two and making things worse. Codex
+  # raised (P2) that decoding first turns a RAW invalid byte such as 0x9b into
+  # U+FFFD before the C1 regex sees it, so raw and encoded forms would collapse.
+  # That reasoning is correct in the abstract, and I could not construct the
+  # case: git REFUSES a raw C1 in a ref name outright ("Illegal byte sequence"
+  # creating the loose ref), and a commit subject containing one comes back out
+  # of `git log` as the ENCODED pair `c2 9b` — verified by byte dump, after an
+  # earlier `grep '233'` check of mine matched the second byte of that pair and
+  # wrongly convinced me the raw byte survived.
+  #
+  # The byte-wise pre-pass I added for it made output strictly worse: it split
+  # the valid `c2 9b` sequence, leaving an orphaned `c2` that decoded to U+FFFD,
+  # so a legitimately-encoded C1 rendered as `<U+FFFD><U+009B>`. Shipping a
+  # sanitiser that corrupts valid input to defend a case I cannot produce is the
+  # wrong trade, so it is reverted and the limit is recorded here instead.
   perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/([\x{0}-\x{8}\x{b}-\x{1f}\x{7f}-\x{9f}])/sprintf("<U+%04X>",ord($1))/ge; $_=encode("UTF-8",$_)'
 }
 
@@ -145,6 +157,23 @@ branch_display="$(branch_display_of "$branch")"
 # command decides what the FETCH returns, so it can falsify the reachability
 # answer this tool exists to produce. A receive-pack override could only
 # misdirect a push, and there is no longer a push.
+# (0b-ii) The report ENDS with a copy-pasteable `git push ${REMOTE} --delete`,
+# so a push URL diverging from the fetch URL means the advice acts on a
+# repository this check never inspected (Codex P1, PR #156).
+#
+# I removed this check during the report-only rescope, reasoning that there is
+# no push. That was wrong in an instructive way: there is no push BY THIS
+# SCRIPT, but the script now tells a human to perform one, so the binding
+# between "what was checked" and "what gets mutated" still has to hold — it just
+# runs through the operator instead of through git. Removing a mutation does not
+# remove a guard whose premise the removal reintroduced in another form.
+while IFS= read -r push_url_check; do
+  [ -n "$push_url_check" ] || continue
+  [ "$push_url_check" = "$(git remote get-url "$REMOTE")" ] || die "${REMOTE} fetches from one URL and pushes to another; this report inspects the FETCH side, and the deletion command it prints would act on the PUSH side, which was never checked"
+done <<EOF
+$(git remote get-url --push --all "$REMOTE")
+EOF
+
 for transport_key in "remote.${REMOTE}.uploadpack" "core.sshCommand"; do
   transport_val="$(git config --get "$transport_key" || true)"
   [ -z "$transport_val" ] || die "$transport_key is set; a configured transport command decides what the fetch returns, so the reachability answer below could describe a repository other than ${REMOTE}"
@@ -178,6 +207,20 @@ symref_line="$(git ls-remote --symref "$REMOTE" "refs/heads/${branch}" "refs/hea
 
 for p in "${PROTECTED[@]}"; do
   [ "$branch" = "$p" ] && die "'$branch_display' is on the protected list in docs/state/registry.md"
+done
+
+# (0e) The LOCAL tracking refs can be symbolic too (Codex P1, PR #156). If
+# `refs/remotes/origin/main` is symbolic to the branch's tracking ref, the fetch
+# refspecs below write THROUGH that indirection: the second refspec overwrites
+# the branch's tracking ref with main, so `rev-list` compares main to itself and
+# reports zero unique commits on a branch that is genuinely ahead.
+#
+# This is the same defect as the remote-side symbolic check added earlier, on
+# the other side of the fetch — I verified the refs the REMOTE hands us and not
+# the refs we write them into.
+for local_ref in "refs/remotes/${REMOTE}/${branch}" "$MAIN_REF"; do
+  local_sym="$(git symbolic-ref -q "$local_ref" || true)"
+  [ -z "$local_sym" ] || die "local tracking ref $(printf '%s' "$local_ref" | strip_control_bytes) is SYMBOLIC (-> $(printf '%s' "$local_sym" | strip_control_bytes)); the fetch would write through it and the reachability count would describe a different ref"
 done
 
 # (1) Fetch the exact refs rather than trusting the clone's refspec.
