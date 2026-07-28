@@ -2040,9 +2040,18 @@ jobs:
         }
       }
     }
+      // Issue #146 moved runSteps 27 -> 29: the claude-review job gained
+      // exactly two `run:` steps -- the denial-evidence surface (step A) and
+      // the completion assertion (step B). actionSteps and inputs are back to
+      // baseline: the transcript-upload machinery (an upload-artifact action
+      // step and its resolve-transcript run step) was dropped as a public-repo
+      // credential-exposure risk with no ratified step-3 consumer (codex round
+      // 4, Rigour Calibration D139). These counters are D140 drift-detection
+      // evidence, so noticing a change is exactly their job; the delta above is
+      // deliberate. Do not update them without knowing which steps moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 27,
+      runSteps: 29,
       actionSteps: 27,
       inputs: 66,
     });
@@ -2090,7 +2099,11 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      runSteps: 51,
+      // Same #146 delta as the corpus test above: +2 run steps (the
+      // denial-evidence and completion-assertion steps A+B). No action-step or
+      // input change -- the transcript-upload machinery was dropped (codex
+      // round 4 / D139).
+      runSteps: 53,
       actionSteps: 46,
       inputs: 117,
     });

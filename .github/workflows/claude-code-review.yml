@@ -114,6 +114,22 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # Read-only, added for #146's per-attempt completion binding: the
+      # "Assert the review actually completed" step reads
+      # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
+      # reject a prior attempt's stale tracking comment (a re-run fail-open,
+      # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
+      # never leaks it. Note this token is NOT confined from the LLM: the
+      # claude-code-action step runs the model's Bash tool with this
+      # `GITHUB_TOKEN` present in its subprocess env (there is no env-scrub,
+      # and `allowed_non_write_users` is empty), so `actions: read` is
+      # reachable under the accepted `Bash(gh pr comment:*)` exfil residual.
+      # Acceptable because it is read-only, public-repo (it exposes only run
+      # metadata any reader can already see), short-lived, and strictly
+      # dominated by the co-resident WRITE-capable minted App token tracked in
+      # #157 -- any injection that exfils this job token already yields the
+      # stronger App token, so `actions: read` adds no meaningful blast radius.
+      actions: read
       id-token: write
 
     steps:
@@ -285,6 +301,326 @@ jobs:
           prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Surface the review run's own denial evidence
+        # Issue #146, step 1 of 3. The action reports
+        # `permission_denials_count` in its execution summary and NOTHING
+        # about WHICH tools were denied, so an allowlist gap cannot be
+        # diagnosed after the fact -- verified against PR #150's run, whose
+        # 977-line log contains the count and no denial records at all. The
+        # detail lives in the action's execution file, which is then
+        # destroyed with the runner. The action exposes the resolved path
+        # as its `execution_file` output; the runner-temp path is only a
+        # fallback for an early action exit that did not set the output.
+        #
+        # The repository is PUBLIC, and that file holds the full agent
+        # transcript. Emit only bounded schema names, numeric denial counts,
+        # and denied tool names. Never emit arbitrary values or whole
+        # subtrees. Unsafe or sensitive-looking model-controlled key and
+        # tool names are redacted, and every printed string is clamped.
+        #
+        # Never fails the job on its own: a missing or unparseable file is
+        # reported and tolerated here, because the authoritative
+        # completion check is the next step. This one only produces
+        # evidence.
+        if: always()
+        env:
+          ACTION_EXECUTION_OUTPUT: ${{ steps.claude-review.outputs.execution_file }}
+          FALLBACK_EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          set -uo pipefail
+          EXECUTION_OUTPUT="${ACTION_EXECUTION_OUTPUT:-$FALLBACK_EXECUTION_OUTPUT}"
+          if [ ! -f "$EXECUTION_OUTPUT" ]; then
+            echo "note: no execution output at $EXECUTION_OUTPUT (the action may have exited before writing it)"
+            exit 0
+          fi
+          evidence="$(mktemp)"
+          # The action writes this file as a single pretty-printed JSON
+          # array of SDK messages (base-action `writeExecutionFile()` ->
+          # `JSON.stringify(messages, null, 2)`; `.json`, not `.jsonl`), so
+          # `jq -s` slurps ONE value and wraps it: the outer `.[]` yields
+          # the message array itself, not the messages. The `messages` def
+          # normalises that -- descend one level when a slurped element is
+          # itself an array -- so every extraction below iterates the flat
+          # top-level message stream (issue #146 G6, settled empirically
+          # against a captured 4-denial transcript; without it the schema
+          # readout was `none`). It is a no-op for the single-object or
+          # newline-delimited shapes, so it is correct whichever way the
+          # action serialises, and the schema-bound extractions (F5) rely on
+          # it to read `.type` off each real SDK message envelope.
+          if jq -sr '
+            def messages: [ .[] | if type == "array" then .[] else . end ];
+            def safe_string:
+              tostring[:200]
+              # A model-controlled tool_name reaches the PUBLIC step summary,
+              # so it must not carry structure-forging bytes. Use a POSITIVE
+              # allowlist (mirroring safe_key), not a blacklist: a \uXXXX
+              # blacklist kept missing invisible-Cf codepoints (LOW-1, then
+              # LOW-3, then U+206A-206F), so per the fix-the-class rule the
+              # mechanism changes to an allowlist (F4). Anthropic tool names
+              # are ^[a-zA-Z0-9_-]{1,64}$ and MCP names (mcp__server__tool)
+              # match, so anything outside [A-Za-z0-9_-] -- every control,
+              # bidi and format codepoint, space, paren, etc. -- is redacted
+              # without ever chasing a new escape. The secret-word check
+              # stays as a second branch (a conforming name may still say
+              # "token").
+              | if (test("^[A-Za-z0-9_-]{1,200}$") | not)
+                then "[redacted non-conforming tool name]"
+                elif test("secret|token|password|credential|api.?key"; "i")
+                then "[redacted sensitive-looking string]"
+                else . end;
+            def safe_key:
+              tostring[:200]
+              | if test("^[A-Za-z_][A-Za-z0-9_.-]{0,199}$")
+                   and (test("secret|token|password|credential|api.?key"; "i") | not)
+                then .
+                else "[redacted unsafe key]" end;
+            ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
+            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # message stream, not a recursive `.. | objects` scan (F5). The
+            # model owns message CONTENT (text, tool_use inputs) but not the
+            # envelope `.type`, so a tool_use `input` carrying a nested
+            # `permission_denials_count` / `denied:{tool_name}` /
+            # `{type:"tool_use"}` can no longer fabricate this public
+            # diagnostic. Denials and their count sit on the `result` record;
+            # invocations are `tool_use` blocks in `assistant` content.
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials_count
+                | select(type == "number")
+                | "permission_denials_count: \(.)" ] | unique) as $counts
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials[]?
+                | .tool_name
+                | select(type == "string")
+                | safe_string ] | unique | sort) as $tools
+            | ([ messages[]
+                | select(.type == "assistant")
+                | .message.content[]?
+                | select(.type == "tool_use") ] | length) as $invocations
+            | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
+              + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
+              + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
+              + "tool invocations seen (NOT necessarily denied): \($invocations)"
+          ' "$EXECUTION_OUTPUT" > "$evidence"; then
+            {
+              echo "## Review run evidence"
+              echo ""
+              # Bound public output even if an execution file contains many
+              # messages or an adversarial number of distinct tool names.
+              head -c 65536 -- "$evidence"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            head -c 65536 -- "$evidence"
+            echo ""
+          else
+            echo "note: execution output is not parseable JSON; no transcript content was emitted"
+          fi
+          exit 0
+
+      - name: Assert the review actually completed
+        # Issue #146, step 2 of 3, and the load-bearing one. Observed on PR
+        # #150: this job exited ZERO after four permission denials, having
+        # completed two of its five steps, while its tracking comment still
+        # read "Claude finished" and the check rendered green. A reader
+        # seeing green plus "finished" would reasonably conclude the PR was
+        # reviewed and clean. It was not reviewed at all.
+        #
+        # D105 warned about the adjacent form of this eight days earlier:
+        # "a skipped job reports Success, so a gate that treats 'the review
+        # workflow ran successfully' as 'a review executed' is satisfied by
+        # a run where it never ran". #150 is a second variant, truncated
+        # rather than skipped, and still Success.
+        #
+        # The detection signature is the run's own self-contradiction, and
+        # it needs no judgement about review QUALITY: the job has finished,
+        # and the tracking comment still advertises unfinished work. That is
+        # `track_progress: true`'s checklist with an unticked box, or its
+        # in-progress heading still present. A control run on PR #152 hit
+        # denials too, completed all its steps, and disclosed exactly what it
+        # could not verify; it passes this check, correctly. So this does NOT
+        # simply flag any run with denials, which would have failed the
+        # healthy case.
+        #
+        # SCOPE (F1, codex P1): a PASS here is sound only against BENIGN /
+        # accidental truncation or skip -- the PR #150 mode this step targets.
+        # It is NOT adversarially authenticated. A prompt-injected review holds
+        # the co-resident write-capable App token and the allowlisted
+        # `Bash(gh pr comment:*)` (see the confinement note below), so it can
+        # forge a fully-checked `claude[bot]` tracking comment -- post a fresh
+        # one, or edit the genuine truncated tracker in place -- carrying THIS
+        # run's `[View job]` link and a fresh `updated_at`. No field this step
+        # reads (author, body, link, timestamp) can distinguish that forgery
+        # from genuine completion. A step-B-side guard would be theatre and
+        # would create false assurance, so none is added.
+        #
+        # The model's Bash grant is exactly `Bash(gh pr comment:*)` /
+        # `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no
+        # `gh api`), and `gh pr comment --edit-last` is a legal invocation
+        # under the `gh pr comment:*` wildcard -- that is the specific
+        # mechanism that lets an injected review rewrite the tracker in place.
+        # So there are TWO future close paths, and step 3 owns the specific
+        # one: (a) #157, the root env-scrub that makes the write-capable token
+        # unreachable from the Bash tool at all; and (b) narrowing the
+        # `gh pr comment` grant itself -- the deliberately-deferred step-3
+        # allowlist work. (b) needs its own evidence-gated security review
+        # because `gh pr comment` is REAL needed functionality (the skill's
+        # summary comment for nits/praise/questions, per the Code Review
+        # Rubric), so it cannot simply be revoked. Until one of those lands,
+        # treat step-B green as benign-truncation-sound, not as
+        # adversarially-authenticated review completion.
+        #
+        # This assertion reads only: it needs no write scope, and its
+        # `GH_TOKEN` is wired to the read-only `secrets.GITHUB_TOKEN`
+        # (`pull-requests: read`, `issues: read`, and `actions: read` for the
+        # per-attempt binding below). That token is NOT, however, confined to
+        # this step -- the claude-code-action step earlier in this job runs the
+        # model's Bash tool with the same `GITHUB_TOKEN` in its subprocess env
+        # (no env-scrub; `allowed_non_write_users` empty), and the action also
+        # mints its own WRITE-capable App token that co-resides there. So a
+        # prompt injection reaching `Bash(gh pr comment:*)` can already reach
+        # both; the read-only job token is strictly dominated by that App token
+        # (#157). This deterministic step is not the exposure and does not leak
+        # the token; it just reuses the same read-only material.
+        #
+        # This workflow-editing PR cannot validate this change on itself:
+        # the action's workflow-validation guard skips its review, so this
+        # step correctly fails because the current run posted no tracking
+        # comment. That red is correct and must not be relaxed. The path
+        # validates post-merge on the next non-workflow PR.
+        if: '!cancelled()'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REVIEW_STEP_OUTCOME: ${{ steps.claude-review.outcome }}
+          REVIEW_STEP_CONCLUSION: ${{ steps.claude-review.conclusion }}
+        run: |
+          set -euo pipefail
+          if [ "$REVIEW_STEP_OUTCOME" != "success" ] || [ "$REVIEW_STEP_CONCLUSION" != "success" ]; then
+            echo "::error::the Claude review action did not genuinely run to success (outcome=$REVIEW_STEP_OUTCOME, conclusion=$REVIEW_STEP_CONCLUSION); this is an action refusal, failure, or skip, not a truncated review"
+            exit 1
+          fi
+
+          # Bind completion evidence to THIS attempt (codex P2, re-run
+          # fail-open). `github.run_id` is stable across re-run attempts and
+          # the tracking comment's `[View job]` link carries only the run id
+          # (no attempt/job), so a re-run whose current attempt truncates
+          # BEFORE writing its own tracking comment would otherwise select the
+          # PRIOR attempt's COMPLETED comment (same run_id, `last`) and PASS --
+          # resurrecting the #150 fail-open. Discriminate by freshness: fetch
+          # THIS attempt's own start time (verified empirically that
+          # `attempts/<n>` returns the per-attempt `run_started_at`, not the
+          # original run's) and reject any comment last touched before it.
+          # Both timestamps are GitHub's own, so they share a clock and need no
+          # skew tolerance. Fail closed if the attempt time is unavailable or
+          # malformed, rather than skipping the freshness check.
+          ATTEMPT_STARTED_AT="$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT" --jq '.run_started_at')"
+          if ! printf '%s' "$ATTEMPT_STARTED_AT" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+            echo "::error::could not determine this run attempt's start time (got '$ATTEMPT_STARTED_AT'); cannot bind completion evidence to the current attempt (issue #146)"
+            exit 1
+          fi
+
+          # Select across all pages, and bind evidence to this exact run.
+          # `github.run_id` is a GitHub-guaranteed positive integer, so the
+          # run-id fragment carries no regex metacharacters. Four anchors,
+          # all fail-closed:
+          #   - boundary, not substring (G2): a bare `contains(...)` matched
+          #     run 123 inside `/actions/runs/1234`, letting an UNRELATED
+          #     newer run's tracking comment satisfy this run's check. The
+          #     `([^0-9]|$)` requires a non-digit or end-of-string after the
+          #     id, so a shorter id can no longer prefix-match a longer one.
+          #   - the run id must sit inside the action's own header
+          #     `[View job](.../actions/runs/<id>)` link, not anywhere in the
+          #     body (fsr LOW-2): a run id merely QUOTED in later review prose
+          #     can no longer satisfy the binding. `[^)\n]*` keeps the match
+          #     on the single link line. This is part of the same action
+          #     wording contract the checklist parsing depends on (see the
+          #     pin-coupling note below); if the action renames "View job"
+          #     the binding stops matching and this step fails closed rather
+          #     than passing an unbound comment.
+          #   - freshness (codex P2 re-run fail-open): the comment must have
+          #     been last updated STRICTLY after this attempt's start, compared
+          #     as epoch seconds so ISO-8601 offsets never matter. The `>` (not
+          #     `>=`) makes a same-second `updated_at == run_started_at` tie
+          #     fail CLOSED -- both are whole-second GitHub timestamps, and a
+          #     genuine tracker is written many seconds into the run (fsr
+          #     measured 11-22s+), so the strict compare never rejects a real
+          #     completion but does reject a prior-attempt comment that happens
+          #     to share the boundary second (F2).
+          #   - `claude[bot]` author + `last` across all pages are unchanged.
+          BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
+            | jq -r --arg run_id "$RUN_ID" --arg attempt_start "$ATTEMPT_STARTED_AT" \
+              'add | [.[]
+                | select(.user.login == "claude[bot]")
+                | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))
+                | select((.updated_at | fromdateiso8601) > ($attempt_start | fromdateiso8601))]
+                | last | .body // ""')"
+
+          if [ -z "$BODY" ]; then
+            echo "::error::this run posted no tracking comment, so no review ran (issue #146)"
+            exit 1
+          fi
+
+          # The signals below (a `- [ ]` checklist box and a "review in
+          # progress" heading) are the shape of the action's OWN
+          # `track_progress: true` tracking comment, verified against the
+          # captured PR #150 (truncated) and PR #152 (healthy) comments at
+          # the pinned action SHA. That wording is the action's, not ours,
+          # and the test fixtures cannot see a FUTURE version's wording:
+          # bumping the `anthropics/claude-code-action` pin above requires
+          # re-validating this tracking-comment wording contract (re-capture
+          # a real tracking comment and update
+          # tests/factory/claude-review-completion-contract.test.ts), or a
+          # reworded checklist will silently stop matching and this gate
+          # will pass a truncated review.
+          #
+          # Inspect only the first contiguous task-list block. This is the
+          # action's tracking checklist, and excludes later review prose
+          # that may legitimately quote unticked acceptance criteria or say
+          # "review in progress".
+          CHECKLIST="$(printf '%s\n' "$BODY" | awk '
+            /^[[:space:]]*[-*+][[:space:]]+\[[ xX]\]/ {
+              if (!seen || in_block) {
+                seen = 1
+                in_block = 1
+                print
+                next
+              }
+            }
+            in_block && /^[[:space:]]*$/ { print; next }
+            in_block { exit }
+          ')"
+          # The heading sits ABOVE the first checklist item, so it is never inside
+          # CHECKLIST and the heading grep below was dead code (local codex
+          # review P1, #146). Capture the header region separately: everything
+          # up to, but excluding, the first checklist item. Scoping it this way
+          # keeps the check off arbitrary review prose further down the comment,
+          # which would false-positive on a finding that quotes the phrase.
+          HEADER="$(printf '%s\n' "$BODY" | awk '
+            /^[[:space:]]*[-*+][[:space:]]+\[[ xX]\]/ { exit }
+            { print }
+          ')"
+          if [ -z "$CHECKLIST" ]; then
+            echo "::error::this run's tracking comment has no tracking checklist; the review completion state cannot be proved (issue #146)"
+            exit 1
+          fi
+
+          # Fail closed on either self-contradiction signal within the
+          # tracking checklist region, never arbitrary review content.
+          if printf '%s' "$CHECKLIST" | grep -qE '^[[:space:]]*[-*+][[:space:]]*\[[[:space:]]\]'; then
+            echo "::error::the review job finished with unticked checklist items in its own tracking comment; the review did not complete (issue #146)"
+            printf '%s\n' "$CHECKLIST" | grep -E '^[[:space:]]*[-*+][[:space:]]*\[[[:space:]]\]' || true
+            exit 1
+          fi
+          if printf '%s' "$HEADER" | grep -qiE 'review in progress'; then
+            echo "::error::the review job finished while its tracking comment still reports work in progress; the review did not complete (issue #146)"
+            exit 1
+          fi
+          echo "confirmed: the review posted a tracking comment with no unfinished work advertised"
 
   # --- spec-grounded-review: the second half of F1-S9's anti-gaming quality
   # gates (factory.md §13 point 3, issue #12). Read-only agent job: runs
