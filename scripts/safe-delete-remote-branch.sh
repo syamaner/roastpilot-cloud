@@ -48,31 +48,7 @@
 #
 set -euo pipefail
 
-# Replacement refs rewrite history for every traversal, so a local
-# `refs/replace/*` entry would make `git rev-list` answer the reachability
-# question about a substituted graph rather than the real one (Codex P1, PR
-# #156). A destructive decision must be taken against real objects.
-export GIT_NO_REPLACE_OBJECTS=1
 
-# Grafts are a SEPARATE mechanism and the env var above does not disable them
-# (Codex P1, PR #156, reproduced: grafting main onto a unique branch tip made
-# the script report `unique: 0` and delete the branch). They are deprecated but
-# still honoured, so refuse outright rather than try to reason around them.
-# `core.graftsFile` can relocate the file, so ask git where it is rather than
-# assuming the default path.
-# `--type=path`, not a bare `--get` (Codex P1, PR #156): git supports `~/x`
-# pathname syntax here and EXPANDS it when honouring the file, while `--get`
-# returns the literal unexpanded string. Testing that raw value checks a path
-# that does not exist while the real graft file is quietly in force — the guard
-# would report clean and the deletion would proceed on rewritten history.
-# Verified: with `core.graftsFile = ~/somegrafts`, `--get` returns `~/somegrafts`
-# and `--type=path --get` returns the expanded absolute path.
-grafts_file="$(git config --type=path --get core.graftsFile || true)"
-[ -n "$grafts_file" ] || grafts_file="$(git rev-parse --git-path info/grafts)"
-# The PATH is attacker-influenced too (Codex P2, PR #156): a graft filename or
-# repository path containing ESC/CR writes those bytes straight to the terminal
-# from inside the refusal itself.
-[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$(printf '%s' "$grafts_file" | strip_control_bytes)'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
 
 REMOTE="origin"
 MAIN_REF="refs/remotes/${REMOTE}/main"
@@ -102,27 +78,37 @@ PROTECTED=(
 # reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
 # C1 control bytes, keeping tab and newline.
 strip_control_bytes() {
-  # ESCAPES rather than deletes (Codex P2, PR #156): deleting the codepoint made
-  # `victim` and `victim<U+009B>` — two genuinely different refs — render as the
-  # same name, and this report's whole job is telling an operator which ref they
-  # are about to act on.
+  # Two passes, and this time the first one is UTF-8-AWARE, which is what both
+  # earlier attempts got wrong (Codex P2, PR #156, x3).
   #
-  # ONE pass, deliberately, after trying two and making things worse. Codex
-  # raised (P2) that decoding first turns a RAW invalid byte such as 0x9b into
-  # U+FFFD before the C1 regex sees it, so raw and encoded forms would collapse.
-  # That reasoning is correct in the abstract, and I could not construct the
-  # case: git REFUSES a raw C1 in a ref name outright ("Illegal byte sequence"
-  # creating the loose ref), and a commit subject containing one comes back out
-  # of `git log` as the ENCODED pair `c2 9b` — verified by byte dump, after an
-  # earlier `grep '233'` check of mine matched the second byte of that pair and
-  # wrongly convinced me the raw byte survived.
+  #   v1 used `\xNN` escapes that BSD sed silently ignores — stripped nothing.
+  #   v2 handled only the encoded form, so a raw byte passed straight through.
+  #   v3 escaped raw bytes byte-wise, but split valid sequences: `c2 9b` became
+  #      an orphaned `c2` (-> U+FFFD) plus `<U+009B>`.
+  #   v4 reverted to decode-only, which loses the raw case again — and the
+  #      reviewer then REPRODUCED that case on Git 2.43, where a ref really can
+  #      hold `\x9b`. I had wrongly concluded it was unconstructable because
+  #      macOS refuses such a ref name at the filesystem layer. Platform-
+  #      specific absence is not absence.
   #
-  # The byte-wise pre-pass I added for it made output strictly worse: it split
-  # the valid `c2 9b` sequence, leaving an orphaned `c2` that decoded to U+FFFD,
-  # so a legitimately-encoded C1 rendered as `<U+FFFD><U+009B>`. Shipping a
-  # sanitiser that corrupts valid input to defend a case I cannot produce is the
-  # wrong trade, so it is reverted and the limit is recorded here instead.
-  perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/([\x{0}-\x{8}\x{b}-\x{1f}\x{7f}-\x{9f}])/sprintf("<U+%04X>",ord($1))/ge; $_=encode("UTF-8",$_)'
+  # So: pass 1 matches whole VALID UTF-8 sequences and lets them through
+  # untouched, escaping only bytes that are not part of one. Pass 2 then escapes
+  # control CODEPOINTS in the now-valid stream. Raw and encoded C1 end up as the
+  # same visible marker without either being corrupted, and two refs differing
+  # by such a byte cannot render alike.
+  perl -pe 'BEGIN{binmode STDIN;binmode STDOUT}
+      s{( [\xc2-\xdf][\x80-\xbf]
+         | \xe0[\xa0-\xbf][\x80-\xbf]
+         | [\xe1-\xec][\x80-\xbf]{2}
+         | \xed[\x80-\x9f][\x80-\xbf]
+         | [\xee-\xef][\x80-\xbf]{2}
+         | \xf0[\x90-\xbf][\x80-\xbf]{2}
+         | [\xf1-\xf3][\x80-\xbf]{3}
+         | \xf4[\x80-\x8f][\x80-\xbf]{2}
+         | [\x09\x0a\x20-\x7e] )
+       |([\x00-\xff])}
+       {defined $1 ? $1 : sprintf("<U+%04X>", ord($2))}gex' \
+    | perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/([\x{0}-\x{8}\x{b}-\x{1f}\x{7f}-\x{9f}])/sprintf("<U+%04X>",ord($1))/ge; $_=encode("UTF-8",$_)'
 }
 
 die() { echo "REFUSE: $*" >&2; exit 1; }
@@ -135,6 +121,32 @@ die() { echo "REFUSE: $*" >&2; exit 1; }
 # what we act on would be a correctness bug — and `$branch_display` is used for
 # every human-facing message.
 branch_display_of() { printf '%s' "$1" | strip_control_bytes; }
+
+# Replacement refs rewrite history for every traversal, so a local
+# `refs/replace/*` entry would make `git rev-list` answer the reachability
+# question about a substituted graph rather than the real one (Codex P1, PR
+# #156). A destructive decision must be taken against real objects.
+export GIT_NO_REPLACE_OBJECTS=1
+
+# Grafts are a SEPARATE mechanism and the env var above does not disable them
+# (Codex P1, PR #156, reproduced: grafting main onto a unique branch tip made
+# the script report `unique: 0` and delete the branch). They are deprecated but
+# still honoured, so refuse outright rather than try to reason around them.
+# `core.graftsFile` can relocate the file, so ask git where it is rather than
+# assuming the default path.
+# `--type=path`, not a bare `--get` (Codex P1, PR #156): git supports `~/x`
+# pathname syntax here and EXPANDS it when honouring the file, while `--get`
+# returns the literal unexpanded string. Testing that raw value checks a path
+# that does not exist while the real graft file is quietly in force — the guard
+# would report clean and the deletion would proceed on rewritten history.
+# Verified: with `core.graftsFile = ~/somegrafts`, `--get` returns `~/somegrafts`
+# and `--type=path --get` returns the expanded absolute path.
+grafts_file="$(git config --type=path --get core.graftsFile || true)"
+[ -n "$grafts_file" ] || grafts_file="$(git rev-parse --git-path info/grafts)"
+# The PATH is attacker-influenced too (Codex P2, PR #156): a graft filename or
+# repository path containing ESC/CR writes those bytes straight to the terminal
+# from inside the refusal itself.
+[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$(printf '%s' "$grafts_file" | strip_control_bytes)'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
 
 branch="${1:-}"
 [ -n "$branch" ] || die "usage: $0 <branch>   (reports only; never deletes)"
@@ -174,7 +186,13 @@ done <<EOF
 $(git remote get-url --push --all "$REMOTE")
 EOF
 
-for transport_key in "remote.${REMOTE}.uploadpack" "core.sshCommand"; do
+# `receivepack` is back (Codex P1, PR #156). I dropped it in the report-only
+# rescope reasoning "there is no push", then restored the push-URL check one
+# round later for the exact reason that invalidates the drop — the success path
+# PRINTS a `git push` command — and did not restore its sibling. Reproduced by
+# the reviewer: origin fetching from A with a receive-pack wrapper targeting B,
+# the report says SAFE about A, the suggested command deletes from B.
+for transport_key in "remote.${REMOTE}.uploadpack" "remote.${REMOTE}.receivepack" "core.sshCommand"; do
   transport_val="$(git config --get "$transport_key" || true)"
   [ -z "$transport_val" ] || die "$transport_key is set; a configured transport command decides what the fetch returns, so the reachability answer below could describe a repository other than ${REMOTE}"
 done
@@ -202,7 +220,25 @@ done
 # take `main`'s target with it. Checking only the requested ref left the
 # comparison side unverified, which is the same asymmetry the fetch/push URL
 # checks were built to avoid.
-symref_line="$(git ls-remote --symref "$REMOTE" "refs/heads/${branch}" "refs/heads/main" 2>/dev/null | grep '^ref: ' || true)"
+# Two defences, because the first one cannot be made reliable.
+#
+# `--symref` is asked for over protocol v2, which is what exposes ARBITRARY
+# branch symrefs; v0/v1 advertise only HEAD's (Codex P1, PR #156, reproduced —
+# with protocol.version=0 an `alias -> main` went unseen, the report said SAFE,
+# and the suggested command deleted `main`). I first tried to detect the
+# degraded case by checking that HEAD came back as a `ref:` line, and verified
+# that this DOES NOT WORK: v0 advertises HEAD's symref perfectly well, so the
+# probe passes while arbitrary symrefs stay hidden. A negotiated-down server
+# therefore cannot be detected this way, and I am not going to pretend it can.
+#
+# So the load-bearing guard is the second one, and it needs no protocol support
+# at all: an alias to main resolves to EXACTLY main's sha. When the branch and
+# main are sha-identical we cannot tell an alias from a coincidence without
+# symref data we may not have, so we refuse. The cost is refusing a genuine
+# branch that happens to sit exactly on main — which has nothing unique to lose
+# and can be deleted by hand — and the benefit is that the alias case cannot
+# reach a SAFE verdict regardless of protocol.
+symref_line="$(git -c protocol.version=2 ls-remote --symref "$REMOTE" "refs/heads/${branch}" "refs/heads/main" 2>/dev/null | grep '^ref: ' || true)"
 [ -z "$symref_line" ] || die "'$branch_display' is a SYMBOLIC ref on ${REMOTE} ($(printf '%s' "$symref_line" | strip_control_bytes)); it dereferences to another branch, so deleting it would act on a ref this check never inspected"
 
 for p in "${PROTECTED[@]}"; do
@@ -242,6 +278,21 @@ sha="$(git rev-parse --verify "${branch_ref}^{commit}")"
 # Capture the exact main the reachability count is computed against; the
 # deletion is leased to it below so the answer cannot go stale under us.
 main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
+# A shallow clone's boundary is not removed by an explicit fetch, so the
+# traversal silently stops at it and the count and log both under-report
+# (Codex P2, PR #156, reproduced: three unique commits reported as two, with the
+# oldest missing from the evidence). The refusal direction is safe, but this
+# report is read as COMPLETE evidence for deciding whether content is
+# superseded, so incomplete evidence is the defect.
+[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo true)" = "false" ] \
+  || die "this is a SHALLOW repository; the reachability traversal would stop at the shallow boundary and silently under-report unique commits. Run \`git fetch --unshallow\` first"
+
+# The protocol-independent half of the symbolic-ref defence (see above): an
+# alias to main is sha-identical to main, and no reachability count can tell
+# the two apart.
+[ "$sha" != "$(git rev-parse --verify "${MAIN_REF}^{commit}")" ] \
+  || die "'$branch_display' resolves to exactly the same commit as main. That is what an alias to main looks like, and this check cannot distinguish an alias from a coincidence without symref data the remote may not advertise. Refusing: deleting an alias would take main's target with it"
+
 unique="$(git rev-list --count "${MAIN_REF}..${branch_ref}")"
 echo "branch:  $branch_display"
 echo "sha:     ${sha:0:12}"

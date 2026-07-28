@@ -83,9 +83,16 @@ beforeEach(() => {
   git(clone, "commit", "--allow-empty", "-m", "base");
   git(clone, "push", "origin", "main");
 
-  // A branch fully reachable from main: safe to delete.
-  git(clone, "branch", "merged-branch", "main");
-  git(clone, "push", "origin", "merged-branch");
+  // A branch fully reachable from main and NOT sha-identical to it, which is
+  // what a genuinely merged branch looks like: its commit is an ancestor of
+  // main. A branch sitting exactly ON main is now refused, because that is
+  // indistinguishable from an alias to main without symref data.
+  git(clone, "checkout", "-q", "-b", "merged-branch");
+  git(clone, "commit", "--allow-empty", "-m", "work that later merged");
+  git(clone, "push", "-q", "origin", "merged-branch");
+  git(clone, "checkout", "-q", "main");
+  git(clone, "merge", "-q", "--no-ff", "-m", "merge the work", "merged-branch");
+  git(clone, "push", "-q", "origin", "main");
 
   // A branch carrying a commit that exists nowhere else: never safe.
   git(clone, "checkout", "-q", "-b", "unique-branch");
@@ -222,6 +229,71 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("OVERWRITTEN");
   });
 
+  // Codex P2, #156: the graft guard called `strip_control_bytes` before that
+  // function was defined, so the refusal printed "command not found" and the
+  // graft PATH rendered empty — losing the one piece of information the
+  // refusal exists to give the operator.
+  it("names the graft path in the refusal rather than an empty string", () => {
+    const graftPath = join(clone, ".git", "info", "grafts");
+    const uniqueTip = git(clone, "rev-parse", "unique-branch").trim();
+    const mainSha = git(clone, "rev-parse", "main").trim();
+    writeFileSync(graftPath, `${mainSha} ${uniqueTip}\n`);
+
+    const { code, out } = runScript(["unique-branch"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("a graft file exists");
+    // The refusal must NAME the file, which is its entire purpose; the earlier
+    // ordering bug printed an empty path plus "command not found".
+    expect(out).toContain("info/grafts");
+    expect(out).not.toContain("command not found");
+    expect(out).not.toContain("exists at ''");
+  });
+
+  // Codex P2, #156: a shallow clone's boundary survives an explicit fetch, so
+  // the traversal silently stops there and the count AND the log both
+  // under-report — and this report is read as complete evidence.
+  it("refuses in a shallow repository rather than under-reporting", () => {
+    const shallow = join(root, "shallow");
+    git(clone, "checkout", "-q", "-b", "deep", "main");
+    for (const m of ["c1", "c2", "c3"]) git(clone, "commit", "--allow-empty", "-m", m);
+    git(clone, "push", "-q", "origin", "deep");
+    git(clone, "checkout", "-q", "main");
+    // `file://`, not a plain path: git optimises LOCAL clones and ignores
+    // --depth entirely, so a path-based clone is not shallow at all (verified).
+    git(root, "clone", "--depth=2", "--branch", "deep", "--single-branch", `file://${remote}`, shallow);
+
+    const result = spawnSync("bash", [SCRIPT, "deep"], { cwd: shallow, encoding: "utf8" });
+    const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(result.status).not.toBe(0);
+    expect(out).toContain("SHALLOW repository");
+    expect(out).not.toContain("VERDICT: SAFE TO DELETE");
+  });
+
+  // Codex P1, #156. The protocol-degradation case cannot be detected reliably
+  // (v0 advertises HEAD's symref, so a HEAD probe passes while arbitrary
+  // symrefs stay hidden — verified). The protocol-INDEPENDENT backstop is what
+  // is tested: an alias to main is sha-identical to main, so sha-identity is
+  // refused outright rather than reported SAFE.
+  it("refuses a branch sha-identical to main, which is what an alias looks like", () => {
+    git(clone, "branch", "on-main", "main");
+    git(clone, "push", "-q", "origin", "on-main");
+    const { code, out } = runScript(["on-main"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("exactly the same commit as main");
+    expect(out).not.toContain("VERDICT: SAFE TO DELETE");
+  });
+
+  // Codex P1, #156, reproduced: the printed delete command honours
+  // `remote.origin.receivepack`, so the advice can act on a repository the
+  // report never inspected.
+  it("refuses when remote.origin.receivepack is configured", () => {
+    git(clone, "config", "remote.origin.receivepack", "/bin/true");
+    const { code, out } = runScript(["merged-branch"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("remote.origin.receivepack is set");
+    expect(out).not.toContain("VERDICT: SAFE TO DELETE");
+  });
+
   // Codex P1, #156, reproduced: a LOCAL tracking ref can be symbolic, and the
   // fetch writes through the indirection — so the branch's tracking ref gets
   // overwritten with main and the count compares main to itself.
@@ -307,7 +379,10 @@ describe("safe-delete-remote-branch.sh", () => {
   // something destructive.
   it("shell-quotes the branch in the suggested delete command", () => {
     const evil = "merged;touch${IFS}/tmp/pwned-canary";
-    git(clone, "branch", evil, "main");
+    // Based on the MERGED commit, not on main: a branch sha-identical to main
+    // is now refused (it is indistinguishable from an alias), so it would never
+    // reach the suggested-command line this test is about.
+    git(clone, "branch", evil, "merged-branch");
     git(clone, "push", "-q", "origin", `refs/heads/${evil}:refs/heads/${evil}`);
 
     const { out } = runScript([evil]);
