@@ -2121,9 +2121,14 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("`opened`");
     // The wait itself is still asserted (Codex P3, #155): what D142
     // changed is how the wait STARTS, never whether it applies.
-    expect(summary).toContain("WAIT for that verdict on this exact head");
+    // Codex P1, #155 round 5: the creation path must require a CLEAN
+    // verdict too. A posted review carrying findings is not clean, and the
+    // earlier wording called the automatic review a valid first verdict
+    // without saying so, which let findings read as a pass.
+    expect(summary).toContain("WAIT for a CLEAN verdict on this exact head");
+    expect(summary).toContain("A posted review with inline findings is NOT clean");
     expect(summary).not.toContain("REFRESHED");
-    expect(summary).toContain("unless a later push moves the head");
+    expect(summary).toContain("no manual trigger is needed to START the review");
     expect(summary).not.toContain("must still manually");
     expect(summary).not.toContain("NOT satisfied automatically");
     // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code

@@ -1501,7 +1501,9 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
       "failed), so CodeQL, Codex, and Claude Code Review never triggered on the refreshed " +
       "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
       `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
-      `commit(s).** (Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
+      `commit(s), and that pass must include posting \`@codex review\` on this PR ` +
+      `yourself — nothing else will start it on this path.** ` +
+      `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
     "",
     `[Run output](${runUrl}).`,
   ].join("\n");
@@ -1623,7 +1625,9 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
           "published (the App wasn't configured, or minting failed), so CodeQL, " +
           "Codex, and Claude Code Review never triggered (GitHub suppresses " +
           "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
-          "factory.md §13). **Do not merge without a manual review pass.** " +
+          "factory.md §13). **Do not merge without a manual review pass, and that " +
+          "pass must include posting `@codex review` on this PR yourself — nothing " +
+          "else will start it on this path.** " +
           `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
@@ -2054,9 +2058,12 @@ export function buildPublishSuccessStepSummary(
         : "Codex auto-reviewed at creation, and for a PR created ready (every " +
           "factory PR) that automatic review IS the valid first verdict: its " +
           "boundary event is `opened`, since such a PR never emits " +
-          "`ready_for_review`. You must still WAIT for that verdict on this exact " +
-          "head before merging (AGENTS.md's Codex-wait rule); what changes is that " +
-          "no manual re-trigger is needed unless a later push moves the head. ") +
+          "`ready_for_review`. You must still WAIT for a CLEAN verdict on this exact " +
+          "head before merging (AGENTS.md's Codex-wait rule): a bot-authored clean " +
+          "comment naming this head, or the bot's 👍, which carries no sha and holds " +
+          "only while the head is unchanged. A posted review with inline findings is " +
+          "NOT clean: fold it, push, and re-trigger once on the new head. What " +
+          "changes is only that no manual trigger is needed to START the review. ") +
       "⚠\uFE0F **Claude Code Review does NOT yet " +
       // sanitizeStepSummaryText already returns its own code span — no
       // extra surrounding backticks here.
