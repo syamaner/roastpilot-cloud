@@ -89,19 +89,32 @@ recorded here instead.
 Neither may be deleted until someone confirms its content is genuinely
 superseded and records that confirmation here.
 
-**Before deleting any remote branch:**
+**Before deleting any remote branch**, run:
 
-1. Prove it is merged from **merged-PR evidence**, never from `git branch
-   --merged` — squash merges break ancestry, so a squash-merged branch looks
-   unmerged and an unmerged branch can look reachable.
-2. `git fetch origin --prune` FIRST, then check
-   `git rev-list --count origin/main..origin/<branch>`. A non-zero count means
-   unique commits exist and the branch is **not** safe to delete, whatever a
-   PR says about it.
+```bash
+scripts/safe-delete-remote-branch.sh <branch>            # report only
+scripts/safe-delete-remote-branch.sh <branch> --delete   # delete if safe
+```
 
-   Both details are load-bearing (Codex P1, PR #156). A bare `<branch>` is
-   resolved through LOCAL refs first, per gitrevisions' disambiguation order,
-   so a stale local ref reports zero unique commits while the remote still
-   holds unseen ones, and the delete destroys them. That is precisely the
-   failure this section exists to prevent, so name the remote-tracking ref
-   explicitly and refresh it before counting.
+Use the script rather than doing this by hand. The prose version of this check
+was written four times and was wrong every time, each in a way that looked
+correct and would have destroyed commits (Codex P1 x4 on PR #156). A checklist
+that a careful reader gets wrong four times is the wrong medium, so it is
+executable now. What it refuses on, and why each matters:
+
+1. **A narrowed fetch refspec.** In a `--single-branch` clone,
+   `git fetch origin --prune` never fetches the branch at all, so any count
+   against it is meaningless. The script fetches the exact refs and fails if
+   that does not produce them.
+2. **Ambiguous revisions.** A bare `<branch>` resolves through local refs
+   first, per gitrevisions' disambiguation order, and even `origin/<branch>`
+   loses to a local branch literally named `origin/<branch>`. Only the fully
+   qualified `refs/remotes/origin/<branch>` is unambiguous.
+3. **Unique commits.** Anything not reachable from `refs/remotes/origin/main`
+   dies with the branch. Merged-PR evidence alone is not sufficient, and
+   `git branch --merged` is actively misleading, because squash merges break
+   ancestry in both directions.
+4. **Time-of-check/time-of-use.** Someone can push between the count and the
+   delete, so the delete is leased to the exact sha that was checked and fails
+   rather than silently clobbering a concurrent push.
+5. **The protected list above**, which it refuses outright.
