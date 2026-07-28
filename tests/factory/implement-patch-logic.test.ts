@@ -1840,7 +1840,12 @@ describe("buildImplementPrBody", () => {
     // post by hand. It took two rounds to land in every sibling site, and had
     // no assertion anywhere, so an edit could have silently dropped it again.
     expect(body).toContain("`@codex review`");
-    expect(body).toContain("nothing else will start it on this path");
+    // Codex P2, #155: the PR body no longer claims nothing else can start the
+    // review — it quotes the trigger phrase, and the connector matches that
+    // phrase inside posted comment bodies, so the body itself may start one.
+    expect(body).not.toContain("nothing else will start it on this path");
+    expect(body).toContain("whether it auto-reviewed here is UNVERIFIED");
+    expect(body).toContain("LOOK FIRST rather than assuming either way");
     // Codex P1, #155: the fallback notices rejected findings-reviews but never
     // required the clean signal be BOT-AUTHORED, and this repository is public,
     // so an unauthored comment is spoofable. The shared constant carries that

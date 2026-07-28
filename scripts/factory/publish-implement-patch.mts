@@ -100,9 +100,12 @@
  *   may instead pass a short-lived token minted for a dedicated GitHub App
  *   (factory.md §13's publisher-identity switch, operator decision 18 Jul
  *   2026 — a minted App installation token, not a standing PAT) —
- *   GitHub suppresses downstream workflow triggers (CI, Codex, Claude Code
+ *   GitHub suppresses downstream WORKFLOW triggers (CI, CodeQL, Claude Code
  *   Review) for `GITHUB_TOKEN`-authored PR events, so a factory PR needs a
- *   real, workflow-triggering identity to actually get reviewed. This
+ *   real, workflow-triggering identity to actually get reviewed. Codex is
+ *   deliberately NOT in that list: the connector is an installed GitHub App
+ *   receiving webhooks, not an Actions workflow, so the suppression rule does
+ *   not govern it and its fallback behaviour is unverified (Codex P2, #155). This
  *   script itself is identity-agnostic: it just uses whatever token the
  *   workflow hands it.
  * - `GITHUB_REPOSITORY` — `owner/repo`.

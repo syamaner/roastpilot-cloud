@@ -1462,10 +1462,13 @@ export interface ProvenanceContext {
  *
  * `publishedViaFallback` — true when this PR was opened using the built-in
  * `GITHUB_TOKEN` because no factory App token was minted (factory.md
- * §13's publisher-identity switch). GitHub suppresses downstream workflow
+ * §13's publisher-identity switch). GitHub suppresses downstream WORKFLOW
  * triggers for `GITHUB_TOKEN`-authored PR events, so a PR opened this way
- * got NO review-automation coverage at all (CodeQL, Codex, Claude Code
- * Review never ran) — a fact the workflow's own `::warning::` annotation
+ * got no workflow review-automation coverage (CodeQL and Claude Code Review
+ * never ran). Codex is NOT covered by that rule — it is an installed GitHub
+ * App receiving webhooks rather than an Actions workflow, so its behaviour
+ * here is unverified in both directions (Codex P2, #155) — a fact the
+ * workflow's own `::warning::` annotation
  * (adjudicated F2, #40 rework) only surfaced in the Actions log, which the
  * human merging the PR doesn't read. This field makes
  * {@link buildImplementPrBody} put that same signal ON the PR itself.
@@ -1688,12 +1691,17 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
     ? [
         "> ⚠\uFE0F **Opened via GITHUB_TOKEN fallback — review-automation workflows did " +
           "NOT run on this PR.** No factory App token was minted when this PR was " +
-          "published (the App wasn't configured, or minting failed), so CodeQL, " +
-          "Codex, and Claude Code Review never triggered (GitHub suppresses " +
-          "downstream workflow triggers for GITHUB_TOKEN-authored PR events — " +
-          "factory.md §13). **Do not merge without a manual review pass, and that " +
-          "pass must include posting `@codex review` on this PR yourself — nothing " +
-          "else will start it on this path.** " + CODEX_VERDICT_CRITERION + " " +
+          "published (the App wasn't configured, or minting failed), so CodeQL and " +
+          "Claude Code Review never triggered: GitHub suppresses downstream WORKFLOW " +
+          "triggers for GITHUB_TOKEN-authored PR events (factory.md §13). Codex is a " +
+          "DIFFERENT mechanism and that rule does not govern it — the connector is an " +
+          "installed GitHub App receiving webhooks, not an Actions workflow — so " +
+          "whether it auto-reviewed here is UNVERIFIED (Codex P2, #155). **Do not " +
+          "merge without a manual review pass, and that pass must include a Codex " +
+          "review of this head.** LOOK FIRST rather than assuming either way: if a 👀 " +
+          "or a review is already on this head then it started without you and you " +
+          "are in the wait; if nothing has appeared within the documented timeout, " +
+          "post `@codex review` once yourself. " + CODEX_VERDICT_CRITERION + " " +
           `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
