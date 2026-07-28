@@ -2102,10 +2102,15 @@ export function buildPublishSuccessStepSummary(
   const reviewAutomationLine = context.publishedViaFallback
     ? "⚠\uFE0F **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
-      `(factory.md §13); Codex does NOT auto-trigger either. ${labelLine} — ` +
-      "a manual review pass is required before merging, and it must include posting " +
-      "`@codex review` on this PR yourself: nothing else will start that review on " +
-      "this path (Codex P2, #155). " + CODEX_VERDICT_CRITERION
+      "(factory.md §13). Codex is a DIFFERENT mechanism and that rule does not govern " +
+      "it: the connector is an installed GitHub App receiving webhooks, not an Actions " +
+      "workflow, so whether it auto-reviews here is UNVERIFIED (Codex P2, #155 — this " +
+      `line used to assert flatly that it does not). ${labelLine} — ` +
+      "a manual review pass is required before merging, and it must include a Codex " +
+      "review of this head. LOOK FIRST rather than assuming either way: if a 👀 or a " +
+      "review is already on this head then it started without you and you are in the " +
+      "wait; if nothing has appeared within the documented timeout, post `@codex " +
+      "review` once yourself. " + CODEX_VERDICT_CRITERION
     : "✅ CI, CodeQL, and dependency review triggered normally. " +
       (context.wasRefresh
         // Codex P1, #155: this summary is ALSO produced by the

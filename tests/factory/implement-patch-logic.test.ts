@@ -2174,7 +2174,12 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("`FACTORY_PUBLISHER_APP_ID is not configured`");
     expect(summary).toContain("⚠\uFE0F **Suppressed**");
     expect(summary).toContain("no-review-automation");
-    expect(summary).toContain("Codex does NOT auto-trigger either");
+    // Codex P2, #155: the summary no longer asserts Codex is suppressed. The
+    // GITHUB_TOKEN workflow-suppression rule governs Actions workflows, not the
+    // installed Codex App, so the honest state is UNVERIFIED and the operator is
+    // told to look before posting rather than to assume either way.
+    expect(summary).toContain("whether it auto-reviews here is UNVERIFIED");
+    expect(summary).not.toContain("Codex does NOT auto-trigger either");
   });
 
   it("reports the label as applied when labelApplied is true or omitted (undefined = not attempted, treated as the default success wording)", () => {
@@ -2272,8 +2277,14 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: false,
     });
     expect(summary).toContain("**Suppressed**");
-    expect(summary).toContain("Codex does NOT auto-trigger either");
-    expect(summary).toContain("posting `@codex review` on this PR yourself");
+    // Codex P2, #155: the summary no longer asserts Codex is suppressed. The
+    // GITHUB_TOKEN workflow-suppression rule governs Actions workflows, not the
+    // installed Codex App, so the honest state is UNVERIFIED and the operator is
+    // told to look before posting rather than to assume either way.
+    expect(summary).toContain("whether it auto-reviews here is UNVERIFIED");
+    expect(summary).not.toContain("Codex does NOT auto-trigger either");
+    expect(summary).toContain("LOOK FIRST rather than assuming either way");
+    expect(summary).toContain("post `@codex review` once yourself");
     expect(summary).not.toContain("IS the valid first verdict");
     // Codex, #155: "no automatic verdict to wait for" must not read as "no
     // wait". The acceptance criterion is the same on this path, and a
@@ -2296,7 +2307,8 @@ describe("buildPublishSuccessStepSummary", () => {
       wasRefresh: true,
     });
     expect(summary).toContain("**Suppressed**");
-    expect(summary).toContain("posting `@codex review` on this PR yourself");
+    expect(summary).toContain("LOOK FIRST rather than assuming either way");
+    expect(summary).toContain("post `@codex review` once yourself");
     expect(summary).not.toContain("REFRESHED, so its head has moved");
     expect(summary).not.toContain("IS the valid first verdict");
   });
