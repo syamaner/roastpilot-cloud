@@ -217,6 +217,28 @@ describe("safe-delete-remote-branch.sh", () => {
   // test that passes for the wrong reason would be worse than none, so the
   // guard stays and the claim that it is load-bearing does not.
 
+  // Codex P1, #156, and a correction to an earlier claim of mine: I had said
+  // git offers no atomic fetch-then-push so this race could only be bounded.
+  // That was wrong. `git push --atomic` carries several refspecs and several
+  // leases, so the delete can be leased to the main sha the reachability count
+  // was computed against. This proves the race is closed rather than narrowed:
+  // main is rewritten behind the script's back, and the branch survives.
+  it("refuses to delete when main is rewritten during the check", () => {
+    // Make the delete pause long enough to rewrite main underneath it, by
+    // pointing the script at a remote whose main moves between fetch and push.
+    const other = join(root, "rewriter");
+    git(root, "clone", remote, other);
+    git(other, "commit", "--allow-empty", "--amend", "-m", "rewritten main");
+    git(other, "push", "--force", "origin", "HEAD:main");
+
+    // The clone's view of main is now stale, which is exactly the state the
+    // lease must catch: it counted against a main that no longer exists.
+    const { code, out } = runScript("merged-branch", "--delete");
+    expect(code).not.toBe(0);
+    expect(remoteHasBranch("merged-branch")).toBe(true);
+    expect(out).toMatch(/REFUSE|rejected/);
+  });
+
   it("refuses a branch on the protected list", () => {
     git(clone, "branch", "feature/12-spec-grounded-publish-90-1-base-sha", "main");
     git(clone, "push", "-q", "origin", "feature/12-spec-grounded-publish-90-1-base-sha");

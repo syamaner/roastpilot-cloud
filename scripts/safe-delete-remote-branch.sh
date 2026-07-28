@@ -132,6 +132,9 @@ git show-ref --verify --quiet "$MAIN_REF" \
 sha="$(git rev-parse --verify "${branch_ref}^{commit}")"
 
 # (3) Any commit not reachable from main means deleting destroys it.
+# Capture the exact main the reachability count is computed against; the
+# deletion is leased to it below so the answer cannot go stale under us.
+main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
 unique="$(git rev-list --count "${MAIN_REF}..${branch_ref}")"
 echo "branch:  $branch"
 echo "sha:     ${sha:0:12}"
@@ -146,30 +149,29 @@ fi
 echo "SAFE: every commit on '$branch' is reachable from main"
 [ "$do_delete" = "--delete" ] || { echo "(report only; pass --delete to remove it)"; exit 0; }
 
-# (4) The reachability decision also depends on the main sha we fetched, and
-# the lease can only protect the ref being deleted (Codex P2, PR #156). So
-# re-fetch main immediately before deleting and refuse if it moved: a main
-# that advanced or was rewritten under us invalidates the count, even though
-# the branch itself is unchanged.
-main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
-git fetch --no-tags "$REMOTE" "+refs/heads/main:refs/remotes/${REMOTE}/main" >/dev/null 2>&1 \
-  || die "could not re-verify main before deleting"
-main_sha_now="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
-# A truly atomic pin across fetch-then-push is not available in git, so bound
-# the hazard precisely instead (Codex P1, PR #156). Reachability can only ever
-# GROW when main fast-forwards, so an advanced main cannot turn a safe answer
-# into an unsafe one. The dangerous case is main being REWOUND or rewritten,
-# which can strand commits that were reachable when we counted. Accept the
-# former, refuse the latter.
-if [ "$main_sha_at_check" != "$main_sha_now" ]; then
-  git merge-base --is-ancestor "$main_sha_at_check" "$main_sha_now" 2>/dev/null \
-    || die "main was rewritten (${main_sha_at_check:0:12} is not an ancestor of ${main_sha_now:0:12}); the reachability result may be stale. Re-run."
-  echo "note: main fast-forwarded ${main_sha_at_check:0:12} -> ${main_sha_now:0:12}; reachability can only have grown, continuing"
+# (4) Close the race properly, with ONE atomic leased push (Codex P1, PR
+# #156). An earlier version of this script re-fetched main, compared it, and
+# claimed git offered no atomic fetch-then-push so the hazard could only be
+# bounded. That was wrong. `git push --atomic` carries several refspecs and
+# several `--force-with-lease` options, and either all succeed or none do, so
+# the deletion can be leased to BOTH the branch sha and the main sha that the
+# reachability count was actually computed against.
+#
+# The main refspec is a no-op update of main to the value we already checked;
+# it exists purely to carry the lease. Verified empirically both ways: with
+# main unchanged the delete succeeds, and with main force-rewritten between
+# the check and the push the whole push is rejected ("stale info") and the
+# branch survives.
+#
+# Any movement of main fails this push, including a benign fast-forward. That
+# is deliberate for a destructive tool: the cost is one re-run, and the
+# alternative is reasoning about which movements are safe while a delete is in
+# flight.
+if ! git push --atomic "$REMOTE" \
+  --force-with-lease="refs/heads/${branch}:${sha}" \
+  --force-with-lease="refs/heads/main:${main_sha_at_check}" \
+  ":refs/heads/${branch}" \
+  "${main_sha_at_check}:refs/heads/main"; then
+  die "atomic delete rejected: '$branch' or 'main' moved since the check. Nothing was deleted. Re-run."
 fi
-
-# (5) Lease the delete to the branch sha we actually checked, so a concurrent
-# push to the branch fails the delete rather than being clobbered.
-git push "$REMOTE" --force-with-lease="refs/heads/${branch}:${sha}" \
-  --delete "$branch" \
-  || die "delete rejected: '$branch' moved since the check (someone pushed). Re-run."
-echo "DELETED: $branch at ${sha:0:12}"
+echo "DELETED: $branch at ${sha:0:12} (leased against main ${main_sha_at_check:0:12})"
