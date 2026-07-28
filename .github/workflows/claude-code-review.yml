@@ -286,6 +286,108 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
+      - name: Surface the review run's own denial evidence
+        # Issue #146, step 1 of 3. The action reports
+        # `permission_denials_count` in its execution summary and NOTHING
+        # about WHICH tools were denied, so an allowlist gap cannot be
+        # diagnosed after the fact -- verified against PR #150's run, whose
+        # 977-line log contains the count and no denial records at all. The
+        # detail lives in `claude-execution-output.json`, which the action
+        # writes to the runner temp directory and which is then destroyed
+        # with the runner.
+        #
+        # This step deliberately prints the file's SHAPE, not its CONTENT.
+        # The repository is PUBLIC, and that file holds the full agent
+        # transcript: uploading it as an artifact, or echoing it, would put
+        # every tool result the reviewer saw in front of anyone who can view
+        # Actions. Emitting top-level keys plus any denial-shaped field is
+        # enough to learn the schema and the denied tool names, and is not
+        # enough to leak a transcript. Once a real run has shown the schema,
+        # step 3 (closing the allowlist gap) can be done on evidence rather
+        # than by guessing, which is the whole point of the ordering.
+        #
+        # Never fails the job on its own: a missing or unparseable file is
+        # reported and tolerated here, because the authoritative
+        # completion check is the next step. This one only produces
+        # evidence.
+        if: always()
+        env:
+          EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          set -uo pipefail
+          if [ ! -f "$EXECUTION_OUTPUT" ]; then
+            echo "note: no execution output at $EXECUTION_OUTPUT (the action may have exited before writing it)"
+            exit 0
+          fi
+          echo "## Review run evidence" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          # Top-level keys only. Values are printed for scalar,
+          # non-transcript fields; anything else is reported by key alone.
+          jq -r '
+            "top-level keys: " + ([paths(scalars|true)|.[0]]|unique|join(", "))
+          ' "$EXECUTION_OUTPUT" 2>/dev/null || echo "note: execution output is not parseable JSON"
+          # Any field whose key mentions a denial, at any depth, with its
+          # value. This is what step 3 needs and what PR #150 could not show.
+          jq -r '
+            [ paths as $p | select($p[-1]|tostring|test("denial|denied";"i")) | {k: ($p|map(tostring)|join(".")), v: getpath($p)} ]
+            | if length == 0 then "denial fields: none present in this run"
+              else (map("denial field " + .k + " = " + (.v|tojson)) | join("\n")) end
+          ' "$EXECUTION_OUTPUT" 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Assert the review actually completed
+        # Issue #146, step 2 of 3, and the load-bearing one. Observed on PR
+        # #150: this job exited ZERO after four permission denials, having
+        # completed two of its five steps, while its tracking comment still
+        # read "Claude finished" and the check rendered green. A reader
+        # seeing green plus "finished" would reasonably conclude the PR was
+        # reviewed and clean. It was not reviewed at all.
+        #
+        # D105 warned about the adjacent form of this eight days earlier:
+        # "a skipped job reports Success, so a gate that treats 'the review
+        # workflow ran successfully' as 'a review executed' is satisfied by
+        # a run where it never ran". #150 is a second variant, truncated
+        # rather than skipped, and still Success.
+        #
+        # The detection signature is the run's own self-contradiction, and
+        # it needs no judgement about review QUALITY: the job has finished,
+        # and the tracking comment still advertises unfinished work. That is
+        # `track_progress: true`'s checklist with an unticked box, or its
+        # in-progress heading still present. A control run on PR #152 hit
+        # denials too, completed all its steps, and disclosed exactly what it
+        # could not verify; it passes this check, correctly. So this does NOT
+        # simply flag any run with denials, which would have failed the
+        # healthy case.
+        #
+        # Reads only. The job token is `pull-requests: read` and stays that
+        # way; nothing here needs a write scope.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The most recent tracking comment authored by the review App.
+          BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq '[.[] | select(.user.login == "claude[bot]")] | last | .body // ""')"
+
+          if [ -z "$BODY" ]; then
+            echo "::error::the review job finished without posting a tracking comment; treat this run as NO REVIEW (issue #146)"
+            exit 1
+          fi
+
+          # Fail closed on either self-contradiction signal.
+          if printf '%s' "$BODY" | grep -qE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]'; then
+            echo "::error::the review job finished with unticked checklist items in its own tracking comment; the review did not complete (issue #146)"
+            printf '%s\n' "$BODY" | grep -E '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' || true
+            exit 1
+          fi
+          if printf '%s' "$BODY" | grep -qiE 'review in progress|Code review in progress'; then
+            echo "::error::the review job finished while its tracking comment still reports work in progress; the review did not complete (issue #146)"
+            exit 1
+          fi
+          echo "confirmed: the review posted a tracking comment with no unfinished work advertised"
+
   # --- spec-grounded-review: the second half of F1-S9's anti-gaming quality
   # gates (factory.md §13 point 3, issue #12). Read-only agent job: runs
   # slice 3b-i's deterministic runner (fetches the PR's linked-issue
