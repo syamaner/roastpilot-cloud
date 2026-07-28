@@ -389,6 +389,31 @@ jobs:
           fi
           exit 0
 
+      - name: Resolve the execution transcript path for upload
+        # Issue #146 G4 (codex P2). The action sets `execution_file` only on a
+        # normal exit; on an EARLY exit it may still have written the
+        # runner-temp fallback. Uploading `steps.claude-review.outputs.execution_file`
+        # directly would hand the upload an EMPTY path in exactly the
+        # early-exit case this artifact exists to diagnose, and upload-artifact
+        # silently warns rather than uploading the fallback that IS on disk.
+        # Resolve the same way step A does and publish the path only when the
+        # file actually exists, so the upload sees either a real file or
+        # nothing (the genuine no-file case, still handled by
+        # `if-no-files-found: warn`).
+        if: always()
+        id: resolve-transcript
+        env:
+          ACTION_EXECUTION_OUTPUT: ${{ steps.claude-review.outputs.execution_file }}
+          FALLBACK_EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          set -uo pipefail
+          EXECUTION_OUTPUT="${ACTION_EXECUTION_OUTPUT:-$FALLBACK_EXECUTION_OUTPUT}"
+          if [ -f "$EXECUTION_OUTPUT" ]; then
+            echo "path=$EXECUTION_OUTPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "note: no execution transcript on disk to upload (checked $EXECUTION_OUTPUT)"
+          fi
+
       - name: Upload the review run's execution transcript (diagnostic artifact)
         # Issue #146 G4. Step A surfaces denied tool NAMES only, so a Bash
         # denial reads as "Bash" x N -- not enough to justify a specific
@@ -397,7 +422,8 @@ jobs:
         # gated artifact rather than into the PUBLIC Actions log, so the
         # `show_full_output: false` posture is preserved. It is the identical
         # trade-off implement-ready-issues.yml already makes for its own
-        # agent transcript.
+        # agent transcript. The path comes from the resolve step above so the
+        # runner-temp fallback is uploaded too, not just the action output.
         #
         # Confidentiality: this job never git-authenticates -- the action's
         # `use_commit_signing: true` above skips configureGitAuth(), so no
@@ -411,7 +437,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: claude-review-transcript
-          path: ${{ steps.claude-review.outputs.execution_file }}
+          path: ${{ steps.resolve-transcript.outputs.path }}
           if-no-files-found: warn
           retention-days: 30
 

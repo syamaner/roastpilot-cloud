@@ -2040,9 +2040,10 @@ jobs:
         }
       }
     }
-      // Issue #146 moved these counters, in two accounted-for steps:
-      //   runSteps 27 -> 29: the claude-review job gained two `run:` steps
-      //     (denial evidence + completion assertion).
+      // Issue #146 moved these counters, in accounted-for steps:
+      //   runSteps 27 -> 30: the claude-review job gained three `run:` steps
+      //     (denial evidence + completion assertion + the G4 transcript-path
+      //     resolve step, codex P2).
       //   actionSteps 27 -> 28, inputs 66 -> 70: it also gained one
       //     `actions/upload-artifact` step (the transcript diagnostic, G4)
       //     whose four `with:` entries (name/path/if-no-files-found/
@@ -2050,10 +2051,10 @@ jobs:
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them to match a run without knowing which steps moved. If G4 is later
-      // dropped, revert actionSteps to 27 and inputs to 66.
+      // dropped, revert runSteps to 29, actionSteps to 27, and inputs to 66.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 29,
+      runSteps: 30,
       actionSteps: 28,
       inputs: 70,
     });
@@ -2101,11 +2102,12 @@ jobs:
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
-      // Same #146 deltas as the corpus test above: +2 run steps (denial
-      // evidence + completion assertion) and +1 upload-artifact action step
-      // with four `with:` inputs (G4). Revert actionSteps to 46 and inputs to
-      // 117 if G4 is dropped.
-      runSteps: 53,
+      // Same #146 deltas as the corpus test above: +3 run steps (denial
+      // evidence + completion assertion + the G4 transcript-path resolve step)
+      // and +1 upload-artifact action step with four `with:` inputs (G4).
+      // Revert runSteps to 53, actionSteps to 46, inputs to 117 if G4 is
+      // dropped.
+      runSteps: 54,
       actionSteps: 47,
       inputs: 121,
     });
