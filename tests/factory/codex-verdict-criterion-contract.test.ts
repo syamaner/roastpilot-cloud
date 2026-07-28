@@ -46,12 +46,12 @@ const CONDITIONS = [
   [
     "requires the Codex bot identity as the author",
     /AUTHORED BY `chatgpt-codex-connector\[bot\]`/,
-    /chatgpt-codex-connector\[bot\]/,
+    /ONLY\s+when authored by the Codex bot identity \(`chatgpt-codex-connector\[bot\]`\)/,
   ],
   [
     "says why identity matters: a public repo makes any channel spoofable",
     /public, so a comment or reaction from anyone else is\s+spoofable/,
-    /spoofable/,
+    /bot-authorship is\s+required on BOTH channels: a reaction or comment content alone is spoofable/,
   ],
   [
     "names the clean COMMENT channel by its literal title",
@@ -65,37 +65,45 @@ const CONDITIONS = [
   [
     "requires the comment to be top-level and carry a Reviewed commit line",
     /TOP-LEVEL comment[\s\S]*`Reviewed commit: <sha>` line whose sha matches/,
-    /top-level[\s\S]*`Reviewed commit: <sha>` line/,
+    /\*\*top-level "Codex Review: Didn't\s+find any major issues" comment carrying a `Reviewed commit: <sha>` line\*\* whose\s+sha matches the PR head/,
   ],
   [
     "requires the 👍 to follow the bot's own 👀",
     /👍 AFTER its own 👀/,
-    /👀/,
+    // NOT a bare /👀/: that matches the emoji anywhere in the file, so the
+    // ordering condition could be deleted outright and this would still pass.
+    /\*\*👍 reaction \(after the 👀\)\*\*/,
   ],
   [
     "records that a bare 👍 with no preceding 👀 is not a completed review",
     /👍\s+with no preceding 👀 is not a completed review/,
-    /in\s+progress, keep waiting/,
+    /A 👀 reaction means the review is \*\*in\s+progress, keep waiting\*\*/,
   ],
   [
     "records that the 👍 carries no sha, so it holds only while the head is unchanged",
     /👍 carries no sha,\s+so it holds only while the head is unchanged/,
-    /carries no sha/,
+    /👍\s+reaction carries no sha, so it is valid only while the head stays unchanged/,
   ],
   [
     "requires the signal to postdate the event that started the review",
     /POSTDATE the event that started/,
-    /must postdate the final-commit trigger|postdate/i,
+    /must correspond to the current head AND postdate \*\*the event that\s+started the automatic review for this PR's shape\*\*/,
   ],
   [
-    "names both boundary events, since a PR created ready never emits ready_for_review",
+    "names BOTH boundary events, since a PR created ready never emits ready_for_review",
     /`opened` for a PR created ready, `ready_for_review` for a\s+draft marked ready/,
-    /`ready_for_review`|created ready/,
+    // Two separate assertions, not an alternation: an alternation is satisfied
+    // by either branch, so deleting one boundary event from the policy would
+    // leave this green while the rule became unsatisfiable for that PR shape.
+    [
+      /a PR \*\*created ready\*\*[\s\S]{0,120}emits `opened` and\s+NEVER emits `ready_for_review`, so `opened` is its boundary/,
+      /a \*\*draft marked ready\*\* emits `ready_for_review`, and that is its\s+boundary/,
+    ],
   ],
   [
     "records that a review carrying findings is not clean",
     /A review carrying findings is\s+NOT clean/,
-    /inline threads\*\* = findings/,
+    /A \*\*posted\s+`pull_request_review` with inline threads\*\* = findings/,
   ],
 ] as const;
 
@@ -105,7 +113,18 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
   });
 
   it.each(CONDITIONS)("AGENTS.md still carries: %s", (_condition, _inConstant, inAgentsMd) => {
-    expect(AGENTS_MD).toMatch(inAgentsMd);
+    // A condition may need SEVERAL matchers when the policy states it in more
+    // than one clause, and then EVERY one must hold. An alternation would be
+    // satisfied by whichever half survived a deletion — which is exactly how
+    // the first version of this file was too weak to do its own job: the
+    // boundary-event row used /`ready_for_review`|created ready/, so removing
+    // either boundary event from the policy left it green while the rule became
+    // unsatisfiable for that PR shape (Codex P2, #155).
+    const matchers = Array.isArray(inAgentsMd) ? inAgentsMd : [inAgentsMd];
+    expect(matchers.length).toBeGreaterThan(0);
+    for (const matcher of matchers) {
+      expect(AGENTS_MD).toMatch(matcher);
+    }
   });
 
   // The silent-fallback clause is the one place the criterion tells an operator
