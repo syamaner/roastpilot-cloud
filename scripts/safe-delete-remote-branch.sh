@@ -99,20 +99,18 @@ PROTECTED=(
 # reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
 # C1 control bytes, keeping tab and newline.
 strip_control_bytes() {
-  # C0 first, by byte. Then C1 in BOTH forms (Codex P2, PR #156): the previous
-  # version handled only the UTF-8 encoding `c2 9b`, while a RAW single-byte
-  # 0x9b is equally valid in a git ref name and survived untouched — so the
-  # sanitiser missed the very bytes it was added for, a second time.
+  # ESCAPES rather than deletes (Codex P2, PR #156). Deleting the codepoint
+  # made `victim` and `victim<U+009B>` — two genuinely different remote refs —
+  # render as the same name, so the evidence could not distinguish the ref that
+  # was checked from another one. On a report whose entire job is telling an
+  # operator which ref they are about to act on, silently collapsing two
+  # identifiers is worse than the terminal-control problem it was fixing.
   #
-  # A blind byte-range strip of 0x80-0x9f is NOT correct here: those bytes are
-  # also UTF-8 continuation bytes inside legitimate multi-byte characters, so
-  # removing them would corrupt ordinary non-ASCII branch names. Decoding
-  # first distinguishes the two: a lone raw C1 is malformed UTF-8 and becomes
-  # U+FFFD (visible, inert), a properly encoded C1 decodes to its codepoint and
-  # is removed, and valid multi-byte characters are preserved. Verified against
-  # all three shapes.
-  LC_ALL=C tr -d '\000-\010\013-\037\177' \
-    | perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/[\x{80}-\x{9f}]//g; $_=encode("UTF-8",$_)'
+  # Decoding first still distinguishes a raw C1 (malformed UTF-8 -> U+FFFD)
+  # from an encoded one, and valid multi-byte characters pass through intact.
+  # Tab and newline are kept; everything else in C0, DEL and C1 is rendered
+  # visibly and inertly as `<U+XXXX>`.
+  perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/([\x{0}-\x{8}\x{b}-\x{1f}\x{7f}-\x{9f}])/sprintf("<U+%04X>",ord($1))/ge; $_=encode("UTF-8",$_)'
 }
 
 die() { echo "REFUSE: $*" >&2; exit 1; }
@@ -147,8 +145,18 @@ branch_display="$(branch_display_of "$branch")"
 # command decides what the FETCH returns, so it can falsify the reachability
 # answer this tool exists to produce. A receive-pack override could only
 # misdirect a push, and there is no longer a push.
-uploadpack_val="$(git config --get "remote.${REMOTE}.uploadpack" || true)"
-[ -z "$uploadpack_val" ] || die "remote.${REMOTE}.uploadpack is set; a configured transport command decides what the fetch returns, so the reachability answer below could describe a repository other than ${REMOTE}"
+for transport_key in "remote.${REMOTE}.uploadpack" "core.sshCommand"; do
+  transport_val="$(git config --get "$transport_key" || true)"
+  [ -z "$transport_val" ] || die "$transport_key is set; a configured transport command decides what the fetch returns, so the reachability answer below could describe a repository other than ${REMOTE}"
+done
+# The environment overrides too (Codex P1, PR #156, reproduced against SSH):
+# an SSH wrapper can route `git-upload-pack` to a different repository while
+# the configured URL is untouched, so the URL proves nothing about which
+# repository answered.
+for transport_env in GIT_SSH_COMMAND GIT_SSH; do
+  eval "transport_env_val=\${$transport_env:-}"
+  [ -z "$transport_env_val" ] || die "$transport_env is set in the environment; it decides which repository answers the fetch, so the reachability answer below cannot be attributed to ${REMOTE}"
+done
 
 
 # (0d) A SYMBOLIC remote ref is not caught by comparing names (Codex P1, PR
@@ -159,7 +167,13 @@ uploadpack_val="$(git config --get "remote.${REMOTE}.uploadpack" || true)"
 # alias is never what someone means to delete, and resolving it would put this
 # tool back in the business of reasoning about indirection on a destructive
 # path.
-symref_line="$(git ls-remote --symref "$REMOTE" "refs/heads/${branch}" 2>/dev/null | grep '^ref: ' || true)"
+# BOTH refs, not just the requested one (Codex P1, PR #156, reproduced): with
+# remote `main -> victim`, both explicit fetches resolve to the same sha, the
+# count is zero, and the report calls `victim` safe — while deleting it would
+# take `main`'s target with it. Checking only the requested ref left the
+# comparison side unverified, which is the same asymmetry the fetch/push URL
+# checks were built to avoid.
+symref_line="$(git ls-remote --symref "$REMOTE" "refs/heads/${branch}" "refs/heads/main" 2>/dev/null | grep '^ref: ' || true)"
 [ -z "$symref_line" ] || die "'$branch_display' is a SYMBOLIC ref on ${REMOTE} ($(printf '%s' "$symref_line" | strip_control_bytes)); it dereferences to another branch, so deleting it would act on a ref this check never inspected"
 
 for p in "${PROTECTED[@]}"; do

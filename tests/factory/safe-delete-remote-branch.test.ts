@@ -222,6 +222,49 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("OVERWRITTEN");
   });
 
+  // Codex P1, #156, reproduced: `main` itself can be a symbolic ref pointing
+  // AT the branch under test. Both explicit fetches then resolve to the same
+  // sha, the unique count is zero, and the report calls the branch safe —
+  // while deleting it would take main's target with it. Checking only the
+  // REQUESTED ref left the comparison side unverified.
+  it("refuses when main is a symbolic ref pointing at the branch under test", () => {
+    git(clone, "checkout", "-q", "-b", "victim", "main");
+    git(clone, "commit", "--allow-empty", "-m", "only on victim");
+    git(clone, "push", "-q", "origin", "victim");
+    git(clone, "checkout", "-q", "main");
+    git(remote, "symbolic-ref", "refs/heads/main", "refs/heads/victim");
+
+    const { code, out } = runScript(["victim"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("is a SYMBOLIC ref");
+    expect(out).not.toContain("SAFE TO DELETE");
+  });
+
+  // Codex P1, #156, reproduced against SSH: a transport wrapper can route
+  // git-upload-pack to a different repository while the configured URL is
+  // untouched, so the URL proves nothing about which repository answered the
+  // fetch — and the fetch is what the whole reachability answer rests on.
+  it.each([["core.sshCommand", "config"], ["GIT_SSH_COMMAND", "env"], ["GIT_SSH", "env"]])(
+    "refuses when %s is set",
+    (key, kind) => {
+      if (kind === "config") {
+        git(clone, "config", key, "/bin/true");
+        const { code, out } = runScript(["merged-branch"]);
+        expect(code).not.toBe(0);
+        expect(out).toContain(`${key} is set`);
+        return;
+      }
+      const result = spawnSync("bash", [SCRIPT, "merged-branch"], {
+        cwd: clone,
+        encoding: "utf8",
+        env: { ...process.env, [key]: "/bin/true" },
+      });
+      const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      expect(result.status).not.toBe(0);
+      expect(out).toContain(`${key} is set in the environment`);
+    },
+  );
+
   // Codex P1, #156, and a hazard the report-only rescope INTRODUCED: the
   // output now prints a copy-pasteable shell command, and git permits shell
   // metacharacters in ref names. A raw interpolation turns a safety report
@@ -280,9 +323,11 @@ describe("safe-delete-remote-branch.sh", () => {
 
     const result = spawnSync("bash", [SCRIPT, raw], { cwd: clone, encoding: "binary" });
     const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-    // The raw C1 byte must not reach the terminal in any line.
-    expect(out).not.toContain("\u009b");
+    // The raw C1 byte must not reach the terminal in any line...
     expect(Buffer.from(out, "binary").includes(0x9b)).toBe(false);
+    // ...and it must be ESCAPED rather than deleted, so two refs differing
+    // only by a control byte cannot render as the same name (Codex P2, #156).
+    expect(out).toMatch(/<U\+[0-9A-F]{4}>/);
   });
 
   // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not
