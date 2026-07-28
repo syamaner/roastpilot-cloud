@@ -394,9 +394,16 @@ that rule here. **Factory-authored PRs** don't use the draft phase for this
 purpose: the read-only implementing agent can't drive an open→ready
 transition, so the privileged publisher opens the PR non-draft and the
 *same* review roster runs **post-open** by design (the App-identity wiring
-exists precisely so CI + Codex + Claude Code Review fire on the opened
-PR), with the human merge as the gate the draft→ready step would otherwise
-be. Whether the publisher should open factory PRs as drafts and have
+exists precisely so CI and Codex fire on the opened PR), with the human
+merge as the gate the draft→ready step would otherwise be. **Claude Code
+Review is NOT part of that roster on an App-minted factory PR yet** (Codex
+P2, #155): `claude-code-review.yml` sets `allowed_bots: 'claude,claude[bot]'`,
+which does not include the publisher identity, so the action rejects it
+outright until #47 lands. `buildPublishSuccessStepSummary` already warns
+the operator of exactly this. Listing it here as one of the lenses that
+"fires on the opened PR" would let a reviewer relying on this policy read a
+missing lens as a completed one, which is the same false-completeness this
+file elsewhere treats as a merge hazard. Whether the publisher should open factory PRs as drafts and have
 `pr-triage` mark them ready post-fold is a factory-design question tracked
 separately, not this rule.
 - **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance

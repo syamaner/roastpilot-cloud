@@ -2128,8 +2128,12 @@ export function buildPublishSuccessStepSummary(
         // operator merge a refreshed head on a stale verdict.
         ? "This PR was REFRESHED, so its head has moved since creation and Codex's " +
           "automatic review at creation describes a SUPERSEDED commit. It does NOT " +
-          "satisfy the wait. Re-trigger with a single `@codex review` on this final " +
-          "commit. " + CODEX_VERDICT_CRITERION + " "
+          "satisfy the wait. **CHECK WHETHER THIS PR IS A DRAFT FIRST** (Codex P2, " +
+          "#155). If it is, do NOT post a trigger: a manual review on a draft posts " +
+          "findings but can never complete the clean-verdict flow (D105), so waiting " +
+          "for one there waits forever. Marking it ready is what starts the automatic " +
+          "review; wait on that instead. Only if it is already ready, re-trigger with " +
+          "a single `@codex review` on this final commit. " + CODEX_VERDICT_CRITERION + " "
         : "Codex's automatic review is DUE on this PR, not known to have happened " +
           "(Codex P2, #155: this line used to assert it had auto-reviewed, which " +
           "reads as a completed status the operator can rely on). For a PR created " +

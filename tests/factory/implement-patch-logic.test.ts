@@ -2259,7 +2259,13 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("REFRESHED");
     expect(summary).toContain("SUPERSEDED");
     expect(summary).toContain("does NOT " + "satisfy the wait");
-    expect(summary).toContain("Re-trigger with a single `@codex review`");
+    // Codex P2, #155: the refresh notice now gates the re-trigger on the PR not
+    // being a draft. A manual review on a draft posts findings but can never
+    // complete the clean-verdict flow (D105), so directing a trigger there sends
+    // the operator into a wait that cannot end.
+    expect(summary).toContain("CHECK WHETHER THIS PR IS A DRAFT FIRST");
+    expect(summary).toContain("Marking it ready is what starts the automatic review");
+    expect(summary).toContain("re-trigger with a single `@codex review`");
     expect(summary).not.toContain("IS the valid first verdict");
     // Codex P2 + claude-review should-fix, #155: BOTH accepted clean channels
     // must be named, because the 👍 carries no sha and would otherwise be
