@@ -2042,18 +2042,25 @@ jobs:
     }
       // Issue #146 moved runSteps 27 -> 29: the claude-review job gained
       // exactly two `run:` steps -- the denial-evidence surface (step A) and
-      // the completion assertion (step B). actionSteps and inputs are back to
-      // baseline: the transcript-upload machinery (an upload-artifact action
-      // step and its resolve-transcript run step) was dropped as a public-repo
-      // credential-exposure risk with no ratified step-3 consumer (codex round
-      // 4, Rigour Calibration D139). These counters are D140 drift-detection
-      // evidence, so noticing a change is exactly their job; the delta above is
-      // deliberate. Do not update them without knowing which steps moved.
+      // the completion assertion (step B). The transcript-upload machinery (an
+      // upload-artifact action step and its resolve-transcript run step) was
+      // dropped as a public-repo credential-exposure risk with no ratified
+      // step-3 consumer (codex round 4, Rigour Calibration D139).
+      //
+      // Issue #157 moved inputs 66 -> 67: the claude-review claude-code-action
+      // invocation gained exactly one `with:` key,
+      // `github_token: ${{ secrets.GITHUB_TOKEN }}`, so the action runs on the
+      // job's own token instead of OIDC-minting a write-capable App token.
+      // jobs/runSteps/actionSteps are unchanged (no step added or removed).
+      //
+      // These counters are D140 drift-detection evidence, so noticing a change
+      // is exactly their job; the deltas above are deliberate. Do not update
+      // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
       runSteps: 29,
       actionSteps: 27,
-      inputs: 66,
+      inputs: 67,
     });
   });
 
@@ -2100,12 +2107,15 @@ jobs:
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 17,
       // Same #146 delta as the corpus test above: +2 run steps (the
-      // denial-evidence and completion-assertion steps A+B). No action-step or
-      // input change -- the transcript-upload machinery was dropped (codex
-      // round 4 / D139).
+      // denial-evidence and completion-assertion steps A+B). The
+      // transcript-upload machinery was dropped (codex round 4 / D139).
+      //
+      // Same #157 delta as the corpus test above: inputs 117 -> 118, the one
+      // added `github_token:` `with:` key on the claude-review invocation. No
+      // action-step change.
       runSteps: 53,
       actionSteps: 46,
-      inputs: 117,
+      inputs: 118,
     });
   });
 });

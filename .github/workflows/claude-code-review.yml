@@ -112,25 +112,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      # #157: the claude-code-action step below now runs on this job's own
+      # `GITHUB_TOKEN` (`github_token:` input) instead of OIDC-minting a
+      # separate write-capable App token, so this `permissions:` block is the
+      # ACTUAL ceiling the model's Bash tool can reach. `pull-requests: write`
+      # is what posts the inline review threads and the tracking comment --
+      # work this job already did before #157, only previously under the
+      # stronger minted App token. So this read->write move authorizes nothing
+      # new (identical writes, a strictly weaker repo-scoped, job-lifetime
+      # credential).
+      pull-requests: write
       issues: read
       # Read-only, added for #146's per-attempt completion binding: the
       # "Assert the review actually completed" step reads
       # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
       # reject a prior attempt's stale tracking comment (a re-run fail-open,
       # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
-      # never leaks it. Note this token is NOT confined from the LLM: the
+      # never leaks it. This token is NOT confined from the LLM: the
       # claude-code-action step runs the model's Bash tool with this
       # `GITHUB_TOKEN` present in its subprocess env (there is no env-scrub,
       # and `allowed_non_write_users` is empty), so `actions: read` is
       # reachable under the accepted `Bash(gh pr comment:*)` exfil residual.
       # Acceptable because it is read-only, public-repo (it exposes only run
-      # metadata any reader can already see), short-lived, and strictly
-      # dominated by the co-resident WRITE-capable minted App token tracked in
-      # #157 -- any injection that exfils this job token already yields the
-      # stronger App token, so `actions: read` adds no meaningful blast radius.
+      # metadata any reader can already see), and short-lived. Since #157 this
+      # is bounded by the same repo-scoped, job-lifetime `GITHUB_TOKEN` as
+      # everything else the Bash tool can reach -- no write-capable minted App
+      # token co-resides any more, so there is no stronger co-resident
+      # credential it could be dominated by.
       actions: read
-      id-token: write
 
     steps:
       - name: Checkout repository
@@ -199,9 +208,23 @@ jobs:
         uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176 (>= v1.0.94, the bot-allowlist-bypass CVE fix)
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # SECURITY-CRITICAL (Refs #157) -- same reasoning as the
+          # spec-grounded-review invocation below and `triage-issues.yml`'s
+          # identical `github_token` input: without it, claude-code-action
+          # OIDC-mints a SEPARATE App token that ALWAYS carries
+          # contents/pull_requests/issues WRITE (its `DEFAULT_PERMISSIONS`),
+          # independent of this job's own `permissions:` block above and
+          # co-resident in the model's Bash subprocess env (no env-scrub,
+          # `Bash(gh pr comment:*)` allowed) -- a write-capable credential a
+          # prompt-injected diff could exfiltrate. Passing this job's own token
+          # instead short-circuits that OIDC exchange entirely, so the action
+          # inherits the ceiling declared above (`pull-requests: write` +
+          # reads, repo-scoped and job-lifetime). (Also why this job requests
+          # no `id-token: write` -- the OIDC exchange path is never reached.)
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           # Adjudicated P1-b (#35 rework): without this, claude-code-action's
           # prepareAgentMode() calls configureGitAuth(), which embeds this
-          # job's OAuth-derived credential directly into .git/config's
+          # job's own `GITHUB_TOKEN` directly into .git/config's
           # remote URL — readable on disk by anything this job's tool
           # policy allows to read files, i.e. a real exfiltration path for
           # a token this job should never need to write with at all (it
@@ -251,11 +274,15 @@ jobs:
           # not folded — operator decision): `Bash(gh pr comment:*)` is
           # itself a real, if narrow, exfiltration surface under prompt
           # injection from a malicious diff — a compromised review session
-          # could shell out with the job's OAuth-derived credential
-          # reachable in its environment. Accepted as-is because this
-          # workflow only ever runs same-repo (the fork guard above), the
-          # blast radius is a same-repo actor already trusted with this
-          # token's scope, and closing it properly would mean a tighter
+          # could shell out with the job's own `GITHUB_TOKEN`
+          # (`pull-requests: write` + reads) reachable in its environment.
+          # Since #157 that built-in token is the ONLY GitHub credential
+          # reachable here — the OIDC-minted write-capable App token this used
+          # to co-reside with is gone — so the exfil surface remains but no
+          # longer discloses a stronger minted credential. Accepted as-is
+          # because this workflow only ever runs same-repo (the fork guard
+          # above), the blast radius is a same-repo actor already trusted with
+          # this token's scope, and closing it properly would mean a tighter
           # subprocess-env scrub that entangles with a looser actor model
           # elsewhere in this file — net-negative for this rework. Revisit
           # sandboxing here if this job is ever extended to run on fork
@@ -446,43 +473,50 @@ jobs:
         # SCOPE (F1, codex P1): a PASS here is sound only against BENIGN /
         # accidental truncation or skip -- the PR #150 mode this step targets.
         # It is NOT adversarially authenticated. A prompt-injected review holds
-        # the co-resident write-capable App token and the allowlisted
-        # `Bash(gh pr comment:*)` (see the confinement note below), so it can
-        # forge a fully-checked `claude[bot]` tracking comment -- post a fresh
-        # one, or edit the genuine truncated tracker in place -- carrying THIS
-        # run's `[View job]` link and a fresh `updated_at`. No field this step
-        # reads (author, body, link, timestamp) can distinguish that forgery
-        # from genuine completion. A step-B-side guard would be theatre and
-        # would create false assurance, so none is added.
+        # this job's own `GITHUB_TOKEN` (`pull-requests: write`, since #157 the
+        # only GitHub credential reachable from the model's Bash tool) and the
+        # allowlisted `Bash(gh pr comment:*)` (see the confinement note below),
+        # so it can still forge a fully-checked `github-actions[bot]` tracking
+        # comment -- post a fresh one, or edit the genuine truncated tracker in
+        # place -- carrying THIS run's `[View job]` link and a fresh
+        # `updated_at`. No field this step reads (author, body, link,
+        # timestamp) can distinguish that forgery from genuine completion. A
+        # step-B-side guard would be theatre and would create false assurance,
+        # so none is added.
         #
         # The model's Bash grant is exactly `Bash(gh pr comment:*)` /
         # `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no
         # `gh api`), and `gh pr comment --edit-last` is a legal invocation
         # under the `gh pr comment:*` wildcard -- that is the specific
         # mechanism that lets an injected review rewrite the tracker in place.
-        # So there are TWO future close paths, and step 3 owns the specific
-        # one: (a) #157, the root env-scrub that makes the write-capable token
-        # unreachable from the Bash tool at all; and (b) narrowing the
-        # `gh pr comment` grant itself -- the deliberately-deferred step-3
-        # allowlist work. (b) needs its own evidence-gated security review
-        # because `gh pr comment` is REAL needed functionality (the skill's
-        # summary comment for nits/praise/questions, per the Code Review
-        # Rubric), so it cannot simply be revoked. Until one of those lands,
-        # treat step-B green as benign-truncation-sound, not as
-        # adversarially-authenticated review completion.
+        # #157 CLOSED the credential-disclosure axis (the write-capable minted
+        # App token that used to co-reside in the Bash env is gone; the
+        # reachable GitHub credential is now this job's repo-scoped,
+        # job-lifetime `GITHUB_TOKEN`), but it did NOT close completion forgery,
+        # because that built-in token STILL carries `pull-requests: write`. The
+        # one remaining close path is narrowing the `gh pr comment` grant
+        # itself -- the deliberately-deferred step-3 allowlist work, which needs
+        # its own evidence-gated security review because `gh pr comment` is REAL
+        # needed functionality (the skill's summary comment for
+        # nits/praise/questions, per the Code Review Rubric), so it cannot
+        # simply be revoked. Until that lands, treat step-B green as
+        # benign-truncation-sound, not as adversarially-authenticated review
+        # completion.
         #
-        # This assertion reads only: it needs no write scope, and its
-        # `GH_TOKEN` is wired to the read-only `secrets.GITHUB_TOKEN`
-        # (`pull-requests: read`, `issues: read`, and `actions: read` for the
-        # per-attempt binding below). That token is NOT, however, confined to
-        # this step -- the claude-code-action step earlier in this job runs the
-        # model's Bash tool with the same `GITHUB_TOKEN` in its subprocess env
-        # (no env-scrub; `allowed_non_write_users` empty), and the action also
-        # mints its own WRITE-capable App token that co-resides there. So a
-        # prompt injection reaching `Bash(gh pr comment:*)` can already reach
-        # both; the read-only job token is strictly dominated by that App token
-        # (#157). This deterministic step is not the exposure and does not leak
-        # the token; it just reuses the same read-only material.
+        # This assertion only READS: its `GH_TOKEN` is wired to
+        # `secrets.GITHUB_TOKEN` (`pull-requests: write` + `issues: read` +
+        # `actions: read`), and it uses only the comment-list and per-attempt
+        # read endpoints -- it never writes. That token is NOT confined to this
+        # step -- the claude-code-action step earlier in this job runs the
+        # model's Bash tool with the SAME `GITHUB_TOKEN` in its subprocess env
+        # (no env-scrub; `allowed_non_write_users` empty). Since #157 that job
+        # token is the WHOLE GitHub credential reachable there: the action no
+        # longer OIDC-mints a separate write-capable App token (it runs on this
+        # `github_token` instead), so a prompt injection reaching
+        # `Bash(gh pr comment:*)` reaches only this repo-scoped, job-lifetime
+        # `pull-requests: write` + reads token -- the credential-disclosure axis
+        # #157 closed. This deterministic step is not the exposure and does not
+        # leak the token; it just reuses the same material.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this
@@ -551,11 +585,14 @@ jobs:
           #     measured 11-22s+), so the strict compare never rejects a real
           #     completion but does reject a prior-attempt comment that happens
           #     to share the boundary second (F2).
-          #   - `claude[bot]` author + `last` across all pages are unchanged.
+          #   - the `github-actions[bot]` author (since #157 the job's own
+          #     `GITHUB_TOKEN` posts the tracker, so the genuine comment is
+          #     authored by `github-actions[bot]`) + `last` across all pages
+          #     are unchanged.
           BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
             | jq -r --arg run_id "$RUN_ID" --arg attempt_start "$ATTEMPT_STARTED_AT" \
               'add | [.[]
-                | select(.user.login == "claude[bot]")
+                | select(.user.login == "github-actions[bot]")
                 | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))
                 | select((.updated_at | fromdateiso8601) > ($attempt_start | fromdateiso8601))]
                 | last | .body // ""')"
