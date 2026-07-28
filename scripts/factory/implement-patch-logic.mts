@@ -373,8 +373,15 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
 export const CODEX_VERDICT_CRITERION =
   "The verdict must be AUTHORED BY `chatgpt-codex-connector[bot]` — this " +
   "repository is public, so a comment or reaction from anyone else is " +
-  "spoofable and does not count — and it must be CLEAN: a bot-authored clean " +
-  "comment naming this exact head, or the bot's 👍 AFTER its own 👀 — a 👍 " +
+  "spoofable and does not count — and it must be CLEAN, which means one of " +
+  "exactly two signals. Either a bot-authored TOP-LEVEL comment titled " +
+  '"Codex Review: Didn\'t find any major issues" carrying a ' +
+  "`Reviewed commit: <sha>` line whose sha matches this exact head — match " +
+  "that title and that line, not your own reading of whether some other " +
+  "comment sounds clean, because the connector also posts bot-authored " +
+  "head-naming comments that are not verdicts at all (queued, skipped, or " +
+  "unable-to-review notices) and none of those satisfies the wait. Or the " +
+  "bot's 👍 AFTER its own 👀 — a 👍 " +
   "with no preceding 👀 is not a completed review, and the 👍 carries no sha, " +
   "so it holds only while the head is unchanged. Matching the head is NOT " +
   "sufficient on its own: the signal must also POSTDATE the event that started " +
@@ -388,8 +395,10 @@ export const CODEX_VERDICT_CRITERION =
   "has yet been posted for this head, and neither a verdict nor a 👀 appears " +
   "within roughly 30 minutes, post `@codex review` once; that is a first review " +
   "that never started, not the re-litigation the once-on-final rule forbids. " +
-  "Where a trigger has already been posted, do not post a second one: wait, and " +
-  "escalate rather than re-trigger.";
+  "Where a trigger has already been posted FOR THIS HEAD, do not post a second " +
+  "one: wait, and escalate rather than re-trigger. A trigger posted on an " +
+  "earlier head does not count — the head moved, so that review describes a " +
+  "superseded commit and this head still needs its own.";
 
 export const FACTORY_TEXT_LINE_LIMIT = 400;
 
@@ -1537,9 +1546,14 @@ export function buildFallbackRefreshCommentBody(runUrl: string): string {
       "workflows did NOT run against the new commit(s).**",
     "",
     "No factory App token was minted for this run (the App wasn't configured, or minting " +
-      "failed), so CodeQL, Codex, and Claude Code Review never triggered on the refreshed " +
-      "branch (GitHub suppresses downstream workflow triggers for GITHUB_TOKEN-authored " +
-      `events — factory.md §13). **Do not merge without a manual review pass on the latest ` +
+      "failed), so CodeQL and Claude Code Review never triggered on the refreshed " +
+      "branch: GitHub suppresses downstream WORKFLOW triggers for GITHUB_TOKEN-authored " +
+      "events (factory.md §13). Codex is assumed not to have reviewed either, but that " +
+      "rests on a different and UNVERIFIED mechanism — the Codex connector is an installed " +
+      "GitHub App receiving webhooks, not an Actions workflow, so the GITHUB_TOKEN " +
+      "suppression rule does not govern it, and its behaviour on a bot-authored PR has not " +
+      "been observed here. Treat it as unreviewed, which is the fail-closed reading: the " +
+      `cost of being wrong is one redundant trigger. **Do not merge without a manual review pass on the latest ` +
       `commit(s), and that pass must include posting \`@codex review\` on this PR ` +
       `yourself — nothing else will start it on this path.** ${CODEX_VERDICT_CRITERION} ` +
       `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,

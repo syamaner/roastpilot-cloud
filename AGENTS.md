@@ -621,10 +621,13 @@ and draws on a **separate, weekly-capped subscription**.
   Cheap, and they do not touch the Codex quota at all.
 - A local `codex review` **never** satisfies the Codex merge wait — that needs a
   bot-authored signal on the PR itself, validated per channel exactly as the PR
-  Merge Policy above defines it (a commit-naming review or clean comment, or a
-  👍 reaction, which carries no sha and is valid only while the head is
-  unchanged). Do not collapse that into a blanket "must name the head sha";
-  the reaction channel cannot carry one.
+  Merge Policy above defines it. **Do not restate the channel rules here.** This
+  parenthetical used to, and had already drifted from the policy it points at:
+  it omitted the 👀-before-👍 ordering, and admitted "a commit-naming review" as
+  clean where the Merge Policy counts a posted review with inline threads as
+  findings. It was the sixth surviving restatement of a rule that #155 collapsed
+  precisely because five copies could not be kept in agreement. One statement,
+  in the Merge Policy, is the whole point.
 - **Budget stop rule:** check the remaining Codex allowance before delegating.
   Below roughly 20%, stop delegating implementation entirely and reserve the
   remainder for pre-open review on boundary-touching slices; review is the
