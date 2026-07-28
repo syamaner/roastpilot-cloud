@@ -43,6 +43,16 @@ set -euo pipefail
 # #156). A destructive decision must be taken against real objects.
 export GIT_NO_REPLACE_OBJECTS=1
 
+# Grafts are a SEPARATE mechanism and the env var above does not disable them
+# (Codex P1, PR #156, reproduced: grafting main onto a unique branch tip made
+# the script report `unique: 0` and delete the branch). They are deprecated but
+# still honoured, so refuse outright rather than try to reason around them.
+# `core.graftsFile` can relocate the file, so ask git where it is rather than
+# assuming the default path.
+grafts_file="$(git config --get core.graftsFile || true)"
+[ -n "$grafts_file" ] || grafts_file="$(git rev-parse --git-path info/grafts)"
+[ -e "$grafts_file" ] && { echo "REFUSE: a graft file exists at '$grafts_file'; it rewrites history for reachability and cannot be disabled the way replacement refs can. Remove it before running this." >&2; exit 1; }
+
 REMOTE="origin"
 MAIN_REF="refs/remotes/${REMOTE}/main"
 
@@ -114,7 +124,7 @@ case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$
 redact_url() {
   printf '%s' "$1" \
     | sed -E 's#(://)[^/@]*@#\1<redacted>@#' \
-    | sed -E 's#([?&][^=&]+=)[^&]*#\1<redacted>#g'
+    | sed -E 's#\?[^#[:space:]]*#?<redacted>#g'
 }
 
 fetch_url="$(git remote get-url "$REMOTE")"
@@ -180,6 +190,29 @@ echo "SAFE: every commit on '$branch' is reachable from main"
 # the deletion can be leased to BOTH the branch sha and the main sha that the
 # reachability count was actually computed against.
 #
+# WHAT THIS DOES AND DOES NOT CLOSE (corrected, Codex P1 PR #156, after I
+# claimed the race was closed rather than narrowed — twice, in opposite
+# directions, so the evidence is recorded here rather than the conclusion).
+#
+# Verified with a pre-receive hook on a real remote: when main still equals
+# `main_sha_at_check` at the moment git reads the remote advertisement, git
+# treats that refspec as ALREADY UP TO DATE and omits it from the transaction
+# entirely. The hook sees only the branch deletion. So on the ordinary path
+# main's lease does NOT participate, and cannot detect a rewrite that lands
+# between the advertisement and the deletion.
+#
+# What still holds: the BRANCH lease does participate, because the branch is
+# being deleted, so a concurrent push to the branch is caught. And when main
+# HAS already moved by advertisement time, the refspec is a rewind, so the
+# push is rejected and nothing is deleted.
+#
+# The residual window is therefore narrow and specific: a force-rewrite of main
+# landing after the advertisement but before the deletion, which would have to
+# make the branch's commits unreachable. On this repo main is protected against
+# exactly that. This is a documented residual, NOT a closed race — the earlier
+# claim that `--atomic` plus two leases closed it was wrong, and a reader acting
+# on that claim would over-trust this tool.
+#
 # The main refspec is a no-op update of main to the value we already checked.
 # Verified empirically both ways, by a real-git regression test that rewrites
 # main from inside the script's own run (a `git` shim that mutates the remote
@@ -208,7 +241,7 @@ echo "SAFE: every commit on '$branch' is reachable from main"
 # `https://host/x.git?access_token=CANARY` prints the token verbatim.
 # So the push output is captured and redacted before anything is shown.
 push_status=0
-push_output="$(git push --atomic "$REMOTE" \
+push_output="$(git push --atomic --no-follow-tags "$REMOTE" \
   --force-with-lease="refs/heads/${branch}:${sha}" \
   --force-with-lease="refs/heads/main:${main_sha_at_check}" \
   ":refs/heads/${branch}" \

@@ -292,9 +292,66 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(code).not.toBe(0);
     expect(out).toContain("<redacted>");
     expect(out).not.toContain(secret);
-    // The key name survives, so the operator can still see WHICH parameter
-    // was suppressed; only the value is withheld.
-    expect(out).toContain(key);
+    // The key name is redacted too, and that is the CURRENT contract rather
+    // than the original one. v3 redacted `?k=v` values and kept key names for
+    // diagnosis; Codex then broke v3 with an opaque, keyless query credential
+    // (`?<token>`, or a bare segment after `&`), which contains no `=` and so
+    // matched nothing (P1, #156, reproduced against a real push). Preserving
+    // key names is a nicety; failing open on a credential is not. So the whole
+    // query component goes, and host/path — the part that identifies which
+    // remote mismatched — is what remains.
+    expect(out).not.toContain(key);
+  });
+
+  // The keyless case that broke the k=v redaction (Codex P1, #156).
+  it.each([
+    ["opaque query with no key at all", "?sk_live_opaquecanary"],
+    ["bare segment after an ampersand", "?a=1&barecanary"],
+  ])("redacts %s", (_name, query) => {
+    git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git${query}`);
+    const { code, out } = runScript(["merged-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("<redacted>");
+    expect(out).not.toContain("opaquecanary");
+    expect(out).not.toContain("barecanary");
+  });
+
+  // Codex P1, #156, reproduced by the reviewer: GIT_NO_REPLACE_OBJECTS does not
+  // disable a legacy graft file, so a graft could make a branch-only commit
+  // look reachable from main and authorise a deletion. Grafts are deprecated
+  // but still honoured, so the script refuses outright.
+  it("refuses to run at all when a graft file is present", () => {
+    const graftPath = join(clone, ".git", "info", "grafts");
+    const uniqueTip = git(clone, "rev-parse", "unique-branch").trim();
+    const mainSha = git(clone, "rev-parse", "main").trim();
+    // Direction matters: this must make MAIN reach the branch tip, so the
+    // branch looks fully merged. Grafting the branch tip onto main is a no-op,
+    // since that is already its parent.
+    writeFileSync(graftPath, `${mainSha} ${uniqueTip}\n`);
+
+    const { code, out } = runScript(["unique-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("a graft file exists");
+    expect(remoteHasBranch("unique-branch")).toBe(true);
+    // The point of refusing rather than compensating: without the guard the
+    // graft makes this branch look safe. Prove the graft really does distort
+    // the answer, so this test cannot pass vacuously.
+    const grafted = git(clone, "rev-list", "--count", "main..unique-branch").trim();
+    expect(grafted).toBe("0");
+  });
+
+  // Codex P2, #156, reproduced: with push.followTags set, the deletion push
+  // also publishes local annotated tags reachable from the main commit it
+  // carries — a tool that promises only to remove a branch silently creating
+  // remote tags.
+  it("does not publish local tags when push.followTags is set", () => {
+    git(clone, "config", "push.followTags", "true");
+    git(clone, "tag", "-a", "v-local-only", "-m", "should not cross");
+
+    const { code } = runScript(["merged-branch", "--delete"]);
+    expect(code).toBe(0);
+    const remoteTags = git(remote, "for-each-ref", "--format=%(refname:short)", "refs/tags/");
+    expect(remoteTags).not.toContain("v-local-only");
   });
 
   // Codex P1, #156: every message the script writes itself was redacted, but
@@ -387,11 +444,20 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(remoteHasBranch("replace-branch")).toBe(true);
   });
 
-  // Codex P1, #156, and a correction to an earlier claim of mine: I had said
-  // git offers no atomic fetch-then-push so this race could only be bounded.
-  // That was wrong. `git push --atomic` carries several refspecs and several
-  // leases, so the delete can be leased to the main sha the reachability count
-  // was computed against.
+  // Codex P1, #156, twice, in opposite directions — worth stating because the
+  // conclusion moved and the evidence is what should be trusted, not me.
+  //
+  // First I said git offered no atomic fetch-then-push, so this race could only
+  // be bounded. That was wrong: `git push --atomic` carries several refspecs
+  // and several leases. Then I said that closed the race. That was ALSO wrong.
+  // Verified with a pre-receive hook on a real remote: when main is unchanged at
+  // advertisement time git treats its refspec as up to date and omits it from
+  // the transaction, so main's lease does not participate at all.
+  //
+  // What this test proves is therefore narrower than its old name suggested: if
+  // main has ALREADY moved when the push starts, the delete is refused and the
+  // branch survives. It does not prove anything about a rewrite landing inside
+  // the push itself, which remains a documented residual in the script.
   //
   // Codex P2, #156 round 4: the first version of this test rewrote main BEFORE
   // invoking the script, so the script's own fetch observed the rewrite and
