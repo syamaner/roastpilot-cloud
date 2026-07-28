@@ -88,15 +88,20 @@ PROTECTED=(
 # reads to make the delete/refuse decision (Codex P2, PR #156). Strip C0 and
 # C1 control bytes, keeping tab and newline.
 strip_control_bytes() {
-  # Keeps ONLY tab (\011) and newline (\012). An earlier range kept \015 too,
-  # which is the carriage return an attacker uses to return to column zero and
-  # overwrite the line just printed — the single most useful byte for forging
-  # this report, left in by a range that looked deliberate.
-  # `$'...'` so the C1 range is LITERAL BYTES in the pattern. BSD/macOS sed does
-  # not interpret `\xNN` escapes and silently matches nothing, so the version
-  # written with them stripped C0 correctly and left every C1 byte intact —
-  # which is precisely the class git actually permits in a ref name.
-  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed -E $'s/\xc2[\x80-\x9f]//g'
+  # C0 first, by byte. Then C1 in BOTH forms (Codex P2, PR #156): the previous
+  # version handled only the UTF-8 encoding `c2 9b`, while a RAW single-byte
+  # 0x9b is equally valid in a git ref name and survived untouched — so the
+  # sanitiser missed the very bytes it was added for, a second time.
+  #
+  # A blind byte-range strip of 0x80-0x9f is NOT correct here: those bytes are
+  # also UTF-8 continuation bytes inside legitimate multi-byte characters, so
+  # removing them would corrupt ordinary non-ASCII branch names. Decoding
+  # first distinguishes the two: a lone raw C1 is malformed UTF-8 and becomes
+  # U+FFFD (visible, inert), a properly encoded C1 decodes to its codepoint and
+  # is removed, and valid multi-byte characters are preserved. Verified against
+  # all three shapes.
+  LC_ALL=C tr -d '\000-\010\013-\037\177' \
+    | perl -MEncode -pe '$_=decode("UTF-8",$_,Encode::FB_DEFAULT); s/[\x{80}-\x{9f}]//g; $_=encode("UTF-8",$_)'
 }
 
 die() { echo "REFUSE: $*" >&2; exit 1; }
@@ -191,6 +196,17 @@ EOF
 }
 
 
+# (0c) Matching URLs do NOT prove the push reaches the inspected repository if
+# the transport command itself is overridden (Codex P1, PR #156, reproduced:
+# with a `receivepack` wrapper the script inspected repo A and deleted the
+# branch from repo B, returning success). Git runs the configured command for
+# the push, so the URL becomes advisory. Refuse any non-default transport
+# command rather than trying to validate one.
+for transport_key in "remote.${REMOTE}.receivepack" "remote.${REMOTE}.uploadpack"; do
+  transport_val="$(git config --get "$transport_key" || true)"
+  [ -z "$transport_val" ] || die "$transport_key is set; a configured transport command means the URL does not determine which repository this push reaches, so the safety check cannot bind to the delete"
+done
+
 fetch_url="$(git remote get-url "$REMOTE")"
 KNOWN_URLS="$fetch_url"
 seen_push_urls=""
@@ -212,6 +228,17 @@ The safety check would inspect one remote and delete on another. Refusing."
 done <<EOF
 $(git remote get-url --push --all "$REMOTE")
 EOF
+
+# (0d) A SYMBOLIC remote ref is not caught by comparing names (Codex P1, PR
+# #156, reproduced: `refs/heads/alias -> refs/heads/main` reported zero unique
+# commits and the deletion removed `main`). Both the reachability check and the
+# push dereference it, so the literal `$branch = main` guard never sees it.
+# Refuse anything symbolic rather than trying to resolve and re-compare: an
+# alias is never what someone means to delete, and resolving it would put this
+# tool back in the business of reasoning about indirection on a destructive
+# path.
+symref_line="$(git ls-remote --symref "$REMOTE" "refs/heads/${branch}" 2>/dev/null | grep '^ref: ' || true)"
+[ -z "$symref_line" ] || die "'$branch_display' is a SYMBOLIC ref on ${REMOTE} ($(printf '%s' "$symref_line" | strip_control_bytes)); it dereferences to another branch, so deleting it would act on a ref this check never inspected"
 
 for p in "${PROTECTED[@]}"; do
   [ "$branch" = "$p" ] && die "'$branch_display' is on the protected list in docs/state/registry.md"

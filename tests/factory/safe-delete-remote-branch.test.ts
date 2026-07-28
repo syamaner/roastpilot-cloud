@@ -398,6 +398,48 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).toContain("OVERWRITTEN");
   });
 
+  // Codex P1, #156, reproduced by the reviewer: a symbolic remote ref
+  // dereferences on BOTH the reachability check and the push, so `alias ->
+  // main` reports zero unique commits and the deletion removes `main`. The
+  // literal name guard never sees it.
+  it("refuses a symbolic remote ref that dereferences to main", () => {
+    git(remote, "symbolic-ref", "refs/heads/alias", "refs/heads/main");
+    const { code, out } = runScript(["alias", "--delete"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain("is a SYMBOLIC ref");
+    // The load-bearing assertion: main must survive.
+    expect(remoteHasBranch("main")).toBe(true);
+    expect(git(remote, "symbolic-ref", "refs/heads/alias").trim()).toBe("refs/heads/main");
+  });
+
+  // Codex P1, #156, reproduced: with a configured transport command, equal
+  // fetch/push URLs do not prove the push reaches the inspected repository —
+  // git runs the configured command and the URL becomes advisory.
+  it.each([["receivepack"], ["uploadpack"]])("refuses when remote.origin.%s is configured", (key) => {
+    git(clone, "config", `remote.origin.${key}`, "/bin/true");
+    const { code, out } = runScript(["merged-branch", "--delete"]);
+    expect(code).not.toBe(0);
+    expect(out).toContain(`remote.origin.${key} is set`);
+    expect(remoteHasBranch("merged-branch")).toBe(true);
+  });
+
+  // Codex P2, #156: the C1 strip handled only the UTF-8 encoding, so a RAW
+  // single-byte 0x9b — equally valid in a ref name — survived into the report.
+  it("neutralises a RAW single-byte C1 control, not just its UTF-8 form", () => {
+    const raw = Buffer.from([0x65, 0x76, 0x69, 0x6c, 0x9b, 0x32, 0x4a, 0x78]).toString("binary");
+    execFileSync("git", ["branch", raw, "main"], { cwd: clone, encoding: "binary" });
+    execFileSync("git", ["push", "-q", "origin", `refs/heads/${raw}:refs/heads/${raw}`], {
+      cwd: clone,
+      encoding: "binary",
+    });
+
+    const result = spawnSync("bash", [SCRIPT, raw, "--delete"], { cwd: clone, encoding: "binary" });
+    const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    // The raw C1 byte must not reach the terminal in any line.
+    expect(out).not.toContain("\u009b");
+    expect(Buffer.from(out, "binary").includes(0x9b)).toBe(false);
+  });
+
   // Codex P2, #156: a nonzero push does not prove the remote is unchanged. If
   // the server applies the transaction and the acknowledgement is lost, git
   // exits nonzero with the branch already deleted — and the old message told
