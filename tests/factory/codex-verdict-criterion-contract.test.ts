@@ -69,7 +69,14 @@ const CONDITIONS = [
   ],
   [
     "requires the comment to be top-level and carry a Reviewed commit line",
-    /TOP-LEVEL comment[\s\S]*`Reviewed commit: <sha>` line whose sha matches/,
+    // NOT `[\s\S]*` between the two literals (factory-security-reviewer, #155).
+    // That bridge spanned the whole 4 KB constant, so they needed only to both
+    // exist somewhere — and the surviving mutation admitted "a TOP-LEVEL
+    // comment or an inline reply alike" as the clean channel while this stayed
+    // green. The top-level requirement exists precisely to stop a connector
+    // IN-THREAD reply being read as a verdict, which is what roastpilot-agent#682
+    // observed. Bounded so the two must sit in the same clause.
+    /TOP-LEVEL comment titled[^.]{0,160}`Reviewed commit: <sha>` line whose sha matches/,
     /\*\*top-level "Codex Review: Didn't\s+find any major issues" comment carrying a `Reviewed commit: <sha>` line\*\* whose\s+sha matches the PR head/,
   ],
   [
@@ -112,7 +119,15 @@ const CONDITIONS = [
   ],
   [
     "records that a review carrying findings is not clean",
-    /A review carrying findings is\s+NOT clean/,
+    // TWO matchers on the CONSTANT side as well (factory-security-reviewer,
+    // #155). The earlier fix added the second matcher to the AGENTS.md side and
+    // left this one single, so the half that says a findings review posted as a
+    // plain top-level comment is still not clean — the half that blocks nothing
+    // mechanically — could be deleted from the text an operator actually reads.
+    [
+      /A review carrying findings is\s+NOT clean/,
+      /even as a top-level comment with no inline threads/,
+    ],
     // TWO matchers, because the rule has two halves and only one was asserted
     // (Codex P2, #155). The inline-thread sentence alone left the load-bearing
     // top-level-comment clause unprotected: a findings review posted as a
@@ -128,7 +143,13 @@ const CONDITIONS = [
 
 describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule", () => {
   it.each(CONDITIONS)("%s", (_condition, inConstant) => {
-    expect(CODEX_VERDICT_CRITERION).toMatch(inConstant);
+    // Arrays on this side too: a rule with two halves needs both asserted, or
+    // the unasserted half can be deleted silently.
+    const matchers = Array.isArray(inConstant) ? inConstant : [inConstant];
+    expect(matchers.length).toBeGreaterThan(0);
+    for (const matcher of matchers) {
+      expect(CODEX_VERDICT_CRITERION).toMatch(matcher);
+    }
   });
 
   it.each(CONDITIONS)("AGENTS.md still carries: %s", (_condition, _inConstant, inAgentsMd) => {
@@ -170,9 +191,16 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
   // included, so the notice can start the very review it tells the operator
   // nothing else will start, turning the operator's instructed trigger into the
   // second one the clause above forbids.
-  it("warns that the notice itself may have started the review", () => {
+  it("warns that a comment quoting the phrase can start the review", () => {
     expect(CODEX_VERDICT_CRITERION).toMatch(/CHECK BEFORE YOU POST/);
-    expect(CODEX_VERDICT_CRITERION).toMatch(/matches the trigger phrase inside posted\s+comment bodies/);
+    expect(CODEX_VERDICT_CRITERION).toMatch(/matches that phrase inside posted\s+comment bodies/);
+    // Codex P2, #155: scoped to a COMMENT. The warning previously said "this
+    // notice", which is false in a step summary — not a comment, so it cannot
+    // trigger anything — and the criterion is embedded in step summaries too.
+    expect(CODEX_VERDICT_CRITERION).toMatch(/A GitHub COMMENT that quotes the trigger phrase/);
+    // And the look-first signal must be bot-authored, or a stranger's 👀 makes
+    // the operator wait out the timeout for a review that never started.
+    expect(CODEX_VERDICT_CRITERION).toMatch(/count ONLY one authored by/);
     // The observation, not just the claim: a rule with no evidence behind it is
     // the kind that gets quietly dropped in the next collapse.
     expect(CODEX_VERDICT_CRITERION).toMatch(/roastpilot-agent#682/);

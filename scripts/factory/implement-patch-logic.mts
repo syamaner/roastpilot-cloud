@@ -358,24 +358,29 @@ export function findTestFileEdits(rawPaths: readonly string[]): string[] {
  * by a second copy of the wording that could drift from it.
  */
 export const TRIGGER_SELF_START_WARNING =
-  "CHECK BEFORE YOU POST, because this notice may already have triggered the " +
-  "review itself: the connector matches the trigger phrase inside posted " +
-  "comment bodies, including within backticks, and this text quotes that " +
-  "phrase. Observed directly on roastpilot-agent#682 (28 Jul 2026), where an " +
-  "inline reply quoting the phrase in a code span drew a connector response 11 " +
-  "seconds later, in that same thread. So look for an existing 👀 or review on " +
-  "this head first; if one is there, this comment started it and you are in " +
-  "the wait, not before it.";
+  "CHECK BEFORE YOU POST. A GitHub COMMENT that quotes the trigger phrase can " +
+  "start the review by itself: the connector matches that phrase inside posted " +
+  "comment bodies, backticks included — observed on roastpilot-agent#682 " +
+  "(28 Jul 2026), where an inline reply quoting it in a code span drew a " +
+  "connector response 11 seconds later in that same thread. So look for an " +
+  "existing 👀 or review on this head first, and count ONLY one authored by " +
+  "`chatgpt-codex-connector[bot]`: this repository is public, so anyone can " +
+  "leave a 👀 or post a review, and treating a stranger's as proof that Codex " +
+  "started leaves you waiting out the timeout for a review that never began. " +
+  "If a bot-authored signal is already there, it started without you and you " +
+  "are in the wait, not before it.";
 
 /** What replaces the warning above once the phrase has been rendered inert. */
 export const INERT_SELF_START_NOTE =
-  "NOTE: this particular notice cannot have started a review — the trigger " +
-  "phrase above is described rather than quoted, deliberately, because the " +
-  "publisher posts this automatically onto a PR that may still be a draft, " +
-  "where a review can post findings but never complete the clean-verdict flow " +
-  "(D105). So no review has begun on account of this comment. Still look " +
-  "before you post: one may have started from the PR body or from someone " +
-  "else's trigger.";
+  "CHECK BEFORE YOU POST — though not because of THIS comment, which cannot " +
+  "have started a review: the trigger phrase above is described rather than " +
+  "quoted, deliberately, because the publisher posts this automatically onto a " +
+  "PR that may still be a draft, where a review posts findings but never " +
+  "completes the clean-verdict flow (D105). A review may still have started " +
+  "from the PR body or someone else's trigger, so look for an existing 👀 or " +
+  "review on this head, counting ONLY one authored by " +
+  "`chatgpt-codex-connector[bot]` — this repository is public, so a stranger's " +
+  "would leave you waiting for a review that never began.";
 
 /**
  * The ONE statement of what satisfies the Codex wait, appended verbatim to
@@ -1659,7 +1664,11 @@ function buildFallbackRefreshCommentBodyRaw(runUrl: string): string {
       "NOT safe to assume one is already running, and NOT safe to assume one is " +
       "not. LOOK FIRST — if a 👀 or a review on this head is " +
       "already there, you are in the wait; if nothing has appeared within the " +
-      `documented timeout below, post \`@codex review\` once yourself. ${CODEX_VERDICT_CRITERION} ` +
+      "documented timeout below, AND THIS PR IS READY, post `@codex review` once " +
+      "yourself. If it is still a DRAFT, do not: a review started on a draft " +
+      "posts findings but can never complete the clean-verdict flow (D105), so " +
+      "it spends a review and begins a wait that cannot end. Mark it ready, " +
+      `which starts the automatic review, and wait on that. ${CODEX_VERDICT_CRITERION} ` +
       `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
     "",
     `[Run output](${runUrl}).`,
@@ -1789,7 +1798,9 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
           "review of this head.** LOOK FIRST rather than assuming either way: if a 👀 " +
           "or a review is already on this head then it started without you and you " +
           "are in the wait; if nothing has appeared within the documented timeout, " +
-          "post `@codex review` once yourself. " + CODEX_VERDICT_CRITERION + " " +
+          "post `@codex review` once yourself — but ONLY if this PR is READY; on " +
+          "a draft, mark it ready instead, because a review started there can " +
+          "never complete the clean-verdict flow. " + CODEX_VERDICT_CRITERION + " " +
           `(Labelled \`${NO_REVIEW_AUTOMATION_LABEL}\`.)`,
         "",
       ]
