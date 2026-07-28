@@ -84,14 +84,24 @@ case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$
 # URLs are REDACTED before being printed: a remote URL may carry inline
 # credentials (`https://user:token@host/...`), and this refusal path would
 # otherwise print them straight into a terminal or CI log (Codex P1, PR #156).
-# Redacts BOTH credential shapes (Codex P1, PR #156). The first version only
-# handled `scheme://userinfo@host`, so a credential carried in a query
-# parameter (`?access_token=...`, `?private_token=...`) printed in full. A
-# safety tool must not be the thing that writes a token into a CI log.
+#
+# This redaction took three rounds, and the first two were the same mistake
+# twice: v1 handled only `scheme://userinfo@host`; v2 added an ALLOWLIST of
+# credential parameter names (`access_token`, `token`, `secret`, ...), which
+# Codex then broke again with `client_secret` — the name is anchored to `[?&]`,
+# so a compound key simply misses the list (Codex P1, PR #156, round 3).
+#
+# Enumerating credential-bearing key names cannot be finished: every new name
+# is a fresh leak, and the failure is silent and unrecoverable, because a token
+# printed into a CI log is disclosed before anyone notices the list was short.
+# So this no longer enumerates. EVERY query-parameter VALUE is redacted
+# regardless of its key, which fails closed by construction. Key names survive
+# for diagnosis, and host/path — the only part that identifies which remote
+# mismatched — is untouched.
 redact_url() {
   printf '%s' "$1" \
     | sed -E 's#(://)[^/@]*@#\1<redacted>@#' \
-    | sed -E 's#([?&](access_token|private_token|token|password|passwd|secret|key|api_key)=)[^&]*#\1<redacted>#gI'
+    | sed -E 's#([?&][^=&]+=)[^&]*#\1<redacted>#g'
 }
 
 fetch_url="$(git remote get-url "$REMOTE")"

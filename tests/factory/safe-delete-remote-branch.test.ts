@@ -194,6 +194,28 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).not.toContain("querysecret123");
   });
 
+  // Codex P1, #156 round 3: the query-parameter fix above was an ALLOWLIST of
+  // credential key names, so a compound key like `client_secret` missed it and
+  // printed in full. The redaction no longer enumerates key names at all, so
+  // this asserts the property that replaced the list: a value is redacted
+  // because it is a query-parameter value, whatever its key is called. These
+  // keys are deliberately ones no allowlist contained.
+  it.each([
+    ["client_secret", "compoundsecret1"],
+    ["refresh_token", "compoundsecret2"],
+    ["auth_token", "compoundsecret3"],
+    ["x-totally-unforeseen-credential", "compoundsecret4"],
+  ])("redacts a credential under the unlisted query key %s", (key, secret) => {
+    git(clone, "remote", "set-url", "--push", "origin", `https://example.invalid/x.git?${key}=${secret}`);
+    const { code, out } = runScript("merged-branch", "--delete");
+    expect(code).not.toBe(0);
+    expect(out).toContain("<redacted>");
+    expect(out).not.toContain(secret);
+    // The key name survives, so the operator can still see WHICH parameter
+    // was suppressed; only the value is withheld.
+    expect(out).toContain(key);
+  });
+
   // Codex P2, #156: a repeated push URL means the delete would be attempted
   // against the same target twice.
   it("refuses a duplicated push URL before mutating anything", () => {
