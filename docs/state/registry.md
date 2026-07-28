@@ -94,6 +94,14 @@ superseded and records that confirmation here.
 1. Prove it is merged from **merged-PR evidence**, never from `git branch
    --merged` — squash merges break ancestry, so a squash-merged branch looks
    unmerged and an unmerged branch can look reachable.
-2. Check `git rev-list --count origin/main..<branch>`. A non-zero count means
+2. `git fetch origin --prune` FIRST, then check
+   `git rev-list --count origin/main..origin/<branch>`. A non-zero count means
    unique commits exist and the branch is **not** safe to delete, whatever a
    PR says about it.
+
+   Both details are load-bearing (Codex P1, PR #156). A bare `<branch>` is
+   resolved through LOCAL refs first, per gitrevisions' disambiguation order,
+   so a stale local ref reports zero unique commits while the remote still
+   holds unseen ones, and the delete destroys them. That is precisely the
+   failure this section exists to prevent, so name the remote-tracking ref
+   explicitly and refresh it before counting.
