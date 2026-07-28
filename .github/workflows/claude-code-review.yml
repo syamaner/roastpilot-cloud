@@ -384,7 +384,11 @@ jobs:
                 | .tool_name
                 | select(type == "string")
                 | safe_string ] | unique | sort) as $tools
-            | ([ .[] | .. | objects | select(has("tool_name")) ] | length) as $invocations
+            # Real tool invocations are assistant `tool_use` content blocks
+            # (schema: `{type:"tool_use", name:...}`); `tool_name` appears only
+            # on `permission_denials[]` records, so counting `has("tool_name")`
+            # counted DENIALS, not invocations (F3). Count `type == "tool_use"`.
+            | ([ .[] | .. | objects | select(.type == "tool_use") ] | length) as $invocations
             | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
               + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
@@ -516,15 +520,21 @@ jobs:
           #     the binding stops matching and this step fails closed rather
           #     than passing an unbound comment.
           #   - freshness (codex P2 re-run fail-open): the comment must have
-          #     been last updated at/after this attempt's start, compared as
-          #     epoch seconds so ISO-8601 offsets never matter.
+          #     been last updated STRICTLY after this attempt's start, compared
+          #     as epoch seconds so ISO-8601 offsets never matter. The `>` (not
+          #     `>=`) makes a same-second `updated_at == run_started_at` tie
+          #     fail CLOSED -- both are whole-second GitHub timestamps, and a
+          #     genuine tracker is written many seconds into the run (fsr
+          #     measured 11-22s+), so the strict compare never rejects a real
+          #     completion but does reject a prior-attempt comment that happens
+          #     to share the boundary second (F2).
           #   - `claude[bot]` author + `last` across all pages are unchanged.
           BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
             | jq -r --arg run_id "$RUN_ID" --arg attempt_start "$ATTEMPT_STARTED_AT" \
               'add | [.[]
                 | select(.user.login == "claude[bot]")
                 | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))
-                | select((.updated_at | fromdateiso8601) >= ($attempt_start | fromdateiso8601))]
+                | select((.updated_at | fromdateiso8601) > ($attempt_start | fromdateiso8601))]
                 | last | .body // ""')"
 
           if [ -z "$BODY" ]; then

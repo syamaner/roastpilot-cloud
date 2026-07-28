@@ -14,7 +14,10 @@
       "role": "assistant",
       "content": [
         { "type": "text", "text": "Investigating the review. Here is ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGG1234 in plain prose with no keyword nearby." },
-        { "type": "tool_use", "id": "tu_1", "name": "Bash", "input": { "command": "gh issue view 1" } }
+        { "type": "tool_use", "id": "tu_1", "name": "Bash", "input": { "command": "gh issue view 1" } },
+        { "type": "tool_use", "id": "tu_2", "name": "Bash", "input": { "command": "gh api repos/x" } },
+        { "type": "tool_use", "id": "tu_3", "name": "WebFetch", "input": { "url": "https://plan" } },
+        { "type": "tool_use", "id": "tu_4", "name": "mcp__github__get_pull_request", "input": {} }
       ]
     },
     "session_id": "sess-abc123"
@@ -24,7 +27,10 @@
     "message": {
       "role": "user",
       "content": [
-        { "type": "tool_result", "tool_use_id": "tu_1", "is_error": true, "content": "denied" }
+        { "type": "tool_result", "tool_use_id": "tu_1", "is_error": true, "content": "permission denied" },
+        { "type": "tool_result", "tool_use_id": "tu_2", "is_error": true, "content": "permission denied" },
+        { "type": "tool_result", "tool_use_id": "tu_3", "is_error": true, "content": "permission denied" },
+        { "type": "tool_result", "tool_use_id": "tu_4", "is_error": true, "content": "permission denied" }
       ]
     },
     "session_id": "sess-abc123"

@@ -379,11 +379,29 @@ describe("claude-review denial-evidence step (step A)", () => {
     expect(summaryBytes).toBeLessThanOrEqual(65536 + 64);
   });
 
-  it("A-T8: bare tool invocations are counted as invocations, never denials", () => {
+  it("A-T8: real tool_use invocations are counted; text/tool_result/denials are not (F3)", () => {
+    // Schema-accurate: an invocation is a `tool_use` content block (keyed on
+    // `name`), NOT an object with `tool_name` (which appears only on denial
+    // records). Two tool_use blocks + a text block + a tool_result -> 2
+    // invocations, and 0 denials (no permission_denials). The pre-F3
+    // `has("tool_name")` count reported 0 here, masking the bug; the correct
+    // `type == "tool_use"` count reports 2, so this test now pins the count.
     const result = runStepAWith([
       {
         type: "assistant",
-        message: { content: [{ type: "tool_use", tool_name: "Bash" }] },
+        message: {
+          content: [
+            { type: "text", text: "let me look" },
+            { type: "tool_use", id: "tu_a", name: "Bash", input: { command: "ls" } },
+            { type: "tool_use", id: "tu_b", name: "Read", input: { file: "x" } },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "tu_a", content: "ok" }],
+        },
       },
       { type: "result", permission_denials_count: 0 },
     ]);
@@ -391,7 +409,7 @@ describe("claude-review denial-evidence step (step A)", () => {
     expect(result.stdout).toContain(
       "denied tool names (0): no denial records found in this document",
     );
-    expect(result.stdout).toContain("tool invocations seen (NOT necessarily denied): 1");
+    expect(result.stdout).toContain("tool invocations seen (NOT necessarily denied): 2");
   });
 
   it("A-T9: planted credential VALUES never reach the closed emission grammar", () => {
@@ -713,5 +731,25 @@ describe("claude-review completion-assertion step (step B)", () => {
     });
     expect(result.status).not.toBe(0);
     expect(result.stdout).not.toContain("confirmed:");
+  });
+
+  it("B-T15: a same-second updated_at == attempt_start is rejected (F2)", () => {
+    // Both timestamps are whole-second GitHub values, so a comment written in
+    // the boundary second reads `updated_at == run_started_at`. The strict `>`
+    // fails that tie CLOSED (a `>=` would admit it). A genuine tracker is
+    // written many seconds in, so this never rejects a real completion.
+    const attemptStart = "2026-07-27T13:18:34Z";
+    const boundaryComment: Comment = {
+      ...trackingComment({ runId: PR152_RUN_ID, ticked: true }),
+      updatedAt: attemptStart, // byte-equal to the attempt start
+    };
+    const result = runStepB({
+      pages: [[boundaryComment]],
+      runId: PR152_RUN_ID,
+      runAttempt: "2",
+      attemptStartedAt: attemptStart,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("posted no tracking comment");
   });
 });
