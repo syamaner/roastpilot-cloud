@@ -593,6 +593,21 @@ mode) this rule is a structural fix for, not a courtesy.
 Every delegation decision has **three axes**, and they are chosen together, in
 one breath — never topology first and model as an afterthought.
 
+**Topology v2 (issue #159, 28 Jul 2026 — 24-hour experiment).** The session
+main loop is a **PM/orchestrator and never implements**. Its write surface is
+`docs/state/registry.md`, issue/PR bodies and comments, and session memory;
+every change to code, tests, workflows, or docs in the tree is delegated. Work
+flows spec-first: each story goes to `story-planner`, whose contract is posted
+on the story issue — spec, behavioural and negative test list, one
+removing-guard-X-must-fail-test-Y check per guard, the class-sweep enumeration,
+a PR plan against the D104 bar, and implementer + reviewer routing. The
+orchestrator verifies that contract against the D104 checklist mechanically and
+executes its routing; it does not re-derive it. Per-PR metrics land on the
+story issue: post-open review rounds (target median ≤ 1), findings folded
+pre-open by the local Codex review, open→merge wall-clock, implementer used,
+Codex sessions spent. At +24h the operator records keep / adjust / revert as a
+plan-repo decision.
+
 ### The roster (`.claude/agents/`)
 
 | Agent | Model | Fires on |
@@ -602,18 +617,23 @@ one breath — never topology first and model as an afterthought.
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
 | `pr-triage` | `sonnet` | independent adjudication of review feedback, so the author never self-triages (D23). |
+| `story-planner` | `fable` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). Read-only; under-specification is the expensive failure this pin exists for. |
+| `implementer` | `opus` | specced implementation that is security-adjacent, touches a protected path, or runs while the Codex quota is in reserve (Axis A). Own worktree, gates before hand-back, never adjudicates findings on its own PR (D23). |
 
 **Pins are mandatory and enforced.** An agent with no `model:` **inherits the
 parent**, so an unpinned definition spawned from an Opus main loop silently runs
 Opus across a whole fan-out. `tests/factory/agent-model-pin.test.ts` asserts
 every definition carries an explicit `model:` from the allowed set, that the two
-adversarial security reviewers stay on `opus`, and that an empty roster fails
-rather than passing vacuously. A documented default that nothing enforces is not
-a default.
+adversarial security reviewers stay on `opus`, that `story-planner` stays on
+`fable` and `implementer` on `opus`, and that an empty roster fails rather than
+passing vacuously. A documented default that nothing enforces is not a default.
 
-**Two tiers only — `opus` and `sonnet`.** No Haiku tier: nothing here is both
-high-volume and correctness-insensitive, and mechanical extraction is better
-served by `gh`/`grep` than by a third model to get wrong.
+**Three tiers — `fable`, `opus`, and `sonnet`.** `fable` exists for exactly one
+role: planning and spec-writing, where under-specification is the expensive
+failure (an implementer, Codex or Opus alike, executes a weak spec faithfully,
+and the cost lands post-open as review rounds). Still no Haiku tier: nothing
+here is both high-volume and correctness-insensitive, and mechanical extraction
+is better served by `gh`/`grep` than by a fourth model to get wrong.
 
 **The Opus triggers are not narrowed to save budget** (operator, 27 Jul 2026).
 Both adversarial reviewers fire on S6's first slice, and that is accepted:
@@ -626,7 +646,8 @@ operator decision, not a cost argument. Monitor and re-evaluate with evidence.
 Codex is available locally (`codex mcp-server`; `codex review --base <branch>`)
 and draws on a **separate, weekly-capped subscription**.
 
-- **Decisions, contracts, and ambiguous design → the interactive agent.**
+- **Decisions and ambiguous design → the interactive agent (the
+  orchestrator); contract-writing → `story-planner`** (topology v2).
   **Excluding adjudication of review feedback on a PR the interactive agent
   itself authored** — that always goes to a human or the `pr-triage` role, even
   for a finding that looks trivially correct or clearly a false positive (D23).
@@ -634,13 +655,25 @@ and draws on a **separate, weekly-capped subscription**.
   contracts efficiently, while an unsettled one costs a full design round every
   time. Every decision settled before delegating converts an expensive round
   into a cheap one. This is the main budget lever.
+- **Assumption checks → Auggie (`mcp__auggie__codebase-retrieval`) first.**
+  Semantic retrieval answers "where does X live", "does a sibling of this
+  pattern exist", "how does the agent repo do this" without reading files. Its
+  results are **claims, not evidence**: anything that licenses an action — an
+  edit, a review-thread resolution, a "swept the repo" statement — is verified
+  by reading the named file/lines or by `grep` before acting, because
+  retrieval is ranked, not exhaustive. Contracts cite `file:line`; the
+  implementer re-verifies the citation.
 - **Fully-specified implementation → Codex**, when the acceptance criteria,
-  tests, closed grammar, and fail-closed behaviour are already written down.
-- **Pre-open adversarial review → `codex review --base main`**, on diffs
-  touching the credential or pipeline boundary. This is cheaper than the same
-  findings arriving post-open as merge-blocking threads that need stale
-  re-posts hand-resolved. Do **not** run it on docs or registry PRs; it draws
-  the same quota.
+  tests, closed grammar, and fail-closed behaviour are already written down —
+  under topology v2, "written down" means a `story-planner` contract exists.
+  Delegate via `mcp__codex__codex`, with `codex-reply` continuing the same
+  session to fold review findings on that task.
+- **Pre-open review → `codex review --base origin/main` on every PR**
+  (topology v2, #159): run it on the final pre-open diff, and again before the
+  re-push of any post-open fold that changes logic. The only exemption is a
+  registry-only diff. This supersedes the earlier path-triggered rule; review
+  is the floor the Codex budget protects, and implementation delegation is
+  what flexes.
 - **Routine review (`qa`, `privacy-auditor`, `pr-triage`) → Claude sub-agents.**
   Cheap, and they do not touch the Codex quota at all.
 - A local `codex review` **never** satisfies the Codex merge wait — that needs a
@@ -660,9 +693,17 @@ and draws on a **separate, weekly-capped subscription**.
 
 ### Axis B — which topology
 
-- **Inline on the main loop** when the judgment *is* the work — which is most F1
-  slices. They are small and security-dense, so a sub-agent costs a context
-  handoff the slice cannot amortise.
+- **Spec-first flow (topology v2).** story → `story-planner` contract on the
+  issue → orchestrator checklist-verifies it against the D104 bar →
+  implementer per the contract's routing → gates + local Codex review +
+  rubric-routed domain reviewers pre-open → draft PR until the required checks
+  are green on the pushed head (D103) → ready → watcher → `pr-triage` → merge
+  per the PR Merge Policy.
+- **Inline on the main loop** when the judgment *is* the work — deciding,
+  adjudicating, orienting. Under topology v2 that no longer includes
+  implementation, however small: the orchestrator's write surface stops at the
+  registry, issues/PRs, and memory, and even a one-line fold is delegated to
+  the implementer that authored the slice.
 - **Sub-agent** for bounded, well-specified, or read-only fan-out work:
   inventories, corpus sweeps, multi-file searches, the review lenses above.
 - **Never fan out for its own sake.** Parallelism is justified by separable
@@ -674,10 +715,13 @@ and draws on a **separate, weekly-capped subscription**.
 
 ### Axis C — which model
 
+- **`fable`** for planning and spec-writing only — the contract the other
+  models implement. Never for implementation or review volume.
 - **`opus`** for adversarial security reasoning and hard adjudication, where a
   miss is the expensive failure.
 - **`sonnet`** for scoped implementation, routine review, test-quality judgment,
   triage, and inventories.
 
 When unsure, pick `sonnet` and escalate a specific spawn to `opus` with a stated
-reason — never leave the model unset to "let it decide".
+reason — never leave the model unset to "let it decide". `fable` is role-scoped
+to the planner, not a general escalation tier.

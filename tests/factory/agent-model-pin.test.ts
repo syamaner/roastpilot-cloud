@@ -12,8 +12,12 @@ const AGENTS_DIRECTORY = join(REPOSITORY_ROOT, ".claude", "agents");
  * `model:` INHERITS THE PARENT, so an unpinned definition spawned from an Opus
  * main loop silently runs Opus across a whole fan-out — the cost failure this
  * test exists to make impossible rather than merely documented.
+ *
+ * `fable` is admitted for exactly one role, the `story-planner` spec tier
+ * (topology v2, issue #159); the describe block below pins that role so the
+ * admission cannot silently widen into a general escalation tier.
  */
-const ALLOWED_MODELS = new Set(["opus", "sonnet"]);
+const ALLOWED_MODELS = new Set(["fable", "opus", "sonnet"]);
 
 /**
  * The adversarial security lenses stay on Opus (operator, 27 Jul 2026). A
@@ -120,6 +124,22 @@ describe("sub-agent model pins (issue #148)", () => {
     );
     expect(triage).toBeDefined();
     expect(parseFrontMatter(triage!.content)?.model).toBe("sonnet");
+  });
+
+  it("pins the story planner to fable, so the spec tier cannot silently downgrade (issue #159)", () => {
+    const planner = readAgentFiles().find(
+      ({ fileName }) => fileName === "story-planner.md",
+    );
+    expect(planner).toBeDefined();
+    expect(parseFrontMatter(planner!.content)?.model).toBe("fable");
+  });
+
+  it("pins the implementer to opus (issue #159)", () => {
+    const implementer = readAgentFiles().find(
+      ({ fileName }) => fileName === "implementer.md",
+    );
+    expect(implementer).toBeDefined();
+    expect(parseFrontMatter(implementer!.content)?.model).toBe("opus");
   });
 
   it.each([
