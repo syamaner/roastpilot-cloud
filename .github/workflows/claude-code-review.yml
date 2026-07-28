@@ -114,6 +114,13 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # Read-only, added for #146's per-attempt completion binding: the
+      # "Assert the review actually completed" step reads
+      # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
+      # reject a prior attempt's stale tracking comment (a re-run fail-open,
+      # codex P2). It grants no write and, on this public repo, exposes only
+      # run metadata already visible to any reader.
+      actions: read
       id-token: write
 
     steps:
@@ -472,10 +479,11 @@ jobs:
         # simply flag any run with denials, which would have failed the
         # healthy case.
         #
-        # Reads only. This step's GH_TOKEN has `pull-requests: read`; the job
-        # also declares `id-token: write`, and the action mints its own
-        # write-capable App token. Nothing in this assertion needs write
-        # scope.
+        # Reads only. This step's GH_TOKEN has `pull-requests: read`,
+        # `issues: read`, and (added for the per-attempt binding below)
+        # `actions: read`; the job also declares `id-token: write`, and the
+        # action mints its own write-capable App token. Nothing in this
+        # assertion needs write scope.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this
@@ -488,6 +496,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           REVIEW_STEP_OUTCOME: ${{ steps.claude-review.outcome }}
           REVIEW_STEP_CONCLUSION: ${{ steps.claude-review.conclusion }}
         run: |
@@ -497,9 +506,28 @@ jobs:
             exit 1
           fi
 
+          # Bind completion evidence to THIS attempt (codex P2, re-run
+          # fail-open). `github.run_id` is stable across re-run attempts and
+          # the tracking comment's `[View job]` link carries only the run id
+          # (no attempt/job), so a re-run whose current attempt truncates
+          # BEFORE writing its own tracking comment would otherwise select the
+          # PRIOR attempt's COMPLETED comment (same run_id, `last`) and PASS --
+          # resurrecting the #150 fail-open. Discriminate by freshness: fetch
+          # THIS attempt's own start time (verified empirically that
+          # `attempts/<n>` returns the per-attempt `run_started_at`, not the
+          # original run's) and reject any comment last touched before it.
+          # Both timestamps are GitHub's own, so they share a clock and need no
+          # skew tolerance. Fail closed if the attempt time is unavailable or
+          # malformed, rather than skipping the freshness check.
+          ATTEMPT_STARTED_AT="$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT" --jq '.run_started_at')"
+          if ! printf '%s' "$ATTEMPT_STARTED_AT" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+            echo "::error::could not determine this run attempt's start time (got '$ATTEMPT_STARTED_AT'); cannot bind completion evidence to the current attempt (issue #146)"
+            exit 1
+          fi
+
           # Select across all pages, and bind evidence to this exact run.
           # `github.run_id` is a GitHub-guaranteed positive integer, so the
-          # run-id fragment carries no regex metacharacters. Three anchors,
+          # run-id fragment carries no regex metacharacters. Four anchors,
           # all fail-closed:
           #   - boundary, not substring (G2): a bare `contains(...)` matched
           #     run 123 inside `/actions/runs/1234`, letting an UNRELATED
@@ -515,10 +543,17 @@ jobs:
           #     pin-coupling note below); if the action renames "View job"
           #     the binding stops matching and this step fails closed rather
           #     than passing an unbound comment.
+          #   - freshness (codex P2 re-run fail-open): the comment must have
+          #     been last updated at/after this attempt's start, compared as
+          #     epoch seconds so ISO-8601 offsets never matter.
           #   - `claude[bot]` author + `last` across all pages are unchanged.
           BODY="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
-            | jq -r --arg run_id "$RUN_ID" \
-              'add | [.[] | select(.user.login == "claude[bot]") | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))] | last | .body // ""')"
+            | jq -r --arg run_id "$RUN_ID" --arg attempt_start "$ATTEMPT_STARTED_AT" \
+              'add | [.[]
+                | select(.user.login == "claude[bot]")
+                | select(.body | test("\\[View job\\]\\([^)\\n]*/actions/runs/" + $run_id + "([^0-9]|$)"))
+                | select((.updated_at | fromdateiso8601) >= ($attempt_start | fromdateiso8601))]
+                | last | .body // ""')"
 
           if [ -z "$BODY" ]; then
             echo "::error::this run posted no tracking comment, so no review ran (issue #146)"

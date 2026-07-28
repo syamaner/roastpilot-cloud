@@ -144,6 +144,10 @@ function runStepAWith(value: unknown): StepAResult {
 interface Comment {
   readonly login: string;
   readonly body: string;
+  // GitHub's comment `updated_at`; step B rejects any comment last touched
+  // before the current attempt started (the re-run freshness binding). Left
+  // unset it defaults fresh, so the existing tests are unaffected.
+  readonly updatedAt?: string;
 }
 
 interface StepBResult {
@@ -152,21 +156,35 @@ interface StepBResult {
   readonly stderr: string;
 }
 
-// Run step B with a stub `gh` whose only job is to emit the slurped
-// `--paginate --slurp` comment payload (an array of pages) that the step's jq
-// consumes. `pages` is the array of pages; each page is an array of comments.
+// This attempt's start time and a default comment `updated_at` after it, so a
+// comment with no explicit `updatedAt` reads as freshly written by the current
+// attempt.
+const DEFAULT_ATTEMPT_START = "2026-07-27T13:00:00Z";
+const DEFAULT_COMMENT_UPDATED = "2026-07-27T13:30:00Z";
+
+// Run step B with a stub `gh` that serves BOTH endpoints the step calls: the
+// per-attempt `actions/runs/<id>/attempts/<n>` (emits `run_started_at`, the
+// value `--jq '.run_started_at'` would extract) and the `--paginate --slurp`
+// comments payload (an array of pages, each an array of comments).
 function runStepB(options: {
   readonly pages: readonly (readonly Comment[])[];
   readonly runId: string;
   readonly outcome?: string;
   readonly conclusion?: string;
+  // Fails the COMMENTS call only (the attempts call still succeeds), so this
+  // exercises the strict-mode fail-closed of the `gh | jq` comment pipeline.
   readonly ghFails?: boolean;
+  // Fails the ATTEMPTS call, exercising the per-attempt fetch's fail-closed.
+  readonly attemptApiFails?: boolean;
+  readonly attemptStartedAt?: string;
+  readonly runAttempt?: string;
 }): StepBResult {
   const run = reviewJobStepRun(STEP_B);
   const workdir = mkdtempSync(join(tmpdir(), "review-step-b-"));
   const bin = join(workdir, "bin");
   const ghPath = join(bin, "gh");
   const commentsPath = join(workdir, "comments.json");
+  const attemptStartPath = join(workdir, "attempt-start");
   try {
     mkdirSync(bin);
     writeFileSync(
@@ -176,15 +194,31 @@ function runStepB(options: {
           page.map((comment) => ({
             user: { login: comment.login },
             body: comment.body,
+            updated_at: comment.updatedAt ?? DEFAULT_COMMENT_UPDATED,
           })),
         ),
       ),
     );
     writeFileSync(
+      attemptStartPath,
+      `${options.attemptStartedAt ?? DEFAULT_ATTEMPT_START}\n`,
+    );
+    // Route by URL: the attempts endpoint carries `/attempts/`; everything
+    // else is the comments call.
+    writeFileSync(
       ghPath,
-      options.ghFails
-        ? "#!/usr/bin/env bash\necho 'stub gh forced failure' >&2\nexit 1\n"
-        : '#!/usr/bin/env bash\ncat "$COMMENTS_PATH"\n',
+      [
+        "#!/usr/bin/env bash",
+        "is_attempts=0",
+        'for arg in "$@"; do case "$arg" in */attempts/*) is_attempts=1 ;; esac; done',
+        'if [ "$is_attempts" -eq 1 ]; then',
+        '  if [ -n "${ATTEMPT_API_FAILS:-}" ]; then echo "stub gh attempts failure" >&2; exit 1; fi',
+        '  cat "$ATTEMPT_START_PATH"; exit 0',
+        "fi",
+        'if [ -n "${COMMENTS_FAIL:-}" ]; then echo "stub gh comments failure" >&2; exit 1; fi',
+        'cat "$COMMENTS_PATH"',
+        "",
+      ].join("\n"),
     );
     chmodSync(ghPath, 0o755);
     const result = spawnSync("bash", ["-c", run], {
@@ -194,10 +228,14 @@ function runStepB(options: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         COMMENTS_PATH: commentsPath,
+        ATTEMPT_START_PATH: attemptStartPath,
+        ...(options.ghFails ? { COMMENTS_FAIL: "1" } : {}),
+        ...(options.attemptApiFails ? { ATTEMPT_API_FAILS: "1" } : {}),
         GH_TOKEN: "test-token",
         REPO: "syamaner/roastpilot-cloud",
         PR_NUMBER: "999",
         RUN_ID: options.runId,
+        RUN_ATTEMPT: options.runAttempt ?? "1",
         REVIEW_STEP_OUTCOME: options.outcome ?? "success",
         REVIEW_STEP_CONCLUSION: options.conclusion ?? "success",
       },
@@ -627,5 +665,53 @@ describe("claude-review completion-assertion step (step B)", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("posted no tracking comment");
+  });
+
+  it("B-T13: a prior-attempt completed comment is rejected on re-run (codex P2)", () => {
+    // run_id is stable across re-run attempts, so a re-run that truncates
+    // before writing its own tracking comment would otherwise select the prior
+    // attempt's COMPLETED comment (same run_id, `last`) and pass -- the #150
+    // fail-open via re-run. The freshness binding rejects any comment last
+    // updated before THIS attempt started.
+    const attemptStart = "2026-07-27T13:18:34Z";
+    const staleComment: Comment = {
+      ...trackingComment({ runId: PR152_RUN_ID, ticked: true }),
+      updatedAt: "2026-07-27T13:16:33Z", // prior attempt, before attemptStart
+    };
+    const stale = runStepB({
+      pages: [[staleComment]],
+      runId: PR152_RUN_ID,
+      runAttempt: "2",
+      attemptStartedAt: attemptStart,
+    });
+    expect(stale.status).toBe(1);
+    expect(stale.stdout).toContain("posted no tracking comment");
+
+    // Positive control: the SAME completed comment, freshly written by this
+    // attempt (updated_at at/after the attempt start), passes.
+    const freshComment: Comment = {
+      ...trackingComment({ runId: PR152_RUN_ID, ticked: true }),
+      updatedAt: "2026-07-27T13:19:00Z", // after attemptStart
+    };
+    const fresh = runStepB({
+      pages: [[freshComment]],
+      runId: PR152_RUN_ID,
+      runAttempt: "2",
+      attemptStartedAt: attemptStart,
+    });
+    expect(fresh.status, `${fresh.stdout}\n${fresh.stderr}`).toBe(0);
+    expect(fresh.stdout).toContain("confirmed:");
+  });
+
+  it("B-T14: a failing attempts API fails the step closed (codex P2)", () => {
+    // If the per-attempt start time is unavailable, the step must fail closed
+    // rather than skip the freshness check and admit a possibly-stale comment.
+    const result = runStepB({
+      pages: [[trackingComment({ runId: PR152_RUN_ID, ticked: true })]],
+      runId: PR152_RUN_ID,
+      attemptApiFails: true,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("confirmed:");
   });
 });
