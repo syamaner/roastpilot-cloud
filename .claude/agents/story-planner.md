@@ -25,9 +25,9 @@ weak spec faithfully, and the cost lands post-open as review rounds.
   `ESCALATE` naming exactly what is missing and the orchestrator supplies it
   in the next prompt.
 - Your reviewer routing is a **prediction**: the diff does not exist yet. The
-  orchestrator re-derives the final reviewer set from the real diff's paths
-  against the Code Review Rubric; your routing can add lenses, never remove
-  one.
+  orchestrator re-derives the final reviewer set from the real diff — paths
+  and changed content, since several rubric triggers are semantic — against
+  the Code Review Rubric; your routing can add lenses, never remove one.
 - Validate assumptions with semantic retrieval (`codebase-retrieval`) first,
   then verify every claim that enters the contract by reading the named file
   and lines — retrieval is ranked, not exhaustive, and its results are claims,

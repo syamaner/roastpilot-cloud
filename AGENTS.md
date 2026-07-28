@@ -395,7 +395,7 @@ ready immediately would have had Codex review head `07f1802`, then CI
 failed the mutation gate, forcing a push to `4d26670` and stranding the
 verdict on a dead head, needing a manual re-trigger (2 spends). Opening as
 a draft let CI fail first, folded the fix there, and Codex reviewed only
-`4d26670` once ready (1 spend). A local `codex review --base main` (Axis A
+`4d26670` once ready (1 spend). A local `codex review --base origin/main` (Axis A
 below) still provides the cross-family lens earliest of all, before the
 branch is even pushed; it does not replace the roster's own automatic pass
 on the ready PR.
@@ -603,12 +603,15 @@ removing-guard-X-must-fail-test-Y check per guard, the class-sweep enumeration,
 a PR plan against the D104 bar, and implementer + reviewer routing. The
 orchestrator verifies that contract against the D104 checklist mechanically and
 executes it, with one deliberate exception: **domain-reviewer routing is
-re-derived from the actual final diff's path set** against the Code Review
-Rubric's routing table before the PR opens. The contract's routing is a
-prediction made before any code exists; it may only add reviewers, never
-remove a lens the real diff's paths trigger — otherwise which security review
-fires would be an output of a sub-agent, and an omitted lens would route a
-pipeline diff past its mandatory pass. Per-PR metrics land on the story
+re-derived from the actual final diff — its path set and its changed
+content** — against the Code Review Rubric's routing table before the PR
+opens, because several rubric triggers are semantic, not path-shaped
+(Zod/Pydantic validation wherever it sits, grants and secure views,
+privileged glue wherever it lives). The contract's routing is a prediction
+made before any code exists; it may only add reviewers, never remove a lens
+the real diff triggers — otherwise which security review fires would be an
+output of a sub-agent, and an omitted lens would route a pipeline diff past
+its mandatory pass. Per-PR metrics land on the story
 issue: post-open review rounds (target median ≤ 1), findings folded pre-open
 by the local Codex review, open→merge wall-clock, implementer used, Codex
 sessions spent, and token spend per delegation (each sub-agent completion
@@ -714,8 +717,8 @@ and draws on a **separate, weekly-capped subscription**.
 - **Spec-first flow (topology v2).** story → `story-planner` contract on the
   issue → orchestrator checklist-verifies it against the D104 bar →
   implementer per the contract's routing → gates + local Codex review +
-  domain reviewers re-derived from the final diff's paths per the rubric (the
-  contract's routing may only add lenses) pre-open → draft PR until the
+  domain reviewers re-derived from the final diff, paths and changed content,
+  per the rubric (the contract's routing may only add lenses) pre-open → draft PR until the
   required checks are green on the pushed head (D103) → ready → watcher →
   `pr-triage` → merge per the PR Merge Policy.
 - **Inline on the main loop** when the judgment *is* the work — deciding,
