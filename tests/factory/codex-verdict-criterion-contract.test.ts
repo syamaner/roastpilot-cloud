@@ -107,7 +107,16 @@ const CONDITIONS = [
   [
     "records that a review carrying findings is not clean",
     /A review carrying findings is\s+NOT clean/,
-    /A \*\*posted\s+`pull_request_review` with inline threads\*\* = findings/,
+    // TWO matchers, because the rule has two halves and only one was asserted
+    // (Codex P2, #155). The inline-thread sentence alone left the load-bearing
+    // top-level-comment clause unprotected: a findings review posted as a
+    // top-level comment with NO inline threads blocks nothing mechanically, so
+    // dropping that clause reopens exactly the merge-gate ambiguity this row
+    // exists to close, while the row stayed green.
+    [
+      /A \*\*posted\s+`pull_request_review` with inline threads\*\* = findings/,
+      /a review carrying findings is not clean even when posted as\s+a top-level comment with no inline threads/,
+    ],
   ],
 ] as const;
 
@@ -168,7 +177,14 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
     // head — who triggered on the previous head — not to trigger at all, so the
     // new head would never be reviewed.
     expect(CODEX_VERDICT_CRITERION).toMatch(/already been posted FOR THIS HEAD, do not post a second/);
-    expect(CODEX_VERDICT_CRITERION).toMatch(/trigger posted on an earlier head does not count/);
+    expect(CODEX_VERDICT_CRITERION).toMatch(/trigger on an EARLIER head does not count/);
+    // The second exemption, and the subtler one (Codex P2, #155): a trigger
+    // posted while the PR was a draft leaves the sha unchanged through
+    // `ready_for_review`, so a head-only comparison reads it as current and
+    // forbids the timeout re-trigger — while the draft review it started can
+    // never supply a post-boundary clean verdict.
+    expect(CODEX_VERDICT_CRITERION).toMatch(/trigger posted BEFORE this PR's\s+boundary event does not count/);
+    expect(CODEX_VERDICT_CRITERION).toMatch(/Match the trigger to the boundary,\s+not merely to the sha/);
   });
 
   // Guards against this whole file passing vacuously if the import breaks or

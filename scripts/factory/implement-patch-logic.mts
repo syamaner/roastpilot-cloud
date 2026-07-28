@@ -402,9 +402,17 @@ export const CODEX_VERDICT_CRITERION =
   "trigger is a first review " +
   "that never started, not the re-litigation the once-on-final rule forbids. " +
   "Where a trigger has already been posted FOR THIS HEAD, do not post a second " +
-  "one: wait, and escalate rather than re-trigger. A trigger posted on an " +
-  "earlier head does not count — the head moved, so that review describes a " +
-  "superseded commit and this head still needs its own. " +
+  "one: wait, and escalate rather than re-trigger. Two kinds of trigger do NOT " +
+  "count as already-posted, and both name a sha that can look current. A " +
+  "trigger on an EARLIER head does not count: the head moved, so that review " +
+  "describes a superseded commit. And a trigger posted BEFORE this PR's " +
+  "boundary event does not count either — typically one posted while the PR " +
+  "was still a draft, which leaves the sha unchanged through " +
+  "`ready_for_review` and so looks current by head alone (Codex P2, #155). " +
+  "That draft review can never supply a post-boundary clean verdict, so " +
+  "counting it would forbid the timeout re-trigger and leave the operator " +
+  "waiting on a verdict that cannot arrive. Match the trigger to the boundary, " +
+  "not merely to the sha. " +
   "CHECK BEFORE YOU POST, because this notice may already have triggered the " +
   "review itself: the connector matches the trigger phrase inside posted " +
   "comment bodies, including within backticks, and this text quotes that " +
