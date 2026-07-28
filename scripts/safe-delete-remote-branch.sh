@@ -52,6 +52,23 @@ branch="${1:-}"
 [ -n "$branch" ] || die "usage: $0 <branch> [--delete]"
 do_delete="${2:-}"
 
+# (0) Never the comparison branch itself. Without this, `main` compares to
+# itself, reports zero unique commits, and deletes the default branch
+# (claude-review + Codex P1, PR #156). Also refuse anything that resolves to
+# the same ref under a different name.
+[ "$branch" = "main" ] && die "'main' is the comparison branch; deleting it is never safe here"
+[ "$branch" = "HEAD" ] && die "refusing the symbolic ref 'HEAD'"
+
+# (0b) The safety check must bind to the ref the DELETE will actually hit.
+# `git remote set-url --push` is an explicitly supported configuration in
+# which fetch and push target different URLs, so verifying one and deleting
+# on the other proves nothing (Codex P1, PR #156).
+fetch_url="$(git remote get-url "$REMOTE")"
+push_url="$(git remote get-url --push "$REMOTE")"
+[ "$fetch_url" = "$push_url" ] || die "\
+${REMOTE} fetches from '$fetch_url' but pushes to '$push_url'.
+The safety check would inspect one remote and delete on another. Refusing."
+
 for p in "${PROTECTED[@]}"; do
   [ "$branch" = "$p" ] && die "'$branch' is on the protected list in docs/state/registry.md"
 done
@@ -86,7 +103,20 @@ fi
 echo "SAFE: every commit on '$branch' is reachable from main"
 [ "$do_delete" = "--delete" ] || { echo "(report only; pass --delete to remove it)"; exit 0; }
 
-# (4) Lease the delete to the sha we actually checked.
+# (4) The reachability decision also depends on the main sha we fetched, and
+# the lease can only protect the ref being deleted (Codex P2, PR #156). So
+# re-fetch main immediately before deleting and refuse if it moved: a main
+# that advanced or was rewritten under us invalidates the count, even though
+# the branch itself is unchanged.
+main_sha_at_check="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
+git fetch --no-tags "$REMOTE" "+refs/heads/main:refs/remotes/${REMOTE}/main" >/dev/null 2>&1 \
+  || die "could not re-verify main before deleting"
+main_sha_now="$(git rev-parse --verify "${MAIN_REF}^{commit}")"
+[ "$main_sha_at_check" = "$main_sha_now" ] \
+  || die "main moved from ${main_sha_at_check:0:12} to ${main_sha_now:0:12} during the check; the reachability result is stale. Re-run."
+
+# (5) Lease the delete to the branch sha we actually checked, so a concurrent
+# push to the branch fails the delete rather than being clobbered.
 git push "$REMOTE" --force-with-lease="refs/heads/${branch}:${sha}" \
   --delete "$branch" \
   || die "delete rejected: '$branch' moved since the check (someone pushed). Re-run."
