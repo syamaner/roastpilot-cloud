@@ -436,7 +436,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: claude-review-transcript
+          # Per run ATTEMPT: upload-artifact names are immutable within a run,
+          # so a re-run (same run_id, incremented run_attempt) would collide
+          # with the prior attempt's artifact and FAIL this step, reddening a
+          # job whose review + completion assertion actually succeeded --
+          # muddying the exact red/green signal this slice establishes.
+          # Suffixing run_attempt keeps each attempt's transcript for step-3
+          # diagnosis, without an overwrite/delete-then-upload race (codex P2).
+          name: claude-review-transcript-${{ github.run_attempt }}
           path: ${{ steps.resolve-transcript.outputs.path }}
           if-no-files-found: warn
           retention-days: 30
