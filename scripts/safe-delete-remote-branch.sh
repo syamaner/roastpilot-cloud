@@ -37,6 +37,12 @@
 #
 set -euo pipefail
 
+# Replacement refs rewrite history for every traversal, so a local
+# `refs/replace/*` entry would make `git rev-list` answer the reachability
+# question about a substituted graph rather than the real one (Codex P1, PR
+# #156). A destructive decision must be taken against real objects.
+export GIT_NO_REPLACE_OBJECTS=1
+
 REMOTE="origin"
 MAIN_REF="refs/remotes/${REMOTE}/main"
 
@@ -51,6 +57,12 @@ die() { echo "REFUSE: $*" >&2; exit 1; }
 branch="${1:-}"
 [ -n "$branch" ] || die "usage: $0 <branch> [--delete]"
 do_delete="${2:-}"
+# Only two arguments are meaningful, and anything past the second was being
+# silently ignored (Codex P2, PR #156). On a destructive tool that is a real
+# hazard: a typo'd or reordered invocation could look accepted while the flag
+# the operator intended went unread.
+[ "$#" -le 2 ] || die "too many arguments; usage: $0 <branch> [--delete]"
+case "${do_delete:-}" in ""|--delete) ;; *) die "unrecognised second argument '$do_delete'; only --delete is accepted" ;; esac
 
 # (0) Never the comparison branch itself. Without this, `main` compares to
 # itself, reports zero unique commits, and deletes the default branch
@@ -72,11 +84,27 @@ do_delete="${2:-}"
 # URLs are REDACTED before being printed: a remote URL may carry inline
 # credentials (`https://user:token@host/...`), and this refusal path would
 # otherwise print them straight into a terminal or CI log (Codex P1, PR #156).
-redact_url() { printf '%s' "$1" | sed -E 's#(://)[^/@]*@#\1<redacted>@#'; }
+# Redacts BOTH credential shapes (Codex P1, PR #156). The first version only
+# handled `scheme://userinfo@host`, so a credential carried in a query
+# parameter (`?access_token=...`, `?private_token=...`) printed in full. A
+# safety tool must not be the thing that writes a token into a CI log.
+redact_url() {
+  printf '%s' "$1" \
+    | sed -E 's#(://)[^/@]*@#\1<redacted>@#' \
+    | sed -E 's#([?&](access_token|private_token|token|password|passwd|secret|key|api_key)=)[^&]*#\1<redacted>#gI'
+}
 
 fetch_url="$(git remote get-url "$REMOTE")"
+seen_push_urls=""
 while IFS= read -r push_url; do
   [ -n "$push_url" ] || continue
+  # A repeated push URL means the delete would be attempted against the same
+  # target more than once (Codex P2, PR #156). Refuse before mutating anything
+  # rather than discovering it half-way through.
+  case "$seen_push_urls" in
+    *"|${push_url}|"*) die "'${REMOTE}' lists the push URL '$(redact_url "$push_url")' more than once; refusing to delete against a duplicated target" ;;
+  esac
+  seen_push_urls="${seen_push_urls}|${push_url}|"
   [ "$fetch_url" = "$push_url" ] || die "\
 ${REMOTE} fetches from '$(redact_url "$fetch_url")' but has a push URL '$(redact_url "$push_url")'.
 The safety check would inspect one remote and delete on another. Refusing."

@@ -167,6 +167,56 @@ describe("safe-delete-remote-branch.sh", () => {
     expect(out).not.toContain("supersecrettoken");
   });
 
+  // Codex P2, #156: anything past the second argument was silently ignored,
+  // so a typo'd or reordered invocation could look accepted while the flag the
+  // operator meant went unread. On a destructive tool that is a real hazard.
+  it("refuses extra arguments rather than ignoring them", () => {
+    const { code, out } = runScript("merged-branch", "--delete", "--oops");
+    expect(code).not.toBe(0);
+    expect(out).toContain("too many arguments");
+    expect(remoteHasBranch("merged-branch")).toBe(true);
+  });
+
+  it("refuses an unrecognised second argument", () => {
+    const { code, out } = runScript("merged-branch", "--force");
+    expect(code).not.toBe(0);
+    expect(out).toContain("unrecognised second argument");
+    expect(remoteHasBranch("merged-branch")).toBe(true);
+  });
+
+  // Codex P1, #156: the first redaction handled `scheme://user:pass@host`
+  // only, so a credential carried in a query parameter printed in full.
+  it("redacts a credential carried in a query parameter", () => {
+    git(clone, "remote", "set-url", "--push", "origin", "https://example.invalid/x.git?access_token=querysecret123");
+    const { code, out } = runScript("merged-branch", "--delete");
+    expect(code).not.toBe(0);
+    expect(out).toContain("<redacted>");
+    expect(out).not.toContain("querysecret123");
+  });
+
+  // Codex P2, #156: a repeated push URL means the delete would be attempted
+  // against the same target twice.
+  it("refuses a duplicated push URL before mutating anything", () => {
+    git(clone, "remote", "set-url", "--push", "origin", remote);
+    git(clone, "remote", "set-url", "--push", "--add", "origin", remote);
+    const { code, out } = runScript("merged-branch", "--delete");
+    expect(code).not.toBe(0);
+    expect(out).toContain("more than once");
+    expect(remoteHasBranch("merged-branch")).toBe(true);
+  });
+
+  // NOT TESTED, deliberately, and recorded rather than quietly dropped: Codex
+  // raised a P1 that a local `refs/replace/*` entry would make `git rev-list`
+  // answer reachability about a substituted graph. The script sets
+  // `GIT_NO_REPLACE_OBJECTS=1` as cheap defence in depth, but I could not
+  // construct the distortion to prove it matters: replacing the branch tip
+  // with main's tip, and replacing main's commit with the branch tip, both
+  // left `rev-list --count main..branch` unchanged at 1, with and without the
+  // env var. Either replacement refs do not affect a symmetric-range count
+  // this way, or the construction needs a shape I did not find. Shipping a
+  // test that passes for the wrong reason would be worse than none, so the
+  // guard stays and the claim that it is load-bearing does not.
+
   it("refuses a branch on the protected list", () => {
     git(clone, "branch", "feature/12-spec-grounded-publish-90-1-base-sha", "main");
     git(clone, "push", "-q", "origin", "feature/12-spec-grounded-publish-90-1-base-sha");
