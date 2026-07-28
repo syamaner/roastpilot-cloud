@@ -89,122 +89,40 @@ recorded here instead.
 Neither may be deleted until someone confirms its content is genuinely
 superseded and records that confirmation here.
 
-**Before deleting any remote branch**, work through this by hand. There is no
-script: one was written on PR #156 and removed before merge (operator decision,
-28 Jul 2026). It is worth recording why, because the reason is the useful part.
+**Before deleting any remote branch**, treat it as a manual, careful operator
+action. There is deliberately no script and no copy-pasteable recipe here, and
+that is the conclusion of PR #156 rather than an omission.
 
-The check itself is easy to state and hard to automate safely. Twelve rounds of
-adversarial review found real defects at a steady rate, and once the script was
-scoped to report-only, essentially every remaining finding was about the gap
-between what it VERIFIED and what the operator would then MUTATE — transport
-overrides that route a push elsewhere (`receivepack`, `uploadpack`,
-`core.sshCommand`, `GIT_SSH_COMMAND`, `ext::` helpers expanding `%S`
-differently for fetch and push), symbolic refs on the remote and local sides,
-protocol versions that do not advertise arbitrary symrefs, shallow boundaries,
-graft files, replacement refs, and terminal-control injection through branch
-names, commit subjects and config paths. Each was genuine. The list did not
-converge.
+Two attempts were made to make this safe and repeatable. The first was an
+executable check; it took twelve rounds of adversarial review, found real
+defects at a steady rate, never converged, and failed the one live case it was
+used on — asked about a squash-merged branch it reported 30 unique commits and
+refused, because squash-merging breaks ancestry. The second was a documented
+shell procedure replacing it; adversarial review found three issues, then
+seven, then nine, several of them re-treads of hazards the script had already
+fixed. Removing the script had not removed the hazards, because they live in
+git rather than in the tool, and a copy-pasteable recipe is executed as
+literally as a script while being reviewed less.
 
-It also failed the one real case it was used on: asked about a squash-merged
-branch, it reported 30 unique commits and refused, because squash-merging
-breaks ancestry — the very limitation documented in its own header.
+The hazards are real and worth knowing before you delete anything:
 
-So the durable protection is this list of protected branches and a human
-reading the evidence, not a tool that looks authoritative. But removing the
-script did not remove the hazards — they live in git, not in the script, so it
-moved them to you. They are therefore spelled out here (every one below was
-found by adversarial review, most with a working reproduction):
+- **A squash-merged branch's commits are not reachable from `main`**, so a
+  reachability count calls them unique. GitHub's merge state is the signal —
+  but a merged branch can be reused, and the historical PR still reports
+  `MERGED` while the new commits exist nowhere else.
+- **The evidence you gather describes the FETCH repository; the delete acts on
+  the PUSH one.** Divergent or multiple push URLs, `receivepack`/`uploadpack`
+  overrides, `core.sshCommand`, `GIT_SSH_COMMAND`, and `ext::` helpers can each
+  make those two different repositories.
+- **Several repository states silently falsify the count**: graft files,
+  `refs/replace/*` entries, shallow boundaries, and symbolic refs on either the
+  remote or the local side. An alias to `main` reports zero unique commits, and
+  deleting it takes main's target with it.
+- **Nothing binds your check to your delete** unless you lease it, and a branch
+  name or commit subject is untrusted input to whatever terminal you read the
+  evidence in.
 
-```bash
-B='<branch>'                       # ALWAYS a quoted variable: git accepts
-                                   # `foo;touch${IFS}/tmp/pwn` as a valid ref
-                                   # name, so an unquoted expansion in ANY of
-                                   # the commands below executes it.
-```
-
-**1. Check the protected list above first.** Those are refused outright.
-
-**2. Refuse a remote you cannot bind the delete to.** The evidence you gather
-describes the FETCH repository; the delete acts on the PUSH one, and git offers
-several ways to make those differ. Require all of this before continuing:
-
-```bash
-git remote get-url origin                    # note it
-git remote get-url --push --all origin       # must be EXACTLY this one URL
-git config --get remote.origin.receivepack   # all four must be empty
-git config --get remote.origin.uploadpack
-git config --get core.sshCommand
-echo "${GIT_SSH_COMMAND:-}${GIT_SSH:-}"      # and this
-```
-
-Multiple or divergent push URLs, any transport override, or an `ext::`-style
-helper (which expands `%S` to `git-upload-pack` for the check and
-`git-receive-pack` for the delete) all break the binding. A reproduction with
-two push URLs deleted the branch from both unchecked repositories and left the
-checked one untouched. Also refuse a URL carrying a credential in its userinfo,
-path or query: a failed push prints it verbatim, and terminals and agent
-sessions get recorded.
-
-**3. Get the merge signal from GitHub — and bind it to the CURRENT tip.**
-
-```bash
-gh pr list --head "$B" --state all --json number,state,mergedAt,headRefOid
-git fetch --no-tags origin "+refs/heads/$B:refs/remotes/origin/$B" "+refs/heads/main:refs/remotes/origin/main"
-git rev-parse "refs/remotes/origin/$B"
-```
-
-A squash-merged branch's commits are NOT reachable from `main`, so reachability
-alone will wrongly call them unique — GitHub's `MERGED` is the reliable signal
-there. But `MERGED` alone is NOT sufficient: a merged branch can be reused or
-receive further commits, and the historical PR still reports `MERGED` while the
-new commits exist nowhere else. **Compare the PR's `headRefOid` with the current
-remote tip.** If they differ, treat the branch as unmerged and go to step 4 for
-the delta.
-
-**4. If it was never merged (or the tip moved), count what would be lost.**
-
-```bash
-git rev-list --count "refs/remotes/origin/main..refs/remotes/origin/$B"
-```
-
-Use the fully qualified remote-tracking refs: a bare `$B` resolves through local
-refs first per gitrevisions, and even `origin/$B` loses to a local branch
-literally named that. Anything non-zero means deleting destroys commits.
-`git branch --merged` is actively misleading here.
-
-**5. Distrust the count if the repository is not an ordinary full clone.** A
-graft file, a `refs/replace/*` entry, a shallow boundary, or a symbolic ref on
-either the remote or the local side will each silently give a wrong answer:
-
-```bash
-git rev-parse --is-shallow-repository        # must be false
-ls .git/info/grafts 2>/dev/null              # must not exist
-git config --get core.graftsFile             # must be empty
-git for-each-ref refs/replace                # must be empty
-git -c protocol.version=2 ls-remote --symref origin "refs/heads/$B" "refs/heads/main"
-git symbolic-ref -q "refs/remotes/origin/$B"; git symbolic-ref -q refs/remotes/origin/main
-```
-
-An alias to `main` reports zero unique commits and deleting it takes main's
-target with it. Protocol v0/v1 do not advertise arbitrary branch symrefs, so a
-missing `ref:` line is not proof of absence.
-
-**6. Read ref names and commit subjects as untrusted.** Git accepts C1 controls
-such as U+009B in a ref name and emits them unchanged, so a crafted name can
-clear or rewrite the very evidence you are reading. Pipe anything you display
-through `cat -v`, or refuse names that are not plain ASCII.
-
-**7. Delete with a lease bound to the tip you checked.**
-
-```bash
-git push --no-follow-tags \
-  --force-with-lease="refs/heads/$B:$(git rev-parse "refs/remotes/origin/$B")" \
-  origin --delete -- "$B"
-```
-
-The lease is what closes the window between your check and the delete — without
-it, a push landing in between is removed silently. `--no-follow-tags` stops an
-inherited `push.followTags=true` publishing unrelated annotated tags during
-routine cleanup (reproduced). `--` stops a leading-dash name being read as an
-option.
-
+Each of those has a worked reproduction in **PR #156's review history**. Read
+it before deleting anything you are not certain about, and prefer asking to
+guessing — the two branches above were deleted by mistake exactly once, by a
+sweep that looked routine.
