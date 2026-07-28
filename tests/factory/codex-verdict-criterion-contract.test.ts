@@ -137,6 +137,21 @@ describe("CODEX_VERDICT_CRITERION states every condition of the merge-wait rule"
     expect(CODEX_VERDICT_CRITERION).toMatch(/roughly 30 minutes/);
   });
 
+  // This constant is embedded in content the publisher POSTS to GitHub — a PR
+  // body via buildImplementPrBody, a PR comment via
+  // buildFallbackRefreshCommentBody — and it quotes the trigger phrase. The
+  // connector matches that phrase inside posted comment bodies, backticks
+  // included, so the notice can start the very review it tells the operator
+  // nothing else will start, turning the operator's instructed trigger into the
+  // second one the clause above forbids.
+  it("warns that the notice itself may have started the review", () => {
+    expect(CODEX_VERDICT_CRITERION).toMatch(/CHECK BEFORE YOU POST/);
+    expect(CODEX_VERDICT_CRITERION).toMatch(/matches the trigger phrase inside posted\s+comment bodies/);
+    // The observation, not just the claim: a rule with no evidence behind it is
+    // the kind that gets quietly dropped in the next collapse.
+    expect(CODEX_VERDICT_CRITERION).toMatch(/roastpilot-agent#682/);
+  });
+
   it("refuses a second trigger only for the SAME head, not for a superseded one", () => {
     // Without "FOR THIS HEAD" this sentence tells an operator on a refreshed
     // head — who triggered on the previous head — not to trigger at all, so the

@@ -398,7 +398,15 @@ export const CODEX_VERDICT_CRITERION =
   "Where a trigger has already been posted FOR THIS HEAD, do not post a second " +
   "one: wait, and escalate rather than re-trigger. A trigger posted on an " +
   "earlier head does not count — the head moved, so that review describes a " +
-  "superseded commit and this head still needs its own.";
+  "superseded commit and this head still needs its own. " +
+  "CHECK BEFORE YOU POST, because this notice may already have triggered the " +
+  "review itself: the connector matches the trigger phrase inside posted " +
+  "comment bodies, including within backticks, and this text quotes that " +
+  "phrase. Observed directly on roastpilot-agent#682 (28 Jul 2026), where an " +
+  "inline reply quoting the phrase in a code span drew a connector response 11 " +
+  "seconds later, in that same thread. So look for an existing 👀 or review on " +
+  "this head first; if one is there, this comment started it and you are in " +
+  "the wait, not before it.";
 
 export const FACTORY_TEXT_LINE_LIMIT = 400;
 
