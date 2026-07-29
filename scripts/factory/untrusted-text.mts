@@ -487,3 +487,91 @@ export function renderBoundedUntrustedReason(
   const omitted = codePoints.length - Array.from(kept).length;
   return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_`;
 }
+
+/**
+ * Renders one untrusted MULTI-LINE block (agent prose whose newlines carry
+ * meaning) for a Markdown sink the privileged publisher POSTs/PATCHes to
+ * GitHub, wrapped in a fenced ```` ```text ```` code block so the whole block
+ * renders as literal, inert text with its line breaks preserved (#158 slice 3,
+ * the triage-verdict reasoning sink). The single-line {@link
+ * renderBoundedUntrustedReason} is wrong here: it collapses `[\r\n]+` to one
+ * space, which would flatten multi-line reasoning into an unreadable run-on.
+ *
+ * **The transform ORDER is load-bearing** — each step is placed so a later one
+ * cannot re-open what an earlier one closed:
+ *
+ *  1. **EOL-normalise** `\r\n`/`\r` → `\n`. CommonMark treats a bare CR as a
+ *     line ending, so without this a `\r`-prefixed `~~~` would sit at a line
+ *     start the step-4 `/m` scan (which only anchors at `\n`) never sees, and
+ *     a tilde fence would survive.
+ *  2. **{@link escapeInvisibleCharactersVisibly}** — render every invisible/
+ *     bidi/exotic-whitespace character (Trojan-Source overrides, zero-width
+ *     trigger splits, NEL/LS/PS separators) as a visible `[U+XXXX]` marker.
+ *     This PRESERVES `\n` (ASCII whitespace is exempt), so the block's real
+ *     line structure survives while a `@<ZWSP>codex` split JS `\s` misses is
+ *     turned into inert marker text, and a NEL/LS/PS that could act as a
+ *     line terminator to a renderer stops reading as one.
+ *  3. **Strip ALL backticks** `` ` `` → "". A backtick can neither close our
+ *     ```` ``` ```` fence early (fence-escape) nor split `@`/`codex` for the
+ *     step-5 neutralise to miss (the slice-1 backtick-split exploit). There is
+ *     no newline-collapse here to do collateral joining, so the strip must
+ *     happen at this step.
+ *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
+ *     renderer that also honours `~~~` fences). AFTER step 3 (a backtick strip
+ *     can expose a `~~~` a backtick had split) and step 1 (so `^`/`/m` anchors
+ *     at the real line starts). An interior `~~~` not at a line start is left
+ *     alone.
+ *  5. **{@link neutralizeCodexTriggerPhrases}** — LAST content transform (the
+ *     slice-1 order lesson: any join-capable removal after it can rebuild a
+ *     `@…codex` it already walked past). Its `\s*` spans `\n`, so a cross-line
+ *     `@\ncodex` split is caught here (the deliberate newline-preservation
+ *     exception — the block keeps its newlines, but a trigger straddling one is
+ *     still defanged). Unconditional: whether the connector honours a trigger
+ *     INSIDE a fenced code block is unproven, so this fails closed and always
+ *     runs.
+ *  6. **Code-point bound + non-silent disclosure** — mirrors {@link
+ *     renderBoundedUntrustedReason} exactly: slice to `maxCodePoints` (never
+ *     splitting an astral char), {@link stripTruncationTailArtifacts} on the
+ *     tail (so truncation cannot resynthesise a trigger or leave half a
+ *     marker/a lone surrogate), and count the omitted characters AFTER that
+ *     strip.
+ *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````. Truncated: the
+ *     kept fence, then a trusted italic disclosure OUTSIDE the fence naming the
+ *     omitted count and where the full evidence lives. The `text` info-string
+ *     is a trusted constant.
+ *
+ * @param text - The untrusted multi-line text.
+ * @param maxCodePoints - The generous per-block code-point budget.
+ * @param fullDetailLocation - A TRUSTED caller-supplied literal naming where the
+ *   full, untruncated evidence lives (e.g. `"the run log"`), interpolated into
+ *   the disclosure suffix OUTSIDE the fence. MUST be a fixed string literal
+ *   owned by the caller, NEVER attacker-derived — it is not itself sanitised.
+ * @returns Markdown: a ```` ```text ```` fenced block, plus a disclosure suffix
+ *   when truncated.
+ */
+export function renderBoundedUntrustedMultilineBlock(
+  text: string,
+  maxCodePoints: number,
+  fullDetailLocation = "the run output",
+): string {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const invisiblesMarked = escapeInvisibleCharactersVisibly(normalized);
+  const withoutBackticks = invisiblesMarked.replace(/`/g, "");
+  const tildeDefused = withoutBackticks.replace(/^( {0,3})~{3,}/gm, "$1~~");
+  const defanged = neutralizeCodexTriggerPhrases(tildeDefused);
+  const codePoints = Array.from(defanged);
+  if (codePoints.length <= maxCodePoints) {
+    return `\`\`\`text\n${defanged}\n\`\`\``;
+  }
+  const kept = stripTruncationTailArtifacts(
+    codePoints.slice(0, maxCodePoints).join(""),
+  );
+  // Count omitted from the ACTUAL kept length, AFTER the tail strip (same
+  // reasoning as renderBoundedUntrustedReason — the strip removes more than the
+  // raw gap, so counting before it would understate the disclosure).
+  const omitted = codePoints.length - Array.from(kept).length;
+  return (
+    `\`\`\`text\n${kept}\n\`\`\`\n` +
+    `_[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_`
+  );
+}
