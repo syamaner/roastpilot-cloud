@@ -270,6 +270,16 @@ describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #15
     expect(content).toContain("a~~~b");
   });
 
+  it("normalises CRLF and bare-CR line endings to LF in the rendered block (pins step 1)", () => {
+    // Step 1 (EOL-normalise) is output-normalisation + defence-in-depth, not the
+    // sole \r~~~ / @\rcodex guard (those are caught by the tilde-defuse and the
+    // neutralise step — JS `/m` anchors at CR and `\s*` spans CR). This pins the
+    // \r\n / \r -> \n normalisation so the step is never a silent no-op.
+    const out = renderBoundedUntrustedMultilineBlock("a\r\nb\rc\nd", BIG, "the run log");
+    expect(fencedContent(out)).toBe("a\nb\nc\nd");
+    expect(out).not.toContain("\r");
+  });
+
   it("T6: bidi/zero-width/NEL are surfaced as [U+XXXX]; a lone surrogate does not crash or survive", () => {
     const out = renderBoundedUntrustedMultilineBlock(
       "a\u202Eb\u200Bc\u0085d\uD83De",

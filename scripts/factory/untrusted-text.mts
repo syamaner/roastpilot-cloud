@@ -500,10 +500,17 @@ export function renderBoundedUntrustedReason(
  * **The transform ORDER is load-bearing** — each step is placed so a later one
  * cannot re-open what an earlier one closed:
  *
- *  1. **EOL-normalise** `\r\n`/`\r` → `\n`. CommonMark treats a bare CR as a
- *     line ending, so without this a `\r`-prefixed `~~~` would sit at a line
- *     start the step-4 `/m` scan (which only anchors at `\n`) never sees, and
- *     a tilde fence would survive.
+ *  1. **EOL-normalise** `\r\n`/`\r` → `\n`, so the posted fenced block has
+ *     consistent line endings. This is NORMALISATION plus defence-in-depth, NOT
+ *     the sole guard for a CR-prefixed fence or trigger: JS's `/m` anchors `^`
+ *     at a bare `\r` (`/^~{3,}/m.test("x\r~~~")` is `true`), so the step-4
+ *     tilde-defuse already catches a `\r~~~` line even without this step, and
+ *     the step-5 `\s*` includes `\r`, so a `@\rcodex` split is already caught
+ *     too. The value here is a clean, deterministic output line ending — a bare
+ *     `\r` left in the rendered block serves no purpose — and belt-and-suspenders
+ *     against a downstream CommonMark renderer that treats bare CR as a line
+ *     ending. A test pins the `\r\n`/`\r` → `\n` normalisation so the step is
+ *     not a silent no-op.
  *  2. **{@link escapeInvisibleCharactersVisibly}** — render every invisible/
  *     bidi/exotic-whitespace character (Trojan-Source overrides, zero-width
  *     trigger splits, NEL/LS/PS separators) as a visible `[U+XXXX]` marker.
@@ -517,10 +524,11 @@ export function renderBoundedUntrustedReason(
  *     no newline-collapse here to do collateral joining, so the strip must
  *     happen at this step.
  *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
- *     renderer that also honours `~~~` fences). AFTER step 3 (a backtick strip
- *     can expose a `~~~` a backtick had split) and step 1 (so `^`/`/m` anchors
- *     at the real line starts). An interior `~~~` not at a line start is left
- *     alone.
+ *     renderer that also honours `~~~` fences). AFTER step 3, because a backtick
+ *     strip can expose a `~~~` a backtick had split. The `/m` `^` anchors at
+ *     every line start (`\n` AND, in JS, a bare `\r`), so this catches a CR-
+ *     prefixed fence with or without step 1's normalisation. An interior `~~~`
+ *     not at a line start is left alone.
  *  5. **{@link neutralizeCodexTriggerPhrases}** — LAST content transform (the
  *     slice-1 order lesson: any join-capable removal after it can rebuild a
  *     `@…codex` it already walked past). Its `\s*` spans `\n`, so a cross-line
