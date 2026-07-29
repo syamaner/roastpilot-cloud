@@ -1524,11 +1524,13 @@ export function findPrForIssueNumber(
  */
 export interface ProvenanceContext {
   /**
-   * The model Claude Code actually ran with, extracted from the implement
-   * job's own execution-transcript artifact (see
-   * {@link extractModelIdFromTranscript}) — `null` when that artifact was
-   * missing, unparseable, or lacked the field. NEVER fabricated: a caller
-   * rendering this must show "unavailable" for `null`, not guess a value.
+   * The model Claude Code actually ran with — extracted and allowlisted in
+   * the implement job itself and handed to the publisher as the `model_id`
+   * job output (issue #164 replaced the full-transcript artifact this used
+   * to be read from), then re-validated via
+   * {@link validateProvenanceModelId}. `null` when that value was missing,
+   * empty, or outside the allowlist. NEVER fabricated: a caller rendering
+   * this must show "unavailable" for `null`, not guess a value.
    */
   readonly modelId: string | null;
   /**
@@ -2341,91 +2343,49 @@ export function buildPublishRejectedStepSummary(
 }
 
 /**
- * Extracts the model ID Claude Code actually ran with, from the implement
- * job's own execution-transcript artifact (F1-S10 slice 3, factory.md
- * §13.12's provenance trailer — the model-ID field).
- *
- * The transcript (`claude-execution-output.json`, uploaded by the
- * implement job as the `implement-agent-transcript` artifact — see
- * `implement-ready-issues.yml`) is the raw Claude Agent SDK message
- * stream: a JSON array whose first message is always `{type: "system",
- * subtype: "init", model: "<id>", ...}` (verified against
- * `anthropics/claude-code-action`'s own
- * `base-action/src/run-claude-sdk.ts` at the pinned SHA — that file reads
- * this exact field the same way, for its own sanitized log line). No
- * other source reports the model actually used: this workflow's
- * `claude-code-action` step declares no `model:` input at all (the action
- * defers to whatever the auth method resolves to), so this transcript
- * field is the ONLY place the real value is ever recorded.
- *
- * Deliberately conservative: returns `null` (never fabricates a value)
- * for anything other than a clean match — unparseable JSON, a non-array
- * top level, an array with no `system`/`init` message, or an init
- * message whose `model` field is missing, empty, not a string, or fails
- * the {@link MODEL_ID_PATTERN} allowlist (see below). A caller must render
- * this as "unavailable", never guess.
- *
- * Validates the `model` value against a strict {@link MODEL_ID_PATTERN}
- * allowlist and REJECTS (never sanitizes/truncates) anything outside it
- * (issue #171, superseding the earlier `\n`/`\r`-only reject of Codex P2,
- * #55): this value is interpolated straight into a git commit trailer
- * ({@link buildCommitTrailer})'s `Provenance-Model` line with only a
- * nonempty check, so a corrupted or tampered transcript's `model` field
- * could otherwise carry a `[skip ci]`/`skip-checks:true` CI-skip token, an
- * `@mention`/`#issue` autolink, a URL, or an embedded newline forging an
- * extra trailer line — every one of those is a character the allowlist
- * excludes. A static allowlist is the structural fix the Rigour Calibration
- * "prefer static constraints" rule points at: every real model ID
- * (`claude-opus-4-8`, `claude-opus-4-1-20250805`, `claude-sonnet-5`) is
- * `[A-Za-z0-9._-]{1,64}`, so REJECTING outright is both simplest and
- * correct — there is no valid partial value to salvage from a model field
- * that fails the shape check.
- *
- * @param rawTranscriptJson - The raw file contents of the transcript
- *   artifact.
- * @returns The model ID string, or `null` if it could not be determined.
- */
-/**
- * The allowlist a transcript's `model` value must fully match to be trusted
- * as a commit-trailer `Provenance-Model` value (issue #171). Anchored
- * (`^…$`, no `m` flag, so a trailing `\n` cannot satisfy it) and limited to
- * `[A-Za-z0-9._-]`, which every real model ID uses and which excludes — in
- * one static constraint — every CI-skip bracket/directive character, the
- * `@`/`#` autolink triggers, `:`/`/` from a URL, whitespace, and newlines.
- * Length-bounded 1-64 so a padded value cannot dominate the trailer.
+ * The allowlist the implement job's handed-off `model_id` must fully match
+ * to be trusted as a commit-trailer `Provenance-Model` value (issue #171).
+ * Anchored (`^…$`, no `m` flag, so a trailing `\n` cannot satisfy it) and
+ * limited to `[A-Za-z0-9._-]`, which every real model ID uses and which
+ * excludes — in one static constraint — every CI-skip bracket/directive
+ * character, the `@`/`#` autolink triggers, `:`/`/` from a URL, whitespace,
+ * and newlines. Length-bounded 1-64 so a padded value cannot dominate the
+ * trailer.
  */
 const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
-export function extractModelIdFromTranscript(
-  rawTranscriptJson: string,
+/**
+ * Authoritatively re-validates the model ID the implement job hands to the
+ * publisher (issue #164). The value arrives as the `model_id` job output —
+ * extracted and allowlisted in the implement job itself by a jq/shell step
+ * (which replaced the broadly-readable full-transcript artifact this used
+ * to be read from) — and is re-checked here, in the publisher, against the
+ * same {@link MODEL_ID_PATTERN} closed grammar before it reaches
+ * {@link buildCommitTrailer}'s `Provenance-Model` line.
+ *
+ * The two allowlist copies (this one and the workflow shell gate) can drift
+ * only in fail-closed directions: a shell gate wider than this rejects here
+ * and the trailer reads "unavailable"; a shell gate narrower degrades a
+ * valid ID to "unavailable". Neither direction can forge a trailer, and the
+ * #171 pre-push CI-skip assertion on the whole commit message is an
+ * independent third net.
+ *
+ * Returns `null` (never a fabricated or partial value) for an `undefined`,
+ * empty, or non-matching candidate — a caller must render that as
+ * "unavailable", never guess.
+ *
+ * @param candidate - The `IMPLEMENT_MODEL_ID` value handed off from the
+ *   implement job, or `undefined` when the env var is unset.
+ * @returns The validated model ID, or `null` if it is missing or outside
+ *   the allowlist.
+ */
+export function validateProvenanceModelId(
+  candidate: string | undefined,
 ): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawTranscriptJson);
-  } catch {
+  if (candidate === undefined || candidate.length === 0) {
     return null;
   }
-  if (!Array.isArray(parsed)) {
-    return null;
-  }
-  const initMessage = (parsed as unknown[]).find(
-    (m): m is Record<string, unknown> =>
-      typeof m === "object" &&
-      m !== null &&
-      (m as Record<string, unknown>).type === "system" &&
-      (m as Record<string, unknown>).subtype === "init",
-  );
-  if (!initMessage) {
-    return null;
-  }
-  const model = initMessage.model;
-  if (typeof model !== "string" || model.length === 0) {
-    return null;
-  }
-  // Reject (never truncate/sanitize) anything outside the static allowlist —
-  // see MODEL_ID_PATTERN. A rejected value renders as "unavailable" in the
-  // trailer, never a partial or forged one.
-  return MODEL_ID_PATTERN.test(model) ? model : null;
+  return MODEL_ID_PATTERN.test(candidate) ? candidate : null;
 }
 
 /**
@@ -2472,7 +2432,7 @@ export function buildCommitTrailer(
   return [
     "Co-Authored-By: Claude <noreply@anthropic.com>",
     `Signed-off-by: ${context.dispatchActor} <${emailSafeActor}@users.noreply.github.com>`,
-    `Provenance-Model: ${context.modelId ?? "unavailable (implement transcript missing or unparseable)"}`,
+    `Provenance-Model: ${context.modelId ?? "unavailable (implement model ID missing or rejected)"}`,
     `Provenance-Prompt-Version: ${context.promptVersion}`,
     `Provenance-Agent-Action: ${context.agentActionRef}`,
     `Provenance-Issue: #${context.issueNumber}`,

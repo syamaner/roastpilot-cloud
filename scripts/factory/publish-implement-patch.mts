@@ -155,13 +155,12 @@
  *   `$GITHUB_STEP_SUMMARY` block (observability fix, 18 Jul 2026 —
  *   see {@link writeStepSummary}). Soft-defaulted to `undefined`
  *   (omitted from the summary) if unset; purely informational.
- * - `IMPLEMENT_TRANSCRIPT_PATH` — path to the downloaded implement-agent
- *   transcript artifact (F1-S10 slice 3, factory.md §13.12's provenance
- *   trailer). May legitimately not exist (best-effort artifact download,
- *   same as `PATCH_PATH`) — a missing/unreadable/unparseable transcript
- *   degrades the trailer's model-ID field to "unavailable", never blocks
- *   an otherwise-valid publish. Soft-defaulted to
- *   `transcript-output/claude-execution-output.json` if unset.
+ * - `IMPLEMENT_MODEL_ID` — the model ID Claude Code ran with, extracted
+ *   and allowlisted in the implement job and handed over as its `model_id`
+ *   job output (issue #164 replaced the full-transcript artifact this was
+ *   read from). Re-validated here via {@link validateProvenanceModelId}; a
+ *   missing/empty/rejected value degrades the trailer's model-ID field to
+ *   "unavailable", never blocks an otherwise-valid publish.
  * - `IMPLEMENT_PROMPT_VERSION` — stands in for a prompt/skill version;
  *   see {@link ProvenanceContext.promptVersion}'s doc for why this is the
  *   repository commit SHA rather than a named skill version. Soft-
@@ -172,7 +171,7 @@
  *   clearly-labeled placeholder if unset.
  */
 
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { appendFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -195,7 +194,6 @@ import {
   buildPublishRejectedStepSummary,
   buildPublishSuccessStepSummary,
   deriveBranchName,
-  extractModelIdFromTranscript,
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
   findAddedPackageJsonTestScriptEdits,
@@ -215,6 +213,7 @@ import {
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
   parseNameStatusZ,
   parseNumstatZ,
+  validateProvenanceModelId,
   type ExistingComment,
   type FactoryPatchLineStat,
   type GamingFlag,
@@ -737,12 +736,6 @@ function applyPatchAndPush(
   // before.
   rmSync("patch-output", { recursive: true, force: true });
   rmSync("issue-context", { recursive: true, force: true });
-  // Same reasoning as patch-output/issue-context above: the "Download
-  // implement agent transcript artifact" step (best-effort, for the
-  // provenance trailer's model-ID field) writes into this job's checkout
-  // too, before this ever runs, and nothing stops a patch from touching
-  // .gitignore to un-ignore it.
-  rmSync("transcript-output", { recursive: true, force: true });
   runGit(["add", "-A"]);
   // The issue title is attacker-writable (#171 threat model: an attacker-
   // authored `ready` issue title). Defang it through the shared commit-message
@@ -1565,36 +1558,6 @@ function writeStepSummary(markdown: string): void {
   }
 }
 
-/**
- * Reads and parses the implement job's execution-transcript artifact for
- * its model ID (F1-S10 slice 3, factory.md §13.12), via
- * {@link extractModelIdFromTranscript}. Best-effort, same shape as the
- * patch artifact's own "may legitimately not exist" handling: the
- * transcript is uploaded with `if: always()` but its download step is
- * `continue-on-error: true` (a missing/failed implement run may never
- * have produced one at all), so a read failure here degrades the
- * provenance trailer's model-ID field to "unavailable" — logged, never
- * thrown, and never a reason to reject an otherwise-valid publish.
- *
- * @param transcriptPath - Path to the downloaded transcript artifact.
- * @returns The model ID, or `null` if the file is missing, unreadable, or
- *   {@link extractModelIdFromTranscript} couldn't find the field.
- */
-async function readModelIdFromTranscript(transcriptPath: string): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await readFile(transcriptPath, "utf8");
-  } catch (err) {
-    console.warn(
-      `Could not read the implement transcript artifact at ${transcriptPath} ` +
-        `(provenance trailer's model ID will read "unavailable"): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-  return extractModelIdFromTranscript(raw);
-}
-
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -1633,9 +1596,7 @@ export async function main(): Promise<void> {
   const promptVersion =
     process.env.IMPLEMENT_PROMPT_VERSION ?? "unknown (IMPLEMENT_PROMPT_VERSION not set)";
   const dispatchActor = process.env.DISPATCH_ACTOR ?? "unknown-dispatcher";
-  const transcriptPath =
-    process.env.IMPLEMENT_TRANSCRIPT_PATH ?? "transcript-output/claude-execution-output.json";
-  const modelId = await readModelIdFromTranscript(transcriptPath);
+  const modelId = validateProvenanceModelId(process.env.IMPLEMENT_MODEL_ID);
   const provenance: ProvenanceContext = { modelId, promptVersion, dispatchActor };
   // Which login `postFailureComment` treats as "our own prior comment"
   // (factory.md §13's publisher-identity switch). Soft-defaulted to the

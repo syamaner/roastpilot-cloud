@@ -100,7 +100,7 @@ afterEach(async () => {
   delete process.env.PATCH_PATH;
   delete process.env.IMPLEMENT_PROMPT_VERSION;
   delete process.env.DISPATCH_ACTOR;
-  delete process.env.IMPLEMENT_TRANSCRIPT_PATH;
+  delete process.env.IMPLEMENT_MODEL_ID;
   process.exitCode = undefined;
 });
 
@@ -500,36 +500,28 @@ describe("publish-implement-patch — #171: CI-skip control tokens on the commit
     ).toBe(true);
   });
 
-  async function commitBodyForTranscriptModel(model: string): Promise<string> {
-    const transcriptPath = join(scratchDir, `model-${Math.random().toString(36).slice(2)}.json`);
-    await fsWriteFile(
-      transcriptPath,
-      JSON.stringify([
-        { type: "system", subtype: "init", model },
-        { type: "result", subtype: "success", is_error: false },
-      ]),
-    );
-    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+  async function commitBodyForModelId(modelId: string): Promise<string> {
+    process.env.IMPLEMENT_MODEL_ID = modelId;
     stubHappyPathFetch();
     await main();
     expect(process.exitCode).toBeUndefined();
     return pushedCommitBody();
   }
 
-  it("E8: a modelId carrying a CI-skip token is rejected — the trailer reads 'unavailable', and the branch still pushes clean", async () => {
-    const body = await commitBodyForTranscriptModel("claude [skip ci]");
+  it("R-N1 (E8 port): a model_id carrying a CI-skip token is rejected — the trailer reads 'unavailable', and the branch still pushes clean", async () => {
+    const body = await commitBodyForModelId("claude [skip ci]");
     expect(body).toContain("Provenance-Model: unavailable");
     expect(body.toLowerCase()).not.toContain("[skip ci]");
   });
 
-  it("E9: a modelId carrying an @mention is rejected — the trailer reads 'unavailable'", async () => {
-    const body = await commitBodyForTranscriptModel("@syamaner");
+  it("E9 port: a model_id carrying an @mention is rejected — the trailer reads 'unavailable'", async () => {
+    const body = await commitBodyForModelId("@syamaner");
     expect(body).toContain("Provenance-Model: unavailable");
     expect(body).not.toContain("@syamaner");
   });
 
-  it("E10: a valid modelId still lands in the trailer unchanged (allowlist regression)", async () => {
-    const body = await commitBodyForTranscriptModel("claude-opus-4-8");
+  it("E10 port: a valid model_id still lands in the trailer unchanged (allowlist regression)", async () => {
+    const body = await commitBodyForModelId("claude-opus-4-8");
     expect(body).toContain("Provenance-Model: claude-opus-4-8");
   });
 
@@ -4347,18 +4339,10 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
     delete process.env.PUBLISHED_VIA_FALLBACK;
   });
 
-  it("the pushed commit carries the full trailer (Co-Authored-By, Signed-off-by, Provenance-*) with real values, including the model ID read from the transcript artifact", async () => {
+  it("R-B1: the pushed commit carries the full trailer (Co-Authored-By, Signed-off-by, Provenance-*) with real values, including the model ID handed off as the model_id job output", async () => {
     process.env.IMPLEMENT_PROMPT_VERSION = "1b781ecabc1234567890abcdef1234567890abcd";
     process.env.DISPATCH_ACTOR = "syamaner";
-    const transcriptPath = join(scratchDir, "transcript.json");
-    await fsWriteFile(
-      transcriptPath,
-      JSON.stringify([
-        { type: "system", subtype: "init", model: "claude-opus-4-1-20250805" },
-        { type: "result", subtype: "success", is_error: false },
-      ]),
-    );
-    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    process.env.IMPLEMENT_MODEL_ID = "claude-opus-4-1-20250805";
     stubHappyPathFetch();
 
     await main();
@@ -4388,19 +4372,15 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
     expect(commitBody).toContain("Provenance-Issue: #6");
   });
 
-  it("degrades honestly to 'unavailable' — never fabricates a model ID — when the transcript artifact is missing (best-effort download step never ran/failed)", async () => {
-    process.env.IMPLEMENT_TRANSCRIPT_PATH = join(scratchDir, "does-not-exist.json");
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("R-B2a: degrades honestly to 'unavailable' — never fabricates a model ID — when IMPLEMENT_MODEL_ID is unset (best-effort handoff never populated it), and still publishes", async () => {
+    delete process.env.IMPLEMENT_MODEL_ID;
     stubHappyPathFetch();
 
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Could not read the implement transcript artifact"),
-    );
 
-    const verifyDir = join(scratchDir, "verify-no-transcript");
+    const verifyDir = join(scratchDir, "verify-no-model-id");
     execFileSync("git", [
       "clone",
       "-q",
@@ -4428,25 +4408,17 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
       body: string;
     };
     expect(prBody.body).toContain("unavailable");
-    warnSpy.mockRestore();
   });
 
-  it("does NOT commit the downloaded transcript-output/ scratch directory into the factory branch", async () => {
-    // Simulate the "Download implement agent transcript artifact" step:
-    // the file already sits on disk in THIS job's checkout before
-    // applyPatchAndPush's git add -A runs.
-    await mkdir(join(localCloneDir, "transcript-output"), { recursive: true });
-    await fsWriteFile(
-      join(localCloneDir, "transcript-output", "claude-execution-output.json"),
-      "leftover transcript artifact\n",
-    );
+  it("R-B2b: degrades to 'unavailable' when IMPLEMENT_MODEL_ID is the empty string, and still publishes", async () => {
+    process.env.IMPLEMENT_MODEL_ID = "";
     stubHappyPathFetch();
 
     await main();
 
     expect(process.exitCode).toBeUndefined();
 
-    const verifyDir = join(scratchDir, "verify-transcript-scratch");
+    const verifyDir = join(scratchDir, "verify-empty-model-id");
     execFileSync("git", [
       "clone",
       "-q",
@@ -4455,10 +4427,11 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
       bareRemoteDir,
       verifyDir,
     ]);
-    const scratchArtifact = await readFile(
-      join(verifyDir, "transcript-output", "claude-execution-output.json"),
-    ).catch(() => null);
-    expect(scratchArtifact).toBeNull();
+    const commitBody = execFileSync("git", ["log", "-1", "--format=%B"], {
+      cwd: verifyDir,
+      encoding: "utf8",
+    });
+    expect(commitBody).toContain("Provenance-Model: unavailable");
   });
 
   it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation (unlike the PR body's Provenance section, which stays creation-time-only)", async () => {
@@ -4490,19 +4463,7 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
   });
 
   it("REJECTS a newline-injected model value end-to-end — the real pushed commit stays single-line, with NO forged Signed-off-by line (Codex P2, #55)", async () => {
-    const transcriptPath = join(scratchDir, "malicious-transcript.json");
-    await fsWriteFile(
-      transcriptPath,
-      JSON.stringify([
-        {
-          type: "system",
-          subtype: "init",
-          model: "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>",
-        },
-        { type: "result", subtype: "success", is_error: false },
-      ]),
-    );
-    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    process.env.IMPLEMENT_MODEL_ID = "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>";
     stubHappyPathFetch();
 
     await main();
