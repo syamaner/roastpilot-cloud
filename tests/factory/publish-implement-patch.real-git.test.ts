@@ -3080,6 +3080,19 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
     expect(title).not.toContain("`");
     expect(title).toContain("[codex trigger removed]");
   });
+
+  it("(d) length-bounds a title whose invisible-escape expansion would exceed GitHub's 256 limit (codex P2 DoS)", async () => {
+    // 40 warning emoji (⚠ + VS16 U+FE0F, the VS16 written as an escape so the
+    // invisible-format gate accepts this file); each U+FE0F expands to an
+    // 8-char `[U+FE0F]` marker, so the raw escaped title is ~360 chars and
+    // would 422 `POST /pulls` AFTER the branch push without a bound.
+    const title = await createdPrTitle("[F1-S3] " + "\u26A0\uFE0F".repeat(40));
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    // The truncation must not leave half an escape marker at the boundary
+    // (safeClamp strips a dangling `[U+XXXX`); check before the trailing `…`.
+    expect(title.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
+  });
 });
 
 describe("publish-implement-patch — Codex round 7: fork-PR confusion (findExistingPrForIssue repo scoping)", () => {

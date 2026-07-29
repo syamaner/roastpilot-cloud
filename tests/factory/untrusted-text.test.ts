@@ -7,9 +7,22 @@ import {
   escapeInvisibleCharactersVisibly,
   MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
   neutralizeCodexTriggerPhrases,
+  safeClamp,
   sanitizeUntrustedInlineText,
   sanitizeUntrustedTextForPostedBody,
 } from "../../scripts/factory/untrusted-text.mts";
+
+/**
+ * The round-3 oracle: a truncation must not RESYNTHESISE a live `@codex`.
+ * Strip any invisible/default-ignorable char (so a zero-width split can't
+ * hide one), then assert no contiguous `@codex`/`＠codex`. The inert marker
+ * `[codex trigger removed]` contains "codex" but never "@codex", so it does
+ * not trip this.
+ */
+function expectNoResynthesizedTrigger(output: string): void {
+  const withoutInvisibles = output.replace(/[\p{C}\p{Default_Ignorable_Code_Point}]/gu, "");
+  expect(/[@＠]codex/iu.test(withoutInvisibles)).toBe(false);
+}
 
 /**
  * A live Codex trigger surviving into a POSTED body is the bug #158 closes.
@@ -202,6 +215,81 @@ describe("sanitizeUntrustedInlineText (shared plain-text primitive — title pat
     expect(sanitizeUntrustedTextForPostedBody(value)).toBe(
       `\`${sanitizeUntrustedInlineText(value)}\``,
     );
+  });
+});
+
+describe("issue #158 fold round 3: a length clamp cannot RESYNTHESISE a live trigger at the truncated tail", () => {
+  const PAD = "a".repeat(194);
+
+  it.each([
+    ["@codexx (word char after codex)", "@codexx"],
+    ["@codexcodex", "@codexcodex"],
+    ["@codexZ", "@codexZ"],
+    ["@codex9", "@codex9"],
+    ["@codexreview (no space)", "@codexreview"],
+    ["＠codexx (fullwidth @)", "＠codexx"],
+  ])("clamps `PAD + %s` without leaving `@codex` at the tail", (_label, suffix) => {
+    // `@codexWORD` is a benign different mention the `\b` deliberately skips,
+    // so neutralize leaves it — but a naive slice to 200 truncates the WORD,
+    // manufacturing `@codex…` at the tail. safeClamp strips that fragment.
+    expectNoResynthesizedTrigger(sanitizeUntrustedTextForPostedBody(PAD + suffix));
+  });
+
+  it("marker-growth boundary: expanded `@codex ` markers shift a trailing `@codexx` onto the cut", () => {
+    // Each `@codex ` neutralises to a LONGER marker, so the trailing
+    // `@codexWORD` lands at the truncation boundary — safeClamp runs AFTER
+    // neutralize (on the expanded string), so it still cleans the real tail.
+    const input = "@codex ".repeat(28) + "@codexx";
+    const output = sanitizeUntrustedTextForPostedBody(input);
+    expectNoResynthesizedTrigger(output);
+    // and the length bound still holds (200 content + ellipsis + 2 backticks).
+    expect(output.length).toBeLessThanOrEqual(MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH + 3);
+  });
+});
+
+describe("safeClamp", () => {
+  it("returns a value already within bound unchanged (no ellipsis)", () => {
+    expect(safeClamp("short value", 200)).toBe("short value");
+    expect(safeClamp("x".repeat(200), 200)).toBe("x".repeat(200));
+  });
+
+  it("truncates with a trailing ellipsis (result is at most maxLength + 1)", () => {
+    const result = safeClamp("x".repeat(250), 200);
+    expect(result.length).toBe(201);
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("strips a trailing `@codex` fragment the truncation manufactured", () => {
+    const result = safeClamp("a".repeat(194) + "@codexx", 200);
+    expect(result).toBe("a".repeat(194) + "…");
+    expect(result).not.toContain("@codex");
+  });
+
+  it("strips a trailing PARTIAL `[U+XXXX` escape marker rather than splitting it", () => {
+    // 196 z + the 8-char marker `[U+FE0F]` = 204 chars; slicing to 200 cuts
+    // the marker to `[U+F`, which safeClamp removes so no half-marker survives.
+    const result = safeClamp("z".repeat(196) + "[U+FE0F]", 200);
+    expect(result).not.toMatch(/\[U\+[0-9A-F]*$/);
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("leaves a COMPLETE trailing `[U+XXXX]` marker intact", () => {
+    // Landing exactly after the closing `]` must not strip a valid marker.
+    expect(safeClamp("y".repeat(192) + "[U+FE0F]", 200)).toBe("y".repeat(192) + "[U+FE0F]");
+  });
+});
+
+describe("issue #158 fold round 3: availability negatives (over-clamping must not eat legitimate content)", () => {
+  it("a legitimate <=200-char field is only escaped, never truncated", () => {
+    const legit = "patch touches lib/foo.ts and lib/bar.ts (200-char safe reason)";
+    expect(sanitizeUntrustedTextForPostedBody(legit)).toBe(`\`${legit}\``);
+  });
+
+  it("a legitimate non-trigger `@` mention survives", () => {
+    expect(sanitizeUntrustedTextForPostedBody("ping @syamaner please")).toBe(
+      "`ping @syamaner please`",
+    );
+    expect(sanitizeUntrustedInlineText("ping @syamaner please")).toBe("ping @syamaner please");
   });
 });
 

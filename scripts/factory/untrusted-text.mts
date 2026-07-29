@@ -59,8 +59,12 @@ export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
 /**
  * Replaces every Codex trigger phrase in `text` with
  * {@link CODEX_TRIGGER_REMOVED_MARKER}, so posting `text` onto a PR/issue
- * cannot itself start a review. Runs on the RAW value (before any newline
- * collapse) so the pattern's `\s*` sees real whitespace, including `\n`.
+ * cannot itself start a review. Called by {@link sanitizeUntrustedInlineText}
+ * as the LAST defang step — AFTER the removal transforms (invisibles-escape,
+ * newline-collapse, backtick-strip), so it sees any `@…codex` those steps
+ * rejoin. It handles INTERIOR triggers (`@codex` followed by a word
+ * boundary); a trigger MANUFACTURED at the tail by a later length truncation
+ * is handled separately by {@link safeClamp}.
  *
  * @param text - Untrusted text about to be interpolated into a posted body.
  * @returns `text` with every trigger occurrence rendered inert.
@@ -256,10 +260,62 @@ export function escapeInvisibleCharactersVisibly(text: string): string {
 /**
  * Per-field character clamp for a sanitised value placed in a posted body
  * or step summary. Keeps one attacker-controlled field from dominating the
- * comment; the clamp runs LAST because truncation can only shorten an
- * already-neutralised value, never synthesise a new trigger.
+ * comment. Applied via {@link safeClamp}, NOT a bare slice: truncation is a
+ * LOSSY transform that can MANUFACTURE a live `@codex` at the new tail (see
+ * {@link safeClamp}), so it needs the trailing-fragment strip that a bare
+ * slice lacks.
  */
 export const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
+
+/**
+ * A partial-or-complete `@…codex` fragment anchored at the END of a string
+ * (`@c`, `@ codex`, `＠codex`, …). {@link safeClamp} strips this after a
+ * length truncation, because truncation is the one transform that can
+ * MANUFACTURE a live trigger the {@link neutralizeCodexTriggerPhrases} `\b`
+ * guard deliberately left alone (#158 fold round 3, factory-security-reviewer
+ * BLOCKER): `@codexx` is a benign DIFFERENT mention the `\b` skips, but
+ * truncating its last char to `@codex` and appending `…` GIVES it the word
+ * boundary that turns it into a live trigger. Truncation's only NEW boundary
+ * is at the tail, so cleaning the tail is provably sufficient; the strip only
+ * removes characters, so the length bound still holds.
+ */
+const TRAILING_TRIGGER_FRAGMENT = /[@＠]\s*c(?:o(?:d(?:e(?:x)?)?)?)?$/iu;
+
+/**
+ * An UNCLOSED `[U+XXXX` escape marker anchored at the END of a string — the
+ * cosmetic artifact a mid-marker truncation would otherwise leave (a marker
+ * that closes with `]` is NOT matched, since `$` sits after the `]`).
+ * {@link safeClamp} strips it so a clamped value never ends in half a marker.
+ */
+const TRAILING_PARTIAL_ESCAPE_MARKER = /\[U\+[0-9A-F]*$/;
+
+/**
+ * Length-bounds `value` to `maxLength` content characters with a trailing
+ * `…`, WITHOUT letting the truncation resynthesise a live `@codex` at the new
+ * end ({@link TRAILING_TRIGGER_FRAGMENT}) or leave half an escape marker
+ * ({@link TRAILING_PARTIAL_ESCAPE_MARKER}). Both strips only REMOVE tail
+ * characters, so the result is at most `maxLength + 1` characters (the `+ 1`
+ * is the ellipsis) — the same bound the bare field clamp this replaces had.
+ * A value already within bound is returned unchanged (no ellipsis).
+ *
+ * The partial-marker strip runs BEFORE the trigger strip so a
+ * `…@codex[U+F`-shaped tail collapses cleanly: remove the dangling marker,
+ * THEN the exposed `@codex`.
+ *
+ * @param value - The already-defanged value to bound.
+ * @param maxLength - The content-character budget (before the ellipsis).
+ * @returns `value` bounded and, when truncated, tail-cleaned and `…`-suffixed.
+ */
+export function safeClamp(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  const truncated = value
+    .slice(0, maxLength)
+    .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
+    .replace(TRAILING_TRIGGER_FRAGMENT, "");
+  return `${truncated}…`;
+}
 
 /**
  * Robustly defangs an untrusted field to inert PLAIN text (no Markdown
@@ -312,10 +368,13 @@ export function sanitizeUntrustedInlineText(value: string): string {
  *
  * Defangs the value to inert plain text via {@link
  * sanitizeUntrustedInlineText} (see there for why the trigger neutralise
- * runs LAST), then clamps to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH}
- * and wraps in a single-backtick inline code span. The clamp is safe last:
- * truncation only shortens an already-defanged value and appends `…`, so it
- * cannot synthesise a new `@codex`.
+ * runs LAST), then length-bounds it with {@link safeClamp} to {@link
+ * MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} and wraps in a single-backtick
+ * inline code span. The clamp uses {@link safeClamp}, NOT a bare slice,
+ * because truncation can otherwise resynthesise a live `@codex` at the new
+ * tail (e.g. `@codexx` → `@codex…`) — the neutralise that ran inside {@link
+ * sanitizeUntrustedInlineText} cannot see a fragment the later truncation
+ * only then creates.
  *
  * The code span is the categorical Markdown fix (post-#46, three prior
  * rounds against the same class): a GFM inline code span renders its
@@ -329,10 +388,5 @@ export function sanitizeUntrustedInlineText(value: string): string {
  * @returns The defanged value, wrapped in its own inline code span.
  */
 export function sanitizeUntrustedTextForPostedBody(value: string): string {
-  const defanged = sanitizeUntrustedInlineText(value);
-  const clamped =
-    defanged.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
-      ? `${defanged.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
-      : defanged;
-  return `\`${clamped}\``;
+  return `\`${safeClamp(sanitizeUntrustedInlineText(value), MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}\``;
 }

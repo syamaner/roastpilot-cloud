@@ -2769,3 +2769,32 @@ describe("issue #158 fold: a backtick-split trigger survives to the posted body 
     expect(body).not.toContain("@codex");
   });
 });
+
+describe("issue #158 fold round 3: a 200-char field clamp cannot resynthesise a trigger through the real builders", () => {
+  const PAD = "a".repeat(194);
+
+  it("buildGamingFlagAnnotation: a suppression line ending in `@codexx` clamps without a live tail trigger", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [{ path: "lib/foo.ts", line: PAD + "@codexx" }],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expectNoLiveTrigger(body);
+    expect(body).not.toContain("@codex");
+  });
+
+  it("buildGamingBothLostReviewBody: a flagged path ending in `@codexcodex` clamps without a live tail trigger", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: [PAD + "@codexcodex"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expectNoLiveTrigger(body);
+    expect(body).not.toContain("@codex");
+  });
+});

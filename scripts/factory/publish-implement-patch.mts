@@ -223,9 +223,21 @@ import {
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
 import {
+  safeClamp,
   sanitizeUntrustedInlineText,
   sanitizeUntrustedTextForPostedBody,
 } from "./untrusted-text.mts";
+
+/**
+ * GitHub's documented maximum PR-title length. A title that exceeds it makes
+ * `POST /pulls` return 422 AFTER the branch is already pushed — an
+ * attacker-triggerable failure, since #158's threat model is an attacker-
+ * authored issue title, and `sanitizeUntrustedInlineText`'s invisible-escape
+ * step can EXPAND a title (each default-ignorable char becomes an 8-char
+ * `[U+XXXX]` marker). The title is length-bounded to stay under this
+ * (#158 fold round 3, codex P2).
+ */
+const GITHUB_PR_TITLE_MAX_LENGTH = 256;
 
 /**
  * Upper bound on the on-disk patch artifact size, in bytes, checked via
@@ -1909,6 +1921,10 @@ export async function main(): Promise<void> {
       return;
     }
 
+    // The fixed, trusted prefix on every factory PR title; its length is the
+    // part of GitHub's title budget the (attacker-controlled) issue title
+    // cannot consume.
+    const prTitlePrefix = `[#${issueNumber}] `;
     const created = await githubRequest<GitHubPullRequestApi>(
       token,
       "POST",
@@ -1919,13 +1935,15 @@ export async function main(): Promise<void> {
         // the earlier neutralize-only guard let a zero-width split `@<ZWSP>codex`
         // through, since ZWSP is not `\s`). A title is not Markdown-rendered, so
         // no code-span WRAP is applied; but escape-invisibles + strip-backticks
-        // + neutralize all run, fail-closed: a backtick or zero-width char split
-        // between `@` and `codex` is a possible connector trigger and the
-        // connector's exact matcher is unverified, so a legit interior backtick
-        // losing its formatting in a title is acceptable cosmetic fallout in the
-        // safe direction.
-        title: `[#${issueNumber}] ${sanitizeUntrustedInlineText(
-          issue.title.replace(/^\s*\[[^\]]*\]\s*/, ""),
+        // + neutralize all run, fail-closed. It is then length-bounded with the
+        // SAME `safeClamp` the body uses, so the defanged (and possibly
+        // marker-EXPANDED) title cannot exceed GitHub's limit and 422 the
+        // create call after the branch push (codex P2). The budget reserves the
+        // fixed `[#N] ` prefix and one char for safeClamp's ellipsis, so the
+        // full title stays within the limit.
+        title: `${prTitlePrefix}${safeClamp(
+          sanitizeUntrustedInlineText(issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")),
+          GITHUB_PR_TITLE_MAX_LENGTH - prTitlePrefix.length - 1,
         )}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
