@@ -223,8 +223,10 @@ import {
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
 import {
+  findCiSkipDirectives,
   safeClamp,
   sanitizeUntrustedInlineText,
+  sanitizeUntrustedTextForCommitMessage,
 } from "./untrusted-text.mts";
 
 /**
@@ -237,6 +239,19 @@ import {
  * (#158 fold round 3, codex P2).
  */
 const GITHUB_PR_TITLE_MAX_LENGTH = 256;
+
+/**
+ * The character budget for the commit SUBJECT line (issue #171). Keeps the
+ * `Implement #N: <title>` subject to a conventional one-line length and, more
+ * importantly, bounds the attacker-controlled title's contribution so a single
+ * field cannot dominate the commit. The sanitised title is clamped with
+ * {@link safeClamp} (never a bare `.slice`), because
+ * {@link sanitizeUntrustedTextForCommitMessage} can EXPAND the value (an
+ * invisible becomes an 8-char `[U+XXXX]` marker) and a bare code-unit slice
+ * could otherwise leave half a marker or a lone surrogate in the pushed
+ * commit.
+ */
+const MAX_COMMIT_SUBJECT_LENGTH = 120;
 
 /**
  * Upper bound on the on-disk patch artifact size, in bytes, checked via
@@ -729,24 +744,47 @@ function applyPatchAndPush(
   // .gitignore to un-ignore it.
   rmSync("transcript-output", { recursive: true, force: true });
   runGit(["add", "-A"]);
-  const commitTitle = `Implement #${issueNumber}: ${issueTitle}`.slice(
-    0,
-    120,
-  );
+  // The issue title is attacker-writable (#171 threat model: an attacker-
+  // authored `ready` issue title). Defang it through the shared commit-message
+  // sanitiser (invisibles surfaced, newlines collapsed so it cannot forge a
+  // second trailer line, backticks stripped, `@codex` and CI-skip control
+  // tokens neutralised), then bound it with `safeClamp` — NOT a bare `.slice`,
+  // which could leave half a `[U+XXXX]` marker or a lone surrogate in the
+  // pushed commit. The budget reserves the trusted prefix and one char for
+  // safeClamp's ellipsis, so the subject stays within MAX_COMMIT_SUBJECT_LENGTH.
+  const commitSubjectPrefix = `Implement #${issueNumber}: `;
+  const commitTitle =
+    commitSubjectPrefix +
+    safeClamp(
+      sanitizeUntrustedTextForCommitMessage(issueTitle),
+      MAX_COMMIT_SUBJECT_LENGTH - commitSubjectPrefix.length - 1,
+    );
   const trailer = buildCommitTrailer({
     issueNumber,
     agentActionRef,
     ...provenance,
   });
-  runGit([
-    "commit",
-    "-m",
-    commitTitle,
-    "-m",
-    `Closes #${issueNumber}`,
-    "-m",
-    trailer,
-  ]);
+  const messageParts = [commitTitle, `Closes #${issueNumber}`, trailer];
+  // Second, INDEPENDENT guard (fail-closed): scan the fully-assembled message
+  // for any honoured CI-skip token before committing. Per-field sanitisation
+  // above covers the title, but the trailer concatenates fields that are NOT
+  // per-field transformed (`dispatchActor`, `promptVersion`, `agentActionRef`);
+  // a token reaching the message through any of them — or through a future
+  // drift in the transform — is caught here and the push refused. Throwing a
+  // PublishRejection BEFORE the commit/push means no branch is pushed and no
+  // PR is opened (the failure lands in main()'s existing handler): a suppressed
+  // required workflow that never reports is invisible to a human merger, so the
+  // safe direction is to publish nothing at all.
+  const survivingCiSkipTokens = findCiSkipDirectives(messageParts.join("\n\n"));
+  if (survivingCiSkipTokens.length > 0) {
+    throw new PublishRejection(
+      `refusing to push: a CI-skip control token survived into the commit ` +
+        `message (${survivingCiSkipTokens.join(", ")}) — committing it could ` +
+        `suppress the required workflow runs a human relies on to see this PR ` +
+        `as reviewed`,
+    );
+  }
+  runGit(["commit", "-m", messageParts[0], "-m", messageParts[1], "-m", messageParts[2]]);
   runGit(["push", "--force", "origin", branchName]);
 }
 
