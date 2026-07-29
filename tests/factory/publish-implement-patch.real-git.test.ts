@@ -532,6 +532,18 @@ describe("publish-implement-patch — #171: CI-skip control tokens on the commit
     const body = await commitBodyForTranscriptModel("claude-opus-4-8");
     expect(body).toContain("Provenance-Model: claude-opus-4-8");
   });
+
+  it("E11: a NESTED-bracket [oops [skip ci] title leaves NO [skip ci] substring in the pushed commit (fsr BLOCKER — GitHub reads it literally)", async () => {
+    stubHappyPathFetch({ issueTitle: "[oops [skip ci]" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    // The byte-level proof against what GitHub's literal substring search reads.
+    expect(body.toLowerCase()).not.toContain("[skip ci]");
+    expect(body).toContain("(ci-skip token removed)");
+  });
 });
 
 describe("publish-implement-patch — real git plumbing (happy path)", () => {

@@ -830,6 +830,39 @@ describe("issue #171: CI-skip control tokens neutralised for the commit surface"
   });
 });
 
+describe("issue #171 (fsr BLOCKER): nested-bracket CI-skip tokens are caught as literal substrings", () => {
+  // GitHub does a LITERAL SUBSTRING search, so `[skip ci]` nested inside an
+  // outer bracket (`[oops [skip ci]`) is still honoured. The earlier
+  // extract-the-outer-group detector normalised `oops [skip ci` to a
+  // non-member and missed it; the per-token literal regexes start the match at
+  // the INNER `[`. Each row is a nested form of a honoured token.
+  it.each([
+    ["nested [skip ci] no space", "[x[skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [skip ci] with space", "[oops [skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [skip ci] longer prefix", "[broken [skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [ci skip]", "[a[ci skip]", /\[\s*ci[\s._-]*skip\s*\]/i],
+    ["nested [no ci]", "[a[no ci]", /\[\s*no[\s._-]*ci\s*\]/i],
+    ["nested [skip actions]", "[a[skip actions]", /\[\s*skip[\s._-]*actions\s*\]/i],
+    ["nested [actions skip]", "[a[actions skip]", /\[\s*actions[\s._-]*skip\s*\]/i],
+  ])("%s: neutralised and detected", (_label, input, liveTokenPattern) => {
+    // findCiSkipDirectives (the pre-push assertion) fires on the raw title.
+    expect(findCiSkipDirectives(input).length).toBeGreaterThan(0);
+    // The transform removes the honoured substring, leaving no live token.
+    const out = sanitizeUntrustedTextForCommitMessage(input);
+    expect(out).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+    expect(liveTokenPattern.test(out)).toBe(false);
+    expect(findCiSkipDirectives(out)).toEqual([]);
+  });
+
+  it("the leftover unclosed outer bracket is harmless prose, not a token", () => {
+    // `[oops [skip ci]` -> `[oops (ci-skip token removed)`: the dangling
+    // `[oops` matches no honoured token.
+    const out = sanitizeUntrustedTextForCommitMessage("[oops [skip ci]");
+    expect(out).toBe("[oops (ci-skip token removed)");
+    expect(findCiSkipDirectives(out)).toEqual([]);
+  });
+});
+
 describe("G14: the untrusted-text leaf stays import-free", () => {
   it("contains no import statement (that is what keeps the verifier's closure minimal)", () => {
     const source = readFileSync(
