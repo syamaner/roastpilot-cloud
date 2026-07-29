@@ -165,7 +165,9 @@ const MAX_LOGGED_REASON_LENGTH = 2000;
  *
  * Three layered defenses, in order:
  *  1. {@link escapeInvisibleCharactersVisibly} — the SAME comment-grade
- *     primitive `neutralizeUntrustedTextForBotComment` uses, rendering
+ *     primitive the posted-comment path uses (via `untrusted-text.mts`'s
+ *     own `sanitizeUntrustedInlineText`, which `sanitizeReasonForDisplay`
+ *     now routes through — #158 slice 2), rendering
  *     every control/format character (`\p{C}`, including ANSI escapes and
  *     bidi overrides) as a visible `[U+XXXX]` marker (round-2 fold: a log
  *     line is rendered too, so this channel needs the full comment-grade

@@ -179,6 +179,43 @@ describe("renderBoundedUntrustedReason (non-silent bounded reason render — PR 
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out)).toBe(false);
     expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(out)).toBe(false);
   });
+
+  it("T17: a custom fullDetailLocation literal is interpolated into the disclosure suffix", () => {
+    const out = renderBoundedUntrustedReason(
+      "x".repeat(600),
+      500,
+      "the uploaded verdict artifact",
+    );
+    expect(out).toBe(
+      `\`${"x".repeat(500)}\` _[truncated, 100 character(s) omitted — full detail in the uploaded verdict artifact]_`,
+    );
+  });
+
+  it("T17: the omitted count is still computed AFTER the tail strip when a custom location is passed", () => {
+    // 494 'a' + '@codex' + 50 'Z' = 550 code points; slice to 500 keeps
+    // `…a@codex`, the trigger-fragment strip removes `@codex` (6), so the true
+    // gap is 56 (50 truncated + 6 stripped), not the naive 550 - 500 = 50.
+    const out = renderBoundedUntrustedReason(
+      "a".repeat(494) + "@codex" + "Z".repeat(50),
+      500,
+      "the run log and the uploaded artifacts",
+    );
+    expect(out).toContain(
+      "_[truncated, 56 character(s) omitted — full detail in the run log and the uploaded artifacts]_",
+    );
+    expectNoResynthesizedTrigger(out.replace(/_\[truncated[\s\S]*$/, ""));
+  });
+
+  it("T17: omitting fullDetailLocation is byte-identical to passing the default (slice-1 callers unchanged)", () => {
+    const oversized = "x".repeat(9000);
+    expect(renderBoundedUntrustedReason(oversized, 8000)).toBe(
+      renderBoundedUntrustedReason(oversized, 8000, "the run output"),
+    );
+    const withinBound = "empty patch (no changes)";
+    expect(renderBoundedUntrustedReason(withinBound, 8000)).toBe(
+      renderBoundedUntrustedReason(withinBound, 8000, "the run output"),
+    );
+  });
 });
 
 describe("sanitizeUntrustedTextForPostedBody (posted-body sanitiser, #158 rename of sanitizeStepSummary text)", () => {

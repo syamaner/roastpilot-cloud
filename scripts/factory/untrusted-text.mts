@@ -442,10 +442,12 @@ export function sanitizeUntrustedTextForPostedBody(value: string): string {
  * `buildSpecGroundingFallbackCommentBody` (per-item + total + omitted count),
  * but lives here so `implement-patch-logic.mts` need not import that
  * markdown-it-bearing module into the import-closure verifier's reach. NOTE:
- * that module's own PER-ITEM helper, `sanitizeReasonForDisplay`, still
- * truncates to 500 code points with a BARE `…` (a silent cut of this same
- * class, not the explicit disclosure below); folding it onto THIS primitive is
- * tracked in #172 for #158 slice 2.
+ * `publish-spec-grounding-verdict-logic.mts`'s own two PER-ITEM helpers
+ * (`sanitizeAgentRationaleForDisplay`, `sanitizeReasonForDisplay`) now BOTH
+ * route through this primitive too (#158 slice 2, closing #172 — each used to
+ * truncate with a BARE `…`, a silent cut of this same class), each passing its
+ * own trusted {@link fullDetailLocation} literal — so there is no second,
+ * independently-maintained silent-truncation path left in that module.
  *
  * Defangs via {@link sanitizeUntrustedInlineText} (so a `@codex review` in a
  * reason cannot start a review from the comment), then bounds by CODE POINTS
@@ -453,15 +455,25 @@ export function sanitizeUntrustedTextForPostedBody(value: string): string {
  * returned in full; a longer one is truncated to `maxCodePoints`, tail-cleaned
  * ({@link stripTruncationTailArtifacts}, so truncation cannot resynthesise a
  * trigger or leave half a marker), and followed by an explicit, non-silent
- * disclosure naming the omitted count and where the full evidence lives (the
- * run log). The kept text is wrapped in a code span; the disclosure is our own
- * trusted italic text OUTSIDE the span.
+ * disclosure naming the omitted count and where the full evidence lives. The
+ * kept text is wrapped in a code span; the disclosure is our own trusted
+ * italic text OUTSIDE the span.
  *
  * @param reason - The untrusted reason text.
  * @param maxCodePoints - The generous per-item code-point budget.
+ * @param fullDetailLocation - A TRUSTED caller-supplied literal naming where the
+ *   full, untruncated evidence lives (e.g. `"the uploaded verdict artifact"`),
+ *   interpolated into the disclosure suffix. This MUST be a fixed string
+ *   literal owned by the caller, NEVER attacker-derived or otherwise untrusted
+ *   text — it is placed OUTSIDE the code span and is not itself sanitised. The
+ *   default keeps the slice-1 `implement-patch-logic.mts` callers byte-for-byte.
  * @returns Markdown: a code span, plus a disclosure suffix when truncated.
  */
-export function renderBoundedUntrustedReason(reason: string, maxCodePoints: number): string {
+export function renderBoundedUntrustedReason(
+  reason: string,
+  maxCodePoints: number,
+  fullDetailLocation = "the run output",
+): string {
   const defanged = sanitizeUntrustedInlineText(reason);
   const codePoints = Array.from(defanged);
   if (codePoints.length <= maxCodePoints) {
@@ -473,5 +485,5 @@ export function renderBoundedUntrustedReason(reason: string, maxCodePoints: numb
   // marker fragment, a lone surrogate), so counting before it would understate
   // the disclosure (qa finding, PR #170).
   const omitted = codePoints.length - Array.from(kept).length;
-  return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in the run output]_`;
+  return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_`;
 }
