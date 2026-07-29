@@ -523,20 +523,25 @@ export function renderBoundedUntrustedReason(
  *     step-5 neutralise to miss (the slice-1 backtick-split exploit). There is
  *     no newline-collapse here to do collateral joining, so the strip must
  *     happen at this step. This strip is LOSSY (a backtick-only reasoning
- *     collapses to an empty block), so whenever it removes anything a non-silent
- *     disclosure is appended OUTSIDE the fence pointing at `fullDetailLocation`
- *     (the run log holds the full un-stripped value) — the AGENTS.md floor is
- *     that evidence is never SILENTLY dropped. It is emitted on EVERY path,
- *     truncated or not: on the truncated path the omitted count is measured
- *     against the POST-strip content, so it does not cover the stripped
- *     backticks, and the formatting note sits alongside the truncation note
- *     (each accurate for its own removal).
+ *     collapses to an empty block); so is the step-4 tilde-defuse. Rather than a
+ *     per-transform check, a SINGLE class-level disclosure fires whenever any
+ *     step-3/4 content-modifying transform changed the text (see
+ *     `modifiedForSafeRendering` below): a non-silent note is appended OUTSIDE
+ *     the fence pointing at `fullDetailLocation` (the run log holds the full
+ *     un-modified value) — the AGENTS.md floor is that evidence is never
+ *     SILENTLY dropped. It is emitted on EVERY path, truncated or not: on the
+ *     truncated path the omitted count is measured against the POST-transform
+ *     content, so it does not cover the stripped/reduced characters, and the
+ *     formatting note sits alongside the truncation note (each accurate for its
+ *     own removal).
  *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
  *     renderer that also honours `~~~` fences). AFTER step 3, because a backtick
  *     strip can expose a `~~~` a backtick had split. The `/m` `^` anchors at
  *     every line start (`\n` AND, in JS, a bare `\r`), so this catches a CR-
  *     prefixed fence with or without step 1's normalisation. An interior `~~~`
- *     not at a line start is left alone.
+ *     not at a line start is left alone. Like step 3, this is a content-
+ *     modifying transform, so any reduction it makes is covered by the same
+ *     step-3 safe-rendering disclosure.
  *  5. **{@link neutralizeCodexTriggerPhrases}** — LAST content transform (the
  *     slice-1 order lesson: any join-capable removal after it can rebuild a
  *     `@…codex` it already walked past). Its `\s*` spans `\n`, so a cross-line
@@ -577,21 +582,29 @@ export function renderBoundedUntrustedMultilineBlock(
   const normalized = text.replace(/\r\n?/g, "\n");
   const invisiblesMarked = escapeInvisibleCharactersVisibly(normalized);
   const withoutBackticks = invisiblesMarked.replace(/`/g, "");
-  // The backtick strip is LOSSY — record whether it dropped anything so an
-  // untruncated block can disclose it rather than silently publishing a
-  // shortened (or empty) reasoning (#158 #174 Codex P2 — the AGENTS.md floor
-  // is that evidence is never SILENTLY dropped; the full un-stripped value is
-  // in the run log written before the POST).
-  const formattingRemoved = withoutBackticks !== invisiblesMarked;
   const tildeDefused = withoutBackticks.replace(/^( {0,3})~{3,}/gm, "$1~~");
   const defanged = neutralizeCodexTriggerPhrases(tildeDefused);
-  // The backtick strip's loss is disclosed on EVERY path when it removed
-  // anything (#174 Codex r2). It is ORTHOGONAL to the truncation note: the
-  // truncation count below is measured against the POST-strip `defanged` text,
-  // so it does NOT account for the stripped backticks. Both notes are accurate
-  // for their own removal and both point at `fullDetailLocation` (the run log,
-  // which holds the full un-stripped value).
-  const formattingNote = formattingRemoved
+  // Disclose whenever ANY content-modifying safe-rendering transform in steps
+  // 3-4 changed the text — strip-backticks OR tilde-defuse, or any future lossy
+  // transform added to that segment — so a shortened (or empty) reasoning is
+  // never published silently (#158 #174 Codex P2/r2/r3 — the AGENTS.md floor is
+  // that evidence is never SILENTLY dropped; the full un-stripped value is in
+  // the run log, written before the POST). Comparing the post-tilde-defuse
+  // content against `invisiblesMarked` closes the whole CLASS in one check
+  // rather than one transform at a time. The baseline is DELIBERATELY the
+  // post-EOL-normalise text: CRLF/CR -> LF (step 1) is benign, content-
+  // preserving line-ending normalisation, not a lossy safety transform, so it
+  // is intentionally NOT disclosed (a note on every Windows-line-ending verdict
+  // would be noise) — do not move the baseline back to the pre-EOL text. The
+  // step-5 trigger neutralise is also excluded: it substitutes a VISIBLE marker,
+  // so nothing is silently lost.
+  const modifiedForSafeRendering = tildeDefused !== invisiblesMarked;
+  // Disclosed on EVERY path when true. ORTHOGONAL to the truncation note: the
+  // truncation count below is measured against the POST-transform `defanged`
+  // text, so it does NOT account for the stripped/reduced characters. Both notes
+  // are accurate for their own removal and both point at `fullDetailLocation`
+  // (the run log, which holds the full un-stripped value).
+  const formattingNote = modifiedForSafeRendering
     ? `\n_[formatting characters removed for safe rendering — full detail in ${fullDetailLocation}]_`
     : "";
   const codePoints = Array.from(defanged);

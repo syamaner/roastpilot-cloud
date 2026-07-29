@@ -380,6 +380,25 @@ describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #15
     );
   });
 
+  it("#174 r3: tilde-defuse alone (no backticks) fires the class-level safe-rendering disclosure", () => {
+    // The r3 case: tilde-defuse reduces `~~~` -> `~~`, a content change the
+    // backtick-only check missed. The generalised check catches it.
+    const out = renderBoundedUntrustedMultilineBlock("a\n~~~\nb", BIG, "the run log");
+    expect(fencedContent(out)).toBe("a\n~~\nb");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174 r3: a CRLF-only block is normalised to LF and gets NO disclosure (EOL-normalise is deliberately excluded)", () => {
+    // EOL-normalise (step 1) is benign, content-preserving line-ending
+    // normalisation — the baseline for the disclosure is the POST-EOL text, so a
+    // Windows-line-ending verdict is NOT flagged as modified.
+    const out = renderBoundedUntrustedMultilineBlock("a\r\nb", BIG, "the run log");
+    expect(out).toBe("```text\na\nb\n```");
+    expect(out).not.toContain("formatting characters removed");
+  });
+
   it("#174 r2: truncated AND backticks → BOTH the truncation note AND the formatting-removed note", () => {
     // The truncation count is measured against the POST-strip content (it
     // reports the 40 the LENGTH bound cut, NOT the 5 stripped backticks), so the
