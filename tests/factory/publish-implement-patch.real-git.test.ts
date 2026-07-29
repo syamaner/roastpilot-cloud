@@ -3644,6 +3644,47 @@ copy to scripts/factory/evil-copy.mts
     errorSpy.mockRestore();
   });
 
+  it("log ordering (PR #170, Codex P2): the full-evidence log is emitted BEFORE the fallible comment POST", async () => {
+    // If the comment POST fails, its throw propagates OUT of the catch block —
+    // so a log placed AFTER it never runs and the disclosures' "full detail in
+    // the run output" promise breaks. The log must precede the comment POST.
+    const longName = "b".repeat(240);
+    const path = `scripts/factory/${longName}.mts`;
+    const diff =
+      `diff --git a/${path} b/${path}\n` +
+      `new file mode 100644\n` +
+      `index 0000000..abc1234\n` +
+      `--- /dev/null\n` +
+      `+++ b/${path}\n` +
+      `@@ -0,0 +1,1 @@\n` +
+      `+export const x = 1;\n`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "long-forbidden-throw.diff", diff);
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        throw new Error("simulated comment POST outage");
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    stubFetch(fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // postFailureComment throws OUT of the catch block, so main() rejects.
+    await expect(main()).rejects.toThrow("simulated comment POST outage");
+
+    // …but the full-evidence log ran first, so the omitted detail is still reachable.
+    const reasonLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((s) => s.includes("did not produce a PR. Reasons:"));
+    expect(reasonLog).toBeDefined();
+    expect(reasonLog).toContain(`scripts/factory/${longName}.mts`);
+    errorSpy.mockRestore();
+  });
+
   it("rejects a COPY OUT of scripts/factory/** (hand-crafted, same reason as above)", async () => {
     const diff = `diff --git a/scripts/factory/publish-implement-patch.mts b/lib/leaked-copy.mts
 similarity index 100%

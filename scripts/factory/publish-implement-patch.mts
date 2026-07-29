@@ -2038,15 +2038,30 @@ export async function main(): Promise<void> {
       );
     }
 
-    // Adjudicated fix (Codex P2, post-#46-merge fix-forward): written
-    // BEFORE postFailureComment, not after. postFailureComment makes its
-    // own GitHub API calls and has no internal try/catch — a genuine
-    // failure there (rate-limit, outage, permissions) throws OUT of this
-    // catch block entirely, so anything placed after it never runs. The
-    // rejected-publish path is exactly the one where the mint-vs-fallback
-    // diagnostic matters most (no PR, no other visible signal), so this
-    // write must not be contingent on the comment call also succeeding.
+    // Both DURABLE diagnostics — the step summary AND the full-evidence run
+    // log — are written BEFORE postFailureComment, not after (Codex P2,
+    // post-#46-merge fix-forward; EXTENDED to the log by the PR #170 fold,
+    // Codex P2). postFailureComment makes its own GitHub API calls with no
+    // internal try/catch, so a genuine failure there (rate-limit, outage,
+    // permissions) throws OUT of this catch block and anything placed after it
+    // never runs. The rejected-publish path is exactly where the
+    // mint-vs-fallback diagnostic matters most (no PR, no other visible
+    // signal); and the run log is the FULL-EVIDENCE home the comment's and
+    // step-summary's truncation disclosures point to ("full detail in the run
+    // output"), so if it ran only AFTER a failing comment POST that promise
+    // would be false and the omitted evidence unreachable. Neither durable
+    // write may be contingent on the comment call succeeding.
     writeStepSummary(buildPublishRejectedStepSummary({ ...summaryContext, reasons }));
+
+    // Sink 2 (the run LOG): NOT a connector surface and NOT markdown, so it
+    // defangs each reason for log hygiene (`sanitizeUntrustedInlineText`:
+    // escape-invisibles + collapse + strip-backticks + neutralize) but does
+    // NOT clamp or code-span-wrap — the whole reason is preserved (#158 fold,
+    // PR #170, Codex P1: the untruncated copy lives here).
+    console.error(
+      `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
+        reasons.map((r) => `  - ${sanitizeUntrustedInlineText(r)}`).join("\n"),
+    );
 
     await postFailureComment(
       token,
@@ -2057,17 +2072,6 @@ export async function main(): Promise<void> {
       runUrl,
       branchPushed,
       failureCommentAuthorLogin,
-    );
-    // Sink 2 (the run LOG) is the FULL-EVIDENCE home the two markdown sinks'
-    // truncation disclosures point to: NOT a connector surface and NOT
-    // markdown, so it defangs each reason for log hygiene
-    // (`sanitizeUntrustedInlineText`: escape-invisibles + collapse + strip-
-    // backticks + neutralize) but does NOT clamp or code-span-wrap — the whole
-    // reason is preserved (#158 fold, PR #170, Codex P1: evidence must not be
-    // dropped silently, so the untruncated copy lives here, in the run output).
-    console.error(
-      `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
-        reasons.map((r) => `  - ${sanitizeUntrustedInlineText(r)}`).join("\n"),
     );
     process.exitCode = 1;
   }
