@@ -231,13 +231,18 @@ describe("formatRationaleForDisplay (F1-S9 slice 3b-iii, issue #12)", () => {
     );
   });
 
-  it("truncates a rationale exceeding the display cap and points to the uploaded verdict artifact, rather than inflating the comment without bound (PR #82 review, FOLD 3)", () => {
+  it("truncates a rationale exceeding the display cap and DISCLOSES the omitted count while pointing to the uploaded verdict artifact, rather than inflating the comment without bound (PR #82 review, FOLD 3; disclosure grammar folded onto the shared leaf, #158 slice 2 / #172)", () => {
     const hugeRationale = "x".repeat(2000); // the verdict schema's own MAX_RATIONALE_LENGTH
     const result = formatRationaleForDisplay(joined({ rationale: hugeRationale }));
     expect(result.length).toBeLessThan(hugeRationale.length);
     expect(result).toContain("x".repeat(300));
     expect(result).not.toContain("x".repeat(301));
-    expect(result).toMatch(/full text in the uploaded verdict artifact/i);
+    // New grammar (#172): an explicit, non-silent disclosure naming the exact
+    // omitted count and where the full text lives — never the old bare `…`.
+    expect(result).toContain(
+      "_[truncated, 1700 character(s) omitted — full detail in the uploaded verdict artifact]_",
+    );
+    expect(result).not.toContain("…");
   });
 
   it("does NOT truncate or add the artifact pointer for a rationale within the display cap", () => {
@@ -1247,11 +1252,16 @@ describe("buildSpecGroundingFallbackCommentBody (F1-S9 slice 3b-iii-d, issue #12
     expect(findExistingSpecGroundingSummaryCommentId(comments)).toBe(42);
   });
 
-  it("truncates a single reason exceeding the per-reason display cap, rather than echoing an untrusted-sized value verbatim (PR #84 review, Codex, FOLD 2)", () => {
+  it("truncates a single reason exceeding the per-reason display cap and DISCLOSES the omitted count, rather than echoing an untrusted-sized value verbatim OR silently cutting with a bare ellipsis (PR #84 review, Codex, FOLD 2; disclosure folded onto the shared leaf, #158 slice 2 / #172)", () => {
     const hugeReason = "x".repeat(10_000);
     const body = buildSpecGroundingFallbackCommentBody([hugeReason]);
     expect(body.length).toBeLessThan(2000);
-    expect(body).toContain("…");
+    // New grammar (#172): a non-silent disclosure of the omitted count and
+    // where the full reason lives, never the old bare `…`.
+    expect(body).toContain(
+      "_[truncated, 9500 character(s) omitted — full detail in the run log and the uploaded artifacts]_",
+    );
+    expect(body).not.toContain("…");
     expect(body).not.toContain(hugeReason);
   });
 

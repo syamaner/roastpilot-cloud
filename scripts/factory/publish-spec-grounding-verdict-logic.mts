@@ -43,9 +43,9 @@
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
 import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
-import { escapeInvisibleCharactersVisibly } from "./spec-grounding-runner-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
+import { renderBoundedUntrustedReason } from "./untrusted-text.mts";
 
 export type { UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
 
@@ -176,81 +176,36 @@ const MAX_RATIONALE_DISPLAY_LENGTH = 300;
  * public issue's own text, itself editable by anyone) rendered as raw
  * Markdown under `github-actions[bot]`'s identity could inject a
  * `\n<!--` (an unclosed HTML comment hiding everything the bot posts
- * after it), a spoofed heading, a live autolinked URL, or an `@mention`.
+ * after it), a spoofed heading, a live autolinked URL, an `@mention`, or
+ * a `@codex review` that steers the connector into a bot-authored clean
+ * verdict (#158).
  *
- * Mirrors the categorical fix `untrusted-text.mts`'s
- * `sanitizeUntrustedTextForPostedBody` applies for this exact injection
- * class (see that function's
- * docstring for the full 3-round history of why per-metacharacter
- * escaping loses to GFM autolinking and a code span is the only
- * categorical defense): wraps the value in a GitHub-Flavored-Markdown
- * inline code span, which renders its contents as literal text —
- * no emphasis, no links, no autolinks, no HTML — by construction. The
- * only two characters that could break OUT of the span (a literal
- * backtick, or a newline that could end the containing list item/start
- * a new Markdown block) are stripped first, same as that function.
- *
- * A code span does NOT, however, stop Unicode BIDI visual reordering
- * (PR #82 round 2 review, FOLD 3 — BLOCKER: a Trojan-Source-style bidi
- * override, e.g. U+202E, survives inside a code span and can reorder how
- * the rendered verdict text VISUALLY reads, under the bot's own
- * identity, even though the span stops it being interpreted as Markdown
- * structure) — closed by running the rationale through `spec-grounding-
- * runner-logic.mts`'s own {@link escapeInvisibleCharactersVisibly} FIRST,
- * the SAME categorical primitive the diff/criteria guards already use
- * (bidi controls are Unicode category `Cf`, already covered by that
- * function's own `UNTRUSTED_DATA_BREAKOUT_PATTERN`), rather than a
- * second, independently-maintained bidi enumeration that could drift
- * from it.
+ * Delegates to `untrusted-text.mts`'s {@link renderBoundedUntrustedReason}
+ * — the SINGLE shared primitive that owns this whole class (#158 slice 2,
+ * closing #172), so this rationale sink and the fallback reason sink cannot
+ * drift apart on any of it. That primitive escapes invisible/bidi
+ * characters, collapses newlines, strips backticks, then neutralises the
+ * `@codex` trigger LAST (so a backtick-split `` @`codex `` the strip rejoins
+ * is still defanged), wraps the kept text in an inert GFM code span (the
+ * categorical defense against Markdown-structure injection — no emphasis,
+ * links, autolinks, HTML, or bidi reordering survives), and — the #172 fix —
+ * DISCLOSES any truncation with the exact omitted count instead of the bare
+ * `…` this used to silently cut with (the AGENTS.md floor is "evidence is
+ * never silently truncated"). Truncation is on a CODE POINT boundary and
+ * tail-cleaned, so it can neither split a surrogate pair nor resynthesise a
+ * trigger at the new end.
  *
  * @param rationale - The agent's own rationale text.
- * @returns The rationale wrapped in an inert code span, truncated with a
- *   pointer to the uploaded verdict artifact if it exceeds
- *   {@link MAX_RATIONALE_DISPLAY_LENGTH}. Truncation happens on a CODE
- *   POINT boundary (PR #82 round 2 review, FOLD 4 — LOW: a plain
- *   `.slice()` can split a surrogate pair in half, e.g. 299 ASCII
- *   characters then half of an emoji, leaving a lone unpaired surrogate
- *   that a downstream validator rejects or GitHub mangles).
+ * @returns The rationale wrapped in an inert code span, bounded to {@link
+ *   MAX_RATIONALE_DISPLAY_LENGTH} code points with an explicit disclosure
+ *   pointing at the uploaded verdict artifact when truncated.
  */
-/**
- * The categorical injection-neutralization core {@link
- * sanitizeAgentRationaleForDisplay}'s own docstring documents in full —
- * factored out (PR #84 review round 2, Codex, FOLD 1) so `criteria-
- * spine.json`'s validation-error reasons (`buildSpecGroundingFallbackCommentBody`'s
- * own `truncateReasonForDisplay`, below) get the IDENTICAL defense, not a
- * second, independently-maintained copy: those reasons can embed
- * AGENT/ISSUE-CONTROLLED content VERBATIM too (an unknown-key name from a
- * malformed verdict, or an invalid `kind`/`truncationKind` value quoted
- * via `JSON.stringify`), so they are exactly as untrusted as a rationale
- * once they reach a posted bot comment.
- *
- * Escapes invisible/bidi-override characters FIRST (`spec-grounding-
- * runner-logic.mts`'s own {@link escapeInvisibleCharactersVisibly}),
- * then strips the two characters that could break OUT of the code span
- * this function's own callers wrap the result in (a literal backtick, or
- * a newline that could end the containing list item/start a new
- * Markdown block) — never truncates itself; each caller applies its own
- * length budget on the CODE POINT boundary this returns intact.
- *
- * @param text - The untrusted text to neutralize.
- * @returns The neutralized text, NOT yet wrapped in a code span or
- *   truncated — the caller's own responsibility.
- */
-function neutralizeUntrustedTextForBotComment(text: string): string {
-  const markedInvisibles = escapeInvisibleCharactersVisibly(text);
-  return markedInvisibles.replace(/[\r\n]+/g, " ").replace(/`/g, "");
-}
-
 function sanitizeAgentRationaleForDisplay(rationale: string): string {
-  const collapsed = neutralizeUntrustedTextForBotComment(rationale);
-  const codePoints = Array.from(collapsed);
-  if (codePoints.length > MAX_RATIONALE_DISPLAY_LENGTH) {
-    return (
-      `\`${codePoints.slice(0, MAX_RATIONALE_DISPLAY_LENGTH).join("")}…\` ` +
-      "_(truncated — full text in the uploaded verdict artifact)_"
-    );
-  }
-  return `\`${collapsed}\``;
+  return renderBoundedUntrustedReason(
+    rationale,
+    MAX_RATIONALE_DISPLAY_LENGTH,
+    "the uploaded verdict artifact",
+  );
 }
 
 /**
@@ -1327,26 +1282,30 @@ const MAX_REASONS_LIST_LENGTH = 50_000;
  * own errors can similarly quote a corrupted field's value; both reach
  * this function as plain `reasons` strings with no upstream sanitization
  * at all, since neither validator's job is comment-rendering safety).
- * Runs {@link neutralizeUntrustedTextForBotComment} (the SAME
- * categorical defense {@link sanitizeAgentRationaleForDisplay} uses —
- * never a second, independently-maintained copy) FIRST, then truncates
- * to {@link MAX_REASON_DISPLAY_LENGTH} code points (never a UTF-16-unit
- * `.slice()`, which can split a surrogate pair in half), then wraps the
- * result in an inert Markdown code span — the categorical defense
- * against Markdown-structure injection, not per-metacharacter escaping.
+ * Delegates to `untrusted-text.mts`'s {@link renderBoundedUntrustedReason}
+ * — the SAME shared primitive {@link sanitizeAgentRationaleForDisplay} now
+ * uses (#158 slice 2, closing #172), never a second, independently-
+ * maintained copy — so it escapes invisibles, collapses newlines, strips
+ * backticks, neutralises the `@codex` trigger LAST, truncates to {@link
+ * MAX_REASON_DISPLAY_LENGTH} code points (never a UTF-16-unit `.slice()`,
+ * which can split a surrogate pair), and wraps the result in an inert
+ * Markdown code span. The #172 fix: a truncation is now DISCLOSED with the
+ * exact omitted count instead of the bare `…` this used to silently cut
+ * with — the full untruncated reason still reaches the run log (logged
+ * before the fallible POST) and the uploaded artifacts, the chain of
+ * disclosed bounds the AGENTS.md "never silently truncated" floor requires.
  *
  * @param reason - The raw reason string.
- * @returns The reason, neutralized and wrapped in a code span, truncated
- *   with a trailing ellipsis (still inside the span) if it exceeds
- *   {@link MAX_REASON_DISPLAY_LENGTH}.
+ * @returns The reason, neutralized and wrapped in a code span, with an
+ *   explicit truncation disclosure pointing at the run log and artifacts if
+ *   it exceeds {@link MAX_REASON_DISPLAY_LENGTH}.
  */
 function sanitizeReasonForDisplay(reason: string): string {
-  const collapsed = neutralizeUntrustedTextForBotComment(reason);
-  const codePoints = Array.from(collapsed);
-  if (codePoints.length > MAX_REASON_DISPLAY_LENGTH) {
-    return `\`${codePoints.slice(0, MAX_REASON_DISPLAY_LENGTH).join("")}…\``;
-  }
-  return `\`${collapsed}\``;
+  return renderBoundedUntrustedReason(
+    reason,
+    MAX_REASON_DISPLAY_LENGTH,
+    "the run log and the uploaded artifacts",
+  );
 }
 
 /**
