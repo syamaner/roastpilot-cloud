@@ -35,16 +35,15 @@
 
 import { isUtf8 } from "node:buffer";
 import {
-  ASCII_WHITESPACE_CHARS,
   buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
   selectIssuesToFetch,
   truncateToByteBudget,
-  UNTRUSTED_DATA_BREAKOUT_PATTERN,
   type IssueLinkKind,
   type LinkedIssueReference,
   type LinkedIssueSpecsResult,
 } from "./spec-grounding-logic.mts";
+import { escapeInvisibleCharactersVisibly } from "./untrusted-text.mts";
 
 /**
  * One criterion the review agent must judge, identified by a stable ID
@@ -1391,86 +1390,15 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
  */
 const DIFF_DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_PR_DIFF(?:_[0-9a-f]+)?\s*>/gi;
 
-/**
- * Renders every character {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} matches
- * as a VISIBLE `[U+XXXX]` marker instead of silently removing it (Codex
- * finding, PR #72 review — a real bug in the original version of this
- * module: it reused `spec-grounding-logic.mts`'s criteria-text guard,
- * which STRIPS these characters, on the diff too).
- *
- * Uses the SAME shared, canonical breakout-character pattern
- * `neutralizeDelimiterBreakout` (criteria/title text) uses — see that
- * pattern's own docstring for why this took three review rounds to become
- * exactly one shared primitive (PR #72 review round 3, BLOCKER: two
- * independently-drifting local patterns — one here, one there — each
- * missed a class the other one covered).
- *
- * DELIBERATELY DIFFERENT TREATMENT from `neutralizeDelimiterBreakout`,
- * even though the DETECTION pattern is now identical (criterion/title
- * text). That function's silent-strip approach is correct THERE because
- * criteria are untrusted DATA — their only job is to be read as a
- * checklist, and an invisible character in them has no legitimate meaning
- * worth preserving. The PR diff is a fundamentally different kind of
- * untrusted input: it is CONTENT THE REVIEW AGENT MUST INSPECT for
- * exactly this class of attack. A bidi override hiding malicious code
- * behind visually-reordered text (Trojan-Source), a control character
- * hidden mid-line, a zero-width character splitting a homoglyph
- * identifier, or any other invisible/unprintable-character trick IN THE
- * DIFF ITSELF is precisely what a security-minded review exists to
- * catch — silently stripping it before the agent ever sees the diff
- * would make the review BLIND to that exact attack class, a strictly
- * worse outcome than the delimiter-breakout risk the original (wrong)
- * version of this function was guarding against.
- *
- * Rendering each such character as a literal, visible marker instead
- * PRESERVES the evidence (the agent can see "there is a suspicious
- * invisible or unprintable character right here") rather than destroying
- * it, and as a side effect also defeats an invisible-character-based
- * delimiter-breakout attempt on the diff's own wrapper tag — an invisible
- * character sitting between `<` and `/` becomes literal, visible marker
- * text once this pass runs, so it no longer reads as whitespace to the
- * plain, ordinary-whitespace-tolerant tag-neutralization pass
- * {@link neutralizeDiffDelimiterBreakout} applies next.
- *
- * NEVER applies `.normalize("NFKC")` (Codex finding, same review round):
- * NFKC normalization can silently change WHICH glyph represents a
- * homoglyph-adjacent character before the agent ever sees the original —
- * exactly the kind of transformation that could mask, not reveal, a
- * homoglyph-substitution attack. This function does not normalize the
- * diff at all.
- *
- * Exported (PR #82 round 2 review, FOLD 3) so `publish-spec-grounding-
- * verdict-logic.mts`'s rationale sanitizer can reuse this SAME categorical
- * primitive for the agent's own rationale text, rather than a second,
- * independently-maintained enumeration of "invisible/bidi characters to
- * neutralize" that could drift from this one — `UNTRUSTED_DATA_BREAKOUT_
- * PATTERN` already includes every Unicode bidi control (U+202A-202E,
- * U+2066-2069 are all category `Cf`, covered by `\p{C}`), so this function
- * already neutralizes Trojan-Source-style bidi reordering, not just this
- * module's own diff-guard use case.
- *
- * @param text - Raw text (a diff, or any other untrusted/agent-authored
- *   string this categorical guard applies to).
- * @returns The same text, byte-for-byte, EXCEPT every invisible/
- *   unprintable character (ordinary ASCII whitespace excluded) is
- *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
- */
-export function escapeInvisibleCharactersVisibly(text: string): string {
-  return text.replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, (ch) => {
-    if (ASCII_WHITESPACE_CHARS.has(ch)) {
-      return ch;
-    }
-    const codePoint = ch.codePointAt(0);
-    if (codePoint === undefined) {
-      // Defensive: this pattern only ever matches a single real codepoint,
-      // never an empty string — unreachable by construction.
-      /* v8 ignore next */
-      return ch;
-    }
-    return `[U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}]`;
-  });
-}
-
+// escapeInvisibleCharactersVisibly moved to the dependency-free
+// `untrusted-text.mts` leaf (issue #158) so the posted-body sanitiser and
+// this module's diff guard share ONE categorical invisible-character
+// primitive without dragging this module's closure into the import-closure
+// verifier's reach. Re-exported here (imported above) so
+// `neutralizeDiffDelimiterBreakout` below still uses it locally and every
+// existing importer of this module keeps working unchanged. See the leaf's
+// own docstring for why it renders (never strips) on the diff surface.
+export { escapeInvisibleCharactersVisibly };
 /**
  * Neutralizes an attempt to break out of {@link wrapUntrustedDiffBlock}'s
  * delimiter pair from WITHIN the diff text itself — the diff's own

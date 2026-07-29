@@ -222,6 +222,10 @@ import {
   type PublishStepSummaryContext,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
+import {
+  neutralizeCodexTriggerPhrases,
+  sanitizeUntrustedTextForPostedBody,
+} from "./untrusted-text.mts";
 
 /**
  * Upper bound on the on-disk patch artifact size, in bytes, checked via
@@ -1910,7 +1914,14 @@ export async function main(): Promise<void> {
       "POST",
       `/repos/${owner}/${repo}/pulls`,
       {
-        title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
+        // The issue title is attacker-writable; neutralize the Codex trigger
+        // phrase before it lands in the PR title (#158). A PR title is not
+        // Markdown-rendered, so no autolink/mention/code-span sanitising is
+        // needed — only the trigger phrase, which the connector matches in
+        // plain text, has to be defanged here.
+        title: `[#${issueNumber}] ${neutralizeCodexTriggerPhrases(
+          issue.title.replace(/^\s*\[[^\]]*\]\s*/, ""),
+        )}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
         body: buildImplementPrBody({
@@ -2027,7 +2038,7 @@ export async function main(): Promise<void> {
     );
     console.error(
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
-        reasons.map((r) => `  - ${r}`).join("\n"),
+        reasons.map((r) => `  - ${sanitizeUntrustedTextForPostedBody(r)}`).join("\n"),
     );
     process.exitCode = 1;
   }

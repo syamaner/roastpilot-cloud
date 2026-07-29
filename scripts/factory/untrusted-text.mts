@@ -1,0 +1,303 @@
+/**
+ * Dependency-free primitives for neutralising untrusted text before the
+ * privileged publisher POSTs or PATCHes it into a GitHub body (issue
+ * comment, PR body, review comment, or `$GITHUB_STEP_SUMMARY`).
+ *
+ * ZERO imports by construction (issue #158): `implement-patch-logic.mts` —
+ * which `node-import-closure-verifier.mts` pulls into its OWN static import
+ * closure via `isProtectedPath` — needs the posted-body sanitiser, but must
+ * not acquire the `markdown-it` transitive closure that reaching for the
+ * escaper in `spec-grounding-*.mts` would drag into the verifier's closure.
+ * Inverting the dependency (this leaf owns the primitives; both the
+ * implement-patch glue and the spec-grounding modules import DOWN into it)
+ * keeps the verifier's closure small and makes this the single home for
+ * "text an attacker can reach must not stay live once posted". A test
+ * asserts this file contains no `import` statement (#158 G14) — adding one
+ * is what re-opens the closure the design closes.
+ */
+
+/**
+ * Matches the Codex review trigger phrase in any casing, with any run of
+ * whitespace between the `@` and `codex` (issue #158). The connector starts
+ * a review when this phrase appears in a posted comment body (backticks
+ * included, observed on roastpilot-agent#682), so a body the publisher
+ * posts that interpolates an attacker-influenced field could otherwise
+ * steer a review into a bot-authored clean verdict the merge-policy
+ * bot-authorship control cannot then distinguish from a real one.
+ *
+ * `[@＠]` covers the ASCII `@` AND the fullwidth `＠` (U+FF20, operator
+ * decision 4 on #158) — fail closed on the homoglyph rather than admit a
+ * one-character evasion. `\s*` tolerates a space/tab/newline split (the
+ * connector's tokeniser plausibly collapses it); an INVISIBLE split (a
+ * zero-width character JS `\s` misses) is handled upstream by
+ * {@link escapeInvisibleCharactersVisibly}, which renders it a visible
+ * `[U+XXXX]` marker that no longer reads as `@…codex`. `\b` keeps a
+ * different mention such as `@codexfoo` from being rewritten while still
+ * catching bare `@codex` and `@codex-review`.
+ *
+ * GLOBAL (`g`) so {@link neutralizeCodexTriggerPhrases} rewrites EVERY
+ * occurrence, not just the first — a body may quote the phrase more than
+ * once. Because the `g` flag makes `.test()`/`.exec()` stateful through
+ * `lastIndex`, a caller that only needs a boolean must use a FRESH,
+ * non-global regex, never this shared instance.
+ */
+export const CODEX_TRIGGER_PATTERN = /[@＠]\s*codex\b/giu;
+
+/**
+ * The inert replacement for a neutralised trigger phrase. Deliberately
+ * chosen NOT to itself match {@link CODEX_TRIGGER_PATTERN} (a test asserts
+ * it) — a marker that re-triggered would reintroduce the very bug it exists
+ * to close.
+ */
+export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
+
+/**
+ * Replaces every Codex trigger phrase in `text` with
+ * {@link CODEX_TRIGGER_REMOVED_MARKER}, so posting `text` onto a PR/issue
+ * cannot itself start a review. Runs on the RAW value (before any newline
+ * collapse) so the pattern's `\s*` sees real whitespace, including `\n`.
+ *
+ * @param text - Untrusted text about to be interpolated into a posted body.
+ * @returns `text` with every trigger occurrence rendered inert.
+ */
+export function neutralizeCodexTriggerPhrases(text: string): string {
+  return text.replace(CODEX_TRIGGER_PATTERN, CODEX_TRIGGER_REMOVED_MARKER);
+}
+
+// Zero-width / bidi-format characters an attacker could inject to split
+// the literal delimiter token into a byte sequence a whitespace-tolerant
+// (but still literal-character) regex still misses, while an LLM
+// tokenizer/renderer plausibly collapses them and reads the result as the
+// real tag anyway (independent factory-security-reviewer finding, F1-S9
+// slice 3, issue #12).
+//
+// CATEGORICAL FIX (operator correction, PR #70 review round 5 \u2014 the
+// markdown-it lesson applied one level down): this pattern was
+// previously an enumerated set of Unicode ranges, extended TWICE across
+// this same PR review as Codex found the next gap each time (U+200B-
+// 200F/202A-202E/2060-2064/FEFF, then U+061C + the bidi ISOLATE block
+// U+2066-2069, then the deprecated bidi shaping controls U+206A-206F).
+// Enumerating ranges is exactly the class of bug the markdown-it swap
+// was meant to close for code-region detection \u2014 the same lesson
+// applies here: `\p{Cf}` (the Unicode FORMAT general category, matched
+// via the `u`-flag property-escape syntax) matches EVERY assigned
+// format character in ONE pattern \u2014 every zero-width character, every
+// bidi control, soft hyphen, and any future Unicode-assigned format
+// character this module has never explicitly enumerated \u2014 closing the
+// whole class by construction rather than the next round's specific
+// gap. Verified (not assumed) against every codepoint previously
+// enumerated here: `\p{Cf}` matches all of them except U+2065, which
+// isn't a real format character at all \u2014 it's an UNASSIGNED reserved
+// codepoint inside the invisible-operators block that only ever
+// appeared here as an accidental inclusion in a convenience numeric
+// range, never a meaningful character an attacker could type or a
+// renderer could collapse.
+//
+// `\p{Cf}` was STILL the wrong property, one round later (Codex finding,
+// PR #70 review round 9 — a real delimiter-breakout, category (a),
+// always folds regardless of the common-form cap): the Unicode Format
+// general category and the "default-ignorable" concept invisible-
+// character attacks actually key off are OVERLAPPING, not identical.
+// Combining Grapheme Joiner (U+034F), variation selectors (U+FE00-FE0F),
+// and Mongolian free variation selectors (U+180B-180D) are all
+// default-ignorable — an LLM tokenizer/renderer plausibly collapses
+// them the same way — but are NOT in category Cf, verified empirically
+// (each tests false against `\p{Cf}` alone) before writing this fix.
+// `\p{Default_Ignorable_Code_Point}` (JS's own supported Unicode binary-
+// property syntax under the `u` flag) closes the DI half; UNIONED with
+// `\p{Cf}` (which has its own members DI doesn't cover, e.g. the Arabic
+// number sign U+0600) the two together close the whole invisible-
+// breakout class by construction, not by enumerating this round's three
+// named characters and waiting for the next.
+//
+// Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a
+// real delimiter-breakout, category (a), always folds):
+// `</UNTRUSTED_ISSUE_DATA>` survives when a NEL (U+0085) sits inside the
+// tag, e.g. between the `<` and the `/`. NEL is Unicode White_Space but is
+// NOT matched by JS's own `\s` metacharacter (verified empirically:
+// `/\s/.test("\u0085")` is `false`), so it defeated BOTH the whitespace-
+// tolerant `\s*` inside {@link DELIMITER_TAG_PATTERN} and the `\p{Cf}`/DI
+// cleanup above — yet a model's tokenizer/renderer plausibly still
+// collapses it as ordinary whitespace and reads the result as the real
+// closing delimiter.
+//
+// STILL not categorically complete, TWO rounds later (Codex + an
+// independent security-reviewer pass, PR #72 review round 3 — BOTH
+// found real breakout gaps sharing ONE root cause: the diff guard added in
+// slice 3b-i for the PR diff had drifted onto a DIFFERENT character set
+// than this one, and neither set alone was complete):
+// - The diff guard's `\p{C}` (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs)
+//   MISSED `\p{Default_Ignorable_Code_Point}`'s own members outside
+//   category C — Combining Grapheme Joiner (U+034F) and the variation
+//   selectors (U+FE00-FE0F) are category Mn, not any C subcategory, so a
+//   `</UNTRUSTED_PR_DIFF>` split by one survived. (This traces to an error
+//   in the guidance that produced the diff guard's pattern: "invert to
+//   `\p{C}`" silently dropped `Default_Ignorable_Code_Point`, which the
+//   ORIGINAL criteria guard, right here, had never lost.)
+// - This module's own criteria guard, in turn, had never picked up
+//   `\p{Cc}` (plain control characters — U+0008 BACKSPACE, U+001B
+//   ESCAPE, U+007F DELETE, verified empirically to break
+//   `</UNTRUSTED_ISSUE_DATA>` out the same way NEL once did) or the
+//   Co/Cn/Cs members `\p{C}` closes, on the PRIMARY anti-gaming surface —
+//   a real, reproduced gap, not a theoretical one.
+//
+// CANONICAL FIX: exactly ONE breakout-character pattern, used by BOTH
+// guards, combining every class either one individually needed: `\p{C}`
+// (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs — controls, format
+// characters, unassigned, private-use, surrogates) UNIONED with
+// `\p{Default_Ignorable_Code_Point}` (closes the Mn-category default-
+// ignorables `\p{C}` alone misses) UNIONED with `\p{White_Space}` (closes
+// NEL and every other exotic space/separator). Sharing this SINGLE
+// exported primitive between `neutralizeDelimiterBreakout` here and slice
+// 3b-i's diff guard (`spec-grounding-runner-logic.mts`) makes "both guards
+// cover the same breakout class" a fact enforced by construction —
+// reusing one constant — rather than a claim in a comment two
+// independently-maintained patterns could silently drift apart from,
+// which is exactly what happened here.
+export const UNTRUSTED_DATA_BREAKOUT_PATTERN = /[\p{C}\p{Default_Ignorable_Code_Point}\p{White_Space}]/gu;
+
+// The ONLY characters {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} must never
+// strip or visibly mark — the four ordinary ASCII whitespace
+// characters (space, tab, LF, CR) real criterion/diff text legitimately
+// contains. Deliberately does NOT also exempt VT/FF (Codex + security-
+// reviewer finding, PR #72 review round 3 — narrowed from an earlier
+// six-character exemption set that also spared those two): VT and FF are
+// themselves `\p{Cc}` control characters, and this guard's whole point,
+// after the same review round found `\p{Cc}` was a real gap, is to
+// surface a control character sitting where it doesn't belong — not
+// carve out two more as "harmless" the same way NEL once was.
+export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
+
+/**
+ * Renders every character {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} matches
+ * as a VISIBLE `[U+XXXX]` marker instead of silently removing it (Codex
+ * finding, PR #72 review — a real bug in the original version of this
+ * module: it reused `spec-grounding-logic.mts`'s criteria-text guard,
+ * which STRIPS these characters, on the diff too).
+ *
+ * Uses the SAME shared, canonical breakout-character pattern
+ * `neutralizeDelimiterBreakout` (criteria/title text) uses — see that
+ * pattern's own docstring for why this took three review rounds to become
+ * exactly one shared primitive (PR #72 review round 3, BLOCKER: two
+ * independently-drifting local patterns — one here, one there — each
+ * missed a class the other one covered).
+ *
+ * DELIBERATELY DIFFERENT TREATMENT from `neutralizeDelimiterBreakout`,
+ * even though the DETECTION pattern is now identical (criterion/title
+ * text). That function's silent-strip approach is correct THERE because
+ * criteria are untrusted DATA — their only job is to be read as a
+ * checklist, and an invisible character in them has no legitimate meaning
+ * worth preserving. The PR diff is a fundamentally different kind of
+ * untrusted input: it is CONTENT THE REVIEW AGENT MUST INSPECT for
+ * exactly this class of attack. A bidi override hiding malicious code
+ * behind visually-reordered text (Trojan-Source), a control character
+ * hidden mid-line, a zero-width character splitting a homoglyph
+ * identifier, or any other invisible/unprintable-character trick IN THE
+ * DIFF ITSELF is precisely what a security-minded review exists to
+ * catch — silently stripping it before the agent ever sees the diff
+ * would make the review BLIND to that exact attack class, a strictly
+ * worse outcome than the delimiter-breakout risk the original (wrong)
+ * version of this function was guarding against.
+ *
+ * Rendering each such character as a literal, visible marker instead
+ * PRESERVES the evidence (the agent can see "there is a suspicious
+ * invisible or unprintable character right here") rather than destroying
+ * it, and as a side effect also defeats an invisible-character-based
+ * delimiter-breakout attempt on the diff's own wrapper tag — an invisible
+ * character sitting between `<` and `/` becomes literal, visible marker
+ * text once this pass runs, so it no longer reads as whitespace to the
+ * plain, ordinary-whitespace-tolerant tag-neutralization pass
+ * {@link neutralizeDiffDelimiterBreakout} applies next.
+ *
+ * NEVER applies `.normalize("NFKC")` (Codex finding, same review round):
+ * NFKC normalization can silently change WHICH glyph represents a
+ * homoglyph-adjacent character before the agent ever sees the original —
+ * exactly the kind of transformation that could mask, not reveal, a
+ * homoglyph-substitution attack. This function does not normalize the
+ * diff at all.
+ *
+ * Exported (PR #82 round 2 review, FOLD 3) so `publish-spec-grounding-
+ * verdict-logic.mts`'s rationale sanitizer can reuse this SAME categorical
+ * primitive for the agent's own rationale text, rather than a second,
+ * independently-maintained enumeration of "invisible/bidi characters to
+ * neutralize" that could drift from this one — `UNTRUSTED_DATA_BREAKOUT_
+ * PATTERN` already includes every Unicode bidi control (U+202A-202E,
+ * U+2066-2069 are all category `Cf`, covered by `\p{C}`), so this function
+ * already neutralizes Trojan-Source-style bidi reordering, not just this
+ * module's own diff-guard use case.
+ *
+ * @param text - Raw text (a diff, or any other untrusted/agent-authored
+ *   string this categorical guard applies to).
+ * @returns The same text, byte-for-byte, EXCEPT every invisible/
+ *   unprintable character (ordinary ASCII whitespace excluded) is
+ *   replaced with a visible `[U+XXXX]` marker showing its exact codepoint.
+ */
+export function escapeInvisibleCharactersVisibly(text: string): string {
+  return text.replace(UNTRUSTED_DATA_BREAKOUT_PATTERN, (ch) => {
+    if (ASCII_WHITESPACE_CHARS.has(ch)) {
+      return ch;
+    }
+    const codePoint = ch.codePointAt(0);
+    if (codePoint === undefined) {
+      // Defensive: this pattern only ever matches a single real codepoint,
+      // never an empty string — unreachable by construction.
+      /* v8 ignore next */
+      return ch;
+    }
+    return `[U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}]`;
+  });
+}
+
+/**
+ * Per-field character clamp for a sanitised value placed in a posted body
+ * or step summary. Keeps one attacker-controlled field from dominating the
+ * comment; the clamp runs LAST because truncation can only shorten an
+ * already-neutralised value, never synthesise a new trigger.
+ */
+export const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
+
+/**
+ * Neutralises an untrusted field for interpolation into a Markdown body the
+ * privileged publisher POSTs/PATCHes to GitHub (issue comment, PR body,
+ * review comment, or `$GITHUB_STEP_SUMMARY`). The name is load-bearing:
+ * this is THE posted-body sanitiser, and every caller interpolating agent/
+ * issue/PR/path/transcript-derived text into such a body routes through
+ * here (#158 — the previous, step-summary-scoped name was how the class
+ * regressed onto surfaces the original author never revisited).
+ *
+ * Ordered pipeline (the order is the contract):
+ *  1. {@link neutralizeCodexTriggerPhrases} on the RAW value, so posting
+ *     the result cannot start a Codex review and the pattern's `\s*` sees
+ *     real whitespace before any collapse.
+ *  2. {@link escapeInvisibleCharactersVisibly}, rendering every invisible/
+ *     bidi/exotic-whitespace character as a visible `[U+XXXX]` marker —
+ *     this defangs a zero-width split (`@<ZWSP>codex`) JS `\s` misses, and
+ *     surfaces a Trojan-Source bidi override instead of hiding it.
+ *  3. Collapse `[\r\n]+` to a single space (a newline would otherwise add
+ *     unintended lines or bullets inside the value).
+ *  4. Strip backticks (the one character that can end the wrapping code
+ *     span early).
+ *  5. Clamp to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} with `…`.
+ *  6. Wrap in a single-backtick inline code span.
+ *
+ * Step 6 is the categorical fix (post-#46, three prior rounds against the
+ * same class): a GFM inline code span renders its contents as literal
+ * text — no links, no autolinks, no `@mention`, no HTML — by construction,
+ * so brackets/parens/backslashes/bare URLs need no per-metacharacter
+ * escaping once inside it. The returned value ALREADY includes its own
+ * surrounding backticks; a caller must NOT wrap it again (that would
+ * double-wrap).
+ *
+ * @param value - The untrusted field value to render.
+ * @returns The neutralised value, wrapped in its own inline code span.
+ */
+export function sanitizeUntrustedTextForPostedBody(value: string): string {
+  const triggerNeutralized = neutralizeCodexTriggerPhrases(value);
+  const invisiblesMarked = escapeInvisibleCharactersVisibly(triggerNeutralized);
+  const collapsed = invisiblesMarked.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  const clamped =
+    collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
+      ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
+      : collapsed;
+  return `\`${clamped}\``;
+}
