@@ -2742,3 +2742,30 @@ describe("issue #158: renderTriggerPhraseInertly gains a pattern backstop (G13)"
     expectNoLiveTrigger(renderTriggerPhraseInertly("please @Codex review this head"));
   });
 });
+
+describe("issue #158 fold: a backtick-split trigger survives to the posted body only if neutralise runs before backtick-strip (it must not)", () => {
+  it("buildGamingFlagAnnotation: a suppression line with `@`+backtick+`codex review` posts no live trigger", () => {
+    const body = buildGamingFlagAnnotation(
+      {
+        testFileEdits: [],
+        suppressions: [{ path: "lib/foo.ts", line: "// v8 ignore next @`codex review" }],
+        packageJsonTestScriptEdits: [],
+        rootPytestConfigSections: [],
+      },
+      true,
+    );
+    expectNoLiveTrigger(body);
+    expect(body).not.toContain("@codex");
+  });
+
+  it("buildGamingBothLostReviewBody: a flagged path with `@`+backtick+`codex review` posts no live trigger", () => {
+    const body = buildGamingBothLostReviewBody({
+      testFileEdits: ["tests/x @`codex review y.test.ts"],
+      suppressions: [],
+      packageJsonTestScriptEdits: [],
+      rootPytestConfigSections: [],
+    });
+    expectNoLiveTrigger(body);
+    expect(body).not.toContain("@codex");
+  });
+});

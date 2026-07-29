@@ -223,7 +223,7 @@ import {
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
 import {
-  neutralizeCodexTriggerPhrases,
+  sanitizeUntrustedInlineText,
   sanitizeUntrustedTextForPostedBody,
 } from "./untrusted-text.mts";
 
@@ -1914,12 +1914,17 @@ export async function main(): Promise<void> {
       "POST",
       `/repos/${owner}/${repo}/pulls`,
       {
-        // The issue title is attacker-writable; neutralize the Codex trigger
-        // phrase before it lands in the PR title (#158). A PR title is not
-        // Markdown-rendered, so no autolink/mention/code-span sanitising is
-        // needed — only the trigger phrase, which the connector matches in
-        // plain text, has to be defanged here.
-        title: `[#${issueNumber}] ${neutralizeCodexTriggerPhrases(
+        // The issue title is attacker-writable, so it is defanged through the
+        // SAME shared primitive the posted-body sanitiser uses (#158 fold —
+        // the earlier neutralize-only guard let a zero-width split `@<ZWSP>codex`
+        // through, since ZWSP is not `\s`). A title is not Markdown-rendered, so
+        // no code-span WRAP is applied; but escape-invisibles + strip-backticks
+        // + neutralize all run, fail-closed: a backtick or zero-width char split
+        // between `@` and `codex` is a possible connector trigger and the
+        // connector's exact matcher is unverified, so a legit interior backtick
+        // losing its formatting in a title is acceptable cosmetic fallout in the
+        // safe direction.
+        title: `[#${issueNumber}] ${sanitizeUntrustedInlineText(
           issue.title.replace(/^\s*\[[^\]]*\]\s*/, ""),
         )}`,
         head: branchName,

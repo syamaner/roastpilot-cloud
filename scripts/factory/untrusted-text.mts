@@ -26,10 +26,15 @@
  * bot-authorship control cannot then distinguish from a real one.
  *
  * `[@＠]` covers the ASCII `@` AND the fullwidth `＠` (U+FF20, operator
- * decision 4 on #158) — fail closed on the homoglyph rather than admit a
- * one-character evasion. `\s*` tolerates a space/tab/newline split (the
- * connector's tokeniser plausibly collapses it); an INVISIBLE split (a
- * zero-width character JS `\s` misses) is handled upstream by
+ * decision 4 on #158) — fail closed on that homoglyph rather than admit a
+ * one-character evasion. A fullwidth-LETTER homoglyph inside the word
+ * itself (e.g. `@ｃodex`, U+FF43) is a documented RESIDUAL, tracked in
+ * **#168**: it is deliberately NOT closed here (no NFKC in this path, which
+ * could itself mask a homoglyph before a human sees it), and it is
+ * symmetric — a homoglyph that misses this ASCII pattern also misses the
+ * connector's presumed-ASCII matcher. `\s*` tolerates a space/tab/newline
+ * split (the connector's tokeniser plausibly collapses it); an INVISIBLE
+ * split (a zero-width character JS `\s` misses) is handled upstream by
  * {@link escapeInvisibleCharactersVisibly}, which renders it a visible
  * `[U+XXXX]` marker that no longer reads as `@…codex`. `\b` keeps a
  * different mention such as `@codexfoo` from being rewritten while still
@@ -257,6 +262,46 @@ export function escapeInvisibleCharactersVisibly(text: string): string {
 export const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
 
 /**
+ * Robustly defangs an untrusted field to inert PLAIN text (no Markdown
+ * wrap, no clamp), for any surface where an attacker-controlled string is
+ * interpolated — a rendered Markdown body OR a non-Markdown context like a
+ * PR title. This is the single shared primitive both {@link
+ * sanitizeUntrustedTextForPostedBody} and the PR-title path call, so
+ * "title and body cannot drift on trigger-defang" is a fact by
+ * construction, not a comment (#158 fold).
+ *
+ * **Order is the whole fix (#158 fold — factory-security-reviewer BLOCKER).**
+ * The trigger neutralise runs LAST, AFTER every removal/collapse step,
+ * because a strip or collapse that runs after it can REJOIN a `@…codex`
+ * the neutralise already walked past. The proven exploit: `` @`codex
+ * review `` slips {@link neutralizeCodexTriggerPhrases} (a backtick is not
+ * `\s`), so stripping backticks FIRST is exactly what lets the neutralise
+ * then see — and defang — the reconstructed `@codex`. The earlier
+ * "neutralise on the raw value first" order was wrong for this reason.
+ *
+ *  1. {@link escapeInvisibleCharactersVisibly} — render every invisible/
+ *     bidi/exotic-whitespace character as a visible `[U+XXXX]` marker.
+ *     This defangs a zero-width split (`@<ZWSP>codex`) JS `\s` misses (the
+ *     `@` and `codex` are separated by literal marker text) and surfaces a
+ *     Trojan-Source bidi override instead of hiding it.
+ *  2. Collapse `[\r\n]+` to a single space.
+ *  3. Strip backticks (they can end a wrapping code span early AND, more
+ *     importantly, a backtick between `@` and `codex` is a trigger-split
+ *     that only stripping reveals).
+ *  4. {@link neutralizeCodexTriggerPhrases} — LAST, so it sees the value
+ *     after every join-capable removal above.
+ *
+ * @param value - The untrusted field value to defang.
+ * @returns The value as inert plain text: invisibles surfaced, newlines
+ *   collapsed, backticks stripped, and every trigger variant neutralised.
+ */
+export function sanitizeUntrustedInlineText(value: string): string {
+  const invisiblesMarked = escapeInvisibleCharactersVisibly(value);
+  const collapsed = invisiblesMarked.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  return neutralizeCodexTriggerPhrases(collapsed);
+}
+
+/**
  * Neutralises an untrusted field for interpolation into a Markdown body the
  * privileged publisher POSTs/PATCHes to GitHub (issue comment, PR body,
  * review comment, or `$GITHUB_STEP_SUMMARY`). The name is load-bearing:
@@ -265,39 +310,29 @@ export const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
  * here (#158 — the previous, step-summary-scoped name was how the class
  * regressed onto surfaces the original author never revisited).
  *
- * Ordered pipeline (the order is the contract):
- *  1. {@link neutralizeCodexTriggerPhrases} on the RAW value, so posting
- *     the result cannot start a Codex review and the pattern's `\s*` sees
- *     real whitespace before any collapse.
- *  2. {@link escapeInvisibleCharactersVisibly}, rendering every invisible/
- *     bidi/exotic-whitespace character as a visible `[U+XXXX]` marker —
- *     this defangs a zero-width split (`@<ZWSP>codex`) JS `\s` misses, and
- *     surfaces a Trojan-Source bidi override instead of hiding it.
- *  3. Collapse `[\r\n]+` to a single space (a newline would otherwise add
- *     unintended lines or bullets inside the value).
- *  4. Strip backticks (the one character that can end the wrapping code
- *     span early).
- *  5. Clamp to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH} with `…`.
- *  6. Wrap in a single-backtick inline code span.
+ * Defangs the value to inert plain text via {@link
+ * sanitizeUntrustedInlineText} (see there for why the trigger neutralise
+ * runs LAST), then clamps to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH}
+ * and wraps in a single-backtick inline code span. The clamp is safe last:
+ * truncation only shortens an already-defanged value and appends `…`, so it
+ * cannot synthesise a new `@codex`.
  *
- * Step 6 is the categorical fix (post-#46, three prior rounds against the
- * same class): a GFM inline code span renders its contents as literal
- * text — no links, no autolinks, no `@mention`, no HTML — by construction,
- * so brackets/parens/backslashes/bare URLs need no per-metacharacter
- * escaping once inside it. The returned value ALREADY includes its own
- * surrounding backticks; a caller must NOT wrap it again (that would
- * double-wrap).
+ * The code span is the categorical Markdown fix (post-#46, three prior
+ * rounds against the same class): a GFM inline code span renders its
+ * contents as literal text — no links, no autolinks, no `@mention`, no
+ * HTML — by construction, so brackets/parens/backslashes/bare URLs need no
+ * per-metacharacter escaping once inside it. The returned value ALREADY
+ * includes its own surrounding backticks; a caller must NOT wrap it again
+ * (that would double-wrap).
  *
  * @param value - The untrusted field value to render.
- * @returns The neutralised value, wrapped in its own inline code span.
+ * @returns The defanged value, wrapped in its own inline code span.
  */
 export function sanitizeUntrustedTextForPostedBody(value: string): string {
-  const triggerNeutralized = neutralizeCodexTriggerPhrases(value);
-  const invisiblesMarked = escapeInvisibleCharactersVisibly(triggerNeutralized);
-  const collapsed = invisiblesMarked.replace(/[\r\n]+/g, " ").replace(/`/g, "");
+  const defanged = sanitizeUntrustedInlineText(value);
   const clamped =
-    collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
-      ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
-      : collapsed;
+    defanged.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
+      ? `${defanged.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
+      : defanged;
   return `\`${clamped}\``;
 }

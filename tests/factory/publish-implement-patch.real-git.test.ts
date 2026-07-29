@@ -3041,6 +3041,47 @@ describe("publish-implement-patch — FIX 7: idempotency keys off issue number, 
   });
 });
 
+describe("publish-implement-patch — #158: a hostile issue title cannot start a Codex review or inject via the PR title", () => {
+  // The issue title is attacker-writable and lands in the PR title, which a
+  // neutralize-ONLY guard failed to defang for a zero-width split (ZWSP is
+  // not `\s`). Asserted against the REAL `POST /repos/.../pulls` request
+  // body's `title`. Each case's evidence assertion fails if the title defang
+  // is deleted (the removing-guard-must-fail check qa required).
+  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
+
+  async function createdPrTitle(issueTitle: string): Promise<string> {
+    const fetchMock = stubHappyPathFetch({ issueTitle });
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(prCreateCall).toBeDefined();
+    return (JSON.parse((prCreateCall?.[1]?.body as string) ?? "{}") as { title: string }).title;
+  }
+
+  it("(a) defangs a plain `@codex review` trigger in the title", async () => {
+    const title = await createdPrTitle("[F1-S3] @codex review");
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expect(title).toContain("[codex trigger removed]");
+  });
+
+  it("(b) surfaces a zero-width-split `@<ZWSP>codex review` visibly in the title (ZWSP is not \\s)", async () => {
+    const title = await createdPrTitle("[F1-S3] @\u200Bcodex review");
+    // The raw zero-width char is gone; the escape step surfaced it visibly.
+    expect(title).not.toContain("\u200B");
+    expect(title).toContain("[U+200B]");
+  });
+
+  it("(c) defangs a backtick-split `@`+backtick+`codex review` trigger in the title", async () => {
+    const title = await createdPrTitle("[F1-S3] @`codex review");
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expect(title).not.toContain("`");
+    expect(title).toContain("[codex trigger removed]");
+  });
+});
+
 describe("publish-implement-patch — Codex round 7: fork-PR confusion (findExistingPrForIssue repo scoping)", () => {
   it("does NOT reuse a fork's PR whose branch coincidentally matches feature/{issueNumber}-, and opens a fresh same-repo PR instead", async () => {
     // A public-repo attack shape: a fork opens a PR from a branch named
