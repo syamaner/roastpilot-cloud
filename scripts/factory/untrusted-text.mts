@@ -73,6 +73,172 @@ export function neutralizeCodexTriggerPhrases(text: string): string {
   return text.replace(CODEX_TRIGGER_PATTERN, CODEX_TRIGGER_REMOVED_MARKER);
 }
 
+// The bracketed CI-skip control tokens GitHub Actions honours in a commit
+// message (issue #171). Verified against GitHub's own docs on 2026-07-29:
+// <https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/skipping-workflow-runs>.
+// The AUTHORITATIVE bracketed set is exactly five tokens — `[skip ci]`,
+// `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]` — each stored
+// here as its NORMALISED key (interior lowercased, with everything that is
+// not an ASCII letter or a backtick stripped; see {@link normalizeBracketKey}).
+// `***NO_CI***` is an Azure Pipelines token, NOT a GitHub one, so it is
+// deliberately checked-and-EXCLUDED. GitHub matches these tokens
+// case-SENSITIVELY, so this key set (fed case-insensitively normalised
+// interiors) is a deliberately over-inclusive, fail-closed SUPERSET: it
+// neutralises strictly MORE spellings than GitHub would honour, never fewer.
+export const CI_SKIP_BRACKET_KEYS: ReadonlySet<string> = new Set([
+  "skipci",
+  "ciskip",
+  "noci",
+  "skipactions",
+  "actionsskip",
+]);
+
+/**
+ * The DIRECTIVE-form CI-skip control GitHub Actions honours in a commit
+ * message trailer (issue #171): `skip-checks:true` / `skip-checks: true`.
+ * Case-insensitive (`i`) and Unicode (`u`) for the same fail-closed
+ * over-inclusiveness as {@link CI_SKIP_BRACKET_KEYS}. GLOBAL (`g`) so a
+ * single message can carry more than one, and so it can drive both the
+ * `.replace` in {@link neutralizeCiSkipDirectives} and the `.matchAll` in
+ * {@link findCiSkipDirectives} — the SAME pattern in both, never a private
+ * copy that could drift (the drift lesson at
+ * {@link UNTRUSTED_DATA_BREAKOUT_PATTERN}). Because the `g` flag makes
+ * `.exec()`/`.test()` stateful through `lastIndex`, callers use only
+ * `.replace`/`.matchAll` (both of which do not corrupt the shared instance's
+ * `lastIndex`), never a bare `.test()`.
+ */
+export const CI_SKIP_DIRECTIVE_PATTERN = /skip-checks\s*:\s*true/giu;
+
+/**
+ * The inert, VISIBLE replacement for a neutralised CI-skip token — never a
+ * silent removal (the AGENTS.md evidence floor: attacker text a guard
+ * removes is surfaced, not vanished). Deliberately chosen NOT to itself
+ * match {@link CI_SKIP_BRACKET_KEYS} (it is parenthesised, not bracketed, so
+ * {@link CI_SKIP_BRACKET_GROUP_PATTERN} never sees it as a group) NOR
+ * {@link CI_SKIP_DIRECTIVE_PATTERN} (no `skip-checks…true`) — a marker that
+ * re-matched would reintroduce the very token it exists to remove (test L9).
+ */
+export const CI_SKIP_TOKEN_REMOVED_MARKER = "(ci-skip token removed)";
+
+/**
+ * Every `[...]` group in a string. Global so {@link neutralizeCiSkipDirectives}
+ * (`.replace`) and {@link findCiSkipDirectives} (`.matchAll`) walk EVERY group,
+ * SHARING this one instance rather than each keeping a private copy — the
+ * transform and the assertion must agree on which groups are tokens by
+ * construction, not by comment. `[^\]]*` is intentionally non-greedy-safe (it
+ * cannot cross a `]`), so `[a][b]` scans as two groups, and an invisible-escape
+ * marker `[U+200B]` scans as its own group whose key is inert (test L10).
+ */
+const CI_SKIP_BRACKET_GROUP_PATTERN = /\[([^\]]*)\]/g;
+
+/**
+ * Normalises a bracket group's interior to its membership key: lowercase,
+ * then strip every character that is NOT an ASCII letter OR a backtick. This
+ * is the single normaliser {@link neutralizeCiSkipDirectives} and
+ * {@link findCiSkipDirectives} both use.
+ *
+ * The backtick is DELIBERATELY the one non-letter left in place. Removing all
+ * whitespace/punctuation makes the key over-inclusive of GitHub's honoured
+ * spellings (`[skip ci]`, `[SKIP-CI]`, `[skip.ci]` all → `skipci`), which is
+ * the intended fail-closed direction. But a backtick must SURVIVE so that
+ * {@link sanitizeUntrustedTextForCommitMessage}'s ordering guarantee is real:
+ * the backtick-strip inside {@link sanitizeUntrustedInlineText} MUST run
+ * before this neutralise, because a backtick-split token like `` [skip`ci] ``
+ * would otherwise slip this normaliser (key `` skip`ci `` ∉ the set) only to
+ * be rejoined into a live `[skipci]` by a later strip (test L4; mutation
+ * G7 — neutralise-before — reconstitutes it). Preserving the backtick loses
+ * NO real coverage: GitHub honours no token containing a backtick, so a
+ * backtick-bearing pseudo-token is not one GitHub would ever act on.
+ */
+function normalizeBracketKey(interior: string): string {
+  return interior.toLowerCase().replace(/[^a-z`]/g, "");
+}
+
+/**
+ * Replaces every honoured CI-skip control token in `text` — each in-set
+ * bracket group AND every {@link CI_SKIP_DIRECTIVE_PATTERN} match — with the
+ * visible {@link CI_SKIP_TOKEN_REMOVED_MARKER} (issue #171). A message a
+ * factory publisher would otherwise commit with a live `[skip ci]` or
+ * `skip-checks:true` in it must not silently suppress the required workflow
+ * runs a human relies on to see a factory PR as reviewed.
+ *
+ * **Composed as the LAST step of {@link sanitizeUntrustedTextForCommitMessage},
+ * AFTER {@link sanitizeUntrustedInlineText}'s backtick-strip** — see
+ * {@link normalizeBracketKey} for why the order is load-bearing. Bracket and
+ * directive forms are disjoint (the marker is neither), so the two passes do
+ * not interact and either order between them is equivalent.
+ *
+ * @param text - Text about to be interpolated into a commit message.
+ * @returns `text` with every honoured CI-skip token rendered inert.
+ */
+export function neutralizeCiSkipDirectives(text: string): string {
+  const bracketsNeutralized = text.replace(
+    CI_SKIP_BRACKET_GROUP_PATTERN,
+    (match, interior: string) =>
+      CI_SKIP_BRACKET_KEYS.has(normalizeBracketKey(interior))
+        ? CI_SKIP_TOKEN_REMOVED_MARKER
+        : match,
+  );
+  return bracketsNeutralized.replace(
+    CI_SKIP_DIRECTIVE_PATTERN,
+    CI_SKIP_TOKEN_REMOVED_MARKER,
+  );
+}
+
+/**
+ * Defangs an untrusted field for interpolation into a git COMMIT MESSAGE the
+ * privileged publisher pushes (issue #171 — the commit surface #158's
+ * posted-body sanitiser never covered). Runs the full inline defang
+ * ({@link sanitizeUntrustedInlineText}: invisibles → `[U+XXXX]`, `[\r\n]+` →
+ * single space so an attacker title cannot forge a second trailer line,
+ * backticks stripped, `@codex` neutralised), THEN
+ * {@link neutralizeCiSkipDirectives} LAST — the CI-skip neutralise must see
+ * the value after the backtick-strip that can rejoin a split token (see
+ * {@link normalizeBracketKey}).
+ *
+ * Unlike {@link sanitizeUntrustedTextForPostedBody} this applies NO code-span
+ * wrap and NO clamp: a commit subject is plain text with its own length
+ * budget the caller clamps with {@link safeClamp}.
+ *
+ * @param value - The untrusted field value (e.g. an attacker-authored issue title).
+ * @returns The value as inert plain text, safe to place in a commit message.
+ */
+export function sanitizeUntrustedTextForCommitMessage(value: string): string {
+  return neutralizeCiSkipDirectives(sanitizeUntrustedInlineText(value));
+}
+
+/**
+ * Scans an ASSEMBLED commit message for any honoured CI-skip control token,
+ * for the publisher's fail-closed PRE-PUSH assertion (issue #171). This is
+ * the SECOND, independent guard: {@link sanitizeUntrustedTextForCommitMessage}
+ * defangs each per-field value, but the assembled message also concatenates
+ * trailer fields that are NOT per-field transformed (the dispatch actor,
+ * prompt version, agent-action ref), so a token reaching the message through
+ * any of them is still caught here and the push refused.
+ *
+ * SHARES {@link CI_SKIP_BRACKET_KEYS}, {@link CI_SKIP_BRACKET_GROUP_PATTERN},
+ * {@link normalizeBracketKey}, and {@link CI_SKIP_DIRECTIVE_PATTERN} with the
+ * transform — never a private narrowed copy (mutation G10). Uses `.matchAll`
+ * (which clones the global regex internally, leaving its `lastIndex`
+ * untouched), never a stateful `.test()` on the shared instance.
+ *
+ * @param message - The fully assembled commit message (all `-m` parts joined).
+ * @returns The matched token strings; a non-empty result means the caller must
+ *   refuse to push.
+ */
+export function findCiSkipDirectives(message: string): string[] {
+  const found: string[] = [];
+  for (const match of message.matchAll(CI_SKIP_BRACKET_GROUP_PATTERN)) {
+    if (CI_SKIP_BRACKET_KEYS.has(normalizeBracketKey(match[1]))) {
+      found.push(match[0]);
+    }
+  }
+  for (const match of message.matchAll(CI_SKIP_DIRECTIVE_PATTERN)) {
+    found.push(match[0]);
+  }
+  return found;
+}
+
 // Zero-width / bidi-format characters an attacker could inject to split
 // the literal delimiter token into a byte sequence a whitespace-tolerant
 // (but still literal-character) regex still misses, while an LLM
