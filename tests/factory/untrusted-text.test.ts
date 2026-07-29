@@ -273,9 +273,20 @@ describe("safeClamp", () => {
     expect(result.endsWith("…")).toBe(true);
   });
 
-  it("leaves a COMPLETE trailing `[U+XXXX]` marker intact", () => {
-    // Landing exactly after the closing `]` must not strip a valid marker.
-    expect(safeClamp("y".repeat(192) + "[U+FE0F]", 200)).toBe("y".repeat(192) + "[U+FE0F]");
+  it("leaves a COMPLETE trailing `[U+XXXX]` marker intact when the cut lands right after its `]`", () => {
+    // The input must EXCEED maxLength so the truncation/strip path actually
+    // runs (an exactly-200-char input would hit the within-bound early return
+    // and the test would pass vacuously — qa finding). Here the cut at 200
+    // lands right after the marker's closing `]` (y*192 + `[U+FE0F]` = 200),
+    // so the partial-marker strip must NOT fire (the tail ends in `]`, not
+    // mid-hex) and the complete marker survives; only the excess `tail` drops.
+    const result = safeClamp("y".repeat(192) + "[U+FE0F]" + "tail", 200);
+    expect(result).toBe("y".repeat(192) + "[U+FE0F]…");
+    expect(result).toContain("[U+FE0F]");
+    expect(result.endsWith("…")).toBe(true);
+    // Length 201 (200 content + `…`) proves the truncation path ran, not the
+    // vacuous early return.
+    expect(result.length).toBe(201);
   });
 });
 

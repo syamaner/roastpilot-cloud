@@ -302,7 +302,15 @@ const TRAILING_PARTIAL_ESCAPE_MARKER = /\[U\+[0-9A-F]*$/;
  * `…@codex[U+F`-shaped tail collapses cleanly: remove the dangling marker,
  * THEN the exposed `@codex`.
  *
- * @param value - The already-defanged value to bound.
+ * **SECURITY PRECONDITION:** `value` MUST already have passed {@link
+ * neutralizeCodexTriggerPhrases} (both callers do, via {@link
+ * sanitizeUntrustedInlineText}). safeClamp neutralises ONLY the
+ * truncation-manufactured tail `@codex`, NOT interior triggers — calling it
+ * on raw attacker text would pass an interior `@codex` straight through and
+ * reopen #158's class. Robust-by-construction hardening (so a future raw-text
+ * caller cannot silently reintroduce the bug) is tracked in #169.
+ *
+ * @param value - The already-defanged (see precondition) value to bound.
  * @param maxLength - The content-character budget (before the ellipsis).
  * @returns `value` bounded and, when truncated, tail-cleaned and `…`-suffixed.
  */
