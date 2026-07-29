@@ -224,7 +224,8 @@ describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #15
 
   /** The literal content BETWEEN the opening ` ```text\n ` and the trailing fence. */
   function fencedContent(output: string): string {
-    const match = /^```text\n([\s\S]*)\n```(?:\n_\[truncated[\s\S]*)?$/.exec(output);
+    const match =
+      /^```text\n([\s\S]*)\n```(?:\n_\[(?:truncated|formatting)[\s\S]*)?$/.exec(output);
     if (match === null) throw new Error(`not a text fence: ${JSON.stringify(output)}`);
     return match[1] as string;
   }
@@ -352,8 +353,41 @@ describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #15
     expect(fencedContent(renderBoundedUntrustedMultilineBlock(prose, BIG, "the run log"))).toBe(prose);
   });
 
-  it("N5: backticks-only content collapses to an empty fence without throwing", () => {
-    expect(renderBoundedUntrustedMultilineBlock("```", BIG, "the run log")).toBe("```text\n\n```");
+  it("N5: backticks-only content collapses to an empty fence WITH a non-silent formatting-removed disclosure", () => {
+    // #174 Codex P2: the empty fence alone would silently drop the whole
+    // reasoning; the disclosure points a reader at the full un-stripped value.
+    expect(renderBoundedUntrustedMultilineBlock("```", BIG, "the run log")).toBe(
+      "```text\n\n```\n_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174: interior backticks (not truncated) → inert fenced body + a formatting-removed disclosure to the run log", () => {
+    const out = renderBoundedUntrustedMultilineBlock("use `--flag` now", BIG, "the run log");
+    expect(fencedContent(out)).toBe("use --flag now");
+    expect(fencedContent(out)).not.toContain("`");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174: a no-backtick block gets NO formatting-removed disclosure (byte-identical to before)", () => {
+    const clean = "no code spans here\njust prose";
+    expect(renderBoundedUntrustedMultilineBlock(clean, BIG, "the run log")).toBe(
+      `\`\`\`text\n${clean}\n\`\`\``,
+    );
+    expect(renderBoundedUntrustedMultilineBlock(clean, BIG, "the run log")).not.toContain(
+      "formatting characters removed",
+    );
+  });
+
+  it("#174: truncated AND backticks → only the truncation disclosure, no DOUBLE disclosure", () => {
+    // Backticks stripped, then still over budget: the truncation note already
+    // points at the run log (which holds the full un-stripped value), so the
+    // formatting-removed note is NOT also added.
+    const out = renderBoundedUntrustedMultilineBlock("`".repeat(5) + "x".repeat(50), 10, "the run log");
+    expect(out).toContain("_[truncated, 40 character(s) omitted — full detail in the run log]_");
+    expect(out).not.toContain("formatting characters removed");
+    expect(fencedContent(out)).toBe("x".repeat(10));
   });
 
   it("counts by CODE POINTS, never splitting an astral char (no lone surrogate at the cut)", () => {

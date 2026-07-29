@@ -522,7 +522,13 @@ export function renderBoundedUntrustedReason(
  *     ```` ``` ```` fence early (fence-escape) nor split `@`/`codex` for the
  *     step-5 neutralise to miss (the slice-1 backtick-split exploit). There is
  *     no newline-collapse here to do collateral joining, so the strip must
- *     happen at this step.
+ *     happen at this step. This strip is LOSSY (a backtick-only reasoning
+ *     collapses to an empty block), so when it removes anything AND the block is
+ *     not otherwise truncated, a non-silent disclosure is appended OUTSIDE the
+ *     fence pointing at `fullDetailLocation` (the run log holds the full
+ *     un-stripped value) — the AGENTS.md floor is that evidence is never
+ *     SILENTLY dropped. When the block IS truncated, the truncation disclosure
+ *     below already points at the same location, so no second note is added.
  *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
  *     renderer that also honours `~~~` fences). AFTER step 3, because a backtick
  *     strip can expose a `~~~` a backtick had split. The `/m` `^` anchors at
@@ -543,10 +549,12 @@ export function renderBoundedUntrustedReason(
  *     tail (so truncation cannot resynthesise a trigger or leave half a
  *     marker/a lone surrogate), and count the omitted characters AFTER that
  *     strip.
- *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````. Truncated: the
- *     kept fence, then a trusted italic disclosure OUTSIDE the fence naming the
- *     omitted count and where the full evidence lives. The `text` info-string
- *     is a trusted constant.
+ *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````, plus a trusted
+ *     italic "formatting characters removed" disclosure OUTSIDE the fence when
+ *     step 3 stripped a backtick (see step 3). Truncated: the kept fence, then a
+ *     trusted italic disclosure OUTSIDE the fence naming the omitted count and
+ *     where the full evidence lives (which also covers any backtick loss, so no
+ *     second note is added). The `text` info-string is a trusted constant.
  *
  * @param text - The untrusted multi-line text.
  * @param maxCodePoints - The generous per-block code-point budget.
@@ -565,11 +573,23 @@ export function renderBoundedUntrustedMultilineBlock(
   const normalized = text.replace(/\r\n?/g, "\n");
   const invisiblesMarked = escapeInvisibleCharactersVisibly(normalized);
   const withoutBackticks = invisiblesMarked.replace(/`/g, "");
+  // The backtick strip is LOSSY — record whether it dropped anything so an
+  // untruncated block can disclose it rather than silently publishing a
+  // shortened (or empty) reasoning (#158 #174 Codex P2 — the AGENTS.md floor
+  // is that evidence is never SILENTLY dropped; the full un-stripped value is
+  // in the run log written before the POST).
+  const formattingRemoved = withoutBackticks !== invisiblesMarked;
   const tildeDefused = withoutBackticks.replace(/^( {0,3})~{3,}/gm, "$1~~");
   const defanged = neutralizeCodexTriggerPhrases(tildeDefused);
   const codePoints = Array.from(defanged);
   if (codePoints.length <= maxCodePoints) {
-    return `\`\`\`text\n${defanged}\n\`\`\``;
+    const block = `\`\`\`text\n${defanged}\n\`\`\``;
+    // Only when NOT truncated — the truncation disclosure below already points
+    // at the same location, so a truncated-and-stripped block needs no second
+    // note.
+    return formattingRemoved
+      ? `${block}\n_[formatting characters removed for safe rendering — full detail in ${fullDetailLocation}]_`
+      : block;
   }
   const kept = stripTruncationTailArtifacts(
     codePoints.slice(0, maxCodePoints).join(""),
