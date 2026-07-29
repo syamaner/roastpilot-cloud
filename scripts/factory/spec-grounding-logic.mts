@@ -152,6 +152,10 @@
  */
 
 import MarkdownIt from "markdown-it";
+import {
+  ASCII_WHITESPACE_CHARS,
+  UNTRUSTED_DATA_BREAKOUT_PATTERN,
+} from "./untrusted-text.mts";
 
 /**
  * Which GitHub keyword linked a PR to an issue, and therefore what
@@ -1338,109 +1342,15 @@ export function buildCriterionIdMarker(nonce: string, issueNumber: number, index
 // fence's own nonce to begin with.
 const DELIMITER_TAG_PATTERN = /<\s*(\/?)\s*UNTRUSTED_ISSUE_DATA(?:_[0-9a-f]+)?\s*>/gi;
 
-// Zero-width / bidi-format characters an attacker could inject to split
-// the literal delimiter token into a byte sequence a whitespace-tolerant
-// (but still literal-character) regex still misses, while an LLM
-// tokenizer/renderer plausibly collapses them and reads the result as the
-// real tag anyway (independent factory-security-reviewer finding, F1-S9
-// slice 3, issue #12).
-//
-// CATEGORICAL FIX (operator correction, PR #70 review round 5 \u2014 the
-// markdown-it lesson applied one level down): this pattern was
-// previously an enumerated set of Unicode ranges, extended TWICE across
-// this same PR review as Codex found the next gap each time (U+200B-
-// 200F/202A-202E/2060-2064/FEFF, then U+061C + the bidi ISOLATE block
-// U+2066-2069, then the deprecated bidi shaping controls U+206A-206F).
-// Enumerating ranges is exactly the class of bug the markdown-it swap
-// was meant to close for code-region detection \u2014 the same lesson
-// applies here: `\p{Cf}` (the Unicode FORMAT general category, matched
-// via the `u`-flag property-escape syntax) matches EVERY assigned
-// format character in ONE pattern \u2014 every zero-width character, every
-// bidi control, soft hyphen, and any future Unicode-assigned format
-// character this module has never explicitly enumerated \u2014 closing the
-// whole class by construction rather than the next round's specific
-// gap. Verified (not assumed) against every codepoint previously
-// enumerated here: `\p{Cf}` matches all of them except U+2065, which
-// isn't a real format character at all \u2014 it's an UNASSIGNED reserved
-// codepoint inside the invisible-operators block that only ever
-// appeared here as an accidental inclusion in a convenience numeric
-// range, never a meaningful character an attacker could type or a
-// renderer could collapse.
-//
-// `\p{Cf}` was STILL the wrong property, one round later (Codex finding,
-// PR #70 review round 9 — a real delimiter-breakout, category (a),
-// always folds regardless of the common-form cap): the Unicode Format
-// general category and the "default-ignorable" concept invisible-
-// character attacks actually key off are OVERLAPPING, not identical.
-// Combining Grapheme Joiner (U+034F), variation selectors (U+FE00-FE0F),
-// and Mongolian free variation selectors (U+180B-180D) are all
-// default-ignorable — an LLM tokenizer/renderer plausibly collapses
-// them the same way — but are NOT in category Cf, verified empirically
-// (each tests false against `\p{Cf}` alone) before writing this fix.
-// `\p{Default_Ignorable_Code_Point}` (JS's own supported Unicode binary-
-// property syntax under the `u` flag) closes the DI half; UNIONED with
-// `\p{Cf}` (which has its own members DI doesn't cover, e.g. the Arabic
-// number sign U+0600) the two together close the whole invisible-
-// breakout class by construction, not by enumerating this round's three
-// named characters and waiting for the next.
-//
-// Exotic Unicode whitespace (Codex finding, PR #70 review round 18 — a
-// real delimiter-breakout, category (a), always folds):
-// `</UNTRUSTED_ISSUE_DATA>` survives when a NEL (U+0085) sits inside the
-// tag, e.g. between the `<` and the `/`. NEL is Unicode White_Space but is
-// NOT matched by JS's own `\s` metacharacter (verified empirically:
-// `/\s/.test("\u0085")` is `false`), so it defeated BOTH the whitespace-
-// tolerant `\s*` inside {@link DELIMITER_TAG_PATTERN} and the `\p{Cf}`/DI
-// cleanup above — yet a model's tokenizer/renderer plausibly still
-// collapses it as ordinary whitespace and reads the result as the real
-// closing delimiter.
-//
-// STILL not categorically complete, TWO rounds later (Codex + an
-// independent security-reviewer pass, PR #72 review round 3 — BOTH
-// found real breakout gaps sharing ONE root cause: the diff guard added in
-// slice 3b-i for the PR diff had drifted onto a DIFFERENT character set
-// than this one, and neither set alone was complete):
-// - The diff guard's `\p{C}` (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs)
-//   MISSED `\p{Default_Ignorable_Code_Point}`'s own members outside
-//   category C — Combining Grapheme Joiner (U+034F) and the variation
-//   selectors (U+FE00-FE0F) are category Mn, not any C subcategory, so a
-//   `</UNTRUSTED_PR_DIFF>` split by one survived. (This traces to an error
-//   in the guidance that produced the diff guard's pattern: "invert to
-//   `\p{C}`" silently dropped `Default_Ignorable_Code_Point`, which the
-//   ORIGINAL criteria guard, right here, had never lost.)
-// - This module's own criteria guard, in turn, had never picked up
-//   `\p{Cc}` (plain control characters — U+0008 BACKSPACE, U+001B
-//   ESCAPE, U+007F DELETE, verified empirically to break
-//   `</UNTRUSTED_ISSUE_DATA>` out the same way NEL once did) or the
-//   Co/Cn/Cs members `\p{C}` closes, on the PRIMARY anti-gaming surface —
-//   a real, reproduced gap, not a theoretical one.
-//
-// CANONICAL FIX: exactly ONE breakout-character pattern, used by BOTH
-// guards, combining every class either one individually needed: `\p{C}`
-// (Cc ∪ Cf ∪ Cn ∪ Co ∪ Cs — controls, format
-// characters, unassigned, private-use, surrogates) UNIONED with
-// `\p{Default_Ignorable_Code_Point}` (closes the Mn-category default-
-// ignorables `\p{C}` alone misses) UNIONED with `\p{White_Space}` (closes
-// NEL and every other exotic space/separator). Sharing this SINGLE
-// exported primitive between `neutralizeDelimiterBreakout` here and slice
-// 3b-i's diff guard (`spec-grounding-runner-logic.mts`) makes "both guards
-// cover the same breakout class" a fact enforced by construction —
-// reusing one constant — rather than a claim in a comment two
-// independently-maintained patterns could silently drift apart from,
-// which is exactly what happened here.
-export const UNTRUSTED_DATA_BREAKOUT_PATTERN = /[\p{C}\p{Default_Ignorable_Code_Point}\p{White_Space}]/gu;
-
-// The ONLY characters {@link UNTRUSTED_DATA_BREAKOUT_PATTERN} must never
-// strip or visibly mark — the four ordinary ASCII whitespace
-// characters (space, tab, LF, CR) real criterion/diff text legitimately
-// contains. Deliberately does NOT also exempt VT/FF (Codex + security-
-// reviewer finding, PR #72 review round 3 — narrowed from an earlier
-// six-character exemption set that also spared those two): VT and FF are
-// themselves `\p{Cc}` control characters, and this guard's whole point,
-// after the same review round found `\p{Cc}` was a real gap, is to
-// surface a control character sitting where it doesn't belong — not
-// carve out two more as "harmless" the same way NEL once was.
-export const ASCII_WHITESPACE_CHARS: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
+// UNTRUSTED_DATA_BREAKOUT_PATTERN and ASCII_WHITESPACE_CHARS moved to the
+// dependency-free `untrusted-text.mts` leaf (issue #158) so the posted-body
+// sanitiser can share the exact same canonical breakout-character set without
+// pulling this module's `markdown-it` closure into the import-closure
+// verifier's reach. Re-exported here (imported above) so `neutralizeDelimiterBreakout`
+// below still uses them locally and every existing importer of this module
+// keeps working unchanged. See the leaf for the full derivation history of
+// why the pattern is exactly `[\p{C}\p{Default_Ignorable_Code_Point}\p{White_Space}]`.
+export { ASCII_WHITESPACE_CHARS, UNTRUSTED_DATA_BREAKOUT_PATTERN };
 
 /**
  * Neutralizes an attempt to break out of {@link renderCriteriaDataBlock}'s

@@ -442,8 +442,14 @@ describe("verifyNodeImportClosure external provenance", () => {
         files: [
           "scripts/factory/implement-patch-logic.mts",
           "scripts/factory/node-import-closure-verifier.mts",
+          // `implement-patch-logic.mts` imports the dependency-free
+          // `untrusted-text.mts` leaf for the posted-body sanitiser (issue
+          // #158). The leaf is zero-import, so it adds one file and one edge
+          // and stops there — the verifier's closure stays small, which is
+          // the whole point of the inversion.
+          "scripts/factory/untrusted-text.mts",
         ],
-        edgeCount: 7,
+        edgeCount: 8,
         violations: [],
       }),
     );

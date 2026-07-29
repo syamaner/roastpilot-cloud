@@ -8,6 +8,19 @@
  * unit-testable without mocking `fetch` or shelling out to `git`.
  */
 
+// The ONLY import in this module, and deliberately so (issue #158): the
+// `untrusted-text.mts` leaf is dependency-free, so importing it keeps this
+// module's static import closure — which `node-import-closure-verifier.mts`
+// reaches through `isProtectedPath` — from acquiring `markdown-it`'s closure
+// that reaching for the same sanitiser in `spec-grounding-*.mts` would drag
+// in. See the leaf's header for the full inversion rationale.
+import {
+  MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
+  neutralizeCodexTriggerPhrases,
+  renderBoundedUntrustedReason,
+  sanitizeUntrustedTextForPostedBody,
+} from "./untrusted-text.mts";
+
 /**
  * Path prefixes/exact matches an implementing agent's patch must never
  * touch (AGENTS.md "Pipeline self-modification", factory.md §13 point 3):
@@ -484,7 +497,15 @@ export function renderTriggerPhraseInertly(text: string): string {
   // rather than in two places that can disagree. An earlier fix bolted the
   // correction on as a trailing note, which left the contradiction in the body
   // and merely appended a denial of it.
-  return described.split(TRIGGER_SELF_START_WARNING).join(INERT_SELF_START_NOTE);
+  const noted = described.split(TRIGGER_SELF_START_WARNING).join(INERT_SELF_START_NOTE);
+  // Backstop (issue #158): the literal swaps above only match the EXACT phrase
+  // in our own trusted prose. neutralizeCodexTriggerPhrases then defangs any
+  // casing/whitespace/fullwidth variant a future edit to that prose — or any
+  // untrusted value this function is ever pointed at — might still carry, so no
+  // rendering of the returned text can start a review. Pattern-second, after
+  // the literal swap, because the literal swap is the readable form and this is
+  // only the completeness net under it.
+  return neutralizeCodexTriggerPhrases(noted);
 }
 
 export const FACTORY_TEXT_LINE_LIMIT = 400;
@@ -1143,12 +1164,12 @@ export interface GamingFlag {
  * seen" to a human who reviewed an earlier version.
  *
  * Every field here is ATTACKER-CONTROLLED (a test-file path, or an added
- * line's own content) and is rendered through {@link sanitizeStepSummaryText}
+ * line's own content) and is rendered through {@link sanitizeUntrustedTextForPostedBody}
  * before being interpolated — never raw (independent factory-security-
  * reviewer finding, F1-S9 slice 1, issue #12): an added line containing a
  * literal backtick could otherwise break out of its code span and inject
  * live Markdown (a link, an `@mention`) into the factory bot's own
- * comment — the identical injection class `sanitizeStepSummaryText` was
+ * comment — the identical injection class `sanitizeUntrustedTextForPostedBody` was
  * already built to close for `$GITHUB_STEP_SUMMARY`. The harm isn't
  * secret exfiltration (nothing sensitive is adjacent); it's that the
  * injection could spoof or bury the very human-review signal this
@@ -1178,7 +1199,7 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
   if (flag.testFileEdits.length > 0) {
     lines.push("**Test file(s) edited:**");
     for (const path of flag.testFileEdits) {
-      lines.push(`- ${sanitizeStepSummaryText(path)}`);
+      lines.push(`- ${sanitizeUntrustedTextForPostedBody(path)}`);
     }
     lines.push("");
   }
@@ -1186,7 +1207,7 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
     lines.push("**Coverage- or mutation-suppression comment(s) added:**");
     for (const match of flag.suppressions) {
       lines.push(
-        `- ${sanitizeStepSummaryText(match.path)}: ${sanitizeStepSummaryText(match.line)}`,
+        `- ${sanitizeUntrustedTextForPostedBody(match.path)}: ${sanitizeUntrustedTextForPostedBody(match.line)}`,
       );
     }
     lines.push("");
@@ -1194,14 +1215,14 @@ export function buildGamingFlagAnnotation(flag: GamingFlag, labelApplied: boolea
   if (flag.packageJsonTestScriptEdits.length > 0) {
     lines.push("**`package.json` test/coverage/lifecycle script(s) redefined:**");
     for (const line of flag.packageJsonTestScriptEdits) {
-      lines.push(`- ${sanitizeStepSummaryText(line)}`);
+      lines.push(`- ${sanitizeUntrustedTextForPostedBody(line)}`);
     }
     lines.push("");
   }
   if (flag.rootPytestConfigSections.length > 0) {
     lines.push("**Pytest config section added to a root-level pyproject.toml/setup.cfg:**");
     for (const line of flag.rootPytestConfigSections) {
-      lines.push(`- ${sanitizeStepSummaryText(line)}`);
+      lines.push(`- ${sanitizeUntrustedTextForPostedBody(line)}`);
     }
     lines.push("");
   }
@@ -1805,9 +1826,14 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
         "",
       ]
     : [];
+  // `modelId` is parsed from the implement job's transcript artifact — an
+  // attacker-influenced field (#158) — so it routes through the posted-body
+  // sanitiser, which returns its own code span. The `unavailable …` fallback
+  // is our own trusted literal and stays a plain (unsanitised) string.
   const modelLine =
-    context.modelId ??
-    "unavailable (the implement job's transcript artifact was missing or unparseable)";
+    context.modelId !== null
+      ? sanitizeUntrustedTextForPostedBody(context.modelId)
+      : "unavailable (the implement job's transcript artifact was missing or unparseable)";
   return [
     ...fallbackWarning,
     "## Story",
@@ -1828,11 +1854,12 @@ export function buildImplementPrBody(context: ImplementPrContext): string {
     "## Provenance",
     "",
     `- **Model:** ${modelLine}`,
-    `- **Prompt/skill version:** \`${context.promptVersion}\` — this workflow embeds ` +
-      "the implement prompt directly in `.github/workflows/implement-ready-issues.yml` " +
-      "rather than invoking a named skill file, so this is the repository commit that " +
-      "prompt text lived in, unchanged, for this run.",
-    `- **Agent action:** \`${context.agentActionRef}\``,
+    `- **Prompt/skill version:** ${sanitizeUntrustedTextForPostedBody(context.promptVersion)} — ` +
+      "this workflow embeds the implement prompt directly in " +
+      "`.github/workflows/implement-ready-issues.yml` rather than invoking a named skill " +
+      "file, so this is the repository commit that prompt text lived in, unchanged, for " +
+      "this run.",
+    `- **Agent action:** ${sanitizeUntrustedTextForPostedBody(context.agentActionRef)}`,
     `- **Issue:** #${context.issueNumber}`,
     `- **Dispatched by:** @${context.dispatchActor}`,
     "",
@@ -1935,6 +1962,66 @@ export function findExistingImplementFailureCommentId(
 }
 
 /**
+ * GENEROUS per-item and total bounds for rendering the rejection `reasons`
+ * into the two MARKDOWN sinks (the failure comment and the step summary),
+ * chosen so no realistic single-line reason ever truncates while still
+ * keeping each sink under its platform ceiling (#158 fold, PR #170, Codex P1).
+ * The full, untruncated evidence always lives in the run LOG (sink 2, via
+ * `sanitizeUntrustedInlineText`, no clamp), which every disclosure points to,
+ * so a bounded markdown render never drops evidence silently. Proposed here;
+ * fsr/qa tune on re-verify (triage deferred the exact constants).
+ *
+ * - Comment: 8000 code points/item, 60000 chars total — a normal reason is one
+ *   short line; 8000 is ~40× that, and the total stays well under GitHub's
+ *   65536-char comment ceiling with room for the preamble/marker/run-link.
+ * - Step summary: 20000 code points/item, 200000 chars total — a larger,
+ *   durable surface (~1 MiB `$GITHUB_STEP_SUMMARY` ceiling), so more generous.
+ */
+const MAX_COMMENT_REASON_CODE_POINTS = 8000;
+const MAX_COMMENT_REASONS_TOTAL_CHARS = 60_000;
+const MAX_SUMMARY_REASON_CODE_POINTS = 20_000;
+const MAX_SUMMARY_REASONS_TOTAL_CHARS = 200_000;
+
+/**
+ * Renders `reasons` as bounded markdown bullet lines for a posted-body sink,
+ * in TWO non-silent layers mirroring `buildSpecGroundingFallbackCommentBody`:
+ * each reason via {@link renderBoundedUntrustedReason} (per-item bound +
+ * disclosure), then the list as a whole capped at `maxTotalChars` — any
+ * reason beyond the total is reported as an omitted COUNT, never silently
+ * dropped. The full evidence is always in the run log.
+ *
+ * @param reasons - The untrusted reason list.
+ * @param bulletPrefix - The bullet lead for this sink (`"- "` / `"  - "`).
+ * @param maxItemCodePoints - Per-reason code-point budget.
+ * @param maxTotalChars - Total list budget, in characters.
+ * @returns The bullet lines, ending with an omitted-count line when capped.
+ */
+function boundedReasonBullets(
+  reasons: readonly string[],
+  bulletPrefix: string,
+  maxItemCodePoints: number,
+  maxTotalChars: number,
+): string[] {
+  const lines: string[] = [];
+  let total = 0;
+  let added = 0;
+  for (const reason of reasons) {
+    const bullet = `${bulletPrefix}${renderBoundedUntrustedReason(reason, maxItemCodePoints)}`;
+    if (total + bullet.length + 1 > maxTotalChars) {
+      break; // Remainder reported as an omitted count below, never silently dropped.
+    }
+    lines.push(bullet);
+    total += bullet.length + 1;
+    added += 1;
+  }
+  const omitted = reasons.length - added;
+  if (omitted > 0) {
+    lines.push(`${bulletPrefix}_(${omitted} further reason(s) omitted — see the run output.)_`);
+  }
+  return lines;
+}
+
+/**
  * Builds the issue comment posted when an implement run does NOT produce
  * a publishable PR — empty/failed patch, a forbidden-path violation, or
  * the implement job itself not succeeding. Mirrors the triage skill's
@@ -1967,7 +2054,12 @@ export function buildImplementFailureCommentBody(
     preamble,
     "",
     "Reasons:",
-    ...reasons.map((r) => `- ${r}`),
+    ...boundedReasonBullets(
+      reasons,
+      "- ",
+      MAX_COMMENT_REASON_CODE_POINTS,
+      MAX_COMMENT_REASONS_TOTAL_CHARS,
+    ),
     "",
     `[Run output](${runUrl})`,
     "",
@@ -2008,87 +2100,10 @@ export interface PublishStepSummaryContext {
 }
 
 /**
- * Upper bound applied by both step-summary sanitizers below — generous
- * enough for any legitimate value (a login, a URL, a short reason phrase)
- * while still bounding how much of a giant/adversarial string could reach
- * the summary.
- */
-const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
-
-/**
- * Renders an untrusted plain-text field (a login, a fallback reason, a
- * rejection reason) as an INERT inline code span before it reaches
- * `$GITHUB_STEP_SUMMARY`'s rendered Markdown, closing a CodeQL alert
- * (#46 reshape) — "network data written to file": `publisherLogin` (from
- * the mint step's `app-slug` API output) and the rejection `reasons`
- * (which can indirectly embed a `deriveBranchName`-derived slug of an
- * issue's title, or a forbidden-path guard's report of an
- * agent-controlled patch path) originate from a GitHub API response or
- * an attacker-writable issue/PR field, not purely this workflow's own
- * literals.
- *
- * **This function's history is why it's a code span, not an escaper**
- * (post-#46-merge fix-forward, 3 rounds against the same class of bug):
- * round 1 escaped `[`/`]`/`(`/`)`/`<`/`>` — closed the `[text](url)`
- * link-injection case. Round 2 (CodeQL `js/incomplete-sanitization`)
- * found that escaping without first escaping a PRE-EXISTING backslash in
- * the input let an attacker-supplied `\` combine with the sanitizer's own
- * inserted `\` to form CommonMark's `\\` (literal-backslash) escape,
- * which consumes itself and un-escapes the next character — fixed by
- * doubling existing backslashes first. Round 3 (Codex) found that even
- * fully-correct escaping doesn't stop GFM's **autolinking**: a bare
- * `www.attacker.example` (no brackets, no parens, nothing to escape) or
- * even the fully-escaped `\[x\]\(https://attacker.example\)` STILL
- * renders as a live, clickable link — GFM autolinks a recognized URL
- * shape regardless of surrounding escape characters. Per-metacharacter
- * escaping is a losing, indefinitely-extendable game against a renderer
- * with more Markdown-active constructs than any escaper enumerates.
- *
- * **The categorical fix: don't escape Markdown, remove the field from
- * Markdown context entirely.** A GitHub-Flavored-Markdown inline CODE
- * SPAN (`` `text` ``) renders its contents as **literal text** — no
- * emphasis, no links, no autolinks, no HTML — by construction, not by
- * enumeration; this is the one Markdown construct whose entire purpose is
- * "stop parsing Markdown here." The ONLY thing that can break a value out
- * of the code span it's wrapped in is a literal backtick or a newline
- * inside it (both would end the span early or add unintended lines), so
- * those two are still stripped before wrapping — everything else
- * (brackets, parens, angle brackets, backslashes, bare URLs, anything
- * else GFM might ever autolink or otherwise interpret) needs no
- * escaping at all once it's inside the span. This also fixes the
- * `<slug>[bot]`-login-mangling tension the earlier escaping rounds fought
- * with "for free": a code span shows `[bot]` exactly as typed.
- *
- * **Trusted vs. untrusted, not "escape everything":** this function is
- * for AGENT/ISSUE-DERIVED fields only. `prUrl` (this workflow's own
- * constructed `github.com/.../pull/N` link, never attacker-influenced)
- * deliberately stays a real, clickable `[text](url)` Markdown link via
- * {@link sanitizeStepSummaryUrl} — code-wrapping the one link the summary
- * WANTS clickable would be a readability regression for zero security
- * benefit.
- *
- * @param value - The field value to render.
- * @returns The value with newlines collapsed to a space and backticks
- *   stripped, clamped to {@link MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH}
- *   characters, then wrapped in a single-backtick inline code span. The
- *   returned string already includes its own surrounding backticks — a
- *   caller must NOT additionally wrap it in `` ` ``/`` ` `` (that would
- *   double-wrap).
- */
-export function sanitizeStepSummaryText(value: string): string {
-  const collapsed = value.replace(/[\r\n]+/g, " ").replace(/`/g, "");
-  const clamped =
-    collapsed.length > MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH
-      ? `${collapsed.slice(0, MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}…`
-      : collapsed;
-  return `\`${clamped}\``;
-}
-
-/**
  * Sanitizes a field placed in a Markdown LINK's URL slot —
  * `[text](${sanitized})` — before it reaches `$GITHUB_STEP_SUMMARY`.
  * `prUrl` is network-derived (a PR-create/-list API response); unlike
- * {@link sanitizeStepSummaryText}'s plain-body-text case, a bracket or
+ * {@link sanitizeUntrustedTextForPostedBody}'s plain-body-text case, a bracket or
  * paren HERE genuinely can corrupt the link's structure (close the URL
  * slot early, or open a second link), so this strips them in addition to
  * newlines/backticks. A well-formed GitHub URL never legitimately
@@ -2107,15 +2122,15 @@ export function sanitizeStepSummaryUrl(value: string): string {
 }
 
 function publisherIdentityLine(context: PublishStepSummaryContext): string {
-  // sanitizeStepSummaryText already returns its value wrapped in its own
+  // sanitizeUntrustedTextForPostedBody already returns its value wrapped in its own
   // code span — do NOT add another layer of backticks around `login`
   // here, that would double-wrap it.
-  const login = sanitizeStepSummaryText(context.publisherLogin);
+  const login = sanitizeUntrustedTextForPostedBody(context.publisherLogin);
   if (!context.publishedViaFallback) {
     return `✅ Minted as ${login}`;
   }
   const reasonSuffix = context.fallbackReason
-    ? ` — ${sanitizeStepSummaryText(context.fallbackReason)}`
+    ? ` — ${sanitizeUntrustedTextForPostedBody(context.fallbackReason)}`
     : "";
   return `⚠\uFE0F Fell back to \`GITHUB_TOKEN\` (identity: ${login})${reasonSuffix}`;
 }
@@ -2250,9 +2265,9 @@ export function buildPublishSuccessStepSummary(
           "START the review, and the timeout clause below is what catches the case " +
           "where it never begins. " + CODEX_VERDICT_CRITERION + " ") +
       "⚠\uFE0F **Claude Code Review does NOT yet " +
-      // sanitizeStepSummaryText already returns its own code span — no
+      // sanitizeUntrustedTextForPostedBody already returns its own code span — no
       // extra surrounding backticks here.
-      `cover factory-authored PRs** — the publisher bot (${sanitizeStepSummaryText(context.publisherLogin)}) ` +
+      `cover factory-authored PRs** — the publisher bot (${sanitizeUntrustedTextForPostedBody(context.publisherLogin)}) ` +
       "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
       "PR as if Claude Code Review never ran until that's resolved.";
   const gamingLabelClause =
@@ -2315,7 +2330,12 @@ export function buildPublishRejectedStepSummary(
     `- **Issue:** #${context.issueNumber}`,
     `- **Publisher identity:** ${publisherIdentityLine(context)}`,
     "- **PR:** none — publish rejected. Reasons:",
-    ...context.reasons.map((r) => `  - ${sanitizeStepSummaryText(r)}`),
+    ...boundedReasonBullets(
+      context.reasons,
+      "  - ",
+      MAX_SUMMARY_REASON_CODE_POINTS,
+      MAX_SUMMARY_REASONS_TOTAL_CHARS,
+    ),
     "",
   ].join("\n");
 }

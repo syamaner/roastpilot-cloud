@@ -178,8 +178,9 @@ const MAX_RATIONALE_DISPLAY_LENGTH = 300;
  * `\n<!--` (an unclosed HTML comment hiding everything the bot posts
  * after it), a spoofed heading, a live autolinked URL, or an `@mention`.
  *
- * Mirrors `implement-patch-logic.mts`'s own categorical fix for this
- * exact injection class (`sanitizeStepSummaryText`, see that function's
+ * Mirrors the categorical fix `untrusted-text.mts`'s
+ * `sanitizeUntrustedTextForPostedBody` applies for this exact injection
+ * class (see that function's
  * docstring for the full 3-round history of why per-metacharacter
  * escaping loses to GFM autolinking and a code span is the only
  * categorical defense): wraps the value in a GitHub-Flavored-Markdown
@@ -350,7 +351,8 @@ export interface ExistingComment {
  * one kind of comment on this repo — `implement-patch-logic.mts`'s own
  * `buildGamingFlagAnnotation` (the anti-gaming classifier's flagged-line
  * annotation) renders attacker-influenced content (e.g. a flagged
- * suppression comment's own line text) through `sanitizeStepSummaryText`,
+ * suppression comment's own line text) through
+ * `sanitizeUntrustedTextForPostedBody`,
  * which PRESERVES the literal text inside its code span — including, if
  * an attacker crafts it deliberately, our own PUBLIC (non-secret,
  * predictable) marker string embedded mid-line inside otherwise-unrelated

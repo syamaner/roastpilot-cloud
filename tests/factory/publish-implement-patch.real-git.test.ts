@@ -3041,6 +3041,71 @@ describe("publish-implement-patch — FIX 7: idempotency keys off issue number, 
   });
 });
 
+describe("publish-implement-patch — #158: a hostile issue title cannot start a Codex review or inject via the PR title", () => {
+  // The issue title is attacker-writable and lands in the PR title, which a
+  // neutralize-ONLY guard failed to defang for a zero-width split (ZWSP is
+  // not `\s`). Asserted against the REAL `POST /repos/.../pulls` request
+  // body's `title`. Each case's evidence assertion fails if the title defang
+  // is deleted (the removing-guard-must-fail check qa required).
+  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
+
+  async function createdPrTitle(issueTitle: string): Promise<string> {
+    const fetchMock = stubHappyPathFetch({ issueTitle });
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    const prCreateCall = calls.find(
+      ([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(prCreateCall).toBeDefined();
+    return (JSON.parse((prCreateCall?.[1]?.body as string) ?? "{}") as { title: string }).title;
+  }
+
+  it("(a) defangs a plain `@codex review` trigger in the title", async () => {
+    const title = await createdPrTitle("[F1-S3] @codex review");
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expect(title).toContain("[codex trigger removed]");
+  });
+
+  it("(b) surfaces a zero-width-split `@<ZWSP>codex review` visibly in the title (ZWSP is not \\s)", async () => {
+    const title = await createdPrTitle("[F1-S3] @\u200Bcodex review");
+    // The raw zero-width char is gone; the escape step surfaced it visibly.
+    expect(title).not.toContain("\u200B");
+    expect(title).toContain("[U+200B]");
+  });
+
+  it("(c) defangs a backtick-split `@`+backtick+`codex review` trigger in the title", async () => {
+    const title = await createdPrTitle("[F1-S3] @`codex review");
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expect(title).not.toContain("`");
+    expect(title).toContain("[codex trigger removed]");
+  });
+
+  it("(d) length-bounds a title whose invisible-escape expansion would exceed GitHub's 256 limit (codex P2 DoS)", async () => {
+    // 40 warning emoji (⚠ + VS16 U+FE0F, the VS16 written as an escape so the
+    // invisible-format gate accepts this file); each U+FE0F expands to an
+    // 8-char `[U+FE0F]` marker, so the raw escaped title is ~360 chars and
+    // would 422 `POST /pulls` AFTER the branch push without a bound.
+    const title = await createdPrTitle("[F1-S3] " + "\u26A0\uFE0F".repeat(40));
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    // The truncation must not leave half an escape marker at the boundary
+    // (safeClamp strips a dangling `[U+XXXX`); check before the trailing `…`.
+    expect(title.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
+  });
+
+  it("(e) a title whose emoji straddle the 256 budget yields no lone surrogate in the POST body (PR #170)", async () => {
+    // The leading ASCII char makes the clamp boundary land on an ODD offset, so
+    // it cuts an astral emoji mid-pair; safeClamp must strip the lone high
+    // surrogate a code-unit slice leaves, or the JSON body is not wire-UTF-8
+    // and GitHub can reject POST /pulls after the branch is already pushed.
+    const title = await createdPrTitle("[F1-S3] a" + "😀".repeat(130));
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(title)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(title)).toBe(false);
+  });
+});
+
 describe("publish-implement-patch — Codex round 7: fork-PR confusion (findExistingPrForIssue repo scoping)", () => {
   it("does NOT reuse a fork's PR whose branch coincidentally matches feature/{issueNumber}-, and opens a fresh same-repo PR instead", async () => {
     // A public-repo attack shape: a fork opens a PR from a branch named
@@ -3545,6 +3610,79 @@ copy to scripts/factory/evil-copy.mts
       "utf8",
     ).catch(() => null);
     expect(exists).toBeNull();
+  });
+
+  it("log sink (PR #170, Codex P1): the FULL rejection reason survives in the run log, untruncated", async () => {
+    // The log is the full-evidence home the markdown sinks' truncation
+    // disclosures point to. A long forbidden path makes the reason exceed the
+    // old 200-char field clamp; asserting the WHOLE path is in `console.error`
+    // proves the log is not silently clamped (removing-guard for the log fix).
+    const longName = "a".repeat(240);
+    const path = `scripts/factory/${longName}.mts`;
+    const diff =
+      `diff --git a/${path} b/${path}\n` +
+      `new file mode 100644\n` +
+      `index 0000000..abc1234\n` +
+      `--- /dev/null\n` +
+      `+++ b/${path}\n` +
+      `@@ -0,0 +1,1 @@\n` +
+      `+export const x = 1;\n`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "long-forbidden.diff", diff);
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const reasonLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((s) => s.includes("did not produce a PR. Reasons:"));
+    expect(reasonLog).toBeDefined();
+    // The ENTIRE 260-char path is present — a re-clamp to 200 would drop its tail.
+    expect(reasonLog).toContain(`scripts/factory/${longName}.mts`);
+    errorSpy.mockRestore();
+  });
+
+  it("log ordering (PR #170, Codex P2): the full-evidence log is emitted BEFORE the fallible comment POST", async () => {
+    // If the comment POST fails, its throw propagates OUT of the catch block —
+    // so a log placed AFTER it never runs and the disclosures' "full detail in
+    // the run output" promise breaks. The log must precede the comment POST.
+    const longName = "b".repeat(240);
+    const path = `scripts/factory/${longName}.mts`;
+    const diff =
+      `diff --git a/${path} b/${path}\n` +
+      `new file mode 100644\n` +
+      `index 0000000..abc1234\n` +
+      `--- /dev/null\n` +
+      `+++ b/${path}\n` +
+      `@@ -0,0 +1,1 @@\n` +
+      `+export const x = 1;\n`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "long-forbidden-throw.diff", diff);
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/comments")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/comments")) {
+        throw new Error("simulated comment POST outage");
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+    stubFetch(fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // postFailureComment throws OUT of the catch block, so main() rejects.
+    await expect(main()).rejects.toThrow("simulated comment POST outage");
+
+    // …but the full-evidence log ran first, so the omitted detail is still reachable.
+    const reasonLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((s) => s.includes("did not produce a PR. Reasons:"));
+    expect(reasonLog).toBeDefined();
+    expect(reasonLog).toContain(`scripts/factory/${longName}.mts`);
+    errorSpy.mockRestore();
   });
 
   it("rejects a COPY OUT of scripts/factory/** (hand-crafted, same reason as above)", async () => {

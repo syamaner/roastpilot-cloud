@@ -222,6 +222,21 @@ import {
   type PublishStepSummaryContext,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
+import {
+  safeClamp,
+  sanitizeUntrustedInlineText,
+} from "./untrusted-text.mts";
+
+/**
+ * GitHub's documented maximum PR-title length. A title that exceeds it makes
+ * `POST /pulls` return 422 AFTER the branch is already pushed — an
+ * attacker-triggerable failure, since #158's threat model is an attacker-
+ * authored issue title, and `sanitizeUntrustedInlineText`'s invisible-escape
+ * step can EXPAND a title (each default-ignorable char becomes an 8-char
+ * `[U+XXXX]` marker). The title is length-bounded to stay under this
+ * (#158 fold round 3, codex P2).
+ */
+const GITHUB_PR_TITLE_MAX_LENGTH = 256;
 
 /**
  * Upper bound on the on-disk patch artifact size, in bytes, checked via
@@ -1905,12 +1920,30 @@ export async function main(): Promise<void> {
       return;
     }
 
+    // The fixed, trusted prefix on every factory PR title; its length is the
+    // part of GitHub's title budget the (attacker-controlled) issue title
+    // cannot consume.
+    const prTitlePrefix = `[#${issueNumber}] `;
     const created = await githubRequest<GitHubPullRequestApi>(
       token,
       "POST",
       `/repos/${owner}/${repo}/pulls`,
       {
-        title: `[#${issueNumber}] ${issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")}`,
+        // The issue title is attacker-writable, so it is defanged through the
+        // SAME shared primitive the posted-body sanitiser uses (#158 fold —
+        // the earlier neutralize-only guard let a zero-width split `@<ZWSP>codex`
+        // through, since ZWSP is not `\s`). A title is not Markdown-rendered, so
+        // no code-span WRAP is applied; but escape-invisibles + strip-backticks
+        // + neutralize all run, fail-closed. It is then length-bounded with the
+        // SAME `safeClamp` the body uses, so the defanged (and possibly
+        // marker-EXPANDED) title cannot exceed GitHub's limit and 422 the
+        // create call after the branch push (codex P2). The budget reserves the
+        // fixed `[#N] ` prefix and one char for safeClamp's ellipsis, so the
+        // full title stays within the limit.
+        title: `${prTitlePrefix}${safeClamp(
+          sanitizeUntrustedInlineText(issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")),
+          GITHUB_PR_TITLE_MAX_LENGTH - prTitlePrefix.length - 1,
+        )}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
         body: buildImplementPrBody({
@@ -2005,15 +2038,30 @@ export async function main(): Promise<void> {
       );
     }
 
-    // Adjudicated fix (Codex P2, post-#46-merge fix-forward): written
-    // BEFORE postFailureComment, not after. postFailureComment makes its
-    // own GitHub API calls and has no internal try/catch — a genuine
-    // failure there (rate-limit, outage, permissions) throws OUT of this
-    // catch block entirely, so anything placed after it never runs. The
-    // rejected-publish path is exactly the one where the mint-vs-fallback
-    // diagnostic matters most (no PR, no other visible signal), so this
-    // write must not be contingent on the comment call also succeeding.
+    // Both DURABLE diagnostics — the step summary AND the full-evidence run
+    // log — are written BEFORE postFailureComment, not after (Codex P2,
+    // post-#46-merge fix-forward; EXTENDED to the log by the PR #170 fold,
+    // Codex P2). postFailureComment makes its own GitHub API calls with no
+    // internal try/catch, so a genuine failure there (rate-limit, outage,
+    // permissions) throws OUT of this catch block and anything placed after it
+    // never runs. The rejected-publish path is exactly where the
+    // mint-vs-fallback diagnostic matters most (no PR, no other visible
+    // signal); and the run log is the FULL-EVIDENCE home the comment's and
+    // step-summary's truncation disclosures point to ("full detail in the run
+    // output"), so if it ran only AFTER a failing comment POST that promise
+    // would be false and the omitted evidence unreachable. Neither durable
+    // write may be contingent on the comment call succeeding.
     writeStepSummary(buildPublishRejectedStepSummary({ ...summaryContext, reasons }));
+
+    // Sink 2 (the run LOG): NOT a connector surface and NOT markdown, so it
+    // defangs each reason for log hygiene (`sanitizeUntrustedInlineText`:
+    // escape-invisibles + collapse + strip-backticks + neutralize) but does
+    // NOT clamp or code-span-wrap — the whole reason is preserved (#158 fold,
+    // PR #170, Codex P1: the untruncated copy lives here).
+    console.error(
+      `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
+        reasons.map((r) => `  - ${sanitizeUntrustedInlineText(r)}`).join("\n"),
+    );
 
     await postFailureComment(
       token,
@@ -2024,10 +2072,6 @@ export async function main(): Promise<void> {
       runUrl,
       branchPushed,
       failureCommentAuthorLogin,
-    );
-    console.error(
-      `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
-        reasons.map((r) => `  - ${r}`).join("\n"),
     );
     process.exitCode = 1;
   }
