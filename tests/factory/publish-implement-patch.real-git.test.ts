@@ -482,6 +482,39 @@ describe("publish-implement-patch — #171: CI-skip control tokens on the commit
       ),
     ).toBe(true);
   });
+
+  async function commitBodyForTranscriptModel(model: string): Promise<string> {
+    const transcriptPath = join(scratchDir, `model-${Math.random().toString(36).slice(2)}.json`);
+    await fsWriteFile(
+      transcriptPath,
+      JSON.stringify([
+        { type: "system", subtype: "init", model },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    stubHappyPathFetch();
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    return pushedCommitBody();
+  }
+
+  it("E8: a modelId carrying a CI-skip token is rejected — the trailer reads 'unavailable', and the branch still pushes clean", async () => {
+    const body = await commitBodyForTranscriptModel("claude [skip ci]");
+    expect(body).toContain("Provenance-Model: unavailable");
+    expect(body.toLowerCase()).not.toContain("[skip ci]");
+  });
+
+  it("E9: a modelId carrying an @mention is rejected — the trailer reads 'unavailable'", async () => {
+    const body = await commitBodyForTranscriptModel("@syamaner");
+    expect(body).toContain("Provenance-Model: unavailable");
+    expect(body).not.toContain("@syamaner");
+  });
+
+  it("E10: a valid modelId still lands in the trailer unchanged (allowlist regression)", async () => {
+    const body = await commitBodyForTranscriptModel("claude-opus-4-8");
+    expect(body).toContain("Provenance-Model: claude-opus-4-8");
+  });
 });
 
 describe("publish-implement-patch — real git plumbing (happy path)", () => {

@@ -2361,26 +2361,41 @@ export function buildPublishRejectedStepSummary(
  * Deliberately conservative: returns `null` (never fabricates a value)
  * for anything other than a clean match — unparseable JSON, a non-array
  * top level, an array with no `system`/`init` message, or an init
- * message whose `model` field is missing, empty, not a string, or
- * carries a newline (see below). A caller must render this as
- * "unavailable", never guess.
+ * message whose `model` field is missing, empty, not a string, or fails
+ * the {@link MODEL_ID_PATTERN} allowlist (see below). A caller must render
+ * this as "unavailable", never guess.
  *
- * Rejects (rather than sanitizes) a `model` value containing `\n`/`\r`
- * (Codex P2, #55): this value is interpolated straight into a git commit
- * trailer ({@link buildCommitTrailer}) with only a nonempty check —
- * without this, a corrupted or tampered transcript whose `model` field
- * contained an embedded newline could forge an extra trailer line (e.g.
- * a fake `Signed-off-by`) into the commit message, the same class of
- * injection the `$GITHUB_STEP_SUMMARY` sanitizer earlier in this
- * pipeline's history was built to close. A legitimate model ID never
- * contains a newline, so REJECTING outright (never truncating/stripping)
- * is both simplest and correct: there is no valid partial value to
- * salvage from a model field that fails this shape check.
+ * Validates the `model` value against a strict {@link MODEL_ID_PATTERN}
+ * allowlist and REJECTS (never sanitizes/truncates) anything outside it
+ * (issue #171, superseding the earlier `\n`/`\r`-only reject of Codex P2,
+ * #55): this value is interpolated straight into a git commit trailer
+ * ({@link buildCommitTrailer})'s `Provenance-Model` line with only a
+ * nonempty check, so a corrupted or tampered transcript's `model` field
+ * could otherwise carry a `[skip ci]`/`skip-checks:true` CI-skip token, an
+ * `@mention`/`#issue` autolink, a URL, or an embedded newline forging an
+ * extra trailer line — every one of those is a character the allowlist
+ * excludes. A static allowlist is the structural fix the Rigour Calibration
+ * "prefer static constraints" rule points at: every real model ID
+ * (`claude-opus-4-8`, `claude-opus-4-1-20250805`, `claude-sonnet-5`) is
+ * `[A-Za-z0-9._-]{1,64}`, so REJECTING outright is both simplest and
+ * correct — there is no valid partial value to salvage from a model field
+ * that fails the shape check.
  *
  * @param rawTranscriptJson - The raw file contents of the transcript
  *   artifact.
  * @returns The model ID string, or `null` if it could not be determined.
  */
+/**
+ * The allowlist a transcript's `model` value must fully match to be trusted
+ * as a commit-trailer `Provenance-Model` value (issue #171). Anchored
+ * (`^…$`, no `m` flag, so a trailing `\n` cannot satisfy it) and limited to
+ * `[A-Za-z0-9._-]`, which every real model ID uses and which excludes — in
+ * one static constraint — every CI-skip bracket/directive character, the
+ * `@`/`#` autolink triggers, `:`/`/` from a URL, whitespace, and newlines.
+ * Length-bounded 1-64 so a padded value cannot dominate the trailer.
+ */
+const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
 export function extractModelIdFromTranscript(
   rawTranscriptJson: string,
 ): string | null {
@@ -2407,7 +2422,10 @@ export function extractModelIdFromTranscript(
   if (typeof model !== "string" || model.length === 0) {
     return null;
   }
-  return /[\r\n]/.test(model) ? null : model;
+  // Reject (never truncate/sanitize) anything outside the static allowlist —
+  // see MODEL_ID_PATTERN. A rejected value renders as "unavailable" in the
+  // trailer, never a partial or forged one.
+  return MODEL_ID_PATTERN.test(model) ? model : null;
 }
 
 /**
