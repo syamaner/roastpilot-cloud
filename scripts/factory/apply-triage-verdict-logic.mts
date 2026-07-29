@@ -12,6 +12,45 @@ import {
   type ReadinessLabel,
   type TriageVerdict,
 } from "./triage-verdict-schema.mts";
+import {
+  renderBoundedUntrustedMultilineBlock,
+  renderBoundedUntrustedReason,
+} from "./untrusted-text.mts";
+
+// Per-field render budgets for the three attacker-influenced sinks in the two
+// posted-body builders below. Every one defangs `@codex` triggers, surfaces
+// invisibles, and discloses (never silently drops) any truncation via the
+// untrusted-text leaf; the caps keep one field — or a flood of tiny error
+// entries — from blowing GitHub's 65,536-character comment limit.
+
+// `verdict.reasoning` is schema-capped at MAX_REASONING_LENGTH = 4000 code
+// units; the worst-case defang expansion is ×8 (a BMP default-ignorable
+// character renders as an 8-char `[U+XXXX]` marker), so 4000 × 8 = 32,000 is
+// the smallest bound at which NO schema-valid reasoning ever truncates. A
+// truncation here would only ever fire on an out-of-contract payload, and even
+// then it discloses the omitted count with the full text in the run log.
+const MAX_RENDERED_REASONING_CODE_POINTS = 32_000;
+
+// Each `missing_info_questions[i]` is schema-capped at MAX_QUESTION_LENGTH =
+// 500 code units. A generous 1000-cp bound leaves headroom for the rare
+// defang-expanded question while still disclosing rather than dropping the
+// (out-of-contract) longer case.
+const MAX_RENDERED_QUESTION_CODE_POINTS = 1_000;
+
+// A fallback `errors[i]` echoes attacker-influenced material (rejected key
+// names, JSON.parse fragments, the fetched issue bodyText) and is NOT
+// length-capped by the schema, so it gets its own generous per-item bound with
+// disclosure to the run log.
+const MAX_RENDERED_ERROR_CODE_POINTS = 1_000;
+
+// The fallback `errors` ARRAY is itself unbounded in item count — thousands of
+// tiny per-question validation errors can be produced from one ~20KB payload —
+// so the list is two-tier capped: the first MAX_RENDERED_ERROR_ITEMS are
+// rendered and the remainder collapse to one trusted omitted-count line. At 40
+// items × 1000-cp bound the fallback body stays well under 65,536 characters
+// (asserted in a test), and the full error list is on console.error in the run
+// log before the first network write.
+const MAX_RENDERED_ERROR_ITEMS = 40;
 
 /**
  * Hidden marker embedded in every triage comment this job posts. Used to
@@ -196,16 +235,29 @@ export function buildVerdictCommentBody(
   verdict: TriageVerdict,
   generation: string,
 ): string {
+  // `verdict.readiness` is a closed enum validated by the schema (trusted).
+  // `verdict.reasoning` is untrusted multi-line agent prose: render it as an
+  // inert fenced block so its `@codex` triggers, invisibles, and any fence/
+  // marker-breakout attempt cannot reach the connector or the terminal-anchored
+  // generation markers this comment carries.
   const lines: string[] = [
     `**Automated triage verdict: \`${verdict.readiness}\`**`,
     "",
-    "> " + verdict.reasoning.split("\n").join("\n> "),
+    renderBoundedUntrustedMultilineBlock(
+      verdict.reasoning,
+      MAX_RENDERED_REASONING_CODE_POINTS,
+      "the run log",
+    ),
   ];
 
   if (verdict.missing_info_questions.length > 0) {
     lines.push("", "**Questions for a human:**");
     for (const q of verdict.missing_info_questions) {
-      lines.push(`- ${q}`);
+      // Each question is untrusted single-line text — an inline code span is
+      // the right inert wrapper (no newlines to preserve here).
+      lines.push(
+        `- ${renderBoundedUntrustedReason(q, MAX_RENDERED_QUESTION_CODE_POINTS, "the run log")}`,
+      );
     }
   }
 
@@ -246,12 +298,30 @@ export function buildFallbackCommentBody(
   errors: readonly string[],
   generation: string,
 ): string {
+  // Each error is untrusted (it echoes rejected key names, JSON.parse
+  // fragments, and the fetched issue bodyText) — render every item inert and
+  // bounded-but-disclosed. The item COUNT is also unbounded, so cap the list:
+  // render the first MAX_RENDERED_ERROR_ITEMS and collapse the remainder to one
+  // trusted omitted-count line, keeping the body under GitHub's comment limit
+  // without silently dropping evidence (the full list is on console.error in
+  // the run log before the first network write).
+  const shownErrors = errors.slice(0, MAX_RENDERED_ERROR_ITEMS);
+  const errorLines = shownErrors.map(
+    (e) => `- ${renderBoundedUntrustedReason(e, MAX_RENDERED_ERROR_CODE_POINTS, "the run log")}`,
+  );
+  const omittedErrors = errors.length - shownErrors.length;
+  if (omittedErrors > 0) {
+    errorLines.push(
+      `- _(${omittedErrors} further error(s) omitted — full detail in the run log.)_`,
+    );
+  }
+
   const lines: string[] = [
     "**Automated triage failed.** The `needs-triage` label is unchanged; " +
       "a human should review this issue manually.",
     "",
     "Validation errors:",
-    ...errors.map((e) => `- ${e}`),
+    ...errorLines,
     "",
     buildTriageGenerationMarker(generation),
     TRIAGE_COMMENT_MARKER,

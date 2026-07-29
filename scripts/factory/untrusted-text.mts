@@ -487,3 +487,140 @@ export function renderBoundedUntrustedReason(
   const omitted = codePoints.length - Array.from(kept).length;
   return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_`;
 }
+
+/**
+ * Renders one untrusted MULTI-LINE block (agent prose whose newlines carry
+ * meaning) for a Markdown sink the privileged publisher POSTs/PATCHes to
+ * GitHub, wrapped in a fenced ```` ```text ```` code block so the whole block
+ * renders as literal, inert text with its line breaks preserved (#158 slice 3,
+ * the triage-verdict reasoning sink). The single-line {@link
+ * renderBoundedUntrustedReason} is wrong here: it collapses `[\r\n]+` to one
+ * space, which would flatten multi-line reasoning into an unreadable run-on.
+ *
+ * **The transform ORDER is load-bearing** — each step is placed so a later one
+ * cannot re-open what an earlier one closed:
+ *
+ *  1. **EOL-normalise** `\r\n`/`\r` → `\n`, so the posted fenced block has
+ *     consistent line endings. This is NORMALISATION plus defence-in-depth, NOT
+ *     the sole guard for a CR-prefixed fence or trigger: JS's `/m` anchors `^`
+ *     at a bare `\r` (`/^~{3,}/m.test("x\r~~~")` is `true`), so the step-4
+ *     tilde-defuse already catches a `\r~~~` line even without this step, and
+ *     the step-5 `\s*` includes `\r`, so a `@\rcodex` split is already caught
+ *     too. The value here is a clean, deterministic output line ending — a bare
+ *     `\r` left in the rendered block serves no purpose — and belt-and-suspenders
+ *     against a downstream CommonMark renderer that treats bare CR as a line
+ *     ending. A test pins the `\r\n`/`\r` → `\n` normalisation so the step is
+ *     not a silent no-op.
+ *  2. **{@link escapeInvisibleCharactersVisibly}** — render every invisible/
+ *     bidi/exotic-whitespace character (Trojan-Source overrides, zero-width
+ *     trigger splits, NEL/LS/PS separators) as a visible `[U+XXXX]` marker.
+ *     This PRESERVES `\n` (ASCII whitespace is exempt), so the block's real
+ *     line structure survives while a `@<ZWSP>codex` split JS `\s` misses is
+ *     turned into inert marker text, and a NEL/LS/PS that could act as a
+ *     line terminator to a renderer stops reading as one.
+ *  3. **Strip ALL backticks** `` ` `` → "". A backtick can neither close our
+ *     ```` ``` ```` fence early (fence-escape) nor split `@`/`codex` for the
+ *     step-5 neutralise to miss (the slice-1 backtick-split exploit). There is
+ *     no newline-collapse here to do collateral joining, so the strip must
+ *     happen at this step. This strip is LOSSY (a backtick-only reasoning
+ *     collapses to an empty block); so is the step-4 tilde-defuse. Rather than a
+ *     per-transform check, a SINGLE class-level disclosure fires whenever any
+ *     step-3/4 content-modifying transform changed the text (see
+ *     `modifiedForSafeRendering` below): a non-silent note is appended OUTSIDE
+ *     the fence pointing at `fullDetailLocation` (the run log holds the full
+ *     un-modified value) — the AGENTS.md floor is that evidence is never
+ *     SILENTLY dropped. It is emitted on EVERY path, truncated or not: on the
+ *     truncated path the omitted count is measured against the POST-transform
+ *     content, so it does not cover the stripped/reduced characters, and the
+ *     formatting note sits alongside the truncation note (each accurate for its
+ *     own removal).
+ *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
+ *     renderer that also honours `~~~` fences). AFTER step 3, because a backtick
+ *     strip can expose a `~~~` a backtick had split. The `/m` `^` anchors at
+ *     every line start (`\n` AND, in JS, a bare `\r`), so this catches a CR-
+ *     prefixed fence with or without step 1's normalisation. An interior `~~~`
+ *     not at a line start is left alone. Like step 3, this is a content-
+ *     modifying transform, so any reduction it makes is covered by the same
+ *     step-3 safe-rendering disclosure.
+ *  5. **{@link neutralizeCodexTriggerPhrases}** — LAST content transform (the
+ *     slice-1 order lesson: any join-capable removal after it can rebuild a
+ *     `@…codex` it already walked past). Its `\s*` spans `\n`, so a cross-line
+ *     `@\ncodex` split is caught here (the deliberate newline-preservation
+ *     exception — the block keeps its newlines, but a trigger straddling one is
+ *     still defanged). Unconditional: whether the connector honours a trigger
+ *     INSIDE a fenced code block is unproven, so this fails closed and always
+ *     runs.
+ *  6. **Code-point bound + non-silent disclosure** — mirrors {@link
+ *     renderBoundedUntrustedReason} exactly: slice to `maxCodePoints` (never
+ *     splitting an astral char), {@link stripTruncationTailArtifacts} on the
+ *     tail (so truncation cannot resynthesise a trigger or leave half a
+ *     marker/a lone surrogate), and count the omitted characters AFTER that
+ *     strip.
+ *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````. Truncated: the
+ *     kept fence, then a trusted italic disclosure OUTSIDE the fence naming the
+ *     omitted count and where the full evidence lives. EITHER form ALSO carries
+ *     the step-3 "formatting characters removed" disclosure OUTSIDE the fence
+ *     when a backtick was stripped — on the truncated path the omitted count
+ *     does not cover the stripped backticks, so both notes appear. All
+ *     disclosures are trusted italic; the `text` info-string is a trusted
+ *     constant.
+ *
+ * @param text - The untrusted multi-line text.
+ * @param maxCodePoints - The generous per-block code-point budget.
+ * @param fullDetailLocation - A TRUSTED caller-supplied literal naming where the
+ *   full, untruncated evidence lives (e.g. `"the run log"`), interpolated into
+ *   the disclosure suffix OUTSIDE the fence. MUST be a fixed string literal
+ *   owned by the caller, NEVER attacker-derived — it is not itself sanitised.
+ * @returns Markdown: a ```` ```text ```` fenced block, plus a disclosure suffix
+ *   when truncated.
+ */
+export function renderBoundedUntrustedMultilineBlock(
+  text: string,
+  maxCodePoints: number,
+  fullDetailLocation = "the run output",
+): string {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const invisiblesMarked = escapeInvisibleCharactersVisibly(normalized);
+  const withoutBackticks = invisiblesMarked.replace(/`/g, "");
+  const tildeDefused = withoutBackticks.replace(/^( {0,3})~{3,}/gm, "$1~~");
+  const defanged = neutralizeCodexTriggerPhrases(tildeDefused);
+  // Disclose whenever ANY content-modifying safe-rendering transform in steps
+  // 3-4 changed the text — strip-backticks OR tilde-defuse, or any future lossy
+  // transform added to that segment — so a shortened (or empty) reasoning is
+  // never published silently (#158 #174 Codex P2/r2/r3 — the AGENTS.md floor is
+  // that evidence is never SILENTLY dropped; the full un-stripped value is in
+  // the run log, written before the POST). Comparing the post-tilde-defuse
+  // content against `invisiblesMarked` closes the whole CLASS in one check
+  // rather than one transform at a time. The baseline is DELIBERATELY the
+  // post-EOL-normalise text: CRLF/CR -> LF (step 1) is benign, content-
+  // preserving line-ending normalisation, not a lossy safety transform, so it
+  // is intentionally NOT disclosed (a note on every Windows-line-ending verdict
+  // would be noise) — do not move the baseline back to the pre-EOL text. The
+  // step-5 trigger neutralise is also excluded: it substitutes a VISIBLE marker,
+  // so nothing is silently lost.
+  const modifiedForSafeRendering = tildeDefused !== invisiblesMarked;
+  // Disclosed on EVERY path when true. ORTHOGONAL to the truncation note: the
+  // truncation count below is measured against the POST-transform `defanged`
+  // text, so it does NOT account for the stripped/reduced characters. Both notes
+  // are accurate for their own removal and both point at `fullDetailLocation`
+  // (the run log, which holds the full un-stripped value).
+  const formattingNote = modifiedForSafeRendering
+    ? `\n_[formatting characters removed for safe rendering — full detail in ${fullDetailLocation}]_`
+    : "";
+  const codePoints = Array.from(defanged);
+  if (codePoints.length <= maxCodePoints) {
+    return `\`\`\`text\n${defanged}\n\`\`\`${formattingNote}`;
+  }
+  const kept = stripTruncationTailArtifacts(
+    codePoints.slice(0, maxCodePoints).join(""),
+  );
+  // Count omitted from the ACTUAL kept length, AFTER the tail strip (same
+  // reasoning as renderBoundedUntrustedReason — the strip removes more than the
+  // raw gap, so counting before it would understate the disclosure).
+  const omitted = codePoints.length - Array.from(kept).length;
+  return (
+    `\`\`\`text\n${kept}\n\`\`\`\n` +
+    `_[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_` +
+    formattingNote
+  );
+}

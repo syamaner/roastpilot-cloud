@@ -7,6 +7,7 @@ import {
   escapeInvisibleCharactersVisibly,
   MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
   neutralizeCodexTriggerPhrases,
+  renderBoundedUntrustedMultilineBlock,
   renderBoundedUntrustedReason,
   safeClamp,
   sanitizeUntrustedInlineText,
@@ -214,6 +215,212 @@ describe("renderBoundedUntrustedReason (non-silent bounded reason render — PR 
     const withinBound = "empty patch (no changes)";
     expect(renderBoundedUntrustedReason(withinBound, 8000)).toBe(
       renderBoundedUntrustedReason(withinBound, 8000, "the run output"),
+    );
+  });
+});
+
+describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #158 slice 3, triage reasoning)", () => {
+  const BIG = 32_000;
+
+  /** The literal content BETWEEN the opening ` ```text\n ` and the trailing fence. */
+  function fencedContent(output: string): string {
+    const match =
+      /^```text\n([\s\S]*)\n```(?:\n_\[(?:truncated|formatting)[\s\S]*)?$/.exec(output);
+    if (match === null) throw new Error(`not a text fence: ${JSON.stringify(output)}`);
+    return match[1] as string;
+  }
+
+  it("T1: preserves a multi-line block byte-identically inside the fence (newlines NOT collapsed)", () => {
+    // The whole reason this primitive exists rather than the single-line span:
+    // the reason prose keeps its line breaks.
+    const reasoning = "Plan link present.\nAcceptance criteria present.\nScope and size OK.";
+    expect(renderBoundedUntrustedMultilineBlock(reasoning, BIG, "the run log")).toBe(
+      "```text\nPlan link present.\nAcceptance criteria present.\nScope and size OK.\n```",
+    );
+  });
+
+  it("T3: an interior and a CROSS-LINE @codex trigger are both neutralised inside the fence", () => {
+    const out = renderBoundedUntrustedMultilineBlock(
+      "please @codex review this\nand also @\ncodex again",
+      BIG,
+      "the run log",
+    );
+    expectNoLiveTrigger(out);
+    expect(out).toContain("[codex trigger removed]");
+  });
+
+  it("T4: NO backtick survives between the trusted fences (fence-escape + backtick-split closed)", () => {
+    const out = renderBoundedUntrustedMultilineBlock(
+      "single `tick`\n```\nfenced\n```\n````js\nfour\n````\n   ```indented",
+      BIG,
+      "the run log",
+    );
+    expect(fencedContent(out)).not.toContain("`");
+  });
+
+  it("T5: a tilde fence at a line start is defused; an interior ~~~ is left intact", () => {
+    const out = renderBoundedUntrustedMultilineBlock(
+      "~~~\nfenced\n~~~~~\n   ~~~ indented\n\r~~~ after CR\nkeep a~~~b interior",
+      BIG,
+      "the run log",
+    );
+    const content = fencedContent(out);
+    // No line in the content still opens with a 3+-tilde fence run.
+    expect(content.split("\n").some((line) => /^ {0,3}~{3,}/.test(line))).toBe(false);
+    // The interior (non-line-start) run is untouched.
+    expect(content).toContain("a~~~b");
+  });
+
+  it("normalises CRLF and bare-CR line endings to LF in the rendered block (pins step 1)", () => {
+    // Step 1 (EOL-normalise) is output-normalisation + defence-in-depth, not the
+    // sole \r~~~ / @\rcodex guard (those are caught by the tilde-defuse and the
+    // neutralise step — JS `/m` anchors at CR and `\s*` spans CR). This pins the
+    // \r\n / \r -> \n normalisation so the step is never a silent no-op.
+    const out = renderBoundedUntrustedMultilineBlock("a\r\nb\rc\nd", BIG, "the run log");
+    expect(fencedContent(out)).toBe("a\nb\nc\nd");
+    expect(out).not.toContain("\r");
+  });
+
+  it("T6: bidi/zero-width/NEL are surfaced as [U+XXXX]; a lone surrogate does not crash or survive", () => {
+    const out = renderBoundedUntrustedMultilineBlock(
+      "a\u202Eb\u200Bc\u0085d\uD83De",
+      BIG,
+      "the run log",
+    );
+    expect(out).toContain("[U+202E]");
+    expect(out).toContain("[U+200B]");
+    expect(out).toContain("[U+0085]");
+    expect(out).toContain("[U+D83D]");
+    expectNoLoneSurrogate(out);
+  });
+
+  it("T7: an over-budget block is truncated, tail-stripped, and discloses the count AFTER the strip", () => {
+    const out = renderBoundedUntrustedMultilineBlock("x".repeat(50), 10, "the run log");
+    expect(out).toBe(
+      "```text\nxxxxxxxxxx\n```\n_[truncated, 40 character(s) omitted — full detail in the run log]_",
+    );
+  });
+
+  it("T7: a truncation at the block boundary cannot resynthesise a trigger and counts the stripped chars", () => {
+    // 494 'a' + '@codex' + 50 'Z' = 550 code points; slice to 500 keeps `…a@codex`,
+    // the trigger-fragment strip removes `@codex` (6), so the true gap is 56.
+    const out = renderBoundedUntrustedMultilineBlock(
+      "a".repeat(494) + "@codex" + "Z".repeat(50),
+      500,
+      "the run log",
+    );
+    expect(out).toContain(
+      "_[truncated, 56 character(s) omitted — full detail in the run log]_",
+    );
+    expectNoResynthesizedTrigger(out.replace(/\n```\n_\[truncated[\s\S]*$/, ""));
+  });
+
+  it("T8: exactly-at-budget content renders in full with no disclosure", () => {
+    const out = renderBoundedUntrustedMultilineBlock("abcde", 5, "the run log");
+    expect(out).toBe("```text\nabcde\n```");
+    expect(out).not.toContain("truncated");
+  });
+
+  it("T8: 4000 BMP invisibles expand to exactly the 32,000-cp budget and render in FULL (derivation)", () => {
+    // The MAX_RENDERED_REASONING_CODE_POINTS=32_000 derivation: a schema-valid
+    // reasoning is <= 4000 code units; the worst-case ×8 defang (a BMP
+    // default-ignorable -> `[U+XXXX]`, 8 chars) hits the budget exactly, so no
+    // schema-valid verdict ever truncates. The repeated char is a \u200B
+    // ZWSP escape, never a literal (the guard forbids literal default-ignorables).
+    const out = renderBoundedUntrustedMultilineBlock("\u200B".repeat(4000), BIG, "the run log");
+    expect(out).toBe("```text\n" + "[U+200B]".repeat(4000) + "\n```");
+    expect(out).not.toContain("truncated");
+  });
+
+  it("T13: a backtick-split @`codex is reconstructed by the strip and then neutralised (order proof)", () => {
+    const out = renderBoundedUntrustedMultilineBlock("@`codex review", BIG, "the run log");
+    expectNoLiveTrigger(out);
+    expect(fencedContent(out)).not.toContain("@codex");
+  });
+
+  it("T14: an embedded triage-marker-shaped comment stays inside the fence (terminal extractors unaffected)", () => {
+    const spoof = "<!-- roastpilot-factory:triage-verdict:do-not-edit -->";
+    const out = renderBoundedUntrustedMultilineBlock(`prefix\n${spoof}\nsuffix`, BIG, "the run log");
+    // The spoof marker is not at the END of the rendered string — it sits before
+    // the closing fence, so the `$`-anchored / endsWith consumers never match it.
+    expect(out.endsWith(spoof)).toBe(false);
+    expect(out.endsWith("```")).toBe(true);
+    expect(fencedContent(out)).toContain(spoof);
+  });
+
+  it("N4: markdown-ish prose (no backticks) is byte-identical inside the fence", () => {
+    const prose = "## Plan\n- item one\n- item two\n> a quoted line\n**bold** and _italic_";
+    expect(fencedContent(renderBoundedUntrustedMultilineBlock(prose, BIG, "the run log"))).toBe(prose);
+  });
+
+  it("N5: backticks-only content collapses to an empty fence WITH a non-silent formatting-removed disclosure", () => {
+    // #174 Codex P2: the empty fence alone would silently drop the whole
+    // reasoning; the disclosure points a reader at the full un-stripped value.
+    expect(renderBoundedUntrustedMultilineBlock("```", BIG, "the run log")).toBe(
+      "```text\n\n```\n_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174: interior backticks (not truncated) → inert fenced body + a formatting-removed disclosure to the run log", () => {
+    const out = renderBoundedUntrustedMultilineBlock("use `--flag` now", BIG, "the run log");
+    expect(fencedContent(out)).toBe("use --flag now");
+    expect(fencedContent(out)).not.toContain("`");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174: a no-backtick block gets NO formatting-removed disclosure (byte-identical to before)", () => {
+    const clean = "no code spans here\njust prose";
+    expect(renderBoundedUntrustedMultilineBlock(clean, BIG, "the run log")).toBe(
+      `\`\`\`text\n${clean}\n\`\`\``,
+    );
+    expect(renderBoundedUntrustedMultilineBlock(clean, BIG, "the run log")).not.toContain(
+      "formatting characters removed",
+    );
+  });
+
+  it("#174 r3: tilde-defuse alone (no backticks) fires the class-level safe-rendering disclosure", () => {
+    // The r3 case: tilde-defuse reduces `~~~` -> `~~`, a content change the
+    // backtick-only check missed. The generalised check catches it.
+    const out = renderBoundedUntrustedMultilineBlock("a\n~~~\nb", BIG, "the run log");
+    expect(fencedContent(out)).toBe("a\n~~\nb");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+  });
+
+  it("#174 r3: a CRLF-only block is normalised to LF and gets NO disclosure (EOL-normalise is deliberately excluded)", () => {
+    // EOL-normalise (step 1) is benign, content-preserving line-ending
+    // normalisation — the baseline for the disclosure is the POST-EOL text, so a
+    // Windows-line-ending verdict is NOT flagged as modified.
+    const out = renderBoundedUntrustedMultilineBlock("a\r\nb", BIG, "the run log");
+    expect(out).toBe("```text\na\nb\n```");
+    expect(out).not.toContain("formatting characters removed");
+  });
+
+  it("#174 r2: truncated AND backticks → BOTH the truncation note AND the formatting-removed note", () => {
+    // The truncation count is measured against the POST-strip content (it
+    // reports the 40 the LENGTH bound cut, NOT the 5 stripped backticks), so the
+    // formatting note must ALSO be present to disclose the strip. Both point at
+    // the run log, which holds the full un-stripped value.
+    const out = renderBoundedUntrustedMultilineBlock("`".repeat(5) + "x".repeat(50), 10, "the run log");
+    expect(out).toContain("_[truncated, 40 character(s) omitted — full detail in the run log]_");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
+    expect(fencedContent(out)).toBe("x".repeat(10));
+  });
+
+  it("counts by CODE POINTS, never splitting an astral char (no lone surrogate at the cut)", () => {
+    const out = renderBoundedUntrustedMultilineBlock("😀".repeat(50), 10, "the run log");
+    expectNoLoneSurrogate(out);
+  });
+
+  it("omitting fullDetailLocation is byte-identical to passing the default", () => {
+    const oversized = "y".repeat(40);
+    expect(renderBoundedUntrustedMultilineBlock(oversized, 10)).toBe(
+      renderBoundedUntrustedMultilineBlock(oversized, 10, "the run output"),
     );
   });
 });
