@@ -523,12 +523,14 @@ export function renderBoundedUntrustedReason(
  *     step-5 neutralise to miss (the slice-1 backtick-split exploit). There is
  *     no newline-collapse here to do collateral joining, so the strip must
  *     happen at this step. This strip is LOSSY (a backtick-only reasoning
- *     collapses to an empty block), so when it removes anything AND the block is
- *     not otherwise truncated, a non-silent disclosure is appended OUTSIDE the
- *     fence pointing at `fullDetailLocation` (the run log holds the full
- *     un-stripped value) — the AGENTS.md floor is that evidence is never
- *     SILENTLY dropped. When the block IS truncated, the truncation disclosure
- *     below already points at the same location, so no second note is added.
+ *     collapses to an empty block), so whenever it removes anything a non-silent
+ *     disclosure is appended OUTSIDE the fence pointing at `fullDetailLocation`
+ *     (the run log holds the full un-stripped value) — the AGENTS.md floor is
+ *     that evidence is never SILENTLY dropped. It is emitted on EVERY path,
+ *     truncated or not: on the truncated path the omitted count is measured
+ *     against the POST-strip content, so it does not cover the stripped
+ *     backticks, and the formatting note sits alongside the truncation note
+ *     (each accurate for its own removal).
  *  4. **Tilde-fence defusal** `^( {0,3})~{3,}` → `$1~~` (defence-in-depth for a
  *     renderer that also honours `~~~` fences). AFTER step 3, because a backtick
  *     strip can expose a `~~~` a backtick had split. The `/m` `^` anchors at
@@ -549,12 +551,14 @@ export function renderBoundedUntrustedReason(
  *     tail (so truncation cannot resynthesise a trigger or leave half a
  *     marker/a lone surrogate), and count the omitted characters AFTER that
  *     strip.
- *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````, plus a trusted
- *     italic "formatting characters removed" disclosure OUTSIDE the fence when
- *     step 3 stripped a backtick (see step 3). Truncated: the kept fence, then a
- *     trusted italic disclosure OUTSIDE the fence naming the omitted count and
- *     where the full evidence lives (which also covers any backtick loss, so no
- *     second note is added). The `text` info-string is a trusted constant.
+ *  7. **Wrap.** Untruncated: ```` ```text\n<content>\n``` ````. Truncated: the
+ *     kept fence, then a trusted italic disclosure OUTSIDE the fence naming the
+ *     omitted count and where the full evidence lives. EITHER form ALSO carries
+ *     the step-3 "formatting characters removed" disclosure OUTSIDE the fence
+ *     when a backtick was stripped — on the truncated path the omitted count
+ *     does not cover the stripped backticks, so both notes appear. All
+ *     disclosures are trusted italic; the `text` info-string is a trusted
+ *     constant.
  *
  * @param text - The untrusted multi-line text.
  * @param maxCodePoints - The generous per-block code-point budget.
@@ -581,15 +585,18 @@ export function renderBoundedUntrustedMultilineBlock(
   const formattingRemoved = withoutBackticks !== invisiblesMarked;
   const tildeDefused = withoutBackticks.replace(/^( {0,3})~{3,}/gm, "$1~~");
   const defanged = neutralizeCodexTriggerPhrases(tildeDefused);
+  // The backtick strip's loss is disclosed on EVERY path when it removed
+  // anything (#174 Codex r2). It is ORTHOGONAL to the truncation note: the
+  // truncation count below is measured against the POST-strip `defanged` text,
+  // so it does NOT account for the stripped backticks. Both notes are accurate
+  // for their own removal and both point at `fullDetailLocation` (the run log,
+  // which holds the full un-stripped value).
+  const formattingNote = formattingRemoved
+    ? `\n_[formatting characters removed for safe rendering — full detail in ${fullDetailLocation}]_`
+    : "";
   const codePoints = Array.from(defanged);
   if (codePoints.length <= maxCodePoints) {
-    const block = `\`\`\`text\n${defanged}\n\`\`\``;
-    // Only when NOT truncated — the truncation disclosure below already points
-    // at the same location, so a truncated-and-stripped block needs no second
-    // note.
-    return formattingRemoved
-      ? `${block}\n_[formatting characters removed for safe rendering — full detail in ${fullDetailLocation}]_`
-      : block;
+    return `\`\`\`text\n${defanged}\n\`\`\`${formattingNote}`;
   }
   const kept = stripTruncationTailArtifacts(
     codePoints.slice(0, maxCodePoints).join(""),
@@ -600,6 +607,7 @@ export function renderBoundedUntrustedMultilineBlock(
   const omitted = codePoints.length - Array.from(kept).length;
   return (
     `\`\`\`text\n${kept}\n\`\`\`\n` +
-    `_[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_`
+    `_[truncated, ${omitted} character(s) omitted — full detail in ${fullDetailLocation}]_` +
+    formattingNote
   );
 }

@@ -380,13 +380,16 @@ describe("renderBoundedUntrustedMultilineBlock (multi-line fenced render — #15
     );
   });
 
-  it("#174: truncated AND backticks → only the truncation disclosure, no DOUBLE disclosure", () => {
-    // Backticks stripped, then still over budget: the truncation note already
-    // points at the run log (which holds the full un-stripped value), so the
-    // formatting-removed note is NOT also added.
+  it("#174 r2: truncated AND backticks → BOTH the truncation note AND the formatting-removed note", () => {
+    // The truncation count is measured against the POST-strip content (it
+    // reports the 40 the LENGTH bound cut, NOT the 5 stripped backticks), so the
+    // formatting note must ALSO be present to disclose the strip. Both point at
+    // the run log, which holds the full un-stripped value.
     const out = renderBoundedUntrustedMultilineBlock("`".repeat(5) + "x".repeat(50), 10, "the run log");
     expect(out).toContain("_[truncated, 40 character(s) omitted — full detail in the run log]_");
-    expect(out).not.toContain("formatting characters removed");
+    expect(out).toContain(
+      "_[formatting characters removed for safe rendering — full detail in the run log]_",
+    );
     expect(fencedContent(out)).toBe("x".repeat(10));
   });
 
