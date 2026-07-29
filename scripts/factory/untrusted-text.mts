@@ -437,10 +437,15 @@ export function sanitizeUntrustedTextForPostedBody(value: string): string {
  * any truncation rather than dropping evidence silently (#158 fold, PR #170,
  * Codex P1 — the AGENTS.md floor is "evidence/state is never SILENTLY dropped
  * or truncated"; a bounded-but-disclosed render is compliant, a silent cut is
- * not). Mirrors the shape of `publish-spec-grounding-verdict-logic.mts`'s
- * `sanitizeReasonForDisplay` / `buildSpecGroundingFallbackCommentBody`, but
- * lives here so `implement-patch-logic.mts` need not import that markdown-it-
- * bearing module into the import-closure verifier's reach.
+ * not). Mirrors the two-tier LIST-bounding shape of
+ * `publish-spec-grounding-verdict-logic.mts`'s
+ * `buildSpecGroundingFallbackCommentBody` (per-item + total + omitted count),
+ * but lives here so `implement-patch-logic.mts` need not import that
+ * markdown-it-bearing module into the import-closure verifier's reach. NOTE:
+ * that module's own PER-ITEM helper, `sanitizeReasonForDisplay`, still
+ * truncates to 500 code points with a BARE `…` (a silent cut of this same
+ * class, not the explicit disclosure below); folding it onto THIS primitive is
+ * tracked in #172 for #158 slice 2.
  *
  * Defangs via {@link sanitizeUntrustedInlineText} (so a `@codex review` in a
  * reason cannot start a review from the comment), then bounds by CODE POINTS
@@ -462,7 +467,11 @@ export function renderBoundedUntrustedReason(reason: string, maxCodePoints: numb
   if (codePoints.length <= maxCodePoints) {
     return `\`${defanged}\``;
   }
-  const omitted = codePoints.length - maxCodePoints;
   const kept = stripTruncationTailArtifacts(codePoints.slice(0, maxCodePoints).join(""));
+  // Count omitted from the ACTUAL kept length, AFTER the tail strip — the strip
+  // removes MORE than the raw `length - maxCodePoints` gap (a partial trigger/
+  // marker fragment, a lone surrogate), so counting before it would understate
+  // the disclosure (qa finding, PR #170).
+  const omitted = codePoints.length - Array.from(kept).length;
   return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in the run output]_`;
 }

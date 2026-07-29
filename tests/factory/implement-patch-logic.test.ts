@@ -2855,9 +2855,11 @@ describe("issue #158 fold (PR #170, Codex P1): rejection reasons are bounded but
 describe("issue #158 fold (PR #170): the reason LIST is also non-silently bounded (omitted count, never a silent drop)", () => {
   it("comment sink: when the reasons exceed the TOTAL budget, the remainder is reported as an omitted count", () => {
     // Ten full-size reasons overrun the 60000-char comment total, so the tail
-    // is disclosed as a count rather than silently dropped.
+    // is disclosed as a count rather than silently dropped. The LITERAL count
+    // (7 bullets fit, 3 don't, at the current caps) is pinned so an off-by-one
+    // or a cap-constant drift can't slip past a green regex (qa finding).
     const reasons = Array.from({ length: 10 }, () => "x".repeat(8000));
     const body = buildImplementFailureCommentBody(reasons, "https://github.com/o/r/actions/runs/1");
-    expect(body).toMatch(/_\(\d+ further reason\(s\) omitted — see the run output\.\)_/);
+    expect(body).toContain("_(3 further reason(s) omitted — see the run output.)_");
   });
 });

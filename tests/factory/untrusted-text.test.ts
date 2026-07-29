@@ -162,6 +162,18 @@ describe("renderBoundedUntrustedReason (non-silent bounded reason render — PR 
     expectNoResynthesizedTrigger(out.replace(/_\[truncated[\s\S]*$/, ""));
   });
 
+  it("discloses the REAL omitted count, including chars removed by the tail strip (qa finding)", () => {
+    // 7994 'a' + '@codex' + 50 'Z' = 8050 code points; slice to 8000 keeps
+    // `…a@codex`, and the trigger-fragment strip removes `@codex` too — so the
+    // true gap is 56 (50 truncated + 6 stripped), not the naive 8050 - 8000.
+    const out = renderBoundedUntrustedReason("a".repeat(7994) + "@codex" + "Z".repeat(50), 8000);
+    expect(out).toContain(
+      "_[truncated, 56 character(s) omitted — full detail in the run output]_",
+    );
+    // and the manufactured `@codex` did not survive into the span.
+    expectNoResynthesizedTrigger(out.replace(/_\[truncated[\s\S]*$/, ""));
+  });
+
   it("counts by CODE POINTS, never splitting an astral char (no lone surrogate)", () => {
     const out = renderBoundedUntrustedReason("😀".repeat(9000), 8000);
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out)).toBe(false);
