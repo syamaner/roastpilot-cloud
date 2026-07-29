@@ -441,6 +441,23 @@ describe("publish-implement-patch — #171: CI-skip control tokens on the commit
     expect(subject.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
   });
 
+  it("E5b: a title of many invisibles clamps with safeClamp, never leaving a dangling [U+XXXX marker (mutation G5 — a bare .slice fails this)", async () => {
+    // Each zero-width char expands to an 8-char `[U+200B]` marker; the two
+    // leading ASCII chars make the 105-char subject budget land MID-marker, so
+    // a bare `.slice` would end the pushed subject in a dangling `[U+200B`.
+    // (A lone surrogate — the emoji case above — is not the discriminator on
+    // the commit path: Node's execFileSync normalises one to U+FFFD before git
+    // ever sees it, so the marker strip is what safeClamp earns here.)
+    stubHappyPathFetch({ issueTitle: "aa" + "\u200B".repeat(40) });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const subject = (await pushedCommitBody()).split("\n")[0];
+    expect(subject.length).toBeLessThanOrEqual(120);
+    expect(subject.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
+  });
+
   it("E6: a clean title still pushes a branch and opens a PR (no false positive)", async () => {
     const fetchMock = stubHappyPathFetch({
       issueTitle: "[F1-S3] add the roast curve component",
