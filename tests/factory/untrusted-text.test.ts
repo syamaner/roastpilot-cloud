@@ -7,6 +7,7 @@ import {
   escapeInvisibleCharactersVisibly,
   MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
   neutralizeCodexTriggerPhrases,
+  renderBoundedUntrustedReason,
   safeClamp,
   sanitizeUntrustedInlineText,
   sanitizeUntrustedTextForPostedBody,
@@ -124,6 +125,47 @@ describe("escapeInvisibleCharactersVisibly (in the untrusted-text leaf)", () => 
 
   it("preserves ordinary ASCII whitespace (space, tab, LF, CR) verbatim", () => {
     expect(escapeInvisibleCharactersVisibly("a b\tc\nd\re")).toBe("a b\tc\nd\re");
+  });
+
+  it("escapes a lone HIGH and a lone LOW surrogate to a visible marker (Cs ⊂ \\p{C})", () => {
+    // Pins the load-bearing invariant that inline() output is ALWAYS
+    // well-formed UTF-16: a future narrowing of UNTRUSTED_DATA_BREAKOUT_PATTERN
+    // away from \p{C} would silently reopen the surrogate class (fsr note).
+    expect(escapeInvisibleCharactersVisibly("a\uD83Db")).toBe("a[U+D83D]b");
+    expect(escapeInvisibleCharactersVisibly("a\uDE00b")).toBe("a[U+DE00]b");
+  });
+});
+
+describe("renderBoundedUntrustedReason (non-silent bounded reason render — PR #170 Codex P1)", () => {
+  it("returns a within-bound reason in full, in a code span, with no disclosure", () => {
+    expect(renderBoundedUntrustedReason("empty patch (no changes)", 8000)).toBe(
+      "`empty patch (no changes)`",
+    );
+  });
+
+  it("defangs a trigger in the reason (no live @codex, marker present)", () => {
+    const out = renderBoundedUntrustedReason("blocked: @codex review this", 8000);
+    expectNoLiveTrigger(out);
+    expect(out).toContain("[codex trigger removed]");
+  });
+
+  it("truncates an oversized reason WITH an explicit non-silent disclosure naming the omitted count", () => {
+    const out = renderBoundedUntrustedReason("x".repeat(9000), 8000);
+    expect(out).toMatch(
+      /^`x{8000}` _\[truncated, 1000 character\(s\) omitted — full detail in the run output\]_$/,
+    );
+  });
+
+  it("a truncation at the reason boundary cannot resynthesise a trigger (@codexx at the cut)", () => {
+    const out = renderBoundedUntrustedReason("a".repeat(7999) + "@codexx", 8000);
+    // strip the disclosure suffix, then assert no contiguous @codex in the span
+    expectNoResynthesizedTrigger(out.replace(/_\[truncated[\s\S]*$/, ""));
+  });
+
+  it("counts by CODE POINTS, never splitting an astral char (no lone surrogate)", () => {
+    const out = renderBoundedUntrustedReason("😀".repeat(9000), 8000);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(out)).toBe(false);
   });
 });
 

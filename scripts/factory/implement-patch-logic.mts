@@ -17,6 +17,7 @@
 import {
   MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
   neutralizeCodexTriggerPhrases,
+  renderBoundedUntrustedReason,
   sanitizeUntrustedTextForPostedBody,
 } from "./untrusted-text.mts";
 
@@ -1961,6 +1962,66 @@ export function findExistingImplementFailureCommentId(
 }
 
 /**
+ * GENEROUS per-item and total bounds for rendering the rejection `reasons`
+ * into the two MARKDOWN sinks (the failure comment and the step summary),
+ * chosen so no realistic single-line reason ever truncates while still
+ * keeping each sink under its platform ceiling (#158 fold, PR #170, Codex P1).
+ * The full, untruncated evidence always lives in the run LOG (sink 2, via
+ * `sanitizeUntrustedInlineText`, no clamp), which every disclosure points to,
+ * so a bounded markdown render never drops evidence silently. Proposed here;
+ * fsr/qa tune on re-verify (triage deferred the exact constants).
+ *
+ * - Comment: 8000 code points/item, 60000 chars total — a normal reason is one
+ *   short line; 8000 is ~40× that, and the total stays well under GitHub's
+ *   65536-char comment ceiling with room for the preamble/marker/run-link.
+ * - Step summary: 20000 code points/item, 200000 chars total — a larger,
+ *   durable surface (~1 MiB `$GITHUB_STEP_SUMMARY` ceiling), so more generous.
+ */
+const MAX_COMMENT_REASON_CODE_POINTS = 8000;
+const MAX_COMMENT_REASONS_TOTAL_CHARS = 60_000;
+const MAX_SUMMARY_REASON_CODE_POINTS = 20_000;
+const MAX_SUMMARY_REASONS_TOTAL_CHARS = 200_000;
+
+/**
+ * Renders `reasons` as bounded markdown bullet lines for a posted-body sink,
+ * in TWO non-silent layers mirroring `buildSpecGroundingFallbackCommentBody`:
+ * each reason via {@link renderBoundedUntrustedReason} (per-item bound +
+ * disclosure), then the list as a whole capped at `maxTotalChars` — any
+ * reason beyond the total is reported as an omitted COUNT, never silently
+ * dropped. The full evidence is always in the run log.
+ *
+ * @param reasons - The untrusted reason list.
+ * @param bulletPrefix - The bullet lead for this sink (`"- "` / `"  - "`).
+ * @param maxItemCodePoints - Per-reason code-point budget.
+ * @param maxTotalChars - Total list budget, in characters.
+ * @returns The bullet lines, ending with an omitted-count line when capped.
+ */
+function boundedReasonBullets(
+  reasons: readonly string[],
+  bulletPrefix: string,
+  maxItemCodePoints: number,
+  maxTotalChars: number,
+): string[] {
+  const lines: string[] = [];
+  let total = 0;
+  let added = 0;
+  for (const reason of reasons) {
+    const bullet = `${bulletPrefix}${renderBoundedUntrustedReason(reason, maxItemCodePoints)}`;
+    if (total + bullet.length + 1 > maxTotalChars) {
+      break; // Remainder reported as an omitted count below, never silently dropped.
+    }
+    lines.push(bullet);
+    total += bullet.length + 1;
+    added += 1;
+  }
+  const omitted = reasons.length - added;
+  if (omitted > 0) {
+    lines.push(`${bulletPrefix}_(${omitted} further reason(s) omitted — see the run output.)_`);
+  }
+  return lines;
+}
+
+/**
  * Builds the issue comment posted when an implement run does NOT produce
  * a publishable PR — empty/failed patch, a forbidden-path violation, or
  * the implement job itself not succeeding. Mirrors the triage skill's
@@ -1993,7 +2054,12 @@ export function buildImplementFailureCommentBody(
     preamble,
     "",
     "Reasons:",
-    ...reasons.map((r) => `- ${sanitizeUntrustedTextForPostedBody(r)}`),
+    ...boundedReasonBullets(
+      reasons,
+      "- ",
+      MAX_COMMENT_REASON_CODE_POINTS,
+      MAX_COMMENT_REASONS_TOTAL_CHARS,
+    ),
     "",
     `[Run output](${runUrl})`,
     "",
@@ -2264,7 +2330,12 @@ export function buildPublishRejectedStepSummary(
     `- **Issue:** #${context.issueNumber}`,
     `- **Publisher identity:** ${publisherIdentityLine(context)}`,
     "- **PR:** none — publish rejected. Reasons:",
-    ...context.reasons.map((r) => `  - ${sanitizeUntrustedTextForPostedBody(r)}`),
+    ...boundedReasonBullets(
+      context.reasons,
+      "  - ",
+      MAX_SUMMARY_REASON_CODE_POINTS,
+      MAX_SUMMARY_REASONS_TOTAL_CHARS,
+    ),
     "",
   ].join("\n");
 }

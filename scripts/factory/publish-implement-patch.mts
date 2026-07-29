@@ -225,7 +225,6 @@ import {
 import {
   safeClamp,
   sanitizeUntrustedInlineText,
-  sanitizeUntrustedTextForPostedBody,
 } from "./untrusted-text.mts";
 
 /**
@@ -2059,9 +2058,16 @@ export async function main(): Promise<void> {
       branchPushed,
       failureCommentAuthorLogin,
     );
+    // Sink 2 (the run LOG) is the FULL-EVIDENCE home the two markdown sinks'
+    // truncation disclosures point to: NOT a connector surface and NOT
+    // markdown, so it defangs each reason for log hygiene
+    // (`sanitizeUntrustedInlineText`: escape-invisibles + collapse + strip-
+    // backticks + neutralize) but does NOT clamp or code-span-wrap — the whole
+    // reason is preserved (#158 fold, PR #170, Codex P1: evidence must not be
+    // dropped silently, so the untruncated copy lives here, in the run output).
     console.error(
       `Implement run for #${issueNumber} did not produce a PR. Reasons:\n` +
-        reasons.map((r) => `  - ${sanitizeUntrustedTextForPostedBody(r)}`).join("\n"),
+        reasons.map((r) => `  - ${sanitizeUntrustedInlineText(r)}`).join("\n"),
     );
     process.exitCode = 1;
   }

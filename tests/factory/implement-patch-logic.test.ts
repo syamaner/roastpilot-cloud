@@ -2798,3 +2798,66 @@ describe("issue #158 fold round 3: a 200-char field clamp cannot resynthesise a 
     expect(body).not.toContain("@codex");
   });
 });
+
+describe("issue #158 fold (PR #170, Codex P1): rejection reasons are bounded but NEVER silently truncated", () => {
+  const RUN = "https://github.com/o/r/actions/runs/1";
+
+  it("comment sink: a normal reason renders in FULL, with no truncation disclosure", () => {
+    const body = buildImplementFailureCommentBody(
+      ["patch touches pipeline-protected path(s), refusing to apply it: .github/workflows/x.yml"],
+      RUN,
+    );
+    expect(body).toContain(
+      "`patch touches pipeline-protected path(s), refusing to apply it: .github/workflows/x.yml`",
+    );
+    expect(body).not.toContain("[truncated,");
+  });
+
+  it("comment sink: an oversized reason is truncated WITH an explicit, non-silent disclosure pointing at the run output", () => {
+    const body = buildImplementFailureCommentBody(["x".repeat(9000)], RUN);
+    expect(body).toMatch(
+      /\[truncated, \d+ character\(s\) omitted — full detail in the run output\]/,
+    );
+    // the run link the disclosure points at is present in the body
+    expect(body).toContain(RUN);
+  });
+
+  it("comment sink: an oversized reason carrying a trigger still posts no live trigger", () => {
+    const body = buildImplementFailureCommentBody(
+      ["@codex review " + "x".repeat(9000)],
+      RUN,
+    );
+    expectNoLiveTrigger(body);
+  });
+
+  it("step-summary sink: an oversized reason is truncated WITH the non-silent disclosure", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: ["y".repeat(21000)],
+    });
+    expect(summary).toMatch(/\[truncated, \d+ character\(s\) omitted/);
+  });
+
+  it("step-summary sink: a normal reason renders in full with no disclosure", () => {
+    const summary = buildPublishRejectedStepSummary({
+      issueNumber: 6,
+      publisherLogin: "roastpilot-factory[bot]",
+      publishedViaFallback: false,
+      reasons: ["the implement run produced no changes (empty patch)"],
+    });
+    expect(summary).toContain("`the implement run produced no changes (empty patch)`");
+    expect(summary).not.toContain("[truncated,");
+  });
+});
+
+describe("issue #158 fold (PR #170): the reason LIST is also non-silently bounded (omitted count, never a silent drop)", () => {
+  it("comment sink: when the reasons exceed the TOTAL budget, the remainder is reported as an omitted count", () => {
+    // Ten full-size reasons overrun the 60000-char comment total, so the tail
+    // is disclosed as a count rather than silently dropped.
+    const reasons = Array.from({ length: 10 }, () => "x".repeat(8000));
+    const body = buildImplementFailureCommentBody(reasons, "https://github.com/o/r/actions/runs/1");
+    expect(body).toMatch(/_\(\d+ further reason\(s\) omitted — see the run output\.\)_/);
+  });
+});

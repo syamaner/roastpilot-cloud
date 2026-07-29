@@ -3612,6 +3612,38 @@ copy to scripts/factory/evil-copy.mts
     expect(exists).toBeNull();
   });
 
+  it("log sink (PR #170, Codex P1): the FULL rejection reason survives in the run log, untruncated", async () => {
+    // The log is the full-evidence home the markdown sinks' truncation
+    // disclosures point to. A long forbidden path makes the reason exceed the
+    // old 200-char field clamp; asserting the WHOLE path is in `console.error`
+    // proves the log is not silently clamped (removing-guard for the log fix).
+    const longName = "a".repeat(240);
+    const path = `scripts/factory/${longName}.mts`;
+    const diff =
+      `diff --git a/${path} b/${path}\n` +
+      `new file mode 100644\n` +
+      `index 0000000..abc1234\n` +
+      `--- /dev/null\n` +
+      `+++ b/${path}\n` +
+      `@@ -0,0 +1,1 @@\n` +
+      `+export const x = 1;\n`;
+    process.env.PATCH_PATH = await writePatch(scratchDir, "long-forbidden.diff", diff);
+    const fetchMock = rejectionOnlyFetchMock();
+    stubFetch(fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    const reasonLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((s) => s.includes("did not produce a PR. Reasons:"));
+    expect(reasonLog).toBeDefined();
+    // The ENTIRE 260-char path is present — a re-clamp to 200 would drop its tail.
+    expect(reasonLog).toContain(`scripts/factory/${longName}.mts`);
+    errorSpy.mockRestore();
+  });
+
   it("rejects a COPY OUT of scripts/factory/** (hand-crafted, same reason as above)", async () => {
     const diff = `diff --git a/scripts/factory/publish-implement-patch.mts b/lib/leaked-copy.mts
 similarity index 100%

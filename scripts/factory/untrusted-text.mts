@@ -334,16 +334,26 @@ const TRAILING_LONE_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
  * @param maxLength - The content-character budget (before the ellipsis).
  * @returns `value` bounded and, when truncated, tail-cleaned and `…`-suffixed.
  */
+/**
+ * Removes the artifacts a truncation can leave at a new string end, in the
+ * order that lets each strip clean what an earlier one exposes: a dangling
+ * partial `[U+XXXX` marker, then a lone high surrogate, then a
+ * truncation-manufactured `@…codex` fragment. Every strip only REMOVES, so it
+ * never lengthens the input. Shared by {@link safeClamp} (code-unit budget)
+ * and {@link renderBoundedUntrustedReason} (code-point budget).
+ */
+function stripTruncationTailArtifacts(truncated: string): string {
+  return truncated
+    .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
+    .replace(TRAILING_LONE_HIGH_SURROGATE, "")
+    .replace(TRAILING_TRIGGER_FRAGMENT, "");
+}
+
 export function safeClamp(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
   }
-  const truncated = value
-    .slice(0, maxLength)
-    .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
-    .replace(TRAILING_LONE_HIGH_SURROGATE, "")
-    .replace(TRAILING_TRIGGER_FRAGMENT, "");
-  return `${truncated}…`;
+  return `${stripTruncationTailArtifacts(value.slice(0, maxLength))}…`;
 }
 
 /**
@@ -418,4 +428,41 @@ export function sanitizeUntrustedInlineText(value: string): string {
  */
 export function sanitizeUntrustedTextForPostedBody(value: string): string {
   return `\`${safeClamp(sanitizeUntrustedInlineText(value), MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH)}\``;
+}
+
+/**
+ * Renders one untrusted REASON for a Markdown sink (a posted comment or the
+ * step summary) under a GENEROUS per-item bound that, unlike {@link
+ * sanitizeUntrustedTextForPostedBody}'s tight 200-char field clamp, DISCLOSES
+ * any truncation rather than dropping evidence silently (#158 fold, PR #170,
+ * Codex P1 — the AGENTS.md floor is "evidence/state is never SILENTLY dropped
+ * or truncated"; a bounded-but-disclosed render is compliant, a silent cut is
+ * not). Mirrors the shape of `publish-spec-grounding-verdict-logic.mts`'s
+ * `sanitizeReasonForDisplay` / `buildSpecGroundingFallbackCommentBody`, but
+ * lives here so `implement-patch-logic.mts` need not import that markdown-it-
+ * bearing module into the import-closure verifier's reach.
+ *
+ * Defangs via {@link sanitizeUntrustedInlineText} (so a `@codex review` in a
+ * reason cannot start a review from the comment), then bounds by CODE POINTS
+ * (never splitting an astral char): a reason within `maxCodePoints` is
+ * returned in full; a longer one is truncated to `maxCodePoints`, tail-cleaned
+ * ({@link stripTruncationTailArtifacts}, so truncation cannot resynthesise a
+ * trigger or leave half a marker), and followed by an explicit, non-silent
+ * disclosure naming the omitted count and where the full evidence lives (the
+ * run log). The kept text is wrapped in a code span; the disclosure is our own
+ * trusted italic text OUTSIDE the span.
+ *
+ * @param reason - The untrusted reason text.
+ * @param maxCodePoints - The generous per-item code-point budget.
+ * @returns Markdown: a code span, plus a disclosure suffix when truncated.
+ */
+export function renderBoundedUntrustedReason(reason: string, maxCodePoints: number): string {
+  const defanged = sanitizeUntrustedInlineText(reason);
+  const codePoints = Array.from(defanged);
+  if (codePoints.length <= maxCodePoints) {
+    return `\`${defanged}\``;
+  }
+  const omitted = codePoints.length - maxCodePoints;
+  const kept = stripTruncationTailArtifacts(codePoints.slice(0, maxCodePoints).join(""));
+  return `\`${kept}\` _[truncated, ${omitted} character(s) omitted — full detail in the run output]_`;
 }
