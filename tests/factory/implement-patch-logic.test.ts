@@ -2599,6 +2599,50 @@ describe("extractModelIdFromTranscript (F1-S10 slice 3, factory.md §13.12)", ()
       ),
     ).toBeNull();
   });
+
+  // #171: the model value is now validated against a static allowlist, not
+  // just a newline reject — closing @mention/#issue/URL/CI-skip-token/length
+  // in one structural constraint. Reject, never truncate.
+  const extractModel = (model: string): string | null =>
+    extractModelIdFromTranscript(
+      JSON.stringify([{ type: "system", subtype: "init", model }]),
+    );
+
+  it("M1: accepts every real model ID shape unchanged", () => {
+    for (const id of [
+      "claude-opus-4-8",
+      "claude-opus-4-1-20250805",
+      "claude-sonnet-5",
+      "claude-haiku-4-5-20251001",
+      "gpt-4.1",
+      "a",
+      "A".repeat(64),
+    ]) {
+      expect(extractModel(id)).toBe(id);
+    }
+  });
+
+  it("M2: REJECTS (returns null, never truncates) an ID outside the allowlist", () => {
+    for (const bad of [
+      "@syamaner",
+      "[skip ci]",
+      "model skip-checks:true",
+      "https://evil.example/x",
+      "claude #171",
+      `claude${"\u200B"}opus`, // an invisible splitting the value
+      "A".repeat(65), // one over the length bound
+    ]) {
+      expect(extractModel(bad)).toBeNull();
+    }
+  });
+
+  it("M3: still rejects a newline/CR-injected value (regression on the #55 case, now via the allowlist)", () => {
+    expect(extractModel("claude-sonnet\nSigned-off-by: mallory <m@e.com>")).toBeNull();
+    expect(extractModel("claude\rSigned-off-by: x")).toBeNull();
+    // JS `$` (no `m` flag) does not match before a trailing newline, so even a
+    // value that is otherwise clean but ends in `\n` is rejected.
+    expect(extractModel("claude-opus-4-8\n")).toBeNull();
+  });
 });
 
 describe("buildCommitTrailer (F1-S10 slice 3, factory.md §13.12)", () => {

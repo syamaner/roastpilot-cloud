@@ -343,6 +343,209 @@ function stubHappyPathFetch(options?: {
   return fetchMock;
 }
 
+/**
+ * The single `feature/6-*` branch the publisher pushed to the bare remote,
+ * or `null` if none was pushed (the fail-closed case). Found by pattern
+ * rather than an exact name so a test does not have to re-derive the title
+ * slug `deriveBranchName` produces.
+ */
+function pushedFeatureBranch(): string | null {
+  const listed = git(bareRemoteDir, ["branch", "--list", "feature/6-*"]);
+  const names = listed
+    .split("\n")
+    .map((line) => line.replace(/^[*+]?\s*/, "").trim())
+    .filter(Boolean);
+  return names[0] ?? null;
+}
+
+/** Clones the pushed `feature/6-*` branch and returns its HEAD commit's full message. */
+async function pushedCommitBody(): Promise<string> {
+  const branch = pushedFeatureBranch();
+  expect(branch).not.toBeNull();
+  const verifyDir = await mkdtemp(join(scratchDir, "verify-"));
+  execFileSync("git", [
+    "clone",
+    "-q",
+    "--branch",
+    branch as string,
+    bareRemoteDir,
+    verifyDir,
+  ]);
+  return execFileSync("git", ["log", "-1", "--format=%B"], {
+    cwd: verifyDir,
+    encoding: "utf8",
+  });
+}
+
+describe("publish-implement-patch — #171: CI-skip control tokens on the commit surface (real pushed commit)", () => {
+  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
+
+  it("E1: a [skip ci] token in the title is neutralised in the pushed commit — no honoured token, visible marker", async () => {
+    stubHappyPathFetch({ issueTitle: "[skip ci] add the feature" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    expect(body).toContain("(ci-skip token removed)");
+    expect(body.toLowerCase()).not.toContain("[skip ci]");
+  });
+
+  it("E2: a skip-checks:true directive in the title is neutralised in the pushed commit", async () => {
+    stubHappyPathFetch({ issueTitle: "urgent fix skip-checks:true please" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    expect(body).toContain("(ci-skip token removed)");
+    expect(body.toLowerCase()).not.toContain("skip-checks:true");
+  });
+
+  it("E3: an @codex trigger in the title cannot start a review from the pushed commit", async () => {
+    stubHappyPathFetch({ issueTitle: "[F1-S3] @codex review this" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    const subject = body.split("\n")[0];
+    expect(LIVE_TRIGGER.test(subject)).toBe(false);
+    expect(subject).toContain("[codex trigger removed]");
+  });
+
+  it("E4: a newline-injected Co-Authored-By in the title cannot forge a trailer (newlines collapsed to one line)", async () => {
+    stubHappyPathFetch({
+      issueTitle: "fix\n\nCo-Authored-By: mallory <mallory@evil.example>",
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    // The forged line was folded into the single subject line, never a trailer.
+    expect(body).not.toMatch(/^Co-Authored-By: mallory/m);
+    expect(body).toMatch(/^Co-Authored-By: Claude <noreply@anthropic\.com>$/m);
+  });
+
+  it("E5: a 400-emoji title clamps cleanly — no lone surrogate, no dangling marker in the pushed subject", async () => {
+    stubHappyPathFetch({ issueTitle: "😀".repeat(400) });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const subject = (await pushedCommitBody()).split("\n")[0];
+    expect(subject.length).toBeLessThanOrEqual(120);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(subject)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(subject)).toBe(false);
+    expect(subject.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
+  });
+
+  it("E5b: a title of many invisibles clamps with safeClamp, never leaving a dangling [U+XXXX marker (mutation G5 — a bare .slice fails this)", async () => {
+    // Each zero-width char expands to an 8-char `[U+200B]` marker; the two
+    // leading ASCII chars make the 105-char subject budget land MID-marker, so
+    // a bare `.slice` would end the pushed subject in a dangling `[U+200B`.
+    // (A lone surrogate — the emoji case above — is not the discriminator on
+    // the commit path: Node's execFileSync normalises one to U+FFFD before git
+    // ever sees it, so the marker strip is what safeClamp earns here.)
+    stubHappyPathFetch({ issueTitle: "aa" + "\u200B".repeat(40) });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const subject = (await pushedCommitBody()).split("\n")[0];
+    expect(subject.length).toBeLessThanOrEqual(120);
+    expect(subject.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
+  });
+
+  it("E6: a clean title still pushes a branch and opens a PR (no false positive)", async () => {
+    const fetchMock = stubHappyPathFetch({
+      issueTitle: "[F1-S3] add the roast curve component",
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(pushedFeatureBranch()).not.toBeNull();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    expect(
+      calls.find(([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST"),
+    ).toBeDefined();
+    const body = await pushedCommitBody();
+    expect(body).not.toContain("(ci-skip token removed)");
+  });
+
+  it("E7: a CI-skip token reaching an un-transformed trailer field fails closed — NO branch pushed, no PR, one failure comment", async () => {
+    // The dispatch actor is NOT per-field transformed; forcing a token into it
+    // proves the pre-push assertion is the independent second guard. A real
+    // dispatch actor is a GitHub username that cannot contain this — the value
+    // is artificial to exercise the fail-closed direction.
+    process.env.DISPATCH_ACTOR = "[skip ci]";
+    const fetchMock = stubHappyPathFetch({ issueTitle: "a clean title" });
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(pushedFeatureBranch()).toBeNull();
+    const calls = fetchMock.mock.calls as Array<[string | URL, RequestInit | undefined]>;
+    // No PR opened.
+    expect(
+      calls.find(([url, init]) => String(url).endsWith("/pulls") && init?.method === "POST"),
+    ).toBeUndefined();
+    // A failure comment WAS posted (the operator-visible signal).
+    expect(
+      calls.some(
+        ([url, init]) => String(url).includes("/comments") && init?.method === "POST",
+      ),
+    ).toBe(true);
+  });
+
+  async function commitBodyForTranscriptModel(model: string): Promise<string> {
+    const transcriptPath = join(scratchDir, `model-${Math.random().toString(36).slice(2)}.json`);
+    await fsWriteFile(
+      transcriptPath,
+      JSON.stringify([
+        { type: "system", subtype: "init", model },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+    process.env.IMPLEMENT_TRANSCRIPT_PATH = transcriptPath;
+    stubHappyPathFetch();
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    return pushedCommitBody();
+  }
+
+  it("E8: a modelId carrying a CI-skip token is rejected — the trailer reads 'unavailable', and the branch still pushes clean", async () => {
+    const body = await commitBodyForTranscriptModel("claude [skip ci]");
+    expect(body).toContain("Provenance-Model: unavailable");
+    expect(body.toLowerCase()).not.toContain("[skip ci]");
+  });
+
+  it("E9: a modelId carrying an @mention is rejected — the trailer reads 'unavailable'", async () => {
+    const body = await commitBodyForTranscriptModel("@syamaner");
+    expect(body).toContain("Provenance-Model: unavailable");
+    expect(body).not.toContain("@syamaner");
+  });
+
+  it("E10: a valid modelId still lands in the trailer unchanged (allowlist regression)", async () => {
+    const body = await commitBodyForTranscriptModel("claude-opus-4-8");
+    expect(body).toContain("Provenance-Model: claude-opus-4-8");
+  });
+
+  it("E11: a NESTED-bracket [oops [skip ci] title leaves NO [skip ci] substring in the pushed commit (fsr BLOCKER — GitHub reads it literally)", async () => {
+    stubHappyPathFetch({ issueTitle: "[oops [skip ci]" });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const body = await pushedCommitBody();
+    // The byte-level proof against what GitHub's literal substring search reads.
+    expect(body.toLowerCase()).not.toContain("[skip ci]");
+    expect(body).toContain("(ci-skip token removed)");
+  });
+});
+
 describe("publish-implement-patch — real git plumbing (happy path)", () => {
   it("applies the patch, commits, and pushes a real branch to the bare remote", async () => {
     stubHappyPathFetch();

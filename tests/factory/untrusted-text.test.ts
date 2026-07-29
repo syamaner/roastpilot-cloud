@@ -2,15 +2,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  CI_SKIP_TOKEN_REMOVED_MARKER,
   CODEX_TRIGGER_PATTERN,
   CODEX_TRIGGER_REMOVED_MARKER,
   escapeInvisibleCharactersVisibly,
+  findCiSkipDirectives,
   MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH,
+  neutralizeCiSkipDirectives,
   neutralizeCodexTriggerPhrases,
   renderBoundedUntrustedMultilineBlock,
   renderBoundedUntrustedReason,
   safeClamp,
   sanitizeUntrustedInlineText,
+  sanitizeUntrustedTextForCommitMessage,
   sanitizeUntrustedTextForPostedBody,
 } from "../../scripts/factory/untrusted-text.mts";
 
@@ -644,6 +648,218 @@ describe("issue #158 fold round 3: availability negatives (over-clamping must no
       "`ping @syamaner please`",
     );
     expect(sanitizeUntrustedInlineText("ping @syamaner please")).toBe("ping @syamaner please");
+  });
+});
+
+/**
+ * The seven exact spellings GitHub Actions honours in a commit message
+ * (verified 2026-07-29). A commit-message sanitiser output that still
+ * CONTAINS one of these (case-insensitively) could suppress a required
+ * workflow run — the #171 bug. The literal-substring check is deliberately
+ * independent of `findCiSkipDirectives` so a bug in the module's own
+ * detector cannot mask a bug in its transform; the shared-detector check is
+ * an additional belt.
+ */
+const HONOURED_CI_SKIP_SPELLINGS = [
+  "[skip ci]",
+  "[ci skip]",
+  "[no ci]",
+  "[skip actions]",
+  "[actions skip]",
+  "skip-checks:true",
+  "skip-checks: true",
+];
+
+function expectNoHonouredCiSkipToken(output: string): void {
+  const lower = output.toLowerCase();
+  for (const spelling of HONOURED_CI_SKIP_SPELLINGS) {
+    expect(lower).not.toContain(spelling.toLowerCase());
+  }
+  expect(findCiSkipDirectives(output)).toEqual([]);
+}
+
+describe("issue #171: CI-skip control tokens neutralised for the commit surface", () => {
+  it("L1: neutralises every honoured spelling (bracketed + directive)", () => {
+    for (const token of [
+      "[skip ci]",
+      "[ci skip]",
+      "[no ci]",
+      "[skip actions]",
+      "[actions skip]",
+      "skip-checks:true",
+      "skip-checks: true",
+    ]) {
+      const out = sanitizeUntrustedTextForCommitMessage(`fix ${token} thing`);
+      expect(out).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+      expectNoHonouredCiSkipToken(out);
+    }
+  });
+
+  it("L2: neutralises case variants (GitHub is case-sensitive; our superset is not)", () => {
+    for (const token of ["[SKIP CI]", "[Ci Skip]", "[No Ci]", "SKIP-CHECKS:TRUE"]) {
+      const out = sanitizeUntrustedTextForCommitMessage(`x ${token} y`);
+      expect(out).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+      expectNoHonouredCiSkipToken(out);
+    }
+  });
+
+  it("L3: neutralises whitespace/punctuation-obfuscated variants", () => {
+    for (const token of [
+      "[skip  ci]",
+      "[ skip ci ]",
+      "[skip-ci]",
+      "[skip.ci]",
+      "[skip_ci]",
+      "[skip\tci]",
+      "skip-checks : true",
+      "skip-checks:  true",
+    ]) {
+      const out = sanitizeUntrustedTextForCommitMessage(`x ${token} y`);
+      expect(out).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+      expectNoHonouredCiSkipToken(out);
+    }
+  });
+
+  it("L4: neutralise runs LAST — a backtick-split token reconstituted by the backtick-strip is still caught (mutation G7 reconstitutes it)", () => {
+    // The backtick-strip inside sanitizeUntrustedInlineText runs BEFORE the
+    // CI-skip neutralise, so `[skip`ci]` becomes `[skipci]` and is then
+    // neutralised. If the neutralise ran first (G7), it would miss the
+    // backtick-poisoned key and the later strip would rejoin a live token.
+    const bracket = sanitizeUntrustedTextForCommitMessage("ship [skip`ci] now");
+    expect(bracket).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+    expectNoHonouredCiSkipToken(bracket);
+
+    // Same order lesson for the directive form: `skip-checks:tru`e` slips a
+    // neutralise-first pass and reconstitutes to a live `skip-checks:true`.
+    const directive = sanitizeUntrustedTextForCommitMessage("trailer skip-checks:tru`e end");
+    expect(directive).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+    expectNoHonouredCiSkipToken(directive);
+  });
+
+  it("L5: neutralises EVERY occurrence in a multi-token message", () => {
+    const out = sanitizeUntrustedTextForCommitMessage(
+      "[skip ci] and [ci skip] and skip-checks:true",
+    );
+    expect(out.match(/\(ci-skip token removed\)/g)).toHaveLength(3);
+    expectNoHonouredCiSkipToken(out);
+  });
+
+  it("L6: findCiSkipDirectives detects every honoured spelling in an assembled message", () => {
+    for (const token of [
+      "[skip ci]",
+      "[ci skip]",
+      "[no ci]",
+      "[skip actions]",
+      "[actions skip]",
+      "skip-checks:true",
+      "skip-checks: true",
+    ]) {
+      const assembled = `Implement #6: title\n\nCloses #6\n\n${token}`;
+      expect(findCiSkipDirectives(assembled).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("L7: findCiSkipDirectives returns [] for a clean assembled message", () => {
+    expect(
+      findCiSkipDirectives("Implement #6: add feature\n\nCloses #6\n\nCo-Authored-By: Claude <noreply@anthropic.com>"),
+    ).toEqual([]);
+  });
+
+  it("L8: output carries no newline, backtick, or live @codex trigger", () => {
+    const out = sanitizeUntrustedTextForCommitMessage(
+      "[skip ci]\n\nCo-Authored-By: mallory <m@e.com> `code` @codex review",
+    );
+    expect(out).not.toContain("\n");
+    expect(out).not.toContain("\r");
+    expect(out).not.toContain("`");
+    expectNoLiveTrigger(out);
+    expectNoHonouredCiSkipToken(out);
+  });
+
+  it("L9: the removal marker is itself inert — it matches neither pattern", () => {
+    expect(neutralizeCiSkipDirectives(CI_SKIP_TOKEN_REMOVED_MARKER)).toBe(
+      CI_SKIP_TOKEN_REMOVED_MARKER,
+    );
+    expect(findCiSkipDirectives(CI_SKIP_TOKEN_REMOVED_MARKER)).toEqual([]);
+  });
+
+  it("L10: an invisible char cannot manufacture or hide a honoured token", () => {
+    // A zero-width space injected mid-token is surfaced as a visible marker
+    // BEFORE the CI-skip neutralise looks, so it can neither reconstitute a
+    // live token nor evade detection — the output reads as inert text.
+    // Built from an escape (never a literal invisible, which the repo's own
+    // invisible-format guard would reject in this source file).
+    const zwsp = "\u200B";
+    const out = sanitizeUntrustedTextForCommitMessage(`go [skip${zwsp}ci] now`);
+    expect(out).toContain("[U+200B]");
+    expectNoHonouredCiSkipToken(out);
+  });
+
+  it("N1: a legitimate [F1-S11]-style story tag is left untouched", () => {
+    const out = sanitizeUntrustedTextForCommitMessage("[F1-S11] add the thing");
+    expect(out).toBe("[F1-S11] add the thing");
+    expect(out).not.toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+  });
+
+  it("N2: a literal [U+200B] escape marker is not read as a token", () => {
+    expect(neutralizeCiSkipDirectives("value [U+200B] here")).toBe("value [U+200B] here");
+    expect(findCiSkipDirectives("value [U+200B] here")).toEqual([]);
+  });
+
+  it("N3: [skipper city] does not substring-match [skip ci]", () => {
+    expect(neutralizeCiSkipDirectives("[skipper city] wins")).toBe("[skipper city] wins");
+    expect(findCiSkipDirectives("[skipper city] wins")).toEqual([]);
+  });
+
+  it("N4: a bare [ci] (not a honoured token) is left untouched", () => {
+    expect(neutralizeCiSkipDirectives("build [ci] logs")).toBe("build [ci] logs");
+    expect(findCiSkipDirectives("build [ci] logs")).toEqual([]);
+  });
+
+  it("N5: skip-checks WITHOUT :true is not a directive", () => {
+    for (const text of ["skip-checks:false", "skip-checks", "skip-checks:untrue"]) {
+      expect(neutralizeCiSkipDirectives(text)).toBe(text);
+      expect(findCiSkipDirectives(text)).toEqual([]);
+    }
+  });
+
+  it("N6: unbracketed prose mentioning skip/ci is left untouched", () => {
+    const prose = "please skip the ci flakiness discussion for now";
+    expect(neutralizeCiSkipDirectives(prose)).toBe(prose);
+    expect(findCiSkipDirectives(prose)).toEqual([]);
+  });
+});
+
+describe("issue #171 (fsr BLOCKER): nested-bracket CI-skip tokens are caught as literal substrings", () => {
+  // GitHub does a LITERAL SUBSTRING search, so `[skip ci]` nested inside an
+  // outer bracket (`[oops [skip ci]`) is still honoured. The earlier
+  // extract-the-outer-group detector normalised `oops [skip ci` to a
+  // non-member and missed it; the per-token literal regexes start the match at
+  // the INNER `[`. Each row is a nested form of a honoured token.
+  it.each([
+    ["nested [skip ci] no space", "[x[skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [skip ci] with space", "[oops [skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [skip ci] longer prefix", "[broken [skip ci]", /\[\s*skip[\s._-]*ci\s*\]/i],
+    ["nested [ci skip]", "[a[ci skip]", /\[\s*ci[\s._-]*skip\s*\]/i],
+    ["nested [no ci]", "[a[no ci]", /\[\s*no[\s._-]*ci\s*\]/i],
+    ["nested [skip actions]", "[a[skip actions]", /\[\s*skip[\s._-]*actions\s*\]/i],
+    ["nested [actions skip]", "[a[actions skip]", /\[\s*actions[\s._-]*skip\s*\]/i],
+  ])("%s: neutralised and detected", (_label, input, liveTokenPattern) => {
+    // findCiSkipDirectives (the pre-push assertion) fires on the raw title.
+    expect(findCiSkipDirectives(input).length).toBeGreaterThan(0);
+    // The transform removes the honoured substring, leaving no live token.
+    const out = sanitizeUntrustedTextForCommitMessage(input);
+    expect(out).toContain(CI_SKIP_TOKEN_REMOVED_MARKER);
+    expect(liveTokenPattern.test(out)).toBe(false);
+    expect(findCiSkipDirectives(out)).toEqual([]);
+  });
+
+  it("the leftover unclosed outer bracket is harmless prose, not a token", () => {
+    // `[oops [skip ci]` -> `[oops (ci-skip token removed)`: the dangling
+    // `[oops` matches no honoured token.
+    const out = sanitizeUntrustedTextForCommitMessage("[oops [skip ci]");
+    expect(out).toBe("[oops (ci-skip token removed)");
+    expect(findCiSkipDirectives(out)).toEqual([]);
   });
 });
 
