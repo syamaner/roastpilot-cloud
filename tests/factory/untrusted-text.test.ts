@@ -25,6 +25,17 @@ function expectNoResynthesizedTrigger(output: string): void {
 }
 
 /**
+ * A lone (unpaired) UTF-16 surrogate is not representable in wire UTF-8, so a
+ * JSON body carrying one can be rejected by GitHub AFTER the branch is pushed
+ * (#158 fold, PR #170). Assert neither an unpaired high nor an unpaired low
+ * surrogate survives a clamp.
+ */
+function expectNoLoneSurrogate(output: string): void {
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(output)).toBe(false);
+  expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(output)).toBe(false);
+}
+
+/**
  * A live Codex trigger surviving into a POSTED body is the bug #158 closes.
  * `expectNoLiveTrigger` asserts the sanitised output can no longer read as
  * `@…codex` to the connector, using a FRESH, non-global literal — never the
@@ -287,6 +298,40 @@ describe("safeClamp", () => {
     // Length 201 (200 content + `…`) proves the truncation path ran, not the
     // vacuous early return.
     expect(result.length).toBe(201);
+  });
+});
+
+describe("issue #158 fold (PR #170): a clamp cannot split an astral char into a lone surrogate", () => {
+  it("strips the lone high surrogate a slice leaves when it cuts an emoji in half", () => {
+    // Codex P2 reproduction: 199 ASCII + emoji, clamped to 200, cuts the first
+    // emoji mid-pair. Without the strip the tail is a lone `\uD83D`.
+    const result = safeClamp("a".repeat(199) + "😀".repeat(10), 200);
+    expectNoLoneSurrogate(result);
+    expect(result.endsWith("…")).toBe(true);
+    expect(result.length).toBeLessThanOrEqual(201);
+  });
+
+  it("handles an emoji-then-partial-marker tail (strip order: marker then surrogate)", () => {
+    // Cut lands inside `[U+FE0F]` (leaving `[U+F`) with a COMPLETE emoji just
+    // before it: the partial-marker strip fires, the emoji stays whole, and no
+    // lone surrogate is left.
+    const result = safeClamp("z".repeat(194) + "😀[U+FE0F]", 200);
+    expectNoLoneSurrogate(result);
+    expect(result).not.toMatch(/\[U\+[0-9A-F]*$/);
+    expect(result).toContain("😀");
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("body path: an astral-heavy field yields no lone surrogate", () => {
+    expectNoLoneSurrogate(sanitizeUntrustedTextForPostedBody("😀".repeat(150)));
+  });
+
+  it("leaves a complete astral char intact when the cut lands on a pair boundary", () => {
+    // 200 code units of emoji = exactly 100 complete pairs; the 200th unit is a
+    // low surrogate whose high partner is present, so nothing is stripped.
+    const result = safeClamp("😀".repeat(150), 200);
+    expectNoLoneSurrogate(result);
+    expect(result.endsWith("😀…")).toBe(true);
   });
 });
 

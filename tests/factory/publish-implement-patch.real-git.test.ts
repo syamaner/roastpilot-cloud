@@ -3093,6 +3093,17 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
     // (safeClamp strips a dangling `[U+XXXX`); check before the trailing `…`.
     expect(title.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);
   });
+
+  it("(e) a title whose emoji straddle the 256 budget yields no lone surrogate in the POST body (PR #170)", async () => {
+    // The leading ASCII char makes the clamp boundary land on an ODD offset, so
+    // it cuts an astral emoji mid-pair; safeClamp must strip the lone high
+    // surrogate a code-unit slice leaves, or the JSON body is not wire-UTF-8
+    // and GitHub can reject POST /pulls after the branch is already pushed.
+    const title = await createdPrTitle("[F1-S3] a" + "😀".repeat(130));
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(title)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(title)).toBe(false);
+  });
 });
 
 describe("publish-implement-patch — Codex round 7: fork-PR confusion (findExistingPrForIssue repo scoping)", () => {

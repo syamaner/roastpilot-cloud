@@ -290,17 +290,37 @@ const TRAILING_TRIGGER_FRAGMENT = /[@＠]\s*c(?:o(?:d(?:e(?:x)?)?)?)?$/iu;
 const TRAILING_PARTIAL_ESCAPE_MARKER = /\[U\+[0-9A-F]*$/;
 
 /**
+ * A lone UTF-16 high surrogate anchored at the END of a string — what a
+ * code-unit `slice` leaves when it cuts an astral character (emoji, etc.) in
+ * half (#158 fold, PR #170, Codex P2). Astral chars pass the pipeline
+ * untouched ({@link escapeInvisibleCharactersVisibly} does not match category
+ * So), so the clamp is the only place a pair can be split. A lone surrogate
+ * is NOT representable in wire UTF-8, so `githubRequest`'s JSON body would
+ * carry a literal `\uD83D` that GitHub can reject — AFTER the branch is
+ * pushed. {@link safeClamp} strips it. Deliberately code-UNIT slicing plus
+ * this strip, NOT `Array.from` code-POINT slicing (the soft-truncation
+ * precedent in `publish-spec-grounding-verdict-logic.mts`): the title caller
+ * has a HARD 256 limit, and code-point slicing could let the code-UNIT length
+ * reach 2×budget and blow it if GitHub counts UTF-16 units. This keeps the
+ * result `≤ maxLength + 1` under both code-unit AND code-point counting.
+ */
+const TRAILING_LONE_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
+
+/**
  * Length-bounds `value` to `maxLength` content characters with a trailing
  * `…`, WITHOUT letting the truncation resynthesise a live `@codex` at the new
- * end ({@link TRAILING_TRIGGER_FRAGMENT}) or leave half an escape marker
- * ({@link TRAILING_PARTIAL_ESCAPE_MARKER}). Both strips only REMOVE tail
- * characters, so the result is at most `maxLength + 1` characters (the `+ 1`
- * is the ellipsis) — the same bound the bare field clamp this replaces had.
- * A value already within bound is returned unchanged (no ellipsis).
+ * end ({@link TRAILING_TRIGGER_FRAGMENT}), leave half an escape marker
+ * ({@link TRAILING_PARTIAL_ESCAPE_MARKER}), or leave a lone UTF-16 surrogate
+ * from a split astral char ({@link TRAILING_LONE_HIGH_SURROGATE}). Every strip
+ * only REMOVES tail characters, so the result is at most `maxLength + 1`
+ * characters (the `+ 1` is the ellipsis) — the same bound the bare field clamp
+ * this replaces had. A value already within bound is returned unchanged (no
+ * ellipsis).
  *
- * The partial-marker strip runs BEFORE the trigger strip so a
- * `…@codex[U+F`-shaped tail collapses cleanly: remove the dangling marker,
- * THEN the exposed `@codex`.
+ * Strip order is partial-marker → lone-surrogate → trigger, so each strip
+ * cleans what an earlier one can expose: a `…😀[U+F` tail drops the dangling
+ * marker to reveal the intact emoji, and a `…@codex😀` cut mid-emoji drops the
+ * lone surrogate to reveal the `@codex` the trigger strip then removes.
  *
  * **SECURITY PRECONDITION:** `value` MUST already have passed {@link
  * neutralizeCodexTriggerPhrases} (both callers do, via {@link
@@ -321,6 +341,7 @@ export function safeClamp(value: string, maxLength: number): string {
   const truncated = value
     .slice(0, maxLength)
     .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
+    .replace(TRAILING_LONE_HIGH_SURROGATE, "")
     .replace(TRAILING_TRIGGER_FRAGMENT, "");
   return `${truncated}…`;
 }
