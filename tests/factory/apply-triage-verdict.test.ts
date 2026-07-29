@@ -1116,3 +1116,96 @@ describe("main — fail-closed paths", () => {
     ]);
   });
 });
+
+describe("main — T12: durable full-evidence logged before the first network write", () => {
+  it("valid path: the full verdict is on console.log BEFORE the comment PATCH, and survives its failure", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    const reasoning = "SENTINEL-REASONING line one\nline two with @codex review";
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning,
+        missing_info_questions: ["SENTINEL-QUESTION"],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    // The comment PATCH — the first network WRITE of the valid path — fails.
+    const { fetchMock, calls } = mockFetch({
+      "PATCH /repos/syamaner/roastpilot-cloud/issues/comments/99": () =>
+        new Response("service unavailable", { status: 503 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await expect(main()).rejects.toThrow(/503/);
+
+    // The comment PATCH was attempted (so we are past the pre-POST log) …
+    expect(
+      calls.some(
+        (c) => c.method === "PATCH" && c.url.includes("/comments/99"),
+      ),
+    ).toBe(true);
+    // … no readiness label was ever written (fail-closed on the failing write) …
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    // … and the COMPLETE, untruncated verdict — the disclosure pointer's
+    // "full detail in the run log" — is on console.log despite the PATCH throw.
+    const evidence = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.includes("SENTINEL-REASONING"));
+    expect(evidence).toBeDefined();
+    const parsed = JSON.parse(evidence as string) as {
+      reasoning: string;
+      missing_info_questions: string[];
+    };
+    expect(parsed.reasoning).toBe(reasoning);
+    expect(parsed.missing_info_questions).toEqual(["SENTINEL-QUESTION"]);
+
+    logSpy.mockRestore();
+  });
+
+  it("fallback path: the full error list is on console.error before the label GET, and survives a reset PUT failure", async () => {
+    // Missing verdict -> fallback. The label RESET PUT fails, so applyFallback
+    // throws before its post-hoc summary log ever runs — the only console.error
+    // left is the NEW pre-write full-evidence log.
+    process.env.VERDICT_PATH = join(workdir, "does-not-exist.json");
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        new Response("reset unavailable", { status: 502 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(main()).rejects.toThrow(/502/);
+
+    // The reset PUT was attempted and failed; no comment PATCH followed it.
+    expect(calls.some((c) => c.method === "PUT")).toBe(true);
+    expect(
+      calls.some(
+        (c) => c.method === "PATCH" && c.url.includes("/comments/99"),
+      ),
+    ).toBe(false);
+    // The pre-write log carries the FULL error list as a JSON array — the only
+    // console.error emitted, since the post-hoc summary never ran.
+    const logged = errorSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => {
+        try {
+          return Array.isArray(JSON.parse(line));
+        } catch {
+          return false;
+        }
+      });
+    expect(logged).toBeDefined();
+    const errors = JSON.parse(logged as string) as string[];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("triage artifact not found");
+
+    errorSpy.mockRestore();
+  });
+});

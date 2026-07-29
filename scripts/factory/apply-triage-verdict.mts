@@ -225,6 +225,21 @@ async function applyValidVerdict(
 ): Promise<void> {
   const { verdict } = result;
 
+  // Durable full-evidence to the 90-day run log BEFORE the first network write.
+  // The posted comment bounds and defangs `verdict.reasoning`/questions (#158
+  // slice 3), and the PATCH can fail — so the complete, untruncated verdict
+  // content is logged here first, where the bounded comment's disclosure
+  // pointer ("full detail in the run log") resolves. Ordering below (comment
+  // first, label flip last) is unchanged and deliberate.
+  console.log(
+    JSON.stringify({
+      issue_number: verdict.issue_number,
+      readiness: verdict.readiness,
+      reasoning: verdict.reasoning,
+      missing_info_questions: verdict.missing_info_questions,
+    }),
+  );
+
   await updateComment(
     token,
     owner,
@@ -303,6 +318,14 @@ async function applyFallback(
   // leaving a stale ready-to-implement label alongside a comment that
   // incorrectly claims it's safe. The fallback comment keeps this execution's
   // non-authorizing hold generation.
+  //
+  // Durable full-evidence to the 90-day run log BEFORE the first network write
+  // of this path. The posted fallback comment bounds and two-tier caps its
+  // error list (#158 slice 3), and every write below can fail (the label PUT,
+  // its verification, or the comment PATCH) — so the complete error list is
+  // logged here first, where the bounded comment's disclosure pointer resolves.
+  // This precedes the label GET and does NOT reorder the labels-first writes.
+  console.error(JSON.stringify(errors));
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
     token,
     "GET",
