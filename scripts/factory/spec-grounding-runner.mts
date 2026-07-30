@@ -340,10 +340,14 @@ interface GitHubCompareCommitsResponse {
 }
 
 /**
- * Fetches every commit message in the exact trusted base/head range.
- * The compare endpoint is SHA-pinned like {@link fetchPrDiff}; malformed
- * or truncated data fails the run instead of silently reverting to the
- * PR body's references.
+ * Fetches commit messages in the exact trusted base/head range.
+ * The compare endpoint is intentionally called unpaginated and SHA-pinned
+ * like {@link fetchPrDiff}: GitHub returns up to 250 commits plus the true
+ * `total_commits`, making 250 the explicit supported limit. A range above
+ * that limit is deliberately failed closed by the truncation guard rather
+ * than partially scanned—an availability-only failure in the safe direction
+ * for a closing-reference gate; pagination is intentionally not implemented
+ * for this zero-instance case.
  */
 export async function fetchPrCommitMessages(
   token: string,
