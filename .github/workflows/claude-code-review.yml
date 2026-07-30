@@ -287,9 +287,37 @@ jobs:
           # elsewhere in this file — net-negative for this rework. Revisit
           # sandboxing here if this job is ever extended to run on fork
           # PRs, where the trust assumption above no longer holds.
+          #
+          # Issue #183 — terminal completion sentinel. The completion
+          # assertion below ("Assert the review actually completed") fails
+          # closed on a truncated review by reading the model-maintained
+          # tracking comment. When the model writes that comment as PROSE
+          # (no task-list checklist — observed on PR #182's re-review, run
+          # 30547564749), there is no unticked box to catch a truncation, so
+          # the assertion needs an explicit terminal marker. The
+          # `--append-system-prompt` line below instructs the reviewer to end
+          # its FINAL tracking-comment update with an exact sentinel line,
+          # written only after every review step (including posting findings)
+          # is complete. This is INSTRUCTION only and fails in the SAFE
+          # direction: a non-compliant model produces today's red
+          # (availability), never a false pass — the assertion below, not this
+          # prompt, is the enforcing gate. The sentinel is repo-owned wording
+          # (it does NOT couple to the action SHA) and must stay byte-identical
+          # to the `SENTINEL='…'` literal in the assertion step and the test
+          # fixtures; C-T11 in
+          # tests/factory/claude-review-completion-contract.test.ts pins that
+          # lockstep so instruction and grammar cannot drift. `claude_args`
+          # passes each line straight to the Claude Code CLI — verified at the
+          # pinned action SHA (base-action `parse-sdk-options` forwards
+          # claudeArgs as `extraArgs`, the same quoted-multi-word passthrough
+          # the `--allowedTools`/`--disallowedTools` lines already rely on;
+          # `--append-system-prompt` is a documented CLI flag). A `#` inside
+          # the quoted value is preserved (the action's `stripShellComments`
+          # only drops lines whose first non-space char is `#`).
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
+            --append-system-prompt "Only after every review step including posting all findings is complete, make your final update to the tracking comment so that its very last line is exactly, byte for byte, this sentinel and nothing else, and never include this sentinel in any earlier or interim update: REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
           # actor `claude[bot]`; the action rejects non-human actors unless
@@ -613,7 +641,14 @@ jobs:
           # a real tracking comment and update
           # tests/factory/claude-review-completion-contract.test.ts), or a
           # reworded checklist will silently stop matching and this gate
-          # will pass a truncated review.
+          # will pass a truncated review. The same pin bump must ALSO
+          # re-verify that `claude_args` passthrough of the
+          # `--append-system-prompt` sentinel instruction (added #183) still
+          # reaches the model — if a future action version stops forwarding
+          # claudeArgs, the prompt goes silently inert and the sentinel branch
+          # below loses its only acceptance path (it fails closed, the safe
+          # direction, but a compliant prose review would then red every time).
+          # The sentinel LITERAL itself is repo-owned and pin-independent.
           #
           # Inspect only the first contiguous task-list block. This is the
           # action's tracking checklist, and excludes later review prose
@@ -642,8 +677,70 @@ jobs:
             { print }
           ')"
           if [ -z "$CHECKLIST" ]; then
-            echo "::error::this run's tracking comment has no tracking checklist; the review completion state cannot be proved (issue #146)"
-            exit 1
+            # === sentinel branch (issue #183) ===
+            # A prose-shaped tracking comment carries NO task-list box anywhere
+            # in the body (so the first-block extractor above returned empty).
+            # The action still emits its "Claude finished" header on a
+            # TRUNCATED run (proven by the captured PR #150 comment), so the
+            # header can never anchor completion; and a prose body has no
+            # unticked box to catch a mid-review death. The only truncation-
+            # proof signal is a terminal marker the model is instructed (via
+            # `--append-system-prompt` above) to write as the LAST line of its
+            # FINAL update, only after posting findings. This branch accepts a
+            # prose body ONLY on that exact terminal sentinel and otherwise
+            # fails closed, so an interim or truncated prose update — which has
+            # no sentinel — still reds (the #146/#150 failure direction). It
+            # keeps the SAME trust level the checklist branch already extends
+            # (the model ticks its own boxes today): it stays
+            # benign-truncation-sound, NOT adversarially authenticated (see the
+            # SCOPE note above) — a prompt-injected model that can forge a
+            # ticked checklist can equally forge a sentinel, unchanged in both
+            # directions by #183.
+            #
+            # The sentinel is repo-owned wording (it does NOT couple to the
+            # action SHA, unlike the checklist / "review in progress" strings
+            # below). It MUST stay byte-identical to the `--append-system-prompt`
+            # instruction above and the test fixtures; C-T11 in
+            # tests/factory/claude-review-completion-contract.test.ts pins that
+            # lockstep so the instruction and this grammar cannot drift apart.
+            SENTINEL='REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)'
+
+            # (a) The final NON-EMPTY line, after stripping trailing whitespace
+            #     and any trailing CR, must byte-equal the sentinel — no
+            #     case-fold, no substring, no prefix. `sed` strips per-line
+            #     trailing whitespace (POSIX `[[:space:]]` includes CR) so a
+            #     trailing-space or CRLF sentinel still matches, and
+            #     `awk 'length'` keeps the last line that is non-empty after
+            #     that strip, so trailing blank lines are tolerated.
+            LAST_LINE="$(printf '%s\n' "$BODY" | sed 's/[[:space:]]*$//' | awk 'length {last=$0} END {print last}')"
+            if [ "$LAST_LINE" != "$SENTINEL" ]; then
+              echo "::error::this run's tracking comment has no tracking checklist and its final line is not the terminal completion sentinel, so review completion cannot be proved (issues #146, #183)"
+              exit 1
+            fi
+
+            # (b) The heading region — body start through the FIRST ATX heading
+            #     line inclusive, or the WHOLE body when there is no heading
+            #     (fail-closed widening) — must not still advertise work in
+            #     progress. Scoping to the first heading keeps later review
+            #     prose that legitimately quotes "review in progress" from
+            #     false-positiving, mirroring the HEADER scoping above. The awk
+            #     match `/^#+[[:space:]]/ && !/^#######/` is `^#{1,6}[[:space:]]`
+            #     written WITHOUT an interval expression, for mawk portability
+            #     on the CI runner.
+            SENTINEL_HEADER="$(printf '%s\n' "$BODY" | awk '{ print } /^#+[[:space:]]/ && !/^#######/ { exit }')"
+            if printf '%s' "$SENTINEL_HEADER" | grep -qiE 'review in progress'; then
+              echo "::error::the review job finished while its tracking comment still reports work in progress; the review did not complete (issue #146)"
+              exit 1
+            fi
+
+            # (c) Prose completion carrying the terminal sentinel is accepted.
+            #     A DISTINCT confirmation line from the checklist branch's below,
+            #     so logs show which branch accepted. Exit here so a prose body
+            #     never falls through to the checklist branch's un-scoped HEADER
+            #     check (which would wrongly red legitimate later "review in
+            #     progress" prose).
+            echo "confirmed: the review posted a prose tracking comment carrying the terminal completion sentinel"
+            exit 0
           fi
 
           # Fail closed on either self-contradiction signal within the
