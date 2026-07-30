@@ -471,7 +471,10 @@ inline.
   reviewer data, IP addresses, visibility, or deletion → **`privacy-auditor`**.
 - Any diff touching the factory's own pipeline — anything under `.github/**`
   (workflows AND composite actions), `scripts/factory/**`, any privileged glue /
-  publisher script wherever it lives, CODEOWNERS, or branch-protection config →
+  publisher script wherever it lives, CODEOWNERS, the factory-integrity
+  enforcement tests (`tests/factory/**`, #160 — a human-editable diff that
+  weakens an alarm must still draw the adversarial lens, not just the guard), or
+  branch-protection config →
   **`factory-security-reviewer`**. (This must cover the full protected surface the
   pipeline-self-modification invariant below names, not just workflows.)
   This is an adversarial red-team: its job is to produce a working exploit, not
@@ -505,8 +508,11 @@ privileged publisher pushes on an agent's behalf — must never touch
 glue/publisher scripts**, any recognized agent instruction/configuration
 basename at any depth (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`,
 `CLAUDE.local.md`, `.claudeignore`, `.mcp.json`, `.npmrc`), `.claude/**`,
-`.codex/**`, or `docs/state/registry.md`. That diff is a review blocker on any
-such PR, full stop. The applied-tree guard, not a prompt instruction, enforces
+`.codex/**`, the factory-integrity enforcement tests (`tests/factory/**` —
+the ALARM that mechanically enforces the pins/guards whose ASSETS this list
+already protects; leaving it writable let a patch gut an enforcement test as a
+"refactor" and disable the check, #160), or `docs/state/registry.md`. That diff
+is a review blocker on any such PR, full stop. The applied-tree guard, not a prompt instruction, enforces
 the repository paths. The registry may enter a factory PR only through trusted
 deterministic transition logic or a conventional human-directed amendment in
 that same PR; without one, the slice may not land because D135 is not waived.
@@ -624,7 +630,7 @@ recorded in the plan repo.
 
 | Agent | Model | Fires on |
 |---|---|---|
-| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative**; do not read this cell as a narrower restatement of it. That surface is all of `.github/**` (workflows **and** composite actions), `scripts/factory/**`, any privileged glue or publisher script wherever it lives, CODEOWNERS, and branch-protection config. Its job is to BREAK the pipeline, not assess it. |
+| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative**; do not read this cell as a narrower restatement of it. That surface is all of `.github/**` (workflows **and** composite actions), `scripts/factory/**`, any privileged glue or publisher script wherever it lives, CODEOWNERS, the factory-integrity enforcement tests (`tests/factory/**`, #160), and branch-protection config. Its job is to BREAK the pipeline, not assess it. |
 | `schema-migration-reviewer` | `opus` | `snowflake/migrations/**`, grants, secure views, and the Zod/Pydantic validation standing in for constraints Snowflake will not enforce. |
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |

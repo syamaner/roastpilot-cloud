@@ -114,7 +114,8 @@ Apply PR hygiene at the DRAFT stage, not just leave it for review to catch:
   Pydantic rules; `privacy-auditor` for routes, procs, AND components —
   anything handling reviewer data, IP addresses, visibility, or deletion,
   per its agent definition; `factory-security-reviewer` for anything under
-  `.github/**` or `scripts/factory/**`; `qa` for more than 600 changed test
+  `.github/**`, `scripts/factory/**`, or `tests/factory/**` (the
+  factory-integrity enforcement tests, #160); `qa` for more than 600 changed test
   lines or otherwise load-bearing test quality; "none (docs/fixtures only)" is
   valid and should be rare). A drafted story missing the execution path, size,
   order, or reviewer tag is not a compliant draft — triage will (correctly)

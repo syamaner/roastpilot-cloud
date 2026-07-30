@@ -29,6 +29,7 @@ Closes #<!-- issue this PR FULLY resolves (auto-closes on merge) -->
      Diffs touching routes/components/procs handling reviewer data, IPs,
      visibility, or deletion: call it out for privacy-auditor.
      Diffs touching .github/**, scripts/factory/**, privileged glue, CODEOWNERS,
-     or branch protection: call it out for factory-security-reviewer.
+     tests/factory/** (the factory-integrity enforcement tests, #160), or branch
+     protection: call it out for factory-security-reviewer.
      Test diffs over 600 lines or otherwise load-bearing test quality: call it
      out for qa. -->

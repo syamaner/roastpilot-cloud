@@ -1,19 +1,34 @@
-# Pipeline self-modification guard (F1-S7, issue #10; AGENTS.md "Pipeline
-# self-modification"; factory.md §13 point 3).
+# Pipeline self-modification guard (F1-S7, issue #10; #160; AGENTS.md
+# "Pipeline self-modification"; factory.md §13 point 3).
 #
-# Mirrors PROTECTED_PATH_PREFIXES / PROTECTED_EXACT_PATHS in
-# scripts/factory/implement-patch-logic.mts's findForbiddenPatchPaths
-# exactly — that function already rejects any implementing agent's patch
-# that touches these paths at all (a fail-closed publish-time guard, unit
-# tested); this file adds the complementary human-review control at the
-# GitHub level (required code-owner review, once branch protection's
-# require_code_owner_reviews is enabled) for the conventional, human
-# -directed PRs that legitimately DO touch these paths. Keep the two lists
-# in lockstep: any path added to one belongs in the other.
+# Mirrors PROTECTED_PATH_PREFIXES and PROTECTED_EXACT_PATHS in
+# scripts/factory/implement-patch-logic.mts's findForbiddenPatchPaths — that
+# function already rejects any implementing agent's patch that touches these
+# paths at all (a fail-closed publish-time guard, unit tested); this file adds
+# the complementary human-review control at the GitHub level (required
+# code-owner review, once branch protection's require_code_owner_reviews is
+# enabled — it is OFF today, so these rules are forward-looking documentation
+# and the guard is the sole mechanical control, #160/#163) for the
+# conventional, human-directed PRs that legitimately DO touch these paths.
+#
+# The mirror is now MECHANICALLY ENFORCED, not just requested (#160):
+# tests/factory/protected-surface-lockstep.test.ts asserts, byte-for-byte,
+# that every exported guard prefix `p` has a `/p` rule here owned @syamaner
+# and every exact path has its `/path` rule (direction A), and that every
+# rule below points at a guard-protected path (direction B). Adding a path to
+# one list without the other now reddens CI. The header's old "keep them in
+# lockstep" plea became a test.
+#
+# NOT mirrored, deliberately: the guard's PROTECTED_BASENAMES (AGENTS.md,
+# CLAUDE.md, .mcp.json, .npmrc, ... at ANY depth). Those are guard-only depth
+# defence against a nested instruction/config file; CODEOWNERS matches known
+# path locations, and the exact roots that matter (/AGENTS.md,
+# /docs/state/registry.md) are already listed below. The lockstep test checks
+# prefixes and exact paths only, for that reason.
 #
 # The invariant both controls enforce together: an implementing agent can
-# never grant itself more pipeline power, and a human changing pipeline
-# power always goes through an explicit, visible review by the operator.
+# never grant itself more pipeline power, and a human changing pipeline power
+# always goes through an explicit, visible review by the operator.
 #
 # PRECEDENCE NOTE (factory-security review, LOW): GitHub reads CODEOWNERS
 # from three possible locations, in this priority order — .github/,
@@ -23,7 +38,9 @@
 # every rule below with no error or warning from GitHub. If a
 # .github/CODEOWNERS or docs/CODEOWNERS ever needs to exist, merge its
 # rules into (or move this file to) whichever location must win, rather
-# than letting two files quietly disagree about who owns what.
+# than letting two files quietly disagree about who owns what. The lockstep
+# test also asserts .github/CODEOWNERS and a root .github-shadowing variant
+# do not exist, so this hazard reddens CI if it is ever introduced.
 
 # The factory's own workflow files — triggers, permissions, secrets,
 # action pins, allowlists.
@@ -35,11 +52,26 @@
 # that same patch.
 /scripts/factory/ @syamaner
 
-# The spec-grounded-review skill: claude-code-review.yml's restore step
-# re-applies this path unconditionally from PR-head, the same treatment
-# as scripts/factory/ (see findForbiddenPatchPaths's own docstring for
-# the full reasoning) — so it needs the same human-review control.
-/.claude/skills/spec-grounded-review/ @syamaner
+# All of .claude/ (subsumes the narrower spec-grounded-review rule this
+# replaced): the sub-agent roster (.claude/agents/**, whose model pins the
+# guard-protected enforcement test enforces, #160), every skill including
+# spec-grounded-review (claude-code-review.yml's restore step re-applies it
+# unconditionally from PR-head, same treatment as scripts/factory/), and
+# .claude/settings*.json. The guard protects .claude/ wholesale; this
+# mirrors it.
+/.claude/ @syamaner
+
+# .codex/ — the Codex CLI's own config/instruction surface, guard-protected
+# wholesale for the same self-modification reason as .claude/.
+/.codex/ @syamaner
+
+# The factory-integrity enforcement tests (#160 — the writable-alarm class):
+# the ONLY mechanical enforcement of pins/guards whose assets are already
+# owned above. Protecting the asset while leaving the alarm writable let a
+# factory patch gut the enforcement as a "test refactor". The subtree
+# coincides exactly with that class; app-slice tests live in tests/ root,
+# e2e/, and snowflake/tests/.
+/tests/factory/ @syamaner
 
 # This file itself — an agent (or anyone) editing CODEOWNERS to drop a
 # protected path must go through the same review the paths it protects
@@ -53,3 +85,13 @@
 # closes the gap where a human-directed PR could create or edit it without
 # code-owner review (factory-security review, MEDIUM).
 /docs/CODEOWNERS @syamaner
+
+# The root agent instruction file — stack rules, gates, review routing that
+# the guard reads. A conventional human-directed edit is expected; an agent
+# patch is blocked outright by the guard.
+/AGENTS.md @syamaner
+
+# The live state registry — an exact protected path (D135): untrusted agent
+# output cannot rewrite the source of truth, while trusted deterministic
+# transition logic or a conventional same-PR amendment still may.
+/docs/state/registry.md @syamaner

@@ -40,23 +40,54 @@ import {
  * of truth, while trusted deterministic transition logic or a conventional
  * same-PR amendment may still satisfy D135.
  *
+ * The `tests/factory/` prefix protects the ALARM, not just the asset
+ * (#160 — the writable-alarm class). Every file under it is a
+ * factory-integrity enforcement test: it either imports the code it tests
+ * from `scripts/factory/**`, or reads live protected-tree state
+ * (`.github/**`, `.claude/**`) and asserts an invariant on it. Those tests
+ * are the only mechanical enforcement of pins/guards whose ASSETS are
+ * already protected above — e.g. `tests/factory/agent-model-pin.test.ts`
+ * enforces the `.claude/agents/**` roster pins. Protecting the asset while
+ * leaving the alarm writable let a factory patch gut `validateAgentModelPins`
+ * as a plausible "test refactor" and disable enforcement before any
+ * `.claude/**` change was ever attempted. The prefix coincides exactly with
+ * that class (app-slice tests live in `tests/` root, `e2e/`, and
+ * `snowflake/tests/`, none of which this reaches), so a factory agent has no
+ * legitimate authorship under it; conventional human-directed test work
+ * still goes through a normal PR, same as every other protected path here.
+ *
  * Branch-protection config has no file-level guard here — it's a GitHub
  * API/settings-level control, not a repo path, so a file-diff guard
  * cannot see it either way.
+ *
+ * All three lists are exported so `tests/factory/protected-surface-lockstep.test.ts`
+ * consumes the guard's OWN definition rather than hand-maintaining a copy that
+ * can silently drift (the same unenforced-mirror bug #160 closes, one level
+ * down): its Direction A asserts CODEOWNERS byte-mirrors `PROTECTED_PATH_PREFIXES`
+ * + `PROTECTED_EXACT_PATHS`, and its Direction B (`isCoveredByGuard`) also reads
+ * `PROTECTED_BASENAMES`. That lockstep test is the sole external consumer of all
+ * three. `PROTECTED_BASENAMES` is exported for that Direction-B check, and is
+ * still deliberately NOT mirrored into CODEOWNERS (basenames are guard-only depth
+ * defence). The placement meta-guard
+ * (`tests/factory/enforcement-test-placement.test.ts`) does NOT consume these
+ * lists — it is import-only detection (`importsFactoryGlue`); see its own header
+ * for why the read/token heuristics that once derived from these lists were
+ * dropped (#177 connector false-positives).
  */
-const PROTECTED_PATH_PREFIXES = [
+export const PROTECTED_PATH_PREFIXES = [
   ".github/",
   "scripts/factory/",
   ".claude/",
   ".codex/",
+  "tests/factory/",
 ] as const;
-const PROTECTED_EXACT_PATHS = [
+export const PROTECTED_EXACT_PATHS = [
   "CODEOWNERS",
   "docs/CODEOWNERS",
   "AGENTS.md",
   "docs/state/registry.md",
 ] as const;
-const PROTECTED_BASENAMES = [
+export const PROTECTED_BASENAMES = [
   ".claude",
   ".codex",
   "AGENTS.md",
