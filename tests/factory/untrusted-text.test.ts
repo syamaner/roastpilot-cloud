@@ -17,18 +17,11 @@ import {
   sanitizeUntrustedTextForCommitMessage,
   sanitizeUntrustedTextForPostedBody,
 } from "../../scripts/factory/untrusted-text.mts";
-
-/**
- * The round-3 oracle: a truncation must not RESYNTHESISE a live `@codex`.
- * Strip any invisible/default-ignorable char (so a zero-width split can't
- * hide one), then assert no contiguous `@codex`/`＠codex`. The inert marker
- * `[codex trigger removed]` contains "codex" but never "@codex", so it does
- * not trip this.
- */
-function expectNoResynthesizedTrigger(output: string): void {
-  const withoutInvisibles = output.replace(/[\p{C}\p{Default_Ignorable_Code_Point}]/gu, "");
-  expect(/[@＠]codex/iu.test(withoutInvisibles)).toBe(false);
-}
+import {
+  expectNoLiveTrigger,
+  expectNoResynthesizedTrigger,
+  hasLiveTrigger,
+} from "./support/live-trigger-oracle";
 
 /**
  * A lone (unpaired) UTF-16 surrogate is not representable in wire UTF-8, so a
@@ -39,18 +32,6 @@ function expectNoResynthesizedTrigger(output: string): void {
 function expectNoLoneSurrogate(output: string): void {
   expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(output)).toBe(false);
   expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(output)).toBe(false);
-}
-
-/**
- * A live Codex trigger surviving into a POSTED body is the bug #158 closes.
- * `expectNoLiveTrigger` asserts the sanitised output can no longer read as
- * `@…codex` to the connector, using a FRESH, non-global literal — never the
- * module's own stateful `g`-flag pattern, and never a regex derived from it,
- * so mutating `CODEX_TRIGGER_PATTERN` cannot also weaken this check.
- */
-const LIVE_TRIGGER = /[@＠]\s*codex/iu;
-function expectNoLiveTrigger(output: string): void {
-  expect(LIVE_TRIGGER.test(output)).toBe(false);
 }
 
 describe("issue #158: no Codex-trigger variant survives sanitizeUntrustedTextForPostedBody", () => {
@@ -106,16 +87,108 @@ describe("neutralizeCodexTriggerPhrases", () => {
     expect(neutralizeCodexTriggerPhrases("@codexfoo shipped")).toBe("@codexfoo shipped");
   });
 
-  it("N5: the removed-trigger marker does not itself match the pattern (no re-trigger)", () => {
-    expect(LIVE_TRIGGER.test(CODEX_TRIGGER_REMOVED_MARKER)).toBe(false);
+  it("N5 / H12: the removed-trigger marker does not itself match the pattern (no re-trigger, fixpoint)", () => {
+    // Fold-aware oracle: the marker is inert on the raw AND the folded view.
+    expect(hasLiveTrigger(CODEX_TRIGGER_REMOVED_MARKER)).toBe(false);
     // The module pattern is global (stateful), so compare with a fresh
     // non-global clone rather than calling `.test()` on the shared instance.
     const fresh = new RegExp(CODEX_TRIGGER_PATTERN.source, "iu");
     expect(fresh.test(CODEX_TRIGGER_REMOVED_MARKER)).toBe(false);
-    // Neutralising the marker is therefore a fixpoint.
+    // H12: neutralising the marker is a fixpoint, under BOTH passes now (the
+    // folded view of the marker carries no `@…codex` either).
     expect(neutralizeCodexTriggerPhrases(CODEX_TRIGGER_REMOVED_MARKER)).toBe(
       CODEX_TRIGGER_REMOVED_MARKER,
     );
+    expect(
+      neutralizeCodexTriggerPhrases(neutralizeCodexTriggerPhrases("@ｃodex review")),
+    ).toBe(neutralizeCodexTriggerPhrases("@ｃodex review"));
+  });
+});
+
+describe("O1: the shared fold-aware trigger oracle is not itself fooled by a homoglyph (G8)", () => {
+  // The oracle is the thing that has to detect the bug; a weakened (ASCII-only)
+  // oracle would green-light a live `@ｃodex`. It shares NO code with the module.
+  it.each([
+    ["@codex", "@codex"],
+    ["＠codex (fullwidth @)", "＠codex"],
+    ["﹫ codex (U+FE6B small @ — the [@＠] enumeration misses it)", "﹫ codex"],
+    ["@ｃodex (U+FF43 fullwidth c)", "@ｃodex"],
+    ["@\\u{1D41C}odex (astral bold c)", "@\u{1D41C}odex"],
+  ])("flags %s as a live trigger", (_label, input) => {
+    expect(hasLiveTrigger(input)).toBe(true);
+  });
+
+  it.each([
+    ["the inert removed-trigger marker", CODEX_TRIGGER_REMOVED_MARKER],
+    ["ordinary prose (no @)", "please review the codebase for me"],
+    ["a bare word 'codex' with no @", "the codex handbook is on the shelf"],
+  ])("does NOT flag %s", (_label, input) => {
+    expect(hasLiveTrigger(input)).toBe(false);
+  });
+});
+
+describe("#168: a homoglyph Codex-trigger variant is folded, detected, and neutralised (emitted text never normalised)", () => {
+  const MARKER = CODEX_TRIGGER_REMOVED_MARKER;
+
+  // Each row asserts BOTH no live trigger survives the fold-aware oracle AND
+  // the inert marker is present, so the fold genuinely detected + replaced it
+  // (a positive assertion that fails loudly on a wrong NFKC assumption).
+  it.each([
+    ["H1 @ｃodex review (U+FF43, live at HEAD)", "@ｃodex review"],
+    ["H2 ＠ｃｏｄｅｘ review (all fullwidth)", "＠ｃｏｄｅｘ review"],
+    ["H3 @ｃｏｄｅｘ (fullwidth word, bare)", "@ｃｏｄｅｘ"],
+    ["H4 @cｏdex (single fullwidth o)", "@cｏdex"],
+    ["H5 ＠ ｃodex (fullwidth @ + space)", "＠ ｃodex"],
+    ["H6 @\\u{1D41C}odex (astral bold c)", "@\u{1D41C}odex"],
+    ["H7 @ⓒodex (circled c)", "@ⓒodex"],
+    ["H8 ﹫ codex review (U+FE6B — the enumeration-miss, live at HEAD)", "﹫ codex review"],
+    ["H9 @Ｃodex (fullwidth uppercase C)", "@Ｃodex"],
+    ["H10 ＠ＣＯＤＥＸ (fullwidth uppercase word)", "＠ＣＯＤＥＸ"],
+  ])("%s: neutralise emits the marker + no live trigger; the body path stays trigger-free (G1)", (_label, input) => {
+    const neutralised = neutralizeCodexTriggerPhrases(input);
+    expect(neutralised).toContain(MARKER);
+    expectNoLiveTrigger(neutralised);
+    expectNoLiveTrigger(sanitizeUntrustedTextForPostedBody(input));
+  });
+
+  it("H11: monotonicity — a raw-view-only trigger (`@codexｘ`, U+FF58 word-continuation) stays neutralised (G2)", () => {
+    // Pass 1's raw `\b` catches `@codex` before the fullwidth x; the fold view
+    // would see `@codexx` (no boundary) and miss it, so RETAINING pass 1 is
+    // what keeps this neutralised.
+    const out = neutralizeCodexTriggerPhrases("@codexｘ");
+    expect(out).toContain(MARKER);
+    expectNoLiveTrigger(out);
+  });
+
+  it("H13: both bounded renderers inherit the fold detection with no per-call change", () => {
+    const reason = renderBoundedUntrustedReason("blocked: @ｃodex review", 8000);
+    expect(reason).toContain(MARKER);
+    expectNoLiveTrigger(reason);
+    const block = renderBoundedUntrustedMultilineBlock("line\n@ｃodex review\nmore", 32_000, "the run log");
+    expect(block).toContain(MARKER);
+    expectNoLiveTrigger(block);
+  });
+
+  it("H14: the commit-message sanitiser inherits the fold detection", () => {
+    const out = sanitizeUntrustedTextForCommitMessage("[F1-S3] @ｃodex review this");
+    expect(out).toContain(MARKER);
+    expectNoLiveTrigger(out);
+  });
+
+  it("H15: a homoglyph DIFFERENT mention (`@ｃodexfoo`) is left byte-identical (the \\b false-positive guard)", () => {
+    expect(neutralizeCodexTriggerPhrases("@ｃodexfoo shipped")).toBe("@ｃodexfoo shipped");
+  });
+
+  it("H16: a compat/homoglyph corpus passes through the emit paths byte-identically (no NFKC leak)", () => {
+    // None of these fold-affected code points is a trigger, so every function's
+    // EMITTED text is byte-for-byte the input (modulo the code-span / no-op
+    // wrappers) — proof NFKC lives only in the throwaway detection buffer.
+    const corpus = "ﬁle ㎏ ① Ⅷ ｱ ½";
+    expect(neutralizeCodexTriggerPhrases(corpus)).toBe(corpus);
+    expect(sanitizeUntrustedInlineText(corpus)).toBe(corpus);
+    expect(escapeInvisibleCharactersVisibly(corpus)).toBe(corpus);
+    expect(sanitizeUntrustedTextForPostedBody(corpus)).toBe(`\`${corpus}\``);
+    expect(sanitizeUntrustedTextForCommitMessage(corpus)).toBe(corpus);
   });
 });
 
@@ -557,6 +630,44 @@ describe("issue #158 fold round 3: a length clamp cannot RESYNTHESISE a live tri
     expectNoResynthesizedTrigger(output);
     // and the length bound still holds (200 content + ellipsis + 2 backticks).
     expect(output.length).toBeLessThanOrEqual(MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH + 3);
+  });
+
+  it.each([
+    ["H17 @ｃodexx (homoglyph word-continuation)", "@ｃodexx"],
+    ["H18 ＠ｃｏｄｅｘＸ (fullwidth word + fullwidth X)", "＠ｃｏｄｅｘＸ"],
+  ])("%s: a truncation-manufactured HOMOGLYPH `@codex` at the tail is stripped (G3, fold-view fragment)", (_label, suffix) => {
+    // The homoglyph mention is a benign different-mention neutralise leaves; a
+    // naive slice truncates the trailing word char, manufacturing a homoglyph
+    // `@ｃodex…` the ASCII TRAILING_TRIGGER_FRAGMENT misses — the fold-view tail
+    // strip is what removes it.
+    expectNoResynthesizedTrigger(sanitizeUntrustedTextForPostedBody(PAD + suffix));
+  });
+
+  it("H19: two ADJACENT homoglyph fold fragments at the clamp tail are both stripped (needs the shrink loop)", () => {
+    // Post-clamp tail is `@ｃod@ｃo`; a single fold-strip pass removes only the
+    // last `@ｃo`, leaving `@ｃod`. The shrink-until-stable loop (G4) strips the
+    // exposed `@ｃod` on the next pass.
+    const input = "w".repeat(193) + "@ｃod@ｃoMORE";
+    expectNoResynthesizedTrigger(sanitizeUntrustedTextForPostedBody(input));
+  });
+
+  it("H20: a fold-fragment strip that EXPOSES a dangling `[U+` marker is cleaned by the loop (G4)", () => {
+    // Post-clamp tail is a literal `[U+FF@ｃo`; the fold-strip removes `@ｃo`
+    // first, EXPOSING the dangling `[U+FF` partial marker, which only a second
+    // loop pass (the partial-marker strip) then removes.
+    const input = "z".repeat(192) + "[U+FF@ｃoMORE";
+    const output = sanitizeUntrustedTextForPostedBody(input);
+    expectNoResynthesizedTrigger(output);
+    // The exposed literal `[U+FF` partial marker must not survive at the tail.
+    expect(output.replace(/…`$/, "")).not.toMatch(/\[U\+[0-9A-F]*$/);
+  });
+
+  it.each([
+    ["H21 @ｃ (single fold char)", "z".repeat(198) + "@ｃodexReview"],
+    ["H21 @ｃo", "z".repeat(197) + "@ｃodexReview"],
+    ["H21 ＠ ｃod (fullwidth @ + space)", "z".repeat(195) + "＠ ｃodexReview"],
+  ])("%s: a PARTIAL homoglyph fragment at the clamp tail is fold-stripped", (_label, input) => {
+    expectNoResynthesizedTrigger(sanitizeUntrustedTextForPostedBody(input));
   });
 });
 
