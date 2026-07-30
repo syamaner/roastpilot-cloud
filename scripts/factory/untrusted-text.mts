@@ -60,57 +60,92 @@ export const CODEX_TRIGGER_PATTERN = /[@＠]\s*codex\b/giu;
  */
 export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
 
+/** A Unicode combining mark (general category M). A combining mark always
+ * belongs to the normalisation unit of its preceding starter (see
+ * {@link buildTriggerDetectionFold}); non-global so `.test` is stateless. */
+const NORMALISATION_UNIT_MARK = /\p{M}/u;
+
 /**
- * Builds a per-code-point NFKC fold of `text` for DETECTION ONLY, plus an index
- * map back to the original. Each folded code UNIT records the `[start, end)`
- * code-unit span of the SOURCE code point it came from, so a match `[a, b)` on
- * `folded` maps back to `[originStart[a], originEnd[b - 1])` — rounding OUTWARD
- * to whole source code points. A match that lands inside a multi-unit compat
- * expansion (e.g. U+2100 ℀ → `a/c`) or a folded astral char therefore covers
- * the ENTIRE source code point (fail closed, never a short splice that could
- * leave a lone surrogate).
+ * Builds a FULL-STRING-NFKC-EQUIVALENT fold of `text` for DETECTION ONLY, plus
+ * an index map back to the original. The folded view is byte-for-byte
+ * `text.normalize("NFKC")` (a fuzz property test pins
+ * `buildTriggerDetectionFold(x).folded === x.normalize("NFKC")`), while the map
+ * stays exact for fail-closed splicing: each folded code UNIT records the
+ * `[start, end)` code-unit span of the SOURCE NORMALISATION UNIT it came from,
+ * so a match `[a, b)` maps back to `[originStart[a], originEnd[b - 1])` —
+ * rounding OUTWARD to whole source units (a match landing inside a compat
+ * expansion such as U+2100 ℀ → `a/c`, a folded astral char, or a base+combining
+ * cluster therefore covers the ENTIRE source unit, never a short splice that
+ * could leave a lone surrogate or a dangling combining mark).
  *
- * This is how a homoglyph trigger (`@ｃodex`, U+FF43) is caught while EMITTED
- * text is never itself normalised (#168): the fold lives only in this throwaway
- * buffer, and callers splice the inert marker over the ORIGINAL span. Per-code-
- * point (not full-string) NFKC keeps the map exact; full-string NFKC's only
- * extra power is cross-code-point composition, which cannot synthesise ASCII
- * `codex` and is a symmetric miss for the connector too. An unassigned code
- * point folds to itself, so a future Unicode assignment is picked up by
- * construction without re-enumerating anything.
+ * MATCH THE PLANT, NOT A MODEL OF IT (factory-security-reviewer P1, #168; the
+ * same lesson as #171's `[skip ci]` fix — guard the real behaviour, not a model
+ * of it). The earlier version normalised PER CODE POINT, which does NOT
+ * reproduce full-string NFKC's cross-code-point canonical composition: a
+ * DECOMPOSED `@codex` + `z` + combining-acute was left LIVE, yet a connector
+ * that NFKC-composes its input sees the composed non-ASCII letter — which gives
+ * `codex` the trailing word boundary the matcher keys off — and fires a review.
+ * Detecting against real full-string NFKC CLOSES that whole composition class.
+ * It stays DETECTION-ONLY: no emitted text is ever normalised (H16/H16b pin
+ * byte-identity), and the diff escaper {@link escapeInvisibleCharactersVisibly}
+ * still never folds at all.
  *
- * DOCUMENTED RESIDUAL (factory-security-reviewer, #168): cross-code-point
- * composition CAN change a word BOUNDARY, one thing per-code-point folding does
- * not reproduce. A decomposed `@codexź` (ASCII `z` + a combining acute)
- * that full-string NFKC would compose to `@codexź` — a non-ASCII letter whose
- * arrival gives `codex` the trailing `\b` the ASCII matcher keys off — is left
- * LIVE by BOTH the raw pass and this per-code-point fold, since neither composes
- * across code points. This is NOT a #168 regression (HEAD's ASCII matcher missed
- * the identical decomposed class) and is reachable ONLY by a hypothetical
- * internally-inconsistent connector that BOTH NFKC-composes its input AND then
- * applies ASCII-only word boundaries; no evidence such a connector exists. It is
- * recorded here rather than silently dropped (the evidence-floor rule), in the
- * same symmetric-miss spirit as the note above.
+ * The segmentation makes concatenated per-unit NFKC EQUAL full-string NFKC: a
+ * unit is a starter plus every following code point that is EITHER a combining
+ * mark (`\p{M}` — keeping a whole combining sequence, and so its canonical
+ * reordering, inside one unit) OR composes with the unit across a starter
+ * boundary (the Hangul-jamo `L`+`V`+`T` case). A code point that does neither
+ * begins a normalisation boundary and a new unit — exactly the points where
+ * `NFKC(A) + NFKC(B) === NFKC(A + B)`. An unassigned code point folds to itself,
+ * so a future Unicode assignment is picked up by construction.
+ *
+ * Exported ONLY so the fuzz property test can pin
+ * `folded === text.normalize("NFKC")` directly against the real helper (#168
+ * P1 fold); it is a pure, read-only detection primitive with no side effects.
  */
-function buildTriggerDetectionFold(text: string): {
+export function buildTriggerDetectionFold(text: string): {
   folded: string;
   originStart: number[];
   originEnd: number[];
 } {
+  const codePoints = Array.from(text);
+  const codeUnitStart: number[] = [];
+  let cursor = 0;
+  for (const codePoint of codePoints) {
+    codeUnitStart.push(cursor);
+    cursor += codePoint.length;
+  }
+
   let folded = "";
   const originStart: number[] = [];
   const originEnd: number[] = [];
-  let index = 0;
-  for (const codePoint of text) {
-    const start = index;
-    const end = index + codePoint.length;
-    const foldedCodePoint = codePoint.normalize("NFKC");
-    folded += foldedCodePoint;
-    for (let unit = 0; unit < foldedCodePoint.length; unit++) {
+  let i = 0;
+  while (i < codePoints.length) {
+    let unit = codePoints[i];
+    const start = codeUnitStart[i];
+    let j = i + 1;
+    while (j < codePoints.length) {
+      const next = codePoints[j];
+      // A starter that does NOT interact with the current unit is a safe
+      // normalisation boundary — stop the unit before it. A combining mark, or a
+      // starter that composes across the boundary (Hangul), stays in the unit.
+      if (
+        !NORMALISATION_UNIT_MARK.test(next) &&
+        unit.normalize("NFKC") + next.normalize("NFKC") === (unit + next).normalize("NFKC")
+      ) {
+        break;
+      }
+      unit += next;
+      j++;
+    }
+    const end = j < codePoints.length ? codeUnitStart[j] : text.length;
+    const foldedUnit = unit.normalize("NFKC");
+    folded += foldedUnit;
+    for (let unitOffset = 0; unitOffset < foldedUnit.length; unitOffset++) {
       originStart.push(start);
       originEnd.push(end);
     }
-    index = end;
+    i = j;
   }
   return { folded, originStart, originEnd };
 }

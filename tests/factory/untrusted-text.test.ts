@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  buildTriggerDetectionFold,
   CI_SKIP_TOKEN_REMOVED_MARKER,
   CODEX_TRIGGER_PATTERN,
   CODEX_TRIGGER_REMOVED_MARKER,
@@ -208,6 +209,123 @@ describe("#168: a homoglyph Codex-trigger variant is folded, detected, and neutr
     );
     expect(sanitizeAndClampUntrustedInlineText(corpus, 200)).toBe(corpus);
     expect(sanitizeAndClampUntrustedTextForCommitMessage(corpus, 200)).toBe(corpus);
+  });
+});
+
+describe("#168 P1 (factory-security-reviewer, connector diverse-lens): the detection fold matches FULL-STRING NFKC, closing the cross-code-point composition class", () => {
+  // A connector that NFKC-composes its input reads a DECOMPOSED `@codex` + ASCII
+  // base + combining mark as a single non-ASCII letter that gives `codex` the
+  // trailing word boundary, and fires a review. The old per-code-point fold left
+  // it live; the full-string-equivalent fold closes it. All combining marks and
+  // homoglyphs here are written as \uXXXX ESCAPES so the source is unambiguously
+  // DECOMPOSED and never carries a literal combining or precomposed character.
+  const MARKER = CODEX_TRIGGER_REMOVED_MARKER;
+  const RAW_PASS = /[@\uff20]\s*codex\b/iu; // the pass-1 matcher alone (fresh, non-global)
+  /** A connector that NFKC-composes then matches `@codex` + ASCII word boundary. */
+  function composingConnectorWouldFire(text: string): boolean {
+    return /@\s*codex\b/iu.test(text.normalize("NFKC"));
+  }
+
+  it.each([
+    ["D1 @codex + z + U+0301 (-> z with acute)", "@codexz\u0301 review"],
+    ["D2 @codex + a + U+0308 (-> a with diaeresis)", "@codexa\u0308 review"],
+    ["D3 @ + fullwidth c (U+FF43) + odex + e + U+0301 (fold AND compose together)", "@\uff43odexe\u0301 review"],
+    ["D4 @codex + n + U+0303 (-> n with tilde)", "@codexn\u0303 review"],
+  ])("%s: a composing connector would fire, the RAW pass alone misses it, and the fold neutralises it", (_label, input) => {
+    // The threat is real: a composing connector fires on the decomposed input.
+    expect(composingConnectorWouldFire(input)).toBe(true);
+    // And it is the FOLD, not the raw pass, doing the work (raw pass alone misses).
+    expect(RAW_PASS.test(input)).toBe(false);
+    // The fold neutralises it: marker present, and no composing connector fires
+    // on the emitted output (through neutralise AND the full body path).
+    const neutralised = neutralizeCodexTriggerPhrases(input);
+    expect(neutralised).toContain(MARKER);
+    expect(composingConnectorWouldFire(neutralised)).toBe(false);
+    expect(composingConnectorWouldFire(sanitizeUntrustedTextForPostedBody(input))).toBe(false);
+    expectNoLiveTrigger(sanitizeUntrustedTextForPostedBody(input));
+  });
+
+  it("D5: a clamp cutting right after a decomposed-composition trigger manufactures no live trigger", () => {
+    // The decomposed mention is a different-mention until the trailing word char
+    // is truncated; the tail strip (which shares this fold) must clean the
+    // manufactured trigger tail so a composing connector cannot fire.
+    const input = "a".repeat(193) + "@codexz\u0301" + "review";
+    const out = sanitizeAndClampUntrustedInlineText(input, 200);
+    expect(composingConnectorWouldFire(out.replace(/\u2026$/, ""))).toBe(false);
+    expectNoResynthesizedTrigger(out.replace(/\u2026$/, ""));
+  });
+
+  it("D6 (availability + no leak): a decomposed NON-trigger passes through byte-identically, the fold never over-reaches", () => {
+    // "cafe" + U+0301 + " @codexfoo": the accent is decomposed and `@codexfoo`
+    // is a plain ASCII different-mention (an ASCII word char follows `codex`, so
+    // no boundary -- a composing connector does NOT fire). The fold must neither
+    // neutralise the mention nor NFKC-normalise the emitted text (no leak).
+    const input = "cafe\u0301 @codexfoo shipped";
+    expect(composingConnectorWouldFire(input)).toBe(false);
+    expect(neutralizeCodexTriggerPhrases(input)).toBe(input);
+    expect(sanitizeUntrustedInlineText(input)).toBe(input);
+  });
+
+  it("PROPERTY: buildTriggerDetectionFold(x).folded === x.normalize('NFKC') for a fuzz corpus, with a well-formed origin map", () => {
+    // The "match the plant" acceptance property: the detection view IS real
+    // full-string NFKC. Seeded xorshift32 so any failure is reproducible; the
+    // corpus spans the categories that stress cross-code-point normalisation.
+    let seed = 0x9e3779b1;
+    const next = () => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) / 0x100000000;
+    };
+    const randomCodePoint = (): number => {
+      const r = next();
+      if (r < 0.26) return 0x20 + Math.floor(next() * 0x5f); // ASCII printable
+      if (r < 0.46) return 0x300 + Math.floor(next() * 0x80); // combining marks
+      if (r < 0.55) return 0xff00 + Math.floor(next() * 0x60); // fullwidth/halfwidth
+      if (r < 0.64) return 0x2100 + Math.floor(next() * 0x100); // letterlike/compat
+      if (r < 0.76) return 0x1100 + Math.floor(next() * 0x100); // Hangul jamo (multi-starter)
+      if (r < 0.82) return 0xac00 + Math.floor(next() * 0x2000); // Hangul syllables
+      if (r < 0.9) return 0x1d400 + Math.floor(next() * 0x200); // astral math
+      if (r < 0.95) return 0x1e00 + Math.floor(next() * 0x100); // Latin extended additional
+      return 0x41 + Math.floor(next() * 0x1a); // ASCII letters (bases for marks)
+    };
+    const randomString = (): string => {
+      let s = "";
+      const len = 1 + Math.floor(next() * 16);
+      for (let k = 0; k < len; k++) {
+        try {
+          s += String.fromCodePoint(randomCodePoint());
+        } catch {
+          /* skip an out-of-range value */
+        }
+      }
+      return s;
+    };
+    // Fixed adversarial fixtures alongside the fuzz (all as \uXXXX escapes).
+    const fixtures = [
+      "@codexz\u0301 review", // decomposed trigger
+      "@\uff43odexe\u0301 review", // fullwidth c + decomposed suffix
+      "\u1100\u1161\u11a8\u1100\u1161\u11a8", // decomposed Hangul jamo runs (L+V+T)
+      "\u2100 \ufb01 \u00bd \u{1d41c}odex", // compat + astral bold c (no @)
+      "a\u0300\u0316b", // multi-mark canonical reordering (ccc 230 then 220)
+    ];
+    for (const x of fixtures) {
+      expect(buildTriggerDetectionFold(x).folded).toBe(x.normalize("NFKC"));
+    }
+    for (let iteration = 0; iteration < 4000; iteration++) {
+      const x = randomString();
+      const { folded, originStart, originEnd } = buildTriggerDetectionFold(x);
+      expect(folded).toBe(x.normalize("NFKC"));
+      // The origin map is well-formed: one entry per folded code unit, each a
+      // valid outward-rounded source span.
+      expect(originStart).toHaveLength(folded.length);
+      expect(originEnd).toHaveLength(folded.length);
+      for (let m = 0; m < folded.length; m++) {
+        expect(originStart[m]).toBeGreaterThanOrEqual(0);
+        expect(originEnd[m]).toBeLessThanOrEqual(x.length);
+        expect(originStart[m]).toBeLessThan(originEnd[m]);
+      }
+    }
   });
 });
 
