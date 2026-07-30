@@ -11,10 +11,11 @@
  * invokes an LLM. It is pure orchestration + I/O over already-reviewed,
  * already-tested pure logic:
  *
- * 1. Fetches the PR (body + head/base SHAs), and parses the body with
- *    {@link parseLinkedIssueReferences}. Empty references ⇒ nothing to
- *    spec-ground; exits early (`has-criteria=false`) before any further
- *    fetch, matching that function's own graceful-no-op contract.
+ * 1. Fetches the PR (body + title + head/base SHAs), verifies the trusted
+ *    head, fetches every branch commit message from that SHA-pinned range,
+ *    and parses their union with {@link parseLinkedIssueReferences}. Empty
+ *    references ⇒ nothing to spec-ground; exits early
+ *    (`has-criteria=false`) before any issue or diff fetch.
  * 2. Calls {@link selectIssuesToFetch} BEFORE fetching anything else — the
  *    primary control for the fetch-count resource-exhaustion vector that
  *    function's own docstring describes; only its capped output is ever
@@ -97,6 +98,7 @@ import {
 
 interface GitHubPullRequest {
   readonly body: string | null;
+  readonly title: string;
   readonly head: { readonly sha: string };
   readonly base: { readonly sha: string };
   /**
@@ -328,6 +330,57 @@ export async function fetchPrDiff(
   );
 }
 
+interface GitHubCompareCommit {
+  readonly commit?: { readonly message?: unknown };
+}
+
+interface GitHubCompareCommitsResponse {
+  readonly total_commits?: unknown;
+  readonly commits?: unknown;
+}
+
+/**
+ * Fetches every commit message in the exact trusted base/head range.
+ * The compare endpoint is SHA-pinned like {@link fetchPrDiff}; malformed
+ * or truncated data fails the run instead of silently reverting to the
+ * PR body's references.
+ */
+export async function fetchPrCommitMessages(
+  token: string,
+  owner: string,
+  repo: string,
+  baseSha: string,
+  headSha: string,
+): Promise<readonly string[]> {
+  const response = await githubRequest<GitHubCompareCommitsResponse>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/compare/${baseSha}...${headSha}?per_page=250`,
+  );
+  if (
+    !Number.isSafeInteger(response.total_commits) ||
+    (response.total_commits as number) < 0
+  ) {
+    throw new Error("Compare response total_commits must be a safe non-negative integer.");
+  }
+  if (!Array.isArray(response.commits)) {
+    throw new Error("Compare response commits must be an array.");
+  }
+  if ((response.total_commits as number) > response.commits.length) {
+    throw new Error(
+      `Compare response is truncated: total_commits=${response.total_commits as number}, ` +
+        `commits.length=${response.commits.length}.`,
+    );
+  }
+  return response.commits.map((entry: unknown, index: number) => {
+    const commit = entry as GitHubCompareCommit;
+    if (typeof commit?.commit?.message !== "string") {
+      throw new Error(`Compare response commits[${index}].commit.message must be a string.`);
+    }
+    return commit.commit.message;
+  });
+}
+
 async function writeOutputFile(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, content, "utf-8");
@@ -384,7 +437,17 @@ export async function main(): Promise<void> {
         `this fetch; failing closed rather than reviewing a possibly-stale or possibly-newer diff.`,
     );
   }
-  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  const commitMessages = await fetchPrCommitMessages(
+    token,
+    owner,
+    repo,
+    pr.base.sha,
+    trustedHeadSha,
+  );
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`, [
+    ...commitMessages,
+    pr.title,
+  ]);
 
   if (references.length === 0) {
     console.log(`PR #${prNumber} references no issue; nothing to spec-ground.`);

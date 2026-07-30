@@ -694,6 +694,8 @@ export interface LinkedReferenceIssueNumberSets {
  * shared primitive stays the SET DERIVATION, not the fetch itself, so the two
  * callers can never compute these sets differently even though they fetch
  * differently.
+ * Commit-sourced references cancel out because both snapshots use this same
+ * body derivation, while head and base drift are checked independently.
  *
  * @param body - The PR's body, as returned by the GitHub API (`null` if empty).
  * @param ownerRepo - `"{owner}/{repo}"`, passed straight through to
@@ -751,6 +753,8 @@ export type PullRequestSnapshotDriftReason =
  * references after inline-comment pagination and immediately before the first
  * DELETE. Keeping all four checks on one response avoids composing separately
  * fetched snapshots with a new TOCTOU gap between them.
+ * Commit-sourced references remain soundly outside this body comparison
+ * because unchanged head/base SHAs pin them and both body snapshots agree.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.

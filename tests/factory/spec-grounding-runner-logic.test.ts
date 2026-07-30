@@ -10,6 +10,10 @@ import {
   parseCriteriaSpineArtifact,
   wrapUntrustedDiffBlock,
 } from "../../scripts/factory/spec-grounding-runner-logic.mts";
+import {
+  parseLinkedIssueReferences,
+  selectIssuesToFetch,
+} from "../../scripts/factory/spec-grounding-logic.mts";
 import type {
   LinkedIssueReference,
   LinkedIssueSpecsResult,
@@ -265,6 +269,23 @@ describe("buildCriteriaSpine (F1-S9 slice 3b-i, issue #12)", () => {
 });
 
 describe("computeCriteriaSpineTruncation (F1-S9 slice 3b-iii, issue #12, PR #76 review L181, widened PR #82 round 2 review FOLD 1)", () => {
+  it("T12 escalates a commit-sourced closing reference pushed beyond the fetch cap", () => {
+    const body = Array.from({ length: 20 }, (_, i) => `Closes #${i + 1}`).join("\n");
+    const references = parseLinkedIssueReferences(body, "syamaner/roastpilot-cloud", [
+      "Closes #21",
+    ]);
+    expect(selectIssuesToFetch(references).map((reference) => reference.issueNumber)).not.toContain(21);
+    const summary = computeCriteriaSpineTruncation(
+      references,
+      { specs: [], truncatedIssueCount: 1 },
+      [],
+    );
+    expect(summary.unreviewedClosingIssues).toContainEqual({
+      issueNumber: 21,
+      truncationKind: "fully-dropped",
+    });
+  });
+
   it("reports no truncation and an empty unreviewed-list for a run where nothing was capped or cut", () => {
     const references: LinkedIssueReference[] = [{ issueNumber: 12, kind: "closing" }];
     const result: LinkedIssueSpecsResult = {

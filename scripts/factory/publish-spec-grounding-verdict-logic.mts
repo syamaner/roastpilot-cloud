@@ -496,6 +496,9 @@ export function isDiffTruncationUnverifiableForClosing(
  * fails the WHOLE run closed before any posting or reconciliation is
  * attempted (F1-S9 slice 90.4's own reconcile-delete included) — a stale
  * verdict must never delete a prior run's still-valid gate.
+ * Commit messages are immutable at the verified head and were already
+ * included in `reviewedClosingIssueNumbers`, so only the mutable body can
+ * add a closing reference without changing that head.
  *
  * @param currentBody - The PR's CURRENT body text — already re-fetched and
  *   head-verified by the caller; this function does no fetching of its own.

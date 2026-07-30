@@ -242,6 +242,8 @@ async function fetchAndVerifyPrShas(
  * 2. The PR's CURRENT body, re-parsed with the SAME {@link
  *    parseLinkedIssueReferences} the runner itself uses, still yields
  *    ZERO linked-issue references.
+ * Commit messages cannot change at the verified head, so this deletion
+ * recheck only needs the body channel that can still mutate independently.
  *
  * Only when BOTH still hold is it actually safe to delete. A genuine
  * network/API failure while re-fetching still propagates uncaught (this
@@ -1582,6 +1584,8 @@ async function publishSummary(
   // closing reference touches NOTHING further: no all-clear, no blocker
   // posting, and no reconcile-delete either (F1-S9 slice 90.4) -- a stale
   // verdict must never delete a prior run's still-valid gate.
+  // Commit-sourced references were fixed by the verified head and already
+  // populate the spine, so this post-review addition check stays body-scoped.
   const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
     pr.body ?? "",
     `${owner}/${repo}`,
@@ -1619,6 +1623,8 @@ async function publishSummary(
   // keeping `tryPostBlockersInline` and the reconcile call below fully
   // independent and independently reviewable, rather than threading a
   // shared computation between two otherwise-unrelated mechanisms.
+  // Commit-sourced references are immutable at this verified head and cancel
+  // out of the body snapshot comparison used by the reconciliation path.
   const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
   const currentClosingIssueNumbers = new Set(
     currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
