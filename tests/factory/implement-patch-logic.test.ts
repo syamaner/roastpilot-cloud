@@ -10,7 +10,7 @@ import {
   buildPublishRejectedStepSummary,
   buildPublishSuccessStepSummary,
   deriveBranchName,
-  extractModelIdFromTranscript,
+  validateProvenanceModelId,
   FACTORY_TEXT_LINE_LIMIT,
   FACTORY_PR_BASE_REF,
   findAddedCoverageSuppressions,
@@ -2527,121 +2527,41 @@ describe("sanitizeStepSummaryUrl", () => {
   });
 });
 
-describe("extractModelIdFromTranscript (F1-S10 slice 3, factory.md §13.12)", () => {
-  it("extracts the model from the system/init message (the real claude-code-action transcript shape)", () => {
-    const transcript = JSON.stringify([
-      {
-        type: "system",
-        subtype: "init",
-        model: "claude-opus-4-1-20250805",
-        session_id: "abc-123",
-      },
-      { type: "assistant", message: { content: [] } },
-      { type: "result", subtype: "success", is_error: false },
-    ]);
-    expect(extractModelIdFromTranscript(transcript)).toBe("claude-opus-4-1-20250805");
-  });
-
-  it("finds the init message even when it isn't first (defensive — real transcripts always lead with it, but this must not assume position)", () => {
-    const transcript = JSON.stringify([
-      { type: "assistant", message: { content: [] } },
-      { type: "system", subtype: "init", model: "claude-sonnet-5" },
-    ]);
-    expect(extractModelIdFromTranscript(transcript)).toBe("claude-sonnet-5");
-  });
-
-  it("returns null for unparseable JSON", () => {
-    expect(extractModelIdFromTranscript("{not valid json")).toBeNull();
-  });
-
-  it("returns null for a non-array top level", () => {
-    expect(extractModelIdFromTranscript(JSON.stringify({ type: "system" }))).toBeNull();
-  });
-
-  it("returns null when no system/init message exists", () => {
-    const transcript = JSON.stringify([{ type: "assistant", message: {} }]);
-    expect(extractModelIdFromTranscript(transcript)).toBeNull();
-  });
-
-  it("returns null when the init message's model field is missing, empty, or not a string", () => {
-    expect(
-      extractModelIdFromTranscript(JSON.stringify([{ type: "system", subtype: "init" }])),
-    ).toBeNull();
-    expect(
-      extractModelIdFromTranscript(
-        JSON.stringify([{ type: "system", subtype: "init", model: "" }]),
-      ),
-    ).toBeNull();
-    expect(
-      extractModelIdFromTranscript(
-        JSON.stringify([{ type: "system", subtype: "init", model: 42 }]),
-      ),
-    ).toBeNull();
-  });
-
-  it("returns null for an empty array", () => {
-    expect(extractModelIdFromTranscript("[]")).toBeNull();
-  });
-
-  it("REJECTS (never truncates/sanitizes) a model value containing a newline — a corrupted/tampered transcript must not forge an extra commit trailer line (Codex P2, #55)", () => {
-    const injected = "claude-sonnet\nSigned-off-by: mallory <mallory@example.com>";
-    expect(
-      extractModelIdFromTranscript(
-        JSON.stringify([{ type: "system", subtype: "init", model: injected }]),
-      ),
-    ).toBeNull();
-  });
-
-  it("REJECTS a model value containing a bare carriage return too, not just \\n", () => {
-    expect(
-      extractModelIdFromTranscript(
-        JSON.stringify([{ type: "system", subtype: "init", model: "claude\rSigned-off-by: x" }]),
-      ),
-    ).toBeNull();
-  });
-
-  // #171: the model value is now validated against a static allowlist, not
-  // just a newline reject — closing @mention/#issue/URL/CI-skip-token/length
-  // in one structural constraint. Reject, never truncate.
-  const extractModel = (model: string): string | null =>
-    extractModelIdFromTranscript(
-      JSON.stringify([{ type: "system", subtype: "init", model }]),
-    );
-
-  it("M1: accepts every real model ID shape unchanged", () => {
-    for (const id of [
-      "claude-opus-4-8",
-      "claude-opus-4-1-20250805",
-      "claude-sonnet-5",
-      "claude-haiku-4-5-20251001",
-      "gpt-4.1",
-      "a",
-      "A".repeat(64),
-    ]) {
-      expect(extractModel(id)).toBe(id);
+describe("validateProvenanceModelId (issue #164 — authoritative publisher re-validation of the handed-off model_id)", () => {
+  it("U-B1: passes every real model ID shape through unchanged", () => {
+    for (const id of ["claude-opus-4-8", "claude-opus-4-1-20250805", "claude-sonnet-5"]) {
+      expect(validateProvenanceModelId(id)).toBe(id);
     }
   });
 
-  it("M2: REJECTS (returns null, never truncates) an ID outside the allowlist", () => {
-    for (const bad of [
-      "@syamaner",
-      "[skip ci]",
-      "model skip-checks:true",
-      "https://evil.example/x",
-      "claude #171",
-      `claude${"\u200B"}opus`, // an invisible splitting the value
-      "A".repeat(65), // one over the length bound
-    ]) {
-      expect(extractModel(bad)).toBeNull();
-    }
+  it("U-N1: returns null for undefined (the IMPLEMENT_MODEL_ID env var was unset)", () => {
+    expect(validateProvenanceModelId(undefined)).toBeNull();
   });
 
-  it("M3: still rejects a newline/CR-injected value (regression on the #55 case, now via the allowlist)", () => {
-    expect(extractModel("claude-sonnet\nSigned-off-by: mallory <m@e.com>")).toBeNull();
-    expect(extractModel("claude\rSigned-off-by: x")).toBeNull();
-    // JS `$` (no `m` flag) does not match before a trailing newline, so even a
-    // value that is otherwise clean but ends in `\n` is rejected.
-    expect(extractModel("claude-opus-4-8\n")).toBeNull();
+  it("U-N2: returns null for an empty string", () => {
+    expect(validateProvenanceModelId("")).toBeNull();
+  });
+
+  it("U-N3: REJECTS a value carrying a space and a CI-skip bracket — never truncates", () => {
+    expect(validateProvenanceModelId("claude [skip ci]")).toBeNull();
+  });
+
+  it("U-N4: REJECTS an @mention autolink", () => {
+    expect(validateProvenanceModelId("@syamaner")).toBeNull();
+  });
+
+  it("U-N5: REJECTS a URL (the `:` and `/` are outside the allowlist)", () => {
+    expect(validateProvenanceModelId("https://evil")).toBeNull();
+  });
+
+  it("U-N6: REJECTS newline-, trailing-newline-, and over-length values (anchored, no m-flag; length-bounded 1-64)", () => {
+    expect(validateProvenanceModelId("model\nEvil-Trailer: x")).toBeNull();
+    // JS `$` (no `m` flag) does not match before a trailing newline, so even
+    // an otherwise-clean value ending in `\n` is rejected.
+    expect(validateProvenanceModelId("claude-opus-4-8\n")).toBeNull();
+    // One over the 1-64 length bound — the only defect, so it is rejected
+    // ONLY while the length bound is present.
+    expect(validateProvenanceModelId("A".repeat(65))).toBeNull();
   });
 });
 

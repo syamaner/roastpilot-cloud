@@ -328,6 +328,57 @@ function runImplementEligibility(
   }
 }
 
+function runExtractModelId(
+  run: string,
+  transcript: string | null,
+  options: { readonly emptyPath?: boolean } = {},
+): {
+  readonly status: number | null;
+  readonly output: string;
+  readonly stdout: string;
+  readonly stderr: string;
+} {
+  const workdir = mkdtempSync(join(tmpdir(), "extract-model-id-"));
+  const outputPath = join(workdir, "output");
+  try {
+    writeFileSync(outputPath, "");
+    // emptyPath → the TRANSCRIPT_PATH env var is "" (nothing to read);
+    // transcript === null with a real path → the file is absent (missing
+    // download); a string → the transcript content is written to disk.
+    let transcriptPath = "";
+    if (!options.emptyPath) {
+      transcriptPath = join(workdir, "transcript.json");
+      if (transcript !== null) {
+        writeFileSync(transcriptPath, transcript);
+      }
+    }
+    const result = spawnSync("bash", ["-c", run], {
+      cwd: workdir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TRANSCRIPT_PATH: transcriptPath,
+        GITHUB_OUTPUT: outputPath,
+      },
+    });
+    return {
+      status: result.status,
+      output: readFileSync(outputPath, "utf8"),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+function transcriptWithModel(model: unknown): string {
+  return JSON.stringify([
+    { type: "system", subtype: "init", model },
+    { type: "result", subtype: "success", is_error: false },
+  ]);
+}
+
 function extractRunbookJqPrograms(backfill: string): readonly string[] {
   return [
     ...backfill.matchAll(
@@ -1290,6 +1341,7 @@ describe("bounded triage context contract", () => {
     expect(asMapping(implement?.outputs)).toEqual({
       triage_generation:
         "${{ steps.issue-context.outputs.triage_generation }}",
+      model_id: "${{ steps.extract-model-id.outputs.model_id }}",
     });
     expect(
       stepIndex(implement, "Checkout roastpilot-cloud (read-only)"),
@@ -1532,5 +1584,132 @@ describe("bounded triage context contract", () => {
     }
     expect(prompt).toContain(".claude/skills/triage/**");
     expect(prompt).toContain("executable input sanitizer");
+  });
+});
+
+describe("issue #164: the implement transcript stays job-local; only an allowlisted model_id crosses", () => {
+  const IMPLEMENT_STEP = "Run the implement agent";
+  const EXTRACT_STEP = "Extract provenance model ID (transcript stays job-local)";
+  const GATES_STEP = "Run local gates (independent of the agent's own self-report)";
+  const PUBLISH_STEP = "Validate and publish the implement patch";
+
+  function eachStep(job: unknown): Mapping[] {
+    const steps = asMapping(job)?.steps;
+    return Array.isArray(steps) ? steps.map((step) => asMapping(step) ?? {}) : [];
+  }
+
+  function extractRun(): string {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const implement = asMapping(asMapping(workflow.jobs)?.implement);
+    return String(namedStep(implement, EXTRACT_STEP).run);
+  }
+
+  it("W-T1: no step uploads the implement-agent-transcript artifact or the raw execution_file, and publish never downloads it", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const jobs = asMapping(workflow.jobs) ?? {};
+    let uploadStepsSeen = 0;
+    for (const jobName of Object.keys(jobs)) {
+      for (const step of eachStep(jobs[jobName])) {
+        const uses = String(step.uses ?? "");
+        const withBlock = asMapping(step.with);
+        const name = String(withBlock?.name ?? "");
+        const path = String(withBlock?.path ?? "");
+        if (uses.includes("upload-artifact")) {
+          uploadStepsSeen += 1;
+          expect(name).not.toBe("implement-agent-transcript");
+          expect(path).not.toContain("steps.implement.outputs.execution_file");
+        }
+        if (uses.includes("download-artifact")) {
+          expect(name).not.toBe("implement-agent-transcript");
+        }
+      }
+    }
+    // Guard against the assertion passing vacuously if the parse ever stops
+    // finding upload steps: the implement-patch upload is retained.
+    expect(uploadStepsSeen).toBeGreaterThan(0);
+  });
+
+  it("W-T2: the implement job exposes model_id as a job output wired to the extract step", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const implement = asMapping(asMapping(workflow.jobs)?.implement);
+    expect(asMapping(implement?.outputs)?.model_id).toBe(
+      "${{ steps.extract-model-id.outputs.model_id }}",
+    );
+  });
+
+  it("W-T3: the publish step reads IMPLEMENT_MODEL_ID from the job output and has no IMPLEMENT_TRANSCRIPT_PATH", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const publish = asMapping(asMapping(workflow.jobs)?.publish);
+    const env = asMapping(namedStep(publish, PUBLISH_STEP).env);
+    expect(env).toBeDefined();
+    expect(env?.IMPLEMENT_MODEL_ID).toBe("${{ needs.implement.outputs.model_id }}");
+    expect(env).not.toHaveProperty("IMPLEMENT_TRANSCRIPT_PATH");
+  });
+
+  it("W-T4: the needs-expression is never inlined into a publish run body, and the extract script reads the path only via env", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const jobs = asMapping(workflow.jobs);
+    for (const step of eachStep(jobs?.publish)) {
+      if (step.run !== undefined) {
+        expect(String(step.run)).not.toContain("needs.implement.outputs.model_id");
+      }
+    }
+    const run = extractRun();
+    expect(run).not.toContain("steps.implement.outputs.execution_file");
+    expect(run).toContain('"$TRANSCRIPT_PATH"');
+  });
+
+  it("W-T5: a CI-skip token / @mention / over-length / trailing-newline model yields an empty model_id, exit 0", () => {
+    const run = extractRun();
+    for (const model of ["claude [skip ci]", "@syamaner", "A".repeat(65), "claude-opus-4-8\n"]) {
+      const result = runExtractModelId(run, transcriptWithModel(model));
+      expect(result.status, `model: ${JSON.stringify(model)}`).toBe(0);
+      expect(result.output, `model: ${JSON.stringify(model)}`).toBe("model_id=\n");
+    }
+  });
+
+  it("W-T6: every corrupt/missing transcript shape yields an empty model_id and exit 0 (never fails the job)", () => {
+    const run = extractRun();
+    const cases: ReadonlyArray<readonly [string, ReturnType<typeof runExtractModelId>]> = [
+      ["missing file", runExtractModelId(run, null)],
+      ["empty TRANSCRIPT_PATH", runExtractModelId(run, "unused", { emptyPath: true })],
+      ["malformed JSON", runExtractModelId(run, "{not valid json")],
+      [
+        "non-array top level",
+        runExtractModelId(run, JSON.stringify({ type: "system", subtype: "init", model: "x" })),
+      ],
+      ["no init message", runExtractModelId(run, JSON.stringify([{ type: "assistant", message: {} }]))],
+      ["non-string model", runExtractModelId(run, transcriptWithModel(42))],
+    ];
+    for (const [label, result] of cases) {
+      expect(result.status, label).toBe(0);
+      expect(result.output, label).toBe("model_id=\n");
+    }
+  });
+
+  it("W-T7: the reject path never echoes transcript bytes to stdout/stderr (no CI-skip token, no oversized-marker fragment)", () => {
+    const run = extractRun();
+    const skip = runExtractModelId(run, transcriptWithModel("claude [skip ci]"));
+    expect(skip.stdout + skip.stderr).not.toContain("[skip ci]");
+
+    const marker = "ZZLEAKMARKERZZ";
+    const oversized = marker.repeat(80_000); // > 1 MiB
+    const big = runExtractModelId(run, transcriptWithModel(oversized));
+    expect(big.status).toBe(0);
+    expect(big.output).toBe("model_id=\n");
+    expect(big.stdout + big.stderr).not.toContain(marker);
+  });
+
+  it("W-T8: extraction runs after the agent and before the gates step (the read-before-agent-code integrity window)", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const implement = asMapping(asMapping(workflow.jobs)?.implement);
+    expect(stepIndex(implement, IMPLEMENT_STEP)).toBeLessThan(stepIndex(implement, EXTRACT_STEP));
+    expect(stepIndex(implement, EXTRACT_STEP)).toBeLessThan(stepIndex(implement, GATES_STEP));
+  });
+
+  it("W-B1: a valid transcript model is emitted verbatim as model_id, exit 0", () => {
+    const result = runExtractModelId(extractRun(), transcriptWithModel("claude-opus-4-8"));
+    expect(result.status).toBe(0);
+    expect(result.output).toBe("model_id=claude-opus-4-8\n");
   });
 });

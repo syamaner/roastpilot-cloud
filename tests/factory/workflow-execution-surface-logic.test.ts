@@ -2113,9 +2113,16 @@ jobs:
       // Same #157 delta as the corpus test above: inputs 117 -> 118, the one
       // added `github_token:` `with:` key on the claude-review invocation. No
       // action-step change.
-      runSteps: 53,
-      actionSteps: 46,
-      inputs: 118,
+      //
+      // Issue #164 moved runSteps 53 -> 54, actionSteps 46 -> 44, and inputs
+      // 118 -> 112 in implement-ready-issues.yml: the transcript upload
+      // (upload-artifact, 4 `with:` entries) and its publish-side download
+      // (download-artifact, 2 `with:` entries) were removed, and one `run:`
+      // extract-model-id step was added. The model ID now crosses as a bounded
+      // job output rather than a broadly-readable 30-day artifact.
+      runSteps: 54,
+      actionSteps: 44,
+      inputs: 112,
     });
   });
 });

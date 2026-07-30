@@ -104,6 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
+      model_id: ${{ steps.extract-model-id.outputs.model_id }}
     permissions:
       contents: read
       # Needed to fetch the target issue's title/body/labels:
@@ -611,45 +612,75 @@ jobs:
               results never make it back into this session, so a run
               structured that way finishes having accomplished nothing.
 
-      - name: Upload the implement agent's execution transcript (diagnostic artifact)
-        # Preferred over show_full_output: true — that flag writes the
-        # full tool-use stream into the PUBLIC Actions log for a public
-        # repo; this uploads the same underlying data as a downloadable
-        # artifact instead, gated behind repo/run access rather than
-        # visible to anyone who can view the log. It also survives after
-        # the run for diagnosis, which the public-log form doesn't offer
-        # any differently.
+      - name: Extract provenance model ID (transcript stays job-local)
+        id: extract-model-id
+        # #164: the implement agent's full execution transcript is no longer
+        # uploaded as an artifact (see the removal note below). The ONE field
+        # the publish job ever derived from it — the model ID for the commit's
+        # `Provenance-Model` trailer — is extracted HERE, in-job, and handed to
+        # publish as a bounded job output (`needs.implement.outputs.model_id`),
+        # never as a durable, broadly-readable artifact.
         #
-        # claude-code-action always writes this file (unconditionally,
-        # independent of show_full_output — verified against
-        # base-action/src/execution-file.ts at the pinned SHA:
-        # writeExecutionFile() has no show_full_output check at all) to
-        # `${RUNNER_TEMP}/claude-execution-output.json`, and exposes its
-        # resolved path as this step's own `execution_file` output
-        # (src/entrypoints/run.ts calls
-        # `core.setOutput("execution_file", ...)` after a successful run,
-        # falling back to `setExecutionFileOutputIfPresent()` otherwise) —
-        # read from `steps.implement.outputs.execution_file` here rather
-        # than hardcoding the path, so this survives the action ever
-        # changing where RUNNER_TEMP resolves to.
+        # Runs from the dispatched main ref (jq/shell, NOT agent-authored Node)
+        # BEFORE the "Run local gates" step below executes any agent-authored
+        # code — preserving today's read-before-agent-code integrity window.
         #
-        # `if: always()`: the file is written even when the agent step
-        # itself fails or times out (uploading unconditionally only helps
-        # diagnosis, same reasoning as the patch-artifact upload below).
+        # Fail-closed to an empty model_id on EVERY input shape (missing/empty
+        # path, unparseable/non-array JSON, no init message, non-string or
+        # control-char-bearing or over-length value), and exit 0 always: a
+        # corrupt transcript must degrade the trailer to "unavailable", never
+        # block publish (publish gates on IMPLEMENT_JOB_RESULT, not on this).
+        # The raw candidate is NEVER echoed on the reject path — echoing it
+        # would move a leak into the public Actions log; only an
+        # allowlist-clean value is ever emitted.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: implement-agent-transcript
-          path: ${{ steps.implement.outputs.execution_file }}
-          if-no-files-found: warn
-          # Bumped from the default-era 1 day (operator finding, 18 Jul
-          # 2026, live App-identity commissioning): this transcript is the
-          # PRIMARY agent-trace for debugging a factory run — the only
-          # record of what the agent actually did/reasoned, not
-          # reconstructable from the PR diff or logs alone — and a 1-day
-          # expiry meant it was already gone by the time an incident 2
-          # days later needed it.
-          retention-days: 30
+        env:
+          # Env-mediated, never interpolated into the run: body — the path is
+          # an action output kept off the expression surface.
+          TRANSCRIPT_PATH: ${{ steps.implement.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          model_id=""
+          if [[ -n "${TRANSCRIPT_PATH:-}" && -f "$TRANSCRIPT_PATH" ]]; then
+            # jq yields the first system/init message's `model`, but only when
+            # the top level is an array AND `model` is a string with no control
+            # character. `strings` stops `jq -r` rendering a non-string (e.g.
+            # `model: 42`) as an allowlist-passing "42"; the control-char reject
+            # stops a value whose only defect is a trailing newline slipping
+            # past the allowlist after `$( )` strips it.
+            candidate=$(jq -r '
+              if type == "array"
+              then (
+                map(select(.type == "system" and .subtype == "init"))
+                | .[0].model
+                | strings
+                | select(test("[[:cntrl:]]") | not)
+              )
+              else empty
+              end
+            ' "$TRANSCRIPT_PATH" 2>/dev/null || true)
+            # The authoritative allowlist — the same closed grammar as
+            # MODEL_ID_PATTERN in implement-patch-logic.mts, re-applied
+            # authoritatively by validateProvenanceModelId in the publisher.
+            # Anything outside it stays empty (never truncated/sanitised).
+            pattern='^[A-Za-z0-9._-]{1,64}$'
+            if [[ "$candidate" =~ $pattern ]]; then
+              model_id="$candidate"
+            fi
+          fi
+          echo "model_id=$model_id" >> "$GITHUB_OUTPUT"
+
+      # The implement agent's full execution transcript is deliberately NOT
+      # uploaded as an artifact any more (#164, the same credential-exposure
+      # class #146 removed from claude-review): `implement-agent-transcript`
+      # was a 30-day, broadly-readable (any authenticated user on a public
+      # repo) record of a Bash-enabled credentialed run's entire tool stream.
+      # The only field publish ever read from it — the model ID — now crosses
+      # as the bounded extract-model-id output above. This consciously reverses
+      # the operator finding that had kept the transcript for post-hoc
+      # diagnosis; that diagnostic loss is accepted as the cost of closing the
+      # exposure. Do NOT re-add a transcript upload without redoing that
+      # credential-exposure analysis.
 
       - name: Scrub the git credential from the workspace before gates/capture run
         # Originally: claude-code-action's configureGitAuth() embeds this
@@ -783,10 +814,13 @@ jobs:
           name: implement-patch
           path: patch-output/patch.diff
           if-no-files-found: warn
-          # Same bump and reasoning as implement-agent-transcript above —
-          # for a run the publish job REJECTS (never opens a PR, never
-          # pushes a branch), this patch is the only surviving record of
-          # what the agent produced.
+          # Bumped from the default 1-day retention (operator finding, 18 Jul
+          # 2026): for a run the publish job REJECTS (never opens a PR, never
+          # pushes a branch), this patch is the only surviving record of what
+          # the agent produced. Unlike the removed transcript, this artifact
+          # is the agent's tracked-file diff — the same bytes an accepted
+          # publish makes public as the PR — captured after the credential
+          # scrub.
           retention-days: 30
 
   # --- publish: privileged job. Runs a deterministic script — never agent
@@ -940,21 +974,6 @@ jobs:
           name: implement-patch
           path: patch-output
 
-      - name: Download implement agent transcript artifact
-        # F1-S10 slice 3 (factory.md §13.12): the provenance trailer's
-        # model-ID field is read from this transcript (the implement
-        # job's raw Claude Agent SDK message stream — see
-        # extractModelIdFromTranscript's docstring). Same "may
-        # legitimately not exist" handling as the patch artifact above —
-        # a failed/timed-out implement run may never have produced one,
-        # and this must degrade the trailer's model field to
-        # "unavailable", never fail the publish.
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: implement-agent-transcript
-          path: transcript-output
-
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1045,15 +1064,15 @@ jobs:
           # the script simply omits the reason line.
           FALLBACK_REASON: ${{ steps.fallback_warning.outputs.fallback_reason }}
           # F1-S10 slice 3 (factory.md §13.12) — the fuller provenance
-          # trailer. IMPLEMENT_TRANSCRIPT_PATH matches the "Download
-          # implement agent transcript artifact" step's own `path:` above
-          # plus the fixed filename claude-code-action's base-action
-          # always writes (`claude-execution-output.json` — see
-          # extractModelIdFromTranscript's docstring for the verified
-          # source). IMPLEMENT_PROMPT_VERSION stands in for a prompt/skill
-          # version: this workflow embeds the implement prompt directly
-          # here rather than invoking a named `.claude/skills/` file, so
-          # `github.sha` (the exact commit this run checked out, which
+          # trailer. IMPLEMENT_MODEL_ID is the model ID the implement job
+          # extracted and allowlisted from its own execution transcript (see
+          # the extract-model-id step; #164 replaced the broadly-readable
+          # full-transcript artifact this used to be read from), handed across
+          # as that job's `model_id` output and re-validated authoritatively
+          # here by validateProvenanceModelId. IMPLEMENT_PROMPT_VERSION stands
+          # in for a prompt/skill version: this workflow embeds the implement
+          # prompt directly here rather than invoking a named `.claude/skills/`
+          # file, so `github.sha` (the exact commit this run checked out, which
           # that embedded prompt text lives in) is the honest stand-in.
           # DISPATCH_ACTOR is the human who authorized THIS attempt — the
           # Signed-off-by identity, per factory.md's dispatch-first
@@ -1064,7 +1083,7 @@ jobs:
           # attempt — the correct one to credit/sign-off, since a rerun can
           # force-push a fresh implementation commit under a different
           # human's authorization than the original dispatch.
-          IMPLEMENT_TRANSCRIPT_PATH: transcript-output/claude-execution-output.json
+          IMPLEMENT_MODEL_ID: ${{ needs.implement.outputs.model_id }}
           IMPLEMENT_PROMPT_VERSION: ${{ github.sha }}
           DISPATCH_ACTOR: ${{ github.triggering_actor }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts
