@@ -401,6 +401,115 @@ describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {
   it("returns EMPTY for a body whose only reference is an oversized digit sequence", () => {
     expect(parseLinkedIssueReferences("Closes #99999999999999999999")).toEqual([]);
   });
+
+  it("T1 preserves body-only parsing when auxiliary sources are omitted", () => {
+    expect(parseLinkedIssueReferences("Closes #41")).toEqual([{ issueNumber: 41, kind: "closing" }]);
+  });
+
+  it("T2 finds a closing reference present only in a commit message", () => {
+    expect(parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", ["Closes #42"])).toEqual([
+      { issueNumber: 42, kind: "closing" },
+    ]);
+  });
+
+  it.each([
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+  ])("T3 recognizes auxiliary closing keyword %s", (keyword) => {
+    expect(parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", [`${keyword} #7`])).toEqual([
+      { issueNumber: 7, kind: "closing" },
+    ]);
+  });
+
+  it("T3 recognizes the colon form in auxiliary text", () => {
+    expect(parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", ["Fixes: #7"])).toEqual([
+      { issueNumber: 7, kind: "closing" },
+    ]);
+  });
+
+  it("T4 recognizes all qualified same-repo forms in auxiliary text", () => {
+    expect(
+      parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", [
+        "Fixes SYAMANER/RoastPilot-Cloud#43",
+        "Resolves https://github.com/syamaner/roastpilot-cloud/issues/44",
+        "Closes https://github.com/syamaner/roastpilot-cloud/pull/45",
+      ]),
+    ).toEqual([
+      { issueNumber: 43, kind: "closing" },
+      { issueNumber: 44, kind: "closing" },
+      { issueNumber: 45, kind: "closing" },
+    ]);
+  });
+
+  it("T5 excludes cross-repo qualified forms in auxiliary text", () => {
+    expect(
+      parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", [
+        "Fixes other/repo#5",
+        "Closes https://github.com/other/repo/issues/6",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("T6 classifies auxiliary house keywords as non-closing", () => {
+    expect(
+      parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", ["Refs #46", "Part of #47"]),
+    ).toEqual([
+      { issueNumber: 46, kind: "non-closing" },
+      { issueNumber: 47, kind: "non-closing" },
+    ]);
+  });
+
+  it("T7 scans auxiliary text raw while retaining structural masking for the body", () => {
+    const formatted = "`Closes #48`\n<!-- Closes #49 -->";
+    expect(parseLinkedIssueReferences(formatted)).toEqual([]);
+    expect(parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", [formatted])).toEqual([
+      { issueNumber: 48, kind: "closing" },
+      { issueNumber: 49, kind: "closing" },
+    ]);
+  });
+
+  it("T8 applies closing-wins across body and auxiliary sources in either direction", () => {
+    expect(parseLinkedIssueReferences("Refs #50", "syamaner/roastpilot-cloud", ["Closes #50"])).toEqual([
+      { issueNumber: 50, kind: "closing" },
+    ]);
+    expect(parseLinkedIssueReferences("Closes #51", "syamaner/roastpilot-cloud", ["Refs #51"])).toEqual([
+      { issueNumber: 51, kind: "closing" },
+    ]);
+  });
+
+  it("T9 deduplicates across sources and preserves body, commit, then title ordering", () => {
+    expect(
+      parseLinkedIssueReferences("Closes #3", "syamaner/roastpilot-cloud", [
+        "Closes #3 and Closes #5",
+        "closes #9",
+      ]),
+    ).toEqual([
+      { issueNumber: 3, kind: "closing" },
+      { issueNumber: 5, kind: "closing" },
+      { issueNumber: 9, kind: "closing" },
+    ]);
+  });
+
+  it("T10 drops invalid issue numbers from auxiliary text", () => {
+    expect(
+      parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", [
+        "Closes #0 and Closes #99999999999999999999",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("T11 finds a closing reference present only in the PR title", () => {
+    expect(
+      parseLinkedIssueReferences("", "syamaner/roastpilot-cloud", ["fix login (closes #5)"]),
+    ).toEqual([{ issueNumber: 5, kind: "closing" }]);
+  });
 });
 
 describe("parseAcceptanceCriteria (F1-S9 slice 3, issue #12)", () => {
