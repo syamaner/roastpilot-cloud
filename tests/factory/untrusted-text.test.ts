@@ -192,6 +192,23 @@ describe("#168: a homoglyph Codex-trigger variant is folded, detected, and neutr
     expect(sanitizeUntrustedTextForPostedBody(corpus)).toBe(`\`${corpus}\``);
     expect(sanitizeUntrustedTextForCommitMessage(corpus)).toBe(corpus);
   });
+
+  it("H16b: the two bounded renderers AND the two #169 clamp wrappers also emit the corpus byte-identically (no NFKC leak on the UNTRUNCATED path)", () => {
+    // qa: H16 above covered five emit paths but NOT the renderers or the two new
+    // clamp wrappers. The corpus is NFKC-UNSTABLE (`corpus.normalize("NFKC") !==
+    // corpus`), so an `.normalize("NFKC")` slipped into ANY of these four
+    // functions' untruncated return path would change the output and fail here.
+    // Budgets are far above the corpus length, so every call takes the
+    // UNTRUNCATED branch (where a leak would otherwise ship silently).
+    const corpus = "ﬁle ㎏ ① Ⅷ ｱ ½";
+    expect(corpus.normalize("NFKC")).not.toBe(corpus); // guard: the corpus must be NFKC-unstable
+    expect(renderBoundedUntrustedReason(corpus, 8000)).toBe(`\`${corpus}\``);
+    expect(renderBoundedUntrustedMultilineBlock(corpus, 32_000, "x")).toBe(
+      `\`\`\`text\n${corpus}\n\`\`\``,
+    );
+    expect(sanitizeAndClampUntrustedInlineText(corpus, 200)).toBe(corpus);
+    expect(sanitizeAndClampUntrustedTextForCommitMessage(corpus, 200)).toBe(corpus);
+  });
 });
 
 describe("escapeInvisibleCharactersVisibly (in the untrusted-text leaf)", () => {

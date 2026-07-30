@@ -78,6 +78,19 @@ export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
  * `codex` and is a symmetric miss for the connector too. An unassigned code
  * point folds to itself, so a future Unicode assignment is picked up by
  * construction without re-enumerating anything.
+ *
+ * DOCUMENTED RESIDUAL (factory-security-reviewer, #168): cross-code-point
+ * composition CAN change a word BOUNDARY, one thing per-code-point folding does
+ * not reproduce. A decomposed `@codexź` (ASCII `z` + a combining acute)
+ * that full-string NFKC would compose to `@codexź` — a non-ASCII letter whose
+ * arrival gives `codex` the trailing `\b` the ASCII matcher keys off — is left
+ * LIVE by BOTH the raw pass and this per-code-point fold, since neither composes
+ * across code points. This is NOT a #168 regression (HEAD's ASCII matcher missed
+ * the identical decomposed class) and is reachable ONLY by a hypothetical
+ * internally-inconsistent connector that BOTH NFKC-composes its input AND then
+ * applies ASCII-only word boundaries; no evidence such a connector exists. It is
+ * recorded here rather than silently dropped (the evidence-floor rule), in the
+ * same symmetric-miss spirit as the note above.
  */
 function buildTriggerDetectionFold(text: string): {
   folded: string;
