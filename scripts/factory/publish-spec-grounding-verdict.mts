@@ -240,11 +240,12 @@ async function fetchAndVerifyPrShas(
  *    boolean here, never a throw: a mismatch is an EXPECTED race outcome
  *    this function's caller degrades from gracefully, not a genuine
  *    error worth failing the whole run over.
- * 2. The PR's CURRENT body and title, re-parsed with the SAME {@link
- *    parseLinkedIssueReferences} the runner itself uses, still yields
- *    ZERO linked-issue references.
- * Commit messages cannot change at the verified head, so this deletion
- * recheck only needs the body channel that can still mutate independently.
+ * 2. The PR's current base still matches the review-provenance base.
+ * 3. Its current body/title plus the commit messages pinned to that
+ *    reviewed base/head range still yield ZERO linked-issue references.
+ * Commit messages are immutable at the verified head, but their compare
+ * range changes when the base is retargeted, so both base and pinned
+ * commit surface remain part of every deletion recheck.
  *
  * Only when BOTH still hold is it actually safe to delete. A genuine
  * network/API failure while re-fetching still propagates uncaught (this
@@ -290,6 +291,8 @@ async function fetchAndVerifyPrShas(
  * @param trustedHeadSha - `TRUSTED_HEAD_SHA`, from the workflow's own
  *   event context — the value this run's OWN read-only pass was
  *   reviewed against, never re-derived.
+ * @param reviewedBaseSha - Base SHA the runner actually reviewed.
+ * @param pinnedCommitMessages - Commit messages fetched for that pinned range.
  * @returns `true` only if the PR's CURRENT head SHA still matches AND
  *   its CURRENT body/title still yields zero linked-issue references.
  */
@@ -299,12 +302,20 @@ async function isStillSafeToDeleteInlineBlockerThreads(
   repo: string,
   prNumber: number,
   trustedHeadSha: string,
+  reviewedBaseSha: string,
+  pinnedCommitMessages: readonly string[],
 ): Promise<boolean> {
   const pr = await githubRequest<GitHubPullRequestShas>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
   if (pr.head.sha !== trustedHeadSha) {
     return false;
   }
-  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`, [pr.title]);
+  if (pr.base.sha !== reviewedBaseSha) {
+    return false;
+  }
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`, [
+    ...pinnedCommitMessages,
+    pr.title,
+  ]);
   return references.length === 0;
 }
 
@@ -435,6 +446,9 @@ const NO_CRITERIA_REASONS: ReadonlySet<string> = new Set<NoCriteriaReason>(["no-
  */
 const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
 
+/** Mirrors spec-grounding-runner-logic.mts's reviewedBaseSha ceiling. */
+const MAX_REVIEWED_BASE_SHA_LENGTH = 200;
+
 /**
  * `outcome.json`'s own shape, post-validation — a discriminated union so
  * `noCriteriaReason`/`reviewedClosingIssueNumbers` are only ever accessible
@@ -461,6 +475,7 @@ type OutcomeArtifact =
        * still exits clean.
        */
       readonly reviewedClosingIssueNumbers: readonly number[];
+      readonly reviewedBaseSha: string;
     };
 
 /**
@@ -496,6 +511,9 @@ type OutcomeArtifact =
  * malformation — it THROWS, never coerces — see this function's own
  * validation site for why a full-array field warrants a stronger signal
  * than a two-valued enum does.
+ * `reviewedBaseSha` likewise throws on a missing or malformed value:
+ * Fork A must compare against the runner's true review provenance, never
+ * a coerced substitute.
  *
  * @param path - `outcome.json`'s path on disk.
  * @returns `null` if the file is absent; the parsed, shape-validated
@@ -503,7 +521,7 @@ type OutcomeArtifact =
  * @throws If the file is present but oversized, unreadable, not valid
  *   JSON, missing `hasCriteria`, carrying an unexpected extra field, or
  *   (on the `hasCriteria: false` path) missing or malformed
- *   `reviewedClosingIssueNumbers`.
+ *   `reviewedClosingIssueNumbers` or `reviewedBaseSha`.
  */
 async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null> {
   const raw = await readArtifactFile(path, MAX_OUTCOME_ARTIFACT_BYTES);
@@ -545,7 +563,11 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
   }
 
   const extraKeys = Object.keys(record).filter(
-    (key) => key !== "hasCriteria" && key !== "noCriteriaReason" && key !== "reviewedClosingIssueNumbers",
+    (key) =>
+      key !== "hasCriteria" &&
+      key !== "noCriteriaReason" &&
+      key !== "reviewedClosingIssueNumbers" &&
+      key !== "reviewedBaseSha",
   );
   if (extraKeys.length > 0) {
     throw new Error(`outcome.json at ${path} carries unexpected field(s) (${extraKeys.join(", ")}), got ${rawText}`);
@@ -610,10 +632,22 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
     }
     seenReviewedClosingIssueNumbers.add(value);
   }
+  const reviewedBaseSha = record.reviewedBaseSha;
+  if (
+    typeof reviewedBaseSha !== "string" ||
+    reviewedBaseSha.length === 0 ||
+    reviewedBaseSha.length > MAX_REVIEWED_BASE_SHA_LENGTH
+  ) {
+    throw new Error(
+      `outcome.json at ${path} must carry a non-empty "reviewedBaseSha" string no longer than ` +
+        `${MAX_REVIEWED_BASE_SHA_LENGTH} characters when hasCriteria is false, got ${rawText}`,
+    );
+  }
   return {
     hasCriteria: false,
     noCriteriaReason,
     reviewedClosingIssueNumbers: rawReviewedClosingIssueNumbers,
+    reviewedBaseSha,
   };
 }
 
@@ -677,11 +711,12 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  *
  * COMPLETES FORK A'S COVERAGE TO THIS PATH TOO (F1-S9 slice 90.5, PR #96
  * review round 2, Codex, cid 3626169262, BLOCKER): before EITHER
- * reason-specific branch below runs, this function now fetches and
- * head-verifies the PR (via {@link fetchAndVerifyPrShas}, the SAME
- * function `publishSummary` uses for the `hasCriteria: true` side) and
- * runs {@link findUnreviewedNewClosingReferences} against
- * `reviewedClosingIssueNumbers`. Without this, Fork A's whole job — fail
+ * reason-specific branch below runs, this function now head-verifies the
+ * PR, verifies its base against the runner-recorded review provenance,
+ * fetches that exact base..head commit range, and runs {@link
+ * findUnreviewedNewClosingReferences} over body, pinned commit messages,
+ * and title against `reviewedClosingIssueNumbers`. Without this, Fork A's
+ * whole job — fail
  * closed on a closing reference this run never actually reviewed — only
  * ever covered the `hasCriteria: true` path: a PR whose linked issue(s)
  * were all self-attested complete (or that referenced no issue at all),
@@ -701,6 +736,8 @@ async function readOutcomeArtifact(path: string): Promise<OutcomeArtifact | null
  *   event context — needed for the `"no-references"` branch's own
  *   pre-delete revalidation, and for this function's own new Fork A
  *   head-verify above.
+ * @param reviewedBaseSha - Base SHA the runner actually reviewed and used
+ *   to pin the commit-message comparison.
  * @param reviewedClosingIssueNumbers - `outcome.json`'s own field of the
  *   same name for this run (F1-S9 slice 90.5) — every closing-kind issue
  *   `spec-grounding-runner.mts` discovered at review time, on this
@@ -715,16 +752,43 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
   prNumber: number,
   reason: NoCriteriaReason,
   trustedHeadSha: string,
+  reviewedBaseSha: string,
   reviewedClosingIssueNumbers: readonly number[],
   runNumber: string,
 ): Promise<void> {
   let deletedInlineBlockerCount = 0;
   try {
     const pr = await fetchAndVerifyPrShas(token, owner, repo, prNumber, trustedHeadSha);
+    if (pr.base.sha !== reviewedBaseSha) {
+      await publishFallback(token, owner, repo, prNumber, [
+        `this PR's current base SHA (${pr.base.sha}) does not match the base this run's own review actually ` +
+          `used (${reviewedBaseSha}) -- the target branch advanced since the review ran; failing closed ` +
+          `rather than clearing state based on a different base.`,
+      ]);
+      process.exitCode = 1;
+      return;
+    }
+    let commitMessages: readonly string[];
+    try {
+      commitMessages = await fetchPrCommitMessages(
+        token,
+        owner,
+        repo,
+        reviewedBaseSha,
+        trustedHeadSha,
+      );
+    } catch (err) {
+      await publishFallback(token, owner, repo, prNumber, [
+        `failed to fetch this PR's reviewed commit messages before clearing prior spec-grounding state: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      ]);
+      process.exitCode = 1;
+      return;
+    }
     const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
       pr.body ?? "",
       `${owner}/${repo}`,
-      [pr.title],
+      [...commitMessages, pr.title],
       reviewedClosingIssueNumbers,
       [],
     );
@@ -760,6 +824,8 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
         repo,
         prNumber,
         trustedHeadSha,
+        reviewedBaseSha,
+        commitMessages,
       );
       if (stillSafeToDelete) {
         const clearResult = await clearStaleInlineBlockerComments(
@@ -768,7 +834,16 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
           repo,
           prNumber,
           currentGeneration,
-          () => isStillSafeToDeleteInlineBlockerThreads(token, owner, repo, prNumber, trustedHeadSha),
+          () =>
+            isStillSafeToDeleteInlineBlockerThreads(
+              token,
+              owner,
+              repo,
+              prNumber,
+              trustedHeadSha,
+              reviewedBaseSha,
+              commitMessages,
+            ),
         );
         deletedInlineBlockerCount = clearResult.deletedCount;
         if (!clearResult.ok) {
@@ -924,6 +999,7 @@ export async function main(
       prNumber,
       outcome.noCriteriaReason,
       trustedHeadSha,
+      outcome.reviewedBaseSha,
       outcome.reviewedClosingIssueNumbers,
       runNumber,
     );

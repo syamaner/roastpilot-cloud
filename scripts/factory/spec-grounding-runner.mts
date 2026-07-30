@@ -473,6 +473,7 @@ export async function main(): Promise<void> {
     // run's OWN sibling `writeGithubOutput` call below, in the
     // `criteriaBlock === ""` branch, for the non-trivial case.
     writeGithubOutput("reviewed-closing-issue-numbers", JSON.stringify([]));
+    writeGithubOutput("reviewed-base-sha", pr.base.sha);
     return;
   }
 
@@ -537,6 +538,7 @@ export async function main(): Promise<void> {
       "reviewed-closing-issue-numbers",
       JSON.stringify([...computeReviewedClosingIssueNumbers(references)].sort((a, b) => a - b)),
     );
+    writeGithubOutput("reviewed-base-sha", pr.base.sha);
     return;
   }
 

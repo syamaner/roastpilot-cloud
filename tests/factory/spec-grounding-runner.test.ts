@@ -153,7 +153,7 @@ describe("main — no linked issue (first early exit)", () => {
     // reviewed-closing-issue-numbers=[] (F1-S9 slice 90.5, PR #96 review
     // round 2, Codex, cid 3626169262): trivially empty here.
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+      `has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
     await expect(readFile(criteriaBlockPath, "utf-8")).rejects.toThrow();
     // PR + commit messages -- no issue or diff fetch at all.
@@ -183,7 +183,7 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     // round 2, Codex, cid 3626169262): #12 WAS reviewed as closing, even
     // though it contributed nothing to criteriaBlock (fully satisfied).
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
     await expect(readFile(prDiffBlockPath, "utf-8")).rejects.toThrow();
     // PR + commit messages + the one linked issue -- no diff fetch.
@@ -205,7 +205,7 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     // Only #12 (closing-kind) is reviewed-as-closing -- #34 (non-closing)
     // is excluded, even though it too contributed nothing unmet.
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 
@@ -222,7 +222,7 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     await main();
 
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 
@@ -424,7 +424,7 @@ describe("main — commit-message reference derivation", () => {
     await main();
 
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 });
@@ -752,7 +752,7 @@ describe("main — a PR with no body at all", () => {
     // A null body -> parsed as empty text -> zero references -> the
     // no-references branch (never any obligation to begin with).
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+      `has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 });

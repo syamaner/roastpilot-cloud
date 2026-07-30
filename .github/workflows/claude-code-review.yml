@@ -1028,7 +1028,7 @@ jobs:
         # alongside the verdict/spine below: {"hasCriteria": true} when the
         # runner found real work, {"hasCriteria": false, "noCriteriaReason":
         # "no-references"|"no-unmet-criteria", "reviewedClosingIssueNumbers":
-        # [...]} on its early exit (PR #87 review, Codex, P1/medium fold —
+        # [...], "reviewedBaseSha":"..."} on its early exit (PR #87 review, Codex, P1/medium fold —
         # the runner's own two DIFFERENT false-emitting branches, "no
         # closing-keyword reference at all" vs "references exist but every
         # acceptance box is self-attested complete", carry materially
@@ -1049,6 +1049,7 @@ jobs:
           HAS_CRITERIA: ${{ steps.runner.outputs.has-criteria }}
           NO_CRITERIA_REASON: ${{ steps.runner.outputs.no-criteria-reason }}
           REVIEWED_CLOSING_ISSUE_NUMBERS: ${{ steps.runner.outputs.reviewed-closing-issue-numbers }}
+          REVIEWED_BASE_SHA: ${{ steps.runner.outputs.reviewed-base-sha }}
         run: |
           set -euo pipefail
           # `rm -rf` THEN `mkdir` (Codex finding, PR #76 review, round 5,
@@ -1087,13 +1088,14 @@ jobs:
           # earlier error message, not the only guard.
           if [ "$HAS_CRITERIA" = "true" ]; then
             jq -n --argjson hasCriteria true '{hasCriteria: $hasCriteria}' > review-output/outcome.json
-          elif [ "$HAS_CRITERIA" = "false" ] && { [ "$NO_CRITERIA_REASON" = "no-references" ] || [ "$NO_CRITERIA_REASON" = "no-unmet-criteria" ]; } && [ -n "$REVIEWED_CLOSING_ISSUE_NUMBERS" ]; then
+          elif [ "$HAS_CRITERIA" = "false" ] && { [ "$NO_CRITERIA_REASON" = "no-references" ] || [ "$NO_CRITERIA_REASON" = "no-unmet-criteria" ]; } && [ -n "$REVIEWED_CLOSING_ISSUE_NUMBERS" ] && [ -n "$REVIEWED_BASE_SHA" ]; then
             jq -n --argjson hasCriteria false --arg noCriteriaReason "$NO_CRITERIA_REASON" \
               --argjson reviewedClosingIssueNumbers "$REVIEWED_CLOSING_ISSUE_NUMBERS" \
-              '{hasCriteria: $hasCriteria, noCriteriaReason: $noCriteriaReason, reviewedClosingIssueNumbers: $reviewedClosingIssueNumbers}' \
+              --arg reviewedBaseSha "$REVIEWED_BASE_SHA" \
+              '{hasCriteria: $hasCriteria, noCriteriaReason: $noCriteriaReason, reviewedClosingIssueNumbers: $reviewedClosingIssueNumbers, reviewedBaseSha: $reviewedBaseSha}' \
               > review-output/outcome.json
           else
-            echo "::error::Unexpected runner output: has-criteria=\"$HAS_CRITERIA\" no-criteria-reason=\"$NO_CRITERIA_REASON\" reviewed-closing-issue-numbers=\"$REVIEWED_CLOSING_ISSUE_NUMBERS\" -- refusing to write outcome.json rather than fabricate an ambiguous marker." >&2
+            echo "::error::Unexpected runner output: has-criteria=\"$HAS_CRITERIA\" no-criteria-reason=\"$NO_CRITERIA_REASON\" reviewed-closing-issue-numbers=\"$REVIEWED_CLOSING_ISSUE_NUMBERS\" reviewed-base-sha=\"$REVIEWED_BASE_SHA\" -- refusing to write outcome.json rather than fabricate an ambiguous marker." >&2
             exit 1
           fi
 
@@ -1365,12 +1367,12 @@ jobs:
     # false, GitHub runs the current publish to completion and collapses
     # any queued runs to the newest pending one (latest state wins), and
     # each publish's own pre-delete TOCTOU revalidation (publish-spec-
-    # grounding-verdict.mts's own isStillSafeToDeleteInlineBlockerThreads,
-    # PR #87 review round 3) re-checks the PR's head SHA + body against
-    # CURRENT state immediately before deleting -- so a queued publish
-    # that starts after a body edit correctly sees the new closing
-    # reference and degrades to the non-destructive path instead of
-    # deleting. Clean composition: no partial-clear, no stale delete.
+    # grounding-verdict.mts's own isStillSafeToDeleteInlineBlockerThreads)
+    # re-checks the PR's head + base SHAs and re-parses its current
+    # body/title with the SHA-pinned commit-message surface immediately
+    # before deleting. A queued publish therefore degrades
+    # non-destructively after mutable-reference or base drift. Clean
+    # composition: no partial-clear, no stale delete.
     concurrency:
       group: spec-grounded-publish-${{ github.event.pull_request.number }}
       cancel-in-progress: false

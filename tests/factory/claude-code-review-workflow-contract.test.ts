@@ -30,6 +30,18 @@ function jobIf(workflow: Mapping, jobName: string): string {
   return job.if;
 }
 
+function jobStep(workflow: Mapping, jobName: string, stepName: string): Mapping {
+  const steps = asMapping(asMapping(workflow.jobs)[jobName]).steps;
+  if (!Array.isArray(steps)) {
+    throw new Error(`${jobName} has no steps array`);
+  }
+  const step = steps.find((candidate) => asMapping(candidate).name === stepName);
+  if (!step) {
+    throw new Error(`${jobName} has no "${stepName}" step`);
+  }
+  return asMapping(step);
+}
+
 describe("claude-code-review workflow edited-event contract", () => {
   it("T18 admits every spec-grounding edited dimension with the non-edited short-circuit", () => {
     const expression = jobIf(parseWorkflow(), "spec-grounded-review");
@@ -63,5 +75,19 @@ describe("claude-code-review workflow edited-event contract", () => {
       "converted_to_draft",
       "edited",
     ]);
+  });
+
+  it("T21 requires and serializes reviewed-base-sha on the false outcome branch", () => {
+    const step = jobStep(
+      parseWorkflow(),
+      "spec-grounded-review",
+      "Write the outcome marker (self-describing artifact)",
+    );
+    expect(asMapping(step.env).REVIEWED_BASE_SHA).toBe(
+      "${{ steps.runner.outputs.reviewed-base-sha }}",
+    );
+    expect(step.run).toContain('[ -n "$REVIEWED_BASE_SHA" ]');
+    expect(step.run).toContain('--arg reviewedBaseSha "$REVIEWED_BASE_SHA"');
+    expect(step.run).toContain("reviewedBaseSha: $reviewedBaseSha");
   });
 });
