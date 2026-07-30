@@ -86,8 +86,7 @@ function prResponse(
 
 const PULLS_JSON_KEY = `GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`;
 const COMPARE_JSON_KEY =
-  `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}` +
-  `?per_page=250 accept=${JSON_ACCEPT}`;
+  `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${JSON_ACCEPT}`;
 const COMPARE_DIFF_KEY = `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${DIFF_ACCEPT}`;
 
 // A fixed, injected nonce for deterministic test fixtures (F1-S9 slice
@@ -263,12 +262,52 @@ describe("main — trusted head SHA verification (PR #72 review fold)", () => {
     // Never reaches the commit, issue, or diff fetch once the SHA check fails.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(calls.map((call) => call.url)).not.toContain(
-      `https://api.github.com/repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}?per_page=250`,
+      `https://api.github.com/repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}`,
     );
   });
 });
 
 describe("main — commit-message reference derivation", () => {
+  it("P1 fetches commit messages from the bare unpaginated compare URL", async () => {
+    const { fetchMock, calls } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(calls[1]?.url).toBe(
+      `https://api.github.com/repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}`,
+    );
+  });
+
+  it("P2 accepts an unpaginated compare response containing exactly 250 commits", async () => {
+    const commits = Array.from({ length: 250 }, (_, i) => ({
+      commit: { message: `Commit ${i + 1}` },
+    }));
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+      [COMPARE_JSON_KEY]: () => jsonResponse({ total_commits: 250, commits }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).resolves.toBeUndefined();
+    expect(await readOutput()).toContain("no-criteria-reason=no-references");
+  });
+
+  it("P3 rejects a compare response with 251 total commits but only 250 returned", async () => {
+    const commits = Array.from({ length: 250 }, (_, i) => ({
+      commit: { message: `Commit ${i + 1}` },
+    }));
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+      [COMPARE_JSON_KEY]: () => jsonResponse({ total_commits: 251, commits }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/truncated/);
+  });
+
   it("T11 wires a title-only closing reference into the runner union", async () => {
     const { fetchMock } = mockFetch({
       [PULLS_JSON_KEY]: () =>

@@ -355,7 +355,7 @@ export async function fetchPrCommitMessages(
   const response = await githubRequest<GitHubCompareCommitsResponse>(
     token,
     "GET",
-    `/repos/${owner}/${repo}/compare/${baseSha}...${headSha}?per_page=250`,
+    `/repos/${owner}/${repo}/compare/${baseSha}...${headSha}`,
   );
   if (
     !Number.isSafeInteger(response.total_commits) ||
