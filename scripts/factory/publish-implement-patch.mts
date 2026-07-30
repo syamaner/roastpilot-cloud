@@ -1459,11 +1459,13 @@ function gamingSignalsBothLost(
  * the factory App-token mint request — so that call would 403 at
  * runtime, dead code that never actually posts anything. The fix is
  * NOT to grant `statuses: write`: commit statuses are the SAME API
- * family `codecov/patch` uses as a required branch-protection check, so
- * a publisher able to write statuses could fabricate a passing required
- * check on its own PR — a real widening of the factory-security threat
- * model that this whole classifier exists to shrink, not grow, purely to
- * revive a signal that has a working alternative anyway.
+ * family `codecov/patch` posts through, and branch protection can require
+ * commit-status checks (codecov/patch is currently surfaced-but-not-required,
+ * pending the operator re-enabling it as required — see AGENTS.md's roster
+ * row), so a publisher able to write statuses could fabricate a passing
+ * required check on its own PR — a real widening of the factory-security
+ * threat model that this whole classifier exists to shrink, not grow, purely
+ * to revive a signal that has a working alternative anyway.
  *
  * WHY `COMMENT`, NOT `REQUEST_CHANGES` (Codex finding, F1-S9 slice 1,
  * issue #12, ready round 6 — a second claim-vs-runtime error, same
