@@ -223,9 +223,9 @@ import {
 } from "./implement-patch-logic.mts";
 import {
   findCiSkipDirectives,
-  safeClamp,
+  sanitizeAndClampUntrustedInlineText,
+  sanitizeAndClampUntrustedTextForCommitMessage,
   sanitizeUntrustedInlineText,
-  sanitizeUntrustedTextForCommitMessage,
 } from "./untrusted-text.mts";
 
 /**
@@ -243,12 +243,11 @@ const GITHUB_PR_TITLE_MAX_LENGTH = 256;
  * The character budget for the commit SUBJECT line (issue #171). Keeps the
  * `Implement #N: <title>` subject to a conventional one-line length and, more
  * importantly, bounds the attacker-controlled title's contribution so a single
- * field cannot dominate the commit. The sanitised title is clamped with
- * {@link safeClamp} (never a bare `.slice`), because
- * {@link sanitizeUntrustedTextForCommitMessage} can EXPAND the value (an
- * invisible becomes an 8-char `[U+XXXX]` marker) and a bare code-unit slice
- * could otherwise leave half a marker or a lone surrogate in the pushed
- * commit.
+ * field cannot dominate the commit. The title is sanitised and clamped in one
+ * step with {@link sanitizeAndClampUntrustedTextForCommitMessage} (never a bare
+ * `.slice`), because the sanitise can EXPAND the value (an invisible becomes an
+ * 8-char `[U+XXXX]` marker) and a bare code-unit slice could otherwise leave
+ * half a marker or a lone surrogate in the pushed commit.
  */
 const MAX_COMMIT_SUBJECT_LENGTH = 120;
 
@@ -738,18 +737,19 @@ function applyPatchAndPush(
   rmSync("issue-context", { recursive: true, force: true });
   runGit(["add", "-A"]);
   // The issue title is attacker-writable (#171 threat model: an attacker-
-  // authored `ready` issue title). Defang it through the shared commit-message
-  // sanitiser (invisibles surfaced, newlines collapsed so it cannot forge a
-  // second trailer line, backticks stripped, `@codex` and CI-skip control
-  // tokens neutralised), then bound it with `safeClamp` — NOT a bare `.slice`,
-  // which could leave half a `[U+XXXX]` marker or a lone surrogate in the
-  // pushed commit. The budget reserves the trusted prefix and one char for
-  // safeClamp's ellipsis, so the subject stays within MAX_COMMIT_SUBJECT_LENGTH.
+  // authored `ready` issue title). Defang AND bound it in one step through the
+  // shared commit-message sanitise-then-clamp wrapper (invisibles surfaced,
+  // newlines collapsed so it cannot forge a second trailer line, backticks
+  // stripped, `@codex` and CI-skip control tokens neutralised, then clamped —
+  // NOT a bare `.slice`, which could leave half a `[U+XXXX]` marker or a lone
+  // surrogate in the pushed commit). The budget reserves the trusted prefix and
+  // one char for the ellipsis, so the subject stays within
+  // MAX_COMMIT_SUBJECT_LENGTH.
   const commitSubjectPrefix = `Implement #${issueNumber}: `;
   const commitTitle =
     commitSubjectPrefix +
-    safeClamp(
-      sanitizeUntrustedTextForCommitMessage(issueTitle),
+    sanitizeAndClampUntrustedTextForCommitMessage(
+      issueTitle,
       MAX_COMMIT_SUBJECT_LENGTH - commitSubjectPrefix.length - 1,
     );
   const trailer = buildCommitTrailer({
@@ -1930,19 +1930,19 @@ export async function main(): Promise<void> {
       "POST",
       `/repos/${owner}/${repo}/pulls`,
       {
-        // The issue title is attacker-writable, so it is defanged through the
-        // SAME shared primitive the posted-body sanitiser uses (#158 fold —
-        // the earlier neutralize-only guard let a zero-width split `@<ZWSP>codex`
-        // through, since ZWSP is not `\s`). A title is not Markdown-rendered, so
-        // no code-span WRAP is applied; but escape-invisibles + strip-backticks
-        // + neutralize all run, fail-closed. It is then length-bounded with the
-        // SAME `safeClamp` the body uses, so the defanged (and possibly
-        // marker-EXPANDED) title cannot exceed GitHub's limit and 422 the
-        // create call after the branch push (codex P2). The budget reserves the
-        // fixed `[#N] ` prefix and one char for safeClamp's ellipsis, so the
-        // full title stays within the limit.
-        title: `${prTitlePrefix}${safeClamp(
-          sanitizeUntrustedInlineText(issue.title.replace(/^\s*\[[^\]]*\]\s*/, "")),
+        // The issue title is attacker-writable, so it is defanged AND bounded
+        // through the SAME shared inline sanitise-then-clamp wrapper the
+        // posted-body path uses (#158 fold — the earlier neutralize-only guard
+        // let a zero-width split `@<ZWSP>codex` through, since ZWSP is not `\s`).
+        // A title is not Markdown-rendered, so no code-span WRAP is applied; but
+        // escape-invisibles + strip-backticks + neutralize all run, fail-closed,
+        // then the value is length-bounded so the defanged (and possibly
+        // marker-EXPANDED) title cannot exceed GitHub's limit and 422 the create
+        // call after the branch push (codex P2). The budget reserves the fixed
+        // `[#N] ` prefix and one char for the ellipsis, so the full title stays
+        // within the limit.
+        title: `${prTitlePrefix}${sanitizeAndClampUntrustedInlineText(
+          issue.title.replace(/^\s*\[[^\]]*\]\s*/, ""),
           GITHUB_PR_TITLE_MAX_LENGTH - prTitlePrefix.length - 1,
         )}`,
         head: branchName,

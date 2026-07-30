@@ -562,12 +562,18 @@ const TRAILING_LONE_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
  * lone surrogate to reveal the `@codex` the trigger strip then removes.
  *
  * **SECURITY PRECONDITION:** `value` MUST already have passed {@link
- * neutralizeCodexTriggerPhrases} (both callers do, via {@link
- * sanitizeUntrustedInlineText}). safeClamp neutralises ONLY the
- * truncation-manufactured tail `@codex`, NOT interior triggers — calling it
- * on raw attacker text would pass an interior `@codex` straight through and
- * reopen #158's class. Robust-by-construction hardening (so a future raw-text
- * caller cannot silently reintroduce the bug) is tracked in #169.
+ * neutralizeCodexTriggerPhrases} (via {@link sanitizeUntrustedInlineText} or
+ * {@link sanitizeUntrustedTextForCommitMessage}). safeClamp neutralises ONLY
+ * the truncation-manufactured tail `@codex`, NOT interior triggers — clamping
+ * raw attacker text would pass an interior `@codex` straight through and reopen
+ * #158's class. That is why safeClamp is MODULE-INTERNAL (#169, design a′): the
+ * only public clamping entry points are {@link
+ * sanitizeAndClampUntrustedInlineText} and {@link
+ * sanitizeAndClampUntrustedTextForCommitMessage}, which run the full sanitise
+ * pipeline BEFORE the clamp. A future caller therefore cannot reach the clamp
+ * with un-neutralised text — it either goes through a wrapper (safe) or fails
+ * typecheck (fail-closed, the cheap direction), a static constraint rather than
+ * a comment a caller could ignore.
  *
  * @param value - The already-defanged (see precondition) value to bound.
  * @param maxLength - The content-character budget (before the ellipsis).
@@ -609,11 +615,50 @@ function stripTruncationTailArtifacts(truncated: string): string {
   }
 }
 
-export function safeClamp(value: string, maxLength: number): string {
+function safeClamp(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
   }
   return `${stripTruncationTailArtifacts(value.slice(0, maxLength))}…`;
+}
+
+/**
+ * The public "sanitise THEN clamp" entry point for an untrusted INLINE field a
+ * caller must both defang and length-bound (a PR title, a step-summary field).
+ * Composed byte-for-byte as `safeClamp(sanitizeUntrustedInlineText(value),
+ * maxLength)` — the same order every caller used before {@link safeClamp} was
+ * made module-internal (#169). Wrapping the composition is a STATIC constraint:
+ * raw attacker text cannot reach the clamp without first passing the full
+ * inline defang (so an interior `@codex`/backtick-split/zero-width variant is
+ * neutralised before truncation can only manufacture a tail one).
+ *
+ * @param value - The untrusted field value to defang and bound.
+ * @param maxLength - The content-character budget (before the ellipsis).
+ * @returns The defanged value, bounded and `…`-suffixed when truncated.
+ */
+export function sanitizeAndClampUntrustedInlineText(value: string, maxLength: number): string {
+  return safeClamp(sanitizeUntrustedInlineText(value), maxLength);
+}
+
+/**
+ * The public "sanitise THEN clamp" entry point for an untrusted field bound for
+ * a git COMMIT MESSAGE (invisibles surfaced, newlines collapsed, backticks
+ * stripped, `@codex` AND CI-skip control tokens neutralised, then length-
+ * bounded). Composed byte-for-byte as
+ * `safeClamp(sanitizeUntrustedTextForCommitMessage(value), maxLength)` — the
+ * same order the commit-subject caller used before {@link safeClamp} was made
+ * module-internal (#169). Same static-constraint rationale as {@link
+ * sanitizeAndClampUntrustedInlineText}.
+ *
+ * @param value - The untrusted field value to defang and bound.
+ * @param maxLength - The content-character budget (before the ellipsis).
+ * @returns The defanged value, bounded and `…`-suffixed when truncated.
+ */
+export function sanitizeAndClampUntrustedTextForCommitMessage(
+  value: string,
+  maxLength: number,
+): string {
+  return safeClamp(sanitizeUntrustedTextForCommitMessage(value), maxLength);
 }
 
 /**

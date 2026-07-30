@@ -12,11 +12,13 @@ import {
   neutralizeCodexTriggerPhrases,
   renderBoundedUntrustedMultilineBlock,
   renderBoundedUntrustedReason,
-  safeClamp,
+  sanitizeAndClampUntrustedInlineText,
+  sanitizeAndClampUntrustedTextForCommitMessage,
   sanitizeUntrustedInlineText,
   sanitizeUntrustedTextForCommitMessage,
   sanitizeUntrustedTextForPostedBody,
 } from "../../scripts/factory/untrusted-text.mts";
+import * as untrustedTextModule from "../../scripts/factory/untrusted-text.mts";
 import {
   expectNoLiveTrigger,
   expectNoResynthesizedTrigger,
@@ -671,40 +673,103 @@ describe("issue #158 fold round 3: a length clamp cannot RESYNTHESISE a live tri
   });
 });
 
-describe("safeClamp", () => {
+describe("K1 (#169): safeClamp is un-exported; the two composed clamp wrappers are the public surface", () => {
+  it("the leaf no longer exports safeClamp", () => {
+    expect("safeClamp" in untrustedTextModule).toBe(false);
+  });
+
+  it("exposes both sanitise-then-clamp wrappers as functions", () => {
+    expect(typeof sanitizeAndClampUntrustedInlineText).toBe("function");
+    expect(typeof sanitizeAndClampUntrustedTextForCommitMessage).toBe("function");
+  });
+});
+
+describe("K2 (#169): each public wrapper NEUTRALISES raw attacker text a bare clamp would pass straight through", () => {
+  const wrappers: ReadonlyArray<readonly [string, (value: string) => string]> = [
+    ["sanitizeAndClampUntrustedInlineText", (value) => sanitizeAndClampUntrustedInlineText(value, 200)],
+    [
+      "sanitizeAndClampUntrustedTextForCommitMessage",
+      (value) => sanitizeAndClampUntrustedTextForCommitMessage(value, 200),
+    ],
+  ];
+
+  describe.each(wrappers)("%s", (_name, wrap) => {
+    it("neutralises an interior `@codex` trigger (marker present, no live trigger)", () => {
+      const out = wrap("blocked: @codex review please");
+      expectNoLiveTrigger(out);
+      expect(out).toContain(CODEX_TRIGGER_REMOVED_MARKER);
+    });
+
+    it("neutralises a backtick-split ``@`codex`` (the backtick strip rejoins it before neutralise)", () => {
+      const out = wrap("see @`codex review");
+      expectNoLiveTrigger(out);
+      expect(out).toContain(CODEX_TRIGGER_REMOVED_MARKER);
+    });
+
+    it("defangs a zero-width split `@<ZWSP>codex` by surfacing it visibly", () => {
+      // ZWSP as an escape, never a literal — the tracked-file invisible-format
+      // guard rejects a literal default-ignorable code point in source.
+      const out = wrap("hi @\u200Bcodex review");
+      expectNoLiveTrigger(out);
+      expect(out).toContain("[U+200B]");
+    });
+
+    it("neutralises a HOMOGLYPH `@ｃodex` (the fold detection reaches through the wrapper)", () => {
+      const out = wrap("note @ｃodex review");
+      expectNoLiveTrigger(out);
+      expect(out).toContain(CODEX_TRIGGER_REMOVED_MARKER);
+    });
+  });
+});
+
+describe("K3 (#169): the wrapper composition order is sanitise-THEN-clamp, pinned against the expected literal", () => {
+  it("sanitises (expanding invisibles to markers) BEFORE clamping, so a marker is never split by a clamp-first slice", () => {
+    // 30 ZWSP escapes each expand to an 8-char `[U+200B]` marker (240 chars),
+    // then the clamp bounds to 20 and drops the dangling half-marker -> exactly
+    // two whole markers + ellipsis. Clamping FIRST would slice 20 raw ZWSP and
+    // then expand to 160 chars of markers — a different, unbounded result.
+    const zwsp = "\u200B".repeat(30);
+    expect(sanitizeAndClampUntrustedInlineText(zwsp, 20)).toBe("[U+200B][U+200B]…");
+    expect(sanitizeAndClampUntrustedTextForCommitMessage(zwsp, 20)).toBe("[U+200B][U+200B]…");
+    // The clamp-first order would have been strictly longer than the budget.
+    expect(sanitizeAndClampUntrustedInlineText(zwsp, 20).length).toBeLessThanOrEqual(21);
+  });
+});
+
+describe("K4 (#169): the safeClamp unit behaviours, PORTED onto the public inline wrapper (sanitise is identity on benign input)", () => {
   it("returns a value already within bound unchanged (no ellipsis)", () => {
-    expect(safeClamp("short value", 200)).toBe("short value");
-    expect(safeClamp("x".repeat(200), 200)).toBe("x".repeat(200));
+    expect(sanitizeAndClampUntrustedInlineText("short value", 200)).toBe("short value");
+    expect(sanitizeAndClampUntrustedInlineText("x".repeat(200), 200)).toBe("x".repeat(200));
   });
 
   it("truncates with a trailing ellipsis (result is at most maxLength + 1)", () => {
-    const result = safeClamp("x".repeat(250), 200);
+    const result = sanitizeAndClampUntrustedInlineText("x".repeat(250), 200);
     expect(result.length).toBe(201);
     expect(result.endsWith("…")).toBe(true);
   });
 
   it("strips a trailing `@codex` fragment the truncation manufactured", () => {
-    const result = safeClamp("a".repeat(194) + "@codexx", 200);
+    const result = sanitizeAndClampUntrustedInlineText("a".repeat(194) + "@codexx", 200);
     expect(result).toBe("a".repeat(194) + "…");
     expect(result).not.toContain("@codex");
   });
 
   it("strips a trailing PARTIAL `[U+XXXX` escape marker rather than splitting it", () => {
-    // 196 z + the 8-char marker `[U+FE0F]` = 204 chars; slicing to 200 cuts
-    // the marker to `[U+F`, which safeClamp removes so no half-marker survives.
-    const result = safeClamp("z".repeat(196) + "[U+FE0F]", 200);
+    // 196 z + the 8-char LITERAL marker text `[U+FE0F]` = 204 chars; sanitise is
+    // identity (no real invisibles), the slice to 200 cuts the marker to `[U+F`,
+    // and the clamp removes it so no half-marker survives.
+    const result = sanitizeAndClampUntrustedInlineText("z".repeat(196) + "[U+FE0F]", 200);
     expect(result).not.toMatch(/\[U\+[0-9A-F]*$/);
     expect(result.endsWith("…")).toBe(true);
   });
 
-  it("leaves a COMPLETE trailing `[U+XXXX]` marker intact when the cut lands right after its `]`", () => {
-    // The input must EXCEED maxLength so the truncation/strip path actually
-    // runs (an exactly-200-char input would hit the within-bound early return
-    // and the test would pass vacuously — qa finding). Here the cut at 200
-    // lands right after the marker's closing `]` (y*192 + `[U+FE0F]` = 200),
-    // so the partial-marker strip must NOT fire (the tail ends in `]`, not
-    // mid-hex) and the complete marker survives; only the excess `tail` drops.
-    const result = safeClamp("y".repeat(192) + "[U+FE0F]" + "tail", 200);
+  it("leaves a COMPLETE trailing `[U+XXXX]` marker intact when the cut lands right after its `]` (non-vacuous, length 201)", () => {
+    // The input must EXCEED maxLength so the truncation/strip path actually runs
+    // (an exactly-200-char input would hit the within-bound early return and the
+    // test would pass vacuously — qa finding). Here the cut at 200 lands right
+    // after the marker's closing `]` (y*192 + `[U+FE0F]` = 200), so the
+    // partial-marker strip must NOT fire and the complete marker survives.
+    const result = sanitizeAndClampUntrustedInlineText("y".repeat(192) + "[U+FE0F]" + "tail", 200);
     expect(result).toBe("y".repeat(192) + "[U+FE0F]…");
     expect(result).toContain("[U+FE0F]");
     expect(result.endsWith("…")).toBe(true);
@@ -714,11 +779,11 @@ describe("safeClamp", () => {
   });
 });
 
-describe("issue #158 fold (PR #170): a clamp cannot split an astral char into a lone surrogate", () => {
+describe("K4 (#169): the astral/lone-surrogate clamp behaviours, PORTED onto the public inline wrapper", () => {
   it("strips the lone high surrogate a slice leaves when it cuts an emoji in half", () => {
     // Codex P2 reproduction: 199 ASCII + emoji, clamped to 200, cuts the first
     // emoji mid-pair. Without the strip the tail is a lone `\uD83D`.
-    const result = safeClamp("a".repeat(199) + "😀".repeat(10), 200);
+    const result = sanitizeAndClampUntrustedInlineText("a".repeat(199) + "😀".repeat(10), 200);
     expectNoLoneSurrogate(result);
     expect(result.endsWith("…")).toBe(true);
     expect(result.length).toBeLessThanOrEqual(201);
@@ -728,7 +793,7 @@ describe("issue #158 fold (PR #170): a clamp cannot split an astral char into a 
     // Cut lands inside `[U+FE0F]` (leaving `[U+F`) with a COMPLETE emoji just
     // before it: the partial-marker strip fires, the emoji stays whole, and no
     // lone surrogate is left.
-    const result = safeClamp("z".repeat(194) + "😀[U+FE0F]", 200);
+    const result = sanitizeAndClampUntrustedInlineText("z".repeat(194) + "😀[U+FE0F]", 200);
     expectNoLoneSurrogate(result);
     expect(result).not.toMatch(/\[U\+[0-9A-F]*$/);
     expect(result).toContain("😀");
@@ -742,7 +807,7 @@ describe("issue #158 fold (PR #170): a clamp cannot split an astral char into a 
   it("leaves a complete astral char intact when the cut lands on a pair boundary", () => {
     // 200 code units of emoji = exactly 100 complete pairs; the 200th unit is a
     // low surrogate whose high partner is present, so nothing is stripped.
-    const result = safeClamp("😀".repeat(150), 200);
+    const result = sanitizeAndClampUntrustedInlineText("😀".repeat(150), 200);
     expectNoLoneSurrogate(result);
     expect(result.endsWith("😀…")).toBe(true);
   });
