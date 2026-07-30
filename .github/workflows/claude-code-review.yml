@@ -8,17 +8,11 @@ on:
     # already running on the now-draft PR would finish and post its findings.
     #
     # `edited` (Codex finding, PR #76 review, L316, F1-S9 issue #12): the
-    # spec-grounded-review job derives its ENTIRE linked-issue set, and
-    # each reference's closing-vs-non-closing classification, from the
-    # PR's own (mutable) body — without `edited`, an author could get a
-    # clean spec-grounded verdict, then edit the body afterward to ADD a
-    # new `Closes #N` or FLIP an existing `Refs` to `Closes`, and the gate
-    # would never re-run against that materially different closing claim
-    # — a direct gaming vector (make the closing claim only after review).
-    # `claude-review` itself does NOT need to react to `edited` at all (a
-    # body edit doesn't change the diff a code review judges) — see that
-    # job's own `if:` below, which explicitly excludes `edited` so a body
-    # edit doesn't burn a full code review, only the cheap spec re-ground.
+    # spec-grounded-review job derives closing claims from body, branch
+    # commit messages, and title, while a base retarget changes the diff
+    # those claims are judged against. The guards below admit exactly those
+    # edited-event dimensions. `claude-review` admits only base edits,
+    # because title/body edits do not change the code diff it reviews.
     types: [opened, synchronize, ready_for_review, reopened, converted_to_draft, edited]
 
 # Concurrency is PER-JOB (see each job's own `concurrency:` block below),
@@ -29,8 +23,9 @@ on:
 # since `claude-review` itself is excluded from `edited` entirely (see its
 # own `if:` below), the replacement run would never re-trigger it —
 # silently losing a code review for that head with no visible trace. Two
-# independent groups mean an edited-triggered run supersedes only
-# `spec-grounded-review`'s own prior run, never an in-flight code review.
+# independent groups mean a title/body edit supersedes only
+# `spec-grounded-review`'s prior run. A base edit correctly also supersedes
+# `claude-review`, whose in-flight diff became stale.
 #
 # ACCEPTED RESIDUAL (Codex finding, PR #76 review, round 4 — a real
 # regression from the split above, deliberately not fixed): BOTH jobs'
@@ -90,13 +85,10 @@ jobs:
     # claimed factory PRs "are reviewed from `opened`", which this same file
     # contradicts twice.)
     #
-    # Excludes `edited` entirely (Codex finding, PR #76 review, L316): this
-    # job reviews the DIFF, which a body edit never changes — reacting to
-    # `edited` here would burn a full code review on every title/body
-    # tweak for no reason. `edited` exists in this workflow's trigger
-    # types ONLY for `spec-grounded-review` below, which DOES need to
-    # react to a body edit (see that job's own `if:`).
-    if: ${{ github.event.action != 'edited' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    # Title/body-only edits stay excluded because they do not change this
+    # job's diff. A base retarget is admitted because it changes the
+    # merge-base diff the review judges.
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
 
     # Adjudicated fold (round-2 Finding 3, #35 rework), now JOB-scoped (Codex
     # finding, PR #76 review, round 3 — see the top-level comment above
@@ -780,30 +772,18 @@ jobs:
     # reviewing it against acceptance criteria this early would produce
     # verdicts on a moving target.
     #
-    # UNLIKE `claude-review`, this job MUST react to `edited` — but only
-    # when the PR's BODY actually changed (Codex finding, PR #76 review,
-    # L316): the runner derives its entire linked-issue set, and each
-    # reference's closing-vs-non-closing classification, from the body
-    # text alone, so an author could get a clean verdict, then edit the
-    # body afterward to add a new `Closes #N` (or flip an existing `Refs`
-    # to `Closes`), leaving a stale verdict standing for a materially
-    # different closing claim — the direct gaming vector this guard
-    # closes. `github.event.changes.body` is present in the `edited`
-    # event's payload ONLY when the body itself was part of the edit
-    # (GitHub's own documented shape) — a title-only edit has no `changes
-    # .body` key at all, so `!= null` correctly skips it, and every
-    # NON-`edited` action (opened/synchronize/etc.) short-circuits past
-    # this check entirely via the leading `action != 'edited'` disjunct.
-    if: ${{ (github.event.action != 'edited' || github.event.changes.body != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    # This job reacts to every edited-event dimension that can stale its
+    # verdict: body and title can change the linked-reference union, while
+    # base changes the diff and reviewedBaseSha those criteria are judged
+    # against. GitHub's edited payload grammar is closed over those three
+    # `changes` keys; non-edited actions short-circuit the guard.
+    if: ${{ (github.event.action != 'edited' || github.event.changes.body != null || github.event.changes.base != null || github.event.changes.title != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
 
     # OWN group, separate from `claude-review`'s (Codex finding, PR #76
     # review, round 3 — see the top-level comment above `jobs:`): an
-    # edited-triggered run (body change) supersedes only a prior
-    # spec-grounded-review run for this PR, never an in-flight
-    # `claude-review` — closing the griefing vector a single shared group
-    # had (edit title/body while claude-review runs -> cancelled ->
-    # replacement run is edited-excluded from claude-review -> that code
-    # review is silently lost for this head).
+    # title/body edited run supersedes only this job's prior run, preserving
+    # the separate code review. A base edit enters both independent groups
+    # and correctly cancels both stale diff consumers.
     concurrency:
       group: spec-grounded-review-${{ github.event.pull_request.number }}
       cancel-in-progress: true
