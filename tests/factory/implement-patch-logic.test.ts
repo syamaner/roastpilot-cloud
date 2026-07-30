@@ -566,7 +566,32 @@ describe("isProtectedPath", () => {
   it("does not protect ordinary application paths", () => {
     expect(isProtectedPath("lib/slug.ts")).toBe(false);
     expect(isProtectedPath("app/r/[slug]/page.tsx")).toBe(false);
-    expect(isProtectedPath("tests/factory/patch-diff.test.ts")).toBe(false);
+  });
+
+  // T1 (#160 — the writable-alarm class): the factory-integrity enforcement
+  // tests are now protected wholesale via the `tests/factory/` prefix. This is
+  // path-shaped, not an inventory of today's files: a not-yet-created
+  // enforcement test under the subtree is protected the moment it lands, which
+  // is the point — a factory patch can never author the alarm that guards it.
+  it.each([
+    "tests/factory/agent-model-pin.test.ts",
+    "tests/factory/implement-patch-logic.test.ts",
+    "tests/factory/fixtures/claude-review-tracking-comment-pr150-truncated.md",
+    "tests/factory/future-alarm.test.ts",
+  ])("protects the factory-integrity enforcement test %s", (path) => {
+    expect(isProtectedPath(path)).toBe(true);
+  });
+
+  // N1 (#160): the protection is slash-anchored to the `tests/factory/` prefix,
+  // so app-slice tests in `tests/` root and near-miss siblings that merely
+  // START with the prefix bytes are NOT protected — a factory agent still
+  // legitimately authors ordinary application tests.
+  it.each([
+    "tests/slug.test.ts",
+    "tests/factory-notes/x.md",
+    "tests/factoryx.test.ts",
+  ])("does not protect the near-miss path %s outside tests/factory/", (path) => {
+    expect(isProtectedPath(path)).toBe(false);
   });
 
   it("fails closed on an unresolved traversal (leading ..)", () => {
@@ -587,12 +612,16 @@ describe("isProtectedPath", () => {
 
 describe("findForbiddenPatchPaths", () => {
   it("returns empty for a clean patch touching only application code", () => {
+    // N3 (#160): a clean patch touches an app-slice test and library code
+    // only. The moved paths (`tests/slug.test.ts`, not `tests/factory/...`)
+    // matter now that `tests/factory/` is a protected prefix — the earlier
+    // fixture would deliberately-correctly be flagged after C1.
     expect(
       findForbiddenPatchPaths([
         "a/lib/slug.ts",
         "b/lib/slug.ts",
-        "a/tests/factory/slug.test.ts",
-        "b/tests/factory/slug.test.ts",
+        "a/tests/slug.test.ts",
+        "b/tests/slug.test.ts",
       ]),
     ).toEqual([]);
   });
@@ -605,6 +634,38 @@ describe("findForbiddenPatchPaths", () => {
       "b/.github/workflows/triage-issues.yml",
     ]);
     expect(forbidden).toEqual([".github/workflows/triage-issues.yml"]);
+  });
+
+  // T2 (#160): the model-pin alarm itself is flagged, so a factory patch
+  // presenting a gutted `validateAgentModelPins` as a test refactor dies at
+  // the publisher before any `.claude/**` change is attempted.
+  it("flags the model-pin enforcement test (the writable alarm, #160)", () => {
+    expect(
+      findForbiddenPatchPaths(["a/tests/factory/agent-model-pin.test.ts"]),
+    ).toEqual(["tests/factory/agent-model-pin.test.ts"]);
+  });
+
+  // T3 (#160): a rename that moves an enforcement test OUT of the subtree
+  // still flags the protected source side — the alarm cannot be laundered
+  // by renaming it to an unprotected path in the same patch.
+  it("flags the protected source side of a rename out of tests/factory/", () => {
+    expect(
+      findForbiddenPatchPaths([
+        "a/tests/factory/agent-model-pin.test.ts",
+        "b/tests/moved-alarm.test.ts",
+      ]),
+    ).toEqual(["tests/factory/agent-model-pin.test.ts"]);
+  });
+
+  // T4 (#160): a traversal-laden path normalises back under the prefix and is
+  // still flagged — the fail-closed normalisation the existing prefixes rely
+  // on covers the new one too, with no special-casing.
+  it("flags a traversal path that normalises under tests/factory/", () => {
+    expect(
+      findForbiddenPatchPaths([
+        "tests/../tests/factory/agent-model-pin.test.ts",
+      ]),
+    ).toEqual(["tests/factory/agent-model-pin.test.ts"]);
   });
 
   it("flags the privileged glue scripts even though they live outside .github/**", () => {
