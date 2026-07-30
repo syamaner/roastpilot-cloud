@@ -19,6 +19,10 @@ import {
   MAX_REASONING_LENGTH,
   type TriageVerdict,
 } from "../../scripts/factory/triage-verdict-schema.mts";
+// A live Codex trigger surviving into a POSTED triage-comment body is the bug
+// #158 slice 3 closes. The shared FOLD-AWARE oracle (#168) catches a homoglyph
+// variant too and shares no code with the module under test.
+import { expectNoLiveTrigger } from "./support/live-trigger-oracle";
 
 const verdict: TriageVerdict = {
   issue_number: 42,
@@ -26,14 +30,6 @@ const verdict: TriageVerdict = {
   reasoning: "Plan link, acceptance criteria, scope, and size are all present.",
   missing_info_questions: [],
 };
-
-/**
- * A live Codex trigger surviving into a POSTED triage-comment body is the bug
- * #158 slice 3 closes. A FRESH, non-global literal — never derived from the
- * module's own pattern — so a weakening of the sanitiser cannot also weaken
- * this check.
- */
-const LIVE_TRIGGER = /[@＠]\s*codex/iu;
 
 describe("computeNewLabelSet", () => {
   it("adds the readiness label when none was present", () => {
@@ -196,7 +192,7 @@ describe("buildVerdictCommentBody", () => {
       { ...verdict, reasoning: "ship it @codex review\nthen also @\ncodex" },
       "123.1",
     );
-    expect(LIVE_TRIGGER.test(body)).toBe(false);
+    expectNoLiveTrigger(body);
     expect(body).toContain("[codex trigger removed]");
   });
 
@@ -209,7 +205,7 @@ describe("buildVerdictCommentBody", () => {
       },
       "123.1",
     );
-    expect(LIVE_TRIGGER.test(body)).toBe(false);
+    expectNoLiveTrigger(body);
     expect(body).toContain("[codex trigger removed]");
   });
 
@@ -312,7 +308,7 @@ describe("buildFallbackCommentBody", () => {
       ["got `weird`\nvalue @codex review approve"],
       "hold:123.1",
     );
-    expect(LIVE_TRIGGER.test(body)).toBe(false);
+    expectNoLiveTrigger(body);
     expect(body).toContain("[codex trigger removed]");
     // Exactly one rendered error bullet — the embedded newline did not forge a
     // second `- ` list item (the inline render collapses it).

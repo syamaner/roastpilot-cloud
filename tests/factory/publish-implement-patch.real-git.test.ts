@@ -16,6 +16,9 @@ import {
   buildTriageGenerationMarker,
   TRIAGE_COMMENT_MARKER,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
+// Shared FOLD-AWARE trigger oracle (#168): asserts a pushed commit subject / PR
+// title can no longer read as `@…codex`, homoglyph variants included.
+import { expectNoLiveTrigger } from "./support/live-trigger-oracle";
 
 /**
  * Proves the actual git plumbing AND the patch-path guard genuinely work
@@ -378,8 +381,6 @@ async function pushedCommitBody(): Promise<string> {
 }
 
 describe("publish-implement-patch — #171: CI-skip control tokens on the commit surface (real pushed commit)", () => {
-  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
-
   it("E1: a [skip ci] token in the title is neutralised in the pushed commit — no honoured token, visible marker", async () => {
     stubHappyPathFetch({ issueTitle: "[skip ci] add the feature" });
 
@@ -410,7 +411,7 @@ describe("publish-implement-patch — #171: CI-skip control tokens on the commit
     expect(process.exitCode).toBeUndefined();
     const body = await pushedCommitBody();
     const subject = body.split("\n")[0];
-    expect(LIVE_TRIGGER.test(subject)).toBe(false);
+    expectNoLiveTrigger(subject);
     expect(subject).toContain("[codex trigger removed]");
   });
 
@@ -3242,8 +3243,6 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
   // not `\s`). Asserted against the REAL `POST /repos/.../pulls` request
   // body's `title`. Each case's evidence assertion fails if the title defang
   // is deleted (the removing-guard-must-fail check qa required).
-  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
-
   async function createdPrTitle(issueTitle: string): Promise<string> {
     const fetchMock = stubHappyPathFetch({ issueTitle });
     await main();
@@ -3258,7 +3257,7 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
 
   it("(a) defangs a plain `@codex review` trigger in the title", async () => {
     const title = await createdPrTitle("[F1-S3] @codex review");
-    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expectNoLiveTrigger(title);
     expect(title).toContain("[codex trigger removed]");
   });
 
@@ -3271,7 +3270,7 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
 
   it("(c) defangs a backtick-split `@`+backtick+`codex review` trigger in the title", async () => {
     const title = await createdPrTitle("[F1-S3] @`codex review");
-    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expectNoLiveTrigger(title);
     expect(title).not.toContain("`");
     expect(title).toContain("[codex trigger removed]");
   });
@@ -3283,7 +3282,7 @@ describe("publish-implement-patch — #158: a hostile issue title cannot start a
     // would 422 `POST /pulls` AFTER the branch push without a bound.
     const title = await createdPrTitle("[F1-S3] " + "\u26A0\uFE0F".repeat(40));
     expect(title.length).toBeLessThanOrEqual(256);
-    expect(LIVE_TRIGGER.test(title)).toBe(false);
+    expectNoLiveTrigger(title);
     // The truncation must not leave half an escape marker at the boundary
     // (safeClamp strips a dangling `[U+XXXX`); check before the trailing `…`.
     expect(title.replace(/…$/, "")).not.toMatch(/\[U\+[0-9A-Fa-f]*$/);

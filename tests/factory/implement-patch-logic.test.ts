@@ -41,16 +41,11 @@ import {
   sanitizeStepSummaryUrl,
   type ExistingComment,
 } from "../../scripts/factory/implement-patch-logic.mts";
-/**
- * A live Codex trigger in a POSTED body is the bug #158 closes. `expectNoLiveTrigger`
- * asserts the sanitised output can no longer read as `@…codex` to the connector, using a
- * FRESH, non-global literal (never the module's own stateful `g`-flag pattern, and never a
- * regex derived from it, so mutating `CODEX_TRIGGER_PATTERN` can't also weaken the check).
- */
-const LIVE_TRIGGER = /[@＠]\s*codex/iu;
-function expectNoLiveTrigger(sanitizedOutput: string): void {
-  expect(LIVE_TRIGGER.test(sanitizedOutput)).toBe(false);
-}
+// A live Codex trigger in a POSTED body is the bug #158 closes. The shared
+// FOLD-AWARE oracle (#168) asserts the sanitised output can no longer read as
+// `@…codex` to the connector — including a homoglyph variant — and shares no
+// code with the module under test, so a mutation of the module cannot weaken it.
+import { expectNoLiveTrigger } from "./support/live-trigger-oracle";
 
 describe("normalizePatchPath", () => {
   it("strips a leading a/ or b/ diff prefix", () => {

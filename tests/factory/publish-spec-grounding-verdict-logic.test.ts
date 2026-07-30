@@ -26,6 +26,13 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "../../scripts/factory/spec-grounding-verdict-schema.mts";
+// Shared FOLD-AWARE trigger oracle (#168): a live `@…codex` in a posted
+// spec-grounding body — homoglyph variants included — is caught here, and the
+// oracle shares no code with the module under test.
+import {
+  expectNoLiveTrigger,
+  expectNoResynthesizedTrigger,
+} from "./support/live-trigger-oracle";
 
 function joined(overrides: Partial<JoinedCriterionResult> = {}): JoinedCriterionResult {
   return {
@@ -1400,18 +1407,7 @@ describe("buildSpecGroundingClearedSummaryCommentBody (PR #86 review, Codex, P2;
  * caught here.
  */
 describe("#158 slice 2: spec-grounding publisher sinks neutralise the @codex trigger + disclose truncation", () => {
-  // A FRESH, non-global literal — never the module's own stateful `g`-flag
-  // pattern, so this oracle cannot be weakened by a mutation of that pattern.
-  const LIVE_TRIGGER = /[@＠]\s*codex/iu;
-  function expectNoLiveTrigger(output: string): void {
-    expect(LIVE_TRIGGER.test(output)).toBe(false);
-  }
-  // Strip invisibles/default-ignorables first so a zero-width split can't hide
-  // a resynthesised `@codex` from the contiguity check.
-  function expectNoResynthesizedTrigger(output: string): void {
-    const bare = output.replace(/[\p{C}\p{Default_Ignorable_Code_Point}]/gu, "");
-    expect(/[@＠]codex/iu.test(bare)).toBe(false);
-  }
+  // The trigger oracles are the shared fold-aware helpers imported above (#168).
 
   // The three rationale sinks all funnel through formatRationaleForDisplay →
   // sanitizeAgentRationaleForDisplay (300cp cap, "the uploaded verdict

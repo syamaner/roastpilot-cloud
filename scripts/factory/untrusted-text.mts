@@ -26,15 +26,19 @@
  * bot-authorship control cannot then distinguish from a real one.
  *
  * `[@＠]` covers the ASCII `@` AND the fullwidth `＠` (U+FF20, operator
- * decision 4 on #158) — fail closed on that homoglyph rather than admit a
- * one-character evasion. A fullwidth-LETTER homoglyph inside the word
- * itself (e.g. `@ｃodex`, U+FF43) is a documented RESIDUAL, tracked in
- * **#168**: it is deliberately NOT closed here (no NFKC in this path, which
- * could itself mask a homoglyph before a human sees it), and it is
- * symmetric — a homoglyph that misses this ASCII pattern also misses the
- * connector's presumed-ASCII matcher. `\s*` tolerates a space/tab/newline
- * split (the connector's tokeniser plausibly collapses it); an INVISIBLE
- * split (a zero-width character JS `\s` misses) is handled upstream by
+ * decision 4 on #158). This is the RAW-view matcher — pass 1 of
+ * {@link neutralizeCodexTriggerPhrases}. A fullwidth-LETTER homoglyph inside
+ * the word itself (e.g. `@ｃodex`, U+FF43), once a documented residual, is now
+ * closed by that function's SECOND pass over a per-code-point-NFKC DETECTION
+ * fold (#168), NOT by widening this enumeration — the `[@＠]` set already
+ * missed U+FE6B ﹫ (NFKC → `@`), proof that enumerating homoglyphs per class is
+ * the wrong mechanism. The NFKC fold exists ONLY in that throwaway detection
+ * buffer: no emitted text is ever normalised, so a homoglyph is never silently
+ * rewritten to a different glyph before a human sees it, and the diff escaper
+ * {@link escapeInvisibleCharactersVisibly} still never folds at all (its
+ * no-NFKC contract stands). `\s*` tolerates a space/tab/newline split (the
+ * connector's tokeniser plausibly collapses it); an INVISIBLE split (a
+ * zero-width character JS `\s` misses) is handled upstream by
  * {@link escapeInvisibleCharactersVisibly}, which renders it a visible
  * `[U+XXXX]` marker that no longer reads as `@…codex`. `\b` keeps a
  * different mention such as `@codexfoo` from being rewritten while still
@@ -56,6 +60,96 @@ export const CODEX_TRIGGER_PATTERN = /[@＠]\s*codex\b/giu;
  */
 export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
 
+/** A Unicode combining mark (general category M). A combining mark always
+ * belongs to the normalisation unit of its preceding starter (see
+ * {@link buildTriggerDetectionFold}); non-global so `.test` is stateless. */
+const NORMALISATION_UNIT_MARK = /\p{M}/u;
+
+/**
+ * Builds a FULL-STRING-NFKC-EQUIVALENT fold of `text` for DETECTION ONLY, plus
+ * an index map back to the original. The folded view is byte-for-byte
+ * `text.normalize("NFKC")` (a fuzz property test pins
+ * `buildTriggerDetectionFold(x).folded === x.normalize("NFKC")`), while the map
+ * stays exact for fail-closed splicing: each folded code UNIT records the
+ * `[start, end)` code-unit span of the SOURCE NORMALISATION UNIT it came from,
+ * so a match `[a, b)` maps back to `[originStart[a], originEnd[b - 1])` —
+ * rounding OUTWARD to whole source units (a match landing inside a compat
+ * expansion such as U+2100 ℀ → `a/c`, a folded astral char, or a base+combining
+ * cluster therefore covers the ENTIRE source unit, never a short splice that
+ * could leave a lone surrogate or a dangling combining mark).
+ *
+ * MATCH THE PLANT, NOT A MODEL OF IT (factory-security-reviewer P1, #168; the
+ * same lesson as #171's `[skip ci]` fix — guard the real behaviour, not a model
+ * of it). The earlier version normalised PER CODE POINT, which does NOT
+ * reproduce full-string NFKC's cross-code-point canonical composition: a
+ * DECOMPOSED `@codex` + `z` + combining-acute was left LIVE, yet a connector
+ * that NFKC-composes its input sees the composed non-ASCII letter — which gives
+ * `codex` the trailing word boundary the matcher keys off — and fires a review.
+ * Detecting against real full-string NFKC CLOSES that whole composition class.
+ * It stays DETECTION-ONLY: no emitted text is ever normalised (H16/H16b pin
+ * byte-identity), and the diff escaper {@link escapeInvisibleCharactersVisibly}
+ * still never folds at all.
+ *
+ * The segmentation makes concatenated per-unit NFKC EQUAL full-string NFKC: a
+ * unit is a starter plus every following code point that is EITHER a combining
+ * mark (`\p{M}` — keeping a whole combining sequence, and so its canonical
+ * reordering, inside one unit) OR composes with the unit across a starter
+ * boundary (the Hangul-jamo `L`+`V`+`T` case). A code point that does neither
+ * begins a normalisation boundary and a new unit — exactly the points where
+ * `NFKC(A) + NFKC(B) === NFKC(A + B)`. An unassigned code point folds to itself,
+ * so a future Unicode assignment is picked up by construction.
+ *
+ * Exported ONLY so the fuzz property test can pin
+ * `folded === text.normalize("NFKC")` directly against the real helper (#168
+ * P1 fold); it is a pure, read-only detection primitive with no side effects.
+ */
+export function buildTriggerDetectionFold(text: string): {
+  folded: string;
+  originStart: number[];
+  originEnd: number[];
+} {
+  const codePoints = Array.from(text);
+  const codeUnitStart: number[] = [];
+  let cursor = 0;
+  for (const codePoint of codePoints) {
+    codeUnitStart.push(cursor);
+    cursor += codePoint.length;
+  }
+
+  let folded = "";
+  const originStart: number[] = [];
+  const originEnd: number[] = [];
+  let i = 0;
+  while (i < codePoints.length) {
+    let unit = codePoints[i];
+    const start = codeUnitStart[i];
+    let j = i + 1;
+    while (j < codePoints.length) {
+      const next = codePoints[j];
+      // A starter that does NOT interact with the current unit is a safe
+      // normalisation boundary — stop the unit before it. A combining mark, or a
+      // starter that composes across the boundary (Hangul), stays in the unit.
+      if (
+        !NORMALISATION_UNIT_MARK.test(next) &&
+        unit.normalize("NFKC") + next.normalize("NFKC") === (unit + next).normalize("NFKC")
+      ) {
+        break;
+      }
+      unit += next;
+      j++;
+    }
+    const end = j < codePoints.length ? codeUnitStart[j] : text.length;
+    const foldedUnit = unit.normalize("NFKC");
+    folded += foldedUnit;
+    for (let unitOffset = 0; unitOffset < foldedUnit.length; unitOffset++) {
+      originStart.push(start);
+      originEnd.push(end);
+    }
+    i = j;
+  }
+  return { folded, originStart, originEnd };
+}
+
 /**
  * Replaces every Codex trigger phrase in `text` with
  * {@link CODEX_TRIGGER_REMOVED_MARKER}, so posting `text` onto a PR/issue
@@ -66,11 +160,47 @@ export const CODEX_TRIGGER_REMOVED_MARKER = "[codex trigger removed]";
  * boundary); a trigger MANUFACTURED at the tail by a later length truncation
  * is handled separately by {@link safeClamp}.
  *
+ * TWO passes, unioned — both leave the emitted text otherwise byte-identical:
+ *  - Pass 1 (RAW view): the original {@link CODEX_TRIGGER_PATTERN} `.replace`.
+ *    Retained so nothing neutralised today can regress — the raw `\b` sits on a
+ *    homoglyph a fold view would fold away (e.g. `@codexｘ`, U+FF58: the raw `\b`
+ *    catches it; the folded view would not).
+ *  - Pass 2 (FOLDED view, #168): build the per-code-point-NFKC fold of pass-1
+ *    output and scan it with a FRESH LOCAL global pattern — never
+ *    {@link CODEX_TRIGGER_PATTERN}, whose `g` flag is stateful. `@` alone
+ *    suffices on the folded view (NFKC folds `＠`/`﹫` to `@`), and `\b`
+ *    preserves the different-mention guard (`@ｃodexfoo` is left alone). Each
+ *    match is mapped back to the ORIGINAL span and the marker spliced over it,
+ *    so a homoglyph trigger (`@ｃodex`) is neutralised without normalising the
+ *    text. Every folded match is a whole `@…codex`, never zero-width, so the
+ *    `exec` cursor always advances (no infinite loop).
+ *
  * @param text - Untrusted text about to be interpolated into a posted body.
  * @returns `text` with every trigger occurrence rendered inert.
  */
 export function neutralizeCodexTriggerPhrases(text: string): string {
-  return text.replace(CODEX_TRIGGER_PATTERN, CODEX_TRIGGER_REMOVED_MARKER);
+  const rawNeutralized = text.replace(CODEX_TRIGGER_PATTERN, CODEX_TRIGGER_REMOVED_MARKER);
+  const { folded, originStart, originEnd } = buildTriggerDetectionFold(rawNeutralized);
+  const foldedTriggerPattern = /@\s*codex\b/giu;
+  const originalSpans: Array<{ start: number; end: number }> = [];
+  for (
+    let match = foldedTriggerPattern.exec(folded);
+    match !== null;
+    match = foldedTriggerPattern.exec(folded)
+  ) {
+    originalSpans.push({
+      start: originStart[match.index],
+      end: originEnd[match.index + match[0].length - 1],
+    });
+  }
+  let result = rawNeutralized;
+  // Splice the marker over each ORIGINAL span right-to-left, so an earlier
+  // splice never shifts a later match's mapped indices.
+  for (let i = originalSpans.length - 1; i >= 0; i--) {
+    const span = originalSpans[i];
+    result = result.slice(0, span.start) + CODEX_TRIGGER_REMOVED_MARKER + result.slice(span.end);
+  }
+  return result;
 }
 
 // The CI-skip control tokens GitHub Actions honours in a commit message
@@ -416,17 +546,27 @@ export const MAX_SANITIZED_STEP_SUMMARY_FIELD_LENGTH = 200;
 
 /**
  * A partial-or-complete `@…codex` fragment anchored at the END of a string
- * (`@c`, `@ codex`, `＠codex`, …). {@link safeClamp} strips this after a
- * length truncation, because truncation is the one transform that can
- * MANUFACTURE a live trigger the {@link neutralizeCodexTriggerPhrases} `\b`
- * guard deliberately left alone (#158 fold round 3, factory-security-reviewer
- * BLOCKER): `@codexx` is a benign DIFFERENT mention the `\b` skips, but
- * truncating its last char to `@codex` and appending `…` GIVES it the word
- * boundary that turns it into a live trigger. Truncation's only NEW boundary
- * is at the tail, so cleaning the tail is provably sufficient; the strip only
- * removes characters, so the length bound still holds.
+ * (`@c`, `@ codex`, `＠codex`, …), matched on the RAW view.
+ * {@link stripTruncationTailArtifacts} strips this after a length truncation,
+ * because truncation is the one transform that can MANUFACTURE a live trigger
+ * the {@link neutralizeCodexTriggerPhrases} `\b` guard deliberately left alone
+ * (#158 fold round 3, factory-security-reviewer BLOCKER): `@codexx` is a benign
+ * DIFFERENT mention the `\b` skips, but truncating its last char to `@codex` and
+ * appending `…` GIVES it the word boundary that turns it into a live trigger.
+ * Truncation's only NEW boundary is at the tail, so cleaning the tail is provably
+ * sufficient; the strip only removes characters, so the length bound still holds.
  */
 const TRAILING_TRIGGER_FRAGMENT = /[@＠]\s*c(?:o(?:d(?:e(?:x)?)?)?)?$/iu;
+
+/**
+ * The FOLDED-view companion of {@link TRAILING_TRIGGER_FRAGMENT} (#168): the same
+ * end-anchored `@…codex` fragment, but matched against a per-code-point-NFKC fold
+ * so a homoglyph tail (`@ｃ`, `@ｃo`, …) a truncation manufactured is stripped too.
+ * `@` alone suffices on the folded view (NFKC folds `＠`/`﹫` to `@`). Run via
+ * `.exec` on the fold; the origin index map cuts the ORIGINAL at the source code
+ * point the match starts on, so the emitted text is never itself normalised.
+ */
+const FOLDED_TRAILING_TRIGGER_FRAGMENT = /@\s*c(?:o(?:d(?:e(?:x)?)?)?)?$/iu;
 
 /**
  * An UNCLOSED `[U+XXXX` escape marker anchored at the END of a string — the
@@ -470,12 +610,18 @@ const TRAILING_LONE_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
  * lone surrogate to reveal the `@codex` the trigger strip then removes.
  *
  * **SECURITY PRECONDITION:** `value` MUST already have passed {@link
- * neutralizeCodexTriggerPhrases} (both callers do, via {@link
- * sanitizeUntrustedInlineText}). safeClamp neutralises ONLY the
- * truncation-manufactured tail `@codex`, NOT interior triggers — calling it
- * on raw attacker text would pass an interior `@codex` straight through and
- * reopen #158's class. Robust-by-construction hardening (so a future raw-text
- * caller cannot silently reintroduce the bug) is tracked in #169.
+ * neutralizeCodexTriggerPhrases} (via {@link sanitizeUntrustedInlineText} or
+ * {@link sanitizeUntrustedTextForCommitMessage}). safeClamp neutralises ONLY
+ * the truncation-manufactured tail `@codex`, NOT interior triggers — clamping
+ * raw attacker text would pass an interior `@codex` straight through and reopen
+ * #158's class. That is why safeClamp is MODULE-INTERNAL (#169, design a′): the
+ * only public clamping entry points are {@link
+ * sanitizeAndClampUntrustedInlineText} and {@link
+ * sanitizeAndClampUntrustedTextForCommitMessage}, which run the full sanitise
+ * pipeline BEFORE the clamp. A future caller therefore cannot reach the clamp
+ * with un-neutralised text — it either goes through a wrapper (safe) or fails
+ * typecheck (fail-closed, the cheap direction), a static constraint rather than
+ * a comment a caller could ignore.
  *
  * @param value - The already-defanged (see precondition) value to bound.
  * @param maxLength - The content-character budget (before the ellipsis).
@@ -485,22 +631,82 @@ const TRAILING_LONE_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
  * Removes the artifacts a truncation can leave at a new string end, in the
  * order that lets each strip clean what an earlier one exposes: a dangling
  * partial `[U+XXXX` marker, then a lone high surrogate, then a
- * truncation-manufactured `@…codex` fragment. Every strip only REMOVES, so it
- * never lengthens the input. Shared by {@link safeClamp} (code-unit budget)
- * and {@link renderBoundedUntrustedReason} (code-point budget).
+ * truncation-manufactured `@…codex` fragment on the RAW view, then the same
+ * fragment on a per-code-point-NFKC FOLDED view (#168 — a homoglyph tail like
+ * `@ｃo` the ASCII fragment misses). Every strip only REMOVES, so it never
+ * lengthens the input. Shared by {@link safeClamp} (code-unit budget) and
+ * {@link renderBoundedUntrustedReason} (code-point budget).
+ *
+ * The whole sequence runs in a SHRINK-UNTIL-STABLE loop because one strip can
+ * expose another the single ordered pass would miss: a partial `[U+` marker
+ * hiding a `@ｃ` fold fragment behind it, or a fold-fragment strip uncovering a
+ * `[U+` marker in front of it. The loop terminates — each pass only removes, so
+ * the string strictly shrinks until a pass changes nothing — and preserves the
+ * `≤ maxLength + 1` bound its callers rely on.
  */
 function stripTruncationTailArtifacts(truncated: string): string {
-  return truncated
-    .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
-    .replace(TRAILING_LONE_HIGH_SURROGATE, "")
-    .replace(TRAILING_TRIGGER_FRAGMENT, "");
+  let current = truncated;
+  for (;;) {
+    let next = current
+      .replace(TRAILING_PARTIAL_ESCAPE_MARKER, "")
+      .replace(TRAILING_LONE_HIGH_SURROGATE, "")
+      .replace(TRAILING_TRIGGER_FRAGMENT, "");
+    const { folded, originStart } = buildTriggerDetectionFold(next);
+    const foldMatch = FOLDED_TRAILING_TRIGGER_FRAGMENT.exec(folded);
+    if (foldMatch !== null) {
+      next = next.slice(0, originStart[foldMatch.index]);
+    }
+    if (next === current) {
+      return next;
+    }
+    current = next;
+  }
 }
 
-export function safeClamp(value: string, maxLength: number): string {
+function safeClamp(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
   }
   return `${stripTruncationTailArtifacts(value.slice(0, maxLength))}…`;
+}
+
+/**
+ * The public "sanitise THEN clamp" entry point for an untrusted INLINE field a
+ * caller must both defang and length-bound (a PR title, a step-summary field).
+ * Composed byte-for-byte as `safeClamp(sanitizeUntrustedInlineText(value),
+ * maxLength)` — the same order every caller used before {@link safeClamp} was
+ * made module-internal (#169). Wrapping the composition is a STATIC constraint:
+ * raw attacker text cannot reach the clamp without first passing the full
+ * inline defang (so an interior `@codex`/backtick-split/zero-width variant is
+ * neutralised before truncation can only manufacture a tail one).
+ *
+ * @param value - The untrusted field value to defang and bound.
+ * @param maxLength - The content-character budget (before the ellipsis).
+ * @returns The defanged value, bounded and `…`-suffixed when truncated.
+ */
+export function sanitizeAndClampUntrustedInlineText(value: string, maxLength: number): string {
+  return safeClamp(sanitizeUntrustedInlineText(value), maxLength);
+}
+
+/**
+ * The public "sanitise THEN clamp" entry point for an untrusted field bound for
+ * a git COMMIT MESSAGE (invisibles surfaced, newlines collapsed, backticks
+ * stripped, `@codex` AND CI-skip control tokens neutralised, then length-
+ * bounded). Composed byte-for-byte as
+ * `safeClamp(sanitizeUntrustedTextForCommitMessage(value), maxLength)` — the
+ * same order the commit-subject caller used before {@link safeClamp} was made
+ * module-internal (#169). Same static-constraint rationale as {@link
+ * sanitizeAndClampUntrustedInlineText}.
+ *
+ * @param value - The untrusted field value to defang and bound.
+ * @param maxLength - The content-character budget (before the ellipsis).
+ * @returns The defanged value, bounded and `…`-suffixed when truncated.
+ */
+export function sanitizeAndClampUntrustedTextForCommitMessage(
+  value: string,
+  maxLength: number,
+): string {
+  return safeClamp(sanitizeUntrustedTextForCommitMessage(value), maxLength);
 }
 
 /**
