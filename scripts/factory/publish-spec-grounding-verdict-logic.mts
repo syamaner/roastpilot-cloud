@@ -444,7 +444,7 @@ export function isDiffTruncationUnverifiableForClosing(
 }
 
 /**
- * Every CLOSING-kind issue this PR's CURRENT body references that this
+ * Every CLOSING-kind issue this PR's CURRENT body/title references that this
  * run's own review never knew about as closing at all (F1-S9 slice 90.5,
  * issue #12 — the re-landed, CORRECTED version of a fix reverted twice in
  * PR #87 rounds 8-9, tracked in issue #90): the body-edit sibling of
@@ -496,9 +496,8 @@ export function isDiffTruncationUnverifiableForClosing(
  * fails the WHOLE run closed before any posting or reconciliation is
  * attempted (F1-S9 slice 90.4's own reconcile-delete included) — a stale
  * verdict must never delete a prior run's still-valid gate.
- * Commit messages are immutable at the verified head and were already
- * included in `reviewedClosingIssueNumbers`, so only the mutable body can
- * add a closing reference without changing that head.
+ * Commit messages are immutable at the verified head and already included
+ * in the reviewed union; body and title are the mutable addition channels.
  *
  * @param currentBody - The PR's CURRENT body text — already re-fetched and
  *   head-verified by the caller; this function does no fetching of its own.
@@ -516,6 +515,7 @@ export function isDiffTruncationUnverifiableForClosing(
 export function findUnreviewedNewClosingReferences(
   currentBody: string,
   thisRepo: string,
+  currentAuxiliaryPlainTextSources: readonly string[],
   reviewedClosingIssueNumbers: readonly number[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
 ): readonly number[] {
@@ -524,7 +524,7 @@ export function findUnreviewedNewClosingReferences(
     ...unreviewedClosingIssues.map((issue) => issue.issueNumber),
   ]);
   const currentClosingIssueNumbers = new Set(
-    parseLinkedIssueReferences(currentBody, thisRepo)
+    parseLinkedIssueReferences(currentBody, thisRepo, currentAuxiliaryPlainTextSources)
       .filter((reference) => reference.kind === "closing")
       .map((reference) => reference.issueNumber),
   );
@@ -635,7 +635,7 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   reached in that case, but a `null` is still required rather than
  *   defaulted, matching `blockersPostedInline`'s own discipline.
  * @param staleBlockerIssueNumbers - The issue numbers `tryPostBlockersInline`
- *   skipped because the PR's CURRENT body no longer references them AT
+ *   skipped because the PR's CURRENT reviewed surfaces no longer reference them AT
  *   ALL — de-referenced entirely, as distinct from
  *   `downgradedClosingBlockerIssueNumbers` (PR #87 review round 4b, Codex,
  *   P1 — a follow-up wording fold, generalized F1-S9 slice 90.6a for the
@@ -646,7 +646,7 @@ export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
  *   units even when one issue owns multiple findings (F1-S9 slice 90.6b,
  *   issue #90, Codex cid 3627450885).
  * @param downgradedClosingBlockerIssueNumbers - The issue numbers
- *   `tryPostBlockersInline` skipped because the PR's CURRENT body still
+ *   `tryPostBlockersInline` skipped because the PR's CURRENT reviewed surfaces still
  *   references them, but no longer with a closing keyword — DOWNGRADED,
  *   as distinct from `staleBlockerIssueNumbers` (F1-S9 slice 90.6a, the
  *   stale-vs-downgraded bucket-split). Combined with
@@ -838,7 +838,7 @@ export function buildSpecGroundingSummaryCommentBody(
         : `The review also identified ${skippedBlockerCount} blocking findings for issues that are no longer CLOSING obligations`;
     const skippedReconciliation =
       skippedBlockerIssueNumbers.length > 0
-        ? ` ${skippedFindingDescription} in this PR's current body — removed entirely, or ` +
+        ? ` ${skippedFindingDescription} across this PR's reviewed reference surfaces — removed entirely, or ` +
           "downgraded to a non-closing reference; see the note(s) below, not repeated here."
         : "";
     // No fragile posted-vs-fallback count split: the headline reports the
@@ -1118,13 +1118,13 @@ export function splitSkippedBlockerNoteBudget(
 
 /**
  * Builds the note appended when one or more planned blocker findings were
- * skipped from inline posting because the PR's CURRENT body no longer
+ * skipped from inline posting because the PR's CURRENT reviewed surfaces no longer
  * references their own issue AT ALL — de-referenced entirely (PR #87
  * review round 4, Codex, P1 — symmetric to the delete-path TOCTOU fold:
  * `tryPostBlockersInline` in `publish-spec-grounding-verdict.mts` re-checks
- * each planned blocker's own `issueNumber` against a fresh re-parse of the
- * PR's CURRENT body, not the runner-time one the verdict/spine were
- * computed against — a body-only edit never bumps the trusted head SHA, so
+ * each planned blocker's own `issueNumber` against a fresh full-surface
+ * derivation, not the runner-time one the verdict/spine were computed
+ * against — body/title edits never bump the trusted head SHA, so
  * this run could otherwise post an inline comment reasserting an
  * obligation the PR no longer claims to have at all).
  *
@@ -1155,7 +1155,7 @@ export function splitSkippedBlockerNoteBudget(
  * @param staleBlockerIssueNumbers - The (deduplicated, ascending) issue
  *   numbers `tryPostBlockersInline` skipped, from `criterionBlockers` or
  *   `unreviewedClosingIssues` whose own issue is no longer referenced by
- *   the PR's current body AT ALL, of any kind.
+ *   the PR's current reviewed surfaces AT ALL, of any kind.
  * @param maxListLength - This note's OWN share of the character budget for
  *   its issue-number list — see {@link splitSkippedBlockerNoteBudget},
  *   which the caller uses to compute this alongside {@link
@@ -1188,7 +1188,7 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
 
 /**
  * Builds the note appended when one or more planned blocker findings were
- * skipped from inline posting because the PR's CURRENT body still
+ * skipped from inline posting because the PR's CURRENT reviewed surfaces still
  * references their own issue, but no longer with a closing keyword —
  * DOWNGRADED (a `Closes #N` edited to a plain `Refs #N`), as distinct from
  * {@link buildStaleBlockerSkippedNote}'s de-referenced-entirely case
@@ -1206,7 +1206,7 @@ export function buildStaleBlockerSkippedNote(staleBlockerIssueNumbers: readonly 
  *
  * @param downgradedClosingBlockerIssueNumbers - The (deduplicated,
  *   ascending) issue numbers `tryPostBlockersInline` skipped, still
- *   referenced by the PR's current body but no longer with a closing
+ *   referenced by the PR's current reviewed surfaces but no longer with a closing
  *   keyword.
  * @param maxListLength - This note's OWN share of the character budget for
  *   its issue-number list — see {@link buildStaleBlockerSkippedNote}'s

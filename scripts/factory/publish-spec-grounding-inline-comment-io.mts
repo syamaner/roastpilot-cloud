@@ -677,7 +677,7 @@ export async function clearStaleInlineBlockerComments(
   return { ok: true, deletedCount };
 }
 
-/** A PR body's own derived closing-kind and any-kind linked-issue-reference sets — see {@link deriveLinkedReferenceIssueNumberSets}. */
+/** Derived closing-kind and any-kind linked-issue-reference sets across explicitly supplied PR surfaces. */
 export interface LinkedReferenceIssueNumberSets {
   readonly closing: ReadonlySet<number>;
   readonly referenced: ReadonlySet<number>;
@@ -694,8 +694,8 @@ export interface LinkedReferenceIssueNumberSets {
  * shared primitive stays the SET DERIVATION, not the fetch itself, so the two
  * callers can never compute these sets differently even though they fetch
  * differently.
- * Commit-sourced references cancel out because both snapshots use this same
- * body derivation, while head and base drift are checked independently.
+ * Drift comparison is sound only when both sides use this identical
+ * derivation over the identical SHA-pinned commit list.
  *
  * @param body - The PR's body, as returned by the GitHub API (`null` if empty).
  * @param ownerRepo - `"{owner}/{repo}"`, passed straight through to
@@ -705,8 +705,9 @@ export interface LinkedReferenceIssueNumberSets {
 export function deriveLinkedReferenceIssueNumberSets(
   body: string | null,
   ownerRepo: string,
+  auxiliaryPlainTextSources: readonly string[],
 ): LinkedReferenceIssueNumberSets {
-  const references = parseLinkedIssueReferences(body ?? "", ownerRepo);
+  const references = parseLinkedIssueReferences(body ?? "", ownerRepo, auxiliaryPlainTextSources);
   return {
     closing: new Set(references.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber)),
     referenced: new Set(references.map((reference) => reference.issueNumber)),
@@ -753,8 +754,8 @@ export type PullRequestSnapshotDriftReason =
  * references after inline-comment pagination and immediately before the first
  * DELETE. Keeping all four checks on one response avoids composing separately
  * fetched snapshots with a new TOCTOU gap between them.
- * Commit-sourced references remain soundly outside this body comparison
- * because unchanged head/base SHAs pin them and both body snapshots agree.
+ * Both snapshots include the same pinned commits plus their own body/title;
+ * the head/base checks deliberately run first and license that commit reuse.
  *
  * @param token - The job's own `pull-requests: write` token.
  * @param owner - The repository owner.
@@ -774,11 +775,13 @@ export async function verifyPullRequestSnapshotUnchanged(
   prNumber: number,
   trustedHeadSha: string,
   reviewedBaseSha: string,
+  pinnedCommitMessages: readonly string[],
   snapshotClosingIssueNumbers: ReadonlySet<number>,
   snapshotReferencedIssueNumbers: ReadonlySet<number>,
 ): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: PullRequestSnapshotDriftReason }> {
   const pr = await githubRequest<{
     readonly body: string | null;
+    readonly title: string;
     readonly head: { readonly sha: string };
     readonly base: { readonly sha: string };
   }>(token, "GET", `/repos/${owner}/${repo}/pulls/${prNumber}`);
@@ -788,7 +791,10 @@ export async function verifyPullRequestSnapshotUnchanged(
   if (pr.base.sha !== reviewedBaseSha) {
     return { ok: false, reason: "base-sha-changed" };
   }
-  const fresh = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`);
+  const fresh = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`, [
+    ...pinnedCommitMessages,
+    pr.title,
+  ]);
   if (!linkedReferenceSnapshotsMatch(fresh, snapshotClosingIssueNumbers, snapshotReferencedIssueNumbers)) {
     return { ok: false, reason: "linked-references-changed" };
   }
@@ -832,6 +838,7 @@ export async function reconcileObsoleteInlineBlockerComments(
   prNumber: number,
   trustedHeadSha: string,
   reviewedBaseSha: string,
+  pinnedCommitMessages: readonly string[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
   currentlyReferencedIssueNumbers: ReadonlySet<number>,
   diffTruncationBlocksClosingClaim: boolean,
@@ -849,6 +856,7 @@ export async function reconcileObsoleteInlineBlockerComments(
     prNumber,
     trustedHeadSha,
     reviewedBaseSha,
+    pinnedCommitMessages,
     currentlyClosingIssueNumbers,
     currentlyReferencedIssueNumbers,
   );
@@ -906,6 +914,7 @@ export async function reconcileObsoleteInlineBlockerComments(
       prNumber,
       trustedHeadSha,
       reviewedBaseSha,
+      pinnedCommitMessages,
       currentlyClosingIssueNumbers,
       currentlyReferencedIssueNumbers,
     );
@@ -923,6 +932,7 @@ export async function reconcileObsoleteInlineBlockerComments(
       prNumber,
       trustedHeadSha,
       reviewedBaseSha,
+      pinnedCommitMessages,
       currentlyClosingIssueNumbers,
       currentlyReferencedIssueNumbers,
     );

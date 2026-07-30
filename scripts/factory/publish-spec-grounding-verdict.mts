@@ -121,7 +121,7 @@ import {
   type SpecGroundingVerdict,
 } from "./spec-grounding-verdict-schema.mts";
 import { parseLinkedIssueReferences } from "./spec-grounding-logic.mts";
-import { fetchPrDiff } from "./spec-grounding-runner.mts";
+import { fetchPrCommitMessages, fetchPrDiff } from "./spec-grounding-runner.mts";
 import {
   MAX_CRITERIA_SPINE_ARTIFACT_BYTES,
   parseCriteriaSpineArtifact,
@@ -165,6 +165,7 @@ import {
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
 interface GitHubPullRequestShas {
+  readonly title: string;
   readonly head: { readonly sha: string };
   readonly base: { readonly sha: string };
   /**
@@ -239,7 +240,7 @@ async function fetchAndVerifyPrShas(
  *    boolean here, never a throw: a mismatch is an EXPECTED race outcome
  *    this function's caller degrades from gracefully, not a genuine
  *    error worth failing the whole run over.
- * 2. The PR's CURRENT body, re-parsed with the SAME {@link
+ * 2. The PR's CURRENT body and title, re-parsed with the SAME {@link
  *    parseLinkedIssueReferences} the runner itself uses, still yields
  *    ZERO linked-issue references.
  * Commit messages cannot change at the verified head, so this deletion
@@ -290,7 +291,7 @@ async function fetchAndVerifyPrShas(
  *   event context — the value this run's OWN read-only pass was
  *   reviewed against, never re-derived.
  * @returns `true` only if the PR's CURRENT head SHA still matches AND
- *   its CURRENT body still yields zero linked-issue references.
+ *   its CURRENT body/title still yields zero linked-issue references.
  */
 async function isStillSafeToDeleteInlineBlockerThreads(
   token: string,
@@ -303,7 +304,7 @@ async function isStillSafeToDeleteInlineBlockerThreads(
   if (pr.head.sha !== trustedHeadSha) {
     return false;
   }
-  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  const references = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`, [pr.title]);
   return references.length === 0;
 }
 
@@ -723,6 +724,7 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
     const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
       pr.body ?? "",
       `${owner}/${repo}`,
+      [pr.title],
       reviewedClosingIssueNumbers,
       [],
     );
@@ -737,7 +739,7 @@ async function clearStaleSpecGroundingStateOnDisappearedCriteria(
             `this PR's linked-issue references changed since the spec-grounded review ran: a closing ` +
             `reference to issue #${issueNumber} was not part of that review (added, or upgraded from a ` +
             `non-closing reference, since this run's head SHA was captured) -- a fresh spec-grounded ` +
-            `review will re-evaluate against this PR's current body.`,
+            `review will re-evaluate against this PR's current body and title.`,
         ),
       );
       process.exitCode = 1;
@@ -1175,7 +1177,7 @@ interface TryPostBlockersInlineResult {
  *   renders the full (still-closing-referenced) blocker detail in the
  *   summary instead either way. `staleBlockerIssueNumbers` is
  *   independent of both — the issue numbers filtered out because the
- *   PR's CURRENT body no longer references them with a closing keyword
+ *   PR's CURRENT reviewed surfaces no longer reference them with a closing keyword
  *   at all (removed entirely, or downgraded to a plain reference).
  * @throws Any OTHER failure (a diff-fetch error, a non-first or non-422
  *   inline-posting failure) — a genuine error, not a case this function
@@ -1188,6 +1190,7 @@ async function tryPostBlockersInline(
   repo: string,
   prNumber: number,
   pr: GitHubPullRequestShas,
+  commitMessages: readonly string[],
   joined: readonly JoinedCriterionResult[],
   criterionBlockers: readonly JoinedCriterionResult[],
   spine: ParsedCriteriaSpine,
@@ -1205,7 +1208,10 @@ async function tryPostBlockersInline(
   // deliberate SECOND parse of the same string per run, independent of
   // `publishSummary`'s own snapshot -- see that function's own comment on
   // why the two stay independent).
-  const currentReferenceSets = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`);
+  const currentReferenceSets = deriveLinkedReferenceIssueNumberSets(pr.body, `${owner}/${repo}`, [
+    ...commitMessages,
+    pr.title,
+  ]);
   const currentlyClosingIssueNumbers = currentReferenceSets.closing;
   // ANY-KIND (F1-S9 slice 90.6a, the stale-vs-downgraded bucket-split,
   // Codex cid 3626169271's own any-kind dimension made LOAD-BEARING here):
@@ -1226,7 +1232,7 @@ async function tryPostBlockersInline(
   // stale: this run's own `diffTruncationBlocksClosingClaim` used to be
   // computed from the REVIEW-TIME `joined`/`spine.unreviewedClosingIssues`
   // sets, which stay `kind: "closing"` forever regardless of what the PR's
-  // CURRENT body says. A body edit that downgrades or removes EVERY
+  // CURRENT reviewed surfaces say. A body/title edit that downgrades or removes EVERY
   // closing reference this run's diff-truncation flag was protecting
   // still left this function planning/posting (or re-posting on every
   // subsequent run) a diff-truncation AGGREGATE blocker comment. Before
@@ -1278,7 +1284,7 @@ async function tryPostBlockersInline(
         .filter((issueNumber) => !currentlyClosingIssueNumbers.has(issueNumber)),
     ),
   ];
-  // De-referenced ENTIRELY -- the PR's current body no longer mentions
+  // De-referenced ENTIRELY -- the PR's current reviewed surfaces no longer mention
   // this issue at all, in any kind.
   const staleBlockerIssueNumbers = noLongerClosingIssueNumbers
     .filter((issueNumber) => !currentlyReferencedIssueNumbers.has(issueNumber))
@@ -1571,6 +1577,23 @@ async function publishSummary(
     return;
   }
 
+  let commitMessages: readonly string[];
+  try {
+    commitMessages = await fetchPrCommitMessages(
+      token,
+      owner,
+      repo,
+      spine.reviewedBaseSha,
+      trustedHeadSha,
+    );
+  } catch (err) {
+    await publishFallback(token, owner, repo, prNumber, [
+      `failed to fetch this PR's reviewed commit messages before publishing: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    process.exitCode = 1;
+    return;
+  }
   // The body-edit sibling of the head/base-SHA checks above (F1-S9 slice
   // 90.5, the CORRECTED re-land of a fix reverted twice in PR #87 rounds
   // 8-9 -- see findUnreviewedNewClosingReferences's own docstring for the
@@ -1584,11 +1607,12 @@ async function publishSummary(
   // closing reference touches NOTHING further: no all-clear, no blocker
   // posting, and no reconcile-delete either (F1-S9 slice 90.4) -- a stale
   // verdict must never delete a prior run's still-valid gate.
-  // Commit-sourced references were fixed by the verified head and already
-  // populate the spine, so this post-review addition check stays body-scoped.
+  // Body and title are mutable; commit terms are pinned and already present
+  // in the reviewed union, so the same full derivation detects only real additions.
   const unreviewedNewClosingIssueNumbers = findUnreviewedNewClosingReferences(
     pr.body ?? "",
     `${owner}/${repo}`,
+    [...commitMessages, pr.title],
     spine.reviewedClosingIssueNumbers,
     spine.unreviewedClosingIssues,
   );
@@ -1603,7 +1627,7 @@ async function publishSummary(
           `this PR's linked-issue references changed since the spec-grounded review ran: a closing ` +
           `reference to issue #${issueNumber} was not part of that review (added, or upgraded from a ` +
           `non-closing reference, since this run's head SHA was captured) -- a fresh spec-grounded ` +
-          `review will re-evaluate against this PR's current body.`,
+          `review will re-evaluate against this PR's current reference surfaces.`,
       ),
     );
     process.exitCode = 1;
@@ -1623,9 +1647,12 @@ async function publishSummary(
   // keeping `tryPostBlockersInline` and the reconcile call below fully
   // independent and independently reviewable, rather than threading a
   // shared computation between two otherwise-unrelated mechanisms.
-  // Commit-sourced references are immutable at this verified head and cancel
-  // out of the body snapshot comparison used by the reconciliation path.
-  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`);
+  // This full-surface set governs both blocker survival and reconciliation
+  // deletion eligibility; no reviewed surface may be dropped here.
+  const currentReferences = parseLinkedIssueReferences(pr.body ?? "", `${owner}/${repo}`, [
+    ...commitMessages,
+    pr.title,
+  ]);
   const currentClosingIssueNumbers = new Set(
     currentReferences.filter((reference) => reference.kind === "closing").map((reference) => reference.issueNumber),
   );
@@ -1669,6 +1696,7 @@ async function publishSummary(
         repo,
         prNumber,
         pr,
+        commitMessages,
         joined,
         criterionBlockers,
         spine,
@@ -1737,6 +1765,7 @@ async function publishSummary(
       prNumber,
       trustedHeadSha,
       spine.reviewedBaseSha,
+      commitMessages,
       currentClosingIssueNumbers,
       currentReferencedIssueNumbers,
       currentDiffTruncationBlocksClosingClaim,
@@ -1910,13 +1939,17 @@ async function publishSummary(
               `different base.`,
           );
         }
-        const freshReferenceSets = deriveLinkedReferenceIssueNumberSets(prAtPublish.body, `${owner}/${repo}`);
+        const freshReferenceSets = deriveLinkedReferenceIssueNumberSets(
+          prAtPublish.body,
+          `${owner}/${repo}`,
+          [...commitMessages, prAtPublish.title],
+        );
         if (!linkedReferenceSnapshotsMatch(freshReferenceSets, currentClosingIssueNumbers, currentReferencedIssueNumbers)) {
           throw new PreWriteVerificationDriftError(
             `this PR's linked-issue references changed again since this run's own earlier snapshot, in ` +
               `the window between this run's comment lookup completing and the write -- refusing to ` +
               `publish a summary built against a body this run can no longer vouch for; a fresh ` +
-              `spec-grounded review will re-evaluate against this PR's current body.`,
+              `spec-grounded review will re-evaluate against this PR's current reference surfaces.`,
           );
         }
       },
