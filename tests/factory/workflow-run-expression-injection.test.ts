@@ -138,7 +138,7 @@ export function validateWorkflowSinkExpressionCorpus(
   workflows: readonly WorkflowFile[],
 ): string[] {
   if (workflows.length === 0) {
-    return ["workflow run expression corpus must not be empty"];
+    return ["workflow sink expression corpus must not be empty"];
   }
   return workflows.flatMap(validateWorkflowSinkExpressions);
 }
@@ -367,7 +367,7 @@ describe("workflow run/shell/script expression injection guard (issues #151, #15
 
   it("fails when the audited corpus is empty", () => {
     expect(validateWorkflowSinkExpressionCorpus([])).toEqual([
-      "workflow run expression corpus must not be empty",
+      "workflow sink expression corpus must not be empty",
     ]);
   });
 
