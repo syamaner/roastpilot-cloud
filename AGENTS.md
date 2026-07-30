@@ -469,14 +469,23 @@ inline.
   Zod/Pydantic validation rules → **`schema-migration-reviewer`**.
 - Any diff touching routes, components, stored procs, or anything handling
   reviewer data, IP addresses, visibility, or deletion → **`privacy-auditor`**.
-- Any diff touching the factory's own pipeline — anything under `.github/**`
+- Any diff touching the factory's own pipeline — the full protected surface,
+  spelled out here so routing is mechanical, not inferential (#163; #161's PR
+  body misread the parenthetical this replaces): anything under `.github/**`
   (workflows AND composite actions), `scripts/factory/**`, any privileged glue /
-  publisher script wherever it lives, CODEOWNERS, the factory-integrity
-  enforcement tests (`tests/factory/**`, #160 — a human-editable diff that
-  weakens an alarm must still draw the adversarial lens, not just the guard), or
-  branch-protection config →
-  **`factory-security-reviewer`**. (This must cover the full protected surface the
-  pipeline-self-modification invariant below names, not just workflows.)
+  publisher script wherever it lives, CODEOWNERS, branch-protection config, the
+  factory-integrity enforcement tests (`tests/factory/**`, #160 — a
+  human-editable diff that weakens an alarm must still draw the adversarial
+  lens, not just the guard), `.claude/**`, `.codex/**`, any recognized agent
+  instruction/configuration basename at any depth (the complete
+  `PROTECTED_BASENAMES` set: `.claude`, `.codex`, `AGENTS.md`,
+  `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.claudeignore`,
+  `.mcp.json`, `.npmrc` — so a file literally named `.claude` / `.codex` at
+  any depth is caught, not only paths under the `.claude/**` / `.codex/**`
+  directory globs), or `docs/state/registry.md` →
+  **`factory-security-reviewer`**. This is the same surface the
+  pipeline-self-modification invariant below names — keep the two in step; if
+  one grows a path, so does the other.
   This is an adversarial red-team: its job is to produce a working exploit, not
   to assess. The F1-S3 implement workflow shipped an EXPLOITABLE pipeline-guard
   that only this lens caught, so a factory-pipeline diff without this pass is not
@@ -506,8 +515,10 @@ F1-stage-2 chained `ready-to-implement` run alike, i.e. anything the
 privileged publisher pushes on an agent's behalf — must never touch
 `.github/**`, CODEOWNERS, branch-protection config, **the privileged
 glue/publisher scripts**, any recognized agent instruction/configuration
-basename at any depth (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`,
-`CLAUDE.local.md`, `.claudeignore`, `.mcp.json`, `.npmrc`), `.claude/**`,
+basename at any depth (the complete `PROTECTED_BASENAMES` set: `.claude`,
+`.codex`, `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.local.md`,
+`.claudeignore`, `.mcp.json`, `.npmrc` — so a file literally named
+`.claude`/`.codex` is caught, not only paths under the globs), `.claude/**`,
 `.codex/**`, the factory-integrity enforcement tests (`tests/factory/**` —
 the ALARM that mechanically enforces the pins/guards whose ASSETS this list
 already protects; leaving it writable let a patch gut an enforcement test as a
@@ -552,8 +563,8 @@ already fully wired the moment this file changes.
 |---|---|---|
 | CI (`Lint, typecheck, unit tests`, `Playwright smoke`, `Snowflake migrations (offline)`) | Required status check | Build/lint/typecheck/unit correctness; branch protection blocks merge on red |
 | `Mutation testing (security-critical Python)` | Required status check | Mutation testing over the grant-boundary Python (`assert_dev_ci_grants.py`, `check_forbidden_grants.py`, `validate_migrations.py` — the last is a genuine dependency of `check_forbidden_grants.py`'s own migration-file discovery, added F1-S9 slice 2, issue #12, ready round) fails on a dropped score, a risen unresolved-mutant count, or a dropped total mutant count against the committed baseline — see `snowflake/check_mutation_score.py`. Wired into branch protection's required-status-checks list (added same day this row was written). |
-| `codecov/patch` | Required status check, once wired | No coverage regression on changed lines |
-| CodeQL (`.github/workflows/codeql.yml`) | Not a required status check — surfaces as code-scanning alerts | Security vulnerabilities (taint flows, injection patterns) in the diff |
+| `codecov/patch` | Runs on every **normally-triggered** PR (not on a `GITHUB_TOKEN`-fallback PR, where GitHub suppresses downstream workflows so CI and the Codecov upload never run — see the fallback note above / factory.md §13), but is NOT in live branch protection's required list (verified #163), so a coverage regression on changed lines is surfaced by the check, not mechanically blocked at merge. Wiring it as a required status check is an operator-owned branch-protection decision | No coverage regression on changed lines |
+| CodeQL (`.github/workflows/codeql.yml`) | Required status check — in live branch protection's required list (verified #163); also surfaces code-scanning alerts. Whether CodeQL *should* be required (an earlier draft here read "not required," which would let scanning-infra flakiness rather than a real finding block merge) is an operator-owned branch-protection decision, not this doc's — this row follows live config | Security vulnerabilities (taint flows, injection patterns) in the diff |
 | Dependency review (`.github/workflows/dependency-review.yml`) | Blocking job on `pull_request` (fails on high-severity advisory or a denied license) | Supply-chain risk on any `package.json`/`package-lock.json` change |
 | Claude Code Review (`.github/workflows/claude-code-review.yml`) | **NOT** a required status check. The Claude action step still **skips and reports SUCCESS** on a workflow-edit PR — observed on PR #140, whose log ends `Action skipped due to workflow validation error… Exiting due to workflow validation skip`; it exits before the plugin marketplace is loaded, so a workflow-edit PR can never verify its own review path (#139). Read a green from the action step as **"no review ran"**, never as "reviewed and clean". Since #146 the `claude-review` **job** carries a completion-assertion step (`if: !cancelled()`) that fails the job when the action's SUCCESS is not backed by a finished `github-actions[bot]` tracking comment, so on a workflow-edit PR (and on the #150-style truncation) that **job now goes red**, not a misleading green — a loud signal for the tracking-comment-absent case. That assertion does not make this a required check and does not cover a review that completed its checklist but silently degraded, so the general "green ≠ reviewed" caution still holds for every other skip/degrade mode. It is also only **benign-truncation-sound, not adversarially authenticated** (#146 F1, codex P1): a prompt-injected review holds this job's own `GITHUB_TOKEN` (`pull-requests: write`, since #157 the only GitHub credential reachable from Bash) and the allowlisted `Bash(gh pr comment:*)`, so it can still forge a fully-checked `github-actions[bot]` tracking comment carrying this run's `[View job]` link and a fresh `updated_at`, and no field the step reads distinguishes that from genuine completion. A step-B-side guard is theatre while that write-capable token is Bash-reachable, so none is added. The model's Bash grant is exactly `Bash(gh pr comment:*)` / `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no `gh api`), and `gh pr comment --edit-last` is legal under the `gh pr comment:*` wildcard — the specific edit-in-place mechanism. **#157** CLOSED the credential-disclosure axis (the write-capable minted App token that used to co-reside in the Bash env is gone; the action now runs on this job's own `github_token`, so the reachable GitHub credential is this repo-scoped, job-lifetime `GITHUB_TOKEN`), but it did NOT close completion forgery, because that built-in token still carries `pull-requests: write`. The one remaining close path is narrowing the `gh pr comment` grant itself (the deferred step-3 allowlist work, evidence-gated because `gh pr comment` is real needed functionality for the skill's summary comment). #157 does not close this on its own (do not read it as closing F1); step-B green stays non-adversarial until the grant narrows | Inline findings tagged blocker/medium/low against this file's Code Review Rubric; the real gate is the inline threads + `required_conversation_resolution`, not the check |
 | Codex | Advisory-but-triaged, not a required check | Cross-family second opinion — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses; see the wait-for-verdict rule in PR Merge Policy above (already ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
@@ -630,7 +641,7 @@ recorded in the plan repo.
 
 | Agent | Model | Fires on |
 |---|---|---|
-| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative**; do not read this cell as a narrower restatement of it. That surface is all of `.github/**` (workflows **and** composite actions), `scripts/factory/**`, any privileged glue or publisher script wherever it lives, CODEOWNERS, the factory-integrity enforcement tests (`tests/factory/**`, #160), and branch-protection config. Its job is to BREAK the pipeline, not assess it. |
+| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative; see it for the full protected surface** (a pointer, not a second copy, so this cell cannot drift narrow of it, #163). Its job is to BREAK the pipeline, not assess it. |
 | `schema-migration-reviewer` | `opus` | `snowflake/migrations/**`, grants, secure views, and the Zod/Pydantic validation standing in for constraints Snowflake will not enforce. |
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
