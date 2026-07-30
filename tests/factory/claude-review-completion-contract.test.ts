@@ -1128,12 +1128,21 @@ describe("claude-review completion-assertion sentinel branch (step B, #183)", ()
 
   it("C-T11: instruction and assertion grammar carry the identical sentinel literal (lockstep)", () => {
     // Pins the two copies of the sentinel together so they cannot drift: the
-    // workflow's --append-system-prompt instruction must embed exactly these
-    // bytes, and the assertion grammar's SENTINEL='...' literal must equal
-    // them. A one-character change to either fails here rather than shipping
-    // an instruction the model obeys and a grammar that rejects the result
-    // (or vice versa). Same lockstep style as
+    // terminal marker the workflow's --append-system-prompt instruction tells
+    // the model to emit as its last line must byte-EQUAL the assertion
+    // grammar's SENTINEL='...' literal. A one-character change to either fails
+    // here rather than shipping an instruction the model obeys and a grammar
+    // that rejects the result (or vice versa). Same lockstep style as
     // claude-code-action-token-model.test.ts T-3.
+    //
+    // The marker is compared with === on the exact substring after the
+    // instruction prose, NOT `appendLine.toContain(SENTINEL)` (connector P2 on
+    // PR #185): toContain would let a SUFFIX on the instruction marker slip
+    // past -- the old marker stays a substring of the longer new one -- while
+    // the assertion's byte-equality (`[ "$LAST_LINE" != "$SENTINEL" ]`) would
+    // then reject EVERY prose-shaped review (an availability regression). An
+    // exact match on the extracted marker catches a suffix, a prefix, or any
+    // other drift on either side.
     const document = parseDocument(readFileSync(REVIEW_WORKFLOW_PATH, "utf8"));
     expect(document.errors).toEqual([]);
     const workflow = document.toJS() as Mapping;
@@ -1155,9 +1164,31 @@ describe("claude-review completion-assertion sentinel branch (step B, #183)", ()
       appendLine,
       "claude_args has no --append-system-prompt line",
     ).toBeTruthy();
-    // (1) the instruction embeds the exact sentinel literal.
-    expect(appendLine).toContain(SENTINEL);
-    // (2) the assertion grammar's SENTINEL literal equals it exactly.
+    // (1) Extract the quoted instruction value (it contains no internal `"`).
+    const instructionValue = appendLine?.match(
+      /--append-system-prompt "(.*)"\s*$/,
+    )?.[1];
+    expect(
+      instructionValue,
+      "could not extract the --append-system-prompt value",
+    ).toBeTruthy();
+    // The terminal marker is the substring after the instruction prose (the
+    // model is told this is its exact last line). Extract it after the prose
+    // delimiter and assert it byte-EQUALS the grammar literal, so a suffix on
+    // the marker fails here (the connector-P2 case) instead of shipping an
+    // instruction/grammar mismatch that reds every prose review.
+    const PROSE_DELIMITER = "interim update: ";
+    const delimiterIndex = instructionValue!.lastIndexOf(PROSE_DELIMITER);
+    expect(
+      delimiterIndex,
+      "instruction prose delimiter not found; cannot isolate the terminal marker",
+    ).toBeGreaterThanOrEqual(0);
+    const instructionMarker = instructionValue!.slice(
+      delimiterIndex + PROSE_DELIMITER.length,
+    );
+    expect(instructionMarker).toBe(SENTINEL);
+    // (2) the assertion grammar's SENTINEL literal equals it exactly, so the
+    // instruction marker and the grammar are transitively byte-identical.
     const grammarLiteral = reviewJobStepRun(STEP_B).match(
       /SENTINEL='([^']*)'/,
     )?.[1];
