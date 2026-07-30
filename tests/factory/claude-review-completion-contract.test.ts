@@ -1102,6 +1102,30 @@ describe("claude-review completion-assertion sentinel branch (step B, #183)", ()
     expect(result.stdout).toContain("still reports work in progress");
   });
 
+  it("C-T12: a headerless prose body with the sentinel as its final line passes (no-heading accept path)", () => {
+    // The ACCEPT counterpart to C-T10's reject: with no ATX heading anywhere
+    // the heading region widens to the whole body (fail-closed), but a
+    // compliant headerless body -- no "review in progress" wording, sentinel
+    // as the final non-empty line -- must still be ACCEPTED. Pins that a
+    // future over-narrowing of the whole-body widening cannot silently start
+    // rejecting compliant headerless prose (availability-only, but this is a
+    // security-gate harness, so close the symmetry).
+    const body = proseBody(
+      PR182_RUN_ID,
+      "This note has no markdown heading at all; it is a short, complete prose summary with no checklist.",
+      "",
+      SENTINEL,
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      "carrying the terminal completion sentinel",
+    );
+  });
+
   it("C-T11: instruction and assertion grammar carry the identical sentinel literal (lockstep)", () => {
     // Pins the two copies of the sentinel together so they cannot drift: the
     // workflow's --append-system-prompt instruction must embed exactly these
