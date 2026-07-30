@@ -43,6 +43,31 @@ const PR152_COMPLETE = readFileSync(
 const PR150_RUN_ID = "30304076291";
 const PR152_RUN_ID = "30306271323";
 
+// Issue #183. PR #182's re-review posted its tracking comment as PROSE (a
+// `### Review summary` heading and plain `-` bullets, but NO task-list box),
+// captured verbatim with `gh api ...issues/182/comments`. A prose body has no
+// unticked box to catch a truncation, so it routes to the completion-sentinel
+// branch. The truncated variant is a mid-paragraph PREFIX of that same body
+// (derived, not separately captured) standing in for an interim update a run
+// died after: same run id, same prose shape, no sentinel.
+const PR182_PROSE = readFileSync(
+  join(FIXTURE_DIR, "claude-review-tracking-comment-pr182-prose-resummary.md"),
+  "utf8",
+);
+const PR182_PROSE_TRUNCATED = readFileSync(
+  join(FIXTURE_DIR, "claude-review-tracking-comment-pr182-prose-truncated.md"),
+  "utf8",
+);
+const PR182_RUN_ID = "30547564749";
+
+// The #183 completion sentinel. This one JS literal is the single source of
+// truth the tests compare against: C-T11 pins that the workflow's
+// `--append-system-prompt` instruction AND the assertion grammar both carry
+// exactly these bytes, so a drift in either the instruction or the grammar
+// fails a test rather than silently shipping an inert instruction.
+const SENTINEL =
+  "REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)";
+
 // The execution-transcript fixture is schema-accurate rather than captured:
 // claude-code-action's execution file is a single pretty-printed JSON array
 // of SDK messages (base-action `writeExecutionFile()` ->
@@ -864,5 +889,254 @@ describe("claude-review completion-assertion step (step B)", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("posted no tracking comment");
+  });
+});
+
+// A prose tracking-comment body whose [View job] header link carries `runId`
+// (so the run-id, freshness and author bindings all pass and execution reaches
+// the completion grammar), followed by the given body lines. Mirrors
+// trackingComment() but emits NO task-list box, so the first-block extractor
+// returns empty and the body routes to the #183 sentinel branch.
+function proseBody(runId: string, ...lines: readonly string[]): string {
+  return [
+    `**Claude finished @syamaner's task in 1m 37s** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${runId})`,
+    "",
+    "---",
+    ...lines,
+  ].join("\n");
+}
+
+describe("claude-review completion-assertion sentinel branch (step B, #183)", () => {
+  it("C-T1: a prose re-review body ending with the sentinel passes on the sentinel branch", () => {
+    // The real PR #182 prose body (no checklist), plus a blank line and the
+    // terminal sentinel as its final line -- the compliant shape the
+    // --append-system-prompt instruction asks the model to produce.
+    const body = `${PR182_PROSE}\n${SENTINEL}`;
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      "carrying the terminal completion sentinel",
+    );
+  });
+
+  it("C-T2: a truncated prose body with no sentinel is rejected (fail-closed proof)", () => {
+    // The load-bearing negative: an interim/truncated prose update (a
+    // mid-paragraph prefix of PR #182's body, no sentinel) must red -- the
+    // #146/#150 failure direction this whole gate exists for. There is no box
+    // to be unticked in a prose body, so the sentinel is the only signal that
+    // keeps this fail-closed.
+    const result = runStepB({
+      pages: [[completionComment(PR182_PROSE_TRUNCATED)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("C-T3: the full PR #182 prose body verbatim (no sentinel) is rejected", () => {
+    // Prose alone never passes, and the fix is not retroactive for the
+    // historical comment: the captured body, unmodified, still reds.
+    const result = runStepB({
+      pages: [[completionComment(PR182_PROSE)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("C-T4: the sentinel quoted mid-body does not satisfy the final-line anchor", () => {
+    // The sentinel appears verbatim on an earlier line, but the FINAL line is
+    // other prose. Anchoring to the last line (not "anywhere in the body")
+    // keeps an interim update that merely quotes the sentinel from passing.
+    const body = proseBody(
+      PR182_RUN_ID,
+      "### Review summary",
+      "",
+      "For reference, the completion sentinel this gate expects is:",
+      SENTINEL,
+      "",
+      "But the review is not actually finished, so more prose follows here.",
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("C-T5: near-miss final lines fail byte-equality (prefix, trailing char, code fence)", () => {
+    // Byte-equality is exact: a blockquote prefix, a single extra trailing
+    // character, or the sentinel wrapped in a closing code fence (so the last
+    // non-empty line is the ``` fence) each fail.
+    const tails: readonly (readonly string[])[] = [
+      [`> ${SENTINEL}`], // (i) blockquote-prefixed
+      [`${SENTINEL}.`], // (ii) one extra non-space trailing character
+      ["```", SENTINEL, "```"], // (iii) sentinel inside a closing code fence
+    ];
+    for (const tail of tails) {
+      const body = proseBody(
+        PR182_RUN_ID,
+        "### Review summary",
+        "",
+        "Done.",
+        "",
+        ...tail,
+      );
+      const result = runStepB({
+        pages: [[completionComment(body)]],
+        runId: PR182_RUN_ID,
+      });
+      expect(result.status, JSON.stringify(tail)).toBe(1);
+      expect(result.stdout, JSON.stringify(tail)).toContain(
+        "final line is not the terminal completion sentinel",
+      );
+    }
+  });
+
+  it("C-T6: trailing blank lines, spaces, and a CR after the sentinel are tolerated", () => {
+    // A genuine completion may carry trailing whitespace/CRLF or blank lines;
+    // the final-non-empty-line + trailing-whitespace/CR strip accepts all of
+    // them while still demanding an exact byte match on the sentinel itself.
+    const tails: readonly string[] = [
+      `${SENTINEL}\n\n\n`, // trailing blank lines
+      `${SENTINEL}   `, // trailing spaces on the sentinel line
+      `${SENTINEL}\r`, // a trailing CR (CRLF line ending)
+      `${SENTINEL}  \r\n  \n`, // spaces + CR + trailing blank lines combined
+    ];
+    for (const tail of tails) {
+      const body = `${proseBody(PR182_RUN_ID, "### Review summary", "", "All good.")}\n${tail}`;
+      const result = runStepB({
+        pages: [[completionComment(body)]],
+        runId: PR182_RUN_ID,
+      });
+      expect(result.status, JSON.stringify(tail)).toBe(0);
+      expect(result.stdout, JSON.stringify(tail)).toContain(
+        "carrying the terminal completion sentinel",
+      );
+    }
+  });
+
+  it("C-T7: an in-progress heading fails even when the sentinel is the final line", () => {
+    // The sentinel is present as the final line (conjunct (a) passes), but the
+    // heading region still advertises work in progress, so conjunct (b) fails
+    // with the existing in-progress message.
+    const body = proseBody(
+      PR182_RUN_ID,
+      "### Code review in progress",
+      "",
+      "Still working through the review passes.",
+      "",
+      SENTINEL,
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("still reports work in progress");
+  });
+
+  it("C-T8: a checklist body with the sentinel appended still fails on unticked boxes (precedence)", () => {
+    // A body carrying ANY task box routes to the checklist branch, never the
+    // sentinel branch -- so PR #150's truncated checklist, even with a
+    // sentinel appended as its final line, still fails on unticked boxes. A
+    // smuggled sentinel cannot buy past an unfinished checklist.
+    const body = `${PR150_TRUNCATED}\n${SENTINEL}`;
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR150_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "finished with unticked checklist items",
+    );
+  });
+
+  it("C-T9: #150 verbatim still fails and #152 verbatim still passes WITHOUT any sentinel", () => {
+    // The checklist branch is unchanged by #183: the truncated #150 comment
+    // still reds on unticked boxes, and the healthy #152 comment still passes
+    // with no sentinel anywhere (the checklist branch must not start demanding
+    // the sentinel).
+    const truncated = runStepB({
+      pages: [[completionComment(PR150_TRUNCATED)]],
+      runId: PR150_RUN_ID,
+    });
+    expect(truncated.status).toBe(1);
+    expect(truncated.stdout).toContain(
+      "finished with unticked checklist items",
+    );
+
+    const healthy = runStepB({
+      pages: [[completionComment(PR152_COMPLETE)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(healthy.status, `${healthy.stdout}\n${healthy.stderr}`).toBe(0);
+    expect(healthy.stdout).toContain("no unfinished work advertised");
+  });
+
+  it("C-T10: a headerless prose body mentioning 'review in progress' fails (whole-body heading region)", () => {
+    // With no ATX heading anywhere, the heading region widens fail-closed to
+    // the WHOLE body, so an in-progress mention in running prose is caught
+    // even though the sentinel is the final line.
+    const body = proseBody(
+      PR182_RUN_ID,
+      "This note has no markdown heading at all, yet it mentions the review in progress state in running prose.",
+      "",
+      SENTINEL,
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("still reports work in progress");
+  });
+
+  it("C-T11: instruction and assertion grammar carry the identical sentinel literal (lockstep)", () => {
+    // Pins the two copies of the sentinel together so they cannot drift: the
+    // workflow's --append-system-prompt instruction must embed exactly these
+    // bytes, and the assertion grammar's SENTINEL='...' literal must equal
+    // them. A one-character change to either fails here rather than shipping
+    // an instruction the model obeys and a grammar that rejects the result
+    // (or vice versa). Same lockstep style as
+    // claude-code-action-token-model.test.ts T-3.
+    const document = parseDocument(readFileSync(REVIEW_WORKFLOW_PATH, "utf8"));
+    expect(document.errors).toEqual([]);
+    const workflow = document.toJS() as Mapping;
+    const job = asMapping(asMapping(workflow.jobs)?.["claude-review"]);
+    const steps = job?.steps;
+    if (!Array.isArray(steps)) {
+      throw new Error("claude-review job has no steps");
+    }
+    const reviewStep = steps.find(
+      (candidate) => asMapping(candidate)?.name === "Run Claude Code Review",
+    );
+    const claudeArgs = String(
+      asMapping(asMapping(reviewStep)?.with)?.claude_args,
+    );
+    const appendLine = claudeArgs
+      .split("\n")
+      .find((line) => line.trimStart().startsWith("--append-system-prompt"));
+    expect(
+      appendLine,
+      "claude_args has no --append-system-prompt line",
+    ).toBeTruthy();
+    // (1) the instruction embeds the exact sentinel literal.
+    expect(appendLine).toContain(SENTINEL);
+    // (2) the assertion grammar's SENTINEL literal equals it exactly.
+    const grammarLiteral = reviewJobStepRun(STEP_B).match(
+      /SENTINEL='([^']*)'/,
+    )?.[1];
+    expect(grammarLiteral).toBe(SENTINEL);
   });
 });
