@@ -11,7 +11,7 @@ import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
-  extractIndividualCriterionBlockerMarker,
+  extractV2CriterionBlockerMarker,
   extractIssueNumberFromInlineBlockerMarker,
   inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
@@ -452,8 +452,8 @@ describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
 
   it("FN1 recognises individual markers only as standalone lines", () => {
     const marker = criterionBlockerCommentMarker("12:0", digestA);
-    expect(extractIndividualCriterionBlockerMarker(marker)).toBe(marker);
-    expect(extractIndividualCriterionBlockerMarker(`prefix ${marker} suffix`)).toBeNull();
+    expect(extractV2CriterionBlockerMarker(marker)).toBe(marker);
+    expect(extractV2CriterionBlockerMarker(`prefix ${marker} suffix`)).toBeNull();
   });
 
   it("FT6/FN2 excludes aggregate, issue-level, and generation-only markers", () => {
@@ -464,7 +464,7 @@ describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
       unreviewedClosingIssueCommentMarker(12),
       inlineBlockerGenerationMarker("1"),
     ]) {
-      expect(extractIndividualCriterionBlockerMarker(marker)).toBeNull();
+      expect(extractV2CriterionBlockerMarker(marker)).toBeNull();
     }
   });
 });

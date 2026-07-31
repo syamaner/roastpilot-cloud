@@ -1498,6 +1498,28 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
     ).resolves.toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((call) => call.method === "DELETE")).toBe(false);
   });
+
+  it("keeps a legacy-form comment for a still-live criterion when the current spine active set is v2-only", async () => {
+    const legacyPositionalCommentMarker = criterionBlockerCommentMarker("12:0");
+    const currentV2Marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([{
+          id: 1,
+          body: `${legacyPositionalCommentMarker}\n${inlineBlockerGenerationMarker("1")}`,
+          user: { type: "Bot", login: "github-actions[bot]" },
+        }]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      reconcileObsoleteInlineBlockerComments(
+        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
+        new Set([12]), new Set([12]), true, 1, new Set([currentV2Marker]),
+      ),
+    ).resolves.toEqual({ ok: true, deletedCount: 0 });
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
   it("deletes a criterion blocker's own comment for an issue that is NO LONGER closing-referenced at all (de-referenced)", async () => {
     const marker = criterionBlockerCommentMarker("12:0");
     const { fetchMock, calls } = mockFetch({
@@ -1543,7 +1565,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
   });
 
   it("FT7 applies de-reference rule 1 first even when a criterion marker is active", async () => {
-    const marker = criterionBlockerCommentMarker("34:0");
+    const marker = criterionBlockerCommentMarker("34:0", "d".repeat(64));
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>

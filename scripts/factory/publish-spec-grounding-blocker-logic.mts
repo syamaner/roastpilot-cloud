@@ -522,17 +522,16 @@ const CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):[0-9a-f]{64}:do-not-edit -->$/;
 
 /**
- * Returns an exact standalone individual-criterion marker line, accepting
- * only the closed legacy and digest grammars. Other blocker marker kinds
- * are deliberately outside this helper's retirement scope.
+ * Returns an exact standalone v2 individual-criterion marker line.
+ * Legacy positional identity cannot be mapped safely to a current
+ * criterion after edits, so treating it as an active-set retirement
+ * candidate could delete a still-live merge gate. Legacy comments retire
+ * only when their issue is de-referenced (or a human resolves them).
  */
-export function extractIndividualCriterionBlockerMarker(body: string): string | null {
+export function extractV2CriterionBlockerMarker(body: string): string | null {
   for (const rawLine of body.split(/\r?\n/)) {
     const trimmed = rawLine.trim();
-    if (
-      CRITERION_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
-      CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.test(trimmed)
-    ) {
+    if (CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.test(trimmed)) {
       return trimmed;
     }
   }

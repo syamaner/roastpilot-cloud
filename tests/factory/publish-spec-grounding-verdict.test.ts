@@ -1850,7 +1850,7 @@ describe("main — the happy path", () => {
     expect((summaryPost?.body as { body: string }).body).not.toMatch(/listed below in THIS summary/i);
   });
 
-  it("FT5 posts a fresh v2 comment before retiring the transition legacy comment in the same run", async () => {
+  it("posts a fresh v2 comment while retaining the fail-closed transition legacy duplicate", async () => {
     const criterionDigest = "a".repeat(64);
     const v2Marker = criterionBlockerCommentMarker("12:0", criterionDigest);
     const legacyPositionalCommentMarker = criterionBlockerCommentMarker("12:0");
@@ -1870,7 +1870,6 @@ describe("main — the happy path", () => {
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
         jsonResponse([{ id: 77, body: `${legacyPositionalCommentMarker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
       "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 88 }, 201),
-      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () => new Response(null, { status: 204 }),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
     });
@@ -1879,10 +1878,9 @@ describe("main — the happy path", () => {
     await main();
 
     const postIndex = calls.findIndex((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"));
-    const deleteIndex = calls.findIndex((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/77"));
     expect(postIndex).toBeGreaterThanOrEqual(0);
-    expect(deleteIndex).toBeGreaterThan(postIndex);
     expect((calls[postIndex]?.body as { body: string }).body).toContain(v2Marker);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/77"))).toBe(false);
   });
 
   it("FT11 never reaches reconcile when fresh v2 posting fails", async () => {
@@ -1966,6 +1964,31 @@ describe("main — the happy path", () => {
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
       "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
         jsonResponse([{ id: 77, body: `${marker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/77"))).toBe(false);
+  });
+
+  it("keeps a pre-v2 legacy thread for a satisfied criterion on a still-closing issue", async () => {
+    const criterionDigest = "a".repeat(64);
+    const legacyPositionalCommentMarker = criterionBlockerCommentMarker("12:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Now handled." }] },
+      spine: {
+        ...VALID_SPINE,
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0", criterionDigest }],
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 77, body: `${legacyPositionalCommentMarker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
       "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
     });
@@ -3329,6 +3352,38 @@ describe("main — the happy path", () => {
     // reconciliation, which runs UNCONDITIONALLY now regardless of
     // whether this run's own new blockers posted inline.
     expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(2);
+  });
+
+  it("keeps a pre-v2 legacy thread when first-CREATE anchor 422 softly degrades and reconciliation falls through", async () => {
+    const criterionDigest = "a".repeat(64);
+    const legacyPositionalCommentMarker = criterionBlockerCommentMarker("12:0");
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      spine: {
+        ...VALID_SPINE,
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0", criterionDigest }],
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([{ id: 77, body: `${legacyPositionalCommentMarker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () =>
+        new Response("Unprocessable Entity", { status: 422 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((call) => call.method === "GET" && call.url.includes("/pulls/83/comments"))).toHaveLength(2);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/pulls/comments/77"))).toBe(false);
   });
 
   it("posts a 'pipeline broke'-style visible fallback and exits nonzero when the PR's current head SHA no longer matches the trusted event SHA", async () => {

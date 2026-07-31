@@ -54,7 +54,7 @@ import { GithubApiError, githubRequest } from "./github-api.mts";
 import {
   bodyContainsAnyBlockerMarker,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
-  extractIndividualCriterionBlockerMarker,
+  extractV2CriterionBlockerMarker,
   extractInlineBlockerGeneration,
   extractIssueNumberFromInlineBlockerMarker,
   type BlockerCommentPlan,
@@ -809,10 +809,15 @@ export async function verifyPullRequestSnapshotUnchanged(
  * the current closing-reference set. The diff-truncation aggregate is eligible
  * only when its exact standalone marker is present, its current applicability
  * predicate is false, and no closing references remain. The zero-closing
- * Individual criterion comments whose exact marker is absent from the
+ * V2 individual criterion comments whose exact marker is absent from the
  * caller-supplied spine-derived active set are retired after fresh
- * per-delete snapshot verification. Issue-level comments remain governed
- * only by de-reference. Before any kind is deleted, this
+ * per-delete snapshot verification. Legacy positional comments and
+ * issue-level comments remain governed only by de-reference: a legacy
+ * index cannot be mapped safely to current criterion text after edits.
+ * The fail-closed transition residual is an extra legacy thread alongside
+ * v2 until de-reference or human resolution; it is limited to PRs commented
+ * before the v2 rollout and never removes a possibly-live gate.
+ * Before any kind is deleted, this
  * function paginates existing comments and freshly re-verifies the head SHA,
  * base SHA, closing references, and any-kind references from one PR response.
  * Aggregate candidates are processed before individuals and reverified again
@@ -885,7 +890,7 @@ export async function reconcileObsoleteInlineBlockerComments(
       if (!currentlyClosingIssueNumbers.has(issueNumber)) {
         obsoleteDereferencedIndividuals.push(c);
       } else {
-        const criterionMarker = extractIndividualCriterionBlockerMarker(c.body);
+        const criterionMarker = extractV2CriterionBlockerMarker(c.body);
         if (criterionMarker !== null && !activeIndividualCriterionMarkers.has(criterionMarker)) {
           obsoleteCriterionRetirements.push(c);
         }
