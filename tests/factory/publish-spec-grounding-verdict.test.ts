@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
-import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
+import {
+  buildStaleCriterionAnnotationSummarySupplement,
+  formatUncaughtErrorForLog,
+  main,
+} from "../../scripts/factory/publish-spec-grounding-verdict.mts";
 import {
   assembleSpecGroundingSummaryCommentBody,
   SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
@@ -27,6 +31,18 @@ import {
 
 const TRUSTED_HEAD_SHA = "headsha000000000000000000000000000000000";
 const TRUSTED_BASE_SHA = "basesha000000000000000000000000000000000";
+
+describe("buildStaleCriterionAnnotationSummarySupplement", () => {
+  it("makes skipped annotation checks PR-visible even when no note changed", () => {
+    expect(buildStaleCriterionAnnotationSummarySupplement(0, 0, 3)).toBe(
+      "3 issue(s)' stale-criterion checks were skipped this run and will be retried on a future rotating run.",
+    );
+  });
+
+  it("returns null only when the pass made no changes and skipped nothing", () => {
+    expect(buildStaleCriterionAnnotationSummarySupplement(0, 0, 0)).toBeNull();
+  });
+});
 
 /** A unified diff with exactly one addable line -- resolves to a real anchor. */
 const DIFF_WITH_ANCHOR = [

@@ -402,6 +402,9 @@ export async function annotateStaleCriterionBlockerComments(
 
   const unresolved = candidates.filter(({ comment }) => unresolvedIds.has(comment.id));
   const issueNumbers = [...new Set(unresolved.map(({ issueNumber }) => issueNumber))].sort((a, b) => a - b);
+  if (issueNumbers.length === 0) {
+    return { annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [] };
+  }
   const rotation = currentGeneration % issueNumbers.length;
   const rotatedIssueNumbers = [...issueNumbers.slice(rotation), ...issueNumbers.slice(0, rotation)];
   const processedIssueNumbers = rotatedIssueNumbers.slice(0, MAX_ANNOTATION_ISSUE_FETCHES);

@@ -203,7 +203,9 @@ describe("stale criterion annotation I/O", () => {
   it("resolved thread is never PATCHed", async () => {
     const { fetchMock, calls } = mockFetch(annotationHandlers("", { resolved: true }));
     vi.stubGlobal("fetch", fetchMock);
-    await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1);
+    await expect(annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).resolves.toEqual({
+      annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [],
+    });
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
@@ -331,11 +333,14 @@ describe("stale criterion annotation I/O", () => {
     handlers["POST /graphql"] = () => reviewThreadsResponse([
       { commentId: 87, isResolved: false }, { commentId: 88, isResolved: false },
     ]);
+    handlers["GET /repos/o/r/issues/12345678901"] = () => jsonResponse({ body: "", updated_at: timestamp });
     const { fetchMock, calls } = mockFetch(handlers);
     vi.stubGlobal("fetch", fetchMock);
-    const result = await annotateStaleCriterionBlockerComments(
+    const annotation = annotateStaleCriterionBlockerComments(
       "t", "o", "r", 5, new Set([12, 12_345_678_901]), 1,
     );
+    await expect(annotation).resolves.toMatchObject({ annotatedCount: 1 });
+    const result = await annotation;
     expect(result.annotatedCount).toBe(1);
     expect(calls.some((call) => call.url.includes("12345678901"))).toBe(false);
   });

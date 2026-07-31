@@ -165,6 +165,25 @@ import {
   reconcileObsoleteInlineBlockerComments,
 } from "./publish-spec-grounding-inline-comment-io.mts";
 
+export function buildStaleCriterionAnnotationSummarySupplement(
+  annotatedCount: number,
+  withdrawnCount: number,
+  skippedIssueCount: number,
+): string | null {
+  const sections: string[] = [];
+  if (annotatedCount + withdrawnCount > 0) {
+    sections.push(
+      "Stale-criterion advisory notes were updated on existing unresolved blocker threads; these notes do not resolve, delete, or weaken any blocker.",
+    );
+  }
+  if (skippedIssueCount > 0) {
+    sections.push(
+      `${skippedIssueCount} issue(s)' stale-criterion checks were skipped this run and will be retried on a future rotating run.`,
+    );
+  }
+  return sections.length === 0 ? null : sections.join("\n\n");
+}
+
 interface GitHubPullRequestShas {
   readonly title: string;
   readonly head: { readonly sha: string };
@@ -1902,11 +1921,12 @@ async function publishSummary(
       `Stale-criterion annotation pass: annotated=${annotationResult.annotatedCount}, ` +
         `withdrawn=${annotationResult.withdrawnCount}, skippedIssues=${annotationResult.skippedIssueNumbers.length}`,
     );
-    if (annotationResult.annotatedCount + annotationResult.withdrawnCount > 0) {
-      appendedSummarySections.push(
-        "Stale-criterion advisory notes were updated on existing unresolved blocker threads; these notes do not resolve, delete, or weaken any blocker.",
-      );
-    }
+    const annotationSupplement = buildStaleCriterionAnnotationSummarySupplement(
+      annotationResult.annotatedCount,
+      annotationResult.withdrawnCount,
+      annotationResult.skippedIssueNumbers.length,
+    );
+    if (annotationSupplement !== null) appendedSummarySections.push(annotationSupplement);
   } catch (err) {
     console.warn(
       `Stale-criterion annotation pass failed without affecting the publish gate: ${err instanceof Error ? err.message : String(err)}`,
