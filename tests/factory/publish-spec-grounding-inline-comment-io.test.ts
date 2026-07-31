@@ -233,6 +233,69 @@ describe("findExistingInlineCommentId", () => {
   it("returns null when existing is empty", () => {
     expect(findExistingInlineCommentId([], plan())).toBeNull();
   });
+
+  it("adopts only its own legacy positional marker when no v2 match exists", () => {
+    const marker = criterionBlockerCommentMarker("12:1", "a".repeat(64));
+    const legacyMarker = criterionBlockerCommentMarker("12:1");
+    const existing: readonly ExistingComment[] = [
+      { id: 42, body: `old\n${legacyMarker}`, authorType: "Bot", authorLogin: "github-actions[bot]" },
+    ];
+    expect(findExistingInlineCommentId(existing, plan({ marker, legacyMarker }))).toBe(42);
+  });
+
+  it("prefers a v2 match over legacy adoption when both exist", () => {
+    const marker = criterionBlockerCommentMarker("12:1", "a".repeat(64));
+    const legacyMarker = criterionBlockerCommentMarker("12:1");
+    const existing: readonly ExistingComment[] = [
+      { id: 1, body: `old\n${legacyMarker}`, authorType: "Bot", authorLogin: "github-actions[bot]" },
+      { id: 2, body: `new\n${marker}`, authorType: "Bot", authorLogin: "github-actions[bot]" },
+    ];
+    expect(findExistingInlineCommentId(existing, plan({ marker, legacyMarker }))).toBe(2);
+  });
+
+  it("returns null for a new digest-bearing criterion with no v2 or legacy comment", () => {
+    expect(
+      findExistingInlineCommentId(
+        [],
+        plan({
+          marker: criterionBlockerCommentMarker("12:0", "c".repeat(64)),
+          legacyMarker: criterionBlockerCommentMarker("12:0"),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("reproduces two-run insertion and reorder without positional cross-updates", () => {
+    const digests = {
+      A: "a".repeat(64),
+      B: "b".repeat(64),
+      C: "c".repeat(64),
+      X: "d".repeat(64),
+    };
+    const existing: readonly ExistingComment[] = (["A", "B", "C"] as const).map((criterion, index) => ({
+      id: index + 1,
+      body: `run 1 ${criterion}\n${criterionBlockerCommentMarker(`12:${index}`, digests[criterion])}`,
+      authorType: "Bot",
+      authorLogin: "github-actions[bot]",
+    }));
+    const run2 = (["X", "A", "B", "C"] as const).map((criterion, index) =>
+      plan({
+        marker: criterionBlockerCommentMarker(`12:${index}`, digests[criterion]),
+        legacyMarker: criterionBlockerCommentMarker(`12:${index}`),
+      }),
+    );
+
+    expect(findExistingInlineCommentId(existing, run2[0]!)).toBeNull();
+    expect(run2.slice(1).map((entry) => findExistingInlineCommentId(existing, entry))).toEqual([1, 2, 3]);
+
+    const reordered = (["B", "A"] as const).map((criterion, index) =>
+      plan({
+        marker: criterionBlockerCommentMarker(`12:${index}`, digests[criterion]),
+        legacyMarker: criterionBlockerCommentMarker(`12:${index}`),
+      }),
+    );
+    expect(reordered.map((entry) => findExistingInlineCommentId(existing, entry))).toEqual([2, 1]);
+  });
 });
 
 describe("findConfirmedUnresolvedReviewCommentIds", () => {
@@ -774,7 +837,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
           {
             id: 1,
             body:
-              `stale criterion blocker\n${criterionBlockerCommentMarker("12:0")}\n` +
+              `stale criterion blocker\n${criterionBlockerCommentMarker("12:0", "a".repeat(64))}\n` +
               inlineBlockerGenerationMarker("1"),
             user: { type: "Bot", login: "github-actions[bot]" },
           },
@@ -861,7 +924,7 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
   });
 
   it("retains newer, missing, and malformed generations while deleting only current-or-older bot-owned blockers", async () => {
-    const marker = criterionBlockerCommentMarker("12:0");
+    const marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
         jsonResponse([

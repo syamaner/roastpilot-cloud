@@ -346,7 +346,19 @@ export function findExistingInlineCommentId(
       c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN &&
       bodyContainsMarkerAsStandaloneLine(c.body, plan.marker),
   );
-  return match ? match.id : null;
+  if (match !== undefined) {
+    return match.id;
+  }
+  if (plan.legacyMarker === undefined) {
+    return null;
+  }
+  const legacyMatch = existing.find(
+    (c) =>
+      c.authorType === "Bot" &&
+      c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN &&
+      bodyContainsMarkerAsStandaloneLine(c.body, plan.legacyMarker as string),
+  );
+  return legacyMatch?.id ?? null;
 }
 
 /**

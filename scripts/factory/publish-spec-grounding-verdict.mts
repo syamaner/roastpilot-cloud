@@ -1444,7 +1444,9 @@ async function tryPostBlockersInline(
   const postResult = await postInlineCommentPlan(token, owner, repo, prNumber, pr.head.sha, plan.comments);
   const unresolvedPostedMarkerSet = new Set(postResult.unresolvedPostedMarkers);
   const fallbackCriterionBlockers = stillReferencedCriterionBlockers.filter((entry) => {
-    const coveringMarker = plan.criterionCoveringMarkers.get(entry.criterionId) ?? criterionBlockerCommentMarker(entry.criterionId);
+    const coveringMarker =
+      plan.criterionCoveringMarkers.get(entry.criterionId) ??
+      criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest);
     return !unresolvedPostedMarkerSet.has(coveringMarker);
   });
   const fallbackUnreviewedClosingIssues = stillReferencedUnreviewedClosingIssues.filter((entry) => {

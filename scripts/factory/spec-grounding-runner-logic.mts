@@ -34,6 +34,7 @@
  */
 
 import { isUtf8 } from "node:buffer";
+import { createHash } from "node:crypto";
 import {
   buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
@@ -83,6 +84,12 @@ export interface CriteriaSpineEntry {
    * legitimately).
    */
   readonly criterionId: string;
+  /**
+   * Cross-run-stable, metadata-only identity derived from the raw
+   * criterion text at spine-build time. The text itself is never
+   * persisted in the spine.
+   */
+  readonly criterionDigest?: string;
 }
 
 /**
@@ -187,7 +194,10 @@ export function buildCriteriaSpine(
     if (truncatedAway) {
       break;
     }
+    const occurrenceCounts = new Map<string, number>();
     for (const [index, criterionText] of spec.unmetCriteria.entries()) {
+      const occurrenceIndex = occurrenceCounts.get(criterionText) ?? 0;
+      occurrenceCounts.set(criterionText, occurrenceIndex + 1);
       const marker = buildCriterionIdMarker(nonce, spec.issueNumber, index);
       const checkboxLine = `  - [ ] ${marker} ${neutralizeDelimiterBreakout(criterionText)}`;
       let foundLineIndex = -1;
@@ -214,6 +224,9 @@ export function buildCriteriaSpine(
         issueNumber: spec.issueNumber,
         kind: spec.kind,
         criterionId: `${spec.issueNumber}:${index}`,
+        criterionDigest: createHash("sha256")
+          .update(`${occurrenceIndex} ${criterionText}`, "utf8")
+          .digest("hex"),
       });
     }
   }
@@ -762,7 +775,7 @@ function validateCriteriaSpineEntry(
     errors.push(`entries[${index}] must be a JSON object`);
     return null;
   }
-  const { issueNumber, kind, criterionId } = raw;
+  const { issueNumber, kind, criterionId, criterionDigest } = raw;
   let ok = true;
   // Number.isSafeInteger, NOT Number.isInteger (PR #84 review, independent
   // pass + Codex, FOLD 2): JSON.parse itself rounds a value beyond
@@ -806,6 +819,10 @@ function validateCriteriaSpineEntry(
     );
     ok = false;
   }
+  if (criterionDigest !== undefined && (typeof criterionDigest !== "string" || !/^[0-9a-f]{64}$/.test(criterionDigest))) {
+    errors.push(`entries[${index}].criterionDigest must match ^[0-9a-f]{64}$ when present`);
+    ok = false;
+  }
   if (!ok) {
     return null;
   }
@@ -813,6 +830,7 @@ function validateCriteriaSpineEntry(
     issueNumber: issueNumber as number,
     kind: kind as IssueLinkKind,
     criterionId: criterionId as string,
+    ...(criterionDigest === undefined ? {} : { criterionDigest: criterionDigest as string }),
   };
 }
 
@@ -1242,6 +1260,7 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   // `.forEach` cannot be broken out of; a `for` loop can stop entirely,
   // never even validating the remaining elements once the budget is hit.
   const seenCriterionIds = new Set<string>();
+  const seenCriterionDigests = new Set<string>();
   const entriesArray = entries as unknown[];
   const entriesErrorsStart = errors.length;
   for (let i = 0; i < entriesArray.length; i++) {
@@ -1261,6 +1280,16 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
       continue;
     }
     seenCriterionIds.add(entry.criterionId);
+    if (entry.criterionDigest !== undefined) {
+      const digestKey = `${entry.issueNumber}:${entry.criterionDigest}`;
+      if (seenCriterionDigests.has(digestKey)) {
+        errors.push(
+          `entries[${i}].criterionDigest "${entry.criterionDigest}" is a duplicate for issue #${entry.issueNumber}`,
+        );
+        continue;
+      }
+      seenCriterionDigests.add(digestKey);
+    }
     validatedEntries.push(entry);
   }
   // Duplicate-issueNumber rejection (PR #84 review round 2, Codex, FOLD 4)

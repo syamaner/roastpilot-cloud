@@ -383,6 +383,74 @@ describe("selectDeterministicBlockerAnchor (F1-S9 slice 3b-iii-c, issue #12)", (
   });
 });
 
+describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
+  const digestA = "a".repeat(64);
+  const digestB = "b".repeat(64);
+  const digestX = "c".repeat(64);
+  const digestAnchorableDiff = [
+    "diff --git a/lib/x.ts b/lib/x.ts",
+    "+++ b/lib/x.ts",
+    "@@ -1 +1,2 @@",
+    " context",
+    "+added",
+  ].join("\n");
+
+  it("does not alias an inserted criterion while retaining the moved criterion identity", () => {
+    const run1A = criterionBlockerCommentMarker("12:0", digestA);
+    expect(criterionBlockerCommentMarker("12:0", digestX)).not.toBe(run1A);
+    expect(criterionBlockerCommentMarker("12:1", digestA)).toBe(run1A);
+  });
+
+  it("keeps both markers stable across reorder-only positional changes", () => {
+    expect(criterionBlockerCommentMarker("12:1", digestA)).toBe(criterionBlockerCommentMarker("12:0", digestA));
+    expect(criterionBlockerCommentMarker("12:0", digestB)).toBe(criterionBlockerCommentMarker("12:1", digestB));
+  });
+
+  it("pins the legacy marker byte-for-byte when no digest exists", () => {
+    expect(criterionBlockerCommentMarker("12:0")).toBe(
+      "<!-- roastpilot-factory:spec-grounding-blocker:criterion:12:0:do-not-edit -->",
+    );
+  });
+
+  it("threads v2 markers through bodies, plans, and covering maps", () => {
+    const result = planBlockerInlineComments(
+      [joined({ criterionId: "12:0", criterionDigest: digestA })],
+      [],
+      digestAnchorableDiff,
+      false,
+      TEST_GENERATION,
+    );
+    const marker = criterionBlockerCommentMarker("12:0", digestA);
+    expect(result.comments[0]).toMatchObject({
+      marker,
+      legacyMarker: criterionBlockerCommentMarker("12:0"),
+    });
+    expect(result.comments[0]?.body.split("\n")).toContain(marker);
+    expect(result.criterionCoveringMarkers.get("12:0")).toBe(marker);
+  });
+
+  it("recognises v2 only as a closed-grammar standalone line", () => {
+    const marker = criterionBlockerCommentMarker("12:0", digestA);
+    expect(extractIssueNumberFromInlineBlockerMarker(marker)).toBe(12);
+    expect(bodyContainsAnyBlockerMarker(marker)).toBe(true);
+    expect(extractIssueNumberFromInlineBlockerMarker(`prefix ${marker} suffix`)).toBeNull();
+    expect(bodyContainsAnyBlockerMarker(`prefix ${marker} suffix`)).toBe(false);
+  });
+
+  it("rejects non-positive and unsafe issue numbers in otherwise v2-shaped markers", () => {
+    expect(
+      extractIssueNumberFromInlineBlockerMarker(
+        `<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:0:${digestA}:do-not-edit -->`,
+      ),
+    ).toBeNull();
+    expect(
+      extractIssueNumberFromInlineBlockerMarker(
+        `<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:9007199254740993:${digestA}:do-not-edit -->`,
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", () => {
   it("includes the issue number, criterionId, and the agent's rationale when addressed", () => {
     const body = buildCriterionBlockerCommentBody(
