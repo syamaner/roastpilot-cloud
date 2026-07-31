@@ -1947,6 +1947,7 @@ async function publishSummary(
         currentReferencedIssueNumbers,
       ),
     appendedSummarySections,
+    spine.linkedIssueProvenance,
   );
 
   // RE-VERIFIED ONE MORE TIME, independently, IMMEDIATELY BEFORE THE

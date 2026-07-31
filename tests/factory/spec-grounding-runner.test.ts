@@ -437,6 +437,7 @@ describe("main — real unmet criteria", () => {
         jsonResponse({
           title: "An issue",
           body: "### Acceptance criteria\n- [ ] Do the thing.",
+          updated_at: "2026-07-30T10:20:30Z",
         }),
       [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n+did the thing\n"),
     });
@@ -475,6 +476,7 @@ describe("main — real unmet criteria", () => {
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
       reviewedBaseSha: BASE_SHA,
+      linkedIssueProvenance: [{ issueNumber: 12, updatedAt: "2026-07-30T10:20:30Z" }],
     });
 
     const diffBlock = await readFile(prDiffBlockPath, "utf-8");
@@ -589,6 +591,7 @@ describe("main — real unmet criteria", () => {
         jsonResponse({
           title: "Another issue",
           body: "### Acceptance criteria\n- [ ] Still open.",
+          updated_at: "2026-07-29T09:08:07Z",
         }),
       [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
     });
@@ -627,6 +630,7 @@ describe("main — real unmet criteria", () => {
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
       reviewedBaseSha: BASE_SHA,
+      linkedIssueProvenance: [{ issueNumber: 8, updatedAt: "2026-07-29T09:08:07Z" }],
     });
   });
 
@@ -641,11 +645,13 @@ describe("main — real unmet criteria", () => {
           // result.specs entirely, same as if it had never been fetched
           // at all from that function's own perspective.
           body: "### Acceptance criteria\n- [x] Already done.",
+          updated_at: "2026-07-28T01:02:03Z",
         }),
       [`GET /repos/syamaner/roastpilot-cloud/issues/8 accept=${JSON_ACCEPT}`]: () =>
         jsonResponse({
           title: "Another issue",
           body: "### Acceptance criteria\n- [ ] Still open.",
+          updated_at: "2026-07-27T04:05:06Z",
         }),
       [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n"),
     });
@@ -673,6 +679,10 @@ describe("main — real unmet criteria", () => {
       diffTruncated: false,
       reviewedClosingIssueNumbers: [12],
       reviewedBaseSha: BASE_SHA,
+      linkedIssueProvenance: [
+        { issueNumber: 12, updatedAt: "2026-07-28T01:02:03Z" },
+        { issueNumber: 8, updatedAt: "2026-07-27T04:05:06Z" },
+      ],
     });
   });
 

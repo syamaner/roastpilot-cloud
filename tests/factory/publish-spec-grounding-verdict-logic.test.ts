@@ -755,7 +755,8 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
     expect(body.length).toBeLessThanOrEqual(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
     expect(body).toContain(SPEC_GROUNDING_SUMMARY_COMMENT_MARKER);
     expect(body).toMatch(/further finding\(s\) omitted/i);
-    expect(body.endsWith(requiredSection)).toBe(true);
+    expect(body).toContain(requiredSection);
+    expect(body).toMatch(/criteria provenance unavailable \(review predates provenance recording\)\.$/);
     expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
   });
 
@@ -1017,17 +1018,60 @@ describe("buildSpecGroundingSummaryCommentBody (F1-S9 slice 3b-iii, issue #12)",
 });
 
 describe("assembleSpecGroundingSummaryCommentBody (F1-S9 slice 90.6b-1, issue #90)", () => {
+  it.each(["No blocking findings.", "1 current-applicable blocking finding remains."])(
+    "always appends validated criteria provenance to a %s summary",
+    (baseBody) => {
+      const provenance = [
+        { issueNumber: 12, updatedAt: "2026-07-30T10:20:30Z" },
+        { issueNumber: 34, updatedAt: "2026-07-31T11:21:31Z" },
+      ];
+      const body = assembleSpecGroundingSummaryCommentBody(() => baseBody, [], provenance);
+      expect(body).toContain(
+        "Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last edit:",
+      );
+      expect(body).toContain("An issue edited after its timestamp above has not been re-evaluated by this run.");
+
+      const machineLines = body
+        .split("\n")
+        .filter((line) => line.startsWith("<!-- roastpilot-factory:spec-grounding-criteria-as-of:"));
+      expect(machineLines).toEqual(
+        provenance.map(
+          ({ issueNumber, updatedAt }) =>
+            `<!-- roastpilot-factory:spec-grounding-criteria-as-of:${issueNumber}:${updatedAt}:do-not-edit -->`,
+        ),
+      );
+      for (const line of machineLines) {
+        expect(line).toMatch(
+          /^<!-- roastpilot-factory:spec-grounding-criteria-as-of:\d+:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z:do-not-edit -->$/,
+        );
+      }
+    },
+  );
+
+  it("renders loud provenance-unavailable text for a legacy spine", () => {
+    const body = assembleSpecGroundingSummaryCommentBody(() => "No blocking findings.", []);
+    expect(body).toContain("criteria provenance unavailable (review predates provenance recording)");
+  });
+
   it("accepts a complete body exactly at GitHub's comment limit, including the separator and a preserved suffix", () => {
     const requiredSection = "required suffix";
+    const provenanceSection =
+      "**Criteria provenance** — criteria provenance unavailable (review predates provenance recording).";
     const fixedPrefix = "x".repeat(
-      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH - 55_000 - 1 - requiredSection.length,
+      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH -
+        55_000 -
+        1 -
+        requiredSection.length -
+        1 -
+        provenanceSection.length,
     );
     const body = assembleSpecGroundingSummaryCommentBody(
       (maxFindingsListLength) => fixedPrefix + "y".repeat(maxFindingsListLength),
       [requiredSection],
     );
     expect(body.length).toBe(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
-    expect(body.endsWith(`\n${requiredSection}`)).toBe(true);
+    expect(body).toContain(`\n${requiredSection}\n`);
+    expect(body.endsWith(provenanceSection)).toBe(true);
   });
 
   it("fails explicitly when required fixed sections alone exceed GitHub's comment limit", () => {

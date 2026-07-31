@@ -114,6 +114,7 @@ interface GitHubPullRequest {
 interface GitHubIssue {
   readonly title: string;
   readonly body: string | null;
+  readonly updated_at: string;
 }
 
 interface RunnerPaths {
@@ -262,14 +263,14 @@ async function fetchIssue(
   owner: string,
   repo: string,
   issueNumber: number,
-): Promise<FetchedIssue | null> {
+): Promise<(FetchedIssue & { readonly updatedAt: string }) | null> {
   try {
     const issue = await githubRequest<GitHubIssue>(
       token,
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}`,
     );
-    return { title: issue.title, body: issue.body ?? "" };
+    return { title: issue.title, body: issue.body ?? "", updatedAt: issue.updated_at };
   } catch (err) {
     if (err instanceof GithubApiError && err.status === 404) {
       console.warn(`Issue #${issueNumber} not found (404) — treated as "nothing to say" for this issue.`);
@@ -479,10 +480,13 @@ export async function main(): Promise<void> {
 
   const toFetch = selectIssuesToFetch(references);
   const issuesMap = new Map<number, FetchedIssue>();
+  const linkedIssueProvenance: { issueNumber: number; updatedAt: string }[] = [];
   for (const reference of toFetch) {
     const issue = await fetchIssue(token, owner, repo, reference.issueNumber);
     if (issue !== null) {
       issuesMap.set(reference.issueNumber, issue);
+      // fetchIssue always supplies this trusted GitHub API server field.
+      linkedIssueProvenance.push({ issueNumber: reference.issueNumber, updatedAt: issue.updatedAt });
     }
   }
 
@@ -618,6 +622,7 @@ export async function main(): Promise<void> {
         diffTruncated: diffBlock.truncated,
         reviewedClosingIssueNumbers,
         reviewedBaseSha: pr.base.sha,
+        linkedIssueProvenance,
       },
       null,
       2,

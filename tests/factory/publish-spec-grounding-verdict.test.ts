@@ -2401,11 +2401,12 @@ describe("main — the happy path", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const budgetProbeSection = `ENTRYPOINT-BUDGET-PROBE:${"P".repeat(10_000)}`;
-    await main((buildBaseBody, appendedSections) => {
+    await main((buildBaseBody, appendedSections, linkedIssueProvenance) => {
       expect(appendedSections).toHaveLength(3);
       return assembleSpecGroundingSummaryCommentBody(
         buildBaseBody,
         [...appendedSections, budgetProbeSection],
+        linkedIssueProvenance,
       );
     });
 
@@ -2421,7 +2422,8 @@ describe("main — the happy path", () => {
     );
     expect(summaryBody.match(/and \d+ more/gi)).toHaveLength(2);
     expect(summaryBody).toMatch(/further finding\(s\) omitted/i);
-    expect(summaryBody.endsWith(budgetProbeSection)).toBe(true);
+    expect(summaryBody).toContain(budgetProbeSection);
+    expect(summaryBody).toMatch(/criteria provenance unavailable \(review predates provenance recording\)\.$/);
     expect(summaryBody.length).toBeLessThanOrEqual(65_536);
   });
 

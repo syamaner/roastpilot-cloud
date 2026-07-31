@@ -43,7 +43,11 @@
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
 import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
-import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
+import type {
+  CriteriaSpineEntry,
+  LinkedIssueProvenance,
+  UnreviewedClosingIssueResult,
+} from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
 import { renderBoundedUntrustedReason } from "./untrusted-text.mts";
 
@@ -955,8 +959,22 @@ export function buildSpecGroundingSummaryCommentBody(
 export function assembleSpecGroundingSummaryCommentBody(
   buildBaseBody: (maxFindingsListLength: number) => string,
   appendedSections: readonly string[],
+  linkedIssueProvenance?: readonly LinkedIssueProvenance[],
 ): string {
-  const suffix = appendedSections
+  const provenanceSection =
+    linkedIssueProvenance === undefined
+      ? "**Criteria provenance** — criteria provenance unavailable (review predates provenance recording)."
+      : [
+          "**Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last edit:",
+          "",
+          ...linkedIssueProvenance.flatMap(({ issueNumber, updatedAt }) => [
+            `- Issue #${issueNumber}: ${updatedAt}`,
+            `<!-- roastpilot-factory:spec-grounding-criteria-as-of:${issueNumber}:${updatedAt}:do-not-edit -->`,
+          ]),
+          "",
+          "An issue edited after its timestamp above has not been re-evaluated by this run.",
+        ].join("\n");
+  const suffix = [...appendedSections, provenanceSection]
     .filter((section) => section.length > 0)
     .map((section) => `\n${section}`)
     .join("");
