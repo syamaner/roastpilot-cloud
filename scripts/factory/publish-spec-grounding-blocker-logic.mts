@@ -354,8 +354,6 @@ export interface BlockerCommentPlan {
    * DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}.
    */
   readonly marker: string;
-  /** Exact positional marker accepted for one-run adoption of a legacy comment. */
-  readonly legacyMarker?: string;
 }
 
 /**
@@ -381,10 +379,10 @@ export interface BlockerCommentPlan {
  * get their own FIXED marker instead, since there is at most one such
  * comment per PR per kind regardless of which entries it currently lists.
  *
- * Digest-bearing entries use a cross-run-stable v2 marker. During the
- * transition, lookup may adopt that entry's own exact legacy positional
- * marker only when no v2 match exists; the PATCHed body then carries v2,
- * bounding the positional residual to one successful run.
+ * Digest-bearing entries use a cross-run-stable v2 marker. Legacy
+ * positional comments are never adopted because their current index may
+ * identify different criterion text after an issue edit; reconciliation
+ * retires them after the current run's v2 comments have posted.
  *
  * @param criterionId - The spine-trusted `criterionId` this inline
  *   comment is about.
@@ -522,6 +520,24 @@ const CRITERION_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion:(\d+):(\d+):do-not-edit -->$/;
 const CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):[0-9a-f]{64}:do-not-edit -->$/;
+
+/**
+ * Returns an exact standalone individual-criterion marker line, accepting
+ * only the closed legacy and digest grammars. Other blocker marker kinds
+ * are deliberately outside this helper's retirement scope.
+ */
+export function extractIndividualCriterionBlockerMarker(body: string): string | null {
+  for (const rawLine of body.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (
+      CRITERION_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
+      CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.test(trimmed)
+    ) {
+      return trimmed;
+    }
+  }
+  return null;
+}
 
 /** Matches {@link unreviewedClosingIssueCommentMarker}'s own COMPLETE line shape, capturing the issue number (group 1). */
 const ISSUE_BLOCKER_MARKER_LINE_PATTERN =
@@ -1065,9 +1081,6 @@ export function planBlockerInlineComments(
       line: anchor.line,
       body: buildCriterionBlockerCommentBody(entry, generation),
       marker: criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest),
-      ...(entry.criterionDigest === undefined
-        ? {}
-        : { legacyMarker: criterionBlockerCommentMarker(entry.criterionId) }),
     })),
     ...(overflowCriteria.length > 0
       ? [

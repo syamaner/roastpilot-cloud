@@ -11,6 +11,7 @@ import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
+  extractIndividualCriterionBlockerMarker,
   extractIssueNumberFromInlineBlockerMarker,
   inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
@@ -423,7 +424,6 @@ describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
     const marker = criterionBlockerCommentMarker("12:0", digestA);
     expect(result.comments[0]).toMatchObject({
       marker,
-      legacyMarker: criterionBlockerCommentMarker("12:0"),
     });
     expect(result.comments[0]?.body.split("\n")).toContain(marker);
     expect(result.criterionCoveringMarkers.get("12:0")).toBe(marker);
@@ -448,6 +448,24 @@ describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
         `<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:9007199254740993:${digestA}:do-not-edit -->`,
       ),
     ).toBeNull();
+  });
+
+  it("FN1 recognises individual markers only as standalone lines", () => {
+    const marker = criterionBlockerCommentMarker("12:0", digestA);
+    expect(extractIndividualCriterionBlockerMarker(marker)).toBe(marker);
+    expect(extractIndividualCriterionBlockerMarker(`prefix ${marker} suffix`)).toBeNull();
+  });
+
+  it("FT6/FN2 excludes aggregate, issue-level, and generation-only markers", () => {
+    for (const marker of [
+      CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
+      UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
+      DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+      unreviewedClosingIssueCommentMarker(12),
+      inlineBlockerGenerationMarker("1"),
+    ]) {
+      expect(extractIndividualCriterionBlockerMarker(marker)).toBeNull();
+    }
   });
 });
 
