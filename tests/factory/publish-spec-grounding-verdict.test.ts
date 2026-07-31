@@ -41,6 +41,7 @@ interface FetchCall {
   readonly url: string;
   readonly method: string;
   readonly body: unknown;
+  readonly accept: string | undefined;
 }
 
 function mockFetch(
@@ -51,10 +52,21 @@ function mockFetch(
     const url = String(input);
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    const call: FetchCall = { url, method, body };
+    const accept =
+      init?.headers && typeof init.headers === "object"
+        ? (init.headers as Record<string, string>)["Accept"]
+        : undefined;
+    const call: FetchCall = { url, method, body, accept };
     calls.push(call);
     const key = `${method} ${url.replace("https://api.github.com", "")}`;
-    const handler = handlers[key];
+    const isTrustedCompare =
+      key ===
+      `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`;
+    const handler =
+      (isTrustedCompare && accept === "application/vnd.github+json"
+        ? handlers[`${key} accept=json`] ??
+          (() => jsonResponse({ total_commits: 0, commits: [] }))
+        : handlers[key]);
     if (!handler) {
       throw new Error(`unexpected fetch call: ${key}`);
     }
@@ -92,6 +104,16 @@ function reviewThreadsResponse(
 
 function textResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
+}
+
+function staleInlineBlockerComment(id = 77, criterionId = "12:0") {
+  return {
+    id,
+    body:
+      `stale blocker\n<!-- roastpilot-factory:spec-grounding-blocker:criterion:${criterionId}:do-not-edit -->\n` +
+      inlineBlockerGenerationMarker("1"),
+    user: { type: "Bot", login: "github-actions[bot]" },
+  };
 }
 
 let workdir: string;
@@ -147,7 +169,12 @@ afterEach(async () => {
 
 /** Standard PR-identity fetch handler, matching the trusted head SHA set in beforeEach. */
 function prFetchHandler() {
-  return jsonResponse({ head: { sha: TRUSTED_HEAD_SHA }, base: { sha: TRUSTED_BASE_SHA }, body: null });
+  return jsonResponse({
+    head: { sha: TRUSTED_HEAD_SHA },
+    base: { sha: TRUSTED_BASE_SHA },
+    body: null,
+    title: "Test pull request",
+  });
 }
 
 /**
@@ -162,12 +189,58 @@ function prFetchHandler() {
  * usage (passed directly as a mockFetch handler) keeps its own simple,
  * argument-free signature.
  */
-function prFetchHandlerWithOverrides(overrides: { headSha?: string; baseSha?: string; body?: string | null }): Response {
+function prFetchHandlerWithOverrides(
+  overrides: { headSha?: string; baseSha?: string; body?: string | null; title?: string },
+): Response {
   return jsonResponse({
     head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
     base: { sha: overrides.baseSha ?? TRUSTED_BASE_SHA },
     body: overrides.body ?? null,
+    title: overrides.title ?? "Test pull request",
   });
+}
+
+async function runFullSurfacePublisherScenario(options: {
+  body?: string | null;
+  title?: string;
+  commitMessages?: readonly string[];
+  verdict?: unknown;
+  spine?: unknown;
+  compareStatus?: number;
+}) {
+  const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+    verdict: options.verdict,
+    spine: options.spine,
+  });
+  process.env.OUTCOME_PATH = outcomePath;
+  process.env.VERDICT_PATH = verdictPath;
+  process.env.CRITERIA_SPINE_PATH = spinePath;
+  const compareKey =
+    `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`;
+  const commitMessages = options.commitMessages ?? [];
+  const handlers: Record<string, (call: FetchCall) => Response> = {
+    "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+      prFetchHandlerWithOverrides({
+        body: options.body ?? null,
+        title: options.title ?? "Reference-free title",
+      }),
+    [`${compareKey} accept=json`]: () =>
+      options.compareStatus === undefined
+        ? jsonResponse({
+            total_commits: commitMessages.length,
+            commits: commitMessages.map((message) => ({ commit: { message } })),
+          })
+        : new Response("compare failed", { status: options.compareStatus }),
+    [compareKey]: () => textResponse(DIFF_WITH_ANCHOR),
+    "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+    "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+  };
+  const { fetchMock, calls } = mockFetch(handlers);
+  vi.stubGlobal("fetch", fetchMock);
+  await main();
+  return calls;
 }
 
 describe("main — the three-way job-result gate", () => {
@@ -273,7 +346,16 @@ describe("main — the outcome.json tri-state", () => {
 
   it("posts a visible fallback when outcome.json has hasCriteria:false but carries an unexpected extra field beyond noCriteriaReason (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", extra: "hack" }));
+    await writeFile(
+      outcomePath,
+      JSON.stringify({
+        hasCriteria: false,
+        noCriteriaReason: "no-references",
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+        extra: "hack",
+      }),
+    );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -305,7 +387,15 @@ describe("main — the outcome.json tri-state", () => {
     "posts a visible fallback when outcome.json's reviewedClosingIssueNumbers %s (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262, BLOCKER -- FAILS CLOSED, unlike noCriteriaReason's own safe-default coercion)",
     async (_label, malformedField, expectedMessage) => {
       const outcomePath = join(workdir, "outcome.json");
-      await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", ...malformedField }));
+      await writeFile(
+        outcomePath,
+        JSON.stringify({
+          hasCriteria: false,
+          noCriteriaReason: "no-references",
+          reviewedBaseSha: TRUSTED_BASE_SHA,
+          ...malformedField,
+        }),
+      );
       process.env.OUTCOME_PATH = outcomePath;
       const { fetchMock, calls } = mockFetch({
         "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
@@ -320,6 +410,37 @@ describe("main — the outcome.json tri-state", () => {
       expect((post?.body as { body: string }).body).toMatch(expectedMessage);
     },
   );
+
+  it.each([
+    ["missing", undefined],
+    ["non-string", 123],
+    ["empty", ""],
+    ["over 200 characters", "a".repeat(201)],
+  ])("E14 rejects reviewedBaseSha when it is %s", async (_label, reviewedBaseSha) => {
+    const outcomePath = join(workdir, "outcome.json");
+    const outcome: Record<string, unknown> = {
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+    };
+    if (reviewedBaseSha !== undefined) {
+      outcome.reviewedBaseSha = reviewedBaseSha;
+    }
+    await writeFile(outcomePath, JSON.stringify(outcome));
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST");
+    expect((fallback?.body as { body: string }).body).toMatch(/reviewedBaseSha/i);
+  });
 
   it("posts a visible fallback when outcome.json exists but isn't valid JSON", async () => {
     const outcomePath = join(workdir, "outcome.json");
@@ -384,7 +505,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -400,11 +521,11 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.every((c) => c.method === "GET")).toBe(true);
   });
 
-  it("reason=no-references: clears a prior summary comment AND prior inline blocker comments when hasCriteria is false but earlier state exists (PR #86 review, Codex, P2)", async () => {
+  it("A1 unchanged-base no-references cleanup clears a prior summary comment AND prior inline blocker comments", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -445,7 +566,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "5";
@@ -482,7 +603,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -527,7 +648,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -576,7 +697,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -617,7 +738,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -661,7 +782,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -703,7 +824,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -742,7 +863,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "2";
@@ -789,7 +910,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     process.env.GITHUB_RUN_NUMBER = "not-a-number";
@@ -815,7 +936,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -842,7 +963,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     let pullsCallCount = 0;
@@ -887,7 +1008,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -910,11 +1031,11 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
-  it("reason=no-unmet-criteria: updates the summary with the self-attested caveat but LEAVES inline blocker threads untouched -- deleting a required_conversation_resolution-gating thread on a self-attested, non-diff-verified signal would be an anti-gaming hole (PR #87 review, Codex, P1/medium fold)", async () => {
+  it("A2 unchanged-base no-unmet-criteria updates the summary and leaves inline blocker threads untouched", async () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -950,7 +1071,7 @@ describe("main — the outcome.json tri-state", () => {
       outcomePath,
       // #12 was reviewed as closing (self-attested complete); #99 is a
       // BRAND-NEW closing reference this run never knew about at all.
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-unmet-criteria", reviewedClosingIssueNumbers: [12], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -972,6 +1093,233 @@ describe("main — the outcome.json tri-state", () => {
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
+  it.each(["no-references", "no-unmet-criteria"] as const)(
+    "E10 fails closed without deleting when the PR base was retargeted from %s",
+    async (noCriteriaReason) => {
+      const outcomePath = join(workdir, "outcome-base-retarget.json");
+      await writeFile(outcomePath, JSON.stringify({
+        hasCriteria: false,
+        noCriteriaReason,
+        reviewedClosingIssueNumbers: noCriteriaReason === "no-references" ? [] : [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      }));
+      process.env.OUTCOME_PATH = outcomePath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+          prFetchHandlerWithOverrides({ baseSha: "different-base" }),
+        "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+          jsonResponse([staleInlineBlockerComment()]),
+        "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await main();
+      expect(process.exitCode).toBe(1);
+      expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+      expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+      const fallback = calls.find((call) => call.method === "POST");
+      expect((fallback?.body as { body: string }).body).toMatch(/different base|does not match the base/i);
+      expect((fallback?.body as { body: string }).body).not.toMatch(/no longer references any issue/i);
+    },
+  );
+
+  it("E11 fails closed without deleting on an unreviewed commit-sourced closing reference", async () => {
+    const outcomePath = join(workdir, "outcome-commit-reference.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const compareKey = `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA} accept=json`;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      [compareKey]: () => jsonResponse({
+        total_commits: 1,
+        commits: [{ commit: { message: "Closes #55" } }],
+      }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([staleInlineBlockerComment()]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST");
+    expect((fallback?.body as { body: string }).body).toMatch(/#55/);
+  });
+
+  it("E12 degrades without deleting when the base retargets inside the pre-delete window", async () => {
+    const outcomePath = join(workdir, "outcome-delete-base-race.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({
+          baseSha: pullsCallCount < 3 ? TRUSTED_BASE_SHA : "retargeted-base",
+        });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 77,
+            body:
+              `stale blocker\n<!-- roastpilot-factory:spec-grounding-blocker:criterion:12:0:do-not-edit -->\n` +
+              inlineBlockerGenerationMarker("1"),
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () =>
+        new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(3);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(true);
+  });
+
+  it("E13 delete gate re-parses the pinned commit surface before cleanup", async () => {
+    const outcomePath = join(workdir, "outcome-delete-commit-reference.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const compareKey = `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA} accept=json`;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      [compareKey]: () => jsonResponse({
+        total_commits: 1,
+        commits: [{ commit: { message: "Refs #77" } }],
+      }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+  });
+
+  it("E13 repeated delete callback stops mid-loop when the base retargets", async () => {
+    const outcomePath = join(workdir, "outcome-delete-mid-loop-base-race.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.GITHUB_RUN_NUMBER = "2";
+    let pullsCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({
+          baseSha: pullsCallCount < 4 ? TRUSTED_BASE_SHA : "retargeted-base",
+        });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          staleInlineBlockerComment(77, "12:0"),
+          staleInlineBlockerComment(78, "12:1"),
+        ]),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/77": () =>
+        new Response(null, { status: 204 }),
+      "DELETE /repos/syamaner/roastpilot-cloud/pulls/comments/78": () =>
+        new Response(null, { status: 204 }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(4);
+    expect(calls.filter((call) => call.method === "DELETE").map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/syamaner/roastpilot-cloud/pulls/comments/77",
+    ]);
+  });
+
+  it("E15 commit-fetch failure fails closed before Fork A cleanup", async () => {
+    const outcomePath = join(workdir, "outcome-commit-fetch-failure.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const compareKey = `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA} accept=json`;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      [compareKey]: () => jsonResponse({}, 500),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([staleInlineBlockerComment()]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST");
+    expect((fallback?.body as { body: string }).body).toMatch(/failed to fetch.*commit messages/i);
+  });
+
+  it("E15 stringifies a non-Error commit-fetch failure before Fork A cleanup", async () => {
+    const outcomePath = join(workdir, "outcome-non-error-commit-fetch-failure.json");
+    await writeFile(outcomePath, JSON.stringify({
+      hasCriteria: false,
+      noCriteriaReason: "no-references",
+      reviewedClosingIssueNumbers: [],
+      reviewedBaseSha: TRUSTED_BASE_SHA,
+    }));
+    process.env.OUTCOME_PATH = outcomePath;
+    const compareKey = `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA} accept=json`;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
+      [compareKey]: () => {
+        throw "plain-string compare failure";
+      },
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([staleInlineBlockerComment()]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST");
+    expect((fallback?.body as { body: string }).body).toMatch(
+      /failed to fetch[\s\S]*commit messages[\s\S]*plain-string compare failure/i,
+    );
+  });
+
   it("an unknown/missing noCriteriaReason on a false outcome.json FAILS CLOSED to the non-destructive treatment -- never deletes inline blocker threads on a signal it could not confirm (PR #87 review, Codex, P1/medium fold)", async () => {
     const outcomePath = join(workdir, "outcome.json");
     // Deliberately missing noCriteriaReason -- a malformed/stale-runner
@@ -980,7 +1328,7 @@ describe("main — the outcome.json tri-state", () => {
     // isolates the noCriteriaReason-coercion behavior specifically, not
     // the separate (and separately tested) reviewedClosingIssueNumbers
     // validation (F1-S9 slice 90.5).
-    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, reviewedClosingIssueNumbers: [] }));
+    await writeFile(outcomePath, JSON.stringify({ hasCriteria: false, reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }));
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/pulls/83": prFetchHandler,
@@ -999,7 +1347,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     // The summary-comment lookup 403s exactly ONCE (clearStaleSpecGroundingSummary's
@@ -1031,7 +1379,7 @@ describe("main — the outcome.json tri-state", () => {
     const outcomePath = join(workdir, "outcome.json");
     await writeFile(
       outcomePath,
-      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [] }),
+      JSON.stringify({ hasCriteria: false, noCriteriaReason: "no-references", reviewedClosingIssueNumbers: [], reviewedBaseSha: TRUSTED_BASE_SHA }),
     );
     process.env.OUTCOME_PATH = outcomePath;
     const { fetchMock, calls } = mockFetch({
@@ -1245,7 +1593,7 @@ describe("main — the happy path", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    expect(calls.some((call) => call.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((call) => call.accept === "application/vnd.github.v3.diff")).toBe(false);
     const post = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
     const body = (post?.body as { body: string }).body;
     expect(body).toContain("CURRENT_NON_CLOSING");
@@ -1452,6 +1800,183 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
 
+  it("E1 enforces a blocker whose closing reference exists only in a reviewed commit message", async () => {
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const compareKey =
+      `GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: null, title: "Reference-free title" }),
+      [`${compareKey} accept=json`]: () =>
+        jsonResponse({
+          total_commits: 1,
+          commits: [{ commit: { message: "Closes #12" } }],
+        }),
+      [compareKey]: () => textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const inlinePost = calls.find((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"));
+    expect(inlinePost?.body).toMatchObject({
+      body: expect.stringContaining("Missing the retry wrapper."),
+    });
+    const summaryPost = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).not.toMatch(/no longer a closing obligation/i);
+    expect(summaryBody).not.toContain("No blocking findings.");
+  });
+
+  it("E2 enforces a blocker whose closing reference exists only in the PR title", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      title: "Implement retry support (Closes #12)",
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(true);
+  });
+
+  it("E3 permits a satisfied commit-sourced closing reference without a fallback", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      commitMessages: ["Closes #12"],
+      verdict: {
+        findings: [{ criterionId: "12:0", satisfied: true, rationale: "Implemented." }],
+      },
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).toContain("No blocking findings.");
+  });
+
+  it("E4 reports a genuinely removed closing obligation while E1 does not", async () => {
+    const calls = await runFullSurfacePublisherScenario({});
+    expect(process.exitCode).toBeUndefined();
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).toMatch(/no longer (?:a )?closing obligation/i);
+  });
+
+  it("E5 enforces a beyond-cap commit-only closing obligation", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      commitMessages: ["Closes #21"],
+      verdict: { findings: [] },
+      spine: {
+        entries: [],
+        truncated: true,
+        unreviewedClosingIssues: [{ issueNumber: 21, truncationKind: "fully-dropped" }],
+        diffTruncated: false,
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      },
+    });
+    expect(process.exitCode).toBeUndefined();
+    const inline = calls.find((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"));
+    expect((inline?.body as { body: string }).body).toMatch(/issue #21/i);
+  });
+
+  it("E6 fails closed when the title adds an unreviewed closing reference", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      body: "Closes #12",
+      title: "Also closes #99",
+    });
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((fallback?.body as { body: string }).body).toContain("#99");
+  });
+
+  it("E7 fails closed when the pinned commit compare fetch fails", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      body: "Closes #12",
+      compareStatus: 500,
+    });
+    expect(process.exitCode).toBe(1);
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(false);
+    const fallback = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((fallback?.body as { body: string }).body).toMatch(/failed to fetch.*commit messages/i);
+  });
+
+  it("E8 refuses no-references cleanup when the current title adds a closing reference", async () => {
+    const outcomePath = join(workdir, "outcome-no-references.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({
+        hasCriteria: false,
+        noCriteriaReason: "no-references",
+        reviewedClosingIssueNumbers: [12],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: null, title: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
+  it("E8 catches a title-only obligation appearing in the pre-delete TOCTOU window", async () => {
+    const outcomePath = join(workdir, "outcome-title-race.json");
+    await writeFile(
+      outcomePath,
+      JSON.stringify({
+        hasCriteria: false,
+        noCriteriaReason: "no-references",
+        reviewedClosingIssueNumbers: [],
+        reviewedBaseSha: TRUSTED_BASE_SHA,
+      }),
+    );
+    process.env.OUTCOME_PATH = outcomePath;
+    let pullsCallCount = 0;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => {
+        pullsCallCount += 1;
+        return prFetchHandlerWithOverrides({
+          body: null,
+          title: pullsCallCount === 1 ? "Reference-free title" : "Closes #12",
+        });
+      },
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(pullsCallCount).toBe(2);
+    expect(calls.some((call) => call.url.includes("/pulls/83/comments"))).toBe(false);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
+  it("E9 keeps commit-sourced snapshots symmetric through reconcile and pre-write", async () => {
+    const calls = await runFullSurfacePublisherScenario({
+      commitMessages: ["Closes #12"],
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(true);
+    const fallbackBodies = calls
+      .filter((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"))
+      .map((call) => (call.body as { body: string }).body);
+    expect(fallbackBodies.join("\n")).not.toMatch(/linked-issue references changed|could not run to completion/i);
+  });
+
   it("embeds this run's own GITHUB_RUN_NUMBER as the generation marker in a REAL posted inline blocker comment (F1-S9 slice 90.3, end-to-end -- workflow env through to the actual posted body)", async () => {
     process.env.GITHUB_RUN_NUMBER = "9999";
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
@@ -1653,7 +2178,7 @@ describe("main — the happy path", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    expect(calls.some((call) => call.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((call) => call.accept === "application/vnd.github.v3.diff")).toBe(false);
     expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"))).toBe(false);
     const summaryPost = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
     const summaryBody = (summaryPost?.body as { body: string }).body;
@@ -3061,7 +3586,7 @@ describe("main — the happy path", () => {
     await main();
 
     expect(process.exitCode).toBeUndefined();
-    const compareCall = calls.find((c) => c.url.includes("/compare/"));
+    const compareCall = calls.find((c) => c.accept === "application/vnd.github.v3.diff");
     expect(compareCall).toBeUndefined();
     const post = calls.find((c) => c.method === "POST");
     const body = (post?.body as { body: string }).body;
@@ -3479,7 +4004,7 @@ describe("main — all-paths new-closing-reference check (F1-S9 slice 90.5, issu
     // fetch, no inline comment lookup or post, no reconcile fetch at all.
     // (The one /pulls/83 call itself is fetchAndVerifyPrShas's own,
     // unavoidable and legitimate -- Fork A needs THAT fetch's own pr.body.)
-    expect(calls.some((c) => c.url.includes("/compare/"))).toBe(false);
+    expect(calls.some((c) => c.accept === "application/vnd.github.v3.diff")).toBe(false);
     expect(calls.some((c) => c.url.includes("/pulls/83/comments"))).toBe(false);
     expect(calls.filter((c) => c.url === "https://api.github.com/repos/syamaner/roastpilot-cloud/pulls/83")).toHaveLength(1);
     const post = calls.find((c) => c.method === "POST");

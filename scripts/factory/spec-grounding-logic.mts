@@ -715,43 +715,13 @@ function stripUnprotectedHtmlComments(
   return result;
 }
 
-/**
- * Scans a PR body for every `<keyword> #<N>` issue reference (plus the
- * `OWNER/REPO#N` and full-URL forms, see {@link ISSUE_LINK_PATTERN}) and
- * classifies each by {@link IssueLinkKind}.
- *
- * Deliberately PR-BODY-ONLY, not commit messages: matches how the
- * factory's own `buildImplementPrBody` writes the canonical `Closes #N`/
- * `Refs #N` line into the PR body specifically, and keeps this predictable
- * — a reviewer (human or agent) reads the PR body to see what's claimed,
- * not the commit log.
- *
- * @param prBody - The PR's rendered body text.
- * @param thisRepo - This repo's own `owner/repo`, used to validate the
- *   qualified/URL reference forms so a CROSS-repo reference is correctly
- *   excluded — defaults to {@link DEFAULT_REPO}; see that constant's own
- *   docstring for why this is a parameter, not an environment read.
- * @returns Every distinct issue number referenced, each with its
- *   strongest claimed link kind (see the CLOSING-wins tie-break below),
- *   in FIRST-APPEARANCE order (not sorted by issue number — see the
- *   padding-evasion mitigation in this function's own implementation).
- *   Empty if the body references no issue at all. Excludes a matched
- *   `#0` or a digit sequence too long to be a real, safe-integer issue
- *   number (PR #93/F1-S9 slice 90.2 review, Codex, must-fix — see this
- *   function's own implementation, at the `Number.isSafeInteger` check,
- *   for the full reasoning): `\d+` places no length bound and permits a
- *   bare `0`, but neither is ever a real GitHub issue number, so dropping
- *   the whole reference — rather than passing an invalid number
- *   downstream — is correct for every consumer of this output.
- */
-export function parseLinkedIssueReferences(
-  prBody: string,
-  thisRepo: string = DEFAULT_REPO,
-): LinkedIssueReference[] {
-  const scannable = buildStructuralView(prBody);
-  const normalizedThisRepo = thisRepo.toLowerCase();
-  const byNumber = new Map<number, IssueLinkKind>();
-  for (const match of scannable.matchAll(ISSUE_LINK_PATTERN)) {
+/** Feeds one already-prepared text surface into the shared reference map. */
+function scanIssueReferencesInto(
+  byNumber: Map<number, IssueLinkKind>,
+  scannableText: string,
+  normalizedThisRepo: string,
+): void {
+  for (const match of scannableText.matchAll(ISSUE_LINK_PATTERN)) {
     const groups = match.groups;
     if (groups === undefined) {
       // Defensive: ISSUE_LINK_PATTERN always has a `groups` object for
@@ -841,6 +811,41 @@ export function parseLinkedIssueReferences(
     if (existing === undefined || existing === "non-closing") {
       byNumber.set(issueNumber, kind);
     }
+  }
+}
+
+/**
+ * Scans every GitHub-closing-relevant PR text surface for each
+ * `<keyword> #<N>` issue reference (plus the `OWNER/REPO#N` and full-URL
+ * forms, see {@link ISSUE_LINK_PATTERN}) and classifies each by
+ * {@link IssueLinkKind}. The body receives Markdown-aware structural
+ * masking; commit messages and the PR title are plain text and are scanned
+ * raw, matching the text GitHub can compose into a merge commit.
+ *
+ * @param prBody - The PR's rendered body text.
+ * @param thisRepo - This repo's own `owner/repo`, used to validate the
+ *   qualified/URL reference forms so a CROSS-repo reference is correctly
+ *   excluded — defaults to {@link DEFAULT_REPO}; see that constant's own
+ *   docstring for why this is a parameter, not an environment read.
+ * @param auxiliaryPlainTextSources - Commit messages followed by the PR
+ *   title, scanned raw and appended after body matches in source order.
+ * @returns Every distinct issue number referenced, each with its
+ *   strongest claimed link kind (see the CLOSING-wins tie-break below),
+ *   in FIRST-APPEARANCE order (not sorted by issue number — see the
+ *   padding-evasion mitigation in this function's own implementation).
+ *   Empty if no source references an issue. Excludes a matched `#0` or a
+ *   digit sequence too long to be a real, safe-integer issue number.
+ */
+export function parseLinkedIssueReferences(
+  prBody: string,
+  thisRepo: string = DEFAULT_REPO,
+  auxiliaryPlainTextSources: readonly string[] = [],
+): LinkedIssueReference[] {
+  const normalizedThisRepo = thisRepo.toLowerCase();
+  const byNumber = new Map<number, IssueLinkKind>();
+  scanIssueReferencesInto(byNumber, buildStructuralView(prBody), normalizedThisRepo);
+  for (const source of auxiliaryPlainTextSources) {
+    scanIssueReferencesInto(byNumber, source, normalizedThisRepo);
   }
   // Returned in FIRST-APPEARANCE order, not sorted by issue number
   // (Codex finding, PR #70 review round 6): an earlier version sorted

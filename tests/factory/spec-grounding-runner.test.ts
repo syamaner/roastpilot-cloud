@@ -41,7 +41,11 @@ function mockFetch(handlers: Record<string, (call: FetchCall) => Response>): {
     calls.push(call);
     const path = url.replace("https://api.github.com", "");
     const key = `${method} ${path} accept=${accept}`;
-    const handler = handlers[key];
+    const handler =
+      handlers[key] ??
+      (key === COMPARE_JSON_KEY
+        ? () => jsonResponse({ total_commits: 0, commits: [] })
+        : undefined);
     if (!handler) {
       throw new Error(`unexpected fetch call: ${key}`);
     }
@@ -69,10 +73,11 @@ const BASE_SHA = "base-sha-def456";
 /** A PR JSON response with the trusted head/base SHAs, overridable per test. */
 function prResponse(
   body: string | null,
-  overrides?: { headSha?: string; baseSha?: string; changedFiles?: number },
+  overrides?: { headSha?: string; baseSha?: string; changedFiles?: number; title?: string },
 ): Response {
   return jsonResponse({
     body,
+    title: overrides?.title ?? "Test pull request",
     head: { sha: overrides?.headSha ?? HEAD_SHA },
     base: { sha: overrides?.baseSha ?? BASE_SHA },
     changed_files: overrides?.changedFiles ?? 1,
@@ -80,6 +85,8 @@ function prResponse(
 }
 
 const PULLS_JSON_KEY = `GET /repos/syamaner/roastpilot-cloud/pulls/70 accept=${JSON_ACCEPT}`;
+const COMPARE_JSON_KEY =
+  `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${JSON_ACCEPT}`;
 const COMPARE_DIFF_KEY = `GET /repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA} accept=${DIFF_ACCEPT}`;
 
 // A fixed, injected nonce for deterministic test fixtures (F1-S9 slice
@@ -132,7 +139,7 @@ async function readOutput(): Promise<string> {
 }
 
 describe("main — no linked issue (first early exit)", () => {
-  it("writes has-criteria=false and no context files, without ever fetching an issue or the diff", async () => {
+  it("T16 writes has-criteria=false after exactly the PR and commits fetches, without fetching an issue or diff", async () => {
     const { fetchMock } = mockFetch({
       [PULLS_JSON_KEY]: () => prResponse("Just a plain description, no keyword."),
     });
@@ -146,16 +153,16 @@ describe("main — no linked issue (first early exit)", () => {
     // reviewed-closing-issue-numbers=[] (F1-S9 slice 90.5, PR #96 review
     // round 2, Codex, cid 3626169262): trivially empty here.
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+      `has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
     await expect(readFile(criteriaBlockPath, "utf-8")).rejects.toThrow();
-    // Exactly one fetch (the PR body) -- no issue or diff fetch at all.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // PR + commit messages -- no issue or diff fetch at all.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("main — linked issue with no unmet criteria (second early exit)", () => {
-  it("writes has-criteria=false and no context files, without ever fetching the diff", async () => {
+  it("T16 writes has-criteria=false after the PR, commits, and issue fetches, without fetching the diff", async () => {
     const { fetchMock } = mockFetch({
       [PULLS_JSON_KEY]: () => prResponse("Closes #12"),
       [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
@@ -176,11 +183,11 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     // round 2, Codex, cid 3626169262): #12 WAS reviewed as closing, even
     // though it contributed nothing to criteriaBlock (fully satisfied).
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
     await expect(readFile(prDiffBlockPath, "utf-8")).rejects.toThrow();
-    // Exactly two fetches (PR body + the one linked issue) -- no diff fetch.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // PR + commit messages + the one linked issue -- no diff fetch.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("excludes a NON-closing reference from reviewed-closing-issue-numbers, even when it's the reason criteriaBlock ended up empty (F1-S9 slice 90.5, PR #96 review round 2, Codex, cid 3626169262)", async () => {
@@ -198,7 +205,7 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     // Only #12 (closing-kind) is reviewed-as-closing -- #34 (non-closing)
     // is excluded, even though it too contributed nothing unmet.
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 
@@ -215,7 +222,7 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
     await main();
 
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\n",
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12,34]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 
@@ -245,15 +252,180 @@ describe("main — linked issue with no unmet criteria (second early exit)", () 
 });
 
 describe("main — trusted head SHA verification (PR #72 review fold)", () => {
-  it("fails closed when the PR's current head SHA does not match the trusted event head SHA", async () => {
-    const { fetchMock } = mockFetch({
+  it("T16 fails closed on head mismatch before fetching commit messages", async () => {
+    const { fetchMock, calls } = mockFetch({
       [PULLS_JSON_KEY]: () => prResponse("Closes #12", { headSha: "some-other-sha-the-pr-moved-to" }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(main()).rejects.toThrow(/does not match the trusted/);
-    // Never reaches an issue or diff fetch once the SHA check fails.
+    // Never reaches the commit, issue, or diff fetch once the SHA check fails.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(calls.map((call) => call.url)).not.toContain(
+      `https://api.github.com/repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}`,
+    );
+  });
+});
+
+describe("main — commit-message reference derivation", () => {
+  it("P1 fetches commit messages from the bare unpaginated compare URL", async () => {
+    const { fetchMock, calls } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(calls[1]?.url).toBe(
+      `https://api.github.com/repos/syamaner/roastpilot-cloud/compare/${BASE_SHA}...${HEAD_SHA}`,
+    );
+  });
+
+  it("P2 accepts an unpaginated compare response containing exactly 250 commits", async () => {
+    const commits = Array.from({ length: 250 }, (_, i) => ({
+      commit: { message: `Commit ${i + 1}` },
+    }));
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+      [COMPARE_JSON_KEY]: () => jsonResponse({ total_commits: 250, commits }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).resolves.toBeUndefined();
+    expect(await readOutput()).toContain("no-criteria-reason=no-references");
+  });
+
+  it("P3 rejects a compare response with 251 total commits but only 250 returned", async () => {
+    const commits = Array.from({ length: 250 }, (_, i) => ({
+      commit: { message: `Commit ${i + 1}` },
+    }));
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No references."),
+      [COMPARE_JSON_KEY]: () => jsonResponse({ total_commits: 251, commits }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/truncated/);
+  });
+
+  it("T11 wires a title-only closing reference into the runner union", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () =>
+        prResponse("", { title: "fix login (closes #12)" }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "Title-linked issue",
+          body: "### Acceptance criteria\n- [x] Complete.",
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(await readOutput()).toContain("reviewed-closing-issue-numbers=[12]");
+  });
+
+  it("T13 fetches and renders an issue referenced only by a branch commit", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No body reference."),
+      [COMPARE_JSON_KEY]: () =>
+        jsonResponse({
+          total_commits: 2,
+          commits: [
+            { commit: { message: "Mechanical preparation" } },
+            { commit: { message: "Closes #12" } },
+          ],
+        }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "Commit-linked issue",
+          body: "### Acceptance criteria\n- [ ] Implement the contract.",
+        }),
+      [COMPARE_DIFF_KEY]: () => textResponse("diff --git a/x b/x\n+implemented\n"),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(await readFile(criteriaBlockPath, "utf-8")).toContain("Implement the contract.");
+    const spine = JSON.parse(await readFile(criteriaSpinePath, "utf-8")) as {
+      reviewedClosingIssueNumbers: number[];
+    };
+    expect(spine.reviewedClosingIssueNumbers).toEqual([12]);
+  });
+
+  it.each([
+    ["missing total_commits", { commits: [] }],
+    ["negative total_commits", { total_commits: -1, commits: [] }],
+    ["non-integer total_commits", { total_commits: 0.5, commits: [] }],
+    ["unsafe total_commits", { total_commits: Number.MAX_SAFE_INTEGER + 1, commits: [] }],
+    ["truncated commits", { total_commits: 3, commits: [{ commit: { message: "a" } }, { commit: { message: "b" } }] }],
+    ["non-array commits", { total_commits: 0, commits: {} }],
+    ["non-string message", { total_commits: 1, commits: [{ commit: { message: 42 } }] }],
+  ])("T14 fails closed on malformed compare JSON: %s", async (_label, compareBody) => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No body reference."),
+      [COMPARE_JSON_KEY]: () => jsonResponse(compareBody),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow();
+    expect(await readOutput()).toBe("");
+  });
+
+  it("T15 fails closed on a non-404 compare fetch failure", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("No body reference."),
+      [COMPARE_JSON_KEY]: () => new Response("forbidden", { status: 403 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow();
+    expect(await readOutput()).toBe("");
+  });
+
+  it("T15 fails closed on a network-level compare fetch failure", async () => {
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const accept =
+        init?.headers && typeof init.headers === "object"
+          ? (init.headers as Record<string, string>)["Accept"]
+          : undefined;
+      const key = `${method} ${url.replace("https://api.github.com", "")} accept=${accept}`;
+      if (key === PULLS_JSON_KEY) {
+        return prResponse("No body reference.");
+      }
+      throw new TypeError("compare network failure");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/compare network failure/);
+    expect(await readOutput()).toBe("");
+  });
+
+  it("T17 does not take the no-references exit for a commit-only reference", async () => {
+    const { fetchMock } = mockFetch({
+      [PULLS_JSON_KEY]: () => prResponse("", { title: "Reference-free title" }),
+      [COMPARE_JSON_KEY]: () =>
+        jsonResponse({
+          total_commits: 1,
+          commits: [{ commit: { message: "Closes #12" } }],
+        }),
+      [`GET /repos/syamaner/roastpilot-cloud/issues/12 accept=${JSON_ACCEPT}`]: () =>
+        jsonResponse({
+          title: "Already complete",
+          body: "### Acceptance criteria\n- [x] Complete.",
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(await readOutput()).toBe(
+      `has-criteria=false\nno-criteria-reason=no-unmet-criteria\nreviewed-closing-issue-numbers=[12]\nreviewed-base-sha=${BASE_SHA}\n`,
+    );
   });
 });
 
@@ -522,6 +694,9 @@ describe("main — real unmet criteria", () => {
       if (`${method} ${url.replace("https://api.github.com", "")} accept=${accept}` === PULLS_JSON_KEY) {
         return prResponse("Closes #12");
       }
+      if (`${method} ${url.replace("https://api.github.com", "")} accept=${accept}` === COMPARE_JSON_KEY) {
+        return jsonResponse({ total_commits: 0, commits: [] });
+      }
       throw new TypeError("fetch failed: network error");
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -548,11 +723,11 @@ describe("main — real unmet criteria", () => {
 
     await main();
 
-    // 1 (PR) + 20 (capped issue fetches) + 1 (diff), no more -- none of
+    // 1 (PR) + 1 (commits) + 20 (capped issue fetches) + 1 (diff), no more -- none of
     // the fetch handlers above cover issue #21-25, so the cap being
     // violated would fail this test with "unexpected fetch call" before
     // ever reaching these assertions.
-    expect(fetchMock).toHaveBeenCalledTimes(22);
+    expect(fetchMock).toHaveBeenCalledTimes(23);
     // has-criteria is still TRUE here even though none of the 20 fetched
     // issues had any unmet criteria of their own: renderCriteriaDataBlock's
     // own documented behavior (spec-grounding-logic.mts) is to still render
@@ -577,7 +752,7 @@ describe("main — a PR with no body at all", () => {
     // A null body -> parsed as empty text -> zero references -> the
     // no-references branch (never any obligation to begin with).
     expect(await readOutput()).toBe(
-      "has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\n",
+      `has-criteria=false\nno-criteria-reason=no-references\nreviewed-closing-issue-numbers=[]\nreviewed-base-sha=${BASE_SHA}\n`,
     );
   });
 });

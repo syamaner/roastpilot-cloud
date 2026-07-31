@@ -9,7 +9,7 @@ import {
   buildStaleBlockerSkippedNote,
   deriveSeverity,
   findExistingSpecGroundingSummaryCommentId,
-  findUnreviewedNewClosingReferences,
+  findUnreviewedNewClosingReferences as findUnreviewedNewClosingReferencesWithAuxiliarySources,
   formatRationaleForDisplay,
   isDiffTruncationUnverifiableForClosing,
   joinFindingsToSpine,
@@ -26,6 +26,21 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "../../scripts/factory/spec-grounding-verdict-schema.mts";
+
+function findUnreviewedNewClosingReferences(
+  currentBody: string,
+  thisRepo: string,
+  reviewedClosingIssueNumbers: readonly number[],
+  unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
+) {
+  return findUnreviewedNewClosingReferencesWithAuxiliarySources(
+    currentBody,
+    thisRepo,
+    [],
+    reviewedClosingIssueNumbers,
+    unreviewedClosingIssues,
+  );
+}
 // Shared FOLD-AWARE trigger oracle (#168): a live `@…codex` in a posted
 // spec-grounding body — homoglyph variants included — is caught here, and the
 // oracle shares no code with the module under test.
@@ -1195,6 +1210,18 @@ function unreviewedClosing(overrides: Partial<UnreviewedClosingIssueResult> = {}
 }
 
 describe("findUnreviewedNewClosingReferences (F1-S9 slice 90.5, issue #12 -- the CORRECTED re-land of PR #87 rounds 8-9)", () => {
+  it("U5 reports a title-new closing reference but not an already-reviewed commit reference", () => {
+    expect(
+      findUnreviewedNewClosingReferencesWithAuxiliarySources(
+        "",
+        "acme/repo",
+        ["Closes #12", "Title closes #99"],
+        [12],
+        [],
+      ),
+    ).toEqual([99]);
+  });
+
   it("returns empty when the current body has no closing-kind reference at all", () => {
     expect(findUnreviewedNewClosingReferences("no references here", "acme/repo", [12], [])).toEqual([]);
   });

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
+  deriveLinkedReferenceIssueNumberSets,
   findConfirmedUnresolvedReviewCommentIds,
   InlineBlockerCleanupError,
-  reconcileObsoleteInlineBlockerComments,
+  reconcileObsoleteInlineBlockerComments as reconcileObsoleteInlineBlockerCommentsWithPinnedCommits,
+  verifyPullRequestSnapshotUnchanged,
   findExistingInlineCommentId,
   findExistingInlineComments,
   postInlineCommentPlan,
@@ -19,6 +21,33 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
+
+function reconcileObsoleteInlineBlockerComments(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  trustedHeadSha: string,
+  reviewedBaseSha: string,
+  currentlyClosingIssueNumbers: ReadonlySet<number>,
+  currentlyReferencedIssueNumbers: ReadonlySet<number>,
+  diffTruncationBlocksClosingClaim: boolean,
+  currentGeneration: number,
+) {
+  return reconcileObsoleteInlineBlockerCommentsWithPinnedCommits(
+    token,
+    owner,
+    repo,
+    prNumber,
+    trustedHeadSha,
+    reviewedBaseSha,
+    [],
+    currentlyClosingIssueNumbers,
+    currentlyReferencedIssueNumbers,
+    diffTruncationBlocksClosingClaim,
+    currentGeneration,
+  );
+}
 
 /**
  * Direct unit tests for the inline blocker comment I/O module,
@@ -62,10 +91,11 @@ const REVIEWED_BASE_SHA = "reviewed-base";
 
 function prSnapshotResponse(
   body: string,
-  overrides: { readonly headSha?: string; readonly baseSha?: string } = {},
+  overrides: { readonly headSha?: string; readonly baseSha?: string; readonly title?: string } = {},
 ): Response {
   return jsonResponse({
     body,
+    title: overrides.title ?? "Test pull request",
     head: { sha: overrides.headSha ?? TRUSTED_HEAD_SHA },
     base: { sha: overrides.baseSha ?? REVIEWED_BASE_SHA },
   });
@@ -1042,6 +1072,178 @@ describe("clearStaleInlineBlockerComments (PR #86 review, Codex, P2)", () => {
     });
     expect(preDeleteChecks).toBe(1);
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
+  });
+});
+
+describe("full-surface linked-reference derivation", () => {
+  it("U1 derives commit- and title-sourced references through the required auxiliary argument", () => {
+    const sets = deriveLinkedReferenceIssueNumberSets("", "o/r", [
+      "Closes #12",
+      "Refs #34",
+      "Title closes #56",
+    ]);
+    expect([...sets.closing]).toEqual([12, 56]);
+    expect([...sets.referenced]).toEqual([12, 34, 56]);
+  });
+
+  it("U2 verifies pinned commits symmetrically, detects title drift, and orders head drift first", async () => {
+    const pinned = ["Closes #12"];
+    const snapshot = deriveLinkedReferenceIssueNumberSets("", "o/r", [
+      ...pinned,
+      "Reference-free title",
+    ]);
+
+    let { fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () =>
+        prSnapshotResponse("", { title: "Reference-free title" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      verifyPullRequestSnapshotUnchanged(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        pinned,
+        snapshot.closing,
+        snapshot.referenced,
+      ),
+    ).resolves.toEqual({ ok: true });
+
+    ({ fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () =>
+        prSnapshotResponse("", { title: "Closes #99" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      verifyPullRequestSnapshotUnchanged(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        pinned,
+        snapshot.closing,
+        snapshot.referenced,
+      ),
+    ).resolves.toEqual({ ok: false, reason: "linked-references-changed" });
+
+    ({ fetchMock } = mockFetch({
+      "GET /repos/o/r/pulls/5": () =>
+        prSnapshotResponse("", { headSha: "moved", title: "Closes #99" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      verifyPullRequestSnapshotUnchanged(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        pinned,
+        snapshot.closing,
+        snapshot.referenced,
+      ),
+    ).resolves.toEqual({ ok: false, reason: "head-sha-changed" });
+  });
+
+  it("U3 preserves a commit-only blocker and deletes an issue absent from every surface", async () => {
+    const marker12 = criterionBlockerCommentMarker("12:0");
+    let harness = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 12,
+            body: `${marker12}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "GET /repos/o/r/pulls/5": () => prSnapshotResponse(""),
+    });
+    vi.stubGlobal("fetch", harness.fetchMock);
+    await expect(
+      reconcileObsoleteInlineBlockerCommentsWithPinnedCommits(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        ["Closes #12"],
+        new Set([12]),
+        new Set([12]),
+        true,
+        1,
+      ),
+    ).resolves.toEqual({ ok: true, deletedCount: 0 });
+    expect(harness.calls.some((call) => call.method === "DELETE")).toBe(false);
+
+    const marker34 = criterionBlockerCommentMarker("34:0");
+    harness = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 34,
+            body: `${marker34}\n${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "GET /repos/o/r/pulls/5": () => prSnapshotResponse(""),
+      "DELETE /repos/o/r/pulls/comments/34": () => new Response(null, { status: 204 }),
+    });
+    vi.stubGlobal("fetch", harness.fetchMock);
+    await expect(
+      reconcileObsoleteInlineBlockerCommentsWithPinnedCommits(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        [],
+        new Set(),
+        new Set(),
+        true,
+        1,
+      ),
+    ).resolves.toEqual({ ok: true, deletedCount: 1 });
+  });
+
+  it("U4 preserves the aggregate blocker when the only closing reference is commit-sourced", async () => {
+    const harness = mockFetch({
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
+        jsonResponse([
+          {
+            id: 44,
+            body:
+              `${DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER}\n` +
+              `${inlineBlockerGenerationMarker("1")}`,
+            user: { type: "Bot", login: "github-actions[bot]" },
+          },
+        ]),
+      "GET /repos/o/r/pulls/5": () => prSnapshotResponse(""),
+    });
+    vi.stubGlobal("fetch", harness.fetchMock);
+    await expect(
+      reconcileObsoleteInlineBlockerCommentsWithPinnedCommits(
+        "token",
+        "o",
+        "r",
+        5,
+        TRUSTED_HEAD_SHA,
+        REVIEWED_BASE_SHA,
+        ["Closes #12"],
+        new Set([12]),
+        new Set([12]),
+        false,
+        1,
+      ),
+    ).resolves.toEqual({ ok: true, deletedCount: 0 });
+    expect(harness.calls.some((call) => call.method === "DELETE")).toBe(false);
   });
 });
 
