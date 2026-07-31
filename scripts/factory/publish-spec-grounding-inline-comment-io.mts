@@ -54,7 +54,6 @@ import { GithubApiError, githubRequest } from "./github-api.mts";
 import {
   bodyContainsAnyBlockerMarker,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
-  extractV2CriterionBlockerMarker,
   extractInlineBlockerGeneration,
   extractIssueNumberFromInlineBlockerMarker,
   type BlockerCommentPlan,
@@ -808,15 +807,13 @@ export async function verifyPullRequestSnapshotUnchanged(
  * Individual blockers are eligible when their decoded issue is absent from
  * the current closing-reference set. The diff-truncation aggregate is eligible
  * only when its exact standalone marker is present, its current applicability
- * predicate is false, and no closing references remain. The zero-closing
- * V2 individual criterion comments whose exact marker is absent from the
- * caller-supplied spine-derived active set are retired after fresh
- * per-delete snapshot verification. Legacy positional comments and
- * issue-level comments remain governed only by de-reference: a legacy
- * index cannot be mapped safely to current criterion text after edits.
- * The fail-closed transition residual is an extra legacy thread alongside
- * v2 until de-reference or human resolution; it is limited to PRs commented
- * before the v2 rollout and never removes a possibly-live gate.
+ * predicate is false, and no closing references remain. Individual criterion
+ * blockers on a still-closing issue retire only on issue de-reference. A v2
+ * blocker whose criterion text changed between runs therefore persists as a
+ * fail-closed gate until a human resolves it. Safe content-aware retirement
+ * requires linked-issue `updated_at` provenance (sub-problem A) to avoid
+ * deleting a live gate during an A→B→A issue-revert race, and is deferred to
+ * #47 / the provenance PR.
  * Before any kind is deleted, this
  * function paginates existing comments and freshly re-verifies the head SHA,
  * base SHA, closing references, and any-kind references from one PR response.
@@ -832,8 +829,6 @@ export async function verifyPullRequestSnapshotUnchanged(
  * @param trustedHeadSha - The workflow event's reviewed head SHA.
  * @param reviewedBaseSha - The runner-observed base SHA from the spine.
  * @param currentlyClosingIssueNumbers - Closing-reference snapshot.
- * @param activeIndividualCriterionMarkers - Exact individual criterion
- *   markers derived once by the caller from every current spine entry.
  * @param currentlyReferencedIssueNumbers - Any-kind reference snapshot.
  * @param diffTruncationBlocksClosingClaim - Current aggregate applicability;
  *   false permits deletion only when the closing-reference set is also empty.
@@ -849,7 +844,6 @@ export async function reconcileObsoleteInlineBlockerComments(
   reviewedBaseSha: string,
   pinnedCommitMessages: readonly string[],
   currentlyClosingIssueNumbers: ReadonlySet<number>,
-  activeIndividualCriterionMarkers: ReadonlySet<string>,
   currentlyReferencedIssueNumbers: ReadonlySet<number>,
   diffTruncationBlocksClosingClaim: boolean,
   currentGeneration: number,
@@ -874,8 +868,7 @@ export async function reconcileObsoleteInlineBlockerComments(
     return { ...snapshotVerification, deletedCount: 0 };
   }
 
-  const obsoleteDereferencedIndividuals: ExistingComment[] = [];
-  const obsoleteCriterionRetirements: ExistingComment[] = [];
+  const obsoleteIndividuals: ExistingComment[] = [];
   const obsoleteAggregates: ExistingComment[] = [];
   for (const c of existing) {
     if (c.authorType !== "Bot" || c.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) {
@@ -888,12 +881,7 @@ export async function reconcileObsoleteInlineBlockerComments(
     const issueNumber = extractIssueNumberFromInlineBlockerMarker(c.body);
     if (issueNumber !== null) {
       if (!currentlyClosingIssueNumbers.has(issueNumber)) {
-        obsoleteDereferencedIndividuals.push(c);
-      } else {
-        const criterionMarker = extractV2CriterionBlockerMarker(c.body);
-        if (criterionMarker !== null && !activeIndividualCriterionMarkers.has(criterionMarker)) {
-          obsoleteCriterionRetirements.push(c);
-        }
+        obsoleteIndividuals.push(c);
       }
       continue;
     }
@@ -940,28 +928,7 @@ export async function reconcileObsoleteInlineBlockerComments(
     await deleteComment(comment);
   }
 
-  for (const comment of obsoleteCriterionRetirements) {
-    const retirementVerification = await verifyPullRequestSnapshotUnchanged(
-      token,
-      owner,
-      repo,
-      prNumber,
-      trustedHeadSha,
-      reviewedBaseSha,
-      pinnedCommitMessages,
-      currentlyClosingIssueNumbers,
-      currentlyReferencedIssueNumbers,
-    );
-    if (!retirementVerification.ok) {
-      return { ...retirementVerification, deletedCount };
-    }
-    await deleteComment(comment);
-  }
-
-  if (
-    (obsoleteAggregates.length > 0 || obsoleteCriterionRetirements.length > 0) &&
-    obsoleteDereferencedIndividuals.length > 0
-  ) {
+  if (obsoleteAggregates.length > 0 && obsoleteIndividuals.length > 0) {
     const individualVerification = await verifyPullRequestSnapshotUnchanged(
       token,
       owner,
@@ -977,7 +944,7 @@ export async function reconcileObsoleteInlineBlockerComments(
       return { ...individualVerification, deletedCount };
     }
   }
-  for (const comment of obsoleteDereferencedIndividuals) {
+  for (const comment of obsoleteIndividuals) {
     await deleteComment(comment);
   }
   return { ok: true, deletedCount };

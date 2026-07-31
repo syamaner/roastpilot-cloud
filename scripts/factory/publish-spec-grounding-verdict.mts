@@ -1810,13 +1810,13 @@ async function publishSummary(
   // whole-run diff-truncation aggregate when its CURRENT applicability
   // predicate is false AND no closing references remain. That conservative
   // boundary preserves #77's cross-object-staleness mitigation. Individual
-  // V2 criterion comments are retained exactly when their marker is present
-  // in the full spine-derived active set, including satisfied and aggregate-
-  // covered criteria; stale v2 digests retire only after this run's posting
-  // attempt. Legacy positional comments are never active-set-retired because
-  // their index cannot be mapped safely after edits; they retire only on
-  // de-reference, leaving a fail-closed transition duplicate until human
-  // resolution. Runs unconditionally on every hasCriteria:true publish.
+  // criterion blockers on a still-closing issue retire only on issue
+  // de-reference. A v2 blocker whose criterion text changed between runs
+  // persists as a fail-closed gate until a human resolves it. Safe retirement
+  // requires linked-issue `updated_at` provenance (sub-problem A) to avoid
+  // deleting a live gate during an A→B→A issue-revert race, and is deferred
+  // to #47 / the provenance PR. Runs unconditionally on every hasCriteria:true
+  // publish.
   //
   // FAIL CLOSED on a snapshot mismatch, not merely a non-destructive skip
   // (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 --
@@ -1847,11 +1847,6 @@ async function publishSummary(
       spine.reviewedBaseSha,
       commitMessages,
       currentClosingIssueNumbers,
-      new Set(
-        spine.entries.map((entry) =>
-          criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest),
-        ),
-      ),
       currentReferencedIssueNumbers,
       currentDiffTruncationBlocksClosingClaim,
       currentGeneration,

@@ -381,8 +381,9 @@ export interface BlockerCommentPlan {
  *
  * Digest-bearing entries use a cross-run-stable v2 marker. Legacy
  * positional comments are never adopted because their current index may
- * identify different criterion text after an issue edit; reconciliation
- * retires them after the current run's v2 comments have posted.
+ * identify different criterion text after an issue edit. They persist
+ * fail-closed while their issue remains closing-referenced and retire only
+ * on issue de-reference (or human resolution).
  *
  * @param criterionId - The spine-trusted `criterionId` this inline
  *   comment is about.
@@ -520,23 +521,6 @@ const CRITERION_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion:(\d+):(\d+):do-not-edit -->$/;
 const CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):[0-9a-f]{64}:do-not-edit -->$/;
-
-/**
- * Returns an exact standalone v2 individual-criterion marker line.
- * Legacy positional identity cannot be mapped safely to a current
- * criterion after edits, so treating it as an active-set retirement
- * candidate could delete a still-live merge gate. Legacy comments retire
- * only when their issue is de-referenced (or a human resolves them).
- */
-export function extractV2CriterionBlockerMarker(body: string): string | null {
-  for (const rawLine of body.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.test(trimmed)) {
-      return trimmed;
-    }
-  }
-  return null;
-}
 
 /** Matches {@link unreviewedClosingIssueCommentMarker}'s own COMPLETE line shape, capturing the issue number (group 1). */
 const ISSUE_BLOCKER_MARKER_LINE_PATTERN =

@@ -11,7 +11,6 @@ import {
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
-  extractV2CriterionBlockerMarker,
   extractIssueNumberFromInlineBlockerMarker,
   inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
@@ -450,23 +449,6 @@ describe("digest-backed criterion blocker identity (#77 sub-problem B)", () => {
     ).toBeNull();
   });
 
-  it("FN1 recognises individual markers only as standalone lines", () => {
-    const marker = criterionBlockerCommentMarker("12:0", digestA);
-    expect(extractV2CriterionBlockerMarker(marker)).toBe(marker);
-    expect(extractV2CriterionBlockerMarker(`prefix ${marker} suffix`)).toBeNull();
-  });
-
-  it("FT6/FN2 excludes aggregate, issue-level, and generation-only markers", () => {
-    for (const marker of [
-      CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
-      UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
-      DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
-      unreviewedClosingIssueCommentMarker(12),
-      inlineBlockerGenerationMarker("1"),
-    ]) {
-      expect(extractV2CriterionBlockerMarker(marker)).toBeNull();
-    }
-  });
 });
 
 describe("buildCriterionBlockerCommentBody (F1-S9 slice 3b-iii-c, issue #12)", () => {

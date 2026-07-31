@@ -33,7 +33,6 @@ function reconcileObsoleteInlineBlockerComments(
   currentlyReferencedIssueNumbers: ReadonlySet<number>,
   diffTruncationBlocksClosingClaim: boolean,
   currentGeneration: number,
-  activeIndividualCriterionMarkers: ReadonlySet<string> = new Set(),
 ) {
   return reconcileObsoleteInlineBlockerCommentsWithPinnedCommits(
     token,
@@ -44,7 +43,6 @@ function reconcileObsoleteInlineBlockerComments(
     reviewedBaseSha,
     [],
     currentlyClosingIssueNumbers,
-    activeIndividualCriterionMarkers,
     currentlyReferencedIssueNumbers,
     diffTruncationBlocksClosingClaim,
     currentGeneration,
@@ -1245,7 +1243,6 @@ describe("full-surface linked-reference derivation", () => {
         REVIEWED_BASE_SHA,
         ["Closes #12"],
         new Set([12]),
-        new Set([marker12]),
         new Set([12]),
         true,
         1,
@@ -1276,7 +1273,6 @@ describe("full-surface linked-reference derivation", () => {
         TRUSTED_HEAD_SHA,
         REVIEWED_BASE_SHA,
         [],
-        new Set(),
         new Set(),
         new Set(),
         true,
@@ -1310,7 +1306,6 @@ describe("full-surface linked-reference derivation", () => {
         REVIEWED_BASE_SHA,
         ["Closes #12"],
         new Set([12]),
-        new Set(),
         new Set([12]),
         false,
         1,
@@ -1321,205 +1316,6 @@ describe("full-surface linked-reference derivation", () => {
 });
 
 describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)", () => {
-  it("FT1 retires an old digest marker on a still-closing issue", async () => {
-    const oldMarker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
-    const currentMarker = criterionBlockerCommentMarker("12:0", "b".repeat(64));
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 1,
-            body: `${oldMarker}\n${inlineBlockerGenerationMarker("1")}`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-        ]),
-      "DELETE /repos/o/r/pulls/comments/1": () => new Response(null, { status: 204 }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token",
-        "o",
-        "r",
-        5,
-        TRUSTED_HEAD_SHA,
-        REVIEWED_BASE_SHA,
-        new Set([12]),
-        new Set([12]),
-        true,
-        1,
-        new Set([currentMarker]),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 1 });
-    expect(calls.filter((call) => call.method === "GET" && call.url.endsWith("/pulls/5"))).toHaveLength(2);
-  });
-
-  it.each([
-    ["individually-posted blocker", 1],
-    ["aggregate-covered sixth blocker", 6],
-    ["satisfied criterion", 0],
-  ])("FT2 never retires a still-active %s", async (_variant, index) => {
-    const marker = criterionBlockerCommentMarker(`12:${index}`, "c".repeat(64));
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([
-          {
-            id: 1,
-            body: `${marker}\n${inlineBlockerGenerationMarker("1")}`,
-            user: { type: "Bot", login: "github-actions[bot]" },
-          },
-        ]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set([marker]),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FT3 preserves unchanged digest markers across reorder-only edits", async () => {
-    const markers = new Set([
-      criterionBlockerCommentMarker("12:1", "a".repeat(64)),
-      criterionBlockerCommentMarker("12:0", "b".repeat(64)),
-    ]);
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([...markers].map((marker, index) => ({
-          id: index + 1,
-          body: `${marker}\n${inlineBlockerGenerationMarker("1")}`,
-          user: { type: "Bot", login: "github-actions[bot]" },
-        }))),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, markers,
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FT8 skips a future-generation orphan marker", async () => {
-    const marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: `${marker}\n${inlineBlockerGenerationMarker("2")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set(),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FN3 leaves a non-bot orphan marker untouched", async () => {
-    const marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: `${marker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "User", login: "human" } }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set(),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FT7 keeps an issue-level marker while its issue remains closing-referenced", async () => {
-    const marker = unreviewedClosingIssueCommentMarker(12);
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: `${marker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set(),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FT9 fails closed when the snapshot drifts immediately before an orphan retirement", async () => {
-    const marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
-    let snapshotFetches = 0;
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => {
-        snapshotFetches += 1;
-        return snapshotFetches === 1
-          ? prSnapshotResponse("Closes #12")
-          : prSnapshotResponse("Closes #99");
-      },
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: `${marker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set(),
-      ),
-    ).resolves.toEqual({ ok: false, reason: "linked-references-changed", deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("FT10 protects a legacy positional comment when a legacy spine marker is active", async () => {
-    const marker = criterionBlockerCommentMarker("12:0");
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{ id: 1, body: `${marker}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set([marker]),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("keeps a legacy-form comment for a still-live criterion when the current spine active set is v2-only", async () => {
-    const legacyPositionalCommentMarker = criterionBlockerCommentMarker("12:0");
-    const currentV2Marker = criterionBlockerCommentMarker("12:0", "a".repeat(64));
-    const { fetchMock, calls } = mockFetch({
-      "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
-      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
-        jsonResponse([{
-          id: 1,
-          body: `${legacyPositionalCommentMarker}\n${inlineBlockerGenerationMarker("1")}`,
-          user: { type: "Bot", login: "github-actions[bot]" },
-        }]),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(
-      reconcileObsoleteInlineBlockerComments(
-        "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-        new Set([12]), new Set([12]), true, 1, new Set([currentV2Marker]),
-      ),
-    ).resolves.toEqual({ ok: true, deletedCount: 0 });
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
   it("deletes a criterion blocker's own comment for an issue that is NO LONGER closing-referenced at all (de-referenced)", async () => {
     const marker = criterionBlockerCommentMarker("12:0");
     const { fetchMock, calls } = mockFetch({
@@ -1564,8 +1360,8 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
   });
 
-  it("FT7 applies de-reference rule 1 first even when a criterion marker is active", async () => {
-    const marker = criterionBlockerCommentMarker("34:0", "d".repeat(64));
+  it("deletes a DOWNGRADED issue's own comment (still referenced in the body, but no longer with a closing keyword) -- covered by the SAME 'not in currentlyClosingIssueNumbers' test as an outright de-reference", async () => {
+    const marker = criterionBlockerCommentMarker("34:0");
     const { fetchMock, calls } = mockFetch({
       "GET /repos/o/r/pulls/5": () => prSnapshotResponse("Closes #12"),
       "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () =>
@@ -1583,10 +1379,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
     // #34 is not in the current closing set (it's still referenced, just
     // as a non-closing keyword) -- this function has no visibility into
     // WHY an issue is absent from the set, only that it is.
-    const result = await reconcileObsoleteInlineBlockerComments(
-      "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-      new Set([12]), new Set([12]), true, 1, new Set([marker]),
-    );
+    const result = await reconcileObsoleteInlineBlockerComments("token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA, new Set([12]), new Set([12]), true, 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 1 });
     expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/comments/1"))).toBe(true);
@@ -1607,10 +1400,7 @@ describe("reconcileObsoleteInlineBlockerComments (F1-S9 slices 90.4 and 90.6a-3)
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await reconcileObsoleteInlineBlockerComments(
-      "token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA,
-      new Set([12]), new Set([12]), true, 1, new Set([marker]),
-    );
+    const result = await reconcileObsoleteInlineBlockerComments("token", "o", "r", 5, TRUSTED_HEAD_SHA, REVIEWED_BASE_SHA, new Set([12]), new Set([12]), true, 1);
 
     expect(result).toEqual({ ok: true, deletedCount: 0 });
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
