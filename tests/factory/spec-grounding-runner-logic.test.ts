@@ -863,7 +863,25 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
       JSON.stringify(validArtifact({ linkedIssueProvenance: [{ issueNumber: 12, updatedAt }] })),
     );
     expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "linkedIssueProvenance[0].updatedAt must match YYYY-MM-DDTHH:MM:SSZ exactly",
+      );
+    }
   });
+
+  it.each(["not-an-array", 12, { issueNumber: 12 }])(
+    "rejects a present non-array linkedIssueProvenance %j",
+    (linkedIssueProvenance) => {
+      const result = parseCriteriaSpineArtifact(
+        JSON.stringify(validArtifact({ linkedIssueProvenance })),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContain('"linkedIssueProvenance" must be an array when present');
+      }
+    },
+  );
 
   it("rejects duplicate linkedIssueProvenance issue numbers", () => {
     const result = parseCriteriaSpineArtifact(
@@ -935,6 +953,23 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors).toContain('"linkedIssueProvenance" has 1001 elements, exceeds 1000');
+  });
+
+  it("rejects present provenance that does not cover every issue represented in entries", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          linkedIssueProvenance: [{ issueNumber: 34, updatedAt: "2026-07-30T10:20:30Z" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "entries contains issue #12, but linkedIssueProvenance has no matching record -- " +
+          "present provenance must cover every issue whose acceptance criteria were evaluated",
+      );
+    }
   });
 
   it("accepts and round-trips a digest-bearing spine", () => {

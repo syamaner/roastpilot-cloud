@@ -1000,6 +1000,9 @@ function validateUnreviewedClosingIssue(
  *   unreviewed closing issues.
  * @param reviewedClosingIssueNumbers - The already-validated, already-
  *   deduped reviewed-closing-issue-number set (F1-S9 slice 90.2).
+ * @param linkedIssueProvenance - The optional, already-validated,
+ *   issue-number-deduped last-activity records. When present, every issue
+ *   represented in `entries` must be covered.
  * @param truncated - This artifact's own `truncated` field.
  * @param errors - Accumulator every violation is pushed onto.
  */
@@ -1007,6 +1010,7 @@ function validateCrossEntryInvariants(
   entries: readonly CriteriaSpineEntry[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   reviewedClosingIssueNumbers: readonly number[],
+  linkedIssueProvenance: readonly LinkedIssueProvenance[] | undefined,
   truncated: boolean,
   errors: string[],
 ): void {
@@ -1049,6 +1053,17 @@ function validateCrossEntryInvariants(
   }
 
   const issueNumbersWithEntries = new Set(indicesByIssue.keys());
+  if (linkedIssueProvenance !== undefined) {
+    const provenanceIssueNumbers = new Set(linkedIssueProvenance.map((entry) => entry.issueNumber));
+    for (const issueNumber of issueNumbersWithEntries) {
+      if (!provenanceIssueNumbers.has(issueNumber)) {
+        errors.push(
+          `entries contains issue #${issueNumber}, but linkedIssueProvenance has no matching record -- ` +
+            "present provenance must cover every issue whose acceptance criteria were evaluated",
+        );
+      }
+    }
+  }
   for (const unreviewed of unreviewedClosingIssues) {
     if (unreviewed.truncationKind === "fully-dropped" && issueNumbersWithEntries.has(unreviewed.issueNumber)) {
       errors.push(
@@ -1442,6 +1457,7 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     validatedEntries,
     validatedUnreviewed,
     validatedReviewedClosingIssueNumbers,
+    linkedIssueProvenance === undefined ? undefined : validatedLinkedIssueProvenance,
     truncated as boolean,
     errors,
   );

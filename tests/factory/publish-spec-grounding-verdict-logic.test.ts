@@ -1027,9 +1027,11 @@ describe("assembleSpecGroundingSummaryCommentBody (F1-S9 slice 90.6b-1, issue #9
       ];
       const body = assembleSpecGroundingSummaryCommentBody(() => baseBody, [], provenance);
       expect(body).toContain(
-        "Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last edit:",
+        "Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last activity:",
       );
-      expect(body).toContain("An issue edited after its timestamp above has not been re-evaluated by this run.");
+      expect(body).toContain(
+        "An issue with activity after its timestamp above has not been re-evaluated by this run.",
+      );
 
       const machineLines = body
         .split("\n")
@@ -1051,6 +1053,27 @@ describe("assembleSpecGroundingSummaryCommentBody (F1-S9 slice 90.6b-1, issue #9
   it("renders loud provenance-unavailable text for a legacy spine", () => {
     const body = assembleSpecGroundingSummaryCommentBody(() => "No blocking findings.", []);
     expect(body).toContain("criteria provenance unavailable (review predates provenance recording)");
+  });
+
+  it("character-budgets provenance as complete human/marker pairs and discloses the exact omitted count", () => {
+    const provenance = Array.from({ length: 1000 }, (_, index) => ({
+      issueNumber: index + 1,
+      updatedAt: "2026-07-30T10:20:30Z",
+    }));
+    const body = assembleSpecGroundingSummaryCommentBody(() => "No blocking findings.", [], provenance);
+    const machineLines = body
+      .split("\n")
+      .filter((line) => line.startsWith("<!-- roastpilot-factory:spec-grounding-criteria-as-of:"));
+    const omittedMatch = /_(\d+) further linked issue provenance record\(s\) omitted/.exec(body);
+    expect(omittedMatch).not.toBeNull();
+    expect(Number(omittedMatch?.[1])).toBe(provenance.length - machineLines.length);
+    expect(machineLines.length).toBeGreaterThan(0);
+    expect(machineLines.length).toBeLessThan(provenance.length);
+    for (const line of machineLines) {
+      const issueNumber = /criteria-as-of:(\d+):/.exec(line)?.[1];
+      expect(body).toContain(`- Issue #${issueNumber}: 2026-07-30T10:20:30Z\n${line}`);
+    }
+    expect(body.length).toBeLessThanOrEqual(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
   });
 
   it("accepts a complete body exactly at GitHub's comment limit, including the separator and a preserved suffix", () => {
