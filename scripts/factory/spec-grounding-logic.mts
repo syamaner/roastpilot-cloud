@@ -933,6 +933,13 @@ const ANY_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s+\S/;
 // list-item token) — so it's enumerated completely once here, not
 // patched incrementally.
 const CHECKBOX_LINE_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s*\[( |x|X)\]\s*(.+)$/;
+
+/** Extracts the trimmed text from any non-empty GFM checkbox-shaped line. */
+export function extractCheckboxLineText(line: string): string | null {
+  const match = CHECKBOX_LINE_PATTERN.exec(line);
+  const text = match?.[2]?.trim();
+  return text === undefined || text.length === 0 ? null : text;
+}
 // PREFIX-only variant, deliberately WITHOUT the trailing `\s*(.+)$`
 // (Codex finding, PR #70 review round 6): used for the STRUCTURAL-view
 // ELIGIBILITY check in {@link parseAcceptanceCriteria} below, which must
@@ -1043,8 +1050,10 @@ export function parseAcceptanceCriteria(issueBody: string): AcceptanceCriterion[
     // truly nothing after it (not even code) has no text to extract, and
     // correctly falls through to "no criterion found" below rather than
     // producing an empty one.
-    const checkboxMatch = CHECKBOX_LINE_PATTERN.exec(originalLines[i] ?? "");
-    if (checkboxMatch === null) {
+    const originalLine = originalLines[i] ?? "";
+    const checkboxMatch = CHECKBOX_LINE_PATTERN.exec(originalLine);
+    const trimmedText = extractCheckboxLineText(originalLine);
+    if (checkboxMatch === null || trimmedText === null) {
       // Genuinely reachable now, not just defensive (the prefix/full
       // pattern split means these two checks are no longer required to
       // agree): a checkbox line with NOTHING after it at all — e.g. a
@@ -1055,27 +1064,12 @@ export function parseAcceptanceCriteria(issueBody: string): AcceptanceCriterion[
       continue;
     }
     const marker = checkboxMatch[1];
-    const text = checkboxMatch[2];
-    if (marker === undefined || text === undefined) {
+    if (marker === undefined) {
       // Defensive: both capture groups are non-optional in
       // CHECKBOX_LINE_PATTERN, so a successful match always populates
       // both — unreachable by construction, same reasoning as
       // parseLinkedIssueReferences's own defensive checks above.
       /* v8 ignore next */
-      continue;
-    }
-    const trimmedText = text.trim();
-    if (trimmedText.length === 0) {
-      // Real output bug, folded (Codex finding, PR #70 review round 7):
-      // "- [ ] " (whitespace only after the checkbox) matches
-      // CHECKBOX_LINE_PATTERN's `(.+)$` (a single space still satisfies
-      // "one or more of any character"), producing a criterion with
-      // EMPTY trimmed text — a blank, meaningless entry in the review
-      // prompt. The prefix/full-pattern split (this module's own
-      // hardening for the all-inline-code case above) correctly lets
-      // this line reach extraction, but a criterion with nothing real to
-      // say once trimmed is never a genuine, actionable one; skip it
-      // rather than push a blank.
       continue;
     }
     criteria.push({ text: trimmedText, checked: marker.toLowerCase() === "x" });
@@ -1114,7 +1108,7 @@ export interface FetchedIssue {
  * drop).
  */
 const MAX_LINKED_ISSUES = 20;
-const MAX_CRITERIA_PER_ISSUE = 50;
+export const MAX_CRITERIA_PER_ISSUE = 50;
 
 /** One linked issue's UNMET acceptance criteria, ready to render into the review prompt's DATA block. */
 export interface LinkedIssueSpec {

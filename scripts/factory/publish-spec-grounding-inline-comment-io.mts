@@ -54,8 +54,12 @@ import { GithubApiError, githubRequest } from "./github-api.mts";
 import {
   bodyContainsAnyBlockerMarker,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
+  buildStaleCriterionNote,
+  computePresentCriterionDigests,
+  extractCriterionDigestFromInlineBlockerMarker,
   extractInlineBlockerGeneration,
   extractIssueNumberFromInlineBlockerMarker,
+  stripStaleCriterionNote,
   type BlockerCommentPlan,
   type InlinePostingDegradeReason,
 } from "./publish-spec-grounding-blocker-logic.mts";
@@ -75,6 +79,8 @@ interface GitHubReviewComment {
 const COMMENT_PAGE_SIZE = 100;
 const REVIEW_THREAD_PAGE_SIZE = 100;
 const MAX_REVIEW_THREAD_PAGES = 50;
+export const MAX_ANNOTATION_ISSUE_FETCHES = 20;
+const ISSUE_UPDATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 const REVIEW_THREAD_RESOLUTION_QUERY = `
   query ReviewThreadResolution(
@@ -322,6 +328,110 @@ export async function findExistingInlineComments(
     }
   }
   return all;
+}
+
+export async function fetchIssueBodyForAnnotation(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<{ readonly ok: true; readonly body: string; readonly updatedAt: string } | { readonly ok: false }> {
+  try {
+    const response = await githubRequest<unknown>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}`,
+      undefined,
+      { maxRateLimitRetries: 0 },
+    );
+    if (typeof response !== "object" || response === null || Array.isArray(response)) return { ok: false };
+    const issue = response as Record<string, unknown>;
+    const body = issue.body === null ? "" : issue.body;
+    if (typeof body !== "string" || typeof issue.updated_at !== "string") return { ok: false };
+    if (!ISSUE_UPDATED_AT_PATTERN.test(issue.updated_at)) return { ok: false };
+    return { ok: true, body, updatedAt: issue.updated_at };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Adds or withdraws terminal advisory notes on confirmed-unresolved v2 blockers. */
+export async function annotateStaleCriterionBlockerComments(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  currentlyClosingIssueNumbers: ReadonlySet<number>,
+  currentGeneration: number,
+): Promise<{
+  readonly annotatedCount: number;
+  readonly withdrawnCount: number;
+  readonly skippedIssueNumbers: readonly number[];
+}> {
+  const existing = await findExistingInlineComments(token, owner, repo, prNumber);
+  const candidates = existing.flatMap((comment) => {
+    if (comment.authorType !== "Bot" || comment.authorLogin !== SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN) return [];
+    const generation = extractInlineBlockerGeneration(comment.body);
+    const identity = extractCriterionDigestFromInlineBlockerMarker(comment.body);
+    if (generation === null || generation > currentGeneration || identity === null) return [];
+    if (!currentlyClosingIssueNumbers.has(identity.issueNumber)) return [];
+    return [{ comment, ...identity }];
+  });
+  if (candidates.length === 0) {
+    return { annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [] };
+  }
+
+  let unresolvedIds: ReadonlySet<number>;
+  try {
+    unresolvedIds = await findConfirmedUnresolvedReviewCommentIds(
+      token,
+      owner,
+      repo,
+      prNumber,
+      new Set(candidates.map(({ comment }) => comment.id)),
+    );
+  } catch {
+    return {
+      annotatedCount: 0,
+      withdrawnCount: 0,
+      skippedIssueNumbers: [...new Set(candidates.map(({ issueNumber }) => issueNumber))],
+    };
+  }
+
+  const unresolved = candidates.filter(({ comment }) => unresolvedIds.has(comment.id));
+  const issueNumbers = [...new Set(unresolved.map(({ issueNumber }) => issueNumber))];
+  const processedIssueNumbers = issueNumbers.slice(0, MAX_ANNOTATION_ISSUE_FETCHES);
+  const skipped = new Set(issueNumbers.slice(MAX_ANNOTATION_ISSUE_FETCHES));
+  let annotatedCount = 0;
+  let withdrawnCount = 0;
+  for (const issueNumber of processedIssueNumbers) {
+    const issue = await fetchIssueBodyForAnnotation(token, owner, repo, issueNumber);
+    if (!issue.ok) {
+      skipped.add(issueNumber);
+      continue;
+    }
+    const presence = computePresentCriterionDigests(issue.body);
+    if (!presence.complete) {
+      skipped.add(issueNumber);
+      continue;
+    }
+    for (const { comment, digest } of unresolved.filter((candidate) => candidate.issueNumber === issueNumber)) {
+      const stripped = stripStaleCriterionNote(comment.body);
+      const isPresent = presence.digests.has(digest);
+      const desired = isPresent ? stripped : stripped + buildStaleCriterionNote(issueNumber, issue.updatedAt);
+      if (desired === comment.body) continue;
+      try {
+        await githubRequest(token, "PATCH", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`, {
+          body: desired,
+        });
+        if (isPresent) withdrawnCount++;
+        else annotatedCount++;
+      } catch (error) {
+        if (!(error instanceof GithubApiError) || error.status !== 404) throw error;
+      }
+    }
+  }
+  return { annotatedCount, withdrawnCount, skippedIssueNumbers: [...skipped] };
 }
 
 /**
@@ -810,10 +920,11 @@ export async function verifyPullRequestSnapshotUnchanged(
  * predicate is false, and no closing references remain. Individual criterion
  * blockers on a still-closing issue retire only on issue de-reference. A v2
  * blocker whose criterion text changed between runs therefore persists as a
- * fail-closed gate until a human resolves it. Safe content-aware retirement
- * requires linked-issue `updated_at` provenance (sub-problem A) to avoid
- * deleting a live gate during an A→B→A issue-revert race, and is deferred to
- * #47 / the provenance PR.
+ * fail-closed gate until a human resolves it. After four adversarial review
+ * rounds exposed a fail-open class (including forgeable runner-attested
+ * keep-gates from a malicious head), the operator rejected delete-based
+ * content-aware retirement. The separate annotation pass may add an advisory
+ * note to such a blocker, but never deletes it or resolves its thread.
  * Before any kind is deleted, this
  * function paginates existing comments and freshly re-verifies the head SHA,
  * base SHA, closing references, and any-kind references from one PR response.

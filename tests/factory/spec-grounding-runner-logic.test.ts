@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCriteriaSpine,
+  criterionOccurrenceDigest,
   computeCriteriaSpineTruncation,
   computeReviewedClosingIssueNumbers,
   GITHUB_COMPARE_DIFF_FILE_LIMIT,
@@ -26,6 +27,19 @@ import type {
 // generates a fresh CSPRNG value per run (spec-grounding-runner.mts's
 // main()); this constant is never used outside this test file.
 const TEST_NONCE = "deadbeefcafef00d";
+
+describe("criterionOccurrenceDigest", () => {
+  it("is exactly the digest buildCriteriaSpine emits and distinguishes occurrence indices", () => {
+    const result: LinkedIssueSpecsResult = {
+      specs: [{ issueNumber: 12, kind: "closing", title: "t", unmetCriteria: ["same", "same"], truncatedCriteriaCount: 0 }],
+      truncatedIssueCount: 0,
+    };
+    const spine = buildCriteriaSpine(result, renderCriteriaDataBlock(result, TEST_NONCE), TEST_NONCE);
+    expect(spine.map(({ criterionDigest }) => criterionDigest)).toEqual([
+      criterionOccurrenceDigest(0, "same"), criterionOccurrenceDigest(1, "same"),
+    ]);
+  });
+});
 
 describe("buildCriteriaSpine (F1-S9 slice 3b-i, issue #12)", () => {
   it("returns an empty spine for an empty result", () => {

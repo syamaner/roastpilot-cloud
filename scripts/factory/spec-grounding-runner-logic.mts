@@ -35,6 +35,11 @@
 
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
+
+/** Stable occurrence-sensitive digest used by both blocker minting and presence scans. */
+export function criterionOccurrenceDigest(occurrenceIndex: number, criterionText: string): string {
+  return createHash("sha256").update(`${occurrenceIndex} ${criterionText}`, "utf8").digest("hex");
+}
 import {
   buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
@@ -224,9 +229,7 @@ export function buildCriteriaSpine(
         issueNumber: spec.issueNumber,
         kind: spec.kind,
         criterionId: `${spec.issueNumber}:${index}`,
-        criterionDigest: createHash("sha256")
-          .update(`${occurrenceIndex} ${criterionText}`, "utf8")
-          .digest("hex"),
+        criterionDigest: criterionOccurrenceDigest(occurrenceIndex, criterionText),
       });
     }
   }

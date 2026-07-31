@@ -1530,6 +1530,61 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
 });
 
 describe("main — the happy path", () => {
+  it("runs annotation after successful reconcile and adds the supplement only when a note changes", async () => {
+    const digest = "a".repeat(64);
+    const existing = {
+      id: 88,
+      body: `blocker\n${criterionBlockerCommentMarker("12:0", digest)}\n${inlineBlockerGenerationMarker("1")}`,
+      user: { type: "Bot", login: "github-actions[bot]" },
+    };
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "done" }] },
+      spine: { ...VALID_SPINE, entries: [{ ...VALID_SPINE.entries[0], criterionDigest: digest }] },
+    });
+    Object.assign(process.env, { OUTCOME_PATH: outcomePath, VERDICT_PATH: verdictPath, CRITERIA_SPINE_PATH: spinePath });
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([existing]),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: false }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/12": () => jsonResponse({ body: "- [ ] changed", updated_at: "2026-07-31T10:20:30Z" }),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/88": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).toContain("Stale-criterion advisory notes were updated");
+    expect(calls.findIndex((call) => call.url.endsWith("/pulls/comments/88"))).toBeLessThan(
+      calls.findIndex((call) => call.url.endsWith("/issues/83/comments")),
+    );
+  });
+
+  it("an annotation throw leaves exit code zero and still posts the summary without a supplement", async () => {
+    const digest = "b".repeat(64);
+    const existing = { id: 88, body: `blocker\n${criterionBlockerCommentMarker("12:0", digest)}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } };
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "done" }] },
+      spine: { ...VALID_SPINE, entries: [{ ...VALID_SPINE.entries[0], criterionDigest: digest }] },
+    });
+    Object.assign(process.env, { OUTCOME_PATH: outcomePath, VERDICT_PATH: verdictPath, CRITERIA_SPINE_PATH: spinePath });
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([existing]),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: false }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/12": () => jsonResponse({ body: "", updated_at: "2026-07-31T10:20:30Z" }),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/88": () => jsonResponse({}, 500),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).not.toContain("Stale-criterion advisory notes were updated");
+  });
+
   it("posts a clean summary and exits zero when every criterion is satisfied", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
@@ -3242,7 +3297,8 @@ describe("main — the happy path", () => {
     // and 422-failing, the post), one from this SAME run's own
     // reconciliation, which runs UNCONDITIONALLY now regardless of
     // whether this run's own new blockers posted inline.
-    expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(2);
+    // posting, reconciliation, then the advisory annotation scan.
+    expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(3);
   });
 
   it("posts a 'pipeline broke'-style visible fallback and exits nonzero when the PR's current head SHA no longer matches the trusted event SHA", async () => {
