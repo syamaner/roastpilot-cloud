@@ -346,7 +346,7 @@ export function findExistingInlineCommentId(
       c.authorLogin === SPEC_GROUNDING_COMMENT_AUTHOR_LOGIN &&
       bodyContainsMarkerAsStandaloneLine(c.body, plan.marker),
   );
-  return match ? match.id : null;
+  return match?.id ?? null;
 }
 
 /**
@@ -807,10 +807,14 @@ export async function verifyPullRequestSnapshotUnchanged(
  * Individual blockers are eligible when their decoded issue is absent from
  * the current closing-reference set. The diff-truncation aggregate is eligible
  * only when its exact standalone marker is present, its current applicability
- * predicate is false, and no closing references remain. The zero-closing
- * boundary preserves issue #77's interim guarantee that existing blocker
- * threads survive linked-issue criteria edits, which do not change PR state.
- * Before either kind is deleted, this
+ * predicate is false, and no closing references remain. Individual criterion
+ * blockers on a still-closing issue retire only on issue de-reference. A v2
+ * blocker whose criterion text changed between runs therefore persists as a
+ * fail-closed gate until a human resolves it. Safe content-aware retirement
+ * requires linked-issue `updated_at` provenance (sub-problem A) to avoid
+ * deleting a live gate during an A→B→A issue-revert race, and is deferred to
+ * #47 / the provenance PR.
+ * Before any kind is deleted, this
  * function paginates existing comments and freshly re-verifies the head SHA,
  * base SHA, closing references, and any-kind references from one PR response.
  * Aggregate candidates are processed before individuals and reverified again

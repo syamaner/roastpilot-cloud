@@ -1800,6 +1800,56 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
 
+  it("recomputes a digest-aware v2 covering marker when the plan map misses, in lockstep with the planned marker", async () => {
+    const criterionDigest = "a".repeat(64);
+    const v2Marker = criterionBlockerCommentMarker("12:0", criterionDigest);
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      spine: {
+        ...VALID_SPINE,
+        entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0", criterionDigest }],
+      },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const originalMapGet = Map.prototype.get;
+    let forcedCoveringMapMiss = false;
+    const mapGetSpy = vi.spyOn(Map.prototype, "get").mockImplementation(function <K, V>(
+      this: Map<K, V>,
+      key: K,
+    ): V | undefined {
+      const value = originalMapGet.call(this, key) as V | undefined;
+      if (!forcedCoveringMapMiss && key === "12:0" && value === v2Marker) {
+        forcedCoveringMapMiss = true;
+        return undefined;
+      }
+      return value;
+    });
+    try {
+      await main();
+    } finally {
+      mapGetSpy.mockRestore();
+    }
+
+    expect(forcedCoveringMapMiss).toBe(true);
+    expect(process.exitCode).toBeUndefined();
+    const inlinePost = calls.find((call) => call.method === "POST" && call.url.endsWith("/pulls/83/comments"));
+    expect((inlinePost?.body as { body: string }).body).toContain(v2Marker);
+    const summaryPost = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summaryPost?.body as { body: string }).body).not.toMatch(/listed below in THIS summary/i);
+  });
+
   it("E1 enforces a blocker whose closing reference exists only in a reviewed commit message", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir);
     process.env.OUTCOME_PATH = outcomePath;

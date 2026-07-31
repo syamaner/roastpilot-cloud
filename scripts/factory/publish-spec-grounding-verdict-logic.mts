@@ -58,6 +58,7 @@ export interface JoinedCriterionResult {
   /** TRUSTED — from the spine, never from the agent's own output. */
   readonly kind: IssueLinkKind;
   readonly criterionId: string;
+  readonly criterionDigest?: string;
   /**
    * Defaults to `false` when the agent's verdict never mentions this
    * `criterionId` at all — the over-match-safe direction (an omitted
@@ -109,6 +110,7 @@ export function joinFindingsToSpine(
         issueNumber: entry.issueNumber,
         kind: entry.kind,
         criterionId: entry.criterionId,
+        ...(entry.criterionDigest === undefined ? {} : { criterionDigest: entry.criterionDigest }),
         satisfied: false,
         rationale: null,
         addressedByReviewer: false,
@@ -118,6 +120,7 @@ export function joinFindingsToSpine(
       issueNumber: entry.issueNumber,
       kind: entry.kind,
       criterionId: entry.criterionId,
+      ...(entry.criterionDigest === undefined ? {} : { criterionDigest: entry.criterionDigest }),
       satisfied: finding.satisfied,
       rationale: finding.rationale,
       addressedByReviewer: true,

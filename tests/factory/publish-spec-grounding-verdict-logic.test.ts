@@ -80,6 +80,22 @@ class AlwaysClosingSet extends Set<number> {
 const ALL_CLOSING: ReadonlySet<number> = new AlwaysClosingSet();
 
 describe("joinFindingsToSpine (F1-S9 slice 3b-iii, issue #12)", () => {
+  it("copies criterionDigest through both join branches and omits the key for legacy entries", () => {
+    const criterionDigest = "a".repeat(64);
+    const spine: CriteriaSpineEntry[] = [
+      { issueNumber: 12, kind: "closing", criterionId: "12:0", criterionDigest },
+      { issueNumber: 12, kind: "closing", criterionId: "12:1", criterionDigest: "b".repeat(64) },
+      { issueNumber: 12, kind: "closing", criterionId: "12:2" },
+    ];
+    const result = joinFindingsToSpine(spine, {
+      findings: [{ criterionId: "12:0", satisfied: true, rationale: "Handled." }],
+    });
+
+    expect(result[0]).toMatchObject({ criterionDigest, addressedByReviewer: true });
+    expect(result[1]).toMatchObject({ criterionDigest: "b".repeat(64), addressedByReviewer: false });
+    expect(result[2]).not.toHaveProperty("criterionDigest");
+  });
+
   it("joins a matching finding's satisfied/rationale onto its spine entry, carrying kind from the SPINE", () => {
     const spine: CriteriaSpineEntry[] = [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }];
     const verdict: SpecGroundingVerdict = {

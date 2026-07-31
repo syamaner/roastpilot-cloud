@@ -114,6 +114,13 @@ describe("validateSpecGroundingVerdict — accepts well-formed verdicts", () => 
   });
 });
 
+describe("criterionId closed grammar", () => {
+  it("rejects a digest-shaped criterionId in the verdict-schema sibling validator", () => {
+    const result = validateSpecGroundingVerdict(validVerdict([validFinding({ criterionId: "a".repeat(64) })]));
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe("validateSpecGroundingVerdict — rejects malformed/adversarial verdict-level input", () => {
   it("rejects a non-object root value (string)", () => {
     expect(validateSpecGroundingVerdict("findings: []").ok).toBe(false);

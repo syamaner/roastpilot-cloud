@@ -379,28 +379,11 @@ export interface BlockerCommentPlan {
  * get their own FIXED marker instead, since there is at most one such
  * comment per PR per kind regardless of which entries it currently lists.
  *
- * CAVEAT — `criterionId`'s stability is RUN-RELATIVE, not cross-run
- * absolute (PR #83 review, L364, team-lead's disposition — documented
- * here rather than fixed, see below): `criterionId` has the shape
- * `<issueNumber>:<index>`, where `index` is this criterion's POSITION in
- * the linked issue's own checkbox list at spine-build time. If that
- * issue's criteria are inserted, removed, or reordered BETWEEN two runs
- * of this workflow on the same PR, the `index` component shifts — a
- * cross-run find-and-update by marker (the not-yet-built publish
- * entrypoint, 3b-iii-d) could then match the marker of a DIFFERENT
- * criterion than the one it originally identified, updating the wrong
- * comment in place. Not fixed here because: (a) the actual trigger is an
- * issue edited between two review runs, which is issue #77's own scope
- * (issue-edit invalidation), not this module's; (b) a content-hash
- * marker isn't feasible as a replacement — the criterion's own TEXT is
- * deliberately kept OUT of the trusted spine (`criteria-spine.json` is
- * metadata-only: issue number, kind, index — never the checkbox text
- * itself, a deliberate security property, see `spec-grounding-runner-
- * logic.mts`), so this module has no criterion text available to hash
- * even if it wanted to. This marker is stable across re-runs ONLY while
- * the linked issue's own criteria are unchanged; cross-run identity
- * under a criteria-changing edit is tracked as part of #77, not solved
- * here.
+ * Digest-bearing entries use a cross-run-stable v2 marker. Legacy
+ * positional comments are never adopted because their current index may
+ * identify different criterion text after an issue edit. They persist
+ * fail-closed while their issue remains closing-referenced and retire only
+ * on issue de-reference (or human resolution).
  *
  * @param criterionId - The spine-trusted `criterionId` this inline
  *   comment is about.
@@ -408,7 +391,11 @@ export interface BlockerCommentPlan {
  *   body, matching {@link SPEC_GROUNDING_SUMMARY_COMMENT_MARKER}'s own
  *   placement convention.
  */
-export function criterionBlockerCommentMarker(criterionId: string): string {
+export function criterionBlockerCommentMarker(criterionId: string, criterionDigest?: string): string {
+  if (criterionDigest !== undefined) {
+    const issueNumber = criterionId.slice(0, criterionId.indexOf(":"));
+    return `<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:${issueNumber}:${criterionDigest}:do-not-edit -->`;
+  }
   return `<!-- roastpilot-factory:spec-grounding-blocker:criterion:${criterionId}:do-not-edit -->`;
 }
 
@@ -532,6 +519,8 @@ export function extractInlineBlockerGeneration(body: string): number | null {
  */
 const CRITERION_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion:(\d+):(\d+):do-not-edit -->$/;
+const CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN =
+  /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):[0-9a-f]{64}:do-not-edit -->$/;
 
 /** Matches {@link unreviewedClosingIssueCommentMarker}'s own COMPLETE line shape, capturing the issue number (group 1). */
 const ISSUE_BLOCKER_MARKER_LINE_PATTERN =
@@ -584,6 +573,11 @@ export function extractIssueNumberFromInlineBlockerMarker(body: string): number 
       const parsed = Number(criterionMatch[1]);
       return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
     }
+    const criterionDigestMatch = CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.exec(trimmed);
+    if (criterionDigestMatch !== null) {
+      const parsed = Number(criterionDigestMatch[1]);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    }
     const issueMatch = ISSUE_BLOCKER_MARKER_LINE_PATTERN.exec(trimmed);
     if (issueMatch !== null) {
       const parsed = Number(issueMatch[1]);
@@ -630,6 +624,7 @@ export function bodyContainsAnyBlockerMarker(body: string): boolean {
     const trimmed = line.trim();
     return (
       CRITERION_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
+      CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
       ISSUE_BLOCKER_MARKER_LINE_PATTERN.test(trimmed) ||
       AGGREGATE_BLOCKER_MARKERS.has(trimmed)
     );
@@ -720,7 +715,7 @@ export function buildCriterionBlockerCommentBody(entry: JoinedCriterionResult, g
     "",
     anchorCaveat(),
     "",
-    criterionBlockerCommentMarker(entry.criterionId),
+    criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest),
     inlineBlockerGenerationMarker(generation),
   ].join("\n");
 }
@@ -1052,7 +1047,10 @@ export function planBlockerInlineComments(
   // see this interface field's own docstring for why this guarantees
   // lockstep rather than a caller re-deriving the cap/split independently.
   const criterionCoveringMarkers = new Map<string, string>([
-    ...individualCriteria.map((entry): [string, string] => [entry.criterionId, criterionBlockerCommentMarker(entry.criterionId)]),
+    ...individualCriteria.map((entry): [string, string] => [
+      entry.criterionId,
+      criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest),
+    ]),
     ...overflowCriteria.map((entry): [string, string] => [entry.criterionId, CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER]),
   ]);
   const issueCoveringMarkers = new Map<number, string>([
@@ -1065,7 +1063,7 @@ export function planBlockerInlineComments(
       path: anchor.path,
       line: anchor.line,
       body: buildCriterionBlockerCommentBody(entry, generation),
-      marker: criterionBlockerCommentMarker(entry.criterionId),
+      marker: criterionBlockerCommentMarker(entry.criterionId, entry.criterionDigest),
     })),
     ...(overflowCriteria.length > 0
       ? [

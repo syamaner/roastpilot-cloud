@@ -462,7 +462,14 @@ describe("main — real unmet criteria", () => {
     // `reviewedBaseSha` (F1-S9 slice 90.2) is the EXACT base this run's
     // own diff fetch used, matching the base handed to prResponse.
     expect(spine).toEqual({
-      entries: [{ issueNumber: 12, kind: "closing", criterionId: "12:0" }],
+      entries: [
+        {
+          issueNumber: 12,
+          kind: "closing",
+          criterionId: "12:0",
+          criterionDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
@@ -607,7 +614,14 @@ describe("main — real unmet criteria", () => {
     // exactly the case this field exists to make distinguishable from a
     // reference genuinely never looked at.
     expect(spine).toEqual({
-      entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
+      entries: [
+        {
+          issueNumber: 8,
+          kind: "non-closing",
+          criterionId: "8:0",
+          criterionDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
@@ -646,7 +660,14 @@ describe("main — real unmet criteria", () => {
     // reviewedClosingIssueNumbers carries any trace that #12 was ever
     // looked at as a closing reference.
     expect(spine).toEqual({
-      entries: [{ issueNumber: 8, kind: "non-closing", criterionId: "8:0" }],
+      entries: [
+        {
+          issueNumber: 8,
+          kind: "non-closing",
+          criterionId: "8:0",
+          criterionDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
       truncated: false,
       unreviewedClosingIssues: [],
       diffTruncated: false,
