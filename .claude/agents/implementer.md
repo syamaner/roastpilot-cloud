@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Implement a fully-specced task from a story-planner contract — security-adjacent diffs, protected-path work, or when the Codex quota is in reserve. Works in its own worktree, runs the gates before handing back, and never adjudicates review findings on its own PR (D23).
+description: FALLBACK implementer (credit pivot, D145) — Codex-MCP is the default for specced work including security-adjacent and protected-path diffs; use this agent only when Codex is unavailable or its weekly quota is in reserve. Implements a fully-specced story-planner contract in its own worktree, runs the gates before handing back, and never adjudicates review findings on its own PR (D23).
 tools: Read, Edit, Write, Grep, Glob, Bash, mcp__auggie__codebase-retrieval
 model: opus
 ---

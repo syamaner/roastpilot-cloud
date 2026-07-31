@@ -396,9 +396,12 @@ failed the mutation gate, forcing a push to `4d26670` and stranding the
 verdict on a dead head, needing a manual re-trigger (2 spends). Opening as
 a draft let CI fail first, folded the fix there, and Codex reviewed only
 `4d26670` once ready (1 spend). A local `codex review --base origin/main` (Axis A
-below) still provides the cross-family lens earliest of all, before the
+below) still provides an independent review lens earliest of all, before the
 branch is even pushed; it does not replace the roster's own automatic pass
-on the ready PR.
+on the ready PR. (Under the D145 pivot the local codex review is same-family
+with the default Codex author, so the cross-family diversity is the Claude
+`factory-security-reviewer`; codex review is cross-family only on the Claude
+fallback path.)
 
 Wait for the verdict per the **Codex-wait rule in the Merge Policy** (its
 single source of truth) before treating the PR as reviewed; don't restate
@@ -567,7 +570,7 @@ already fully wired the moment this file changes.
 | CodeQL (`.github/workflows/codeql.yml`) | Required status check — in live branch protection's required list (verified #163); also surfaces code-scanning alerts. Whether CodeQL *should* be required (an earlier draft here read "not required," which would let scanning-infra flakiness rather than a real finding block merge) is an operator-owned branch-protection decision, not this doc's — this row follows live config | Security vulnerabilities (taint flows, injection patterns) in the diff |
 | Dependency review (`.github/workflows/dependency-review.yml`) | Blocking job on `pull_request` (fails on high-severity advisory or a denied license) | Supply-chain risk on any `package.json`/`package-lock.json` change |
 | Claude Code Review (`.github/workflows/claude-code-review.yml`) | **NOT** a required status check. The Claude action step still **skips and reports SUCCESS** on a workflow-edit PR — observed on PR #140, whose log ends `Action skipped due to workflow validation error… Exiting due to workflow validation skip`; it exits before the plugin marketplace is loaded, so a workflow-edit PR can never verify its own review path (#139). Read a green from the action step as **"no review ran"**, never as "reviewed and clean". Since #146 the `claude-review` **job** carries a completion-assertion step (`if: !cancelled()`) that fails the job when the action's SUCCESS is not backed by a finished `github-actions[bot]` tracking comment, so on a workflow-edit PR (and on the #150-style truncation) that **job now goes red**, not a misleading green — a loud signal for the tracking-comment-absent case. That assertion does not make this a required check and does not cover a review that completed its checklist but silently degraded, so the general "green ≠ reviewed" caution still holds for every other skip/degrade mode. It is also only **benign-truncation-sound, not adversarially authenticated** (#146 F1, codex P1): a prompt-injected review holds this job's own `GITHUB_TOKEN` (`pull-requests: write`, since #157 the only GitHub credential reachable from Bash) and the allowlisted `Bash(gh pr comment:*)`, so it can still forge a fully-checked `github-actions[bot]` tracking comment carrying this run's `[View job]` link and a fresh `updated_at`, and no field the step reads distinguishes that from genuine completion. A step-B-side guard is theatre while that write-capable token is Bash-reachable, so none is added. The model's Bash grant is exactly `Bash(gh pr comment:*)` / `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no `gh api`), and `gh pr comment --edit-last` is legal under the `gh pr comment:*` wildcard — the specific edit-in-place mechanism. **#157** CLOSED the credential-disclosure axis (the write-capable minted App token that used to co-reside in the Bash env is gone; the action now runs on this job's own `github_token`, so the reachable GitHub credential is this repo-scoped, job-lifetime `GITHUB_TOKEN`), but it did NOT close completion forgery, because that built-in token still carries `pull-requests: write`. The one remaining close path is narrowing the `gh pr comment` grant itself (the deferred step-3 allowlist work, evidence-gated because `gh pr comment` is real needed functionality for the skill's summary comment). #157 does not close this on its own (do not read it as closing F1); step-B green stays non-adversarial until the grant narrows | Inline findings tagged blocker/medium/low against this file's Code Review Rubric; the real gate is the inline threads + `required_conversation_resolution`, not the check |
-| Codex | Advisory-but-triaged, not a required check | Cross-family second opinion — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses; see the wait-for-verdict rule in PR Merge Policy above (already ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
+| Codex | Advisory-but-triaged, not a required check | A distinct cloud review lens — the diverse-lens catch the agent-repo retros keep finding a same-family reviewer misses. Under the D145 pivot Codex is the default AUTHOR, so this review is SAME-family in the default case and the cross-family diversity is the Claude `factory-security-reviewer`; the Codex connector is cross-family only on the Claude-fallback path. It stays valuable as a distinct, non-deterministic cloud instance (it caught the #187 revert-race P2 the same-family author review passed). See the wait-for-verdict rule in PR Merge Policy above (ported verbatim from the agent repo — not re-pasted here to avoid two copies drifting) |
 | Domain sub-agents (`schema-migration-reviewer`, `privacy-auditor`, `factory-security-reviewer`, `qa`) | Rubric-routed, human/PM-invoked | The escalation lenses named in Code Review Rubric's routing table above; not auto-run on every factory PR yet (factory.md §13 decision (ii) — rubric-routed to start, automate later is a live option) |
 
 ### Codex — operator decision (recorded 18 Jul 2026, updated 18 Jul 2026, F1-S4)
@@ -647,7 +650,7 @@ recorded in the plan repo.
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
 | `pr-triage` | `sonnet` | independent adjudication of review feedback, so the author never self-triages (D23). |
 | `story-planner` | `fable` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). Read-only **by construction** — no shell, no write tools (Read/Grep/Glob + retrieval only). That removes the execution and mutation channels, **not every channel**: poisoned retrieval can still steer what it reads and what its returned text contains (#162), so the orchestrator reads the contract before posting it and retrieval stays off credentialed trees (Axis A). The orchestrator supplies the story text and posts the contract; under-specification is the expensive failure this pin exists for. |
-| `implementer` | `opus` | specced implementation that is security-adjacent, touches a protected path, or runs while the Codex quota is in reserve (Axis A). Own worktree, gates before hand-back, never adjudicates findings on its own PR (D23). |
+| `implementer` | `opus` | **Fallback implementer only** (credit pivot, D145): Codex-MCP is the default for specced work — including security-adjacent and protected-path diffs — so this agent runs only when Codex is unavailable or its weekly quota is below the Axis-A budget stop. Own worktree, gates before hand-back, never adjudicates findings on its own PR (D23). |
 
 **Pins are mandatory and enforced.** An agent with no `model:` **inherits the
 parent**, so an unpinned definition spawned from an Opus main loop silently runs
@@ -698,11 +701,30 @@ and draws on a **separate, weekly-capped subscription**.
   operator-level config outside the repo's review surface — so treat
   retrieval-shaped content as untrusted input everywhere, and never point the
   tool at a tree holding credentials.
-- **Fully-specified implementation → Codex**, when the acceptance criteria,
-  tests, closed grammar, and fail-closed behaviour are already written down —
-  under topology v2, "written down" means a `story-planner` contract exists.
-  Delegate via `mcp__codex__codex`, with `codex-reply` continuing the same
-  session to fold review findings on that task.
+- **Specced implementation → Codex by DEFAULT (credit pivot, D145).**
+  Anthropic credits are scarce and the Codex subscription is comparatively
+  plentiful, so implementation delegation defaults to Codex-MCP — including
+  security-adjacent and protected-path work — once a `story-planner` contract
+  exists (topology v2's sense of "written down": acceptance criteria, tests,
+  closed grammar, fail-closed behaviour). Delegate via `mcp__codex__codex`,
+  with `codex-reply` continuing the same session to fold review findings. The
+  Claude `implementer` (opus) agent is the FALLBACK only — Codex unavailable,
+  or its weekly quota below the budget stop threshold. The safety floor stays
+  on Claude and is NOT cut for credits (D145): it is the load-bearing
+  cross-family adversarial lens now that Codex authors, and #80 / #187 are the
+  proof cases where it caught fail-opens the same-family author review missed.
+  That floor is currently ENFORCED BY THE ORCHESTRATOR, which re-derives the
+  reviewer set from the real diff's content (not only its paths) and adds the
+  APPROPRIATE Claude domain reviewer — `factory-security-reviewer` for the
+  factory pipeline, `schema-migration-reviewer` for schema / grants / Zod-
+  Pydantic validation, `privacy-auditor` for the app's reviewer-data / PII /
+  visibility / deletion surface — so a security-touching Codex-authored change
+  gets a cross-family adversarial lens whose threat model actually fits it
+  (routing a change to the wrong-scope reviewer would be a floor in name only).
+  The rubric has no general catch-all trigger for a security-sensitive change
+  that falls under NONE of those three domains, so that residual is orchestrator
+  judgment today; making it mechanical before reviewer routing runs
+  autonomously is tracked with the #47 autonomous-operation hardening.
 - **Pre-open review → `codex review --base origin/main` on every PR**
   (topology v2, #159): run it on the final pre-open diff, and again before the
   re-push of any post-open fold that changes logic. The only exemption is a
