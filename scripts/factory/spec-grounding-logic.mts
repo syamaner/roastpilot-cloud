@@ -1092,6 +1092,8 @@ export function parseAcceptanceCriteria(issueBody: string): AcceptanceCriterion[
 export interface FetchedIssue {
   readonly title: string;
   readonly body: string;
+  /** GitHub API server metadata, when fetched by the network-facing runner. */
+  readonly updatedAt?: string;
 }
 
 /**

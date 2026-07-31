@@ -528,6 +528,13 @@ export interface ParsedCriteriaSpine {
    * the event-to-runner-fetch window).
    */
   readonly reviewedBaseSha: string;
+  /** Last-edit metadata for every successfully fetched linked issue. */
+  readonly linkedIssueProvenance?: readonly LinkedIssueProvenance[];
+}
+
+export interface LinkedIssueProvenance {
+  readonly issueNumber: number;
+  readonly updatedAt: string;
 }
 
 export type ParsedCriteriaSpineResult =
@@ -628,6 +635,11 @@ const MAX_VALIDATION_ERRORS_PER_ARRAY = 200;
  * parser's).
  */
 const MAX_REVIEWED_CLOSING_ISSUE_NUMBERS = 1000;
+
+/** Generous corruption ceiling; legitimate runs fetch at most 20 linked issues. */
+const MAX_LINKED_ISSUE_PROVENANCE = 1000;
+
+const GITHUB_ISSUE_UPDATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 /**
  * Upper bound on `reviewedBaseSha`'s own length, in characters (F1-S9
@@ -988,6 +1000,9 @@ function validateUnreviewedClosingIssue(
  *   unreviewed closing issues.
  * @param reviewedClosingIssueNumbers - The already-validated, already-
  *   deduped reviewed-closing-issue-number set (F1-S9 slice 90.2).
+ * @param linkedIssueProvenance - The optional, already-validated,
+ *   issue-number-deduped last-activity records. When present, every issue
+ *   represented in `entries` must be covered.
  * @param truncated - This artifact's own `truncated` field.
  * @param errors - Accumulator every violation is pushed onto.
  */
@@ -995,6 +1010,7 @@ function validateCrossEntryInvariants(
   entries: readonly CriteriaSpineEntry[],
   unreviewedClosingIssues: readonly UnreviewedClosingIssueResult[],
   reviewedClosingIssueNumbers: readonly number[],
+  linkedIssueProvenance: readonly LinkedIssueProvenance[] | undefined,
   truncated: boolean,
   errors: string[],
 ): void {
@@ -1037,6 +1053,17 @@ function validateCrossEntryInvariants(
   }
 
   const issueNumbersWithEntries = new Set(indicesByIssue.keys());
+  if (linkedIssueProvenance !== undefined) {
+    const provenanceIssueNumbers = new Set(linkedIssueProvenance.map((entry) => entry.issueNumber));
+    for (const issueNumber of issueNumbersWithEntries) {
+      if (!provenanceIssueNumbers.has(issueNumber)) {
+        errors.push(
+          `entries contains issue #${issueNumber}, but linkedIssueProvenance has no matching record -- ` +
+            "present provenance must cover every issue whose acceptance criteria were evaluated",
+        );
+      }
+    }
+  }
   for (const unreviewed of unreviewedClosingIssues) {
     if (unreviewed.truncationKind === "fully-dropped" && issueNumbersWithEntries.has(unreviewed.issueNumber)) {
       errors.push(
@@ -1180,8 +1207,15 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
   }
 
   const errors: string[] = [];
-  const { entries, truncated, unreviewedClosingIssues, diffTruncated, reviewedClosingIssueNumbers, reviewedBaseSha } =
-    parsed;
+  const {
+    entries,
+    truncated,
+    unreviewedClosingIssues,
+    diffTruncated,
+    reviewedClosingIssueNumbers,
+    reviewedBaseSha,
+    linkedIssueProvenance,
+  } = parsed;
 
   if (!Array.isArray(entries)) {
     errors.push('"entries" must be an array');
@@ -1217,6 +1251,9 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
       `"reviewedBaseSha" must be a non-empty string of at most ${MAX_REVIEWED_BASE_SHA_LENGTH} characters`,
     );
   }
+  if (linkedIssueProvenance !== undefined && !Array.isArray(linkedIssueProvenance)) {
+    errors.push('"linkedIssueProvenance" must be an array when present');
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -1237,6 +1274,14 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     errors.push(
       `"reviewedClosingIssueNumbers" has ${(reviewedClosingIssueNumbers as unknown[]).length} elements, ` +
         `exceeds ${MAX_REVIEWED_CLOSING_ISSUE_NUMBERS}`,
+    );
+  }
+  if (
+    Array.isArray(linkedIssueProvenance) &&
+    linkedIssueProvenance.length > MAX_LINKED_ISSUE_PROVENANCE
+  ) {
+    errors.push(
+      `"linkedIssueProvenance" has ${linkedIssueProvenance.length} elements, exceeds ${MAX_LINKED_ISSUE_PROVENANCE}`,
     );
   }
   if (errors.length > 0) {
@@ -1364,6 +1409,42 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     validatedReviewedClosingIssueNumbers.push(candidate);
   }
 
+  const validatedLinkedIssueProvenance: LinkedIssueProvenance[] = [];
+  const seenProvenanceIssueNumbers = new Set<number>();
+  const provenanceArray = (linkedIssueProvenance ?? []) as unknown[];
+  const provenanceErrorsStart = errors.length;
+  for (let i = 0; i < provenanceArray.length; i++) {
+    if (errors.length - provenanceErrorsStart >= MAX_VALIDATION_ERRORS_PER_ARRAY) {
+      errors.push(
+        `"linkedIssueProvenance": stopped after ${MAX_VALIDATION_ERRORS_PER_ARRAY} validation ` +
+          `error(s) -- ${provenanceArray.length - i} more element(s) not validated`,
+      );
+      break;
+    }
+    const candidate = provenanceArray[i];
+    if (!isPlainRecord(candidate)) {
+      errors.push(`linkedIssueProvenance[${i}] must be a JSON object`);
+      continue;
+    }
+    const { issueNumber, updatedAt } = candidate;
+    if (typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+      errors.push(`linkedIssueProvenance[${i}].issueNumber must be a positive integer`);
+      continue;
+    }
+    if (seenProvenanceIssueNumbers.has(issueNumber)) {
+      errors.push(`linkedIssueProvenance[${i}].issueNumber ${issueNumber} is a duplicate`);
+      continue;
+    }
+    if (typeof updatedAt !== "string" || !GITHUB_ISSUE_UPDATED_AT_PATTERN.test(updatedAt)) {
+      errors.push(
+        `linkedIssueProvenance[${i}].updatedAt must match YYYY-MM-DDTHH:MM:SSZ exactly`,
+      );
+      continue;
+    }
+    seenProvenanceIssueNumbers.add(issueNumber);
+    validatedLinkedIssueProvenance.push({ issueNumber, updatedAt });
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -1376,6 +1457,7 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
     validatedEntries,
     validatedUnreviewed,
     validatedReviewedClosingIssueNumbers,
+    linkedIssueProvenance === undefined ? undefined : validatedLinkedIssueProvenance,
     truncated as boolean,
     errors,
   );
@@ -1392,6 +1474,9 @@ export function parseCriteriaSpineArtifact(raw: string | Buffer): ParsedCriteria
       diffTruncated: diffTruncated as boolean,
       reviewedClosingIssueNumbers: validatedReviewedClosingIssueNumbers,
       reviewedBaseSha: reviewedBaseSha as string,
+      ...(linkedIssueProvenance === undefined
+        ? {}
+        : { linkedIssueProvenance: validatedLinkedIssueProvenance }),
     },
   };
 }

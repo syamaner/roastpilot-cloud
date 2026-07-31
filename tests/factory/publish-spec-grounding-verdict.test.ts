@@ -1800,6 +1800,42 @@ describe("main — the happy path", () => {
     expect(summaryBody).not.toMatch(/listed below in THIS summary/i);
   });
 
+  it("renders populated linked-issue provenance from the parsed spine through the real publisher entrypoint", async () => {
+    const linkedIssueProvenance = [{ issueNumber: 12, updatedAt: "2026-07-30T10:20:30Z" }];
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      spine: { ...VALID_SPINE, linkedIssueProvenance },
+    });
+    process.env.OUTCOME_PATH = outcomePath;
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.CRITERIA_SPINE_PATH = spinePath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () =>
+        prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      [`GET /repos/syamaner/roastpilot-cloud/compare/${TRUSTED_BASE_SHA}...${TRUSTED_HEAD_SHA}`]: () =>
+        textResponse(DIFF_WITH_ANCHOR),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/pulls/83/comments": () => jsonResponse({ id: 1 }, 201),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () =>
+        jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 2 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const summaryPost = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    const summaryBody = (summaryPost?.body as { body: string }).body;
+    expect(summaryBody).toContain(
+      "Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last activity:",
+    );
+    expect(summaryBody).toContain("- Issue #12: 2026-07-30T10:20:30Z");
+    expect(summaryBody).toContain(
+      "<!-- roastpilot-factory:spec-grounding-criteria-as-of:12:2026-07-30T10:20:30Z:do-not-edit -->",
+    );
+  });
+
   it("recomputes a digest-aware v2 covering marker when the plan map misses, in lockstep with the planned marker", async () => {
     const criterionDigest = "a".repeat(64);
     const v2Marker = criterionBlockerCommentMarker("12:0", criterionDigest);
@@ -2401,11 +2437,12 @@ describe("main — the happy path", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const budgetProbeSection = `ENTRYPOINT-BUDGET-PROBE:${"P".repeat(10_000)}`;
-    await main((buildBaseBody, appendedSections) => {
+    await main((buildBaseBody, appendedSections, linkedIssueProvenance) => {
       expect(appendedSections).toHaveLength(3);
       return assembleSpecGroundingSummaryCommentBody(
         buildBaseBody,
         [...appendedSections, budgetProbeSection],
+        linkedIssueProvenance,
       );
     });
 
@@ -2421,7 +2458,8 @@ describe("main — the happy path", () => {
     );
     expect(summaryBody.match(/and \d+ more/gi)).toHaveLength(2);
     expect(summaryBody).toMatch(/further finding\(s\) omitted/i);
-    expect(summaryBody.endsWith(budgetProbeSection)).toBe(true);
+    expect(summaryBody).toContain(budgetProbeSection);
+    expect(summaryBody).toMatch(/criteria provenance unavailable \(review predates provenance recording\)\.$/);
     expect(summaryBody.length).toBeLessThanOrEqual(65_536);
   });
 

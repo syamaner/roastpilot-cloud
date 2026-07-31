@@ -43,7 +43,11 @@
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
 import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
-import type { CriteriaSpineEntry, UnreviewedClosingIssueResult } from "./spec-grounding-runner-logic.mts";
+import type {
+  CriteriaSpineEntry,
+  LinkedIssueProvenance,
+  UnreviewedClosingIssueResult,
+} from "./spec-grounding-runner-logic.mts";
 import type { SpecGroundingVerdict } from "./spec-grounding-verdict-schema.mts";
 import { renderBoundedUntrustedReason } from "./untrusted-text.mts";
 
@@ -554,8 +558,47 @@ export function findUnreviewedNewClosingReferences(
  */
 const MAX_FINDINGS_LIST_LENGTH = 55_000;
 
+/** Bounds the variable per-issue provenance list, keeping each human/marker pair atomic. */
+const MAX_PROVENANCE_LIST_LENGTH = 8_000;
+
 /** GitHub's maximum accepted issue-comment body length, in characters. */
 export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
+
+function buildCriteriaProvenanceSection(
+  linkedIssueProvenance: readonly LinkedIssueProvenance[] | undefined,
+): string {
+  if (linkedIssueProvenance === undefined) {
+    return "**Criteria provenance** — criteria provenance unavailable (review predates provenance recording).";
+  }
+
+  const lines = [
+    "**Criteria provenance** — acceptance criteria were evaluated as of each linked issue's last activity:",
+    "",
+  ];
+  let listLength = 0;
+  let addedCount = 0;
+  for (const { issueNumber, updatedAt } of linkedIssueProvenance) {
+    const entry =
+      `- Issue #${issueNumber}: ${updatedAt}\n` +
+      `<!-- roastpilot-factory:spec-grounding-criteria-as-of:${issueNumber}:${updatedAt}:do-not-edit -->`;
+    if (listLength + entry.length + 1 > MAX_PROVENANCE_LIST_LENGTH) {
+      break;
+    }
+    lines.push(entry);
+    listLength += entry.length + 1;
+    addedCount += 1;
+  }
+  const omittedCount = linkedIssueProvenance.length - addedCount;
+  if (omittedCount > 0) {
+    lines.push(
+      "",
+      `_${omittedCount} further linked issue provenance record(s) omitted from this summary to stay ` +
+        "within GitHub's comment size limit; see the uploaded criteria-spine artifact for the full list._",
+    );
+  }
+  lines.push("", "An issue with activity after its timestamp above has not been re-evaluated by this run.");
+  return lines.join("\n");
+}
 
 /**
  * Builds the single, non-blocking summary comment body.
@@ -955,8 +998,10 @@ export function buildSpecGroundingSummaryCommentBody(
 export function assembleSpecGroundingSummaryCommentBody(
   buildBaseBody: (maxFindingsListLength: number) => string,
   appendedSections: readonly string[],
+  linkedIssueProvenance?: readonly LinkedIssueProvenance[],
 ): string {
-  const suffix = appendedSections
+  const provenanceSection = buildCriteriaProvenanceSection(linkedIssueProvenance);
+  const suffix = [...appendedSections, provenanceSection]
     .filter((section) => section.length > 0)
     .map((section) => `\n${section}`)
     .join("");

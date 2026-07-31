@@ -840,6 +840,138 @@ describe("parseCriteriaSpineArtifact (F1-S9 slice 3b-iii-d, issue #12)", () => {
     });
   });
 
+  it("accepts and round-trips linked issue provenance while legacy artifacts remain valid", () => {
+    const provenance = [{ issueNumber: 12, updatedAt: "2026-07-30T10:20:30Z" }];
+    const current = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ linkedIssueProvenance: provenance })),
+    );
+    expect(current.ok).toBe(true);
+    if (current.ok) expect(current.spine.linkedIssueProvenance).toEqual(provenance);
+
+    const legacy = parseCriteriaSpineArtifact(JSON.stringify(validArtifact()));
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) expect(legacy.spine.linkedIssueProvenance).toBeUndefined();
+  });
+
+  it.each([
+    "2026-07-30T10:20:30.000Z",
+    "2026-7-30T10:20:30Z",
+    "2026-07-30T10:20:30Z\n**injected**",
+    "2026-07-30T10:20:30Z<!-- injected -->",
+  ])("rejects malformed or injected linkedIssueProvenance updatedAt %j", (updatedAt) => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ linkedIssueProvenance: [{ issueNumber: 12, updatedAt }] })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "linkedIssueProvenance[0].updatedAt must match YYYY-MM-DDTHH:MM:SSZ exactly",
+      );
+    }
+  });
+
+  it.each(["not-an-array", 12, { issueNumber: 12 }])(
+    "rejects a present non-array linkedIssueProvenance %j",
+    (linkedIssueProvenance) => {
+      const result = parseCriteriaSpineArtifact(
+        JSON.stringify(validArtifact({ linkedIssueProvenance })),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContain('"linkedIssueProvenance" must be an array when present');
+      }
+    },
+  );
+
+  it("rejects duplicate linkedIssueProvenance issue numbers", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          linkedIssueProvenance: [
+            { issueNumber: 12, updatedAt: "2026-07-30T10:20:30Z" },
+            { issueNumber: 12, updatedAt: "2026-07-31T10:20:30Z" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("linkedIssueProvenance[1].issueNumber 12 is a duplicate");
+    }
+  });
+
+  it.each([null, "not-an-object", []])(
+    "rejects a non-object linkedIssueProvenance element %j",
+    (candidate) => {
+      const result = parseCriteriaSpineArtifact(
+        JSON.stringify(validArtifact({ linkedIssueProvenance: [candidate] })),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContain("linkedIssueProvenance[0] must be a JSON object");
+      }
+    },
+  );
+
+  it("rejects an unsafe linkedIssueProvenance issue number", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          linkedIssueProvenance: [
+            { issueNumber: Number.MAX_SAFE_INTEGER + 1, updatedAt: "2026-07-30T10:20:30Z" },
+          ],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "linkedIssueProvenance[0].issueNumber must be a positive integer",
+      );
+    }
+  });
+
+  it("bounds accumulated linkedIssueProvenance element errors", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ linkedIssueProvenance: Array.from({ length: 201 }, () => null) })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.at(-1)).toMatch(
+        /"linkedIssueProvenance": stopped after 200 validation error\(s\) -- 1 more element\(s\) not validated/,
+      );
+    }
+  });
+
+  it("rejects linkedIssueProvenance above its generous cardinality cap", () => {
+    const linkedIssueProvenance = Array.from({ length: 1001 }, (_, index) => ({
+      issueNumber: index + 1,
+      updatedAt: "2026-07-30T10:20:30Z",
+    }));
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(validArtifact({ linkedIssueProvenance })),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain('"linkedIssueProvenance" has 1001 elements, exceeds 1000');
+  });
+
+  it("rejects present provenance that does not cover every issue represented in entries", () => {
+    const result = parseCriteriaSpineArtifact(
+      JSON.stringify(
+        validArtifact({
+          linkedIssueProvenance: [{ issueNumber: 34, updatedAt: "2026-07-30T10:20:30Z" }],
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "entries contains issue #12, but linkedIssueProvenance has no matching record -- " +
+          "present provenance must cover every issue whose acceptance criteria were evaluated",
+      );
+    }
+  });
+
   it("accepts and round-trips a digest-bearing spine", () => {
     const digest = "a".repeat(64);
     const result = parseCriteriaSpineArtifact(
