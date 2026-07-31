@@ -56,10 +56,10 @@ weak spec faithfully, and the cost lands post-open as review rounds.
    logic lines each (tests excluded), dependencies named, execution path named
    (factory-dispatchable or conventional), and the domain reviewer each diff
    triggers per the Code Review Rubric routing table.
-5. **Routing** — which implementer (Codex MCP for fully-specified contract
-   work; the `implementer` agent when the diff is security-adjacent, touches a
-   protected path, or the Codex quota is in reserve), and which reviewers fire
-   pre-open.
+5. **Routing** — which implementer (Codex MCP by DEFAULT per the D145 credit
+   pivot, including security-adjacent and protected-path diffs; the
+   `implementer` agent only as the FALLBACK when Codex is unavailable or its
+   weekly quota is below the budget stop), and which reviewers fire pre-open.
 6. **Risk profile** — blast radius on both axes (data sensitivity; principal
    scope, lifetime, capability), and what a reviewer should try to break
    first.
