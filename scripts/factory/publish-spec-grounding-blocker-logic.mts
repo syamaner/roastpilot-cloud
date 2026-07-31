@@ -91,6 +91,77 @@ import {
   formatRationaleForDisplay,
 } from "./publish-spec-grounding-verdict-logic.mts";
 import type { JoinedCriterionResult, UnreviewedClosingIssueResult } from "./publish-spec-grounding-verdict-logic.mts";
+import { extractCheckboxLineText, MAX_CRITERIA_PER_ISSUE } from "./spec-grounding-logic.mts";
+import { criterionOccurrenceDigest } from "./spec-grounding-runner-logic.mts";
+
+/**
+ * Work bound for advisory scans. Genuine GitHub bodies can exceed this many
+ * newline-delimited lines within their character cap; crossing it therefore
+ * returns incomplete and fails toward no annotation, never "criteria absent".
+ */
+export const MAX_ANNOTATION_SCAN_LINES = 10_000;
+export const STALE_CRITERION_NOTE_MARKER =
+  "<!-- roastpilot-factory:spec-grounding-blocker:stale-criterion-note:do-not-edit -->";
+const ISSUE_UPDATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const STALE_CRITERION_NOTE_LINE_TEMPLATE =
+  "> **Possibly stale:** as of issue #{issueNumber}'s last edit at {updatedAt}, this criterion's exact text no longer appears as a checkbox item anywhere in that issue's body. It may have been reworded, removed, or reformatted. A human should re-check the issue and resolve this thread if the obligation no longer applies. This note is informational only; it does not resolve, delete, or weaken this blocker.";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const [NOTE_BEFORE_ISSUE = "", NOTE_AFTER_ISSUE = ""] = STALE_CRITERION_NOTE_LINE_TEMPLATE.split("{issueNumber}");
+const [NOTE_BEFORE_UPDATED_AT = "", NOTE_AFTER_UPDATED_AT = ""] = NOTE_AFTER_ISSUE.split("{updatedAt}");
+const STALE_CRITERION_NOTE_SUFFIX_PATTERN = new RegExp(
+  `\\r?\\n\\r?\\n${escapeRegExp(STALE_CRITERION_NOTE_MARKER)}\\r?\\n` +
+    `${escapeRegExp(NOTE_BEFORE_ISSUE)}(\\d{1,10})${escapeRegExp(NOTE_BEFORE_UPDATED_AT)}` +
+    `(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z)${escapeRegExp(NOTE_AFTER_UPDATED_AT)}$`,
+);
+
+export function computePresentCriterionDigests(
+  issueBody: string,
+): { readonly complete: true; readonly digests: ReadonlySet<string> } | { readonly complete: false } {
+  const lines = issueBody.split(/\r?\n/);
+  if (lines.length > MAX_ANNOTATION_SCAN_LINES) return { complete: false };
+  const texts = new Set<string>();
+  for (const line of lines) {
+    const text = extractCheckboxLineText(line);
+    if (text !== null) texts.add(text);
+  }
+  const digests = new Set<string>();
+  for (const criterionText of texts) {
+    for (let occurrenceIndex = 0; occurrenceIndex < MAX_CRITERIA_PER_ISSUE; occurrenceIndex++) {
+      digests.add(criterionOccurrenceDigest(occurrenceIndex, criterionText));
+    }
+  }
+  return { complete: true, digests };
+}
+
+function staleCriterionNoteLine(issueNumber: number, issueUpdatedAt: string): string {
+  return STALE_CRITERION_NOTE_LINE_TEMPLATE
+    .replace("{issueNumber}", String(issueNumber))
+    .replace("{updatedAt}", issueUpdatedAt);
+}
+
+export function buildStaleCriterionNote(issueNumber: number, issueUpdatedAt: string): string {
+  if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0 || issueNumber > 9_999_999_999) {
+    throw new Error("stale-criterion note issue number must be a positive integer of at most 10 digits");
+  }
+  if (!ISSUE_UPDATED_AT_PATTERN.test(issueUpdatedAt)) {
+    throw new Error("stale-criterion note timestamp is malformed");
+  }
+  return `\n\n${STALE_CRITERION_NOTE_MARKER}\n${staleCriterionNoteLine(issueNumber, issueUpdatedAt)}`;
+}
+
+export function stripStaleCriterionNote(body: string): string {
+  let stripped = body;
+  for (let i = 0; i < 4; i++) {
+    const match = STALE_CRITERION_NOTE_SUFFIX_PATTERN.exec(stripped);
+    if (match === null) break;
+    stripped = stripped.slice(0, match.index);
+  }
+  return stripped;
+}
 
 /** A single deterministic anchor point in a PR's diff: a file path and a line number on the file's NEW (post-PR) side. */
 export interface DiffAnchor {
@@ -521,6 +592,24 @@ const CRITERION_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion:(\d+):(\d+):do-not-edit -->$/;
 const CRITERION_DIGEST_BLOCKER_MARKER_LINE_PATTERN =
   /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):[0-9a-f]{64}:do-not-edit -->$/;
+const CRITERION_DIGEST_CAPTURE_PATTERN =
+  /^<!-- roastpilot-factory:spec-grounding-blocker:criterion-digest:(\d+):([0-9a-f]{64}):do-not-edit -->$/;
+
+/** Reads a v2 criterion blocker's positive issue number and exact digest. */
+export function extractCriterionDigestFromInlineBlockerMarker(
+  body: string,
+): { readonly issueNumber: number; readonly digest: string } | null {
+  for (const rawLine of body.split(/\r?\n/)) {
+    const match = CRITERION_DIGEST_CAPTURE_PATTERN.exec(rawLine.trim());
+    if (match === null) continue;
+    const issueNumber = Number(match[1]);
+    const digest = match[2];
+    return Number.isSafeInteger(issueNumber) && issueNumber > 0 && digest !== undefined
+      ? { issueNumber, digest }
+      : null;
+  }
+  return null;
+}
 
 /** Matches {@link unreviewedClosingIssueCommentMarker}'s own COMPLETE line shape, capturing the issue number (group 1). */
 const ISSUE_BLOCKER_MARKER_LINE_PATTERN =

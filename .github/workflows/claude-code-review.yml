@@ -1380,6 +1380,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: read # Used only to fetch current linked-issue bodies for stale-criterion advisory annotation.
       pull-requests: write
     steps:
       - name: Checkout TRUSTED base only -- never the PR's own head

@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
-import { formatUncaughtErrorForLog, main } from "../../scripts/factory/publish-spec-grounding-verdict.mts";
+import {
+  buildStaleCriterionAnnotationSummarySupplement,
+  formatUncaughtErrorForLog,
+  main,
+} from "../../scripts/factory/publish-spec-grounding-verdict.mts";
 import {
   assembleSpecGroundingSummaryCommentBody,
   SPEC_GROUNDING_SUMMARY_COMMENT_MARKER,
@@ -27,6 +31,18 @@ import {
 
 const TRUSTED_HEAD_SHA = "headsha000000000000000000000000000000000";
 const TRUSTED_BASE_SHA = "basesha000000000000000000000000000000000";
+
+describe("buildStaleCriterionAnnotationSummarySupplement", () => {
+  it("makes skipped annotation checks PR-visible even when no note changed", () => {
+    expect(buildStaleCriterionAnnotationSummarySupplement(0, 0, 3)).toBe(
+      "3 issue(s)' stale-criterion checks were skipped this run and will be retried on a future rotating run.",
+    );
+  });
+
+  it("returns null only when the pass made no changes and skipped nothing", () => {
+    expect(buildStaleCriterionAnnotationSummarySupplement(0, 0, 0)).toBeNull();
+  });
+});
 
 /** A unified diff with exactly one addable line -- resolves to a real anchor. */
 const DIFF_WITH_ANCHOR = [
@@ -1530,6 +1546,61 @@ describe("main — hasCriteria: true, verdict/spine reading", () => {
 });
 
 describe("main — the happy path", () => {
+  it("runs annotation after successful reconcile and adds the supplement only when a note changes", async () => {
+    const digest = "a".repeat(64);
+    const existing = {
+      id: 88,
+      body: `blocker\n${criterionBlockerCommentMarker("12:0", digest)}\n${inlineBlockerGenerationMarker("1")}`,
+      user: { type: "Bot", login: "github-actions[bot]" },
+    };
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "done" }] },
+      spine: { ...VALID_SPINE, entries: [{ ...VALID_SPINE.entries[0], criterionDigest: digest }] },
+    });
+    Object.assign(process.env, { OUTCOME_PATH: outcomePath, VERDICT_PATH: verdictPath, CRITERIA_SPINE_PATH: spinePath });
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([existing]),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: false }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/12": () => jsonResponse({ body: "- [ ] changed", updated_at: "2026-07-31T10:20:30Z" }),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/88": () => jsonResponse({}),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).toContain("Stale-criterion advisory notes were updated");
+    expect(calls.findIndex((call) => call.url.endsWith("/pulls/comments/88"))).toBeLessThan(
+      calls.findIndex((call) => call.url.endsWith("/issues/83/comments")),
+    );
+  });
+
+  it("an annotation throw leaves exit code zero and still posts the summary without a supplement", async () => {
+    const digest = "b".repeat(64);
+    const existing = { id: 88, body: `blocker\n${criterionBlockerCommentMarker("12:0", digest)}\n${inlineBlockerGenerationMarker("1")}`, user: { type: "Bot", login: "github-actions[bot]" } };
+    const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
+      verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "done" }] },
+      spine: { ...VALID_SPINE, entries: [{ ...VALID_SPINE.entries[0], criterionDigest: digest }] },
+    });
+    Object.assign(process.env, { OUTCOME_PATH: outcomePath, VERDICT_PATH: verdictPath, CRITERIA_SPINE_PATH: spinePath });
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83": () => prFetchHandlerWithOverrides({ body: "Closes #12" }),
+      "GET /repos/syamaner/roastpilot-cloud/pulls/83/comments?per_page=100&page=1": () => jsonResponse([existing]),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: false }]),
+      "GET /repos/syamaner/roastpilot-cloud/issues/12": () => jsonResponse({ body: "", updated_at: "2026-07-31T10:20:30Z" }),
+      "PATCH /repos/syamaner/roastpilot-cloud/pulls/comments/88": () => jsonResponse({}, 500),
+      "GET /repos/syamaner/roastpilot-cloud/issues/83/comments?per_page=100&page=1": () => jsonResponse([]),
+      "POST /repos/syamaner/roastpilot-cloud/issues/83/comments": () => jsonResponse({ id: 1 }, 201),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await main();
+    expect(process.exitCode).toBeUndefined();
+    const summary = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/83/comments"));
+    expect((summary?.body as { body: string }).body).not.toContain("Stale-criterion advisory notes were updated");
+  });
+
   it("posts a clean summary and exits zero when every criterion is satisfied", async () => {
     const { outcomePath, verdictPath, spinePath } = await writeArtifacts(workdir, {
       verdict: { findings: [{ criterionId: "12:0", satisfied: true, rationale: "Retry wrapper is present." }] },
@@ -3242,7 +3313,8 @@ describe("main — the happy path", () => {
     // and 422-failing, the post), one from this SAME run's own
     // reconciliation, which runs UNCONDITIONALLY now regardless of
     // whether this run's own new blockers posted inline.
-    expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(2);
+    // posting, reconciliation, then the advisory annotation scan.
+    expect(calls.filter((c) => c.method === "GET" && c.url.includes("/pulls/83/comments")).length).toBe(3);
   });
 
   it("posts a 'pipeline broke'-style visible fallback and exits nonzero when the PR's current head SHA no longer matches the trusted event SHA", async () => {

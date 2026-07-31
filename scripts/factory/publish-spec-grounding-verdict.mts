@@ -157,12 +157,32 @@ import {
 } from "./publish-spec-grounding-comment-io.mts";
 import {
   clearStaleInlineBlockerComments,
+  annotateStaleCriterionBlockerComments,
   deriveLinkedReferenceIssueNumberSets,
   InlineBlockerCleanupError,
   linkedReferenceSnapshotsMatch,
   postInlineCommentPlan,
   reconcileObsoleteInlineBlockerComments,
 } from "./publish-spec-grounding-inline-comment-io.mts";
+
+export function buildStaleCriterionAnnotationSummarySupplement(
+  annotatedCount: number,
+  withdrawnCount: number,
+  skippedIssueCount: number,
+): string | null {
+  const sections: string[] = [];
+  if (annotatedCount + withdrawnCount > 0) {
+    sections.push(
+      "Stale-criterion advisory notes were updated on existing unresolved blocker threads; these notes do not resolve, delete, or weaken any blocker.",
+    );
+  }
+  if (skippedIssueCount > 0) {
+    sections.push(
+      `${skippedIssueCount} issue(s)' stale-criterion checks were skipped this run and will be retried on a future rotating run.`,
+    );
+  }
+  return sections.length === 0 ? null : sections.join("\n\n");
+}
 
 interface GitHubPullRequestShas {
   readonly title: string;
@@ -1811,12 +1831,11 @@ async function publishSummary(
   // predicate is false AND no closing references remain. That conservative
   // boundary preserves #77's cross-object-staleness mitigation. Individual
   // criterion blockers on a still-closing issue retire only on issue
-  // de-reference. A v2 blocker whose criterion text changed between runs
-  // persists as a fail-closed gate until a human resolves it. Safe retirement
-  // requires linked-issue `updated_at` provenance (sub-problem A) to avoid
-  // deleting a live gate during an A→B→A issue-revert race, and is deferred
-  // to #47 / the provenance PR. Runs unconditionally on every hasCriteria:true
-  // publish.
+  // de-reference. Delete-based content-aware retirement was rejected after
+  // four adversarial review rounds exposed a fail-open class, including
+  // malicious-head-forgeable runner attestations. The advisory annotation
+  // pass below replaces it without deleting or resolving anything. Runs
+  // unconditionally on every hasCriteria:true publish.
   //
   // FAIL CLOSED on a snapshot mismatch, not merely a non-destructive skip
   // (F1-S9 slice 90.4, PR #95 review round 4, Codex, P1, cid 3625635480 --
@@ -1837,6 +1856,7 @@ async function publishSummary(
   // first DELETE call -- see that function's own docstring, cid
   // 3625635476) is what actually detects the mismatch; this is purely
   // the caller's own response to that signal.
+  const appendedSummarySections: string[] = [];
   try {
     const reconcileResult = await reconcileObsoleteInlineBlockerComments(
       token,
@@ -1884,7 +1904,35 @@ async function publishSummary(
     return;
   }
 
-  const appendedSummarySections: string[] = [];
+  // This pass is advisory and touches no gate state. Its worst failure is the
+  // status quo (the thread remains and the human gets no hint), so converting
+  // a note-writing bug into availability loss for the whole publish gate would
+  // be the wrong failure direction.
+  try {
+    const annotationResult = await annotateStaleCriterionBlockerComments(
+      token,
+      owner,
+      repo,
+      prNumber,
+      currentClosingIssueNumbers,
+      currentGeneration,
+    );
+    console.log(
+      `Stale-criterion annotation pass: annotated=${annotationResult.annotatedCount}, ` +
+        `withdrawn=${annotationResult.withdrawnCount}, skippedIssues=${annotationResult.skippedIssueNumbers.length}`,
+    );
+    const annotationSupplement = buildStaleCriterionAnnotationSummarySupplement(
+      annotationResult.annotatedCount,
+      annotationResult.withdrawnCount,
+      annotationResult.skippedIssueNumbers.length,
+    );
+    if (annotationSupplement !== null) appendedSummarySections.push(annotationSupplement);
+  } catch (err) {
+    console.warn(
+      `Stale-criterion annotation pass failed without affecting the publish gate: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   if (currentApplicableBlockerCount > 0 && !blockersPostedInline) {
     appendedSummarySections.push(buildAnchorFallbackSummarySupplement(
       // FILTERED, not the raw review-time `criterionBlockers`/

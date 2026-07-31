@@ -46,6 +46,11 @@ import {
 } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./untrusted-text.mts";
 
+/** Stable occurrence-sensitive digest used by both blocker minting and presence scans. */
+export function criterionOccurrenceDigest(occurrenceIndex: number, criterionText: string): string {
+  return createHash("sha256").update(`${occurrenceIndex} ${criterionText}`, "utf8").digest("hex");
+}
+
 /**
  * One criterion the review agent must judge, identified by a stable ID
  * computed once per run — never accepted from the agent.
@@ -224,9 +229,7 @@ export function buildCriteriaSpine(
         issueNumber: spec.issueNumber,
         kind: spec.kind,
         criterionId: `${spec.issueNumber}:${index}`,
-        criterionDigest: createHash("sha256")
-          .update(`${occurrenceIndex} ${criterionText}`, "utf8")
-          .digest("hex"),
+        criterionDigest: criterionOccurrenceDigest(occurrenceIndex, criterionText),
       });
     }
   }

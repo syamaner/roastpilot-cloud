@@ -2,6 +2,8 @@ import MarkdownIt from "markdown-it";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildLinkedIssueSpecs,
+  extractCheckboxLineText,
+  MAX_CRITERIA_PER_ISSUE,
   parseAcceptanceCriteria,
   parseLinkedIssueReferences,
   renderCriteriaDataBlock,
@@ -24,6 +26,18 @@ const TEST_NONCE = "deadbeefcafef00d";
 // manual restore.
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("shared checkbox extraction", () => {
+  it("preserves parseAcceptanceCriteria's six-marker, trim, empty-skip grammar", () => {
+    expect(["- [ ] a", "* [x] b", "+ [X] c", "1. [ ] d", "2) [ ] e"].map(extractCheckboxLineText)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(extractCheckboxLineText("- [ ]   ")).toBeNull();
+    expect(extractCheckboxLineText("plain text")).toBeNull();
+    expect(MAX_CRITERIA_PER_ISSUE).toBe(50);
+    expect(parseAcceptanceCriteria("## Acceptance criteria\n- [ ]   a  \n* [x] b")).toEqual([
+      { text: "a", checked: false }, { text: "b", checked: true },
+    ]);
+  });
 });
 
 describe("parseLinkedIssueReferences (F1-S9 slice 3, issue #12)", () => {

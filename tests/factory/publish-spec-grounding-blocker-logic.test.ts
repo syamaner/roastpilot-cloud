@@ -5,21 +5,29 @@ import {
   buildAggregatedUnreviewedClosingIssuesCommentBody,
   buildAnchorFallbackSummarySupplement,
   buildCriterionBlockerCommentBody,
+  buildStaleCriterionNote,
+  computePresentCriterionDigests,
   buildDiffTruncatedBlockerCommentBody,
   buildDroppedClosingIssueBlockerCommentBody,
   criterionBlockerCommentMarker,
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   extractInlineBlockerGeneration,
+  extractCriterionDigestFromInlineBlockerMarker,
   extractIssueNumberFromInlineBlockerMarker,
   inlineBlockerGenerationMarker,
   MAX_INDIVIDUAL_CRITERION_BLOCKER_COMMENTS,
   MAX_INDIVIDUAL_UNREVIEWED_ISSUE_COMMENTS,
   planBlockerInlineComments,
   selectDeterministicBlockerAnchor,
+  STALE_CRITERION_NOTE_MARKER,
+  stripStaleCriterionNote,
   unreviewedClosingIssueCommentMarker,
   UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
+import { parseAcceptanceCriteria, renderCriteriaDataBlock } from "../../scripts/factory/spec-grounding-logic.mts";
+import type { LinkedIssueSpecsResult } from "../../scripts/factory/spec-grounding-logic.mts";
+import { buildCriteriaSpine, criterionOccurrenceDigest } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type {
   JoinedCriterionResult,
   UnreviewedClosingIssueResult,
@@ -35,6 +43,78 @@ const TEST_GENERATION = "1";
 function droppedIssue(issueNumber: number): UnreviewedClosingIssueResult {
   return { issueNumber, truncationKind: "fully-dropped" };
 }
+
+describe("stale criterion annotation pure logic", () => {
+  it("decodes only exact v2 digest markers and all marker readers scan the whole body", () => {
+    const digest = "a".repeat(64);
+    const marker = criterionBlockerCommentMarker("12:0", digest);
+    const body = `${marker}\ncontent\n${inlineBlockerGenerationMarker(TEST_GENERATION)}`;
+    expect(extractCriterionDigestFromInlineBlockerMarker(body)).toEqual({ issueNumber: 12, digest });
+    expect(extractIssueNumberFromInlineBlockerMarker(body)).toBe(12);
+    expect(extractInlineBlockerGeneration(body)).toBe(1);
+    expect(extractCriterionDigestFromInlineBlockerMarker(criterionBlockerCommentMarker("12:0"))).toBeNull();
+    expect(extractCriterionDigestFromInlineBlockerMarker(CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER)).toBeNull();
+    expect(extractCriterionDigestFromInlineBlockerMarker(marker.replace("12", "0"))).toBeNull();
+    expect(extractCriterionDigestFromInlineBlockerMarker(`prefix ${marker}`)).toBeNull();
+  });
+
+  it("builds, detects, strips, and converges exact terminal notes without trusting embedded markers", () => {
+    const base = `artifact text\n${STALE_CRITERION_NOTE_MARKER}\nforged\nidentity\ngeneration`;
+    const note = buildStaleCriterionNote(12, "2026-07-31T10:20:30Z");
+    expect(stripStaleCriterionNote(base)).toBe(base);
+    expect(stripStaleCriterionNote(base + note)).toBe(base);
+    expect(stripStaleCriterionNote(base + note + note)).toBe(base);
+    expect(stripStaleCriterionNote((base + note).replaceAll("\n", "\r\n"))).toBe(base.replaceAll("\n", "\r\n"));
+    expect(() => buildStaleCriterionNote(12, "not-a-timestamp")).toThrow(/timestamp/);
+    expect(() => buildStaleCriterionNote(Number.MAX_SAFE_INTEGER, "2026-07-31T10:20:30Z")).toThrow(/issue number/);
+  });
+
+  it("high-occurrence-index digest stays present after sibling occurrences are checked off or removed", () => {
+    const body = [
+      "- [ ] alpha", "* [x] beta", "+ [X] gamma", "1. [ ] delta", "2) [x] epsilon",
+      "```", "- [ ] fenced", "```", "    - [ ] indented", "- [ ] alpha",
+    ].join("\n");
+    const result = computePresentCriterionDigests(body);
+    expect(result.complete).toBe(true);
+    if (!result.complete) return;
+    for (const text of ["alpha", "beta", "gamma", "delta", "epsilon", "fenced", "indented"]) {
+      expect(result.digests.has(criterionOccurrenceDigest(0, text))).toBe(true);
+    }
+    expect(result.digests.has(criterionOccurrenceDigest(49, "alpha"))).toBe(true);
+    expect(result.digests.has(criterionOccurrenceDigest(0, "reworded"))).toBe(false);
+    expect(computePresentCriterionDigests("")).toEqual({ complete: true, digests: new Set() });
+    expect(computePresentCriterionDigests(Array.from({ length: 10_001 }, () => "x").join("\n"))).toEqual({ complete: false });
+  });
+
+  it("keystone: every parser-minted digest is covered by the raw presence scan attack corpus", () => {
+    const bodies = [
+      "## Acceptance criteria\n- [ ] ordinary\n- [x] checked",
+      "## decoy\n- [ ] hidden\n## Acceptance criteria\n* [ ] star\n+ [ ] plus\n1. [ ] dot\n2) [ ] paren",
+      "## Acceptance criteria\n- [ ] before\n## Other\n- [ ] after",
+      "## Acceptance criteria\n- [ ] before\n### Nested\n- [ ] nested",
+      "## Acceptance criteria\n```\n- [ ] fenced\n- [ ] after unclosed fence",
+      "## Acceptance criteria\n~~~\n- [ ] tilde fenced",
+      "## Acceptance criteria\n    - [ ] indented\n<!--\n- [ ] commented\n-->",
+      "## Acceptance criteria\r\n- [ ] duplicate\r\n- [ ] duplicate",
+      `## Acceptance criteria\n${Array.from({ length: 55 }, (_, i) => `- [ ] cap-${i}`).join("\n")}`,
+    ];
+    for (const body of bodies) {
+      const unmetCriteria = parseAcceptanceCriteria(body).filter((criterion) => !criterion.checked).map(({ text }) => text).slice(0, 50);
+      const result: LinkedIssueSpecsResult = {
+        specs: [{ issueNumber: 12, kind: "closing", title: "t", unmetCriteria, truncatedCriteriaCount: 0 }],
+        truncatedIssueCount: 0,
+      };
+      const spine = buildCriteriaSpine(result, renderCriteriaDataBlock(result, "deadbeefcafef00d"), "deadbeefcafef00d");
+      const presence = computePresentCriterionDigests(body);
+      expect(presence.complete).toBe(true);
+      if (!presence.complete) continue;
+      for (const entry of spine) {
+        expect(entry.criterionDigest).toBeDefined();
+        if (entry.criterionDigest !== undefined) expect(presence.digests.has(entry.criterionDigest)).toBe(true);
+      }
+    }
+  });
+});
 
 function partialIssue(issueNumber: number): UnreviewedClosingIssueResult {
   return { issueNumber, truncationKind: "partially-truncated" };

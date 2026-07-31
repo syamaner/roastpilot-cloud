@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearStaleInlineBlockerComments,
+  annotateStaleCriterionBlockerComments,
+  fetchIssueBodyForAnnotation,
   deriveLinkedReferenceIssueNumberSets,
   findConfirmedUnresolvedReviewCommentIds,
   InlineBlockerCleanupError,
+  MAX_ANNOTATION_PATCHES,
   reconcileObsoleteInlineBlockerComments as reconcileObsoleteInlineBlockerCommentsWithPinnedCommits,
   verifyPullRequestSnapshotUnchanged,
   findExistingInlineCommentId,
@@ -13,12 +16,14 @@ import {
 } from "../../scripts/factory/publish-spec-grounding-inline-comment-io.mts";
 import {
   criterionBlockerCommentMarker,
+  buildStaleCriterionNote,
   CRITERION_BLOCKERS_AGGREGATE_COMMENT_MARKER,
   DIFF_TRUNCATED_BLOCKER_COMMENT_MARKER,
   inlineBlockerGenerationMarker,
   unreviewedClosingIssueCommentMarker,
   UNREVIEWED_ISSUES_AGGREGATE_COMMENT_MARKER,
 } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
+import { criterionOccurrenceDigest } from "../../scripts/factory/spec-grounding-runner-logic.mts";
 import type { BlockerCommentPlan } from "../../scripts/factory/publish-spec-grounding-blocker-logic.mts";
 import type { ExistingComment } from "../../scripts/factory/publish-spec-grounding-verdict-logic.mts";
 
@@ -141,6 +146,222 @@ function plan(overrides: Partial<BlockerCommentPlan> = {}): BlockerCommentPlan {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("stale criterion annotation I/O", () => {
+  const timestamp = "2026-07-31T10:20:30Z";
+  const absentDigest = criterionOccurrenceDigest(0, "old text");
+  const marker = criterionBlockerCommentMarker("12:0", absentDigest);
+  const baseBody = `blocker\n${marker}\n${inlineBlockerGenerationMarker("1")}`;
+
+  function comment(overrides: Record<string, unknown> = {}) {
+    return { id: 88, body: baseBody, user: { type: "Bot", login: "github-actions[bot]" }, ...overrides };
+  }
+
+  function annotationHandlers(
+    issueBody: string | null,
+    overrides: { resolved?: boolean; issueResponse?: Response; comments?: unknown[]; patch?: Response } = {},
+  ): Record<string, () => Response> {
+    return {
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse(overrides.comments ?? [comment()]),
+      "POST /graphql": () => reviewThreadsResponse([{ commentId: 88, isResolved: overrides.resolved ?? false }]),
+      "GET /repos/o/r/issues/12": () => overrides.issueResponse ?? jsonResponse({ body: issueBody, updated_at: timestamp }),
+      "PATCH /repos/o/r/pulls/comments/88": () => overrides.patch ?? jsonResponse({}),
+    };
+  }
+
+  it("absent digest + unresolved thread PATCHes stripped body plus one note, and issues no DELETE and no GraphQL mutation", async () => {
+    const { fetchMock, calls } = mockFetch(annotationHandlers("- [ ] new text"));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).toEqual({
+      annotatedCount: 1, withdrawnCount: 0, skippedIssueNumbers: [],
+    });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ body: baseBody + buildStaleCriterionNote(12, timestamp) });
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.filter((call) => call.url.endsWith("/graphql"))).toHaveLength(1);
+    expect(calls.find((call) => call.url.endsWith("/graphql"))?.body).toEqual(expect.objectContaining({ query: expect.stringMatching(/^\s*query /) }));
+  });
+
+  it("present digest withdraws a stale note", async () => {
+    const stale = baseBody + buildStaleCriterionNote(12, timestamp);
+    const { fetchMock, calls } = mockFetch(annotationHandlers("- [x] old text", { comments: [comment({ body: stale })] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).toEqual({
+      annotatedCount: 0, withdrawnCount: 1, skippedIssueNumbers: [],
+    });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ body: baseBody });
+  });
+
+  it("steady-state re-run makes zero write calls", async () => {
+    const stale = baseBody + buildStaleCriterionNote(12, timestamp);
+    const { fetchMock, calls } = mockFetch(annotationHandlers("- [ ] new", { comments: [comment({ body: stale })] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1);
+    expect(calls.filter((call) => ["PATCH", "DELETE"].includes(call.method))).toHaveLength(0);
+  });
+
+  it("resolved thread is never PATCHed", async () => {
+    const { fetchMock, calls } = mockFetch(annotationHandlers("", { resolved: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).resolves.toEqual({
+      annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [],
+    });
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("lookup failure annotates nothing", async () => {
+    const handlers = annotationHandlers("");
+    handlers["POST /graphql"] = () => errorResponse(500);
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).toEqual({ annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [12] });
+    expect(calls.some((call) => call.method === "PATCH" || call.url.endsWith("/issues/12"))).toBe(false);
+  });
+
+  it("non-bot comment carrying a forged digest marker is untouched", async () => {
+    for (const user of [{ type: "User", login: "github-actions[bot]" }, { type: "Bot", login: "attacker[bot]" }]) {
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([comment({ user })]),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it("future-generation comment is untouched", async () => {
+    const future = baseBody.replace(inlineBlockerGenerationMarker("1"), inlineBlockerGenerationMarker("2"));
+    const { fetchMock, calls } = mockFetch({ "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([comment({ body: future })]) });
+    vi.stubGlobal("fetch", fetchMock);
+    await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("blocker on a non-closing issue triggers no fetch and no PATCH", async () => {
+    const { fetchMock, calls } = mockFetch({ "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse([comment()]) });
+    vi.stubGlobal("fetch", fetchMock);
+    await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set(), 1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([
+    ["fetch failure never yields a note", errorResponse(500)],
+    ["malformed updated_at never reaches a comment body", jsonResponse({ body: "", updated_at: "bad" })],
+  ])("%s", async (_name, issueResponse) => {
+    const { fetchMock, calls } = mockFetch(annotationHandlers("", { issueResponse }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).skippedIssueNumbers).toEqual([12]);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("over-cap body yields no note", async () => {
+    const overCap = Array.from({ length: 10_001 }, () => "x").join("\n");
+    const { fetchMock, calls } = mockFetch(annotationHandlers(overCap));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).skippedIssueNumbers).toEqual([12]);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("PATCH 404 is tolerated", async () => {
+    const { fetchMock } = mockFetch(annotationHandlers("", { patch: errorResponse(404) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1)).resolves.toEqual({ annotatedCount: 0, withdrawnCount: 0, skippedIssueNumbers: [] });
+  });
+
+  it(">20 issues rotates the deterministic fetch window across generations and reports the excess", async () => {
+    const comments = Array.from({ length: 21 }, (_, index) => {
+      const issueNumber = index + 1;
+      return {
+        id: issueNumber,
+        body: `b\n${criterionBlockerCommentMarker(`${issueNumber}:0`, absentDigest)}\n${inlineBlockerGenerationMarker("1")}`,
+        user: { type: "Bot", login: "github-actions[bot]" },
+      };
+    });
+    const run = async (generation: number) => {
+      const handlers: Record<string, () => Response> = {
+        "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse(comments),
+        "POST /graphql": () => reviewThreadsResponse(comments.map(({ id }) => ({ commentId: id, isResolved: false }))),
+      };
+      for (let issueNumber = 1; issueNumber <= 21; issueNumber++) {
+        handlers[`GET /repos/o/r/issues/${issueNumber}`] = () => jsonResponse({ body: "- [ ] old text", updated_at: timestamp });
+      }
+      const { fetchMock, calls } = mockFetch(handlers);
+      vi.stubGlobal("fetch", fetchMock);
+      const result = await annotateStaleCriterionBlockerComments(
+        "t", "o", "r", 5, new Set(comments.map(({ id }) => id)), generation,
+      );
+      return {
+        fetched: calls.filter((call) => call.url.includes("/issues/")).map((call) => call.url),
+        skipped: result.skippedIssueNumbers,
+      };
+    };
+    const first = await run(1);
+    const second = await run(2);
+    expect(first.fetched).toHaveLength(20);
+    expect(second.fetched).toHaveLength(20);
+    expect(first.fetched).not.toEqual(second.fetched);
+    expect(first.skipped).toEqual([1]);
+    expect(second.skipped).toEqual([2]);
+  });
+
+  it("caps total PATCH attempts and visibly reports the truncated issue", async () => {
+    const comments = Array.from({ length: MAX_ANNOTATION_PATCHES + 5 }, (_, index) => ({
+      id: index + 1,
+      body: `b\n${criterionBlockerCommentMarker(`12:${index}`, absentDigest)}\n${inlineBlockerGenerationMarker("1")}`,
+      user: { type: "Bot", login: "github-actions[bot]" },
+    }));
+    const handlers: Record<string, () => Response> = {
+      "GET /repos/o/r/pulls/5/comments?per_page=100&page=1": () => jsonResponse(comments),
+      "POST /graphql": () => reviewThreadsResponse(comments.map(({ id }) => ({ commentId: id, isResolved: false }))),
+      "GET /repos/o/r/issues/12": () => jsonResponse({ body: "", updated_at: timestamp }),
+    };
+    for (const { id } of comments) handlers[`PATCH /repos/o/r/pulls/comments/${id}`] = () => jsonResponse({});
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await annotateStaleCriterionBlockerComments("t", "o", "r", 5, new Set([12]), 1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(MAX_ANNOTATION_PATCHES);
+    expect(result).toEqual({ annotatedCount: MAX_ANNOTATION_PATCHES, withdrawnCount: 0, skippedIssueNumbers: [12] });
+  });
+
+  it("drops an out-of-range issue marker without starving another issue", async () => {
+    const poison = {
+      id: 87,
+      body: `b\n${criterionBlockerCommentMarker("12345678901:0", absentDigest)}\n${inlineBlockerGenerationMarker("1")}`,
+      user: { type: "Bot", login: "github-actions[bot]" },
+    };
+    const handlers = annotationHandlers("", { comments: [poison, comment()] });
+    handlers["POST /graphql"] = () => reviewThreadsResponse([
+      { commentId: 87, isResolved: false }, { commentId: 88, isResolved: false },
+    ]);
+    handlers["GET /repos/o/r/issues/12345678901"] = () => jsonResponse({ body: "", updated_at: timestamp });
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+    const annotation = annotateStaleCriterionBlockerComments(
+      "t", "o", "r", 5, new Set([12, 12_345_678_901]), 1,
+    );
+    await expect(annotation).resolves.toMatchObject({ annotatedCount: 1 });
+    const result = await annotation;
+    expect(result.annotatedCount).toBe(1);
+    expect(calls.some((call) => call.url.includes("12345678901"))).toBe(false);
+  });
+
+  it("fetch accepts null body and rejects malformed response shapes", async () => {
+    const { fetchMock } = mockFetch({ "GET /repos/o/r/issues/12": () => jsonResponse({ body: null, updated_at: timestamp }) });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchIssueBodyForAnnotation("t", "o", "r", 12)).toEqual({ ok: true, body: "", updatedAt: timestamp });
+  });
+
+  it.each([
+    ["non-object", "bad"],
+    ["array", []],
+    ["non-string body", { body: 7, updated_at: timestamp }],
+    ["non-string updated_at", { body: "", updated_at: 7 }],
+    ["missing updated_at", { body: "" }],
+  ])("fetch rejects %s response", async (_label, responseBody) => {
+    const { fetchMock } = mockFetch({ "GET /repos/o/r/issues/12": () => jsonResponse(responseBody) });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchIssueBodyForAnnotation("t", "o", "r", 12)).toEqual({ ok: false });
+  });
 });
 
 describe("findExistingInlineComments", () => {
