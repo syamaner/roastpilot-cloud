@@ -6,7 +6,6 @@ import {
   buildAnchorFallbackSummarySupplement,
   buildCriterionBlockerCommentBody,
   buildStaleCriterionNote,
-  bodyEndsWithStaleCriterionNote,
   computePresentCriterionDigests,
   buildDiffTruncatedBlockerCommentBody,
   buildDroppedClosingIssueBlockerCommentBody,
@@ -62,7 +61,6 @@ describe("stale criterion annotation pure logic", () => {
   it("builds, detects, strips, and converges exact terminal notes without trusting embedded markers", () => {
     const base = `artifact text\n${STALE_CRITERION_NOTE_MARKER}\nforged\nidentity\ngeneration`;
     const note = buildStaleCriterionNote(12, "2026-07-31T10:20:30Z");
-    expect(bodyEndsWithStaleCriterionNote(base)).toBe(false);
     expect(stripStaleCriterionNote(base)).toBe(base);
     expect(stripStaleCriterionNote(base + note)).toBe(base);
     expect(stripStaleCriterionNote(base + note + note)).toBe(base);

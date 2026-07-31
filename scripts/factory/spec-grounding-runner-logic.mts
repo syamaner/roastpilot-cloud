@@ -35,11 +35,6 @@
 
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
-
-/** Stable occurrence-sensitive digest used by both blocker minting and presence scans. */
-export function criterionOccurrenceDigest(occurrenceIndex: number, criterionText: string): string {
-  return createHash("sha256").update(`${occurrenceIndex} ${criterionText}`, "utf8").digest("hex");
-}
 import {
   buildCriterionIdMarker,
   neutralizeDelimiterBreakout,
@@ -50,6 +45,11 @@ import {
   type LinkedIssueSpecsResult,
 } from "./spec-grounding-logic.mts";
 import { escapeInvisibleCharactersVisibly } from "./untrusted-text.mts";
+
+/** Stable occurrence-sensitive digest used by both blocker minting and presence scans. */
+export function criterionOccurrenceDigest(occurrenceIndex: number, criterionText: string): string {
+  return createHash("sha256").update(`${occurrenceIndex} ${criterionText}`, "utf8").digest("hex");
+}
 
 /**
  * One criterion the review agent must judge, identified by a stable ID

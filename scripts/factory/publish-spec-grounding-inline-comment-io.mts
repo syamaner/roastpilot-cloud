@@ -80,6 +80,7 @@ const COMMENT_PAGE_SIZE = 100;
 const REVIEW_THREAD_PAGE_SIZE = 100;
 const MAX_REVIEW_THREAD_PAGES = 50;
 export const MAX_ANNOTATION_ISSUE_FETCHES = 20;
+export const MAX_ANNOTATION_PATCHES = 20;
 const ISSUE_UPDATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 const REVIEW_THREAD_RESOLUTION_QUERY = `
@@ -374,6 +375,7 @@ export async function annotateStaleCriterionBlockerComments(
     const generation = extractInlineBlockerGeneration(comment.body);
     const identity = extractCriterionDigestFromInlineBlockerMarker(comment.body);
     if (generation === null || generation > currentGeneration || identity === null) return [];
+    if (identity.issueNumber > 9_999_999_999) return [];
     if (!currentlyClosingIssueNumbers.has(identity.issueNumber)) return [];
     return [{ comment, ...identity }];
   });
@@ -399,12 +401,15 @@ export async function annotateStaleCriterionBlockerComments(
   }
 
   const unresolved = candidates.filter(({ comment }) => unresolvedIds.has(comment.id));
-  const issueNumbers = [...new Set(unresolved.map(({ issueNumber }) => issueNumber))];
-  const processedIssueNumbers = issueNumbers.slice(0, MAX_ANNOTATION_ISSUE_FETCHES);
-  const skipped = new Set(issueNumbers.slice(MAX_ANNOTATION_ISSUE_FETCHES));
+  const issueNumbers = [...new Set(unresolved.map(({ issueNumber }) => issueNumber))].sort((a, b) => a - b);
+  const rotation = currentGeneration % issueNumbers.length;
+  const rotatedIssueNumbers = [...issueNumbers.slice(rotation), ...issueNumbers.slice(0, rotation)];
+  const processedIssueNumbers = rotatedIssueNumbers.slice(0, MAX_ANNOTATION_ISSUE_FETCHES);
+  const skipped = new Set(rotatedIssueNumbers.slice(MAX_ANNOTATION_ISSUE_FETCHES));
   let annotatedCount = 0;
   let withdrawnCount = 0;
-  for (const issueNumber of processedIssueNumbers) {
+  let patchAttempts = 0;
+  issueLoop: for (const [processedIndex, issueNumber] of processedIssueNumbers.entries()) {
     const issue = await fetchIssueBodyForAnnotation(token, owner, repo, issueNumber);
     if (!issue.ok) {
       skipped.add(issueNumber);
@@ -420,6 +425,11 @@ export async function annotateStaleCriterionBlockerComments(
       const isPresent = presence.digests.has(digest);
       const desired = isPresent ? stripped : stripped + buildStaleCriterionNote(issueNumber, issue.updatedAt);
       if (desired === comment.body) continue;
+      if (patchAttempts >= MAX_ANNOTATION_PATCHES) {
+        for (const skippedIssueNumber of processedIssueNumbers.slice(processedIndex)) skipped.add(skippedIssueNumber);
+        break issueLoop;
+      }
+      patchAttempts++;
       try {
         await githubRequest(token, "PATCH", `/repos/${owner}/${repo}/pulls/comments/${comment.id}`, {
           body: desired,

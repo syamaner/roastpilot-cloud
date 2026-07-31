@@ -94,12 +94,29 @@ import type { JoinedCriterionResult, UnreviewedClosingIssueResult } from "./publ
 import { extractCheckboxLineText, MAX_CRITERIA_PER_ISSUE } from "./spec-grounding-logic.mts";
 import { criterionOccurrenceDigest } from "./spec-grounding-runner-logic.mts";
 
+/**
+ * Work bound for advisory scans. Genuine GitHub bodies can exceed this many
+ * newline-delimited lines within their character cap; crossing it therefore
+ * returns incomplete and fails toward no annotation, never "criteria absent".
+ */
 export const MAX_ANNOTATION_SCAN_LINES = 10_000;
 export const STALE_CRITERION_NOTE_MARKER =
   "<!-- roastpilot-factory:spec-grounding-blocker:stale-criterion-note:do-not-edit -->";
 const ISSUE_UPDATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const STALE_CRITERION_NOTE_SUFFIX_PATTERN =
-  /\r?\n\r?\n<!-- roastpilot-factory:spec-grounding-blocker:stale-criterion-note:do-not-edit -->\r?\n> \*\*Possibly stale:\*\* as of issue #(\d{1,10})'s last edit at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z), this criterion's exact text no longer appears as a checkbox item anywhere in that issue's body\. It may have been reworded, removed, or reformatted\. A human should re-check the issue and resolve this thread if the obligation no longer applies\. This note is informational only; it does not resolve, delete, or weaken this blocker\.$/;
+const STALE_CRITERION_NOTE_LINE_TEMPLATE =
+  "> **Possibly stale:** as of issue #{issueNumber}'s last edit at {updatedAt}, this criterion's exact text no longer appears as a checkbox item anywhere in that issue's body. It may have been reworded, removed, or reformatted. A human should re-check the issue and resolve this thread if the obligation no longer applies. This note is informational only; it does not resolve, delete, or weaken this blocker.";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const [NOTE_BEFORE_ISSUE = "", NOTE_AFTER_ISSUE = ""] = STALE_CRITERION_NOTE_LINE_TEMPLATE.split("{issueNumber}");
+const [NOTE_BEFORE_UPDATED_AT = "", NOTE_AFTER_UPDATED_AT = ""] = NOTE_AFTER_ISSUE.split("{updatedAt}");
+const STALE_CRITERION_NOTE_SUFFIX_PATTERN = new RegExp(
+  `\\r?\\n\\r?\\n${escapeRegExp(STALE_CRITERION_NOTE_MARKER)}\\r?\\n` +
+    `${escapeRegExp(NOTE_BEFORE_ISSUE)}(\\d{1,10})${escapeRegExp(NOTE_BEFORE_UPDATED_AT)}` +
+    `(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z)${escapeRegExp(NOTE_AFTER_UPDATED_AT)}$`,
+);
 
 export function computePresentCriterionDigests(
   issueBody: string,
@@ -121,7 +138,9 @@ export function computePresentCriterionDigests(
 }
 
 function staleCriterionNoteLine(issueNumber: number, issueUpdatedAt: string): string {
-  return `> **Possibly stale:** as of issue #${issueNumber}'s last edit at ${issueUpdatedAt}, this criterion's exact text no longer appears as a checkbox item anywhere in that issue's body. It may have been reworded, removed, or reformatted. A human should re-check the issue and resolve this thread if the obligation no longer applies. This note is informational only; it does not resolve, delete, or weaken this blocker.`;
+  return STALE_CRITERION_NOTE_LINE_TEMPLATE
+    .replace("{issueNumber}", String(issueNumber))
+    .replace("{updatedAt}", issueUpdatedAt);
 }
 
 export function buildStaleCriterionNote(issueNumber: number, issueUpdatedAt: string): string {
@@ -142,10 +161,6 @@ export function stripStaleCriterionNote(body: string): string {
     stripped = stripped.slice(0, match.index);
   }
   return stripped;
-}
-
-export function bodyEndsWithStaleCriterionNote(body: string): boolean {
-  return stripStaleCriterionNote(body) !== body;
 }
 
 /** A single deterministic anchor point in a PR's diff: a file path and a line number on the file's NEW (post-PR) side. */
