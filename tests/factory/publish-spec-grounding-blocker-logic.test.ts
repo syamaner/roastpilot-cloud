@@ -71,7 +71,7 @@ describe("stale criterion annotation pure logic", () => {
     expect(() => buildStaleCriterionNote(Number.MAX_SAFE_INTEGER, "2026-07-31T10:20:30Z")).toThrow(/issue number/);
   });
 
-  it("finds exact, checked, fenced, indented, duplicate and every GFM marker text, but not changed text", () => {
+  it("high-occurrence-index digest stays present after sibling occurrences are checked off or removed", () => {
     const body = [
       "- [ ] alpha", "* [x] beta", "+ [X] gamma", "1. [ ] delta", "2) [x] epsilon",
       "```", "- [ ] fenced", "```", "    - [ ] indented", "- [ ] alpha",
