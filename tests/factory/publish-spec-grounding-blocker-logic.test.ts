@@ -110,7 +110,10 @@ describe("stale criterion annotation pure logic", () => {
       const presence = computePresentCriterionDigests(body);
       expect(presence.complete).toBe(true);
       if (!presence.complete) continue;
-      for (const entry of spine) expect(presence.digests.has(entry.criterionDigest)).toBe(true);
+      for (const entry of spine) {
+        expect(entry.criterionDigest).toBeDefined();
+        if (entry.criterionDigest !== undefined) expect(presence.digests.has(entry.criterionDigest)).toBe(true);
+      }
     }
   });
 });
