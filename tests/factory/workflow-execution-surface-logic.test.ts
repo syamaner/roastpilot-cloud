@@ -1989,9 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    // Issue #192 moved workflow files 7 -> 8: the supported throwaway
-    // `_probe-192-tag-mode-tools.yml` workflow joined the live corpus.
-    expect(names).toHaveLength(8);
+    expect(names).toHaveLength(7);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2060,29 +2058,14 @@ jobs:
       // to exclude untrusted third-party comments from the review prompt.
       // jobs/runSteps/actionSteps are unchanged.
       //
-      // Issue #192 moved jobs 9 -> 10: the supported throwaway probe workflow
-      // added its one `probe` ordinary job.
-      //
-      // Issue #192 moved runSteps 29 -> 30: the probe added exactly one `run:`
-      // step, `Surface the review run's own denial evidence`.
-      //
-      // Issue #192 moved actionSteps 27 -> 29: the probe added exactly the
-      // checkout action and the claude-code-action probe invocation.
-      //
-      // Issue #192 moved inputs 68 -> 79: checkout adds
-      // `persist-credentials`, while claude-code-action adds its ten `with:`
-      // keys: `claude_code_oauth_token`, `github_token`, `use_commit_signing`,
-      // `allowed_bots`, `allowed_non_write_users`, `include_comments_by_actor`,
-      // `show_full_output`, `track_progress`, `claude_args`, and `prompt`.
-      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 10,
-      runSteps: 30,
-      actionSteps: 29,
-      inputs: 79,
+      jobs: 9,
+      runSteps: 29,
+      actionSteps: 27,
+      inputs: 68,
     });
   });
 
@@ -2127,7 +2110,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 18,
+      jobs: 17,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2146,24 +2129,9 @@ jobs:
       // Issue #194 moved inputs 112 -> 113: exactly one
       // `include_comments_by_actor` input was added to claude-review; no job
       // or step count changed.
-      //
-      // Issue #192 moved jobs 17 -> 18: the supported throwaway probe
-      // workflow added its one `probe` ordinary job.
-      //
-      // Issue #192 moved runSteps 54 -> 55: the probe added exactly one `run:`
-      // step, `Surface the review run's own denial evidence`.
-      //
-      // Issue #192 moved actionSteps 44 -> 46: the probe added exactly the
-      // checkout action and the claude-code-action probe invocation.
-      //
-      // Issue #192 moved inputs 113 -> 124: checkout adds
-      // `persist-credentials`, while claude-code-action adds its ten `with:`
-      // keys: `claude_code_oauth_token`, `github_token`, `use_commit_signing`,
-      // `allowed_bots`, `allowed_non_write_users`, `include_comments_by_actor`,
-      // `show_full_output`, `track_progress`, `claude_args`, and `prompt`.
-      runSteps: 55,
-      actionSteps: 46,
-      inputs: 124,
+      runSteps: 54,
+      actionSteps: 44,
+      inputs: 113,
     });
   });
 });
