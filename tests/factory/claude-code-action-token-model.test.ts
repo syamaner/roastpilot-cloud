@@ -44,10 +44,10 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 // The triggering-actor allowlist (#146). Unrelated to comment authorship, and
 // must NOT move when the completion-comment author literal changes -- T-4.
 const EXPECTED_ALLOWED_BOTS = "claude,claude[bot]";
-// The live corpus has exactly four invocations (claude-review, spec-grounded,
-// triage, implement). A fifth must fail this tripwire so it cannot be added
-// without owning the `github_token` contract too (class sweep, #157 §4).
-const EXPECTED_INVOCATION_COUNT = 4;
+// The live corpus has exactly five invocations (claude-review, spec-grounded,
+// triage, implement, and the throwaway #192 probe); the probe also passes the
+// built-in `github_token`. This pin returns to four when cleanup removes it.
+const EXPECTED_INVOCATION_COUNT = 5;
 
 type Mapping = Record<string, unknown>;
 
@@ -390,7 +390,7 @@ describe("claude-code-action token model (issue #157)", () => {
     }
   });
 
-  it("T-5: every live claude-code-action invocation passes the built-in token, and there are exactly four", () => {
+  it("T-5: every live claude-code-action invocation passes the built-in token, and there are exactly five", () => {
     const analysis = analyzeTokenModel(collectSourceFiles());
     expect(analysis.failures).toEqual([]);
     expect(analysis.invocationCount).toBe(EXPECTED_INVOCATION_COUNT);
