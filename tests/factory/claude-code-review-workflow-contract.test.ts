@@ -91,3 +91,32 @@ describe("claude-code-review workflow edited-event contract", () => {
     expect(step.run).toContain("reviewedBaseSha: $reviewedBaseSha");
   });
 });
+
+describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
+  it("T22 binds include_comments_by_actor to the PR author, not a wildcard or a blank", () => {
+    // Exact-string match, not a truthy/presence check (fsr-195 mutation M2:
+    // swapping this input for an inert one of equal count, e.g.
+    // `label_trigger: ""`, is otherwise invisible to every existing test --
+    // the D140 drift counters in workflow-execution-surface-logic.test.ts
+    // only pin cardinality, not which key it is or what it's bound to). This
+    // assertion fails closed on removal (the key is absent -> undefined !==
+    // the expected string), on rebinding to "" or "*" (still not the
+    // expected string), and on rebinding to a different context expression.
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    expect(asMapping(step.with).include_comments_by_actor).toBe(
+      "${{ github.event.pull_request.user.login }}",
+    );
+  });
+
+  it("T23 keeps track_progress true, the precondition that makes the T22 guard live at all", () => {
+    // fsr-195 mutation M10: flipping track_progress to false is invisible to
+    // T22 (the input count and binding are untouched) but makes
+    // include_comments_by_actor completely inert -- detectMode() only forces
+    // tag mode (which reads this input via fetchGitHubData) when
+    // track_progress is truthy; false falls through to agent mode, which
+    // never calls fetchGitHubData at all. A reader seeing T22 green would
+    // otherwise reasonably assume the filter is live.
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    expect(asMapping(step.with).track_progress).toBe(true);
+  });
+});

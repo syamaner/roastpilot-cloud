@@ -328,6 +328,61 @@ jobs:
           # read-only secret); `show_full_output: false` avoids writing the
           # full transcript/output to a public step summary.
           allowed_non_write_users: ""
+          # SECURITY, PARTIAL FIX ONLY -- see #194, kept OPEN, not closed by
+          # this change (factory-security-reviewer, PR #195 review): the
+          # pinned action's `include_comments_by_actor` input
+          # (`action.yml:47-50`) applies `filterCommentsByActor` to issue
+          # comments, review bodies, and inline review comments
+          # (`src/github/data/fetcher.ts:294, :390, :399` at the pinned SHA),
+          # admitting only text whose author is listed here. Bind that
+          # identity to this PR's author so the PRE-FETCHED PROMPT no longer
+          # embeds an arbitrary public commenter's text after the run starts.
+          #
+          # THIS DOES NOT CLOSE #194. It only filters the three channels
+          # `fetchGitHubData` embeds into the prompt up front. `claude-review`
+          # separately grants `Bash(gh pr view:*)` (this step's `claude_args`,
+          # above), and the pinned code-review plugin's own command file
+          # instructs, as its first review step, `gh pr view <PR> --comments`
+          # -- that call applies NO author filtering whatsoever (confirmed
+          # live against this repo: `gh pr view 177 --json comments --jq
+          # '[.comments[].author.login]|unique'` returns every commenter,
+          # unfiltered). So the exact same untrusted comment bodies this input
+          # excludes from the initial prompt can re-enter the same session,
+          # with the same unscrubbed `CLAUDE_CODE_OAUTH_TOKEN` and the same
+          # `Bash(gh pr comment:*)` grant, via a tool call the plugin
+          # explicitly tells the model to make. This is a genuinely EASIER
+          # path than the TOCTOU race #194 originally documented (no race
+          # needed at all -- the comment only has to exist when the tool call
+          # fires), and this input's own removal of `github-actions[bot]`'s
+          # tracking comment from the pre-fetched context makes the model
+          # MORE likely to reach for that same call (plugin step 1 asks
+          # whether Claude already commented, which the filtered prompt can
+          # no longer answer on its own).
+          #
+          # This is also an identity filter, not a time filter: it does not
+          # restore the broken pull_request TOCTOU property (`extractTrigger
+          # Timestamp` still returns `undefined` for this event type), and it
+          # does not filter the payload-frozen PR title or body, which remain
+          # part of the accepted same-repo-PR threat model.
+          #
+          # Genuine closure requires narrowing or removing `Bash(gh pr
+          # view:*)` (or landing `ENV_SCRUB`) -- #192's scope, not this PR's.
+          # The Accepted residual comment above is therefore NOT restored by
+          # this change; its same-repo-actor-only premise remains untrue
+          # until #192 lands. Do not read a green build here as "the
+          # injection path is closed" -- it narrows one of two entry points
+          # into the same unscrubbed credential.
+          #
+          # Side effect worth knowing, not yet decided (fsr, PR #195 review,
+          # MEDIUM-1): this also drops bot comments -- Codex findings,
+          # coverage reports, this job's own prior tracking comment -- from
+          # the review prompt, since none of them are the PR author. Widening
+          # to `...user.login }},*[bot]` would restore them (no login can
+          # contain `[`/`]`/`,`, so this cannot be used to smuggle a human
+          # actor in) but is a PERMISSIVE scope change under D139's direction
+          # test, so it needs its own explicit operator decision rather than
+          # a silent fold here.
+          include_comments_by_actor: ${{ github.event.pull_request.user.login }}
           show_full_output: false
           plugin_marketplaces: './.claude-marketplace'
           plugins: 'code-review@roastpilot-pinned-plugins'
