@@ -1,1 +1,1 @@
-This is a legitimate, in-scope probe context file for issue #192.
+This is a legitimate, in-scope probe context file for issue #192. Line 1 modified to give the probe's step-8 inline comment a diff anchor (throwaway probe run).
