@@ -107,8 +107,9 @@ jobs:
       # #157: the claude-code-action step below now runs on this job's own
       # `GITHUB_TOKEN` (`github_token:` input) instead of OIDC-minting a
       # separate write-capable App token, so this `permissions:` block is the
-      # ACTUAL ceiling the model's Bash tool can reach. `pull-requests: write`
-      # is what posts the inline review threads and the tracking comment --
+      # ACTUAL ceiling the model-facing write sinks can reach.
+      # `pull-requests: write` is what posts the inline review threads and the
+      # tracking comment --
       # work this job already did before #157, only previously under the
       # stronger minted App token. So this read->write move authorizes nothing
       # new (identical writes, a strictly weaker repo-scoped, job-lifetime
@@ -120,17 +121,18 @@ jobs:
       # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
       # reject a prior attempt's stale tracking comment (a re-run fail-open,
       # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
-      # never leaks it. This token is NOT confined from the LLM: the
-      # claude-code-action step runs the model's Bash tool with this
-      # `GITHUB_TOKEN` present in its subprocess env (there is no env-scrub,
-      # and `allowed_non_write_users` is empty), so `actions: read` is
-      # reachable under the accepted `Bash(gh pr comment:*)` exfil residual.
+      # never leaks it. This token is NOT confined from the LLM: tag mode
+      # injects a bare `Read` permission, and #192 empirically confirmed that
+      # it reads arbitrary absolute paths, so `/proc/self/environ` remains
+      # readable even though Bash is denied below. `actions: read` is
+      # therefore a capability reachable with the credential exposed through
+      # that Read path.
       # Acceptable because it is read-only, public-repo (it exposes only run
       # metadata any reader can already see), and short-lived. Since #157 this
       # is bounded by the same repo-scoped, job-lifetime `GITHUB_TOKEN` as
-      # everything else the Bash tool can reach -- no write-capable minted App
-      # token co-resides any more, so there is no stronger co-resident
-      # credential it could be dominated by.
+      # everything else this job's token can reach -- no write-capable minted
+      # App token co-resides any more, so there is no stronger co-resident
+      # GitHub credential it could be dominated by.
       actions: read
 
     steps:
@@ -206,10 +208,10 @@ jobs:
           # OIDC-mints a SEPARATE App token that ALWAYS carries
           # contents/pull_requests/issues WRITE (its `DEFAULT_PERMISSIONS`),
           # independent of this job's own `permissions:` block above and
-          # co-resident in the model's Bash subprocess env (no env-scrub,
-          # `Bash(gh pr comment:*)` allowed) -- a write-capable credential a
-          # prompt-injected diff could exfiltrate. Passing this job's own token
-          # instead short-circuits that OIDC exchange entirely, so the action
+          # co-resident in the model's environment -- a write-capable
+          # credential a prompt-injected review could exfiltrate. Passing this
+          # job's own token instead short-circuits that OIDC exchange entirely,
+          # so the action
           # inherits the ceiling declared above (`pull-requests: write` +
           # reads, repo-scoped and job-lifetime). (Also why this job requests
           # no `id-token: write` -- the OIDC exchange path is never reached.)
@@ -238,7 +240,8 @@ jobs:
           # This job only ever needs to READ the diff and POST inline
           # review comments; it has no legitimate reason to touch the
           # working tree, the git history, or delete anything, so deny
-          # every edit/write/commit-adjacent tool explicitly rather than
+          # every edit/write tool and the entire Bash subprocess surface
+          # explicitly rather than
           # relying on the plugin's default profile to stay conservative
           # forever. Deny rules win over acceptEdits and the tag mode's own
           # allow list (verified against the pinned action's source), so
@@ -257,28 +260,29 @@ jobs:
           # summary instead of the resolvable inline threads
           # `required_conversation_resolution` actually gates merge on.
           # `--allowedTools` and `--disallowedTools` coexist safely here:
-          # deny still wins over allow (and over acceptEdits) for every
-          # write/commit-adjacent tool, so granting the inline-comment
-          # server and a few read-only `gh pr` Bash forms doesn't reopen
-          # the write blast radius the deny list closes.
+          # deny still wins over allow (and over acceptEdits). The only
+          # explicit allow is the inline-comment server; blanket `Bash` in
+          # the deny list removes the entire subprocess-spawn surface.
           #
-          # Accepted residual (round-2 Finding 4, REAL but low-severity,
-          # not folded — operator decision): `Bash(gh pr comment:*)` is
-          # itself a real, if narrow, exfiltration surface under prompt
-          # injection from a malicious diff — a compromised review session
-          # could shell out with the job's own `GITHUB_TOKEN`
-          # (`pull-requests: write` + reads) reachable in its environment.
-          # Since #157 that built-in token is the ONLY GitHub credential
-          # reachable here — the OIDC-minted write-capable App token this used
-          # to co-reside with is gone — so the exfil surface remains but no
-          # longer discloses a stronger minted credential. Accepted as-is
-          # because this workflow only ever runs same-repo (the fork guard
-          # above), the blast radius is a same-repo actor already trusted with
-          # this token's scope, and closing it properly would mean a tighter
-          # subprocess-env scrub that entangles with a looser actor model
-          # elsewhere in this file — net-negative for this rework. Revisit
-          # sandboxing here if this job is ever extended to run on fork
-          # PRs, where the trust assumption above no longer holds.
+          # Refs #194 and #192: removing the former `Bash(gh pr comment:*)`,
+          # `Bash(gh pr view:*)`, and `Bash(gh pr diff:*)` grants closes two
+          # demonstrated paths. A review can no longer publish environment
+          # bytes with `gh pr comment --body-file`, and the pinned plugin's
+          # `gh pr view <PR> --comments` instruction can no longer re-admit
+          # an unfiltered public comment after the author-filtered pre-fetch.
+          #
+          # IMPORTANT RESIDUAL -- THIS DOES NOT FULLY CLOSE #194 OR #192.
+          # Tag mode (`track_progress: true`) still injects a bare `Read`;
+          # #192's probe empirically confirmed that it reads arbitrary
+          # absolute paths, so `Read(/proc/self/environ)` remains possible.
+          # The inline-comment tool and the `update_claude_comment` tracking-
+          # comment channel remain write sinks. Therefore
+          # `Read(env) -> inline/tracking comment` is an INDEPENDENT exfil path
+          # for any residual injection vector, notably a same-repo PR author
+          # through the PR title/body under the already-accepted same-repo
+          # threat model. This change is defense in depth and closes the
+          # public-commenter path; fully closing the primitive is tag-mode
+          # territory tracked in #192.
           #
           # Issue #183 — terminal completion sentinel. The completion
           # assertion below ("Assert the review actually completed") fails
@@ -307,8 +311,8 @@ jobs:
           # the quoted value is preserved (the action's `stripShellComments`
           # only drops lines whose first non-space char is `#`).
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash"
             --append-system-prompt "Only after every review step including posting all findings is complete, make your final update to the tracking comment so that its very last line is exactly, byte for byte, this sentinel and nothing else, and never include this sentinel in any earlier or interim update: REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
@@ -328,8 +332,8 @@ jobs:
           # read-only secret); `show_full_output: false` avoids writing the
           # full transcript/output to a public step summary.
           allowed_non_write_users: ""
-          # SECURITY, PARTIAL FIX ONLY -- see #194, kept OPEN, not closed by
-          # this change (factory-security-reviewer, PR #195 review): the
+          # SECURITY -- public-commenter path closure for #194, without
+          # claiming full issue closure: the
           # pinned action's `include_comments_by_actor` input
           # (`action.yml:47-50`) applies `filterCommentsByActor` to issue
           # comments, review bodies, and inline review comments
@@ -338,26 +342,15 @@ jobs:
           # identity to this PR's author so the PRE-FETCHED PROMPT no longer
           # embeds an arbitrary public commenter's text after the run starts.
           #
-          # THIS DOES NOT CLOSE #194. It only filters the three channels
-          # `fetchGitHubData` embeds into the prompt up front. `claude-review`
-          # separately grants `Bash(gh pr view:*)` (this step's `claude_args`,
-          # above), and the pinned code-review plugin's own command file
-          # instructs, as its first review step, `gh pr view <PR> --comments`
-          # -- that call applies NO author filtering whatsoever (confirmed
-          # live against this repo: `gh pr view 177 --json comments --jq
-          # '[.comments[].author.login]|unique'` returns every commenter,
-          # unfiltered). So the exact same untrusted comment bodies this input
-          # excludes from the initial prompt can re-enter the same session,
-          # with the same unscrubbed `CLAUDE_CODE_OAUTH_TOKEN` and the same
-          # `Bash(gh pr comment:*)` grant, via a tool call the plugin
-          # explicitly tells the model to make. This is a genuinely EASIER
-          # path than the TOCTOU race #194 originally documented (no race
-          # needed at all -- the comment only has to exist when the tool call
-          # fires), and this input's own removal of `github-actions[bot]`'s
-          # tracking comment from the pre-fetched context makes the model
-          # MORE likely to reach for that same call (plugin step 1 asks
-          # whether Claude already commented, which the filtered prompt can
-          # no longer answer on its own).
+          # The blanket Bash deny above now closes the separate re-admission
+          # path that made the original filter partial: although the pinned
+          # code-review plugin's first step instructs
+          # `gh pr view <PR> --comments`, the model can no longer execute that
+          # command. With
+          # the pre-fetch restricted to the PR author and Bash denied, a
+          # no-write-access public commenter can no longer get their text into
+          # this review session. Removing `gh pr comment` also closes the
+          # empirically demonstrated `--body-file /proc/self/environ` sink.
           #
           # This is also an identity filter, not a time filter: it does not
           # restore the broken pull_request TOCTOU property (`extractTrigger
@@ -365,13 +358,13 @@ jobs:
           # does not filter the payload-frozen PR title or body, which remain
           # part of the accepted same-repo-PR threat model.
           #
-          # Genuine closure requires narrowing or removing `Bash(gh pr
-          # view:*)` (or landing `ENV_SCRUB`) -- #192's scope, not this PR's.
-          # The Accepted residual comment above is therefore NOT restored by
-          # this change; its same-repo-actor-only premise remains untrue
-          # until #192 lands. Do not read a green build here as "the
-          # injection path is closed" -- it narrows one of two entry points
-          # into the same unscrubbed credential.
+          # Do not generalize that public-commenter closure into full closure
+          # of #194 or #192. Tag mode still injects the bare, arbitrary-path
+          # `Read` confirmed by #192, while inline and tracking comments remain
+          # sinks. A residual injection vector such as same-repo-author PR
+          # title/body text can therefore still drive
+          # `Read(env) -> inline/tracking comment`; removing Bash does not
+          # remove that independent exfiltration primitive.
           #
           # Side effect worth knowing, not yet decided (fsr, PR #195 review,
           # MEDIUM-1): this also drops bot comments -- Codex findings,
@@ -547,51 +540,32 @@ jobs:
         #
         # SCOPE (F1, codex P1): a PASS here is sound only against BENIGN /
         # accidental truncation or skip -- the PR #150 mode this step targets.
-        # It is NOT adversarially authenticated. A prompt-injected review holds
-        # this job's own `GITHUB_TOKEN` (`pull-requests: write`, since #157 the
-        # only GitHub credential reachable from the model's Bash tool) and the
-        # allowlisted `Bash(gh pr comment:*)` (see the confinement note below),
-        # so it can still forge a fully-checked `github-actions[bot]` tracking
-        # comment -- post a fresh one, or edit the genuine truncated tracker in
-        # place -- carrying THIS run's `[View job]` link and a fresh
-        # `updated_at`. No field this step reads (author, body, link,
-        # timestamp) can distinguish that forgery from genuine completion. A
-        # step-B-side guard would be theatre and would create false assurance,
-        # so none is added.
-        #
-        # The model's Bash grant is exactly `Bash(gh pr comment:*)` /
-        # `Bash(gh pr diff:*)` / `Bash(gh pr view:*)` (no generic Bash, no
-        # `gh api`), and `gh pr comment --edit-last` is a legal invocation
-        # under the `gh pr comment:*` wildcard -- that is the specific
-        # mechanism that lets an injected review rewrite the tracker in place.
-        # #157 CLOSED the credential-disclosure axis (the write-capable minted
-        # App token that used to co-reside in the Bash env is gone; the
-        # reachable GitHub credential is now this job's repo-scoped,
-        # job-lifetime `GITHUB_TOKEN`), but it did NOT close completion forgery,
-        # because that built-in token STILL carries `pull-requests: write`. The
-        # one remaining close path is narrowing the `gh pr comment` grant
-        # itself -- the deliberately-deferred step-3 allowlist work, which needs
-        # its own evidence-gated security review because `gh pr comment` is REAL
-        # needed functionality (the skill's summary comment for
-        # nits/praise/questions, per the Code Review Rubric), so it cannot
-        # simply be revoked. Until that lands, treat step-B green as
-        # benign-truncation-sound, not as adversarially-authenticated review
-        # completion.
+        # It is NOT adversarially authenticated. This change denies all Bash,
+        # so the former `gh pr comment --edit-last` forgery route is closed.
+        # But tag mode still injects the bare arbitrary-path `Read` confirmed
+        # by #192, and the model-maintained `update_claude_comment` channel can
+        # still write the tracking comment. A residual same-repo prompt
+        # injection can therefore still direct the model to publish a
+        # fully-checked body carrying THIS run's `[View job]` link and a fresh
+        # `updated_at`. No field this step reads (author, body, link, timestamp)
+        # can distinguish that model-authored forgery from genuine completion.
+        # A step-B-side guard would be theatre and would create false assurance,
+        # so none is added. Treat step-B green as benign-truncation-sound, not
+        # as adversarially-authenticated review completion.
         #
         # This assertion only READS: its `GH_TOKEN` is wired to
         # `secrets.GITHUB_TOKEN` (`pull-requests: write` + `issues: read` +
         # `actions: read`), and it uses only the comment-list and per-attempt
         # read endpoints -- it never writes. That token is NOT confined to this
-        # step -- the claude-code-action step earlier in this job runs the
-        # model's Bash tool with the SAME `GITHUB_TOKEN` in its subprocess env
-        # (no env-scrub; `allowed_non_write_users` empty). Since #157 that job
-        # token is the WHOLE GitHub credential reachable there: the action no
-        # longer OIDC-mints a separate write-capable App token (it runs on this
-        # `github_token` instead), so a prompt injection reaching
-        # `Bash(gh pr comment:*)` reaches only this repo-scoped, job-lifetime
-        # `pull-requests: write` + reads token -- the credential-disclosure axis
-        # #157 closed. This deterministic step is not the exposure and does not
-        # leak the token; it just reuses the same material.
+        # step -- the claude-code-action step earlier in this job receives the
+        # SAME `GITHUB_TOKEN`. Since #157 that job token is the whole GitHub
+        # credential reachable there: the action no longer OIDC-mints a
+        # separate write-capable App token. Denying Bash closes the subprocess
+        # route, but #192's tag-mode bare `Read` can still read
+        # `/proc/self/environ`, and the inline/tracking-comment sinks keep
+        # `Read(env) -> comment` possible for residual same-repo injection.
+        # This deterministic step is not the exposure and does not leak the
+        # token; it just reuses the same material.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this

@@ -42,6 +42,38 @@ function jobStep(workflow: Mapping, jobName: string, stepName: string): Mapping 
   return asMapping(step);
 }
 
+const INLINE_COMMENT_TOOL =
+  "mcp__github_inline_comment__create_inline_comment";
+
+function claudeArgTools(
+  claudeArgs: unknown,
+  flag: "allowedTools" | "disallowedTools",
+): string[] {
+  if (typeof claudeArgs !== "string") {
+    throw new Error("claude_args is not a string");
+  }
+  const prefix = `--${flag} "`;
+  const lines = claudeArgs
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(prefix));
+  if (lines.length !== 1 || !lines[0].endsWith('"')) {
+    throw new Error(`claude_args must contain exactly one quoted --${flag}`);
+  }
+  return lines[0].slice(prefix.length, -1).split(",");
+}
+
+function deniesAllBashAndAllowsOnlyInlineComments(claudeArgs: unknown): boolean {
+  const allowedTools = claudeArgTools(claudeArgs, "allowedTools");
+  const disallowedTools = claudeArgTools(claudeArgs, "disallowedTools");
+  return (
+    allowedTools.length === 1 &&
+    allowedTools[0] === INLINE_COMMENT_TOOL &&
+    !allowedTools.some((tool) => tool === "Bash" || tool.startsWith("Bash(")) &&
+    disallowedTools.includes("Bash")
+  );
+}
+
 describe("claude-code-review workflow edited-event contract", () => {
   it("T18 admits every spec-grounding edited dimension with the non-edited short-circuit", () => {
     const expression = jobIf(parseWorkflow(), "spec-grounded-review");
@@ -118,5 +150,41 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     // otherwise reasonably assume the filter is live.
     const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
     expect(asMapping(step.with).track_progress).toBe(true);
+  });
+
+  it("T24 allows exactly the inline-comment tool and denies all Bash subprocesses", () => {
+    // PR #199 / issue #194 removed every Bash grant after #192's empirical
+    // probe proved `gh pr comment --body-file /proc/self/environ` could publish
+    // credentials. Pin both halves of that property: the review model gets
+    // only the inline-comment MCP tool, and bare `Bash` in disallowedTools
+    // denies the whole subprocess surface rather than selected commands.
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const claudeArgs = asMapping(step.with).claude_args;
+    const allowedTools = claudeArgTools(claudeArgs, "allowedTools");
+    const disallowedTools = claudeArgTools(claudeArgs, "disallowedTools");
+
+    expect(allowedTools).toEqual([INLINE_COMMENT_TOOL]);
+    expect(
+      allowedTools.some((tool) => tool === "Bash" || tool.startsWith("Bash(")),
+    ).toBe(false);
+    expect(disallowedTools).toContain("Bash");
+    expect(deniesAllBashAndAllowsOnlyInlineComments(claudeArgs)).toBe(true);
+  });
+
+  it("T25 rejects re-admitting the demonstrated gh-pr-comment Bash grant", () => {
+    // Mutation proof: cardinality-only execution-surface tests stay green when
+    // a claude_args VALUE regresses, so exercise this content guard directly.
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const claudeArgs = asMapping(step.with).claude_args;
+    if (typeof claudeArgs !== "string") {
+      throw new Error("claude_args is not a string");
+    }
+    const mutated = claudeArgs.replace(
+      `--allowedTools "${INLINE_COMMENT_TOOL}"`,
+      `--allowedTools "${INLINE_COMMENT_TOOL},Bash(gh pr comment:*)"`,
+    );
+
+    expect(mutated).not.toBe(claudeArgs);
+    expect(deniesAllBashAndAllowsOnlyInlineComments(mutated)).toBe(false);
   });
 });
