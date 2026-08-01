@@ -8,9 +8,10 @@ import { parseDocument } from "yaml";
 // job's own built-in `GITHUB_TOKEN` (`github_token: ${{ secrets.GITHUB_TOKEN
 // }}`), never letting the action OIDC-mint its own write-capable App token into
 // the model's Bash subprocess env. The class this guards is a claude-code-action
-// invocation that OMITS `github_token` (the claude-review defect #157 fixes) --
-// and, because the claude-review job is the one with `Bash(gh pr comment:*)`
-// allowed, an omission there is directly exfiltratable. `factory-security-
+// invocation that OMITS `github_token` (the claude-review defect #157 fixes).
+// Since #199, claude-review itself has no Bash grant; T-5 nonetheless guards the
+// broader class for every current or future claude-code-action invocation
+// rather than relying on that one job's present tool surface. `factory-security-
 // reviewer.md` already states this rule as a PROMPT; this file converts it to a
 // gate: T-5 (every invocation passes the built-in token, with a count tripwire)
 // and T-6 (no `id-token` anywhere) mechanically stop the class from returning.
