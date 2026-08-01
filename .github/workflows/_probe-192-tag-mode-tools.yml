@@ -32,10 +32,18 @@ jobs:
           use_commit_signing: true
           allowed_bots: ""
           allowed_non_write_users: ""
+          # PRs #194/#195 bind accepted-comment identity to this PR's
+          # author so arbitrary public commenters are not embedded in the
+          # pre-fetched prompt. This only partially mitigates the channel
+          # documented by #194; #192's tool-grant work is the full closure.
+          include_comments_by_actor: ${{ github.event.pull_request.user.login }}
           show_full_output: false
           track_progress: true
+          # The scoped Read answers #192's Set-union sub-question: does tag
+          # mode's injected bare Read survive parse-sdk-options merging?
+          # It cannot widen access because tag mode already grants bare Read.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read(probe-context/test.txt)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
           prompt: |
             You are running a narrow, one-shot permission probe. Do exactly
