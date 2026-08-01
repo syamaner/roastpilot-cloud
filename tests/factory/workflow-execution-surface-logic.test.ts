@@ -2053,6 +2053,11 @@ jobs:
       // job's own token instead of OIDC-minting a write-capable App token.
       // jobs/runSteps/actionSteps are unchanged (no step added or removed).
       //
+      // Issue #194 moved inputs 67 -> 68: the claude-review invocation gained
+      // exactly one `include_comments_by_actor` input, bound to the PR author,
+      // to exclude untrusted third-party comments from the review prompt.
+      // jobs/runSteps/actionSteps are unchanged.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
@@ -2060,7 +2065,7 @@ jobs:
       jobs: 9,
       runSteps: 29,
       actionSteps: 27,
-      inputs: 67,
+      inputs: 68,
     });
   });
 
@@ -2120,9 +2125,13 @@ jobs:
       // (download-artifact, 2 `with:` entries) were removed, and one `run:`
       // extract-model-id step was added. The model ID now crosses as a bounded
       // job output rather than a broadly-readable 30-day artifact.
+      //
+      // Issue #194 moved inputs 112 -> 113: exactly one
+      // `include_comments_by_actor` input was added to claude-review; no job
+      // or step count changed.
       runSteps: 54,
       actionSteps: 44,
-      inputs: 112,
+      inputs: 113,
     });
   });
 });
