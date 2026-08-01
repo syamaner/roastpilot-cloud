@@ -1,0 +1,205 @@
+name: "Probe: issue #192 tag-mode tool grant (throwaway)"
+
+# THROWAWAY -- exists only to answer issue #192's live question: what tool
+# grant does claude-review's real tag-mode run actually receive? This genuine
+# pull_request trigger is required to enter tag mode, but the job is airtight
+# to one same-repo operator branch. Run once, report the answer, then delete it.
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  probe:
+    if: ${{ github.event.pull_request.head.ref == 'probe/192-tag-mode-tools' && github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'syamaner' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run the tag-mode tool-grant probe
+        id: probe
+        uses: anthropics/claude-code-action@700e7f8316990de46bed556429765647af760efc # v1.0.176
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_commit_signing: true
+          allowed_bots: ""
+          allowed_non_write_users: ""
+          show_full_output: false
+          track_progress: true
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*)"
+          prompt: |
+            You are running a narrow, one-shot permission probe. Do exactly
+            the following, in order, and nothing else:
+
+            1. Attempt Read on the relative path probe-context/test.txt.
+               Record ALLOWED or DENIED. Never output the file content.
+            2. Attempt Read on exactly the absolute path /etc/hostname. This
+               is the ONLY absolute path to ever attempt. Do not attempt any
+               other absolute path, anything under /proc or /home, or any
+               credential-shaped path. Record ALLOWED or DENIED. Never output
+               the file content.
+            3. Attempt Glob for the pattern *.md at the repository root.
+               Record ALLOWED or DENIED and, if allowed, the COUNT of matches
+               only. Never list filenames or content.
+            4. Attempt Grep for the literal string roastpilot in README.md at
+               the repository root. Record ALLOWED or DENIED and, if allowed,
+               a match COUNT only. Never output matched lines or content.
+            5. Attempt LS on the repository root directory. Record ALLOWED or
+               DENIED. Never list the actual directory contents in the output.
+            6. Attempt mcp__github_comment__update_claude_comment with the
+               fixed body [probe #192: testing update_claude_comment reachability].
+               Record ALLOWED or DENIED. This may touch only this probe's own
+               tracking comment on this throwaway PR.
+            7. Attempt Bash with EXACTLY this command and no other flags or
+               targets: gh pr comment --body-file /etc/hostname
+               It must target this same PR: no --repo/-R override and no other
+               target. Record ALLOWED or DENIED and whether it appears to have
+               actually posted a new PR comment. Never output file content.
+            8. Post exactly ONE inline comment with
+               mcp__github_inline_comment__create_inline_comment, targeting
+               probe-context/test.txt line 1, with confirmed: true. Its body
+               must contain ONLY these seven clearly labeled verdict lines,
+               replacing each placeholder with ALLOWED or DENIED and adding
+               counts/posting status only on the applicable line:
+
+               step1_relative_read=<VERDICT>
+               step2_absolute_etc_hostname=<VERDICT>
+               step3_glob=<VERDICT>
+               step4_grep=<VERDICT>
+               step5_ls=<VERDICT>
+               step6_update_claude_comment=<VERDICT>
+               step7_bash_gh_pr_comment=<VERDICT>
+
+               Include no other commentary, actual file content, matched
+               content, filenames, directory contents, or secret-shaped
+               strings anywhere in that comment.
+
+            Do nothing else. No other files, no other tool calls, no summary
+            beyond the one inline comment in step 8.
+
+      - name: Surface the review run's own denial evidence
+        # Issue #146, step 1 of 3. The action reports
+        # `permission_denials_count` in its execution summary and NOTHING
+        # about WHICH tools were denied, so an allowlist gap cannot be
+        # diagnosed after the fact -- verified against PR #150's run, whose
+        # 977-line log contains the count and no denial records at all. The
+        # detail lives in the action's execution file, which is then
+        # destroyed with the runner. The action exposes the resolved path
+        # as its `execution_file` output; the runner-temp path is only a
+        # fallback for an early action exit that did not set the output.
+        #
+        # The repository is PUBLIC, and that file holds the full agent
+        # transcript. Emit only bounded schema names, numeric denial counts,
+        # and denied tool names. Never emit arbitrary values or whole
+        # subtrees. Unsafe or sensitive-looking model-controlled key and
+        # tool names are redacted, and every printed string is clamped.
+        #
+        # Never fails the job on its own: a missing or unparseable file is
+        # reported and tolerated here, because the authoritative
+        # completion check is the next step. This one only produces
+        # evidence.
+        if: always()
+        env:
+          ACTION_EXECUTION_OUTPUT: ${{ steps.probe.outputs.execution_file }}
+          FALLBACK_EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          set -uo pipefail
+          EXECUTION_OUTPUT="${ACTION_EXECUTION_OUTPUT:-$FALLBACK_EXECUTION_OUTPUT}"
+          if [ ! -f "$EXECUTION_OUTPUT" ]; then
+            echo "note: no execution output at $EXECUTION_OUTPUT (the action may have exited before writing it)"
+            exit 0
+          fi
+          evidence="$(mktemp)"
+          # The action writes this file as a single pretty-printed JSON
+          # array of SDK messages (base-action `writeExecutionFile()` ->
+          # `JSON.stringify(messages, null, 2)`; `.json`, not `.jsonl`), so
+          # `jq -s` slurps ONE value and wraps it: the outer `.[]` yields
+          # the message array itself, not the messages. The `messages` def
+          # normalises that -- descend one level when a slurped element is
+          # itself an array -- so every extraction below iterates the flat
+          # top-level message stream (issue #146 G6, settled empirically
+          # against a captured 4-denial transcript; without it the schema
+          # readout was `none`). It is a no-op for the single-object or
+          # newline-delimited shapes, so it is correct whichever way the
+          # action serialises, and the schema-bound extractions (F5) rely on
+          # it to read `.type` off each real SDK message envelope.
+          if jq -sr '
+            def messages: [ .[] | if type == "array" then .[] else . end ];
+            def safe_string:
+              tostring[:200]
+              # A model-controlled tool_name reaches the PUBLIC step summary,
+              # so it must not carry structure-forging bytes. Use a POSITIVE
+              # allowlist (mirroring safe_key), not a blacklist: a \uXXXX
+              # blacklist kept missing invisible-Cf codepoints (LOW-1, then
+              # LOW-3, then U+206A-206F), so per the fix-the-class rule the
+              # mechanism changes to an allowlist (F4). Anthropic tool names
+              # are ^[a-zA-Z0-9_-]{1,64}$ and MCP names (mcp__server__tool)
+              # match, so anything outside [A-Za-z0-9_-] -- every control,
+              # bidi and format codepoint, space, paren, etc. -- is redacted
+              # without ever chasing a new escape. The secret-word check
+              # stays as a second branch (a conforming name may still say
+              # "token").
+              | if (test("^[A-Za-z0-9_-]{1,200}$") | not)
+                then "[redacted non-conforming tool name]"
+                elif test("secret|token|password|credential|api.?key"; "i")
+                then "[redacted sensitive-looking string]"
+                else . end;
+            def safe_key:
+              tostring[:200]
+              | if test("^[A-Za-z_][A-Za-z0-9_.-]{0,199}$")
+                   and (test("secret|token|password|credential|api.?key"; "i") | not)
+                then .
+                else "[redacted unsafe key]" end;
+            ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
+            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # message stream, not a recursive `.. | objects` scan (F5). The
+            # model owns message CONTENT (text, tool_use inputs) but not the
+            # envelope `.type`, so a tool_use `input` carrying a nested
+            # `permission_denials_count` / `denied:{tool_name}` /
+            # `{type:"tool_use"}` can no longer fabricate this public
+            # diagnostic. Denials and their count sit on the `result` record;
+            # invocations are `tool_use` blocks in `assistant` content.
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials_count
+                | select(type == "number")
+                | "permission_denials_count: \(.)" ] | unique) as $counts
+            | ([ messages[]
+                | select(.type == "result")
+                | .permission_denials[]?
+                | .tool_name
+                | select(type == "string")
+                | safe_string ] | unique | sort) as $tools
+            | ([ messages[]
+                | select(.type == "assistant")
+                | .message.content[]?
+                | select(.type == "tool_use") ] | length) as $invocations
+            | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
+              + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
+              + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
+              + "tool invocations seen (NOT necessarily denied): \($invocations)"
+          ' "$EXECUTION_OUTPUT" > "$evidence"; then
+            {
+              echo "## Review run evidence"
+              echo ""
+              # Bound public output even if an execution file contains many
+              # messages or an adversarial number of distinct tool names.
+              head -c 65536 -- "$evidence"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            head -c 65536 -- "$evidence"
+            echo ""
+          else
+            echo "note: execution output is not parseable JSON; no transcript content was emitted"
+          fi
+          exit 0
