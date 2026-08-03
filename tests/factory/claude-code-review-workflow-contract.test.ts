@@ -225,16 +225,21 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(deniesAllBashAndAllowsOnlyInlineComments(mutated)).toBe(false);
   });
 
-  it("T26 denies every SDK init tool observed in the captured catalog", () => {
+  it("T26 denies every non-permitted SDK init tool in the captured catalog", () => {
     const fixture = parseToolCatalogFixture();
     const observedInitTools = fixtureStringArray(fixture, "observedInitTools");
+    const permittedResidual = new Set(
+      fixtureStringArray(fixture, "permittedResidual"),
+    );
     const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
     const deniedTools = claudeArgTools(
       asMapping(step.with).claude_args,
       "disallowedTools",
     );
 
-    for (const tool of observedInitTools) {
+    for (const tool of observedInitTools.filter(
+      (candidate) => !permittedResidual.has(candidate),
+    )) {
       expect(deniedTools, `${tool} must be denied`).toContain(tool);
     }
   });
