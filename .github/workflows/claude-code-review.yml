@@ -121,12 +121,11 @@ jobs:
       # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
       # reject a prior attempt's stale tracking comment (a re-run fail-open,
       # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
-      # never leaks it. This token is NOT confined from the LLM: tag mode
-      # injects a bare `Read` permission, and #192 empirically confirmed that
-      # it reads arbitrary absolute paths, so `/proc/self/environ` remains
-      # readable even though Bash is denied below. `actions: read` is
-      # therefore a capability reachable with the credential exposed through
-      # that Read path.
+      # never leaks it. The token remains co-resident in the action process,
+      # but the catalog-wide deny below removes every reader, including the
+      # tag-mode-injected bare `Read`, and all three injected GitHub CI tools.
+      # The model therefore has no tool that can obtain the token bytes or use
+      # the `actions: read` capability directly.
       # Acceptable because it is read-only, public-repo (it exposes only run
       # metadata any reader can already see), and short-lived. Since #157 this
       # is bounded by the same repo-scoped, job-lifetime `GITHUB_TOKEN` as
@@ -237,15 +236,15 @@ jobs:
           # under the plugin's own tag-mode permission profile, which
           # defaults to `acceptEdits` — auto-confirming any edit/write/
           # commit tool call rather than requiring interactive approval.
-          # This job only ever needs to READ the diff and POST inline
-          # review comments; it has no legitimate reason to touch the
-          # working tree, the git history, or delete anything, so deny
-          # every edit/write tool and the entire Bash subprocess surface
-          # explicitly rather than
-          # relying on the plugin's default profile to stay conservative
-          # forever. Deny rules win over acceptEdits and the tag mode's own
-          # allow list (verified against the pinned action's source), so
-          # this closes the write blast radius.
+          # #192 accepts this review as a metadata-only lens. It needs only
+          # the two MCP comment sinks: the explicitly allowed inline-comment
+          # tool and the action-injected tracking-comment update tool. Deny
+          # every other tool in the captured SDK init catalog and every other
+          # tool in the action's computed allowlist, including readers,
+          # discovery, subprocesses, network egress, sub-agents, skills,
+          # workflows, schedulers, messaging, CI/job-log reads, and repo
+          # writes. Deny rules win over acceptEdits and the tag mode's unioned
+          # allowlist (verified against the pinned action and SDK behaviour).
           #
           # CRITICAL (round-2 Finding 1, #35 rework): the `--disallowedTools`
           # deny-only form above (this rework's original shape) silently
@@ -261,8 +260,9 @@ jobs:
           # `required_conversation_resolution` actually gates merge on.
           # `--allowedTools` and `--disallowedTools` coexist safely here:
           # deny still wins over allow (and over acceptEdits). The only
-          # explicit allow is the inline-comment server; blanket `Bash` in
-          # the deny list removes the entire subprocess-spawn surface.
+          # explicit allow is the inline-comment server. Do NOT deny
+          # `mcp__github_comment__update_claude_comment`: tag mode needs that
+          # injected sink for the tracking comment and completion assertion.
           #
           # Refs #194 and #192: removing the former `Bash(gh pr comment:*)`,
           # `Bash(gh pr view:*)`, and `Bash(gh pr diff:*)` grants closes two
@@ -271,18 +271,22 @@ jobs:
           # `gh pr view <PR> --comments` instruction can no longer re-admit
           # an unfiltered public comment after the author-filtered pre-fetch.
           #
-          # IMPORTANT RESIDUAL -- THIS DOES NOT FULLY CLOSE #194 OR #192.
-          # Tag mode (`track_progress: true`) still injects a bare `Read`;
-          # #192's probe empirically confirmed that it reads arbitrary
-          # absolute paths, so `Read(/proc/self/environ)` remains possible.
-          # The inline-comment tool and the `update_claude_comment` tracking-
-          # comment channel remain write sinks. Therefore
-          # `Read(env) -> inline/tracking comment` is an INDEPENDENT exfil path
-          # for any residual injection vector, notably a same-repo PR author
-          # through the PR title/body under the already-accepted same-repo
-          # threat model. This change is defense in depth and closes the
-          # public-commenter path; fully closing the primitive is tag-mode
-          # territory tracked in #192.
+          # This closes the #192 read-to-comment primitive: the review cannot
+          # read the workspace, `/proc/self/environ`, Actions job logs, or the
+          # network, and cannot spawn a subprocess or sub-agent to recover
+          # those capabilities. It can publish only text already present in
+          # its prefetched metadata context through the two comment sinks.
+          # IMPORTANT RESIDUAL -- the PR title/body injection channel survives,
+          # because the author filter below does not filter those fields, and
+          # the tracking comment remains forgeable by the model through
+          # `update_claude_comment`. The completion assertion is therefore
+          # benign-truncation-sound, not adversarially authenticated.
+          #
+          # UNVERIFIED until this change's live PR run: whether the MCP tool set
+          # (`mcp_servers`) is observable in the SDK transcript, and whether the
+          # roughly 490-character deny value parses intact (only roughly 150
+          # characters were proven by the probe). The evidence step below emits
+          # both the parsed init catalog and bounded mcp_servers evidence.
           #
           # Issue #183 — terminal completion sentinel. The completion
           # assertion below ("Assert the review actually completed") fails
@@ -310,9 +314,13 @@ jobs:
           # `--append-system-prompt` is a documented CLI flag). A `#` inside
           # the quoted value is preserved (the action's `stripShellComments`
           # only drops lines whose first non-space char is `#`).
+          # Pin-bump contract (#192): the action pin fixes the SDK tool set, so
+          # any `claude-code-action` pin bump requires re-capturing
+          # tests/factory/fixtures/claude-review-sdk-tool-catalog.json and
+          # re-verifying this deny grammar. T33 locks that fixture to this pin.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash,Read,Glob,Grep,LS,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,CronCreate,CronDelete,CronList,DesignSync,EnterWorktree,ExitWorktree,Monitor,PushNotification,RemoteTrigger,ReportFindings,ScheduleWakeup,SendMessage,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate,ToolSearch,WebFetch,WebSearch,Workflow"
             --append-system-prompt "Only after every review step including posting all findings is complete, make your final update to the tracking comment so that its very last line is exactly, byte for byte, this sentinel and nothing else, and never include this sentinel in any earlier or interim update: REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
@@ -358,13 +366,13 @@ jobs:
           # does not filter the payload-frozen PR title or body, which remain
           # part of the accepted same-repo-PR threat model.
           #
-          # Do not generalize that public-commenter closure into full closure
-          # of #194 or #192. Tag mode still injects the bare, arbitrary-path
-          # `Read` confirmed by #192, while inline and tracking comments remain
-          # sinks. A residual injection vector such as same-repo-author PR
-          # title/body text can therefore still drive
-          # `Read(env) -> inline/tracking comment`; removing Bash does not
-          # remove that independent exfiltration primitive.
+          # Do not generalize the catalog closure into removal of prompt
+          # injection or authentication of the completion signal. Same-repo
+          # author PR title/body text remains an injection channel, and the
+          # model can still write context-derived text to inline and tracking
+          # comments. What is closed is the payload acquisition path: with the
+          # whole reader/egress/execution catalog denied, that injection cannot
+          # obtain runner, workspace, job-log, or network data to publish.
           #
           # Side effect worth knowing, not yet decided (fsr, PR #195 review,
           # MEDIUM-1): this also drops bot comments -- Codex findings,
@@ -410,9 +418,10 @@ jobs:
         #
         # The repository is PUBLIC, and that file holds the full agent
         # transcript. Emit only bounded schema names, numeric denial counts,
-        # and denied tool names. Never emit arbitrary values or whole
-        # subtrees. Unsafe or sensitive-looking model-controlled key and
-        # tool names are redacted, and every printed string is clamped.
+        # denied/init tool names, and the observable mcp_servers names. Never
+        # emit arbitrary values or whole subtrees. Unsafe or sensitive-looking
+        # model-controlled names are redacted, and every printed string is
+        # clamped.
         #
         # Never fails the job on its own: a missing or unparseable file is
         # reported and tolerated here, because the authoritative
@@ -447,7 +456,8 @@ jobs:
             def messages: [ .[] | if type == "array" then .[] else . end ];
             def safe_string:
               tostring[:200]
-              # A model-controlled tool_name reaches the PUBLIC step summary,
+              # A model-controlled tool or MCP-server name reaches the PUBLIC
+              # step summary,
               # so it must not carry structure-forging bytes. Use a POSITIVE
               # allowlist (mirroring safe_key), not a blacklist: a \uXXXX
               # blacklist kept missing invisible-Cf codepoints (LOW-1, then
@@ -471,14 +481,16 @@ jobs:
                 then .
                 else "[redacted unsafe key]" end;
             ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
-            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # Bind all extractions to the trusted TOP-LEVEL SDK
             # message stream, not a recursive `.. | objects` scan (F5). The
             # model owns message CONTENT (text, tool_use inputs) but not the
             # envelope `.type`, so a tool_use `input` carrying a nested
             # `permission_denials_count` / `denied:{tool_name}` /
-            # `{type:"tool_use"}` can no longer fabricate this public
-            # diagnostic. Denials and their count sit on the `result` record;
-            # invocations are `tool_use` blocks in `assistant` content.
+            # `{type:"tool_use"}` or forged `{type:"system",subtype:"init"}`
+            # record cannot fabricate this public diagnostic. Denials and their
+            # count sit on the `result` record; init evidence sits only on real
+            # `system`/`init` envelopes; invocations are `tool_use` blocks in
+            # `assistant` content.
             | ([ messages[]
                 | select(.type == "result")
                 | .permission_denials_count
@@ -491,12 +503,30 @@ jobs:
                 | select(type == "string")
                 | safe_string ] | unique | sort) as $tools
             | ([ messages[]
+                | select(.type == "system" and .subtype == "init") ] | length) as $init_records
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init")
+                | .tools[]?
+                | select(type == "string")
+                | safe_string ] | unique | sort) as $init_tools
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init" and has("mcp_servers")) ] | length) as $mcp_records
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init")
+                | .mcp_servers[]?
+                | if type == "string" then safe_string
+                  elif type == "object" and (.name? | type) == "string"
+                  then .name | safe_string
+                  else empty end ] | unique | sort) as $mcp_servers
+            | ([ messages[]
                 | select(.type == "assistant")
                 | .message.content[]?
                 | select(.type == "tool_use") ] | length) as $invocations
             | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
               + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
+              + "SDK init tool names: \(if $init_records == 0 then "no system/init record present" elif ($init_tools | length) == 0 then "init record present with empty .tools" else "(\($init_tools | length)): \($init_tools | join(", "))" end)\n"
+              + "SDK init mcp_servers: \(if $mcp_records == 0 then "not present on any init record" elif ($mcp_servers | length) == 0 then "present with no string/name entries" else "present; names (\($mcp_servers | length)): \($mcp_servers | join(", "))" end)\n"
               + "tool invocations seen (NOT necessarily denied): \($invocations)"
           ' "$EXECUTION_OUTPUT" > "$evidence"; then
             {
@@ -542,13 +572,13 @@ jobs:
         # accidental truncation or skip -- the PR #150 mode this step targets.
         # It is NOT adversarially authenticated. This change denies all Bash,
         # so the former `gh pr comment --edit-last` forgery route is closed.
-        # But tag mode still injects the bare arbitrary-path `Read` confirmed
-        # by #192, and the model-maintained `update_claude_comment` channel can
-        # still write the tracking comment. A residual same-repo prompt
-        # injection can therefore still direct the model to publish a
-        # fully-checked body carrying THIS run's `[View job]` link and a fresh
-        # `updated_at`. No field this step reads (author, body, link, timestamp)
-        # can distinguish that model-authored forgery from genuine completion.
+        # The model-maintained `update_claude_comment` channel necessarily
+        # remains available. A residual same-repo PR title/body injection can
+        # therefore still direct the model to publish a fully-checked body
+        # carrying THIS run's `[View job]` link and a fresh `updated_at`, using
+        # text already present in its context. No field this step reads (author,
+        # body, link, timestamp) can distinguish that model-authored forgery
+        # from genuine completion.
         # A step-B-side guard would be theatre and would create false assurance,
         # so none is added. Treat step-B green as benign-truncation-sound, not
         # as adversarially-authenticated review completion.
@@ -559,13 +589,13 @@ jobs:
         # read endpoints -- it never writes. That token is NOT confined to this
         # step -- the claude-code-action step earlier in this job receives the
         # SAME `GITHUB_TOKEN`. Since #157 that job token is the whole GitHub
-        # credential reachable there: the action no longer OIDC-mints a
-        # separate write-capable App token. Denying Bash closes the subprocess
-        # route, but #192's tag-mode bare `Read` can still read
-        # `/proc/self/environ`, and the inline/tracking-comment sinks keep
-        # `Read(env) -> comment` possible for residual same-repo injection.
-        # This deterministic step is not the exposure and does not leak the
-        # token; it just reuses the same material.
+        # credential co-resident there: the action no longer OIDC-mints a
+        # separate write-capable App token. The catalog-wide deny removes Bash,
+        # generic readers, CI/job-log readers, and egress, so the model has no
+        # tool path to obtain or publish the token bytes. The two comment sinks
+        # remain, but can publish only context-derived text. This deterministic
+        # step is not an exposure and does not leak the token; it just reuses
+        # the same material.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this
