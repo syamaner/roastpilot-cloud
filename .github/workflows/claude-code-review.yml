@@ -312,7 +312,7 @@ jobs:
           # only drops lines whose first non-space char is `#`).
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash,Read,Glob,Grep"
             --append-system-prompt "Only after every review step including posting all findings is complete, make your final update to the tracking comment so that its very last line is exactly, byte for byte, this sentinel and nothing else, and never include this sentinel in any earlier or interim update: REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
@@ -410,7 +410,7 @@ jobs:
         #
         # The repository is PUBLIC, and that file holds the full agent
         # transcript. Emit only bounded schema names, numeric denial counts,
-        # and denied tool names. Never emit arbitrary values or whole
+        # and tool names. Never emit arbitrary values or whole
         # subtrees. Unsafe or sensitive-looking model-controlled key and
         # tool names are redacted, and every printed string is clamped.
         #
@@ -471,7 +471,7 @@ jobs:
                 then .
                 else "[redacted unsafe key]" end;
             ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
-            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # Bind all extractions to the trusted TOP-LEVEL SDK
             # message stream, not a recursive `.. | objects` scan (F5). The
             # model owns message CONTENT (text, tool_use inputs) but not the
             # envelope `.type`, so a tool_use `input` carrying a nested
@@ -491,12 +491,18 @@ jobs:
                 | select(type == "string")
                 | safe_string ] | unique | sort) as $tools
             | ([ messages[]
+                | select(.type == "system" and .subtype == "init")
+                | .tools[]?
+                | select(type == "string")
+                | safe_string ] | unique | sort) as $init_tools
+            | ([ messages[]
                 | select(.type == "assistant")
                 | .message.content[]?
                 | select(.type == "tool_use") ] | length) as $invocations
             | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
               + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
+              + "SDK init tool names (\($init_tools | length)): \(if ($init_tools | length) == 0 then "no init tools found in this document" else ($init_tools | join(", ")) end)\n"
               + "tool invocations seen (NOT necessarily denied): \($invocations)"
           ' "$EXECUTION_OUTPUT" > "$evidence"; then
             {
