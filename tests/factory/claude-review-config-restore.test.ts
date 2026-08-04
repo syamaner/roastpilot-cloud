@@ -1,9 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
-  lstatSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -284,8 +286,13 @@ describe("claude-review base-owned configuration restore", () => {
         "trusted base instructions\n",
       );
       const tracked = join(fixture.repository, "tracked.txt");
-      expect(lstatSync(tracked).isFile()).toBe(true);
-      expect(readFileSync(tracked, "utf8")).toBe("trusted regular file\n");
+      const trackedFd = openSync(tracked, "r");
+      try {
+        expect(fstatSync(trackedFd).isFile()).toBe(true);
+        expect(readFileSync(trackedFd, "utf8")).toBe("trusted regular file\n");
+      } finally {
+        closeSync(trackedFd);
+      }
       expect(readFileSync(join(fixture.repository, "deleted.txt"), "utf8")).toBe(
         "restore this deletion\n",
       );
