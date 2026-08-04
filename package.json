@@ -33,6 +33,6 @@
     "yaml": "^2.9.0"
   },
   "overrides": {
-    "postcss": "^8.5.19"
+    "postcss": "^8.5.25"
   }
 }
