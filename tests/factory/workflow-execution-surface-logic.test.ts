@@ -2062,12 +2062,17 @@ jobs:
       // one `run:` step, `Restore base-owned configuration`; jobs,
       // actionSteps, and inputs are unchanged.
       //
+      // 4 Aug 2026, issue #205 moved jobs 9 -> 10 and runSteps 30 -> 32:
+      // the new credential-free `resolve-trusted-revision` job contributes
+      // one `run:` resolve step, and the publish job contributes its new
+      // pre-checkout `run:` assert step. actionSteps and inputs are unchanged.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 9,
-      runSteps: 30,
+      jobs: 10,
+      runSteps: 32,
       actionSteps: 27,
       inputs: 68,
     });
@@ -2114,7 +2119,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 17,
+      jobs: 18,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2137,7 +2142,12 @@ jobs:
       // Issues #192/#194 moved runSteps 54 -> 55: claude-review gained exactly
       // one `run:` step, `Restore base-owned configuration`; jobs,
       // actionSteps, and inputs are unchanged.
-      runSteps: 55,
+      //
+      // 4 Aug 2026, issue #205 moved jobs 17 -> 18 and runSteps 55 -> 57:
+      // the new credential-free `resolve-trusted-revision` job contributes
+      // one `run:` resolve step, and the publish job contributes its new
+      // pre-checkout `run:` assert step. actionSteps and inputs are unchanged.
+      runSteps: 57,
       actionSteps: 44,
       inputs: 113,
     });
