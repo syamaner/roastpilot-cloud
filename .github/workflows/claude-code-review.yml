@@ -121,12 +121,11 @@ jobs:
       # `actions/runs/<id>/attempts/<n>` to learn THIS attempt's start time and
       # reject a prior attempt's stale tracking comment (a re-run fail-open,
       # codex P2). That deterministic step wires `GH_TOKEN` explicitly and
-      # never leaks it. This token is NOT confined from the LLM: tag mode
-      # injects a bare `Read` permission, and #192 empirically confirmed that
-      # it reads arbitrary absolute paths, so `/proc/self/environ` remains
-      # readable even though Bash is denied below. `actions: read` is
-      # therefore a capability reachable with the credential exposed through
-      # that Read path.
+      # never leaks it. The token remains co-resident in the action process,
+      # but the catalog-wide deny below removes every reader, including the
+      # tag-mode-injected bare `Read`, and all three injected GitHub CI tools.
+      # The model therefore has no tool that can obtain the token bytes or use
+      # the `actions: read` capability directly.
       # Acceptable because it is read-only, public-repo (it exposes only run
       # metadata any reader can already see), and short-lived. Since #157 this
       # is bounded by the same repo-scoped, job-lifetime `GITHUB_TOKEN` as
@@ -141,6 +140,56 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Restore base-owned configuration
+        # #192/#194: UNVERIFIED whether this claude-review invocation loads
+        # repository `.claude`/`.mcp.json` configuration at runtime (the action
+        # source is not vendored). Restore it fail-closed regardless: this also
+        # removes CLAUDE.local.md-class trusted-memory injection and reverts
+        # modifications to every file owned by the trusted revision.
+        #
+        # Trusted-revision selection is deliberately harder than the sibling
+        # spec-grounded-review restore. This pull_request workflow has no
+        # branches filter, so an attacker can retarget a PR onto their own base
+        # branch. Event-pinned base.sha is trusted only when BASE_REF exactly
+        # byte-matches the event's default branch; otherwise use the fetched
+        # default-branch tip. BASE_REF is compared only and never passed to git.
+        #
+        # This is a TOTAL restore with no PR-head exceptions. claude-review's
+        # prompt is prefetched and Unit 1 denies Read/Glob/Grep/LS/Bash, so it
+        # needs no workspace content from the PR. That reasoning is sound only
+        # while those whole-tool denies remain; T13 pins the coupling.
+        # `--no-renames` blocks the proven `git mv <base file>
+        # CLAUDE.local.md` evasion, while NUL-delimited `-z`/`read -r -d ''`
+        # prevents Git C-quoting unusual path bytes that rm would silently miss.
+        #
+        # Placement is load-bearing: this is the first step after checkout, so
+        # no PR-head content survives before another step can execute it and
+        # the trusted pinned `.claude-marketplace` checkout does not exist yet.
+        # Every command fails closed; the action is skipped and the existing
+        # completion assertion reds.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
+          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            git fetch --depth 1 origin "$BASE_SHA"
+            TRUSTED_SHA="$BASE_SHA"
+          else
+            git fetch --depth 1 origin "refs/heads/$DEFAULT_BRANCH"
+            TRUSTED_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
+          [ -n "$TRUSTED_SHA" ] || { echo "::error::could not resolve a trusted revision"; exit 1; }
+          # Remove tracked PR-added files before checkout so a file/directory type replacement cannot delete trusted content after it is restored; empty directories may remain harmlessly, and no untracked files exist at this first-step placement.
+          git diff --name-only -z --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD -- . |
+            while IFS= read -r -d '' added_path; do
+              echo "::notice::removing PR-added path not present at the trusted revision: $added_path"
+              rm -rf -- "$added_path"
+            done
+          git checkout "$TRUSTED_SHA" -- .
 
       # F1-S7 / #41: source-reviewed at this exact commit. The marketplace
       # resolves code-review to ./plugins/code-review, whose tree contains
@@ -237,15 +286,16 @@ jobs:
           # under the plugin's own tag-mode permission profile, which
           # defaults to `acceptEdits` — auto-confirming any edit/write/
           # commit tool call rather than requiring interactive approval.
-          # This job only ever needs to READ the diff and POST inline
-          # review comments; it has no legitimate reason to touch the
-          # working tree, the git history, or delete anything, so deny
-          # every edit/write tool and the entire Bash subprocess surface
-          # explicitly rather than
-          # relying on the plugin's default profile to stay conservative
-          # forever. Deny rules win over acceptEdits and the tag mode's own
-          # allow list (verified against the pinned action's source), so
-          # this closes the write blast radius.
+          # #192 accepts this review as a metadata-only lens. Outside the
+          # single ToolSearch loader relaxation documented beside claude_args,
+          # it needs only the two MCP comment sinks: the explicitly allowed
+          # inline-comment tool and the action-injected tracking-comment update
+          # tool. Deny every other tool in the captured SDK init catalog and
+          # every other tool in the action's computed allowlist, including
+          # readers, discovery, subprocesses, network egress, sub-agents, skills,
+          # workflows, schedulers, messaging, CI/job-log reads, and repo
+          # writes. Deny rules win over acceptEdits and the tag mode's unioned
+          # allowlist (verified against the pinned action and SDK behaviour).
           #
           # CRITICAL (round-2 Finding 1, #35 rework): the `--disallowedTools`
           # deny-only form above (this rework's original shape) silently
@@ -261,8 +311,9 @@ jobs:
           # `required_conversation_resolution` actually gates merge on.
           # `--allowedTools` and `--disallowedTools` coexist safely here:
           # deny still wins over allow (and over acceptEdits). The only
-          # explicit allow is the inline-comment server; blanket `Bash` in
-          # the deny list removes the entire subprocess-spawn surface.
+          # explicit allow is the inline-comment server. Do NOT deny
+          # `mcp__github_comment__update_claude_comment`: tag mode needs that
+          # injected sink for the tracking comment and completion assertion.
           #
           # Refs #194 and #192: removing the former `Bash(gh pr comment:*)`,
           # `Bash(gh pr view:*)`, and `Bash(gh pr diff:*)` grants closes two
@@ -271,18 +322,23 @@ jobs:
           # `gh pr view <PR> --comments` instruction can no longer re-admit
           # an unfiltered public comment after the author-filtered pre-fetch.
           #
-          # IMPORTANT RESIDUAL -- THIS DOES NOT FULLY CLOSE #194 OR #192.
-          # Tag mode (`track_progress: true`) still injects a bare `Read`;
-          # #192's probe empirically confirmed that it reads arbitrary
-          # absolute paths, so `Read(/proc/self/environ)` remains possible.
-          # The inline-comment tool and the `update_claude_comment` tracking-
-          # comment channel remain write sinks. Therefore
-          # `Read(env) -> inline/tracking comment` is an INDEPENDENT exfil path
-          # for any residual injection vector, notably a same-repo PR author
-          # through the PR title/body under the already-accepted same-repo
-          # threat model. This change is defense in depth and closes the
-          # public-commenter path; fully closing the primitive is tag-mode
-          # territory tracked in #192.
+          # This closes the #192 read-to-comment primitive through BOTH controls:
+          # the first-step restore above removes PR-controlled startup config
+          # before the action can load it, and this tool-call deny removes every
+          # workspace, `/proc/self/environ`, Actions-log, network, subprocess,
+          # and sub-agent capability. It can publish only text already present
+          # in its prefetched metadata context through the two comment sinks.
+          # IMPORTANT RESIDUAL -- the PR title/body injection channel survives,
+          # because the author filter below does not filter those fields, and
+          # the tracking comment remains forgeable by the model through
+          # `update_claude_comment`. The completion assertion is therefore
+          # benign-truncation-sound, not adversarially authenticated.
+          #
+          # UNVERIFIED until this change's live PR run: whether the MCP tool set
+          # (`mcp_servers`) is observable in the SDK transcript, and whether the
+          # roughly 490-character deny value parses intact (only roughly 150
+          # characters were proven by the probe). The evidence step below emits
+          # both the parsed init catalog and bounded mcp_servers evidence.
           #
           # Issue #183 — terminal completion sentinel. The completion
           # assertion below ("Assert the review actually completed") fails
@@ -310,9 +366,19 @@ jobs:
           # `--append-system-prompt` is a documented CLI flag). A `#` inside
           # the quoted value is preserved (the action's `stripShellComments`
           # only drops lines whose first non-space char is `#`).
+          # Pin-bump contract (#192): the action pin fixes the SDK tool set, so
+          # any `claude-code-action` pin bump requires re-capturing
+          # tests/factory/fixtures/claude-review-sdk-tool-catalog.json and
+          # re-verifying this deny grammar. T33 locks that fixture to this pin.
+          # §1.3 authorises ToolSearch as the single relaxation: with it denied,
+          # run 30855019509 posted only a stub tracking comment and step B red
+          # on the no-sentinel body. ToolSearch restores no read or egress
+          # capability: every reader, egress, and execution tool remains denied
+          # by name, so it cannot surface one, and the only MCP tools it can
+          # load are the two permitted comment sinks.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash,Read,Glob,Grep,LS,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,CronCreate,CronDelete,CronList,DesignSync,EnterWorktree,ExitWorktree,Monitor,PushNotification,RemoteTrigger,ReportFindings,ScheduleWakeup,SendMessage,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate,WebFetch,WebSearch,Workflow"
             --append-system-prompt "Only after every review step including posting all findings is complete, make your final update to the tracking comment so that its very last line is exactly, byte for byte, this sentinel and nothing else, and never include this sentinel in any earlier or interim update: REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)"
           # A `synchronize` push made by the Claude GitHub App itself (e.g.
           # a human re-running Claude Code locally against this PR) has
@@ -358,13 +424,14 @@ jobs:
           # does not filter the payload-frozen PR title or body, which remain
           # part of the accepted same-repo-PR threat model.
           #
-          # Do not generalize that public-commenter closure into full closure
-          # of #194 or #192. Tag mode still injects the bare, arbitrary-path
-          # `Read` confirmed by #192, while inline and tracking comments remain
-          # sinks. A residual injection vector such as same-repo-author PR
-          # title/body text can therefore still drive
-          # `Read(env) -> inline/tracking comment`; removing Bash does not
-          # remove that independent exfiltration primitive.
+          # Do not generalize the combined restore + catalog closure into
+          # removal of prompt injection or authentication of the completion
+          # signal. Same-repo author PR title/body text remains an injection
+          # channel, and the model can still write context-derived text to
+          # inline and tracking comments. What is closed is payload acquisition:
+          # PR-controlled startup config is gone before action startup, and the
+          # reader/egress/execution deny blocks runner, workspace, job-log, and
+          # network data after startup.
           #
           # Side effect worth knowing, not yet decided (fsr, PR #195 review,
           # MEDIUM-1): this also drops bot comments -- Codex findings,
@@ -410,9 +477,10 @@ jobs:
         #
         # The repository is PUBLIC, and that file holds the full agent
         # transcript. Emit only bounded schema names, numeric denial counts,
-        # and denied tool names. Never emit arbitrary values or whole
-        # subtrees. Unsafe or sensitive-looking model-controlled key and
-        # tool names are redacted, and every printed string is clamped.
+        # denied/init tool names, and the observable mcp_servers names. Never
+        # emit arbitrary values or whole subtrees. Unsafe or sensitive-looking
+        # model-controlled names are redacted, and every printed string is
+        # clamped.
         #
         # Never fails the job on its own: a missing or unparseable file is
         # reported and tolerated here, because the authoritative
@@ -447,7 +515,8 @@ jobs:
             def messages: [ .[] | if type == "array" then .[] else . end ];
             def safe_string:
               tostring[:200]
-              # A model-controlled tool_name reaches the PUBLIC step summary,
+              # A model-controlled tool or MCP-server name reaches the PUBLIC
+              # step summary,
               # so it must not carry structure-forging bytes. Use a POSITIVE
               # allowlist (mirroring safe_key), not a blacklist: a \uXXXX
               # blacklist kept missing invisible-Cf codepoints (LOW-1, then
@@ -471,14 +540,16 @@ jobs:
                 then .
                 else "[redacted unsafe key]" end;
             ([ messages[] | select(type == "object") | keys[] | safe_key ] | unique) as $keys
-            # Bind all three extractions to the trusted TOP-LEVEL SDK
+            # Bind all extractions to the trusted TOP-LEVEL SDK
             # message stream, not a recursive `.. | objects` scan (F5). The
             # model owns message CONTENT (text, tool_use inputs) but not the
             # envelope `.type`, so a tool_use `input` carrying a nested
             # `permission_denials_count` / `denied:{tool_name}` /
-            # `{type:"tool_use"}` can no longer fabricate this public
-            # diagnostic. Denials and their count sit on the `result` record;
-            # invocations are `tool_use` blocks in `assistant` content.
+            # `{type:"tool_use"}` or forged `{type:"system",subtype:"init"}`
+            # record cannot fabricate this public diagnostic. Denials and their
+            # count sit on the `result` record; init evidence sits only on real
+            # `system`/`init` envelopes; invocations are `tool_use` blocks in
+            # `assistant` content.
             | ([ messages[]
                 | select(.type == "result")
                 | .permission_denials_count
@@ -491,12 +562,30 @@ jobs:
                 | select(type == "string")
                 | safe_string ] | unique | sort) as $tools
             | ([ messages[]
+                | select(.type == "system" and .subtype == "init") ] | length) as $init_records
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init")
+                | .tools[]?
+                | select(type == "string")
+                | safe_string ] | unique | sort) as $init_tools
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init" and has("mcp_servers")) ] | length) as $mcp_records
+            | ([ messages[]
+                | select(.type == "system" and .subtype == "init")
+                | .mcp_servers[]?
+                | if type == "string" then safe_string
+                  elif type == "object" and (.name? | type) == "string"
+                  then .name | safe_string
+                  else empty end ] | unique | sort) as $mcp_servers
+            | ([ messages[]
                 | select(.type == "assistant")
                 | .message.content[]?
                 | select(.type == "tool_use") ] | length) as $invocations
             | "top-level keys: \(if ($keys | length) == 0 then "none" else ($keys | join(", ")) end)\n"
               + "permission denial counts: \(if ($counts | length) == 0 then "none present" else ($counts | join(", ")) end)\n"
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
+              + "SDK init tool names: \(if $init_records == 0 then "no system/init record present" elif ($init_tools | length) == 0 then "init record present with empty .tools" else "(\($init_tools | length)): \($init_tools | join(", "))" end)\n"
+              + "SDK init mcp_servers: \(if $mcp_records == 0 then "not present on any init record" elif ($mcp_servers | length) == 0 then "present with no string/name entries" else "present; names (\($mcp_servers | length)): \($mcp_servers | join(", "))" end)\n"
               + "tool invocations seen (NOT necessarily denied): \($invocations)"
           ' "$EXECUTION_OUTPUT" > "$evidence"; then
             {
@@ -542,13 +631,13 @@ jobs:
         # accidental truncation or skip -- the PR #150 mode this step targets.
         # It is NOT adversarially authenticated. This change denies all Bash,
         # so the former `gh pr comment --edit-last` forgery route is closed.
-        # But tag mode still injects the bare arbitrary-path `Read` confirmed
-        # by #192, and the model-maintained `update_claude_comment` channel can
-        # still write the tracking comment. A residual same-repo prompt
-        # injection can therefore still direct the model to publish a
-        # fully-checked body carrying THIS run's `[View job]` link and a fresh
-        # `updated_at`. No field this step reads (author, body, link, timestamp)
-        # can distinguish that model-authored forgery from genuine completion.
+        # The model-maintained `update_claude_comment` channel necessarily
+        # remains available. A residual same-repo PR title/body injection can
+        # therefore still direct the model to publish a fully-checked body
+        # carrying THIS run's `[View job]` link and a fresh `updated_at`, using
+        # text already present in its context. No field this step reads (author,
+        # body, link, timestamp) can distinguish that model-authored forgery
+        # from genuine completion.
         # A step-B-side guard would be theatre and would create false assurance,
         # so none is added. Treat step-B green as benign-truncation-sound, not
         # as adversarially-authenticated review completion.
@@ -559,13 +648,13 @@ jobs:
         # read endpoints -- it never writes. That token is NOT confined to this
         # step -- the claude-code-action step earlier in this job receives the
         # SAME `GITHUB_TOKEN`. Since #157 that job token is the whole GitHub
-        # credential reachable there: the action no longer OIDC-mints a
-        # separate write-capable App token. Denying Bash closes the subprocess
-        # route, but #192's tag-mode bare `Read` can still read
-        # `/proc/self/environ`, and the inline/tracking-comment sinks keep
-        # `Read(env) -> comment` possible for residual same-repo injection.
-        # This deterministic step is not the exposure and does not leak the
-        # token; it just reuses the same material.
+        # credential co-resident there: the action no longer OIDC-mints a
+        # separate write-capable App token. The catalog-wide deny removes Bash,
+        # generic readers, CI/job-log readers, and egress, so the model has no
+        # tool path to obtain or publish the token bytes. The two comment sinks
+        # remain, but can publish only context-derived text. This deterministic
+        # step is not an exposure and does not leak the token; it just reuses
+        # the same material.
         #
         # This workflow-editing PR cannot validate this change on itself:
         # the action's workflow-validation guard skips its review, so this
@@ -873,7 +962,17 @@ jobs:
         # EVERY tracked path, not by naming which ones to check.
         #
         # MECHANISM, three steps:
-        # 1. `git checkout "$BASE_SHA" -- .` overlays base's own content
+        # 1. `git diff --diff-filter=A --no-renames "$BASE_SHA" HEAD --
+        #    .` finds every path ADDED in this PR's own HEAD relative to
+        #    base (`.mcp.json`, `.claude/settings.json`, `CLAUDE.local.md`,
+        #    `.claudeignore`, `.npmrc`, a root symlink — all of these are
+        #    genuinely NEW paths, not existing ones the PR edited), and
+        #    removes each one outright. This is what closes "restore
+        #    absence", not just content. It MUST run before the base
+        #    checkout: if PR-head replaces a base directory with a
+        #    same-named file, deleting that added path after checkout would
+        #    delete the trusted directory that checkout just restored.
+        # 2. `git checkout "$BASE_SHA" -- .` overlays base's own content
         #    onto every path base tracks, across the WHOLE checkout (no
         #    sparse cone to silently exclude anything, per the checkout
         #    step above) — this alone reverts any MODIFICATION to an
@@ -882,15 +981,6 @@ jobs:
         #    `checkout -- <path>` always overlays base's exact tracked
         #    content (including its type — file, symlink, whatever)
         #    regardless of what the working tree currently has there.
-        # 2. `git checkout` alone never DELETES a path the PR added that
-        #    base doesn't have (it only overlays what base DOES have) —
-        #    so `git diff --diff-filter=A --no-renames "$BASE_SHA" HEAD --
-        #    .` finds every path ADDED in this PR's own HEAD relative to
-        #    base (`.mcp.json`, `.claude/settings.json`, `CLAUDE.local.md`,
-        #    `.claudeignore`, `.npmrc`, a root symlink — all of these are
-        #    genuinely NEW paths, not existing ones the PR edited), and
-        #    removes each one outright. This is what closes "restore
-        #    absence", not just content.
         #
         #    `--no-renames` is NOT optional (Codex finding, PR #76 review,
         #    round 6, BLOCKER — proven with a live reproduction): git's
@@ -909,7 +999,8 @@ jobs:
         #    `--no-renames`, git reports the SAME operation as a plain
         #    delete (`README.md`) + add (`CLAUDE.local.md`) pair instead —
         #    the add is now correctly caught and removed, and step 1
-        #    (`git checkout $BASE_SHA -- .`) independently restores
+        #    removes it before step 2 (`git checkout $BASE_SHA -- .`)
+        #    independently restores
         #    `README.md` regardless of rename detection, since it overlays
         #    base's own tracked content for every path base has, with no
         #    awareness of what HEAD renamed it to or from.
@@ -983,12 +1074,14 @@ jobs:
           set -euo pipefail
           git fetch --depth 1 origin "$BASE_SHA"
 
-          git checkout "$BASE_SHA" -- .
+          # Remove PR-added paths before checkout so file/directory replacements cannot delete trusted content after restoration.
+          git diff --name-only -z --diff-filter=A --no-renames "$BASE_SHA" HEAD -- . |
+            while IFS= read -r -d '' added_path; do
+              echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
+              rm -rf -- "$added_path"
+            done
 
-          git diff --name-only --diff-filter=A --no-renames "$BASE_SHA" HEAD -- . | while IFS= read -r added_path; do
-            echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
-            rm -rf -- "$added_path"
-          done
+          git checkout "$BASE_SHA" -- .
 
           git checkout HEAD -- scripts/factory .claude/skills/spec-grounded-review
 

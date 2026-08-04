@@ -6,6 +6,9 @@ import { parseDocument } from "yaml";
 const WORKFLOW_PATH = fileURLToPath(
   new URL("../../.github/workflows/claude-code-review.yml", import.meta.url),
 );
+const TOOL_CATALOG_FIXTURE_PATH = fileURLToPath(
+  new URL("./fixtures/claude-review-sdk-tool-catalog.json", import.meta.url),
+);
 
 type Mapping = Record<string, unknown>;
 
@@ -20,6 +23,23 @@ function parseWorkflow(): Mapping {
   const document = parseDocument(readFileSync(WORKFLOW_PATH, "utf8"));
   expect(document.errors).toEqual([]);
   return document.toJS() as Mapping;
+}
+
+function parseToolCatalogFixture(): Mapping {
+  return asMapping(
+    JSON.parse(readFileSync(TOOL_CATALOG_FIXTURE_PATH, "utf8")) as unknown,
+  );
+}
+
+function fixtureStringArray(fixture: Mapping, field: string): string[] {
+  const value = fixture[field];
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry) => typeof entry === "string")
+  ) {
+    throw new Error(`tool-catalog fixture ${field} is not a string array`);
+  }
+  return value;
 }
 
 function jobIf(workflow: Mapping, jobName: string): string {
@@ -44,6 +64,23 @@ function jobStep(workflow: Mapping, jobName: string, stepName: string): Mapping 
 
 const INLINE_COMMENT_TOOL =
   "mcp__github_inline_comment__create_inline_comment";
+const TRACKING_COMMENT_TOOL =
+  "mcp__github_comment__update_claude_comment";
+const ORIGINAL_DENY_TOOLS = [
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  "mcp__github_file_ops__commit_files",
+  "mcp__github_file_ops__delete_files",
+  "Bash",
+];
+const READER_TOOLS = ["Read", "Glob", "Grep", "LS"];
+const CI_TOOLS = [
+  "mcp__github_ci__get_ci_status",
+  "mcp__github_ci__get_workflow_run_details",
+  "mcp__github_ci__download_job_log",
+];
 
 function claudeArgTools(
   claudeArgs: unknown,
@@ -186,5 +223,145 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
 
     expect(mutated).not.toBe(claudeArgs);
     expect(deniesAllBashAndAllowsOnlyInlineComments(mutated)).toBe(false);
+  });
+
+  it("T26 denies every non-permitted SDK init tool in the captured catalog", () => {
+    const fixture = parseToolCatalogFixture();
+    const observedInitTools = fixtureStringArray(fixture, "observedInitTools");
+    const permittedResidual = new Set(
+      fixtureStringArray(fixture, "permittedResidual"),
+    );
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const deniedTools = claudeArgTools(
+      asMapping(step.with).claude_args,
+      "disallowedTools",
+    );
+
+    for (const tool of observedInitTools.filter(
+      (candidate) => !permittedResidual.has(candidate),
+    )) {
+      expect(deniedTools, `${tool} must be denied`).toContain(tool);
+    }
+  });
+
+  it("T27 explicitly denies core readers plus egress and execution tools", () => {
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const deniedTools = claudeArgTools(
+      asMapping(step.with).claude_args,
+      "disallowedTools",
+    );
+    const egressAndExecutionTools = [
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "Skill",
+      "Workflow",
+    ];
+
+    for (const tool of [...READER_TOOLS, ...egressAndExecutionTools]) {
+      expect(deniedTools, `${tool} must be denied explicitly`).toContain(tool);
+    }
+  });
+
+  it("T28 denies every non-permitted MCP tool in the action-computed allowlist", () => {
+    const fixture = parseToolCatalogFixture();
+    const computedAllowlist = fixtureStringArray(
+      fixture,
+      "actionComputedAllowlist",
+    );
+    const permittedMcpTools = new Set([
+      INLINE_COMMENT_TOOL,
+      TRACKING_COMMENT_TOOL,
+    ]);
+    const mcpToolsThatMustBeDenied = computedAllowlist.filter(
+      (tool) => tool.startsWith("mcp__") && !permittedMcpTools.has(tool),
+    );
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const deniedTools = claudeArgTools(
+      asMapping(step.with).claude_args,
+      "disallowedTools",
+    );
+
+    for (const tool of mcpToolsThatMustBeDenied) {
+      expect(deniedTools, `${tool} must be denied`).toContain(tool);
+    }
+  });
+
+  it("T29 preserves the tracking-comment sink and exactly one explicit allow", () => {
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const claudeArgs = asMapping(step.with).claude_args;
+    const allowedTools = claudeArgTools(claudeArgs, "allowedTools");
+    const deniedTools = claudeArgTools(claudeArgs, "disallowedTools");
+
+    expect(deniedTools).not.toContain(TRACKING_COMMENT_TOOL);
+    expect(allowedTools).toEqual([INLINE_COMMENT_TOOL]);
+  });
+
+  it("T30 uses only whole-tool deny names, never path- or command-scoped forms", () => {
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const deniedTools = claudeArgTools(
+      asMapping(step.with).claude_args,
+      "disallowedTools",
+    );
+
+    for (const tool of deniedTools) {
+      expect(tool, `${tool} must be an unscoped tool name`).toMatch(
+        /^[A-Za-z0-9_]+$/,
+      );
+    }
+  });
+
+  it("T31 byte-pins the fixture-derived complete deny grammar", () => {
+    const fixture = parseToolCatalogFixture();
+    const observedInitTools = fixtureStringArray(
+      fixture,
+      "observedInitTools",
+    );
+    const permittedResidual = new Set(
+      fixtureStringArray(fixture, "permittedResidual"),
+    );
+    const expectedDenyTools = [
+      ...ORIGINAL_DENY_TOOLS,
+      ...READER_TOOLS,
+      ...CI_TOOLS,
+      ...observedInitTools
+        .filter((tool) => !permittedResidual.has(tool))
+        .sort(),
+    ];
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    const deniedTools = claudeArgTools(
+      asMapping(step.with).claude_args,
+      "disallowedTools",
+    );
+
+    expect(deniedTools).toEqual(expectedDenyTools);
+    expect(deniedTools).not.toContain("");
+    expect(new Set(deniedTools).size).toBe(deniedTools.length);
+  });
+
+  it("T32 permits only ToolSearch as a fixture-recorded residual", () => {
+    const permittedResidual = fixtureStringArray(
+      parseToolCatalogFixture(),
+      "permittedResidual",
+    );
+
+    for (const tool of permittedResidual) {
+      expect(tool).toBe("ToolSearch");
+    }
+  });
+
+  it("T33 locks the captured SDK catalog to the claude-review action pin", () => {
+    const step = jobStep(parseWorkflow(), "claude-review", "Run Claude Code Review");
+    if (typeof step.uses !== "string") {
+      throw new Error("claude-review action step has no string uses value");
+    }
+    const pin = step.uses.match(
+      /^anthropics\/claude-code-action@([0-9a-f]{40})$/,
+    );
+    if (!pin) {
+      throw new Error("claude-review action step is not pinned to a 40-hex SHA");
+    }
+
+    expect(parseToolCatalogFixture().actionSha).toBe(pin[1]);
   });
 });
