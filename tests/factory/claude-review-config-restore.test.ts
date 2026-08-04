@@ -136,6 +136,7 @@ function createGitFixture(): GitFixture {
     ".claude/skills/spec-grounded-review/SKILL.md",
     "base skill fixture\n",
   );
+  write(repository, ".claude/agents/trusted.md", "trusted agent fixture\n");
   const baseSha = commitAll(repository, "base");
   git(repository, ["push", "--quiet", "-u", "origin", "main"]);
   git(origin, ["symbolic-ref", "HEAD", "refs/heads/main"]);
@@ -347,6 +348,73 @@ describe("claude-review base-owned configuration restore", () => {
       } finally {
         closeSync(trackedFd);
       }
+    });
+  });
+
+  it("T4d preserves the sibling restore and PR-head re-apply ordering", () => {
+    withGitFixture((fixture) => {
+      createFeature(fixture.repository);
+      rmSync(join(fixture.repository, ".claude/agents"), { recursive: true });
+      write(fixture.repository, ".claude/agents", "malicious replacement\n");
+      write(fixture.repository, ".mcp.json", "malicious command server\n");
+      write(fixture.repository, "CLAUDE.md", "malicious instructions\n");
+      rmSync(join(fixture.repository, "deleted.txt"));
+      write(
+        fixture.repository,
+        "scripts/factory/base.txt",
+        "PR-head factory fixture\n",
+      );
+      write(
+        fixture.repository,
+        ".claude/skills/spec-grounded-review/SKILL.md",
+        "PR-head skill fixture\n",
+      );
+      commitAll(fixture.repository, "exercise sibling restore ordering");
+
+      const result = runReviewRestore(fixture, {
+        run: stepRun("spec-grounded-review", SIBLING_RESTORE_STEP),
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(join(fixture.repository, ".mcp.json"))).toBe(false);
+      expect(readFileSync(join(fixture.repository, "CLAUDE.md"), "utf8")).toBe(
+        "trusted base instructions\n",
+      );
+      expect(readFileSync(join(fixture.repository, "deleted.txt"), "utf8")).toBe(
+        "restore this deletion\n",
+      );
+      const agentsDirectoryFd = openSync(
+        join(fixture.repository, ".claude/agents"),
+        "r",
+      );
+      try {
+        expect(fstatSync(agentsDirectoryFd).isDirectory()).toBe(true);
+      } finally {
+        closeSync(agentsDirectoryFd);
+      }
+      const trustedAgentFd = openSync(
+        join(fixture.repository, ".claude/agents/trusted.md"),
+        "r",
+      );
+      try {
+        expect(readFileSync(trustedAgentFd, "utf8")).toBe(
+          "trusted agent fixture\n",
+        );
+      } finally {
+        closeSync(trustedAgentFd);
+      }
+      expect(
+        readFileSync(join(fixture.repository, "scripts/factory/base.txt"), "utf8"),
+      ).toBe("PR-head factory fixture\n");
+      expect(
+        readFileSync(
+          join(
+            fixture.repository,
+            ".claude/skills/spec-grounded-review/SKILL.md",
+          ),
+          "utf8",
+        ),
+      ).toBe("PR-head skill fixture\n");
     });
   });
 
