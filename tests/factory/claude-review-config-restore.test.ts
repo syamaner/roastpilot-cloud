@@ -299,6 +299,57 @@ describe("claude-review base-owned configuration restore", () => {
     });
   });
 
+  it("T4b restores a trusted directory replaced by a PR-added file", () => {
+    withGitFixture((fixture) => {
+      createFeature(fixture.repository);
+      rmSync(join(fixture.repository, ".claude"), { recursive: true });
+      write(fixture.repository, ".claude", "malicious file at directory path\n");
+      commitAll(fixture.repository, "replace trusted directory with file");
+
+      const result = runReviewRestore(fixture);
+
+      expect(result.status, result.stderr).toBe(0);
+      const claudeDirectoryFd = openSync(join(fixture.repository, ".claude"), "r");
+      try {
+        expect(fstatSync(claudeDirectoryFd).isDirectory()).toBe(true);
+      } finally {
+        closeSync(claudeDirectoryFd);
+      }
+      const trustedSkillFd = openSync(
+        join(
+          fixture.repository,
+          ".claude/skills/spec-grounded-review/SKILL.md",
+        ),
+        "r",
+      );
+      try {
+        expect(readFileSync(trustedSkillFd, "utf8")).toBe("base skill fixture\n");
+      } finally {
+        closeSync(trustedSkillFd);
+      }
+    });
+  });
+
+  it("T4c restores a trusted file replaced by a PR-added directory", () => {
+    withGitFixture((fixture) => {
+      createFeature(fixture.repository);
+      rmSync(join(fixture.repository, "tracked.txt"));
+      write(fixture.repository, "tracked.txt/payload", "malicious directory\n");
+      commitAll(fixture.repository, "replace trusted file with directory");
+
+      const result = runReviewRestore(fixture);
+
+      expect(result.status, result.stderr).toBe(0);
+      const trackedFd = openSync(join(fixture.repository, "tracked.txt"), "r");
+      try {
+        expect(fstatSync(trackedFd).isFile()).toBe(true);
+        expect(readFileSync(trackedFd, "utf8")).toBe("trusted regular file\n");
+      } finally {
+        closeSync(trackedFd);
+      }
+    });
+  });
+
   it("T5 blocks the default-rename CLAUDE.local.md evasion", () => {
     withGitFixture((fixture) => {
       createFeature(fixture.repository);

@@ -183,13 +183,13 @@ jobs:
             TRUSTED_SHA="$(git rev-parse FETCH_HEAD)"
           fi
           [ -n "$TRUSTED_SHA" ] || { echo "::error::could not resolve a trusted revision"; exit 1; }
-          git checkout "$TRUSTED_SHA" -- .
-          # Removes tracked PR-added files; empty directories may remain harmlessly, and no untracked files exist at this first-step placement.
+          # Remove tracked PR-added files before checkout so a file/directory type replacement cannot delete trusted content after it is restored; empty directories may remain harmlessly, and no untracked files exist at this first-step placement.
           git diff --name-only -z --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD -- . |
             while IFS= read -r -d '' added_path; do
               echo "::notice::removing PR-added path not present at the trusted revision: $added_path"
               rm -rf -- "$added_path"
             done
+          git checkout "$TRUSTED_SHA" -- .
 
       # F1-S7 / #41: source-reviewed at this exact commit. The marketplace
       # resolves code-review to ./plugins/code-review, whose tree contains
