@@ -45,7 +45,64 @@ on:
 # action is possible from a stale in-flight result either way. Revisit
 # only if a real harm from the stale-findings case turns up.
 jobs:
+  resolve-trusted-revision:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      trusted-sha: ${{ steps.resolve.outputs.trusted-sha }}
+      trusted-source: ${{ steps.resolve.outputs.trusted-source }}
+    steps:
+      - name: Resolve the trusted revision
+        id: resolve
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
+          case "$DEFAULT_BRANCH" in
+            -*|*[[:space:]]*|*'*'*)
+              echo "::error::default_branch has an unsafe shape; cannot establish a trusted revision"
+              exit 1
+              ;;
+          esac
+
+          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            TRUSTED_SHA="$BASE_SHA"
+            TRUSTED_SOURCE="base-sha"
+          else
+            EXPECTED_REF="refs/heads/$DEFAULT_BRANCH"
+            LS="$(git ls-remote "$REMOTE_URL" "refs/heads/$DEFAULT_BRANCH")"
+            MATCH_COUNT=0
+            TRUSTED_SHA=""
+            while IFS= read -r remote_line; do
+              remote_sha="${remote_line%%$'\t'*}"
+              remote_ref="${remote_line#*$'\t'}"
+              [ "$remote_line" != "$remote_ref" ] || continue
+              [ "$remote_ref" = "$EXPECTED_REF" ] || continue
+              MATCH_COUNT=$((MATCH_COUNT + 1))
+              TRUSTED_SHA="$remote_sha"
+            done <<< "$LS"
+            if [ "$MATCH_COUNT" -ne 1 ]; then
+              echo "::error::default branch lookup returned $MATCH_COUNT exact matches; cannot establish a trusted revision"
+              exit 1
+            fi
+            TRUSTED_SOURCE="default-branch-tip"
+          fi
+
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::trusted revision is not a lowercase 40-hex SHA"
+            exit 1
+          fi
+          {
+            echo "trusted-sha=$TRUSTED_SHA"
+            echo "trusted-source=$TRUSTED_SOURCE"
+          } >> "$GITHUB_OUTPUT"
+
   claude-review:
+    needs: resolve-trusted-revision
     # Skip Dependabot PRs: GitHub withholds repository secrets from
     # Dependabot `pull_request` runs (read-only token), so
     # CLAUDE_CODE_OAUTH_TOKEN is empty and the action would fail. Dependency
@@ -148,12 +205,11 @@ jobs:
         # removes CLAUDE.local.md-class trusted-memory injection and reverts
         # modifications to every file owned by the trusted revision.
         #
-        # Trusted-revision selection is deliberately harder than the sibling
-        # spec-grounded-review restore. This pull_request workflow has no
-        # branches filter, so an attacker can retarget a PR onto their own base
-        # branch. Event-pinned base.sha is trusted only when BASE_REF exactly
-        # byte-matches the event's default branch; otherwise use the fetched
-        # default-branch tip. BASE_REF is compared only and never passed to git.
+        # The credential-free resolver establishes the trusted revision once
+        # for every consumer. It trusts the immutable event base SHA only while
+        # the base ref byte-matches the default branch; after a retarget it uses
+        # the default-branch tip. The attacker-controlled base ref is compared
+        # only inside that resolver and never reaches git.
         #
         # This is a TOTAL restore with no PR-head exceptions. claude-review's
         # prompt is prefetched and Unit 1 denies Read/Glob/Grep/LS/Bash, so it
@@ -169,20 +225,14 @@ jobs:
         # Every command fails closed; the action is skipped and the existing
         # completion assertion reds.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TRUSTED_SHA: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
         run: |
           set -euo pipefail
-          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
-          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
-            git fetch --depth 1 origin "$BASE_SHA"
-            TRUSTED_SHA="$BASE_SHA"
-          else
-            git fetch --depth 1 origin "refs/heads/$DEFAULT_BRANCH"
-            TRUSTED_SHA="$(git rev-parse FETCH_HEAD)"
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::resolved trusted revision is not a lowercase 40-hex SHA"
+            exit 1
           fi
-          [ -n "$TRUSTED_SHA" ] || { echo "::error::could not resolve a trusted revision"; exit 1; }
+          git fetch --depth 1 origin "$TRUSTED_SHA"
           # Remove tracked PR-added files before checkout so a file/directory type replacement cannot delete trusted content after it is restored; empty directories may remain harmlessly, and no untracked files exist at this first-step placement.
           git diff --name-only -z --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD -- . |
             while IFS= read -r -d '' added_path; do
@@ -190,7 +240,6 @@ jobs:
               rm -rf -- "$added_path"
             done
           git checkout "$TRUSTED_SHA" -- .
-
       # F1-S7 / #41: source-reviewed at this exact commit. The marketplace
       # resolves code-review to ./plugins/code-review, whose tree contains
       # only its manifest, README, and command (no hooks or MCP servers).
@@ -881,6 +930,7 @@ jobs:
   # below.
   spec-grounded-review:
     name: Spec-grounded review (read-only)
+    needs: resolve-trusted-revision
     # Same trust model as `claude-review` above, mirrored exactly rather
     # than re-derived: this job needs the same read-only GITHUB_TOKEN and
     # CLAUDE_CODE_OAUTH_TOKEN secret, neither of which GitHub supplies to a
@@ -933,12 +983,14 @@ jobs:
           # satisfied" would defeat this entire gate's purpose, past every
           # nonce-fence this design otherwise relies on, and the prior
           # restore step never even looked at it. A full checkout (this
-          # step) plus restoring the ENTIRE working tree from base (the
+          # step) plus restoring the ENTIRE working tree from the trusted
+          # revision (the
           # next step) closes this categorically: the invariant is now
-          # "everything is base except two named exceptions", enforced
+          # "everything is trusted-revision content except two named
+          # exceptions", enforced
           # over the ACTUAL MATERIALIZED TREE, not a declared list.
 
-      - name: Restore trusted configuration + manifests from the BASE revision
+      - name: Restore trusted configuration + manifests from the trusted revision
         # Codex findings, PR #76 review (P1, four rounds — round 5 is a
         # BLOCKER, proven with a live reproduction against the prior
         # round's own fix): for a factory-App-published PR, the checkout
@@ -956,29 +1008,29 @@ jobs:
         # sparse-checkout list` entry" fix, which the checkout step's own
         # comment explains was the wrong axis: that list is a STRICT
         # SUBSET of what cone mode actually materializes). The invariant
-        # this step enforces is unconditional: "the working tree equals
-        # base, except `scripts/factory` and
+        # this step enforces is unconditional: "the working tree equals the
+        # trusted revision, except `scripts/factory` and
         # `.claude/skills/spec-grounded-review`" — verified by restoring
         # EVERY tracked path, not by naming which ones to check.
         #
         # MECHANISM, three steps:
-        # 1. `git diff --diff-filter=A --no-renames "$BASE_SHA" HEAD --
-        #    .` finds every path ADDED in this PR's own HEAD relative to
-        #    base (`.mcp.json`, `.claude/settings.json`, `CLAUDE.local.md`,
+        # 1. `git diff --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD --
+        #    .` finds every path ADDED in this PR's own HEAD relative to the
+        #    trusted revision (`.mcp.json`, `.claude/settings.json`, `CLAUDE.local.md`,
         #    `.claudeignore`, `.npmrc`, a root symlink — all of these are
         #    genuinely NEW paths, not existing ones the PR edited), and
         #    removes each one outright. This is what closes "restore
-        #    absence", not just content. It MUST run before the base
-        #    checkout: if PR-head replaces a base directory with a
+        #    absence", not just content. It MUST run before the trusted
+        #    checkout: if PR-head replaces a trusted directory with a
         #    same-named file, deleting that added path after checkout would
         #    delete the trusted directory that checkout just restored.
-        # 2. `git checkout "$BASE_SHA" -- .` overlays base's own content
-        #    onto every path base tracks, across the WHOLE checkout (no
+        # 2. `git checkout "$TRUSTED_SHA" -- .` overlays trusted content
+        #    onto every path the trusted revision tracks, across the WHOLE checkout (no
         #    sparse cone to silently exclude anything, per the checkout
         #    step above) — this alone reverts any MODIFICATION to an
-        #    existing base-tracked path (a `CLAUDE.md` edit, a base file
+        #    existing trusted path (a `CLAUDE.md` edit, a trusted file
         #    replaced in-place by a malicious symlink, etc.), since
-        #    `checkout -- <path>` always overlays base's exact tracked
+        #    `checkout -- <path>` always overlays the trusted revision's exact tracked
         #    content (including its type — file, symlink, whatever)
         #    regardless of what the working tree currently has there.
         #
@@ -999,7 +1051,7 @@ jobs:
         #    `--no-renames`, git reports the SAME operation as a plain
         #    delete (`README.md`) + add (`CLAUDE.local.md`) pair instead —
         #    the add is now correctly caught and removed, and step 1
-        #    removes it before step 2 (`git checkout $BASE_SHA -- .`)
+        #    removes it before step 2 (`git checkout $TRUSTED_SHA -- .`)
         #    independently restores
         #    `README.md` regardless of rename detection, since it overlays
         #    base's own tracked content for every path base has, with no
@@ -1024,7 +1076,7 @@ jobs:
         #
         #    PREVIOUSLY this second exception was bootstrap-only (`git
         #    checkout HEAD -- .claude/skills/spec-grounded-review` gated
-        #    behind `! git cat-file -e "$BASE_SHA:.claude/skills/spec-
+        #    behind `! git cat-file -e "$TRUSTED_SHA:.claude/skills/spec-
         #    grounded-review"`), reasoning it would "self-close the moment
         #    this PR [#76] merges and base always has it too". That
         #    framing was backwards (Codex finding, PR #81 review, P1): the
@@ -1069,19 +1121,23 @@ jobs:
         # `README.md` is correctly restored to its original content, and
         # the other two additions are gone too.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TRUSTED_SHA: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
         run: |
           set -euo pipefail
-          git fetch --depth 1 origin "$BASE_SHA"
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::resolved trusted revision is not a lowercase 40-hex SHA"
+            exit 1
+          fi
+          git fetch --depth 1 origin "$TRUSTED_SHA"
 
           # Remove PR-added paths before checkout so file/directory replacements cannot delete trusted content after restoration.
-          git diff --name-only -z --diff-filter=A --no-renames "$BASE_SHA" HEAD -- . |
+          git diff --name-only -z --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD -- . |
             while IFS= read -r -d '' added_path; do
-              echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
+              echo "::notice::removing PR-added path not present at the trusted revision ($TRUSTED_SHA): $added_path"
               rm -rf -- "$added_path"
             done
 
-          git checkout "$BASE_SHA" -- .
+          git checkout "$TRUSTED_SHA" -- .
 
           git checkout HEAD -- scripts/factory .claude/skills/spec-grounded-review
 
@@ -1450,10 +1506,11 @@ jobs:
 
   publish-spec-grounding-review:
     name: Publish spec-grounded review (privileged)
-    needs: spec-grounded-review
-    # Runs on SUCCESS (publishes the real verdict) and FAILURE (posts the
-    # entrypoint's own visible fallback) -- but NOT on "skipped" or
-    # "cancelled" (corrected from an earlier draft's `!cancelled()` alone,
+    needs: [resolve-trusted-revision, spec-grounded-review]
+    # Runs when the resolver succeeded and the review job reached SUCCESS
+    # (publishes the real verdict) or FAILURE (posts the entrypoint's own
+    # visible fallback) -- but NOT on "skipped" or "cancelled" (corrected
+    # from an earlier draft's `!cancelled()` alone,
     # PR #91 review, Codex, must-fix): `spec-grounded-review` is skipped
     # outright for a draft PR, a Dependabot PR, a fork PR, or a
     # title-only `edited` event (that job's own `if:`), and this job's
@@ -1471,7 +1528,7 @@ jobs:
     # no-op handling stays in place regardless, as defense-in-depth for
     # any OTHER way this job could still end up invoked with that result
     # (this `if:` is the primary control, not the only one).
-    if: ${{ !cancelled() && needs.spec-grounded-review.result != 'skipped' }}
+    if: ${{ !cancelled() && needs.spec-grounded-review.result != 'skipped' && needs.resolve-trusted-revision.result == 'success' }}
 
     # OWN group, separate from spec-grounded-review's own (mirrors this
     # file's per-job philosophy, top-of-file comment, rather than a single
@@ -1505,6 +1562,16 @@ jobs:
       issues: read # Used only to fetch current linked-issue bodies for stale-criterion advisory annotation.
       pull-requests: write
     steps:
+      - name: Assert the resolved trusted revision
+        env:
+          TRUSTED_SHA: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::resolved trusted revision is not a lowercase 40-hex SHA"
+            exit 1
+          fi
+
       - name: Checkout TRUSTED base only -- never the PR's own head
         # THE load-bearing security decision for this job (team-lead
         # ENDORSED, with one rationale correction -- see below): this is
@@ -1519,11 +1586,12 @@ jobs:
         # write`, so if it ran the PR's own (possibly attacker-modified)
         # publish-spec-grounding-verdict.mts (or any sibling file in its
         # import graph), a malicious PR could rewrite this script to do
-        # ANYTHING with that token. Pinning `ref:` to `base.sha`
-        # (immutable, event-pinned -- never `base.ref`, a branch tip that
-        # could race) means every scripts/factory/*.mts file this job ever
-        # executes is ALWAYS the already-reviewed, already-merged base
-        # version, independent of the PR's own head.
+        # ANYTHING with that token. Pinning `ref:` to the shared resolver's
+        # validated output means every scripts/factory/*.mts file this job
+        # executes comes from the immutable event base SHA only while the PR
+        # targets the default branch. After a retarget, it comes from the
+        # resolved default-branch tip; the attacker-controlled base ref never
+        # reaches git.
         #
         # WHAT THIS PIN DOES NOT COVER (correction to an earlier draft of
         # this reasoning -- do not rely on the wrong version): the
@@ -1559,14 +1627,14 @@ jobs:
         # exactly this class of reliability problem at ITS round 5 (see
         # that job's own checkout step comment). A full checkout here
         # exposes no PR content at all, unlike that job's checkout: this
-        # step already pins `ref:` to `base.sha`, so the working tree is
-        # ALWAYS the trusted, already-reviewed base revision end to end --
+        # step already pins `ref:` to the resolved trusted SHA, so the working
+        # tree is ALWAYS a trusted revision end to end --
         # there is no PR-head content to restore away afterward, making
         # this job's own checkout simpler AND safer than the read-only
         # job's checkout-PR-then-restore-from-base sequence.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
           persist-credentials: false
 
       - name: Set up Node
@@ -1599,8 +1667,8 @@ jobs:
         # documents (a PR-controlled lock file + lifecycle scripts + a
         # token-bearing next step in the same job is a poison-then-
         # exfiltrate chain). Here that risk is even smaller than in that
-        # job: this checkout is pinned to `base.sha`, so `npm ci` installs
-        # from the BASE revision's own `package-lock.json`, never a PR's
+        # job: this checkout is pinned to the resolved trusted SHA, so `npm ci`
+        # installs from that revision's own `package-lock.json`, never a PR's
         # own lock file -- a PR cannot inject or pin a malicious
         # dependency version into what this job installs at all. Kept
         # anyway, matching the same job's own defence-in-depth posture
