@@ -2058,12 +2058,16 @@ jobs:
       // to exclude untrusted third-party comments from the review prompt.
       // jobs/runSteps/actionSteps are unchanged.
       //
+      // Issues #192/#194 moved runSteps 29 -> 30: claude-review gained exactly
+      // one `run:` step, `Restore base-owned configuration`; jobs,
+      // actionSteps, and inputs are unchanged.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 9,
-      runSteps: 29,
+      runSteps: 30,
       actionSteps: 27,
       inputs: 68,
     });
@@ -2129,7 +2133,11 @@ jobs:
       // Issue #194 moved inputs 112 -> 113: exactly one
       // `include_comments_by_actor` input was added to claude-review; no job
       // or step count changed.
-      runSteps: 54,
+      //
+      // Issues #192/#194 moved runSteps 54 -> 55: claude-review gained exactly
+      // one `run:` step, `Restore base-owned configuration`; jobs,
+      // actionSteps, and inputs are unchanged.
+      runSteps: 55,
       actionSteps: 44,
       inputs: 113,
     });

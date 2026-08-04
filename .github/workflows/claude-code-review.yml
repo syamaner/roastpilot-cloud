@@ -141,6 +141,56 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore base-owned configuration
+        # #192/#194: UNVERIFIED whether this claude-review invocation loads
+        # repository `.claude`/`.mcp.json` configuration at runtime (the action
+        # source is not vendored). Restore it fail-closed regardless: this also
+        # removes CLAUDE.local.md-class trusted-memory injection and reverts
+        # modifications to every file owned by the trusted revision.
+        #
+        # Trusted-revision selection is deliberately harder than the sibling
+        # spec-grounded-review restore. This pull_request workflow has no
+        # branches filter, so an attacker can retarget a PR onto their own base
+        # branch. Event-pinned base.sha is trusted only when BASE_REF exactly
+        # byte-matches the event's default branch; otherwise use the fetched
+        # default-branch tip. BASE_REF is compared only and never passed to git.
+        #
+        # This is a TOTAL restore with no PR-head exceptions. claude-review's
+        # prompt is prefetched and Unit 1 denies Read/Glob/Grep/LS/Bash, so it
+        # needs no workspace content from the PR. That reasoning is sound only
+        # while those whole-tool denies remain; T13 pins the coupling.
+        # `--no-renames` blocks the proven `git mv <base file>
+        # CLAUDE.local.md` evasion, while NUL-delimited `-z`/`read -r -d ''`
+        # prevents Git C-quoting unusual path bytes that rm would silently miss.
+        #
+        # Placement is load-bearing: this is the first step after checkout, so
+        # no PR-head content survives before another step can execute it and
+        # the trusted pinned `.claude-marketplace` checkout does not exist yet.
+        # Every command fails closed; the action is skipped and the existing
+        # completion assertion reds.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
+          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            git fetch --depth 1 origin "$BASE_SHA"
+            TRUSTED_SHA="$BASE_SHA"
+          else
+            git fetch --depth 1 origin "refs/heads/$DEFAULT_BRANCH"
+            TRUSTED_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
+          [ -n "$TRUSTED_SHA" ] || { echo "::error::could not resolve a trusted revision"; exit 1; }
+          git checkout "$TRUSTED_SHA" -- .
+          # Removes tracked PR-added files; empty directories may remain harmlessly, and no untracked files exist at this first-step placement.
+          git diff --name-only -z --diff-filter=A --no-renames "$TRUSTED_SHA" HEAD -- . |
+            while IFS= read -r -d '' added_path; do
+              echo "::notice::removing PR-added path not present at the trusted revision: $added_path"
+              rm -rf -- "$added_path"
+            done
+
       # F1-S7 / #41: source-reviewed at this exact commit. The marketplace
       # resolves code-review to ./plugins/code-review, whose tree contains
       # only its manifest, README, and command (no hooks or MCP servers).
@@ -272,11 +322,12 @@ jobs:
           # `gh pr view <PR> --comments` instruction can no longer re-admit
           # an unfiltered public comment after the author-filtered pre-fetch.
           #
-          # This closes the #192 read-to-comment primitive: the review cannot
-          # read the workspace, `/proc/self/environ`, Actions job logs, or the
-          # network, and cannot spawn a subprocess or sub-agent to recover
-          # those capabilities. It can publish only text already present in
-          # its prefetched metadata context through the two comment sinks.
+          # This closes the #192 read-to-comment primitive through BOTH controls:
+          # the first-step restore above removes PR-controlled startup config
+          # before the action can load it, and this tool-call deny removes every
+          # workspace, `/proc/self/environ`, Actions-log, network, subprocess,
+          # and sub-agent capability. It can publish only text already present
+          # in its prefetched metadata context through the two comment sinks.
           # IMPORTANT RESIDUAL -- the PR title/body injection channel survives,
           # because the author filter below does not filter those fields, and
           # the tracking comment remains forgeable by the model through
@@ -373,13 +424,14 @@ jobs:
           # does not filter the payload-frozen PR title or body, which remain
           # part of the accepted same-repo-PR threat model.
           #
-          # Do not generalize the catalog closure into removal of prompt
-          # injection or authentication of the completion signal. Same-repo
-          # author PR title/body text remains an injection channel, and the
-          # model can still write context-derived text to inline and tracking
-          # comments. What is closed is the payload acquisition path: with the
-          # whole reader/egress/execution catalog denied, that injection cannot
-          # obtain runner, workspace, job-log, or network data to publish.
+          # Do not generalize the combined restore + catalog closure into
+          # removal of prompt injection or authentication of the completion
+          # signal. Same-repo author PR title/body text remains an injection
+          # channel, and the model can still write context-derived text to
+          # inline and tracking comments. What is closed is payload acquisition:
+          # PR-controlled startup config is gone before action startup, and the
+          # reader/egress/execution deny blocks runner, workspace, job-log, and
+          # network data after startup.
           #
           # Side effect worth knowing, not yet decided (fsr, PR #195 review,
           # MEDIUM-1): this also drops bot comments -- Codex findings,
@@ -1022,10 +1074,11 @@ jobs:
 
           git checkout "$BASE_SHA" -- .
 
-          git diff --name-only --diff-filter=A --no-renames "$BASE_SHA" HEAD -- . | while IFS= read -r added_path; do
-            echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
-            rm -rf -- "$added_path"
-          done
+          git diff --name-only -z --diff-filter=A --no-renames "$BASE_SHA" HEAD -- . |
+            while IFS= read -r -d '' added_path; do
+              echo "::notice::removing PR-added path not present at base ($BASE_SHA): $added_path"
+              rm -rf -- "$added_path"
+            done
 
           git checkout HEAD -- scripts/factory .claude/skills/spec-grounded-review
 
