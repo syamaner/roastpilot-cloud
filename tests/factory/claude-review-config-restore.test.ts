@@ -20,9 +20,11 @@ import { parseDocument } from "yaml";
 const WORKFLOW_PATH = fileURLToPath(
   new URL("../../.github/workflows/claude-code-review.yml", import.meta.url),
 );
+const RESOLVER_JOB = "resolve-trusted-revision";
+const RESOLVER_STEP = "Resolve the trusted revision";
 const REVIEW_RESTORE_STEP = "Restore base-owned configuration";
 const SIBLING_RESTORE_STEP =
-  "Restore trusted configuration + manifests from the BASE revision";
+  "Restore trusted configuration + manifests from the trusted revision";
 const REVIEW_ACTION_STEP = "Run Claude Code Review";
 const MARKETPLACE_CLEAR_STEP = "Clear Claude Code plugin marketplace path";
 const GIT = "/usr/bin/git";
@@ -165,9 +167,7 @@ interface RestoreResult {
 function runReviewRestore(
   fixture: GitFixture,
   options: {
-    readonly baseSha?: string;
-    readonly baseRef?: string;
-    readonly defaultBranch?: string;
+    readonly trustedSha?: string;
     readonly run?: string;
   } = {},
 ): RestoreResult {
@@ -179,9 +179,7 @@ function runReviewRestore(
       encoding: "utf8",
       env: {
         ...process.env,
-        BASE_SHA: options.baseSha ?? fixture.baseSha,
-        BASE_REF: options.baseRef ?? "main",
-        DEFAULT_BRANCH: options.defaultBranch ?? "main",
+        TRUSTED_SHA: options.trustedSha ?? fixture.baseSha,
       },
     },
   );
@@ -192,6 +190,40 @@ function runReviewRestore(
   };
 }
 
+function resolveTrustedRevision(
+  fixture: GitFixture,
+  options: {
+    readonly baseSha?: string;
+    readonly baseRef?: string;
+    readonly defaultBranch?: string;
+  } = {},
+): RestoreResult & { readonly trustedSha: string } {
+  const outputPath = join(fixture.parent, "resolver-output");
+  writeFileSync(outputPath, "");
+  const result = spawnSync("bash", ["-c", stepRun(RESOLVER_JOB, RESOLVER_STEP)], {
+    cwd: fixture.repository,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      BASE_SHA: options.baseSha ?? fixture.baseSha,
+      BASE_REF: options.baseRef ?? "main",
+      DEFAULT_BRANCH: options.defaultBranch ?? "main",
+      REMOTE_URL: fixture.origin,
+      GITHUB_OUTPUT: outputPath,
+    },
+  });
+  const trustedSha = readFileSync(outputPath, "utf8")
+    .split("\n")
+    .find((line) => line.startsWith("trusted-sha="))
+    ?.slice("trusted-sha=".length) ?? "";
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    trustedSha,
+  };
+}
+
 function expectBaseTree(repository: string, baseSha: string): void {
   expect(() =>
     git(repository, ["diff", "--quiet", baseSha, "--", "."]),
@@ -199,7 +231,7 @@ function expectBaseTree(repository: string, baseSha: string): void {
 }
 
 describe("claude-review base-owned configuration restore", () => {
-  it("T1 exists first after checkout with event-only env bindings", () => {
+  it("T1 exists first after checkout with the shared resolver binding", () => {
     const steps = jobSteps("claude-review");
     const checkoutIndex = steps.findIndex(
       (step) => step.name === "Checkout repository",
@@ -217,10 +249,12 @@ describe("claude-review base-owned configuration restore", () => {
     expect(restoreIndex).toBeLessThan(clearIndex);
     expect(restoreIndex).toBeLessThan(actionIndex);
     expect(asMapping(restore.env)).toEqual({
-      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
-      BASE_REF: "${{ github.event.pull_request.base.ref }}",
-      DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}",
+      TRUSTED_SHA:
+        "${{ needs.resolve-trusted-revision.outputs.trusted-sha }}",
     });
+    expect(asMapping(asMapping(workflow().jobs)["claude-review"]).needs).toBe(
+      RESOLVER_JOB,
+    );
     expect(restore.run).not.toContain("${{");
   });
 
@@ -460,9 +494,13 @@ describe("claude-review base-owned configuration restore", () => {
         write(fixture.repository, "lib/feature.ts", "export const pwned = true;\n");
         commitAll(fixture.repository, "feature on attacker base");
 
-        const result = runReviewRestore(fixture, {
+        const resolved = resolveTrustedRevision(fixture, {
           baseSha: attackerBaseSha,
           baseRef,
+        });
+        expect(resolved.status, resolved.stderr).toBe(0);
+        const result = runReviewRestore(fixture, {
+          trustedSha: resolved.trustedSha,
         });
 
         expect(result.status, result.stderr).toBe(0);
@@ -487,7 +525,11 @@ describe("claude-review base-owned configuration restore", () => {
       git(fixture.repository, ["push", "--quiet", "origin", "main"]);
       git(fixture.repository, ["checkout", "--quiet", "feature"]);
 
-      const result = runReviewRestore(fixture);
+      const resolved = resolveTrustedRevision(fixture);
+      expect(resolved.status, resolved.stderr).toBe(0);
+      const result = runReviewRestore(fixture, {
+        trustedSha: resolved.trustedSha,
+      });
 
       expect(result.status, result.stderr).toBe(0);
       expect(readFileSync(join(fixture.repository, "CLAUDE.md"), "utf8")).toBe(
@@ -529,7 +571,9 @@ describe("claude-review base-owned configuration restore", () => {
       write(fixture.repository, ".mcp.json", "still present on fetch failure\n");
       commitAll(fixture.repository, "feature");
 
-      const result = runReviewRestore(fixture, { baseSha: "f".repeat(40) });
+      const result = runReviewRestore(fixture, {
+        trustedSha: "f".repeat(40),
+      });
 
       expect(result.status).not.toBe(0);
       expect(existsSync(join(fixture.repository, ".mcp.json"))).toBe(true);
@@ -541,7 +585,7 @@ describe("claude-review base-owned configuration restore", () => {
       createFeature(fixture.repository);
       write(fixture.repository, "lib/feature.ts", "export const feature = true;\n");
       commitAll(fixture.repository, "feature");
-      const result = runReviewRestore(fixture, { defaultBranch: "" });
+      const result = resolveTrustedRevision(fixture, { defaultBranch: "" });
 
       expect(result.status).not.toBe(0);
       expect(result.stdout).toContain(
@@ -575,8 +619,8 @@ describe("claude-review base-owned configuration restore", () => {
 
   it("T12 keeps every trusted-revision failure guard fail-closed", () => {
     const run = stepRun("claude-review", REVIEW_RESTORE_STEP);
-    expect(run).toContain('[ -n "$DEFAULT_BRANCH" ] || {');
-    expect(run).toContain('[ -n "$TRUSTED_SHA" ] || {');
+    expect(run).toContain('[ -z "$TRUSTED_SHA" ]');
+    expect(run).toContain('^[0-9a-f]{40}$');
     expect(run).not.toMatch(/git fetch[^\n]*\|\| true/);
     expect(run).toContain("set -euo pipefail");
   });
