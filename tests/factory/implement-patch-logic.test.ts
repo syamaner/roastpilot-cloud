@@ -9,6 +9,7 @@ import {
   buildImplementPrBody,
   buildPublishRejectedStepSummary,
   buildPublishSuccessStepSummary,
+  CLAUDE_REVIEW_ALLOWLISTED_PUBLISHER_LOGIN,
   deriveBranchName,
   validateProvenanceModelId,
   FACTORY_TEXT_LINE_LIMIT,
@@ -2172,7 +2173,7 @@ describe("buildPublishSuccessStepSummary", () => {
   it("shows a minted identity and normal review-automation triggering when not on fallback", () => {
     const summary = buildPublishSuccessStepSummary({
       issueNumber: 6,
-      publisherLogin: "roastpilot-factory[bot]",
+      publisherLogin: CLAUDE_REVIEW_ALLOWLISTED_PUBLISHER_LOGIN,
       publishedViaFallback: false,
       prNumber: 99,
       prUrl: "https://github.com/o/r/pull/99",
@@ -2223,11 +2224,31 @@ describe("buildPublishSuccessStepSummary", () => {
     expect(summary).toContain("no manual trigger is needed to START the review");
     expect(summary).not.toContain("must still manually");
     expect(summary).not.toContain("NOT satisfied automatically");
-    // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
-    // Review must NOT be reported as part of "triggered normally" — it
-    // does not actually run on a factory-minted PR until #47 lands.
-    expect(summary).toContain("Claude Code Review does NOT yet cover factory-authored PRs");
-    expect(summary).toContain("#47");
+    expect(summary).not.toContain(
+      "Claude Code Review does NOT yet cover factory-authored PRs",
+    );
+    expect(summary).toContain(
+      `Both Claude Code Review lenses now trigger on this PR** for the allowlisted publisher (\`${CLAUDE_REVIEW_ALLOWLISTED_PUBLISHER_LOGIN}\`)`,
+    );
+    expect(summary).toContain("Read their actual check results before merging");
+    expect(summary).toContain("green CI does not mean reviewed");
+  });
+
+  it("keeps the Claude review warning for an unknown non-fallback publisher", () => {
+    const summary = buildPublishSuccessStepSummary({
+      issueNumber: 6,
+      publisherLogin: "some-other-app[bot]",
+      publishedViaFallback: false,
+      prNumber: 99,
+      prUrl: "https://github.com/o/r/pull/99",
+      wasRefresh: false,
+    });
+    expect(summary).toContain(
+      "Claude Code Review does NOT yet cover factory-authored PRs",
+    );
+    expect(summary).not.toContain(
+      "Both Claude Code Review lenses now trigger on this PR",
+    );
   });
 
   it("shows the fallback identity, reason, suppressed review automation, and that Codex does not auto-trigger, when on fallback", () => {
