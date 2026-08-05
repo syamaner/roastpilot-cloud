@@ -43,6 +43,25 @@ const PR152_COMPLETE = readFileSync(
 const PR150_RUN_ID = "30304076291";
 const PR152_RUN_ID = "30306271323";
 
+const STUB_NOOP = [
+  `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+  "",
+  "---",
+  "### Code review",
+  "",
+  "- [ ] Read each changed file",
+  "- [ ] Post findings",
+].join("\n");
+const STUB_STRUCK = [
+  `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+  "",
+  "---",
+  "### Code review",
+  "",
+  "- [ ] ~~Read each changed file~~ (metadata-only run: file reads denied)",
+  "- [ ] ~~Post findings~~ (metadata-only run: no findings available)",
+].join("\n");
+
 // Issue #183. PR #182's re-review posted its tracking comment as PROSE (a
 // `### Review summary` heading and plain `-` bullets, but NO task-list box),
 // captured verbatim with `gh api ...issues/182/comments`. A prose body has no
@@ -203,6 +222,8 @@ function runStepB(options: {
   readonly attemptApiFails?: boolean;
   readonly attemptStartedAt?: string;
   readonly runAttempt?: string;
+  readonly catalogMetadataOnly?: string;
+  readonly resultClean?: string;
 }): StepBResult {
   const run = reviewJobStepRun(STEP_B);
   const workdir = mkdtempSync(join(tmpdir(), "review-step-b-"));
@@ -263,6 +284,8 @@ function runStepB(options: {
         RUN_ATTEMPT: options.runAttempt ?? "1",
         REVIEW_STEP_OUTCOME: options.outcome ?? "success",
         REVIEW_STEP_CONCLUSION: options.conclusion ?? "success",
+        CATALOG_METADATA_ONLY: options.catalogMetadataOnly ?? "",
+        RESULT_CLEAN: options.resultClean ?? "",
       },
     });
     return {
@@ -573,6 +596,51 @@ describe("claude-review denial-evidence step (step A)", () => {
     );
     // Only the one real tool_use block counts; the nested one in `input` does not.
     expect(result.stdout).toContain("tool invocations seen (NOT necessarily denied): 1");
+  });
+
+  it("A-T14: emits trusted clean result-record evidence", () => {
+    const result = runStepAWith([
+      { type: "system", subtype: "init", tools: ["ToolSearch"] },
+      {
+        type: "result",
+        is_error: false,
+        subtype: "success",
+        num_turns: 1,
+      },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    for (const emission of [result.stdout, result.summary]) {
+      expect(emission).toContain("result records: 1");
+      expect(emission).toContain("result is_error: false");
+      expect(emission).toContain("result subtype: success");
+      expect(emission).toContain("result num_turns: 1");
+    }
+  });
+
+  it("A-T15: hostile result subtypes are redacted on both evidence channels", () => {
+    const newline = String.fromCharCode(10);
+    const bidi = String.fromCharCode(0x202e);
+    const result = runStepAWith([
+      { type: "result", subtype: `success${newline}## forged` },
+      { type: "result", subtype: `success${bidi}variant` },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    for (const emission of [result.stdout, result.summary]) {
+      expect(emission).toContain("[redacted non-conforming tool name]");
+      expect(emission).not.toContain("## forged");
+      expect(emission).not.toContain(bidi);
+    }
+  });
+
+  it("A-T16: absent result records remain evidence-only and report absence", () => {
+    const result = runStepAWith([
+      { type: "system", subtype: "init", tools: ["ToolSearch"] },
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("result records: 0");
+    expect(result.stdout).toContain("result is_error: absent");
+    expect(result.stdout).toContain("result subtype: absent");
+    expect(result.stdout).toContain("result num_turns: absent");
   });
 });
 
@@ -889,6 +957,156 @@ describe("claude-review completion-assertion step (step B)", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("posted no tracking comment");
+  });
+});
+
+describe("claude-review metadata-only completion recognition (step B)", () => {
+  it.each([
+    ["MO-T1", STUB_NOOP],
+    ["MO-T2", STUB_STRUCK],
+  ])("%s: true/true accepts a run-bound metadata-only stub", (_id, body) => {
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      "metadata-only review configuration with a clean terminal exit",
+    );
+    expect(result.stdout).not.toContain("no unfinished work advertised");
+  });
+
+  it("MO-T3: a non-clean result falls through to the unticked alarm", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_NOOP)]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "false",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("finished with unticked checklist items");
+  });
+
+  it("MO-T4: an absent result signal falls through closed", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_NOOP)]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("finished with unticked checklist items");
+  });
+
+  it.each(["", "false"])(
+    "MO-T5: catalog metadata_only=%j preserves the tool-bearing unticked alarm",
+    (catalogMetadataOnly) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_NOOP)]],
+        runId: PR152_RUN_ID,
+        catalogMetadataOnly,
+        resultClean: "true",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(
+        "the review job finished with unticked checklist items in its own tracking comment",
+      );
+    },
+  );
+
+  it("MO-T6: true/true cannot bypass the no-tracking-comment guard", () => {
+    const result = runStepB({
+      pages: [[]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("posted no tracking comment");
+  });
+
+  it("MO-T7: true/true cannot bypass author, run-id, or freshness bindings", () => {
+    const mallory = runStepB({
+      pages: [[{ login: "mallory", body: STUB_NOOP }]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(mallory.status).toBe(1);
+    expect(mallory.stdout).toContain("posted no tracking comment");
+
+    const wrongRun = runStepB({
+      pages: [[completionComment(STUB_NOOP)]],
+      runId: "99999999999",
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(wrongRun.status).toBe(1);
+    expect(wrongRun.stdout).toContain("posted no tracking comment");
+
+    const stale = runStepB({
+      pages: [
+        [
+          {
+            ...completionComment(STUB_NOOP),
+            updatedAt: "2026-07-27T12:59:59Z",
+          },
+        ],
+      ],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(stale.status).toBe(1);
+    expect(stale.stdout).toContain("posted no tracking comment");
+  });
+
+  it("MO-T8: struck checklist decoration cannot forge metadata-only acceptance", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_STRUCK)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("finished with unticked checklist items");
+  });
+
+  it("MO-T9: the #184 prose-truncation boundary remains closed", () => {
+    const result = runStepB({
+      pages: [[completionComment(PR182_PROSE_TRUNCATED)]],
+      runId: PR182_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it.each(["True", "1", " true", "yes"])(
+    "MO-T10: catalog signal %j does not satisfy the closed true grammar",
+    (catalogMetadataOnly) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_NOOP)]],
+        runId: PR152_RUN_ID,
+        catalogMetadataOnly,
+        resultClean: "true",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("finished with unticked checklist items");
+    },
+  );
+
+  it("MO-T11: true/true cannot bypass the action-outcome guard", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_NOOP)]],
+      runId: PR152_RUN_ID,
+      outcome: "failure",
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("did not genuinely run to success");
   });
 });
 
