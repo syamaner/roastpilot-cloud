@@ -1034,12 +1034,11 @@ jobs:
           # Deliberately does NOT fall back to `vars.FACTORY_PUBLISHER_LOGIN`
           # here (an earlier draft of this expression did, and that was a
           # live bug caught before merge, not just a style choice): that
-          # variable is currently still set to `syamaner`, left over from
-          # the superseded PAT-era design (§FACTORY_PUBLISHER_TOKEN note
-          # above), and won't be cleared until the operator finishes
-          # provisioning the App. Falling through to a stale value whenever
-          # `app-slug` is empty — which today means EVERY run, since no App
-          # token is minted yet — would reintroduce the exact
+          # variable can retain a value from the superseded PAT-era design
+          # (§FACTORY_PUBLISHER_TOKEN note above), while the provisioned App's
+          # minted token and `app-slug` output are authoritative. Falling
+          # through to a stale value whenever a mint does not yield an
+          # `app-slug` would reintroduce the exact
           # mismatched-login idempotency bug this whole mechanism exists to
           # prevent: GH_TOKEN authenticates as `github-actions[bot]` right
           # now, not `syamaner`, so this must resolve to
