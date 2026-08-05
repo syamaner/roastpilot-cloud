@@ -2067,12 +2067,16 @@ jobs:
       // one `run:` resolve step, and the publish job contributes its new
       // pre-checkout `run:` assert step. actionSteps and inputs are unchanged.
       //
+      // Issue #192 Unit 2 moved runSteps 32 -> 33: claude-review gained exactly
+      // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
+      // actionSteps, and inputs are unchanged.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 10,
-      runSteps: 32,
+      runSteps: 33,
       actionSteps: 27,
       inputs: 68,
     });
@@ -2147,7 +2151,11 @@ jobs:
       // the new credential-free `resolve-trusted-revision` job contributes
       // one `run:` resolve step, and the publish job contributes its new
       // pre-checkout `run:` assert step. actionSteps and inputs are unchanged.
-      runSteps: 57,
+      //
+      // Issue #192 Unit 2 moved runSteps 57 -> 58: claude-review gained exactly
+      // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
+      // actionSteps, and inputs are unchanged.
+      runSteps: 58,
       actionSteps: 44,
       inputs: 113,
     });

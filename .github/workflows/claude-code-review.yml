@@ -626,6 +626,23 @@ jobs:
                   elif type == "object" and (.name? | type) == "string"
                   then .name | safe_string
                   else empty end ] | unique | sort) as $mcp_servers
+            | ([ messages[] | select(.type == "result") ] | length) as $result_records
+            | ([ messages[]
+                | select(.type == "result")
+                | if has("is_error")
+                  then if (.is_error | type) == "boolean" then (.is_error | tostring) else "not a boolean" end
+                  else "absent" end ]
+                | if length == 0 then ["absent"] else unique end) as $result_is_errors
+            | ([ messages[]
+                | select(.type == "result")
+                | if has("subtype")
+                  then if (.subtype | type) == "string" then (.subtype | safe_string) else "not a string" end
+                  else "absent" end ]
+                | if length == 0 then ["absent"] else unique end) as $result_subtypes
+            | ([ messages[]
+                | select(.type == "result")
+                | .num_turns
+                | select(type == "number") ] | unique) as $result_num_turns
             | ([ messages[]
                 | select(.type == "assistant")
                 | .message.content[]?
@@ -635,6 +652,10 @@ jobs:
               + "denied tool names (\($tools | length)): \(if ($tools | length) == 0 then "no denial records found in this document" else ($tools | join(", ")) end)\n"
               + "SDK init tool names: \(if $init_records == 0 then "no system/init record present" elif ($init_tools | length) == 0 then "init record present with empty .tools" else "(\($init_tools | length)): \($init_tools | join(", "))" end)\n"
               + "SDK init mcp_servers: \(if $mcp_records == 0 then "not present on any init record" elif ($mcp_servers | length) == 0 then "present with no string/name entries" else "present; names (\($mcp_servers | length)): \($mcp_servers | join(", "))" end)\n"
+              + "result records: \($result_records)\n"
+              + "result is_error: \($result_is_errors | join(", "))\n"
+              + "result subtype: \($result_subtypes | join(", "))\n"
+              + "result num_turns: \(if ($result_num_turns | length) == 0 then "absent" else ($result_num_turns | map(tostring) | join(", ")) end)\n"
               + "tool invocations seen (NOT necessarily denied): \($invocations)"
           ' "$EXECUTION_OUTPUT" > "$evidence"; then
             {
@@ -650,6 +671,140 @@ jobs:
           else
             echo "note: execution output is not parseable JSON; no transcript content was emitted"
           fi
+          exit 0
+
+      - name: Enforce the SDK tool-catalog closure
+        id: catalog-closure
+        if: '!cancelled()'
+        env:
+          ACTION_EXECUTION_OUTPUT: ${{ steps.claude-review.outputs.execution_file }}
+          FALLBACK_EXECUTION_OUTPUT: ${{ runner.temp }}/claude-execution-output.json
+          TOOL_CATALOG_FIXTURE: ${{ github.workspace }}/tests/factory/fixtures/claude-review-sdk-tool-catalog.json
+          PERMITTED_RESIDUAL: '["ToolSearch"]'
+        run: |
+          set -euo pipefail
+          printf 'metadata_only=false\nresult_clean=false\n' >> "$GITHUB_OUTPUT"
+          EXECUTION_OUTPUT="${ACTION_EXECUTION_OUTPUT:-$FALLBACK_EXECUTION_OUTPUT}"
+          if [ ! -f "$EXECUTION_OUTPUT" ]; then
+            echo "::error::SDK execution output is missing; tool-catalog closure cannot be evaluated"
+            exit 1
+          fi
+
+          if ! jq -e '
+            type == "array" and length > 0
+              and all(.[]; type == "string" and test("^[A-Za-z0-9_-]{1,64}$"))
+          ' <<< "$PERMITTED_RESIDUAL" > /dev/null 2>&1; then
+            echo "::error::immutable permitted residual policy is not a non-empty JSON array of conforming tool names"
+            exit 1
+          fi
+          if [ ! -f "$TOOL_CATALOG_FIXTURE" ] || ! jq -e '
+            ((.observedInitTools | type) == "array")
+              and (.observedInitTools | all(.[]; type == "string"))
+          ' "$TOOL_CATALOG_FIXTURE" > /dev/null 2>&1; then
+            echo "::error::tool-catalog fixture is missing, unparseable, or invalid (required field: observedInitTools)"
+            exit 1
+          fi
+          permitted_residual="$PERMITTED_RESIDUAL"
+          observed_init_tools="$(jq -c '.observedInitTools' "$TOOL_CATALOG_FIXTURE")"
+          residual_count="$(jq -r 'length' <<< "$PERMITTED_RESIDUAL")"
+
+          messages="$(mktemp)"
+          if ! jq -sc '
+            def messages: [ .[] | if type == "array" then .[] else . end ];
+            messages
+          ' "$EXECUTION_OUTPUT" > "$messages" 2> /dev/null; then
+            echo "::error::SDK execution output is not parseable JSON; no transcript content was emitted"
+            exit 1
+          fi
+
+          # Scan both terminal result summaries and per-invocation tool_result records for denials to close the denial-detection class (connector P2, #192 Unit 2); absent summary fields pass, but present malformed values fail closed.
+          result_clean=false
+          if jq -e '
+            ([.[] | select(.type == "result")]) as $results
+            | ([ .[]
+                | select(.type == "user")
+                | (.message.content // [])[]?
+                | select(type == "object" and .type == "tool_result")
+                | select(has("is_error") and (.is_error != false))
+              ] | length) as $tool_result_flagged
+            | ($results | length) == 1
+              and (($results[0].is_error | type) == "boolean")
+              and ($results[0].is_error == false)
+              and (($results[0].subtype | type) == "string")
+              and ($results[0].subtype == "success")
+              and (
+                ($results[0] | has("permission_denials_count") | not)
+                or (($results[0].permission_denials_count | type) == "number" and $results[0].permission_denials_count == 0)
+              )
+              and (
+                ($results[0] | has("permission_denials") | not)
+                or (($results[0].permission_denials | type) == "array" and ($results[0].permission_denials | length) == 0)
+              )
+              and ($tool_result_flagged == 0)
+          ' "$messages" > /dev/null; then
+            result_clean=true
+          fi
+          printf 'result_clean=%s\n' "$result_clean" >> "$GITHUB_OUTPUT"
+
+          init_records="$(jq '[.[] | select(.type == "system" and .subtype == "init")] | length' "$messages")"
+          if [ "$init_records" -eq 0 ]; then
+            echo "::error::SDK execution output contains no top-level system/init record"
+            exit 1
+          fi
+          if ! jq -e '
+            [.[] | select(.type == "system" and .subtype == "init")] as $init
+            | all($init[];
+                has("tools")
+                and (.tools | type == "array")
+                and all(.tools[]; type == "string"))
+          ' "$messages" > /dev/null; then
+            echo "::error::every top-level system/init record must carry a .tools array containing only strings"
+            exit 1
+          fi
+
+          raw_tools="$(jq -c '[.[] | select(.type == "system" and .subtype == "init") | .tools[]] | unique | sort' "$messages")"
+          offenders="$(jq -cn --argjson tools "$raw_tools" --argjson permitted "$permitted_residual" '
+            [$tools[] as $tool | select(($permitted | index($tool)) == null) | $tool]
+          ')"
+          if [ "$(jq 'length' <<< "$offenders")" -ne 0 ]; then
+            diagnostics="$(mktemp)"
+            jq -r --argjson observed "$observed_init_tools" '
+              def safe_string:
+                tostring[:200]
+                | if (test("^[A-Za-z0-9_-]{1,200}$") | not)
+                  then "[redacted non-conforming tool name]"
+                  elif test("secret|token|password|credential|api.?key"; "i")
+                  then "[redacted sensitive-looking string]"
+                  else . end;
+              .[] as $tool
+              | if ($observed | index($tool)) != null
+                then "denied tool reappeared in the SDK init catalog — deny mechanism flip: \($tool | safe_string)"
+                else "unknown tool name outside the permitted residual: \($tool | safe_string)"
+                end
+            ' <<< "$offenders" > "$diagnostics"
+            {
+              echo "## SDK tool-catalog closure failure"
+              echo ""
+              head -c 65536 -- "$diagnostics"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            head -c 65536 -- "$diagnostics"
+            echo ""
+            # Widening permittedResidual widens BOTH this catalog closure and
+            # step B's metadata-only relaxation. Revisit them together; T32
+            # pins the residual to exactly ToolSearch until an operator changes it.
+            exit 1
+          fi
+
+          # Fail closed on the connector-P2 vacuous-truth empty-catalog gap (#192 Unit 2).
+          if [ "$(jq 'length' <<< "$raw_tools")" -eq 0 ]; then
+            echo "::error::every top-level system/init record reported an empty .tools array; cannot confirm the permitted residual with zero observed tools"
+            exit 1
+          fi
+
+          # mcp_servers observability is emitted by step A as non-failing drift evidence and is not a security boundary (tool access is the catalog closure); fail-closing pin removed per #211 grounding and operator decision (#192 Unit 2).
+          printf 'metadata_only=true\n' >> "$GITHUB_OUTPUT"
+          echo "confirmed: SDK tool-catalog closure holds for $residual_count permitted residual tool(s); metadata_only=true, result_clean=$result_clean"
           exit 0
 
       - name: Assert the review actually completed
@@ -719,6 +874,8 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REVIEW_STEP_OUTCOME: ${{ steps.claude-review.outcome }}
           REVIEW_STEP_CONCLUSION: ${{ steps.claude-review.conclusion }}
+          CATALOG_METADATA_ONLY: ${{ steps.catalog-closure.outputs.metadata_only }}
+          RESULT_CLEAN: ${{ steps.catalog-closure.outputs.result_clean }}
         run: |
           set -euo pipefail
           if [ "$REVIEW_STEP_OUTCOME" != "success" ] || [ "$REVIEW_STEP_CONCLUSION" != "success" ]; then
@@ -787,6 +944,11 @@ jobs:
           if [ -z "$BODY" ]; then
             echo "::error::this run posted no tracking comment, so no review ran (issue #146)"
             exit 1
+          fi
+
+          if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ]; then
+            echo "confirmed: metadata-only review configuration with a clean terminal exit; tracking-comment checklist state is not required (issue #192 Unit 2)"
+            exit 0
           fi
 
           # The signals below (a `- [ ]` checklist box and a "review in

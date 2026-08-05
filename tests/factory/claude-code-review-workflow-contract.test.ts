@@ -364,4 +364,100 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
 
     expect(parseToolCatalogFixture().actionSha).toBe(pin[1]);
   });
+
+  it("T34 keeps steps A, C, and B strictly adjacent with step C unconditional", () => {
+    const workflow = parseWorkflow();
+    const steps = asMapping(asMapping(workflow.jobs)["claude-review"]).steps;
+    if (!Array.isArray(steps)) {
+      throw new Error("claude-review job has no steps array");
+    }
+    const names = steps.map((step) => asMapping(step).name);
+    const stepAIndex = names.indexOf("Surface the review run's own denial evidence");
+    const stepCIndex = names.indexOf("Enforce the SDK tool-catalog closure");
+    const stepBIndex = names.indexOf("Assert the review actually completed");
+
+    expect(stepAIndex).toBeGreaterThanOrEqual(0);
+    expect(stepCIndex).toBe(stepAIndex + 1);
+    expect(stepBIndex).toBe(stepCIndex + 1);
+    const stepC = asMapping(steps[stepCIndex]);
+    expect(stepC.id).toBe("catalog-closure");
+    expect(stepC.if).toBe("!cancelled()");
+  });
+
+  it("T35 wires step C only to execution files, immutable policy, and diagnostic fixture", () => {
+    const workflow = parseWorkflow();
+    const stepA = jobStep(
+      workflow,
+      "claude-review",
+      "Surface the review run's own denial evidence",
+    );
+    const stepC = jobStep(
+      workflow,
+      "claude-review",
+      "Enforce the SDK tool-catalog closure",
+    );
+    const stepAEnv = asMapping(stepA.env);
+    const stepCEnv = asMapping(stepC.env);
+
+    expect(Object.keys(stepCEnv).sort()).toEqual([
+      "ACTION_EXECUTION_OUTPUT",
+      "FALLBACK_EXECUTION_OUTPUT",
+      "PERMITTED_RESIDUAL",
+      "TOOL_CATALOG_FIXTURE",
+    ]);
+    expect(stepCEnv.ACTION_EXECUTION_OUTPUT).toBe(
+      stepAEnv.ACTION_EXECUTION_OUTPUT,
+    );
+    expect(stepCEnv.ACTION_EXECUTION_OUTPUT).toBe(
+      "${{ steps.claude-review.outputs.execution_file }}",
+    );
+    expect(stepCEnv.FALLBACK_EXECUTION_OUTPUT).toBe(
+      stepAEnv.FALLBACK_EXECUTION_OUTPUT,
+    );
+    expect(stepCEnv.FALLBACK_EXECUTION_OUTPUT).toBe(
+      "${{ runner.temp }}/claude-execution-output.json",
+    );
+    expect(stepCEnv.TOOL_CATALOG_FIXTURE).toBe(
+      "${{ github.workspace }}/tests/factory/fixtures/claude-review-sdk-tool-catalog.json",
+    );
+    expect(JSON.stringify(stepCEnv)).not.toMatch(/GH_TOKEN|secrets\./u);
+  });
+
+  it("T36 locks step C output names to step B's exact-string gate", () => {
+    const stepB = jobStep(
+      parseWorkflow(),
+      "claude-review",
+      "Assert the review actually completed",
+    );
+    const env = asMapping(stepB.env);
+    const run = String(stepB.run);
+
+    expect(env.CATALOG_METADATA_ONLY).toBe(
+      "${{ steps.catalog-closure.outputs.metadata_only }}",
+    );
+    expect(env.RESULT_CLEAN).toBe(
+      "${{ steps.catalog-closure.outputs.result_clean }}",
+    );
+    expect(run).toContain('[ "$CATALOG_METADATA_ONLY" = "true" ]');
+    expect(run).toContain('[ "$RESULT_CLEAN" = "true" ]');
+    expect(run).toContain(
+      'if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ]; then',
+    );
+  });
+
+  it("T37 locks the immutable permitted residual policy to the fixture anchor", () => {
+    const stepC = jobStep(
+      parseWorkflow(),
+      "claude-review",
+      "Enforce the SDK tool-catalog closure",
+    );
+    const literal = asMapping(stepC.env).PERMITTED_RESIDUAL;
+    if (typeof literal !== "string") {
+      throw new Error("catalog-closure PERMITTED_RESIDUAL is not a string");
+    }
+
+    expect(JSON.parse(literal) as unknown).toEqual(
+      fixtureStringArray(parseToolCatalogFixture(), "permittedResidual"),
+    );
+  });
 });
