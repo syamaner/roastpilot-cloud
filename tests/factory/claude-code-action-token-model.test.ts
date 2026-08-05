@@ -44,7 +44,8 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 };
 // The triggering-actor allowlist (#146). Unrelated to comment authorship, and
 // must NOT move when the completion-comment author literal changes -- T-4.
-const EXPECTED_ALLOWED_BOTS = "claude,claude[bot]";
+const EXPECTED_ALLOWED_BOTS =
+  "claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]";
 // The live corpus has exactly four invocations (claude-review, spec-grounded,
 // triage, implement). A fifth must fail this tripwire so it cannot be added
 // without owning the `github_token` contract too (class sweep, #157 §4).
@@ -297,19 +298,14 @@ function stepBRun(content: string): string {
   return String(asMapping(step)?.run ?? "");
 }
 
-// Every claude-code-action invocation's allowed_bots within
-// claude-code-review.yml (both jobs), for the "must not over-sweep" guard.
-function allowedBotsInReviewWorkflow(content: string): unknown[] {
+// Every claude-code-action invocation's allowed_bots within one workflow or
+// composite action, for the triggering-actor admission guards.
+function allowedBotsInSource(content: string): unknown[] {
   const parsed = asMapping(parseDocument(content).toJS({ maxAliasCount: 100 }));
   const values: unknown[] = [];
-  for (const job of Object.values(asMapping(parsed?.jobs) ?? {})) {
-    for (const step of Array.isArray(asMapping(job)?.steps)
-      ? (asMapping(job)!.steps as unknown[])
-      : []) {
-      const mapping = asMapping(step);
-      if (mapping && isClaudeActionUses(mapping.uses)) {
-        values.push(asMapping(mapping.with)?.allowed_bots);
-      }
+  for (const step of parsed ? stepsOf(parsed) : []) {
+    if (isClaudeActionUses(step.uses)) {
+      values.push(asMapping(step.with)?.allowed_bots);
     }
   }
   return values;
@@ -384,10 +380,29 @@ describe("claude-code-action token model (issue #157)", () => {
   });
 
   it("T-4: both claude-code-review invocations keep the triggering-actor allowlist unchanged", () => {
-    const values = allowedBotsInReviewWorkflow(REVIEW_WORKFLOW_CONTENT);
+    const values = allowedBotsInSource(REVIEW_WORKFLOW_CONTENT);
     expect(values).toHaveLength(2);
     for (const value of values) {
       expect(value).toBe(EXPECTED_ALLOWED_BOTS);
+    }
+  });
+
+  it("T-4a: credential-bearing triage and implement invocations reject every bot", () => {
+    for (const workflowName of [
+      "triage-issues.yml",
+      "implement-ready-issues.yml",
+    ]) {
+      const content = readFileSync(join(WORKFLOWS_DIR, workflowName), "utf8");
+      expect(allowedBotsInSource(content)).toEqual([""]);
+    }
+  });
+
+  it("T-4b: no allowed_bots value admits GitHub Actions, a wildcard, or an expression", () => {
+    for (const source of collectSourceFiles()) {
+      for (const value of allowedBotsInSource(source.content)) {
+        expect(typeof value).toBe("string");
+        expect(value).not.toMatch(/github-actions|\*|\$\{\{/);
+      }
     }
   });
 

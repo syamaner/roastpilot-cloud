@@ -1945,6 +1945,10 @@ export const IMPLEMENT_FAILURE_COMMENT_MARKER =
  */
 export const IMPLEMENT_FAILURE_COMMENT_AUTHOR_LOGIN = "github-actions[bot]";
 
+/** Publisher identity admitted to both Claude Code Review lenses. */
+export const CLAUDE_REVIEW_ALLOWLISTED_PUBLISHER_LOGIN =
+  "roastpilot-factory[bot]";
+
 /** A comment as returned by the GitHub REST API, narrowed to the fields we use. */
 export interface ExistingComment {
   readonly id: number;
@@ -2242,18 +2246,23 @@ export function buildPublishSuccessStepSummary(
   // Codex does not auto-trigger at all (same GITHUB_TOKEN-authored-event
   // suppression as every other gate).
   //
-  // Adjudicated fix (Codex P1, post-#46-merge fix-forward): Claude Code
-  // Review is a THIRD case, not lumped in with "triggered normally" on
-  // the non-fallback path. claude-code-review.yml's `allowed_bots` is
-  // still `claude,claude[bot]` — allowlisting the factory publisher bot
-  // was deliberately dropped from #46 and re-scoped to #47 for its own
-  // security review (allowlisting it while the review job still holds
-  // `Bash(gh pr comment:*)` + an OAuth token is a real credential-exfil
-  // path on agent/issue-derived content). Until #47 lands,
-  // `claude-code-action` REJECTS `roastpilot-factory[bot]` outright, so
-  // Claude Code Review does NOT actually run on an App-minted factory PR
-  // — reporting it as "triggered normally" here would be false on the
-  // one path this summary exists to be honest about.
+  // Claude Code Review is a THIRD status, not implied by CI/CodeQL/dependency
+  // review being triggered normally. The confirmed factory publisher is now
+  // admitted to both review lenses because the SDK tool-catalog closure
+  // (#204/#211), base-owned config restore (Unit 1b), GITHUB_TOKEN-only posture
+  // (#157), and trusted-revision resolver (#209) are in place. Other publisher
+  // identities remain unknown and therefore retain the fail-closed warning.
+  const claudeReviewLine =
+    context.publisherLogin === CLAUDE_REVIEW_ALLOWLISTED_PUBLISHER_LOGIN
+      ? "✅ **Both Claude Code Review lenses now trigger on this PR** for the " +
+        `allowlisted publisher (${sanitizeUntrustedTextForPostedBody(context.publisherLogin)}). ` +
+        "Read their actual check results before merging; green CI does not mean reviewed."
+      : "⚠\uFE0F **Claude Code Review does NOT yet " +
+        // sanitizeUntrustedTextForPostedBody already returns its own code span — no
+        // extra surrounding backticks here.
+        `cover factory-authored PRs** — the publisher bot (${sanitizeUntrustedTextForPostedBody(context.publisherLogin)}) ` +
+        "isn't allowlisted in `claude-code-review.yml`; treat this PR as if Claude " +
+        "Code Review never ran until that identity is reviewed and allowlisted.";
   const reviewAutomationLine = context.publishedViaFallback
     ? "⚠\uFE0F **Suppressed** — GitHub does not trigger downstream workflows (CI, CodeQL, " +
       "dependency review, Claude Code Review) for `GITHUB_TOKEN`-authored PR events " +
@@ -2291,18 +2300,14 @@ export function buildPublishSuccessStepSummary(
           "ready — every factory PR — the boundary event is `opened`, since such a " +
           "PR never emits `ready_for_review`, and that automatic review IS the " +
           "valid first verdict WHEN IT ARRIVES. It has not yet been observed on a " +
-          "bot-authored factory PR, where a sibling review lens is known to refuse " +
-          "the publisher identity until #47 lands, so treat its arrival as expected " +
-          "rather than done. You must WAIT for it (AGENTS.md's Codex-wait rule); " +
+          "bot-authored factory PR. The sibling Claude review lenses now admit the " +
+          "confirmed publisher identity, but still treat each lens's arrival as " +
+          "expected rather than done. You must WAIT for it (AGENTS.md's Codex-wait " +
+          "rule); " +
           "what changes on this path is only that no manual trigger is needed to " +
           "START the review, and the timeout clause below is what catches the case " +
           "where it never begins. " + CODEX_VERDICT_CRITERION + " ") +
-      "⚠\uFE0F **Claude Code Review does NOT yet " +
-      // sanitizeUntrustedTextForPostedBody already returns its own code span — no
-      // extra surrounding backticks here.
-      `cover factory-authored PRs** — the publisher bot (${sanitizeUntrustedTextForPostedBody(context.publisherLogin)}) ` +
-      "isn't allowlisted in `claude-code-review.yml` yet (tracked in #47); treat this " +
-      "PR as if Claude Code Review never ran until that's resolved.";
+      claudeReviewLine;
   const gamingLabelClause =
     context.gamingLabelApplied === false
       ? `attempted but FAILED to apply the \`${NO_AUTO_CHAIN_LABEL}\` label — check the run's logs`

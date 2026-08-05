@@ -135,12 +135,12 @@ jobs:
     # draft phase is actually for is the runner-only gates, and skipping
     # claude-review here keeps a review lens from being spent on a head that is
     # still expected to move; it fires on ready_for_review once the PR is out of
-    # draft. (Factory PRs open non-draft, so this `if` admits them from `opened`.
-    # That is NOT the same as their being reviewed: the action still rejects
-    # the publisher bot, which is deliberately absent from `allowed_bots`
-    # until #47 allowlists it. Codex, #155: an earlier version of this line
-    # claimed factory PRs "are reviewed from `opened`", which this same file
-    # contradicts twice.)
+    # draft. Factory PRs open non-draft, so this `if` admits them from `opened`,
+    # and both review lenses now allow the confirmed publisher identity. That
+    # widening is admissible because its preconditions are already in place:
+    # SDK tool-catalog closure (#204/#211), base-owned config restore (Unit 1b),
+    # the GITHUB_TOKEN-only posture (#157), and the trusted-revision resolver
+    # (#209).
     #
     # Title/body-only edits stay excluded because they do not change this
     # job's diff. A base retarget is admitted because it changes the
@@ -436,7 +436,7 @@ jobs:
           # `claude` explicitly (both suffix forms) — NOT `*`, so an
           # arbitrary third-party bot still can't trigger a review that
           # holds the repo's read-only secret.
-          allowed_bots: 'claude,claude[bot]'
+          allowed_bots: 'claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]'
           # F1-S7 (issue #10) pre-slice audit: this job's own sibling
           # invocation below (the spec-grounded-review skill job) sets both
           # of these explicitly; this one didn't, relying on the action's
@@ -1538,18 +1538,12 @@ jobs:
           # push, the same class of gap `claude-review`'s own comment on
           # this exact allowlist already documents.
           #
-          # `roastpilot-factory[bot]` is DELIBERATELY NOT added here yet,
-          # not an oversight (Codex finding, PR #76 review — team-lead's
-          # disposition: intentional sequencing, not a fold): once a
-          # factory App bot identity starts opening PRs, this allowlist's
-          # absence of that identity would reject it and this job would
-          # never review a factory-authored PR at all. The fix is NOT to
-          # widen this allowlist for that bot yet — it is to close the
-          # exfil path #47 (F1-S7) tracks FIRST, then add
-          # `roastpilot-factory[bot]` here (see `implement-patch-logic.mts`'s
-          # own identical allowlist-sequencing precedent for the same bot
-          # identity).
-          allowed_bots: 'claude,claude[bot]'
+          # The confirmed factory publisher is admitted in both suffix forms.
+          # This widening is admissible because the pre-widening safety
+          # properties have landed: SDK tool-catalog closure (#204/#211),
+          # base-owned config restore (Unit 1b), the GITHUB_TOKEN-only posture
+          # (#157), and the trusted-revision resolver (#209).
+          allowed_bots: 'claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]'
           allowed_non_write_users: ""
           show_full_output: false
           # Grant Edit ONLY for the one file this skill is allowed to

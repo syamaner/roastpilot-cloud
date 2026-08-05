@@ -290,8 +290,8 @@ exception. The load-bearing points:
   indefinitely" (Codex, #155). Worth knowing when you rely on it: the
   automatic trigger has been OBSERVED on human-authored PRs (#150, #155,
   #156, agent #682) and has NOT yet been observed on a bot-authored factory
-  PR, where a sibling review lens is known to refuse the publisher identity
-  until #47 lands.
+  PR. Both sibling Claude review lenses now admit the confirmed publisher
+  identity, so treat Codex's arrival as expected rather than done.
 
   Head-match alone is NOT enough, and that is a real hole rather than a
   theoretical one (Codex P1 on the agent repo's copy, #682): a manually
@@ -409,21 +409,20 @@ that rule here. **Factory-authored PRs** don't use the draft phase for this
 purpose: the read-only implementing agent can't drive an open→ready
 transition, so the privileged publisher opens the PR non-draft and the
 *same* review roster runs **post-open** by design (the App-identity wiring
-exists precisely so CI and Codex fire on the opened PR), with the human
-merge as the gate the draft→ready step would otherwise be. **BOTH Claude
-lenses are missing from that roster on an App-minted factory PR** (Codex P2
-then P1, #155 — the first correction named only one of them, which was the
-same false-completeness one level down). `claude-code-review.yml` sets
-`allowed_bots: 'claude,claude[bot]'` at BOTH invocations — the `claude-review`
-job AND the `spec-grounded-review` job — and neither list contains the
-publisher identity, so the action rejects a factory-authored PR outright in
-both cases until #47 lands. That exclusion is deliberate sequencing, not an
-oversight: the workflow's own comment records that widening the allowlist
-before #47 closes the exfil path would be the wrong order. So the roster
-that actually runs on an opened factory PR is CI and Codex. Listing either
-Claude lens here as one that "fires on the opened PR" would let a reviewer
-relying on this policy read a missing lens as a completed one, which is the
-same false-completeness this file elsewhere treats as a merge hazard. Whether the publisher should open factory PRs as drafts and have
+exists precisely so CI, Codex, and both Claude review lenses fire on the
+opened PR), with the human merge as the gate the draft→ready step would
+otherwise be. `claude-code-review.yml` now allowlists the confirmed publisher
+identity, `roastpilot-factory[bot]`, at BOTH invocations — the `claude-review`
+job AND the `spec-grounded-review` job — so both lenses run on App-minted
+factory PRs. The widening is admissible because the exfil path is closed by
+the SDK tool-catalog closure (#204/#211), base-owned config restore (Unit 1b),
+GITHUB_TOKEN-only posture (#157), and trusted-revision resolver (#209). The
+roster that actually runs on an opened factory PR is therefore CI, Codex, and
+both Claude lenses. Trigger admission is NOT completion evidence: step B
+remains bound to `github-actions[bot]` only and still rejects
+`roastpilot-factory[bot]`. A lens firing is not proof that it completed cleanly;
+the operator must read the actual check results before merging, because green
+CI alone is not a reviewed verdict. Whether the publisher should open factory PRs as drafts and have
 `pr-triage` mark them ready post-fold is a factory-design question tracked
 separately, not this rule.
 - **Fix the CLASS, sweep the repo — pre-open.** When a finding is one instance
