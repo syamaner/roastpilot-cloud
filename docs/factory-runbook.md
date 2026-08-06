@@ -375,3 +375,119 @@ become metered), a payment method is ever added, or the factory switches
 to metered Anthropic API billing. At that point, set a real Anthropic
 monthly spend limit + usage alert and a GitHub Actions minutes budget,
 and reopen this checklist.
+
+## F1-S6 dry-run runbook (skeleton — 9h fills from observed behaviour)
+
+### Stuck states and recovery
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+### Half-published branches
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+### Malformed verdicts
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+### Where the logs live
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+### Cost and usage record
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+### Rollback (C7 cross-link)
+
+(To be filled during the supervised 9h session from observed behaviour; do not fill from speculation.)
+
+## Metrics baseline capture (9b)
+
+Capture one record immediately after each factory-authored PR merges. Use the
+merged PR's final head, not a later branch tip, and retain the command output or
+downloaded artifact with the operator's capture notes. Gather each field as
+follows:
+
+| Manifest field | Evidence and gathering procedure |
+|---|---|
+| `prNumber`, `headSha` | `gh pr view <PR> -R syamaner/roastpilot-cloud --json number,headRefOid` on the merged PR. |
+| `issueNumber` | Read the PR's closing/reference declaration with `gh pr view <PR> -R syamaner/roastpilot-cloud --json body,closingIssuesReferences`; record the single issue the factory dispatch implemented. |
+| `issueType` | Determine the issue's scope against the closed enum (`feature`, `security-fix`, `hardening`, `documentation`, `migration`, `schema`) and record the operator's classification rationale in the capture notes. Stop if the scope is ambiguous. |
+| `execution` | Record `factory` only when the PR is attributable to the factory implementation/publisher run; retain the run URL and verify the publisher identity with `gh pr view <PR> -R syamaner/roastpilot-cloud --json author`. Otherwise record `conventional`. |
+| `securitySurface` | Save `gh pr diff <PR> -R syamaner/roastpilot-cloud --name-only` and apply the `factory-security-reviewer` routing set in `AGENTS.md` to that exact path list. |
+| `triageOverridden` | Compare the bot-owned terminal triage verdict and readiness label with the human's final triage disposition in the issue timeline (`gh api --paginate repos/syamaner/roastpilot-cloud/issues/<ISSUE>/timeline`). Record true for a human override, never infer agreement from missing evidence. |
+| `firstPassCiGreen` | From the first post-open PR head, query `gh api repos/syamaner/roastpilot-cloud/commits/<SHA>/check-runs`; record true only when every applicable CI check passed on that first head without a corrective push. |
+| `postOpenReviewRounds` | Use `gh api --paginate repos/syamaner/roastpilot-cloud/pulls/<PR>/commits`, `/reviews`, and `/comments`; count completed review/fix rounds after the PR opened, retaining the timestamps and head SHAs used for the count. |
+| `humanTouchMinutes` | Start and stop an operator timer for issue/PR intervention, review handling, and recovery; record the elapsed minutes in the capture notes before entering the finite non-negative total. |
+| `reviewFindings` | Read every check result, submitted review, inline thread, and top-level reviewer verdict. Normalize each substantive finding to its byte-exact lens, severity, description, and counterfactual; retain links to the source review or run artifact. |
+| `lensCosts` | Record token usage from each lens's own usage artifact when available and wall-clock time from the corresponding Actions job timestamps (`gh run view <RUN> --json jobs`). Use explicit `null` when a measurement is unavailable; never substitute zero. |
+| `sampledForAudit` | Apply the committed seed and `deterministicAuditSampleDraw(prNumber, seed, 20)` before audit assignment and record the returned boolean. Security-surface audit obligation is separate and remains unconditional. |
+
+A formal issue-type label (ISSUE_TEMPLATE field plus triage support) is a candidate future enhancement for automated capture, not a requirement for human-driven R1 capture.
+
+The canonical manifest location is
+`scripts/factory/metrics/pr-baseline.json`. Load its complete text, construct
+the fully evidenced `FactoryPrRecord`, and pass both to `upsertPrRecord`. Write
+the returned text only when the result is `ok`. An identical replay is a
+byte-preserving no-op; a malformed manifest or conflicting record is an
+operator stop, never an overwrite. Commit baseline data separately from logic.
+
+## Promotion ratchet (9b)
+
+The autonomy ladder advances no more than one rung per successful evaluation:
+
+| Rung | Dispatch | Chaining | Merge |
+|---|---|---|---|
+| R0 | Paused | Off | Human |
+| R1 | Human dispatch | Off | Human |
+| R2 | Shadow execution | Draft-for-audit | Human |
+| R3 | Automatic | Triage-to-implement | Human |
+
+Merge is never automatic at any rung. R3 is the top rung; an evaluation there
+holds rather than inventing another level.
+
+The caller MUST evaluate only factory records since the last recorded rung
+change. Mechanical enforcement of that cutoff belongs to the consumer slice,
+which owns persisted rung state; this pure-logic layer does not infer it.
+Conventional records never enlarge the window. The ratified defaults are: at least K=35
+factory PRs, at least three distinct issue types, override rate at most 10%,
+first-pass CI-green rate at least 80%, post-open review-round median at most 1,
+random audit sample 20%, and Wilson z=1.96. The override gate uses the 95%
+Wilson lower bound for agreement (`n - overrides`) and requires at least 0.90.
+K=35 is the break-even for a flawless window: 34/34 has lower bound about
+0.8985 and still holds, while 35/35 is about 0.9011 and can advance. Every
+other rule is evaluated in the same pass, so the hold report preserves all
+observed failures rather than stopping at the first.
+
+### Consumer-slice enforcement (deferred)
+
+The ratchet consumer slice, not this pure-logic layer, must enforce all three
+operator-ratified input preconditions:
+
+1. mechanically window records at the last persisted rung change;
+2. verify each `sampledForAudit` value against the committed audit-sample seed;
+3. require positive review-completion evidence, rejecting an empty recorded-lens
+   set or a zero review-round count caused by a skipped roster as promotable
+   evidence.
+
+## Audit sampling and ledger (9b)
+
+Every security-surface PR is audited (100%), whether or not it wins the random
+draw. For each non-security factory PR, use the exact committed sampling seed
+and call `deterministicAuditSampleDraw(prNumber, seed, 20)`; do not redraw with
+a new seed after seeing the result. Preserve the committed seed with the
+metrics data so another operator can reproduce the selection.
+
+Each audit-ledger entry has exactly `prNumber`, `auditor`, `performedAt`, and
+`outcome`. The timestamp is UTC at second precision and the outcome is one of
+`clean`, `findings-fixed`, or `escape`; unknown outcomes fail closed. Rotate
+the assigned human auditor procedurally so the same operator does not
+repeatedly audit their own capture, and record the assignment before the audit
+begins. Multiple entries for a PR are allowed when follow-up evidence warrants
+them.
+
+Before ratchet evaluation, join every security-surface or randomly sampled
+window record to the ledger by PR number. If any owed audit has no ledger
+entry, the ratchet refuses promotion and reports the missing PR number. Any
+recorded `escape` in the window independently refuses promotion.
