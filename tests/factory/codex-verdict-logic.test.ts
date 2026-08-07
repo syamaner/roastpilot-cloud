@@ -576,14 +576,26 @@ describe("closed input grammar and operator advice", () => {
     });
   });
 
-  it("waits after any post-boundary bot evidence, even non-verdict or stale", () => {
-    const evaluatedAt = "2026-08-07T11:00:00Z";
-    expect(manualTriggerAdvice(input({ evaluatedAt, topLevelComments: [comment({
+  it("waits after a head-agnostic non-verdict bot comment engages the review", () => {
+    expect(manualTriggerAdvice(input({
+      evaluatedAt: "2026-08-07T11:00:00Z", topLevelComments: [comment({
       body: "Review queued.",
     })] }))).toBe("wait");
-    expect(manualTriggerAdvice(input({ evaluatedAt, reviews: [review({
+  });
+
+  it("ignores a stale-head bot review for current-head fallback advice", () => {
+    expect(manualTriggerAdvice(input({
+      evaluatedAt: "2026-08-07T11:00:00Z", reviews: [review({
       commitSha: PREVIOUS_HEAD,
-    })] }))).toBe("wait");
+    })] }))).toBe("due");
+  });
+
+  it("ignores a stale-head bot comment for current-head fallback advice", () => {
+    expect(manualTriggerAdvice(input({
+      evaluatedAt: "2026-08-07T11:00:00Z", topLevelComments: [comment({
+        body: cleanBody(PREVIOUS_HEAD),
+      })],
+    }))).toBe("due");
   });
 
   it("ignores stranger and pre-boundary bot signals for timeout advice", () => {
