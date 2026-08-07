@@ -3,11 +3,9 @@ import {
   FULL_SHA_PATTERN,
   LINE_SPLIT_PATTERN,
   isBoundary,
-  isCommentRecord,
   isEvidenceComplete,
   isPlainRecord,
   isReactionRecord,
-  isReviewRecord,
   isSignalInput,
   isTriggerRecord,
   parseStrictIsoUtc,
@@ -220,10 +218,6 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     !FULL_SHA_PATTERN.test(input.headSha) ||
     !isBoundary(input.boundary) ||
     parseStrictIsoUtc(input.evaluatedAt) === null ||
-    !Array.isArray(input.reviews) ||
-    !input.reviews.every(isReviewRecord) ||
-    !Array.isArray(input.topLevelComments) ||
-    !input.topLevelComments.every(isCommentRecord) ||
     !Array.isArray(input.triggerComments) ||
     !input.triggerComments.every(isTriggerRecord) ||
     !Array.isArray(input.reactions) ||
@@ -249,23 +243,10 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
-  const currentHeadReviewEngaged = input.reviews.some((review) =>
-    isCodexBot(review.authorLogin) &&
-    review.commitSha === input.headSha &&
-    postdatesBoundary(review.submittedAt, input.boundary));
-  const currentHeadOrAgnosticCommentEngaged = input.topLevelComments.some(
-    (comment) => {
-      const matchedSha = reviewedCommitSha(comment.body);
-      return isCodexBot(comment.authorLogin) &&
-        (matchedSha === null || matchedSha === input.headSha) &&
-        postdatesBoundary(comment.createdAt, input.boundary);
-    },
-  );
-  const reactionEngaged = input.reactions.some((reaction) =>
+  const botSignalEngaged = input.reactions.some((reaction) =>
+    reaction.content === "eyes" &&
     isCodexBot(reaction.authorLogin) &&
     postdatesBoundary(reaction.createdAt, input.boundary));
-  const botSignalEngaged = currentHeadReviewEngaged ||
-    currentHeadOrAgnosticCommentEngaged || reactionEngaged;
   if (botSignalEngaged) return "wait";
   const timeoutMilliseconds = CODEX_WAIT_TIMEOUT_MINUTES * 60 * 1000;
   return evaluatedAt - boundaryAt >= timeoutMilliseconds

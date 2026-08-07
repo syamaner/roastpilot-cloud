@@ -576,11 +576,12 @@ describe("closed input grammar and operator advice", () => {
     });
   });
 
-  it("waits after a head-agnostic non-verdict bot comment engages the review", () => {
+  it("ignores a head-agnostic non-verdict bot comment for fallback advice", () => {
     expect(manualTriggerAdvice(input({
       evaluatedAt: "2026-08-07T11:00:00Z", topLevelComments: [comment({
-      body: "Review queued.",
-    })] }))).toBe("wait");
+        body: "Review skipped.",
+      })],
+    }))).toBe("due");
   });
 
   it("ignores a stale-head bot review for current-head fallback advice", () => {
@@ -608,13 +609,20 @@ describe("closed input grammar and operator advice", () => {
     }))).toBe("due");
   });
 
+  it("ignores bot reactions other than eyes for timeout advice", () => {
+    expect(manualTriggerAdvice(input({
+      reactions: [{ ...pair()[1] }],
+      evaluatedAt: "2026-08-07T10:30:00Z",
+    }))).toBe("due");
+  });
+
   it.each([
     ["reviews", { reviews: [null] }],
     ["top-level comments", { topLevelComments: [null] }],
-  ])("returns wait for malformed standalone %s advice input", (_label, override) => {
+  ])("does not inspect unused standalone %s advice input", (_label, override) => {
     expect(manualTriggerAdvice({
       ...input({ evaluatedAt: "2026-08-07T11:00:00Z" }), ...override,
-    } as unknown as CodexSignalInput)).toBe("wait");
+    } as unknown as CodexSignalInput)).toBe("due");
   });
 
   it("treats the trigger defining a manual-retrigger boundary as already posted", () => {
