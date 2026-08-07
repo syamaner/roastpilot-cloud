@@ -40,6 +40,10 @@ function cleanBody(sha = HEAD, title = CODEX_CLEAN_COMMENT_TITLE): string {
   return `${title}\n\nReviewed commit: ${sha}`;
 }
 
+function findingsBody(sha = HEAD): string {
+  return `Codex found major issues.\n\nReviewed commit: ${sha}`;
+}
+
 function comment(overrides: Partial<CodexCommentRecord> = {}): CodexCommentRecord {
   return {
     authorLogin: CODEX_BOT_LOGIN,
@@ -145,10 +149,11 @@ describe("accepted Codex verdict evidence", () => {
     expect(reduceCodexVerdict(input({ reviews: [finding] }))).toEqual({
       verdict: "findings",
       evidence: {
-        authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
+        source: "review", authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
         submittedAt: AFTER, inlineThreadCount: 1,
         boundaryKind: "opened", boundaryOccurredAt: BOUNDARY_AT,
       },
+      draft: false,
       ratchetEligible: true,
     });
   });
@@ -190,12 +195,41 @@ describe("accepted Codex verdict evidence", () => {
   it.each([
     ["clean comment", { topLevelComments: [comment()] }],
     ["reaction pair", { reactions: pair() }],
-    ["findings review", { reviews: [review()] }],
-  ])("gates draft %s evidence from every ratchet-eligible verdict", (_label, evidence) => {
+  ])("keeps draft %s evidence pending and ratchet-ineligible", (_label, evidence) => {
     expect(reduceCodexVerdict(input({ prState: "draft", ...evidence }))).toEqual({
       verdict: "unknown-pending",
       reasons: ["not-ready-draft"],
       manualTriggerAdvice: "not-applicable-draft",
+      ratchetEligible: false,
+    });
+  });
+
+  it("preserves a draft findings review as ratchet-ineligible evidence", () => {
+    expect(reduceCodexVerdict(input({
+      prState: "draft", reviews: [review()],
+    }))).toEqual({
+      verdict: "findings",
+      evidence: {
+        source: "review", authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
+        submittedAt: AFTER, inlineThreadCount: 1,
+        boundaryKind: "opened", boundaryOccurredAt: BOUNDARY_AT,
+      },
+      draft: true,
+      ratchetEligible: false,
+    });
+  });
+
+  it("preserves a draft findings comment as ratchet-ineligible evidence", () => {
+    expect(reduceCodexVerdict(input({
+      prState: "draft", topLevelComments: [comment({ body: findingsBody() })],
+    }))).toEqual({
+      verdict: "findings",
+      evidence: {
+        source: "comment", authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
+        createdAt: AFTER, boundaryKind: "opened",
+        boundaryOccurredAt: BOUNDARY_AT,
+      },
+      draft: true,
       ratchetEligible: false,
     });
   });
@@ -236,6 +270,24 @@ describe("adversarial evidence fails closed", () => {
     expectPending(reduceCodexVerdict(input({
       reviews: [review({ commitSha: PREVIOUS_HEAD })],
     })), "stale-head-signal-only");
+  });
+
+  it("rejects conflicting reviewed-commit markers without dropping either", () => {
+    const body = `${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}` +
+      `\nReviewed commit: ${PREVIOUS_HEAD}`;
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+      reactions: pair(),
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+    expect(verdict.ratchetEligible).toBe(false);
+  });
+
+  it("accepts benign duplicate current-head reviewed-commit markers", () => {
+    const body = `${cleanBody()}\nReviewed commit: ${HEAD}`;
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
   it("deduplicates the same pending reason produced by comment and review channels", () => {
@@ -293,11 +345,13 @@ describe("adversarial evidence fails closed", () => {
     })), "unrecognised-bot-comment-only");
   });
 
-  it("T16 rejects a near-miss title and the exact title embedded in prose", () => {
+  it("T16 treats current-head near-miss titles as findings, never clean", () => {
     const nearMiss = cleanBody("a".repeat(40), "Codex Review: didn't find major issues");
     const embedded = cleanBody(HEAD, `Notice: ${CODEX_CLEAN_COMMENT_TITLE} today`);
     for (const body of [nearMiss, embedded]) {
-      expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
+      expect(reduceCodexVerdict(input({
+        topLevelComments: [comment({ body })],
+      }))).toMatchObject({ verdict: "findings", evidence: { source: "comment" } });
     }
     expect(isCleanComment(
       comment({ body: cleanBody(HEAD, `## ${CODEX_CLEAN_COMMENT_TITLE}`) }),
@@ -313,11 +367,11 @@ describe("adversarial evidence fails closed", () => {
     })), "unrecognised-bot-comment-only");
   });
 
-  it.each(["```", "~~~"])("rejects an exact title quoted inside a %s fence", (fence) => {
+  it.each(["```", "~~~"])("treats a current-head title inside a %s fence as findings", (fence) => {
     const body = `${fence}text\n${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}\n${fence}`;
-    expectPending(reduceCodexVerdict(input({
+    expect(reduceCodexVerdict(input({
       topLevelComments: [comment({ body })],
-    })), "unrecognised-bot-comment-only");
+    }))).toMatchObject({ verdict: "findings", evidence: { source: "comment" } });
   });
 
   it("requires the title as the first non-blank line and accepts both title forms", () => {
@@ -327,7 +381,9 @@ describe("adversarial evidence fails closed", () => {
       `<blockquote>\n${CODEX_CLEAN_COMMENT_TITLE}\n</blockquote>\nReviewed commit: ${HEAD}`,
       `Some notice\n${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}`,
     ]) {
-      expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
+      expect(reduceCodexVerdict(input({
+        topLevelComments: [comment({ body })],
+      }))).toMatchObject({ verdict: "findings", evidence: { source: "comment" } });
     }
     for (const title of [CODEX_CLEAN_COMMENT_TITLE, `## ${CODEX_CLEAN_COMMENT_TITLE}`]) {
       expect(reduceCodexVerdict(input({
@@ -339,6 +395,13 @@ describe("adversarial evidence fails closed", () => {
   it.each([
     ["single-line HTML-comment title", `<!-- ${CODEX_CLEAN_COMMENT_TITLE} -->\nReviewed commit: ${HEAD}`],
     ["multi-line HTML-comment title", `<!--\n${CODEX_CLEAN_COMMENT_TITLE}\n-->\nReviewed commit: ${HEAD}`],
+  ])("treats a current-head non-authenticating %s as findings", (_label, body) => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+    }))).toMatchObject({ verdict: "findings", evidence: { source: "comment" } });
+  });
+
+  it.each([
     ["U+2028-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\njunk\u2028Reviewed commit: ${HEAD}`],
     ["U+2029-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\njunk\u2029Reviewed commit: ${HEAD}`],
     ["Markdown-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n> Reviewed commit: ${HEAD}`],
@@ -414,6 +477,46 @@ describe("adversarial evidence fails closed", () => {
     expect(reduceCodexVerdict(input({
       reviews: [review()], topLevelComments: [comment()], reactions: pair(),
     })).verdict).toBe("findings");
+  });
+
+  it("gives a findings comment precedence over a clean comment", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [
+        comment(),
+        comment({ body: findingsBody(), createdAt: LATER }),
+      ],
+    }))).toEqual({
+      verdict: "findings",
+      evidence: {
+        source: "comment", authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
+        createdAt: LATER, boundaryKind: "opened",
+        boundaryOccurredAt: BOUNDARY_AT,
+      },
+      draft: false,
+      ratchetEligible: true,
+    });
+  });
+
+  it("gives a findings comment precedence over a clean reaction pair", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: findingsBody() })],
+      reactions: pair(),
+    }))).toMatchObject({
+      verdict: "findings", evidence: { source: "comment" },
+      ratchetEligible: true,
+    });
+  });
+
+  it("suppresses clean when a current-head non-verdict notice coexists", () => {
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [
+        comment(),
+        comment({ body: `Review skipped.\nReviewed commit: ${HEAD}` }),
+      ],
+      reactions: pair(),
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+    expect(verdict.ratchetEligible).toBe(false);
   });
 
   it("T22 keeps empty evidence pending with no-bot-signal and waits inside timeout", () => {
@@ -645,13 +748,25 @@ describe("closed input grammar and operator advice", () => {
     }))).toBe("due");
   });
 
-  it("T27 pins ratchet eligibility as literal false for pending and true otherwise", () => {
+  it("T27 pins pending false and distinguishes draft from ready findings", () => {
     const pending = reduceCodexVerdict(input());
     const clean = reduceCodexVerdict(input({ topLevelComments: [comment()] }));
-    const findings = reduceCodexVerdict(input({ reviews: [review()] }));
+    const readyFindings = reduceCodexVerdict(input({ reviews: [review()] }));
+    const draftFindings = reduceCodexVerdict(input({
+      prState: "draft", reviews: [review()],
+    }));
     if (pending.verdict === "unknown-pending") { const literal: false = pending.ratchetEligible; expect(literal).toBe(false); }
     if (clean.verdict === "clean") { const literal: true = clean.ratchetEligible; expect(literal).toBe(true); }
-    if (findings.verdict === "findings") { const literal: true = findings.ratchetEligible; expect(literal).toBe(true); }
+    if (readyFindings.verdict === "findings") {
+      const eligibility: boolean = readyFindings.ratchetEligible;
+      expect({ eligibility, draft: readyFindings.draft })
+        .toEqual({ eligibility: true, draft: false });
+    }
+    if (draftFindings.verdict === "findings") {
+      const eligibility: boolean = draftFindings.ratchetEligible;
+      expect({ eligibility, draft: draftFindings.draft })
+        .toEqual({ eligibility: false, draft: true });
+    }
   });
 
   it("T28 is deterministic and the pure module has no time, randomness, fs, or network capability", () => {

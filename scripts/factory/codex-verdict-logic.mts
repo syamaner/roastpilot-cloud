@@ -22,6 +22,17 @@ export const CODEX_CLEAN_COMMENT_TITLE =
 export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
 const REVIEWED_COMMIT_LINE_ANCHORED = /^Reviewed commit: ([0-9a-f]{40})$/u;
+const CODEX_NON_VERDICT_NOTICE_LINES = [
+  "Review queued.",
+  "Review skipped.",
+  "Review unable to review.",
+  "Unable to review.",
+] as const;
+
+type ReviewedCommitResult =
+  | { readonly kind: "none" }
+  | { readonly kind: "single"; readonly sha: string }
+  | { readonly kind: "conflicting" };
 
 export type PendingReason =
   | "malformed-input"
@@ -61,14 +72,24 @@ export type CleanEvidence =
       readonly boundaryOccurredAt: string;
     };
 
-export interface FindingsEvidence {
-  readonly authorLogin: string;
-  readonly matchedSha: string;
-  readonly submittedAt: string;
-  readonly inlineThreadCount: number;
-  readonly boundaryKind: CodexBoundary["kind"];
-  readonly boundaryOccurredAt: string;
-}
+export type FindingsEvidence =
+  | {
+      readonly source: "review";
+      readonly authorLogin: string;
+      readonly matchedSha: string;
+      readonly submittedAt: string;
+      readonly inlineThreadCount: number;
+      readonly boundaryKind: CodexBoundary["kind"];
+      readonly boundaryOccurredAt: string;
+    }
+  | {
+      readonly source: "comment";
+      readonly authorLogin: string;
+      readonly matchedSha: string;
+      readonly createdAt: string;
+      readonly boundaryKind: CodexBoundary["kind"];
+      readonly boundaryOccurredAt: string;
+    };
 
 export type CodexVerdict =
   | {
@@ -80,7 +101,9 @@ export type CodexVerdict =
   | {
       readonly verdict: "findings";
       readonly evidence: FindingsEvidence;
-      readonly ratchetEligible: true;
+      readonly draft: boolean;
+      /** Consumers may promote findings only when this value is exactly true. */
+      readonly ratchetEligible: boolean;
     }
   | {
       readonly verdict: "unknown-pending";
@@ -101,27 +124,90 @@ export function isCodexBot(login: string): boolean {
   return login === CODEX_BOT_LOGIN;
 }
 
-function hasCleanTitleLine(body: string): boolean {
-  const firstNonBlankLine = body.split(LINE_SPLIT_PATTERN)
-    .find((line) => !/^\s*$/u.test(line));
-  if (firstNonBlankLine === undefined) return false;
-  if (firstNonBlankLine === CODEX_CLEAN_COMMENT_TITLE) return true;
-  const heading = /^(#{1,6}) /u.exec(firstNonBlankLine);
-  return heading !== null &&
-    firstNonBlankLine.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
+function firstNonBlankLine(body: string): string | null {
+  return body.split(LINE_SPLIT_PATTERN)
+    .find((line) => !/^\s*$/u.test(line)) ?? null;
 }
 
-function reviewedCommitSha(body: string): string | null {
+function hasCleanTitleLine(body: string): boolean {
+  const firstNonBlank = firstNonBlankLine(body);
+  if (firstNonBlank === null) return false;
+  if (firstNonBlank === CODEX_CLEAN_COMMENT_TITLE) return true;
+  const heading = /^(#{1,6}) /u.exec(firstNonBlank);
+  return heading !== null &&
+    firstNonBlank.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
+}
+
+function reviewedCommitSha(body: string): ReviewedCommitResult {
+  const shas = new Set<string>();
   for (const line of body.split(LINE_SPLIT_PATTERN)) {
     const match = line.match(REVIEWED_COMMIT_LINE_ANCHORED);
-    if (match !== null) return match[1];
+    if (match !== null) shas.add(match[1]);
   }
-  return null;
+  if (shas.size === 0) return { kind: "none" };
+  if (shas.size > 1) return { kind: "conflicting" };
+  return { kind: "single", sha: [...shas][0] };
 }
 
 function hasReviewedCommitPrefix(body: string): boolean {
   return body.split(LINE_SPLIT_PATTERN).some((line) =>
     line.startsWith("Reviewed commit:"));
+}
+
+function isRecognizedNonVerdictNotice(body: string): boolean {
+  const firstNonBlank = firstNonBlankLine(body);
+  return firstNonBlank !== null &&
+    CODEX_NON_VERDICT_NOTICE_LINES.includes(
+      firstNonBlank as typeof CODEX_NON_VERDICT_NOTICE_LINES[number],
+    );
+}
+
+interface CommentClassification {
+  readonly comment: CodexCommentRecord;
+  readonly reviewedCommit: ReviewedCommitResult;
+  readonly cleanTitle: boolean;
+  readonly cleanGrammar: boolean;
+  readonly currentHeadMarker: boolean;
+  readonly postBoundary: boolean;
+  readonly clean: boolean;
+  readonly findings: boolean;
+  readonly blocksClean: boolean;
+}
+
+function classifyComment(
+  comment: CodexCommentRecord,
+  headSha: string,
+  boundary: CodexBoundary,
+  headChangedAt: string | null,
+): CommentClassification {
+  const reviewedCommit = reviewedCommitSha(comment.body);
+  const botTopLevel = isCodexBot(comment.authorLogin) &&
+    comment.channel === "issue-comment";
+  const cleanTitle = hasCleanTitleLine(comment.body);
+  const cleanGrammar = botTopLevel && cleanTitle &&
+    reviewedCommit.kind === "single";
+  const currentHeadMarker = reviewedCommit.kind === "single" &&
+    reviewedCommit.sha === headSha;
+  const postBoundary = postdatesBoundary(comment.createdAt, boundary);
+  const clean = cleanGrammar && currentHeadMarker && postBoundary &&
+    headChangedAt !== null && postdates(comment.createdAt, headChangedAt);
+  const recognizedNotice = botTopLevel &&
+    isRecognizedNonVerdictNotice(comment.body);
+  const findings = botTopLevel && postBoundary && currentHeadMarker &&
+    !cleanTitle && !recognizedNotice;
+  const blocksClean = botTopLevel && postBoundary && !clean &&
+    (currentHeadMarker || reviewedCommit.kind === "conflicting");
+  return {
+    comment,
+    reviewedCommit,
+    cleanTitle,
+    cleanGrammar,
+    currentHeadMarker,
+    postBoundary,
+    clean,
+    findings,
+    blocksClean,
+  };
 }
 
 /**
@@ -137,16 +223,7 @@ export function isCleanComment(
   boundary: CodexBoundary,
   headChangedAt: string | null,
 ): boolean {
-  const reviewedCommit = reviewedCommitSha(comment.body);
-  return (
-    isCodexBot(comment.authorLogin) &&
-    comment.channel === "issue-comment" &&
-    hasCleanTitleLine(comment.body) &&
-    reviewedCommit === headSha &&
-    postdatesBoundary(comment.createdAt, boundary) &&
-    headChangedAt !== null &&
-    postdates(comment.createdAt, headChangedAt)
-  );
+  return classifyComment(comment, headSha, boundary, headChangedAt).clean;
 }
 
 /** Apply the caller-declared PR-shape boundary with strict `>` semantics. */
@@ -279,6 +356,50 @@ function addReason(reasons: PendingReason[], reason: PendingReason): void {
 export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
   try {
     if (!isSignalInput(input)) return malformedVerdict(input);
+    const commentClassifications = input.topLevelComments.map((comment) =>
+      classifyComment(
+        comment,
+        input.headSha,
+        input.boundary,
+        input.headChangedAt,
+      ));
+    const findingsReview = input.reviews.find((review) =>
+      isFindingsReview(review, input.headSha, input.boundary));
+    const findingsComment = commentClassifications.find(
+      (classification) => classification.findings,
+    );
+    if (findingsReview !== undefined) {
+      return {
+        verdict: "findings",
+        evidence: {
+          source: "review",
+          authorLogin: findingsReview.authorLogin,
+          matchedSha: findingsReview.commitSha,
+          submittedAt: findingsReview.submittedAt,
+          inlineThreadCount: findingsReview.inlineThreadCount,
+          boundaryKind: input.boundary.kind,
+          boundaryOccurredAt: input.boundary.occurredAt,
+        },
+        draft: input.prState === "draft",
+        ratchetEligible: input.prState === "ready",
+      };
+    }
+    if (findingsComment !== undefined &&
+      findingsComment.reviewedCommit.kind === "single") {
+      return {
+        verdict: "findings",
+        evidence: {
+          source: "comment",
+          authorLogin: findingsComment.comment.authorLogin,
+          matchedSha: findingsComment.reviewedCommit.sha,
+          createdAt: findingsComment.comment.createdAt,
+          boundaryKind: input.boundary.kind,
+          boundaryOccurredAt: input.boundary.occurredAt,
+        },
+        draft: input.prState === "draft",
+        ratchetEligible: input.prState === "ready",
+      };
+    }
     if (input.prState !== "ready") {
       return {
         verdict: "unknown-pending",
@@ -288,47 +409,33 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
       };
     }
 
-    const findings = input.reviews.find((review) =>
-      isFindingsReview(review, input.headSha, input.boundary));
-    if (findings !== undefined) {
-      return {
-        verdict: "findings",
-        evidence: {
-          authorLogin: findings.authorLogin,
-          matchedSha: findings.commitSha,
-          submittedAt: findings.submittedAt,
-          inlineThreadCount: findings.inlineThreadCount,
-          boundaryKind: input.boundary.kind,
-          boundaryOccurredAt: input.boundary.occurredAt,
-        },
-        ratchetEligible: true,
-      };
-    }
-
     const evidenceComplete =
       input.evidenceComplete.reviews &&
       input.evidenceComplete.topLevelComments &&
       input.evidenceComplete.reactions;
-    const cleanComment = input.topLevelComments.find((comment) =>
-      isCleanComment(comment, input.headSha, input.boundary, input.headChangedAt));
-    if (cleanComment !== undefined && evidenceComplete) {
-      const matchedSha = reviewedCommitSha(cleanComment.body);
-      if (matchedSha !== null) {
-        const evidence: CleanEvidence = {
-          channel: "clean-comment",
-          authorLogin: cleanComment.authorLogin,
-          matchedSha,
-          signalAt: cleanComment.createdAt,
-          boundaryKind: input.boundary.kind,
-          boundaryOccurredAt: input.boundary.occurredAt,
-        };
-        return { verdict: "clean", channel: "clean-comment", evidence, ratchetEligible: true };
-      }
+    const blockingBotComment = commentClassifications.some(
+      (classification) => classification.blocksClean,
+    );
+    const cleanComment = commentClassifications.find(
+      (classification) => classification.clean,
+    );
+    if (cleanComment !== undefined && evidenceComplete && !blockingBotComment &&
+      cleanComment.reviewedCommit.kind === "single") {
+      const evidence: CleanEvidence = {
+        channel: "clean-comment",
+        authorLogin: cleanComment.comment.authorLogin,
+        matchedSha: cleanComment.reviewedCommit.sha,
+        signalAt: cleanComment.comment.createdAt,
+        boundaryKind: input.boundary.kind,
+        boundaryOccurredAt: input.boundary.occurredAt,
+      };
+      return { verdict: "clean", channel: "clean-comment", evidence, ratchetEligible: true };
     }
 
     const reactionPair = findCleanReactionPair(
       input.reactions, input.boundary, input.headChangedAt);
-    if (reactionPair !== null && input.headChangedAt !== null && evidenceComplete) {
+    if (reactionPair !== null && input.headChangedAt !== null && evidenceComplete &&
+      !blockingBotComment) {
       const [eyes, plusOne] = reactionPair;
       const evidence: CleanEvidence = {
         channel: "reaction-pair",
@@ -355,33 +462,39 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
     if (relevantRecords.length === 0) addReason(reasons, "no-bot-signal");
     else if (botRecords.length === 0) addReason(reasons, "non-bot-author-signal-only");
 
-    const botComments = input.topLevelComments.filter((comment) => isCodexBot(comment.authorLogin));
-    const verdictShapedBotComments = botComments.filter((comment) =>
-      comment.channel === "issue-comment" &&
-      hasCleanTitleLine(comment.body) &&
-      reviewedCommitSha(comment.body) !== null);
-    const currentHeadBotComments = verdictShapedBotComments.filter((comment) =>
-      reviewedCommitSha(comment.body) === input.headSha);
-    if (botComments.length > verdictShapedBotComments.length) {
+    const botComments = commentClassifications.filter((classification) =>
+      isCodexBot(classification.comment.authorLogin));
+    if (botComments.some((classification) =>
+      !classification.cleanGrammar && !classification.findings)) {
       addReason(reasons, "unrecognised-bot-comment-only");
     }
-    if (botComments.some((comment) =>
-      hasCleanTitleLine(comment.body) &&
-      hasReviewedCommitPrefix(comment.body) &&
-      reviewedCommitSha(comment.body) !== input.headSha)) {
+    if (botComments.some((classification) =>
+      classification.cleanTitle &&
+      hasReviewedCommitPrefix(classification.comment.body) &&
+      (classification.reviewedCommit.kind !== "single" ||
+        classification.reviewedCommit.sha !== input.headSha))) {
       addReason(reasons, "stale-head-signal-only");
     }
-    if (currentHeadBotComments.some((comment) =>
-      !postdatesBoundary(comment.createdAt, input.boundary))) {
+    const currentHeadCleanGrammarComments = botComments.filter(
+      (classification) => classification.cleanGrammar &&
+        classification.currentHeadMarker,
+    );
+    if (currentHeadCleanGrammarComments.some((classification) =>
+      !classification.postBoundary)) {
       addReason(reasons, "pre-boundary-signal-only");
     }
-    const postBoundaryCurrentHeadBotComments = currentHeadBotComments.filter((comment) =>
-      postdatesBoundary(comment.createdAt, input.boundary));
+    const postBoundaryCurrentHeadBotComments =
+      currentHeadCleanGrammarComments.filter(
+        (classification) => classification.postBoundary,
+      );
     if (postBoundaryCurrentHeadBotComments.length > 0) {
       if (input.headChangedAt === null) {
         addReason(reasons, "head-change-indeterminate");
-      } else if (postBoundaryCurrentHeadBotComments.some((comment) =>
-        !postdates(comment.createdAt, input.headChangedAt as string))) {
+      } else if (postBoundaryCurrentHeadBotComments.some((classification) =>
+        !postdates(
+          classification.comment.createdAt,
+          input.headChangedAt as string,
+        ))) {
         addReason(reasons, "stale-head-signal-only");
       }
     }
