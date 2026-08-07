@@ -7,6 +7,7 @@ export const REVIEWED_COMMIT_LINE = /^Reviewed commit: ([0-9a-f]{40})$/m;
 export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const LINE_SPLIT_PATTERN = /\r\n|\r|\n/u;
 const STRICT_ISO_UTC_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
 
@@ -163,7 +164,7 @@ function visibleTopLevelLines(body: string): readonly string[] {
   const visible: string[] = [];
   let fence: { readonly marker: "`" | "~"; readonly length: number } | null = null;
   let htmlCommentOpen = false;
-  for (const line of body.split(/\r?\n/u)) {
+  for (const line of body.split(LINE_SPLIT_PATTERN)) {
     if (fence !== null) {
       const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
       if (
@@ -210,12 +211,13 @@ function visibleTopLevelLines(body: string): readonly string[] {
 }
 
 function hasCleanTitleLine(body: string): boolean {
-  return visibleTopLevelLines(body).some((line) => {
-    if (line === CODEX_CLEAN_COMMENT_TITLE) return true;
-    const heading = /^(#{1,6}) /u.exec(line);
-    return heading !== null &&
-      line.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
-  });
+  const firstNonBlankLine = body.split(LINE_SPLIT_PATTERN)
+    .find((line) => !/^\s*$/u.test(line));
+  if (firstNonBlankLine === undefined) return false;
+  if (firstNonBlankLine === CODEX_CLEAN_COMMENT_TITLE) return true;
+  const heading = /^(#{1,6}) /u.exec(firstNonBlankLine);
+  return heading !== null &&
+    firstNonBlankLine.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
 }
 
 function reviewedCommitSha(body: string): string | null {
@@ -270,6 +272,7 @@ function findCleanReactionPair(
       if (
         plusOne.content === "+1" &&
         isCodexBot(plusOne.authorLogin) &&
+        eyes.subjectId.length > 0 &&
         plusOne.subjectId === eyes.subjectId &&
         postdates(plusOne.createdAt, eyes.createdAt) &&
         postdatesBoundary(eyes.createdAt, boundary) &&
@@ -321,7 +324,8 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     !Array.isArray(input.triggerComments) ||
     !input.triggerComments.every(isTriggerRecord) ||
     !Array.isArray(input.reactions) ||
-    !input.reactions.every(isReactionRecord)
+    !input.reactions.every(isReactionRecord) ||
+    !isEvidenceComplete(input.evidenceComplete)
   ) {
     return "wait";
   }
@@ -336,6 +340,7 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   ) {
     return "already-posted";
   }
+  if (input.evidenceComplete.reactions !== true) return "wait";
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
@@ -602,6 +607,7 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
           .filter((plusOne) =>
             eyes.content === "eyes" && plusOne.content === "+1" &&
             isCodexBot(eyes.authorLogin) && isCodexBot(plusOne.authorLogin) &&
+            eyes.subjectId.length > 0 &&
             eyes.subjectId === plusOne.subjectId &&
             postdates(plusOne.createdAt, eyes.createdAt) &&
             postdatesBoundary(eyes.createdAt, input.boundary) &&
@@ -612,6 +618,7 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
         input.reactions.some((plusOne) =>
           eyes.content === "eyes" && plusOne.content === "+1" &&
           isCodexBot(eyes.authorLogin) && isCodexBot(plusOne.authorLogin) &&
+          eyes.subjectId.length > 0 &&
           eyes.subjectId === plusOne.subjectId && postdates(plusOne.createdAt, eyes.createdAt) &&
           (!postdatesBoundary(eyes.createdAt, input.boundary) ||
             !postdatesBoundary(plusOne.createdAt, input.boundary))));

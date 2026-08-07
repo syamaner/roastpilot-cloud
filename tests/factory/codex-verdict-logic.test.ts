@@ -157,6 +157,10 @@ describe("accepted Codex verdict evidence", () => {
     const due = input({ evaluatedAt: "2026-08-07T10:30:00Z" });
     const waiting = input({ evaluatedAt: "2026-08-07T10:29:00Z" });
     expect(manualTriggerAdvice(due)).toBe("due");
+    expect(manualTriggerAdvice(input({
+      evaluatedAt: "2026-08-07T10:30:00Z",
+      evidenceComplete: { reviews: true, topLevelComments: true, reactions: false },
+    }))).toBe("wait");
     expect(reduceCodexVerdict(due)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "due" });
     expect(reduceCodexVerdict(waiting)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "wait" });
   });
@@ -276,14 +280,18 @@ describe("adversarial evidence fails closed", () => {
     })), "unrecognised-bot-comment-only");
   });
 
-  it("rejects a blockquoted title while retaining genuine plain and heading titles", () => {
-    const quoted = `> ${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}`;
-    expectPending(reduceCodexVerdict(input({
-      topLevelComments: [comment({ body: quoted })],
-    })), "unrecognised-bot-comment-only");
+  it("requires the title as the first non-blank line and accepts both title forms", () => {
+    for (const body of [
+      `> ${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}`,
+      `<pre>\n${CODEX_CLEAN_COMMENT_TITLE}\n</pre>\nReviewed commit: ${HEAD}`,
+      `<blockquote>\n${CODEX_CLEAN_COMMENT_TITLE}\n</blockquote>\nReviewed commit: ${HEAD}`,
+      `Some notice\n${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}`,
+    ]) {
+      expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
+    }
     for (const title of [CODEX_CLEAN_COMMENT_TITLE, `## ${CODEX_CLEAN_COMMENT_TITLE}`]) {
       expect(reduceCodexVerdict(input({
-        topLevelComments: [comment({ body: cleanBody(HEAD, title) })],
+        topLevelComments: [comment({ body: `\n \t\n${cleanBody(HEAD, title)}` })],
       }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
     }
   });
@@ -292,6 +300,7 @@ describe("adversarial evidence fails closed", () => {
     ["single-line HTML-comment title", `<!-- ${CODEX_CLEAN_COMMENT_TITLE} -->\nReviewed commit: ${HEAD}`],
     ["multi-line HTML-comment title", `<!--\n${CODEX_CLEAN_COMMENT_TITLE}\n-->\nReviewed commit: ${HEAD}`],
     ["fenced reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n\`\`\`\nReviewed commit: ${HEAD}\n\`\`\``],
+    ["lone-CR fenced reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\r\`\`\`\rReviewed commit: ${HEAD}\r\`\`\``],
     ["blockquoted reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n> Reviewed commit: ${HEAD}`],
     ["HTML-comment reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n<!--\nReviewed commit: ${HEAD}\n-->`],
   ])("rejects clean grammar with a hidden %s", (_label, body) => {
@@ -301,10 +310,13 @@ describe("adversarial evidence fails closed", () => {
   });
 
   it("accepts visible clean grammar alongside unrelated hidden markdown", () => {
-    const body = ["<!-- one -->", "<!-- two -->", "```text", "example", "```", "> quote",
-      CODEX_CLEAN_COMMENT_TITLE, `Reviewed commit: ${HEAD}`].join("\n");
+    const body = [CODEX_CLEAN_COMMENT_TITLE, "<!-- one -->", "<!-- two -->", "```text",
+      "example", "```", "> quote", `Reviewed commit: ${HEAD}`].join("\n");
     expect(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })))
       .toMatchObject({ verdict: "clean", channel: "clean-comment" });
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: cleanBody().replaceAll("\n", "\r") })],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
   it.each(["queued", "skipped", "unable to review"])("T17 rejects a bot head-naming %s notice", (state) => {
@@ -312,10 +324,15 @@ describe("adversarial evidence fails closed", () => {
     expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
   });
 
-  it("T18 rejects bot reactions on different subjects", () => {
+  it("T18 rejects bot reactions on different or empty subjects", () => {
     expectPending(reduceCodexVerdict(input({
       reactions: pair({ plusOne: { subjectId: "issue:2" } }),
     })), "unpaired-or-misordered-reactions");
+    const verdict = reduceCodexVerdict(input({
+      reactions: pair({ eyes: { subjectId: "" }, plusOne: { subjectId: "" } }),
+    }));
+    expectPending(verdict, "unpaired-or-misordered-reactions");
+    expect(verdict.ratchetEligible).toBe(false);
   });
 
   it("T19 requires determinate proof that thumbs-up follows the current head push", () => {
@@ -451,6 +468,7 @@ describe("closed input grammar and operator advice", () => {
   });
 
   it("rejects malformed evidence-completeness records", () => {
+    expect(manualTriggerAdvice({ ...input(), evidenceComplete: null } as unknown as CodexSignalInput)).toBe("wait");
     const missing: Record<string, unknown> = { ...input().evidenceComplete };
     delete missing.reactions;
     for (const evidenceComplete of [
