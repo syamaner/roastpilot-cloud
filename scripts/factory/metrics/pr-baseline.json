@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "description": "F1-S6 dry-run metrics baseline. The 27 Jul 2026 observed sample (issue #9 comments 2026-07-27T21:43:41Z and 2026-07-27T21:47:31Z) transcribed as execution=conventional FactoryPrRecord entries per D136 (data delivered separately from logic), D143 (Wilson-lower-bound confidence, at least 3 distinct issue types, enforced audit sampling) and the ratified 9b contract (D147). These are illustrative baseline EVIDENCE, not factory PRs: evaluatePromotion filters to execution=factory only, so nothing here counts toward any ratchet promotion, diversity, or audit-owed decision, and the audit ledger is empty by design. Field values follow the runbook capture procedure (docs/factory-runbook.md, Metrics baseline capture (9b)). Caveats carried from the source sample, recorded so no value here is mistaken for instrumented precision: (1) n=1 session, no controlled comparison, poor issue-type diversity (one hardening slice #150, one security fix #153 for issue #151, one docs/state reconciliation #152). (2) humanTouchMinutes was NOT instrumented and the operator declined to estimate it (not reported rather than estimated). The merged schema (Unit 1) types this field as a required non-nullable number with no way to encode unavailable, so it is recorded as 0 strictly as an UN-INSTRUMENTED SENTINEL, never a measured zero. It is inert: no summariser sums it and it gates nothing in evaluatePromotion. Making the field nullable so un-instrumented effort is representable honestly is a Unit-1 schema question routed as a follow-on, deliberately out of this data-only slice. (3) lensCosts records the REVIEW-ALLOCATION cost the field exists to study (contract 1.3 and the 21:47 operator comment): the sub-agent review lenses and the cloud review lenses. The always-on automated CI gates (ci, codeql, dependency-review, codecov, mutation-gate) are not enumerated per-PR because their cost is fixed CI infrastructure, not the review-allocation variable. Within that scope, per-lens token cost is concrete ONLY for PR #150, whose split the operator documented (factory-security-reviewer 155k, schema-migration-reviewer 111k, qa 109k, pr-triage 107k of a roughly 482k sub-agent total); every other review lens that ran but whose per-PR cost was not separately measured is recorded with tokens=null (measured-unavailable, never coerced to 0, surfaced as unknownCostEntries) rather than omitted, including the cloud review lenses on #150 and the claude-code-review control run plus the codex-connector clean verdict on #152. wallClockSeconds is null throughout: only 8 to 23 minute per-invocation ranges were recorded, not per-lens figures. Scope: this manifest transcribes the operator's 27 Jul sample as the authoritative source and does NOT forensically reconstruct additional lens executions or wall-clock durations from 10-day-old Actions job metadata that the sample did not capture; a review lens the sample did not record (for example spec-grounded-review) is therefore absent rather than asserted with an inferred cost, because inventing a not-in-source execution would itself inject unvalidated evidence. (4) Post-ready rework rounds were 0 across the session. postOpenReviewRounds follows the runbook definition (review/fix rounds after the PR OPENED, not only after ready): #150 was opened as a draft (D103 shift-left), its first draft push failed CI on the mutation gate (firstPassCiGreen=false) and was corrected by one further push before ready, so it records postOpenReviewRounds=1, a draft-phase CI fix folded before any review lens ran, NOT post-ready churn. #152 and #153 were first-pass green (firstPassCiGreen=true). #152 records postOpenReviewRounds=1: its pr-triage catch was a completed post-open review round (it prompted the dated authorization comment before merge) even though #152's own diff needed no fix push. #153 had no post-open review/fix round (postOpenReviewRounds=0; its fsr findings all landed pre-push). The mutation-gate failure on #150 is recorded both as firstPassCiGreen=false and as a mutation-gate reviewFinding (runbook: every substantive check result is a finding), marked downstream-gate-would-catch so no review lens earns credit for it. (5) pr-triage recorded 0 overrides across the session (triageOverridden=false everywhere). (6) securitySurface records routing-set membership per the capture procedure (apply the factory-security-reviewer routing set to the PR path list), NOT whether an fsr pass happened to run: true for #150 (workflow plus grant-boundary Python), #152 (docs/state/registry.md is in the routing set, though the session handled it as a docs sync and ran no fsr pass), and #153 (workflow plus tests/factory). A conventional record's audit obligation is inert here because the ratchet consumes factory records only and the ledger is empty by design. (7) Counterfactual markers use the source's only explicit assessments: the committed mutation-baseline claim was caught by the CI mutation gate regardless of any review lens (downstream-gate-would-catch), the factory-security-reviewer guard-bypass blockers were unique to that adversarial lens (unique-to-lens), and every other finding is unassessed and therefore never credited. (8) Findings from the pre-open sub-agent lenses (factory-security-reviewer, schema-migration-reviewer, codex-local-review, pr-triage) landed pre-push, so no GitHub PR review thread exists to link; the claude-code-review style nit and the Codex clean verdicts on #150 were post-ready. Each description cites the retained aggregate source (the issue #9 sample of 2026-07-27T21:43:41Z, which records per-lens counts, not individual findings) and notes that individual detail was not separately retained. The two substantive pr-triage catches the sample reports are preserved as pr-triage findings: one is attributed to #152 (evidenced by the 2026-07-27T21:29:02Z authorization-recording comment), the other is unattributed in the source and recorded on the #150 record; the attribution state is flagged in each description. sampledForAudit is false throughout: the R-percent draw applies to factory records, and no draw was performed for these conventional baseline entries.",
+  "records": [
+    {
+      "prNumber": 150,
+      "headSha": "4d26670fb28a881f17a94589619aee4201b86d01",
+      "issueNumber": 58,
+      "issueType": "hardening",
+      "execution": "conventional",
+      "securitySurface": true,
+      "triageOverridden": false,
+      "firstPassCiGreen": false,
+      "postOpenReviewRounds": 1,
+      "humanTouchMinutes": 0,
+      "reviewFindings": [
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "blocker",
+          "description": "factory-security-reviewer blocker on slice 9a, landed pre-push; unique to the adversarial pipeline lens. Aggregate source (individual detail not separately retained): issue #9 sample 2026-07-27T21:43:41Z, fsr #150 row (1 blocker, 3 low).",
+          "counterfactual": "unique-to-lens"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "low",
+          "description": "factory-security-reviewer low-severity finding on slice 9a, landed pre-push (1 of 3 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #150 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "low",
+          "description": "factory-security-reviewer low-severity finding on slice 9a, landed pre-push (2 of 3 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #150 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "low",
+          "description": "factory-security-reviewer low-severity finding on slice 9a, landed pre-push (3 of 3 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #150 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "schema-migration-reviewer",
+          "severity": "medium",
+          "description": "schema-migration-reviewer medium finding on the grant-boundary Python, landed pre-push. Source: issue #9 sample 2026-07-27T21:43:41Z, schema-migration-reviewer row (1 medium, 2 low).",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "schema-migration-reviewer",
+          "severity": "low",
+          "description": "schema-migration-reviewer low-severity finding on slice 9a, landed pre-push (1 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, schema-migration-reviewer row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "schema-migration-reviewer",
+          "severity": "low",
+          "description": "schema-migration-reviewer low-severity finding on slice 9a, landed pre-push (2 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, schema-migration-reviewer row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "codex-local-review",
+          "severity": "medium",
+          "description": "Local codex review P2, landed pre-push: a false claim in committed evidence (the prose stated 21 mutants killed while 2 were alive, though the committed counts themselves were honest). A distinct sibling defect, the baseline pinned to an environment-unreproducible number, was caught by the CI mutation gate on first push and is recorded as the separate mutation-gate finding below. Source: issue #9 sample 2026-07-27T21:43:41Z.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "mutation-gate",
+          "severity": "blocker",
+          "description": "Mutation-gate CI failure on #150's first draft push: the committed mutation baseline was pinned to an environment-unreproducible number and the required check failed until a corrective push re-measured it from a CI artifact. A downstream automated-gate catch, so no review lens earns credit (operator, 21:47); recorded here per the runbook (every substantive check result is a finding). Source: issue #9 sample 2026-07-27T21:43:41Z.",
+          "counterfactual": "downstream-gate-would-catch"
+        },
+        {
+          "lens": "pr-triage",
+          "severity": "medium",
+          "description": "pr-triage substantive catch during pre-merge adjudication (session-level; exact per-PR attribution unavailable from the source, recorded here on the primary slice #150). This is the unattributed one of the two session catches; the other is attributed to #152. Source: issue #9 sample 2026-07-27T21:43:41Z (pr-triage x3: 0 overrides, 2 substantive catches).",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "claude-code-review",
+          "severity": "low",
+          "description": "claude-code-review style nit on PR #150, post-ready. Source: issue #9 sample 2026-07-27T21:43:41Z, claude-review row (1 truncated run, 2 clean, 1 style nit).",
+          "counterfactual": "unassessed"
+        }
+      ],
+      "lensCosts": [
+        {
+          "lens": "factory-security-reviewer",
+          "tokens": 155000,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "schema-migration-reviewer",
+          "tokens": 111000,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "qa",
+          "tokens": 109000,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "pr-triage",
+          "tokens": 107000,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "codex-local-review",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "codex-connector",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "claude-code-review",
+          "tokens": null,
+          "wallClockSeconds": null
+        }
+      ],
+      "sampledForAudit": false
+    },
+    {
+      "prNumber": 152,
+      "headSha": "e6fb6529754feeb0f7c9ae926d2de4df03e44e2c",
+      "issueNumber": 9,
+      "issueType": "documentation",
+      "execution": "conventional",
+      "securitySurface": true,
+      "triageOverridden": false,
+      "firstPassCiGreen": true,
+      "postOpenReviewRounds": 1,
+      "humanTouchMinutes": 0,
+      "reviewFindings": [
+        {
+          "lens": "pr-triage",
+          "severity": "medium",
+          "description": "pr-triage substantive catch on PR #152: independent triage flagged that the registry asserted operator confirmation was given 27 Jul 2026 while the most recent GitHub-visible record still read as pending, prompting the dated authorization-recording comment. One of the two session-level pr-triage catches, the one the source attributes explicitly. Source: issue #9 comment 2026-07-27T21:29:02Z.",
+          "counterfactual": "unassessed"
+        }
+      ],
+      "lensCosts": [
+        {
+          "lens": "pr-triage",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "claude-code-review",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "codex-connector",
+          "tokens": null,
+          "wallClockSeconds": null
+        }
+      ],
+      "sampledForAudit": false
+    },
+    {
+      "prNumber": 153,
+      "headSha": "48634dca6c896ee559072249b19fc312172dfc76",
+      "issueNumber": 151,
+      "issueType": "security-fix",
+      "execution": "conventional",
+      "securitySurface": true,
+      "triageOverridden": false,
+      "firstPassCiGreen": true,
+      "postOpenReviewRounds": 0,
+      "humanTouchMinutes": 0,
+      "reviewFindings": [
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "blocker",
+          "description": "factory-security-reviewer blocker on the issue-151 fix, landed pre-push: the initial run-injection guard was defeated 29 ways of 32; the categorical fix inverted an enumerated deny-list to an allow-list. Unique to the adversarial pipeline lens. Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #151 row (1 blocker, 2 medium, 2 low).",
+          "counterfactual": "unique-to-lens"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "medium",
+          "description": "factory-security-reviewer medium finding on the issue-151 fix, landed pre-push (1 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #151 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "medium",
+          "description": "factory-security-reviewer medium finding on the issue-151 fix, landed pre-push (2 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #151 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "low",
+          "description": "factory-security-reviewer low-severity finding on the issue-151 fix, landed pre-push (1 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #151 row.",
+          "counterfactual": "unassessed"
+        },
+        {
+          "lens": "factory-security-reviewer",
+          "severity": "low",
+          "description": "factory-security-reviewer low-severity finding on the issue-151 fix, landed pre-push (2 of 2 aggregate). Source: issue #9 sample 2026-07-27T21:43:41Z, fsr #151 row.",
+          "counterfactual": "unassessed"
+        }
+      ],
+      "lensCosts": [
+        {
+          "lens": "factory-security-reviewer",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "pr-triage",
+          "tokens": null,
+          "wallClockSeconds": null
+        },
+        {
+          "lens": "codex-connector",
+          "tokens": null,
+          "wallClockSeconds": null
+        }
+      ],
+      "sampledForAudit": false
+    }
+  ]
+}
