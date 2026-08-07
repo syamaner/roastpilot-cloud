@@ -284,6 +284,40 @@ describe("adversarial evidence fails closed", () => {
     expect(verdict.ratchetEligible).toBe(false);
   });
 
+  it.each([
+    ["trailing whitespace", `Reviewed commit: ${PREVIOUS_HEAD} `],
+    ["extra whitespace after the prefix", `Reviewed commit:  ${PREVIOUS_HEAD}`],
+    ["uppercase SHA", `Reviewed commit: ${PREVIOUS_HEAD.toUpperCase()}`],
+    ["seven-character SHA", `Reviewed commit: ${PREVIOUS_HEAD.slice(0, 7)}`],
+    ["non-hex SHA", `Reviewed commit: ${"g".repeat(40)}`],
+    ["trailing text", `Reviewed commit: ${PREVIOUS_HEAD} extra`],
+  ])("rejects a valid marker plus a malformed marker with %s", (_label, malformedLine) => {
+    const body = `${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}` +
+      `\n${malformedLine}`;
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+      reactions: pair(),
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+    expect(verdict.ratchetEligible).toBe(false);
+  });
+
+  it("treats a malformed-only reviewed-commit marker as conflicting", () => {
+    const body = `${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD} extra`;
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+      reactions: pair(),
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+    expect(verdict.ratchetEligible).toBe(false);
+  });
+
+  it("keeps a single valid current-head reviewed-commit marker clean", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: cleanBody() })],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+  });
+
   it("accepts benign duplicate current-head reviewed-commit markers", () => {
     const body = `${cleanBody()}\nReviewed commit: ${HEAD}`;
     expect(reduceCodexVerdict(input({

@@ -22,6 +22,7 @@ export const CODEX_CLEAN_COMMENT_TITLE =
 export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
 const REVIEWED_COMMIT_LINE_ANCHORED = /^Reviewed commit: ([0-9a-f]{40})$/u;
+const REVIEWED_COMMIT_PREFIX = "Reviewed commit:";
 export const CODEX_NON_VERDICT_NOTICE_LINES = [
   "Review queued.",
   "Review skipped.",
@@ -138,20 +139,28 @@ function hasCleanTitleLine(body: string): boolean {
     firstNonBlank.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
 }
 
+/** Keep marker parsing and prefix detection on exactly the same line set. */
+function isReviewedCommitPrefixedLine(line: string): boolean {
+  return line.startsWith(REVIEWED_COMMIT_PREFIX);
+}
+
 function reviewedCommitSha(body: string): ReviewedCommitResult {
+  const prefixedLines = body.split(LINE_SPLIT_PATTERN)
+    .filter(isReviewedCommitPrefixedLine);
+  if (prefixedLines.length === 0) return { kind: "none" };
   const shas = new Set<string>();
-  for (const line of body.split(LINE_SPLIT_PATTERN)) {
+  for (const line of prefixedLines) {
     const match = line.match(REVIEWED_COMMIT_LINE_ANCHORED);
-    if (match !== null) shas.add(match[1]);
+    if (match === null) return { kind: "conflicting" };
+    shas.add(match[1]);
   }
-  if (shas.size === 0) return { kind: "none" };
   if (shas.size > 1) return { kind: "conflicting" };
   return { kind: "single", sha: [...shas][0] };
 }
 
 function hasReviewedCommitPrefix(body: string): boolean {
-  return body.split(LINE_SPLIT_PATTERN).some((line) =>
-    line.startsWith("Reviewed commit:"));
+  return body.split(LINE_SPLIT_PATTERN)
+    .some(isReviewedCommitPrefixedLine);
 }
 
 function isRecognizedNonVerdictNotice(body: string): boolean {
