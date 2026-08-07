@@ -248,6 +248,7 @@ function findCleanReactionPair(
   boundary: CodexBoundary,
   headChangedAt: string | null,
 ): readonly [CodexReactionRecord, CodexReactionRecord] | null {
+  // See reduceCodexVerdict's caller contract: reactions are review-object-scoped.
   if (headChangedAt === null || parseStrictIsoUtc(headChangedAt) === null) return null;
   for (const eyes of reactions) {
     if (eyes.content !== "eyes" || !isCodexBot(eyes.authorLogin)) continue;
@@ -361,6 +362,15 @@ function addReason(reasons: PendingReason[], reason: PendingReason): void {
  * Per P5, the reducer trusts the caller-declared boundary: after any head push
  * that postdates the prior boundary, the caller MUST supply a manual-retrigger
  * boundary rather than reusing `opened` or `ready-for-review`.
+ *
+ * For the reaction channel, the caller (9d) MUST supply in `reactions` only
+ * reactions belonging to the current-head review-request object initiated by
+ * the boundary/review-trigger event, never reactions from other `@codex`
+ * interactions (such as questions or address commands) on the same PR. With
+ * correctly scoped input, same-`subjectId` and freshness pairing is sufficient;
+ * the reducer cannot verify which subject is the review request because that
+ * identity is intentionally outside this pure reducer's input and is tracked
+ * for 9d.
  */
 export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
   try {
