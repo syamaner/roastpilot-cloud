@@ -55,6 +55,7 @@ export interface CodexTriggerRecord {
 
 export type PendingReason =
   | "malformed-input"
+  | "not-ready-draft"
   | "no-bot-signal"
   | "stale-head-signal-only"
   | "pre-boundary-signal-only"
@@ -151,11 +152,35 @@ export function isCodexBot(login: string): boolean {
 }
 
 function hasCleanTitleLine(body: string): boolean {
-  return body.split(/\r?\n/u).some((line) => {
+  let fence: { readonly marker: "`" | "~"; readonly length: number } | null = null;
+  for (const line of body.split(/\r?\n/u)) {
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence !== null) {
+      if (
+        delimiter !== null &&
+        delimiter[1][0] === fence.marker &&
+        delimiter[1].length >= fence.length &&
+        delimiter[2].trim().length === 0
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (delimiter !== null) {
+      fence = {
+        marker: delimiter[1][0] as "`" | "~",
+        length: delimiter[1].length,
+      };
+      continue;
+    }
+    if (/^ {0,3}>/u.test(line)) continue;
     if (line === CODEX_CLEAN_COMMENT_TITLE) return true;
     const heading = /^(#{1,6}) /u.exec(line);
-    return heading !== null && line.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
-  });
+    if (heading !== null && line.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Test a comment against the one accepted top-level clean-comment grammar. */
@@ -244,7 +269,9 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     !isBoundary(input.boundary) ||
     parseStrictIsoUtc(input.evaluatedAt) === null ||
     !Array.isArray(input.triggerComments) ||
-    !input.triggerComments.every(isTriggerRecord)
+    !input.triggerComments.every(isTriggerRecord) ||
+    !Array.isArray(input.reactions) ||
+    !input.reactions.every(isReactionRecord)
   ) {
     return "wait";
   }
@@ -252,7 +279,9 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     input.triggerComments.some(
       (trigger) =>
         trigger.onHeadSha === input.headSha &&
-        postdatesBoundary(trigger.createdAt, input.boundary),
+        (postdatesBoundary(trigger.createdAt, input.boundary) ||
+          (input.boundary.kind === "manual-retrigger" &&
+            trigger.createdAt === input.boundary.occurredAt)),
     )
   ) {
     return "already-posted";
@@ -260,8 +289,23 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
+  const latestPostBoundaryBotEyesAt = input.reactions.reduce(
+    (latest, reaction) => {
+      if (
+        reaction.content !== "eyes" ||
+        !isCodexBot(reaction.authorLogin) ||
+        !postdatesBoundary(reaction.createdAt, input.boundary)
+      ) {
+        return latest;
+      }
+      return Math.max(latest, parseStrictIsoUtc(reaction.createdAt)!);
+    },
+    boundaryAt,
+  );
   const timeoutMilliseconds = CODEX_WAIT_TIMEOUT_MINUTES * 60 * 1000;
-  return evaluatedAt - boundaryAt >= timeoutMilliseconds ? "due" : "wait";
+  return evaluatedAt - latestPostBoundaryBotEyesAt >= timeoutMilliseconds
+    ? "due"
+    : "wait";
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -370,10 +414,21 @@ function hasReviewedCommitPrefix(body: string): boolean {
  * Reduce validated public PR metadata to the fail-closed Codex merge-wait state.
  * Findings outrank clean evidence; timeout affects advice only. This function
  * catches malformed runtime values despite the caller-facing TypeScript type.
+ * Per P5, the reducer trusts the caller-declared boundary: after any head push
+ * that postdates the prior boundary, the caller MUST supply a manual-retrigger
+ * boundary rather than reusing `opened` or `ready-for-review`.
  */
 export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
   try {
     if (!isSignalInput(input)) return malformedVerdict(input);
+    if (input.prState !== "ready") {
+      return {
+        verdict: "unknown-pending",
+        reasons: ["not-ready-draft"],
+        manualTriggerAdvice: "not-applicable-draft",
+        ratchetEligible: false,
+      };
+    }
 
     const findings = input.reviews.find((review) =>
       isFindingsReview(review, input.headSha, input.boundary));
@@ -498,6 +553,7 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
         addReason(reasons, "stale-head-signal-only");
       }
     }
+    // Intentional defensive fallback: validated evidence should be classified above.
     if (reasons.length === 0) addReason(reasons, "no-bot-signal");
     return {
       verdict: "unknown-pending",

@@ -91,6 +91,15 @@ function expectPending(verdict: CodexVerdict, reason?: string): void {
   }
 }
 
+function expectMalformed(value: unknown, advice: "wait" | "not-applicable-draft" = "wait"): void {
+  expect(reduceCodexVerdict(value as CodexSignalInput)).toEqual({
+    verdict: "unknown-pending",
+    reasons: ["malformed-input"],
+    manualTriggerAdvice: advice,
+    ratchetEligible: false,
+  });
+}
+
 describe("accepted Codex verdict evidence", () => {
   it("T1 accepts a clean top-level comment after an opened boundary", () => {
     const signal = comment();
@@ -150,6 +159,19 @@ describe("accepted Codex verdict evidence", () => {
     expect(reduceCodexVerdict(due)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "due" });
     expect(reduceCodexVerdict(waiting)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "wait" });
   });
+
+  it.each([
+    ["clean comment", { topLevelComments: [comment()] }],
+    ["reaction pair", { reactions: pair() }],
+    ["findings review", { reviews: [review()] }],
+  ])("gates draft %s evidence from every ratchet-eligible verdict", (_label, evidence) => {
+    expect(reduceCodexVerdict(input({ prState: "draft", ...evidence }))).toEqual({
+      verdict: "unknown-pending",
+      reasons: ["not-ready-draft"],
+      manualTriggerAdvice: "not-applicable-draft",
+      ratchetEligible: false,
+    });
+  });
 });
 
 describe("adversarial evidence fails closed", () => {
@@ -189,6 +211,13 @@ describe("adversarial evidence fails closed", () => {
     })), "stale-head-signal-only");
   });
 
+  it("G-c requires full SHA equality rather than a shared seven-character prefix", () => {
+    const samePrefixHead = `${HEAD.slice(0, 7)}${"b".repeat(33)}`;
+    expectPending(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: cleanBody(samePrefixHead) })],
+    })), "stale-head-signal-only");
+  });
+
   it("T13 rejects a current-head clean comment before the boundary", () => {
     expectPending(reduceCodexVerdict(input({
       topLevelComments: [comment({ createdAt: BEFORE })],
@@ -220,6 +249,25 @@ describe("adversarial evidence fails closed", () => {
     expect(isCleanComment(comment({ body: cleanBody(HEAD, `## ${CODEX_CLEAN_COMMENT_TITLE}`) }), HEAD, OPENED)).toBe(true);
   });
 
+  it.each(["```", "~~~"])("rejects an exact title quoted inside a %s fence", (fence) => {
+    const body = `${fence}text\n${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}\n${fence}`;
+    expectPending(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+    })), "unrecognised-bot-comment-only");
+  });
+
+  it("rejects a blockquoted title while retaining genuine plain and heading titles", () => {
+    const quoted = `> ${CODEX_CLEAN_COMMENT_TITLE}\nReviewed commit: ${HEAD}`;
+    expectPending(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: quoted })],
+    })), "unrecognised-bot-comment-only");
+    for (const title of [CODEX_CLEAN_COMMENT_TITLE, `## ${CODEX_CLEAN_COMMENT_TITLE}`]) {
+      expect(reduceCodexVerdict(input({
+        topLevelComments: [comment({ body: cleanBody(HEAD, title) })],
+      }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+    }
+  });
+
   it.each(["queued", "skipped", "unable to review"])("T17 rejects a bot head-naming %s notice", (state) => {
     const body = `Review ${state}.\nReviewed commit: ${HEAD}`;
     expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
@@ -238,10 +286,24 @@ describe("adversarial evidence fails closed", () => {
     })), "stale-head-signal-only");
   });
 
+  it("G-e classifies an ordered bot pair before a manual-retrigger as pre-boundary", () => {
+    const boundary: CodexBoundary = {
+      kind: "manual-retrigger",
+      occurredAt: "2026-08-07T10:03:00Z",
+    };
+    expectPending(reduceCodexVerdict(input({ boundary, reactions: pair() })), "pre-boundary-signal-only");
+  });
+
   it("T20 treats a posted bot review with zero inline threads as findings, never clean", () => {
     expect(reduceCodexVerdict(input({ reviews: [review({ inlineThreadCount: 0 })] }))).toMatchObject({
       verdict: "findings", evidence: { inlineThreadCount: 0 },
     });
+  });
+
+  it("G-d rejects a non-bot findings review on the current head after the boundary", () => {
+    expectPending(reduceCodexVerdict(input({
+      reviews: [review({ authorLogin: "stranger" })],
+    })), "non-bot-author-signal-only");
   });
 
   it("T21 gives findings precedence over coexisting clean evidence", () => {
@@ -296,10 +358,46 @@ describe("closed input grammar and operator advice", () => {
     });
   });
 
+  it.each([
+    ["null boundary", { boundary: null }],
+    ["string boundary", { boundary: "opened" }],
+    ["array boundary", { boundary: [] }],
+    ["null review", { reviews: [null] }],
+    ["string comment", { topLevelComments: ["x"] }],
+    ["numeric reaction", { reactions: [42] }],
+    ["array trigger", { triggerComments: [[]] }],
+  ])("G-a rejects a non-object nested value: %s", (_label, override) => {
+    expectMalformed({ ...input(), ...override });
+  });
+
+  it("G-b rejects extra and missing keys at top-level and in nested records", () => {
+    const extraTop = { ...input(), unexpected: true };
+    const extraNested = {
+      ...input(),
+      topLevelComments: [{ ...comment(), unexpected: true }],
+    };
+    const missingTop: Record<string, unknown> = { ...input() };
+    delete missingTop.evaluatedAt;
+    const missingReview: Record<string, unknown> = { ...review() };
+    delete missingReview.commitSha;
+    const missingNested = { ...input(), reviews: [missingReview] };
+    for (const malformed of [extraTop, extraNested, missingTop, missingNested]) {
+      expectMalformed(malformed);
+    }
+  });
+
+  it("G-f preserves draft-only advice when another field makes the input malformed", () => {
+    expectMalformed({ ...input(), prState: "draft", headSha: "short" }, "not-applicable-draft");
+  });
+
   it("T24 never advises a manual trigger while the PR is a draft", () => {
-    expect(reduceCodexVerdict(input({
+    const draft = input({
       prState: "draft", evaluatedAt: "2026-08-07T11:00:00Z",
-    }))).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "not-applicable-draft" });
+    });
+    expect(manualTriggerAdvice(draft)).toBe("not-applicable-draft");
+    expect(reduceCodexVerdict(draft)).toMatchObject({
+      verdict: "unknown-pending", manualTriggerAdvice: "not-applicable-draft",
+    });
   });
 
   it("T25 does not count a current-sha trigger posted before the boundary", () => {
@@ -322,6 +420,64 @@ describe("closed input grammar and operator advice", () => {
     expect(manualTriggerAdvice(thisHead)).toBe("already-posted");
     expect(containsCodexTriggerPhrase(`please ${CODEX_TRIGGER_PHRASE} now`)).toBe(true);
     expect(containsCodexTriggerPhrase("please review")).toBe(false);
+  });
+
+  it("restarts timeout advice from the latest post-boundary bot eyes", () => {
+    const reactions: readonly CodexReactionRecord[] = [{
+      ...pair()[0],
+      createdAt: "2026-08-07T10:10:00Z",
+    }];
+    const beforeEyesTimeout = input({
+      reactions,
+      evaluatedAt: "2026-08-07T10:31:00Z",
+    });
+    const atEyesTimeout = input({
+      reactions,
+      evaluatedAt: "2026-08-07T10:40:00Z",
+    });
+    expect(manualTriggerAdvice(beforeEyesTimeout)).toBe("wait");
+    expect(reduceCodexVerdict(beforeEyesTimeout)).toMatchObject({
+      verdict: "unknown-pending", manualTriggerAdvice: "wait",
+    });
+    expect(manualTriggerAdvice(atEyesTimeout)).toBe("due");
+  });
+
+  it("uses the latest bot eyes and ignores stranger or pre-boundary eyes", () => {
+    const twoBotEyes: readonly CodexReactionRecord[] = [
+      { ...pair()[0], createdAt: "2026-08-07T10:05:00Z" },
+      { ...pair()[0], createdAt: "2026-08-07T10:15:00Z", subjectId: "issue:2" },
+    ];
+    expect(manualTriggerAdvice(input({
+      reactions: twoBotEyes,
+      evaluatedAt: "2026-08-07T10:40:00Z",
+    }))).toBe("wait");
+    expect(manualTriggerAdvice(input({
+      reactions: [
+        { ...pair()[0], createdAt: BEFORE },
+        { ...pair()[0], authorLogin: "stranger", createdAt: "2026-08-07T10:20:00Z" },
+      ],
+      evaluatedAt: "2026-08-07T10:30:00Z",
+    }))).toBe("due");
+  });
+
+  it("treats the trigger defining a manual-retrigger boundary as already posted", () => {
+    const boundary: CodexBoundary = {
+      kind: "manual-retrigger",
+      occurredAt: BOUNDARY_AT,
+    };
+    const boundaryTrigger = input({
+      boundary,
+      evaluatedAt: "2026-08-07T11:00:00Z",
+      triggerComments: [{ createdAt: BOUNDARY_AT, onHeadSha: HEAD }],
+    });
+    expect(manualTriggerAdvice(boundaryTrigger)).toBe("already-posted");
+    expect(reduceCodexVerdict(boundaryTrigger)).toMatchObject({
+      verdict: "unknown-pending", manualTriggerAdvice: "already-posted",
+    });
+    expect(manualTriggerAdvice(input({
+      evaluatedAt: "2026-08-07T10:30:00Z",
+      triggerComments: [{ createdAt: BOUNDARY_AT, onHeadSha: HEAD }],
+    }))).toBe("due");
   });
 
   it("T27 pins ratchet eligibility as literal false for pending and true otherwise", () => {
