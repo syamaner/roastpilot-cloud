@@ -22,7 +22,7 @@ export const CODEX_CLEAN_COMMENT_TITLE =
 export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
 const REVIEWED_COMMIT_LINE_ANCHORED = /^Reviewed commit: ([0-9a-f]{40})$/u;
-const CODEX_NON_VERDICT_NOTICE_LINES = [
+export const CODEX_NON_VERDICT_NOTICE_LINES = [
   "Review queued.",
   "Review skipped.",
   "Review unable to review.",
@@ -195,7 +195,7 @@ function classifyComment(
     isRecognizedNonVerdictNotice(comment.body);
   const findings = botTopLevel && postBoundary && currentHeadMarker &&
     !cleanTitle && !recognizedNotice;
-  const blocksClean = botTopLevel && postBoundary && !clean &&
+  const blocksClean = isCodexBot(comment.authorLogin) && postBoundary && !clean &&
     (currentHeadMarker || reviewedCommit.kind === "conflicting");
   return {
     comment,

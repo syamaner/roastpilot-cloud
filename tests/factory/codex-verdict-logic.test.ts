@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_BOT_LOGIN,
   CODEX_CLEAN_COMMENT_TITLE,
+  CODEX_NON_VERDICT_NOTICE_LINES,
   CODEX_WAIT_TIMEOUT_MINUTES,
   containsCodexTriggerPhrase,
   isCleanComment,
@@ -345,6 +346,41 @@ describe("adversarial evidence fails closed", () => {
     })), "unrecognised-bot-comment-only");
   });
 
+  it("blocks a clean comment when a current-head review-thread reply coexists", () => {
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment(), comment({ channel: "review-thread-reply" })],
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+  });
+
+  it("blocks a clean reaction pair when a current-head review-thread reply coexists", () => {
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ channel: "review-thread-reply" })],
+      reactions: pair(),
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+  });
+
+  it("keeps a current-head review-thread reply pending, never findings", () => {
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ channel: "review-thread-reply" })],
+    }));
+    expectPending(verdict, "unrecognised-bot-comment-only");
+    expect(verdict.ratchetEligible).toBe(false);
+  });
+
+  it("does not let a stale-head review-thread reply block a fresh clean", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [
+        comment(),
+        comment({
+          channel: "review-thread-reply",
+          body: cleanBody(PREVIOUS_HEAD),
+        }),
+      ],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+  });
+
   it("T16 treats current-head near-miss titles as findings, never clean", () => {
     const nearMiss = cleanBody("a".repeat(40), "Codex Review: didn't find major issues");
     const embedded = cleanBody(HEAD, `Notice: ${CODEX_CLEAN_COMMENT_TITLE} today`);
@@ -430,10 +466,18 @@ describe("adversarial evidence fails closed", () => {
     }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
-  it.each(["queued", "skipped", "unable to review"])("T17 rejects a bot head-naming %s notice", (state) => {
-    const body = `Review ${state}.\nReviewed commit: ${HEAD}`;
-    expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
-  });
+  it.each(CODEX_NON_VERDICT_NOTICE_LINES)(
+    "T17 keeps the bot notice %j pending and suppresses clean",
+    (notice) => {
+      const body = `${notice}\nReviewed commit: ${HEAD}`;
+      const verdict = reduceCodexVerdict(input({
+        topLevelComments: [comment(), comment({ body })],
+        reactions: pair(),
+      }));
+      expectPending(verdict, "unrecognised-bot-comment-only");
+      expect(verdict.ratchetEligible).toBe(false);
+    },
+  );
 
   it("T18 rejects bot reactions on different or empty subjects", () => {
     expectPending(reduceCodexVerdict(input({
