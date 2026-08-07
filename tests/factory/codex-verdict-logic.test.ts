@@ -381,6 +381,35 @@ describe("adversarial evidence fails closed", () => {
     }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
+  it("does not let a stranger current-head comment suppress bot clean", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [
+        comment(),
+        comment({ authorLogin: "stranger", body: findingsBody() }),
+      ],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+  });
+
+  it("does not let stranger conflicting markers suppress bot clean", () => {
+    const conflictingBody = `Stranger notice.\nReviewed commit: ${HEAD}` +
+      `\nReviewed commit: ${PREVIOUS_HEAD}`;
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [
+        comment(),
+        comment({ authorLogin: "stranger", body: conflictingBody }),
+      ],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+  });
+
+  it("does not let a stranger current-head comment suppress reaction clean", () => {
+    expect(reduceCodexVerdict(input({
+      topLevelComments: [comment({
+        authorLogin: "stranger", body: findingsBody(),
+      })],
+      reactions: pair(),
+    }))).toMatchObject({ verdict: "clean", channel: "reaction-pair" });
+  });
+
   it("T16 treats current-head near-miss titles as findings, never clean", () => {
     const nearMiss = cleanBody("a".repeat(40), "Codex Review: didn't find major issues");
     const embedded = cleanBody(HEAD, `Notice: ${CODEX_CLEAN_COMMENT_TITLE} today`);
