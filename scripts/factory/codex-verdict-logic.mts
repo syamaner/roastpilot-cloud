@@ -23,8 +23,15 @@ export interface CodexSignalInput {
   readonly reviews: readonly CodexReviewRecord[];
   readonly topLevelComments: readonly CodexCommentRecord[];
   readonly reactions: readonly CodexReactionRecord[];
+  readonly evidenceComplete: CodexEvidenceCompleteness;
   readonly triggerComments: readonly CodexTriggerRecord[];
   readonly evaluatedAt: string;
+}
+
+export interface CodexEvidenceCompleteness {
+  readonly reviews: boolean;
+  readonly topLevelComments: boolean;
+  readonly reactions: boolean;
 }
 
 export interface CodexReviewRecord {
@@ -56,6 +63,7 @@ export interface CodexTriggerRecord {
 export type PendingReason =
   | "malformed-input"
   | "not-ready-draft"
+  | "evidence-incomplete"
   | "no-bot-signal"
   | "stale-head-signal-only"
   | "pre-boundary-signal-only"
@@ -151,11 +159,13 @@ export function isCodexBot(login: string): boolean {
   return login === CODEX_BOT_LOGIN;
 }
 
-function hasCleanTitleLine(body: string): boolean {
+function visibleTopLevelLines(body: string): readonly string[] {
+  const visible: string[] = [];
   let fence: { readonly marker: "`" | "~"; readonly length: number } | null = null;
+  let htmlCommentOpen = false;
   for (const line of body.split(/\r?\n/u)) {
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
     if (fence !== null) {
+      const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
       if (
         delimiter !== null &&
         delimiter[1][0] === fence.marker &&
@@ -166,21 +176,59 @@ function hasCleanTitleLine(body: string): boolean {
       }
       continue;
     }
-    if (delimiter !== null) {
-      fence = {
-        marker: delimiter[1][0] as "`" | "~",
-        length: delimiter[1].length,
-      };
-      continue;
+    if (!htmlCommentOpen) {
+      const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+      if (delimiter !== null) {
+        fence = {
+          marker: delimiter[1][0] as "`" | "~",
+          length: delimiter[1].length,
+        };
+        continue;
+      }
+      if (/^ {0,3}>/u.test(line)) continue;
     }
-    if (/^ {0,3}>/u.test(line)) continue;
+
+    let cursor = 0;
+    let intersectsHtmlComment = htmlCommentOpen;
+    while (cursor <= line.length) {
+      if (htmlCommentOpen) {
+        const closeAt = line.indexOf("-->", cursor);
+        if (closeAt === -1) break;
+        htmlCommentOpen = false;
+        cursor = closeAt + 3;
+        continue;
+      }
+      const openAt = line.indexOf("<!--", cursor);
+      if (openAt === -1) break;
+      intersectsHtmlComment = true;
+      htmlCommentOpen = true;
+      cursor = openAt + 4;
+    }
+    if (!intersectsHtmlComment) visible.push(line);
+  }
+  return visible;
+}
+
+function hasCleanTitleLine(body: string): boolean {
+  return visibleTopLevelLines(body).some((line) => {
     if (line === CODEX_CLEAN_COMMENT_TITLE) return true;
     const heading = /^(#{1,6}) /u.exec(line);
-    if (heading !== null && line.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE) {
-      return true;
-    }
+    return heading !== null &&
+      line.slice(heading[0].length) === CODEX_CLEAN_COMMENT_TITLE;
+  });
+}
+
+function reviewedCommitSha(body: string): string | null {
+  for (const line of visibleTopLevelLines(body)) {
+    const match = line.match(REVIEWED_COMMIT_LINE);
+    if (match !== null) return match[1];
   }
-  return false;
+  return null;
+}
+
+function hasReviewedCommitPrefix(body: string): boolean {
+  return visibleTopLevelLines(body).some((line) =>
+    line.startsWith("Reviewed commit:"));
 }
 
 /** Test a comment against the one accepted top-level clean-comment grammar. */
@@ -188,15 +236,17 @@ export function isCleanComment(
   comment: CodexCommentRecord,
   headSha: string,
   boundary: CodexBoundary,
+  headChangedAt: string | null,
 ): boolean {
-  const reviewedCommit = comment.body.match(REVIEWED_COMMIT_LINE);
+  const reviewedCommit = reviewedCommitSha(comment.body);
   return (
     isCodexBot(comment.authorLogin) &&
     comment.channel === "issue-comment" &&
     hasCleanTitleLine(comment.body) &&
-    reviewedCommit !== null &&
-    reviewedCommit[1] === headSha &&
-    postdatesBoundary(comment.createdAt, boundary)
+    reviewedCommit === headSha &&
+    postdatesBoundary(comment.createdAt, boundary) &&
+    headChangedAt !== null &&
+    postdates(comment.createdAt, headChangedAt)
   );
 }
 
@@ -371,10 +421,21 @@ function isTriggerRecord(value: unknown): value is CodexTriggerRecord {
   );
 }
 
+function isEvidenceComplete(value: unknown): value is CodexEvidenceCompleteness {
+  if (!isPlainRecord(value) ||
+    !hasExactKeys(value, ["reviews", "topLevelComments", "reactions"])) return false;
+  return (
+    typeof value.reviews === "boolean" &&
+    typeof value.topLevelComments === "boolean" &&
+    typeof value.reactions === "boolean"
+  );
+}
+
 function isSignalInput(value: unknown): value is CodexSignalInput {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
     "headSha", "prState", "boundary", "headChangedAt", "reviews",
-    "topLevelComments", "reactions", "triggerComments", "evaluatedAt",
+    "topLevelComments", "reactions", "evidenceComplete", "triggerComments",
+    "evaluatedAt",
   ])) return false;
   return (
     typeof value.headSha === "string" &&
@@ -386,6 +447,7 @@ function isSignalInput(value: unknown): value is CodexSignalInput {
     Array.isArray(value.reviews) && value.reviews.every(isReviewRecord) &&
     Array.isArray(value.topLevelComments) && value.topLevelComments.every(isCommentRecord) &&
     Array.isArray(value.reactions) && value.reactions.every(isReactionRecord) &&
+    isEvidenceComplete(value.evidenceComplete) &&
     Array.isArray(value.triggerComments) && value.triggerComments.every(isTriggerRecord) &&
     typeof value.evaluatedAt === "string" &&
     parseStrictIsoUtc(value.evaluatedAt) !== null
@@ -404,10 +466,6 @@ function malformedVerdict(value: unknown): CodexVerdict {
 
 function addReason(reasons: PendingReason[], reason: PendingReason): void {
   if (!reasons.includes(reason)) reasons.push(reason);
-}
-
-function hasReviewedCommitPrefix(body: string): boolean {
-  return body.split(/\r?\n/u).some((line) => line.startsWith("Reviewed commit:"));
 }
 
 /**
@@ -447,11 +505,15 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
       };
     }
 
+    const evidenceComplete =
+      input.evidenceComplete.reviews &&
+      input.evidenceComplete.topLevelComments &&
+      input.evidenceComplete.reactions;
     const cleanComment = input.topLevelComments.find((comment) =>
-      isCleanComment(comment, input.headSha, input.boundary));
-    if (cleanComment !== undefined) {
-      const matchedSha = cleanComment.body.match(REVIEWED_COMMIT_LINE)?.[1];
-      if (matchedSha !== undefined) {
+      isCleanComment(comment, input.headSha, input.boundary, input.headChangedAt));
+    if (cleanComment !== undefined && evidenceComplete) {
+      const matchedSha = reviewedCommitSha(cleanComment.body);
+      if (matchedSha !== null) {
         const evidence: CleanEvidence = {
           channel: "clean-comment",
           authorLogin: cleanComment.authorLogin,
@@ -466,7 +528,7 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
 
     const reactionPair = findCleanReactionPair(
       input.reactions, input.boundary, input.headChangedAt);
-    if (reactionPair !== null && input.headChangedAt !== null) {
+    if (reactionPair !== null && input.headChangedAt !== null && evidenceComplete) {
       const [eyes, plusOne] = reactionPair;
       const evidence: CleanEvidence = {
         channel: "reaction-pair",
@@ -482,6 +544,7 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
     }
 
     const reasons: PendingReason[] = [];
+    if (!evidenceComplete) addReason(reasons, "evidence-incomplete");
     const relevantReactions = input.reactions.filter((reaction) => reaction.content !== "other");
     const relevantRecords = [
       ...input.reviews,
@@ -496,21 +559,31 @@ export function reduceCodexVerdict(input: CodexSignalInput): CodexVerdict {
     const verdictShapedBotComments = botComments.filter((comment) =>
       comment.channel === "issue-comment" &&
       hasCleanTitleLine(comment.body) &&
-      comment.body.match(REVIEWED_COMMIT_LINE) !== null);
+      reviewedCommitSha(comment.body) !== null);
     const currentHeadBotComments = verdictShapedBotComments.filter((comment) =>
-      comment.body.match(REVIEWED_COMMIT_LINE)?.[1] === input.headSha);
+      reviewedCommitSha(comment.body) === input.headSha);
     if (botComments.length > verdictShapedBotComments.length) {
       addReason(reasons, "unrecognised-bot-comment-only");
     }
     if (botComments.some((comment) =>
       hasCleanTitleLine(comment.body) &&
       hasReviewedCommitPrefix(comment.body) &&
-      comment.body.match(REVIEWED_COMMIT_LINE)?.[1] !== input.headSha)) {
+      reviewedCommitSha(comment.body) !== input.headSha)) {
       addReason(reasons, "stale-head-signal-only");
     }
     if (currentHeadBotComments.some((comment) =>
       !postdatesBoundary(comment.createdAt, input.boundary))) {
       addReason(reasons, "pre-boundary-signal-only");
+    }
+    const postBoundaryCurrentHeadBotComments = currentHeadBotComments.filter((comment) =>
+      postdatesBoundary(comment.createdAt, input.boundary));
+    if (postBoundaryCurrentHeadBotComments.length > 0) {
+      if (input.headChangedAt === null) {
+        addReason(reasons, "head-change-indeterminate");
+      } else if (postBoundaryCurrentHeadBotComments.some((comment) =>
+        !postdates(comment.createdAt, input.headChangedAt as string))) {
+        addReason(reasons, "stale-head-signal-only");
+      }
     }
 
     const botReviews = input.reviews.filter((review) => isCodexBot(review.authorLogin));

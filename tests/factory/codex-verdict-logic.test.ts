@@ -78,6 +78,7 @@ function input(overrides: Partial<CodexSignalInput> = {}): CodexSignalInput {
     reviews: [],
     topLevelComments: [],
     reactions: [],
+    evidenceComplete: { reviews: true, topLevelComments: true, reactions: true },
     triggerComments: [],
     evaluatedAt: "2026-08-07T10:10:00Z",
     ...overrides,
@@ -104,7 +105,7 @@ describe("accepted Codex verdict evidence", () => {
   it("T1 accepts a clean top-level comment after an opened boundary", () => {
     const signal = comment();
     expect(isCodexBot(signal.authorLogin)).toBe(true);
-    expect(isCleanComment(signal, HEAD, OPENED)).toBe(true);
+    expect(isCleanComment(signal, HEAD, OPENED, BEFORE)).toBe(true);
     expect(postdatesBoundary(signal.createdAt, OPENED)).toBe(true);
     expect(reduceCodexVerdict(input({ topLevelComments: [signal] }))).toMatchObject({
       verdict: "clean", channel: "clean-comment", ratchetEligible: true,
@@ -227,6 +228,20 @@ describe("adversarial evidence fails closed", () => {
     })), "pre-boundary-signal-only");
   });
 
+  it("requires a current-head clean comment to strictly postdate the head push", () => {
+    for (const headChangedAt of [AFTER, LATER]) {
+      expectPending(reduceCodexVerdict(input({
+        headChangedAt, topLevelComments: [comment({ createdAt: AFTER })],
+      })), "stale-head-signal-only");
+    }
+    expectPending(reduceCodexVerdict(input({
+      headChangedAt: null, topLevelComments: [comment()],
+    })), "head-change-indeterminate");
+    expect(reduceCodexVerdict(input({
+      headChangedAt: AFTER, topLevelComments: [comment({ createdAt: LATER })],
+    }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
+  });
+
   it("T14 rejects equality at the boundary because postdating is strict", () => {
     expect(postdates(BOUNDARY_AT, BOUNDARY_AT)).toBe(false);
     expectPending(reduceCodexVerdict(input({
@@ -246,7 +261,12 @@ describe("adversarial evidence fails closed", () => {
     for (const body of [nearMiss, embedded]) {
       expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
     }
-    expect(isCleanComment(comment({ body: cleanBody(HEAD, `## ${CODEX_CLEAN_COMMENT_TITLE}`) }), HEAD, OPENED)).toBe(true);
+    expect(isCleanComment(
+      comment({ body: cleanBody(HEAD, `## ${CODEX_CLEAN_COMMENT_TITLE}`) }),
+      HEAD,
+      OPENED,
+      BEFORE,
+    )).toBe(true);
   });
 
   it.each(["```", "~~~"])("rejects an exact title quoted inside a %s fence", (fence) => {
@@ -266,6 +286,25 @@ describe("adversarial evidence fails closed", () => {
         topLevelComments: [comment({ body: cleanBody(HEAD, title) })],
       }))).toMatchObject({ verdict: "clean", channel: "clean-comment" });
     }
+  });
+
+  it.each([
+    ["single-line HTML-comment title", `<!-- ${CODEX_CLEAN_COMMENT_TITLE} -->\nReviewed commit: ${HEAD}`],
+    ["multi-line HTML-comment title", `<!--\n${CODEX_CLEAN_COMMENT_TITLE}\n-->\nReviewed commit: ${HEAD}`],
+    ["fenced reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n\`\`\`\nReviewed commit: ${HEAD}\n\`\`\``],
+    ["blockquoted reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n> Reviewed commit: ${HEAD}`],
+    ["HTML-comment reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n<!--\nReviewed commit: ${HEAD}\n-->`],
+  ])("rejects clean grammar with a hidden %s", (_label, body) => {
+    expectPending(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+    })), "unrecognised-bot-comment-only");
+  });
+
+  it("accepts visible clean grammar alongside unrelated hidden markdown", () => {
+    const body = ["<!-- one -->", "<!-- two -->", "```text", "example", "```", "> quote",
+      CODEX_CLEAN_COMMENT_TITLE, `Reviewed commit: ${HEAD}`].join("\n");
+    expect(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })))
+      .toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
   it.each(["queued", "skipped", "unable to review"])("T17 rejects a bot head-naming %s notice", (state) => {
@@ -317,6 +356,27 @@ describe("adversarial evidence fails closed", () => {
       verdict: "unknown-pending", reasons: ["no-bot-signal"],
       manualTriggerAdvice: "wait", ratchetEligible: false,
     });
+  });
+
+  it.each(["reviews", "topLevelComments", "reactions"] as const)(
+    "gates clean when %s evidence is incomplete",
+    (source) => {
+      const evidenceComplete = { ...input().evidenceComplete, [source]: false };
+      expectPending(reduceCodexVerdict(input({
+        evidenceComplete, topLevelComments: [comment()],
+      })), "evidence-incomplete");
+    },
+  );
+
+  it("accepts complete clean evidence but does not completeness-gate findings", () => {
+    expect(reduceCodexVerdict(input({ topLevelComments: [comment()] }))).toMatchObject({ verdict: "clean" });
+    expectPending(reduceCodexVerdict(input({
+      evidenceComplete: { reviews: false, topLevelComments: true, reactions: true }, reactions: pair(),
+    })), "evidence-incomplete");
+    expect(reduceCodexVerdict(input({
+      evidenceComplete: { reviews: false, topLevelComments: true, reactions: true },
+      reviews: [review()],
+    }))).toMatchObject({ verdict: "findings" });
   });
 });
 
@@ -388,6 +448,18 @@ describe("closed input grammar and operator advice", () => {
 
   it("G-f preserves draft-only advice when another field makes the input malformed", () => {
     expectMalformed({ ...input(), prState: "draft", headSha: "short" }, "not-applicable-draft");
+  });
+
+  it("rejects malformed evidence-completeness records", () => {
+    const missing: Record<string, unknown> = { ...input().evidenceComplete };
+    delete missing.reactions;
+    for (const evidenceComplete of [
+      missing,
+      { ...input().evidenceComplete, unexpected: true },
+      { ...input().evidenceComplete, reviews: "yes" },
+    ]) {
+      expectMalformed({ ...input(), evidenceComplete });
+    }
   });
 
   it("T24 never advises a manual trigger while the PR is a draft", () => {
