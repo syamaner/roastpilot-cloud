@@ -4,24 +4,25 @@ import {
   CODEX_BOT_LOGIN,
   CODEX_CLEAN_COMMENT_TITLE,
   CODEX_WAIT_TIMEOUT_MINUTES,
-  REVIEWED_COMMIT_LINE,
   containsCodexTriggerPhrase,
   isCleanComment,
   isCleanReactionPair,
   isCodexBot,
   isFindingsReview,
   manualTriggerAdvice,
-  parseStrictIsoUtc,
   postdates,
   postdatesBoundary,
   reduceCodexVerdict,
+  type CodexVerdict,
+} from "../../scripts/factory/codex-verdict-logic.mts";
+import {
+  parseStrictIsoUtc,
   type CodexBoundary,
   type CodexCommentRecord,
   type CodexReactionRecord,
   type CodexReviewRecord,
   type CodexSignalInput,
-  type CodexVerdict,
-} from "../../scripts/factory/codex-verdict-logic.mts";
+} from "../../scripts/factory/codex-signal-schema.mts";
 import {
   CODEX_TRIGGER_PHRASE,
   CODEX_VERDICT_CRITERION,
@@ -107,27 +108,48 @@ describe("accepted Codex verdict evidence", () => {
     expect(isCodexBot(signal.authorLogin)).toBe(true);
     expect(isCleanComment(signal, HEAD, OPENED, BEFORE)).toBe(true);
     expect(postdatesBoundary(signal.createdAt, OPENED)).toBe(true);
-    expect(reduceCodexVerdict(input({ topLevelComments: [signal] }))).toMatchObject({
-      verdict: "clean", channel: "clean-comment", ratchetEligible: true,
-      evidence: { matchedSha: HEAD, boundaryKind: "opened" },
+    expect(reduceCodexVerdict(input({ topLevelComments: [signal] }))).toEqual({
+      verdict: "clean",
+      channel: "clean-comment",
+      evidence: {
+        channel: "clean-comment", authorLogin: CODEX_BOT_LOGIN,
+        matchedSha: HEAD, signalAt: AFTER, boundaryKind: "opened",
+        boundaryOccurredAt: BOUNDARY_AT,
+      },
+      ratchetEligible: true,
     });
   });
 
   it("T2 accepts a same-subject, ordered bot reaction pair", () => {
+    const boundary: CodexBoundary = {
+      kind: "ready-for-review", occurredAt: BOUNDARY_AT,
+    };
     const reactions = pair();
-    expect(isCleanReactionPair(reactions, OPENED, BEFORE)).toBe(true);
-    expect(reduceCodexVerdict(input({ reactions }))).toMatchObject({
-      verdict: "clean", channel: "reaction-pair", ratchetEligible: true,
-      evidence: { subjectId: "issue:1", eyesAt: AFTER, plusOneAt: LATER },
+    expect(isCleanReactionPair(reactions, boundary, BEFORE)).toBe(true);
+    expect(reduceCodexVerdict(input({ boundary, reactions }))).toEqual({
+      verdict: "clean",
+      channel: "reaction-pair",
+      evidence: {
+        channel: "reaction-pair", authorLogin: CODEX_BOT_LOGIN,
+        subjectId: "issue:1", eyesAt: AFTER, plusOneAt: LATER,
+        headChangedAt: BEFORE, boundaryKind: "ready-for-review",
+        boundaryOccurredAt: BOUNDARY_AT,
+      },
+      ratchetEligible: true,
     });
   });
 
   it("T3 returns findings for a current bot review with inline threads", () => {
     const finding = review();
     expect(isFindingsReview(finding, HEAD, OPENED)).toBe(true);
-    expect(reduceCodexVerdict(input({ reviews: [finding] }))).toMatchObject({
-      verdict: "findings", ratchetEligible: true,
-      evidence: { matchedSha: HEAD, inlineThreadCount: 1 },
+    expect(reduceCodexVerdict(input({ reviews: [finding] }))).toEqual({
+      verdict: "findings",
+      evidence: {
+        authorLogin: CODEX_BOT_LOGIN, matchedSha: HEAD,
+        submittedAt: AFTER, inlineThreadCount: 1,
+        boundaryKind: "opened", boundaryOccurredAt: BOUNDARY_AT,
+      },
+      ratchetEligible: true,
     });
   });
 
@@ -216,6 +238,18 @@ describe("adversarial evidence fails closed", () => {
     })), "stale-head-signal-only");
   });
 
+  it("deduplicates the same pending reason produced by comment and review channels", () => {
+    const verdict = reduceCodexVerdict(input({
+      topLevelComments: [comment({ body: cleanBody(PREVIOUS_HEAD) })],
+      reviews: [review({ commitSha: PREVIOUS_HEAD })],
+    }));
+    expectPending(verdict, "stale-head-signal-only");
+    if (verdict.verdict === "unknown-pending") {
+      expect(verdict.reasons.filter((reason) =>
+        reason === "stale-head-signal-only")).toHaveLength(1);
+    }
+  });
+
   it("G-c requires full SHA equality rather than a shared seven-character prefix", () => {
     const samePrefixHead = `${HEAD.slice(0, 7)}${"b".repeat(33)}`;
     expectPending(reduceCodexVerdict(input({
@@ -271,6 +305,12 @@ describe("adversarial evidence fails closed", () => {
       OPENED,
       BEFORE,
     )).toBe(true);
+  });
+
+  it.each(["", " \t"])("rejects an empty or whitespace-only title body", (body) => {
+    expectPending(reduceCodexVerdict(input({
+      topLevelComments: [comment({ body })],
+    })), "unrecognised-bot-comment-only");
   });
 
   it.each(["```", "~~~"])("rejects an exact title quoted inside a %s fence", (fence) => {
@@ -408,11 +448,13 @@ describe("adversarial evidence fails closed", () => {
 describe("closed input grammar and operator advice", () => {
   it.each([
     ["headSha", { headSha: "short" }],
+    ["non-hex 40-character headSha", { headSha: "g".repeat(40) }],
     ["boundary kind", { boundary: { kind: "unknown", occurredAt: BOUNDARY_AT } }],
     ["PR state", { prState: "merged" }],
     ["timestamp", { evaluatedAt: "August 7, 2026 10:10 UTC" }],
     ["reaction content", { reactions: [{ ...pair()[0], content: "heart" }] }],
     ["review commit SHA", { reviews: [review({ commitSha: HEAD.slice(0, 7) })] }],
+    ["non-hex 40-character review SHA", { reviews: [review({ commitSha: "g".repeat(40) })] }],
     ["trigger head SHA", { triggerComments: [{ createdAt: AFTER, onHeadSha: "not-hex" }] }],
   ])("T23 returns malformed-input without throwing for malformed %s", (_label, override) => {
     const malformed = { ...input(), ...override } as unknown as CodexSignalInput;
@@ -522,35 +564,29 @@ describe("closed input grammar and operator advice", () => {
     expect(containsCodexTriggerPhrase("please review")).toBe(false);
   });
 
-  it("restarts timeout advice from the latest post-boundary bot eyes", () => {
+  it("never advises due after a bot eyes engages the review", () => {
     const reactions: readonly CodexReactionRecord[] = [{
       ...pair()[0],
       createdAt: "2026-08-07T10:10:00Z",
     }];
-    const beforeEyesTimeout = input({
-      reactions,
-      evaluatedAt: "2026-08-07T10:31:00Z",
-    });
-    const atEyesTimeout = input({
-      reactions,
-      evaluatedAt: "2026-08-07T10:40:00Z",
-    });
-    expect(manualTriggerAdvice(beforeEyesTimeout)).toBe("wait");
-    expect(reduceCodexVerdict(beforeEyesTimeout)).toMatchObject({
+    const engaged = input({ reactions, evaluatedAt: "2026-08-07T11:00:00Z" });
+    expect(manualTriggerAdvice(engaged)).toBe("wait");
+    expect(reduceCodexVerdict(engaged)).toMatchObject({
       verdict: "unknown-pending", manualTriggerAdvice: "wait",
     });
-    expect(manualTriggerAdvice(atEyesTimeout)).toBe("due");
   });
 
-  it("uses the latest bot eyes and ignores stranger or pre-boundary eyes", () => {
-    const twoBotEyes: readonly CodexReactionRecord[] = [
-      { ...pair()[0], createdAt: "2026-08-07T10:05:00Z" },
-      { ...pair()[0], createdAt: "2026-08-07T10:15:00Z", subjectId: "issue:2" },
-    ];
-    expect(manualTriggerAdvice(input({
-      reactions: twoBotEyes,
-      evaluatedAt: "2026-08-07T10:40:00Z",
-    }))).toBe("wait");
+  it("waits after any post-boundary bot evidence, even non-verdict or stale", () => {
+    const evaluatedAt = "2026-08-07T11:00:00Z";
+    expect(manualTriggerAdvice(input({ evaluatedAt, topLevelComments: [comment({
+      body: "Review queued.",
+    })] }))).toBe("wait");
+    expect(manualTriggerAdvice(input({ evaluatedAt, reviews: [review({
+      commitSha: PREVIOUS_HEAD,
+    })] }))).toBe("wait");
+  });
+
+  it("ignores stranger and pre-boundary bot signals for timeout advice", () => {
     expect(manualTriggerAdvice(input({
       reactions: [
         { ...pair()[0], createdAt: BEFORE },
@@ -558,6 +594,15 @@ describe("closed input grammar and operator advice", () => {
       ],
       evaluatedAt: "2026-08-07T10:30:00Z",
     }))).toBe("due");
+  });
+
+  it.each([
+    ["reviews", { reviews: [null] }],
+    ["top-level comments", { topLevelComments: [null] }],
+  ])("returns wait for malformed standalone %s advice input", (_label, override) => {
+    expect(manualTriggerAdvice({
+      ...input({ evaluatedAt: "2026-08-07T11:00:00Z" }), ...override,
+    } as unknown as CodexSignalInput)).toBe("wait");
   });
 
   it("treats the trigger defining a manual-retrigger boundary as already posted", () => {
@@ -592,9 +637,11 @@ describe("closed input grammar and operator advice", () => {
   it("T28 is deterministic and the pure module has no time, randomness, fs, or network capability", () => {
     const sample = input({ topLevelComments: [comment()], reactions: pair() });
     expect(reduceCodexVerdict(sample)).toEqual(reduceCodexVerdict(sample));
-    const source = readFileSync(new URL("../../scripts/factory/codex-verdict-logic.mts", import.meta.url), "utf8");
-    for (const banned of ["Date.now", "Math.random", "node:fs", "node:http", "node:https", "fetch("]) {
-      expect(source).not.toContain(banned);
+    for (const filename of ["codex-verdict-logic.mts", "codex-signal-schema.mts"]) {
+      const source = readFileSync(new URL(`../../scripts/factory/${filename}`, import.meta.url), "utf8");
+      for (const banned of ["Date.now", "Math.random", "node:fs", "node:http", "node:https", "fetch("]) {
+        expect(source).not.toContain(banned);
+      }
     }
   });
 
@@ -602,7 +649,6 @@ describe("closed input grammar and operator advice", () => {
     expect(CODEX_VERDICT_CRITERION).toContain(CODEX_BOT_LOGIN);
     expect(CODEX_VERDICT_CRITERION).toContain(CODEX_CLEAN_COMMENT_TITLE);
     expect(CODEX_VERDICT_CRITERION).toContain("Reviewed commit:");
-    expect(REVIEWED_COMMIT_LINE.source).toContain("Reviewed commit:");
     expect(CODEX_WAIT_TIMEOUT_MINUTES).toBe(30);
   });
 });

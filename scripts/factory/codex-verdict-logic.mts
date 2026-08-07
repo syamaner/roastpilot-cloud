@@ -1,66 +1,29 @@
 import { CODEX_TRIGGER_PHRASE } from "./implement-patch-logic.mts";
+import {
+  FULL_SHA_PATTERN,
+  LINE_SPLIT_PATTERN,
+  isBoundary,
+  isCommentRecord,
+  isEvidenceComplete,
+  isPlainRecord,
+  isReactionRecord,
+  isReviewRecord,
+  isSignalInput,
+  isTriggerRecord,
+  parseStrictIsoUtc,
+  type CodexBoundary,
+  type CodexCommentRecord,
+  type CodexReactionRecord,
+  type CodexReviewRecord,
+  type CodexSignalInput,
+} from "./codex-signal-schema.mts";
 
 export const CODEX_BOT_LOGIN = "chatgpt-codex-connector[bot]";
 export const CODEX_CLEAN_COMMENT_TITLE =
   "Codex Review: Didn't find any major issues";
-export const REVIEWED_COMMIT_LINE = /^Reviewed commit: ([0-9a-f]{40})$/m;
 export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
-const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
-const LINE_SPLIT_PATTERN = /\r\n|\r|\n/u;
 const REVIEWED_COMMIT_LINE_ANCHORED = /^Reviewed commit: ([0-9a-f]{40})$/u;
-const STRICT_ISO_UTC_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
-
-export interface CodexBoundary {
-  readonly kind: "opened" | "ready-for-review" | "manual-retrigger";
-  readonly occurredAt: string;
-}
-
-export interface CodexSignalInput {
-  readonly headSha: string;
-  readonly prState: "draft" | "ready";
-  readonly boundary: CodexBoundary;
-  readonly headChangedAt: string | null;
-  readonly reviews: readonly CodexReviewRecord[];
-  readonly topLevelComments: readonly CodexCommentRecord[];
-  readonly reactions: readonly CodexReactionRecord[];
-  readonly evidenceComplete: CodexEvidenceCompleteness;
-  readonly triggerComments: readonly CodexTriggerRecord[];
-  readonly evaluatedAt: string;
-}
-
-export interface CodexEvidenceCompleteness {
-  readonly reviews: boolean;
-  readonly topLevelComments: boolean;
-  readonly reactions: boolean;
-}
-
-export interface CodexReviewRecord {
-  readonly authorLogin: string;
-  readonly commitSha: string;
-  readonly submittedAt: string;
-  readonly inlineThreadCount: number;
-}
-
-export interface CodexCommentRecord {
-  readonly authorLogin: string;
-  readonly body: string;
-  readonly createdAt: string;
-  readonly channel: "issue-comment" | "review-thread-reply";
-}
-
-export interface CodexReactionRecord {
-  readonly authorLogin: string;
-  readonly content: "eyes" | "+1" | "other";
-  readonly createdAt: string;
-  readonly subjectId: string;
-}
-
-export interface CodexTriggerRecord {
-  readonly createdAt: string;
-  readonly onHeadSha: string;
-}
 
 export type PendingReason =
   | "malformed-input"
@@ -127,27 +90,6 @@ export type CodexVerdict =
       readonly manualTriggerAdvice: ManualTriggerAdvice;
       readonly ratchetEligible: false;
     };
-
-/** Parse only calendar-valid ISO-8601 instants in the explicit UTC `Z` form. */
-export function parseStrictIsoUtc(value: string): number | null {
-  const match = STRICT_ISO_UTC_PATTERN.exec(value);
-  if (match === null) return null;
-  const instant = Date.parse(value);
-  if (!Number.isFinite(instant)) return null;
-  const date = new Date(instant);
-  const fields = match.slice(1, 7).map(Number);
-  const observed = [
-    date.getUTCFullYear(),
-    date.getUTCMonth() + 1,
-    date.getUTCDate(),
-    date.getUTCHours(),
-    date.getUTCMinutes(),
-    date.getUTCSeconds(),
-  ];
-  return observed.every((field, index) => field === fields[index])
-    ? instant
-    : null;
-}
 
 /** Return true only when both strict UTC instants parse and `a` is later. */
 export function postdates(a: string, b: string): boolean {
@@ -278,6 +220,10 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     !FULL_SHA_PATTERN.test(input.headSha) ||
     !isBoundary(input.boundary) ||
     parseStrictIsoUtc(input.evaluatedAt) === null ||
+    !Array.isArray(input.reviews) ||
+    !input.reviews.every(isReviewRecord) ||
+    !Array.isArray(input.topLevelComments) ||
+    !input.topLevelComments.every(isCommentRecord) ||
     !Array.isArray(input.triggerComments) ||
     !input.triggerComments.every(isTriggerRecord) ||
     !Array.isArray(input.reactions) ||
@@ -303,121 +249,27 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
-  const latestPostBoundaryBotEyesAt = input.reactions.reduce(
-    (latest, reaction) => {
-      if (
-        reaction.content !== "eyes" ||
-        !isCodexBot(reaction.authorLogin) ||
-        !postdatesBoundary(reaction.createdAt, input.boundary)
-      ) {
-        return latest;
-      }
-      return Math.max(latest, parseStrictIsoUtc(reaction.createdAt)!);
-    },
-    boundaryAt,
-  );
+  const botSignalEngaged = [
+    ...input.reviews.map((review) => ({
+      authorLogin: review.authorLogin,
+      occurredAt: review.submittedAt,
+    })),
+    ...input.topLevelComments.map((comment) => ({
+      authorLogin: comment.authorLogin,
+      occurredAt: comment.createdAt,
+    })),
+    ...input.reactions.map((reaction) => ({
+      authorLogin: reaction.authorLogin,
+      occurredAt: reaction.createdAt,
+    })),
+  ].some((signal) =>
+    isCodexBot(signal.authorLogin) &&
+    postdatesBoundary(signal.occurredAt, input.boundary));
+  if (botSignalEngaged) return "wait";
   const timeoutMilliseconds = CODEX_WAIT_TIMEOUT_MINUTES * 60 * 1000;
-  return evaluatedAt - latestPostBoundaryBotEyesAt >= timeoutMilliseconds
+  return evaluatedAt - boundaryAt >= timeoutMilliseconds
     ? "due"
     : "wait";
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(record);
-  return actual.length === keys.length && actual.every((key) => keys.includes(key));
-}
-
-function isBoundary(value: unknown): value is CodexBoundary {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["kind", "occurredAt"])) return false;
-  return (
-    (value.kind === "opened" ||
-      value.kind === "ready-for-review" ||
-      value.kind === "manual-retrigger") &&
-    typeof value.occurredAt === "string" &&
-    parseStrictIsoUtc(value.occurredAt) !== null
-  );
-}
-
-function isReviewRecord(value: unknown): value is CodexReviewRecord {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["authorLogin", "commitSha", "submittedAt", "inlineThreadCount"])) return false;
-  return (
-    typeof value.authorLogin === "string" &&
-    typeof value.commitSha === "string" &&
-    FULL_SHA_PATTERN.test(value.commitSha) &&
-    typeof value.submittedAt === "string" &&
-    parseStrictIsoUtc(value.submittedAt) !== null &&
-    Number.isSafeInteger(value.inlineThreadCount) &&
-    (value.inlineThreadCount as number) >= 0
-  );
-}
-
-function isCommentRecord(value: unknown): value is CodexCommentRecord {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["authorLogin", "body", "createdAt", "channel"])) return false;
-  return (
-    typeof value.authorLogin === "string" &&
-    typeof value.body === "string" &&
-    typeof value.createdAt === "string" &&
-    parseStrictIsoUtc(value.createdAt) !== null &&
-    (value.channel === "issue-comment" || value.channel === "review-thread-reply")
-  );
-}
-
-function isReactionRecord(value: unknown): value is CodexReactionRecord {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["authorLogin", "content", "createdAt", "subjectId"])) return false;
-  return (
-    typeof value.authorLogin === "string" &&
-    (value.content === "eyes" || value.content === "+1" || value.content === "other") &&
-    typeof value.createdAt === "string" &&
-    parseStrictIsoUtc(value.createdAt) !== null &&
-    typeof value.subjectId === "string"
-  );
-}
-
-function isTriggerRecord(value: unknown): value is CodexTriggerRecord {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["createdAt", "onHeadSha"])) return false;
-  return (
-    typeof value.createdAt === "string" &&
-    parseStrictIsoUtc(value.createdAt) !== null &&
-    typeof value.onHeadSha === "string" &&
-    FULL_SHA_PATTERN.test(value.onHeadSha)
-  );
-}
-
-function isEvidenceComplete(value: unknown): value is CodexEvidenceCompleteness {
-  if (!isPlainRecord(value) ||
-    !hasExactKeys(value, ["reviews", "topLevelComments", "reactions"])) return false;
-  return (
-    typeof value.reviews === "boolean" &&
-    typeof value.topLevelComments === "boolean" &&
-    typeof value.reactions === "boolean"
-  );
-}
-
-function isSignalInput(value: unknown): value is CodexSignalInput {
-  if (!isPlainRecord(value) || !hasExactKeys(value, [
-    "headSha", "prState", "boundary", "headChangedAt", "reviews",
-    "topLevelComments", "reactions", "evidenceComplete", "triggerComments",
-    "evaluatedAt",
-  ])) return false;
-  return (
-    typeof value.headSha === "string" &&
-    FULL_SHA_PATTERN.test(value.headSha) &&
-    (value.prState === "draft" || value.prState === "ready") &&
-    isBoundary(value.boundary) &&
-    (value.headChangedAt === null ||
-      (typeof value.headChangedAt === "string" && parseStrictIsoUtc(value.headChangedAt) !== null)) &&
-    Array.isArray(value.reviews) && value.reviews.every(isReviewRecord) &&
-    Array.isArray(value.topLevelComments) && value.topLevelComments.every(isCommentRecord) &&
-    Array.isArray(value.reactions) && value.reactions.every(isReactionRecord) &&
-    isEvidenceComplete(value.evidenceComplete) &&
-    Array.isArray(value.triggerComments) && value.triggerComments.every(isTriggerRecord) &&
-    typeof value.evaluatedAt === "string" &&
-    parseStrictIsoUtc(value.evaluatedAt) !== null
-  );
 }
 
 function malformedVerdict(value: unknown): CodexVerdict {
