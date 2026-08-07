@@ -8,6 +8,7 @@ export const CODEX_WAIT_TIMEOUT_MINUTES = 30;
 
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const LINE_SPLIT_PATTERN = /\r\n|\r|\n/u;
+const REVIEWED_COMMIT_LINE_ANCHORED = /^Reviewed commit: ([0-9a-f]{40})$/u;
 const STRICT_ISO_UTC_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
 
@@ -160,56 +161,6 @@ export function isCodexBot(login: string): boolean {
   return login === CODEX_BOT_LOGIN;
 }
 
-function visibleTopLevelLines(body: string): readonly string[] {
-  const visible: string[] = [];
-  let fence: { readonly marker: "`" | "~"; readonly length: number } | null = null;
-  let htmlCommentOpen = false;
-  for (const line of body.split(LINE_SPLIT_PATTERN)) {
-    if (fence !== null) {
-      const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
-      if (
-        delimiter !== null &&
-        delimiter[1][0] === fence.marker &&
-        delimiter[1].length >= fence.length &&
-        delimiter[2].trim().length === 0
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    if (!htmlCommentOpen) {
-      const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
-      if (delimiter !== null) {
-        fence = {
-          marker: delimiter[1][0] as "`" | "~",
-          length: delimiter[1].length,
-        };
-        continue;
-      }
-      if (/^ {0,3}>/u.test(line)) continue;
-    }
-
-    let cursor = 0;
-    let intersectsHtmlComment = htmlCommentOpen;
-    while (cursor <= line.length) {
-      if (htmlCommentOpen) {
-        const closeAt = line.indexOf("-->", cursor);
-        if (closeAt === -1) break;
-        htmlCommentOpen = false;
-        cursor = closeAt + 3;
-        continue;
-      }
-      const openAt = line.indexOf("<!--", cursor);
-      if (openAt === -1) break;
-      intersectsHtmlComment = true;
-      htmlCommentOpen = true;
-      cursor = openAt + 4;
-    }
-    if (!intersectsHtmlComment) visible.push(line);
-  }
-  return visible;
-}
-
 function hasCleanTitleLine(body: string): boolean {
   const firstNonBlankLine = body.split(LINE_SPLIT_PATTERN)
     .find((line) => !/^\s*$/u.test(line));
@@ -221,19 +172,25 @@ function hasCleanTitleLine(body: string): boolean {
 }
 
 function reviewedCommitSha(body: string): string | null {
-  for (const line of visibleTopLevelLines(body)) {
-    const match = line.match(REVIEWED_COMMIT_LINE);
+  for (const line of body.split(LINE_SPLIT_PATTERN)) {
+    const match = line.match(REVIEWED_COMMIT_LINE_ANCHORED);
     if (match !== null) return match[1];
   }
   return null;
 }
 
 function hasReviewedCommitPrefix(body: string): boolean {
-  return visibleTopLevelLines(body).some((line) =>
+  return body.split(LINE_SPLIT_PATTERN).some((line) =>
     line.startsWith("Reviewed commit:"));
 }
 
-/** Test a comment against the one accepted top-level clean-comment grammar. */
+/**
+ * Test a comment against the accepted clean-comment grammar. The first
+ * non-blank title line authenticates the verdict comment. Its reviewed-commit
+ * line may then occur anywhere because exact SHA, freshness, and completeness
+ * checks independently gate acceptance; no Markdown/HTML location heuristic
+ * is needed.
+ */
 export function isCleanComment(
   comment: CodexCommentRecord,
   headSha: string,
@@ -340,7 +297,9 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   ) {
     return "already-posted";
   }
-  if (input.evidenceComplete.reactions !== true) return "wait";
+  if (!(input.evidenceComplete.reviews &&
+    input.evidenceComplete.topLevelComments &&
+    input.evidenceComplete.reactions)) return "wait";
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
@@ -388,6 +347,7 @@ function isReviewRecord(value: unknown): value is CodexReviewRecord {
   return (
     typeof value.authorLogin === "string" &&
     typeof value.commitSha === "string" &&
+    FULL_SHA_PATTERN.test(value.commitSha) &&
     typeof value.submittedAt === "string" &&
     parseStrictIsoUtc(value.submittedAt) !== null &&
     Number.isSafeInteger(value.inlineThreadCount) &&
@@ -422,7 +382,8 @@ function isTriggerRecord(value: unknown): value is CodexTriggerRecord {
   return (
     typeof value.createdAt === "string" &&
     parseStrictIsoUtc(value.createdAt) !== null &&
-    typeof value.onHeadSha === "string"
+    typeof value.onHeadSha === "string" &&
+    FULL_SHA_PATTERN.test(value.onHeadSha)
   );
 }
 

@@ -157,10 +157,10 @@ describe("accepted Codex verdict evidence", () => {
     const due = input({ evaluatedAt: "2026-08-07T10:30:00Z" });
     const waiting = input({ evaluatedAt: "2026-08-07T10:29:00Z" });
     expect(manualTriggerAdvice(due)).toBe("due");
-    expect(manualTriggerAdvice(input({
-      evaluatedAt: "2026-08-07T10:30:00Z",
-      evidenceComplete: { reviews: true, topLevelComments: true, reactions: false },
-    }))).toBe("wait");
+    for (const source of ["reviews", "topLevelComments", "reactions"] as const) {
+      const evidenceComplete = { ...due.evidenceComplete, [source]: false };
+      expect(manualTriggerAdvice(input({ ...due, evidenceComplete }))).toBe("wait");
+    }
     expect(reduceCodexVerdict(due)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "due" });
     expect(reduceCodexVerdict(waiting)).toMatchObject({ verdict: "unknown-pending", manualTriggerAdvice: "wait" });
   });
@@ -299,14 +299,22 @@ describe("adversarial evidence fails closed", () => {
   it.each([
     ["single-line HTML-comment title", `<!-- ${CODEX_CLEAN_COMMENT_TITLE} -->\nReviewed commit: ${HEAD}`],
     ["multi-line HTML-comment title", `<!--\n${CODEX_CLEAN_COMMENT_TITLE}\n-->\nReviewed commit: ${HEAD}`],
+    ["U+2028-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\njunk\u2028Reviewed commit: ${HEAD}`],
+    ["U+2029-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\njunk\u2029Reviewed commit: ${HEAD}`],
+    ["Markdown-prefixed reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n> Reviewed commit: ${HEAD}`],
+  ])("rejects clean grammar with a non-authenticating %s", (_label, body) => {
+    expectPending(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })), "unrecognised-bot-comment-only");
+  });
+
+  it.each([
     ["fenced reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n\`\`\`\nReviewed commit: ${HEAD}\n\`\`\``],
     ["lone-CR fenced reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\r\`\`\`\rReviewed commit: ${HEAD}\r\`\`\``],
-    ["blockquoted reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n> Reviewed commit: ${HEAD}`],
     ["HTML-comment reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n<!--\nReviewed commit: ${HEAD}\n-->`],
-  ])("rejects clean grammar with a hidden %s", (_label, body) => {
-    expectPending(reduceCodexVerdict(input({
-      topLevelComments: [comment({ body })],
-    })), "unrecognised-bot-comment-only");
+    ["preformatted reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n<pre>\nReviewed commit: ${HEAD}\n</pre>`],
+    ["HTML-blockquoted reviewed-commit", `${CODEX_CLEAN_COMMENT_TITLE}\n<blockquote>\nReviewed commit: ${HEAD}\n</blockquote>`],
+  ])("accepts an authenticated title with a %s anywhere", (_label, body) => {
+    expect(reduceCodexVerdict(input({ topLevelComments: [comment({ body })] })))
+      .toMatchObject({ verdict: "clean", channel: "clean-comment" });
   });
 
   it("accepts visible clean grammar alongside unrelated hidden markdown", () => {
@@ -404,6 +412,8 @@ describe("closed input grammar and operator advice", () => {
     ["PR state", { prState: "merged" }],
     ["timestamp", { evaluatedAt: "August 7, 2026 10:10 UTC" }],
     ["reaction content", { reactions: [{ ...pair()[0], content: "heart" }] }],
+    ["review commit SHA", { reviews: [review({ commitSha: HEAD.slice(0, 7) })] }],
+    ["trigger head SHA", { triggerComments: [{ createdAt: AFTER, onHeadSha: "not-hex" }] }],
   ])("T23 returns malformed-input without throwing for malformed %s", (_label, override) => {
     const malformed = { ...input(), ...override } as unknown as CodexSignalInput;
     expect(() => reduceCodexVerdict(malformed)).not.toThrow();
