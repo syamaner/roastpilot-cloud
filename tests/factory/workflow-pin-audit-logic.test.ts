@@ -1951,6 +1951,7 @@ describe("live audited manifests (issue #102)", () => {
     ["claude-code-review.yml", "claude-review"],
     ["claude-code-review.yml", "spec-grounded-review"],
     ["claude-code-review.yml", "publish-spec-grounding-review"],
+    ["codex-verdict-status.yml", "post-advisory-status"],
     ["codeql.yml", "analyze"],
     ["dependency-review.yml", "dependency-review"],
     ["dev-snowflake-contract.yml", "contract-check"],
