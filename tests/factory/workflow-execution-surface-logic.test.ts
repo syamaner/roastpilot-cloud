@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2071,14 +2071,21 @@ jobs:
       // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
       // actionSteps, and inputs are unchanged.
       //
+      // 8 Aug 2026, 9d Unit 2 PR2 (D148): the trusted-revision review fold is
+      // +1 job / +1 run step / +0 action steps / +1 input over the committed
+      // PR2 totals: the credential-free resolver adds its job/run step, and
+      // privileged checkout gains the trusted `ref:` input. Cumulatively the
+      // new dark codex-verdict-status.yml is +2 jobs / +3 run steps / +2
+      // action steps / +4 inputs.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 10,
-      runSteps: 33,
-      actionSteps: 27,
-      inputs: 68,
+      jobs: 12,
+      runSteps: 36,
+      actionSteps: 29,
+      inputs: 72,
     });
   });
 
@@ -2123,7 +2130,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 18,
+      jobs: 20,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2155,9 +2162,12 @@ jobs:
       // Issue #192 Unit 2 moved runSteps 57 -> 58: claude-review gained exactly
       // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
       // actionSteps, and inputs are unchanged.
-      runSteps: 58,
-      actionSteps: 44,
-      inputs: 113,
+      // 8 Aug 2026, 9d Unit 2 PR2 (D148): same +1 job / +1 run step / +0
+      // action steps / +1 input trusted-revision fold over committed PR2 as
+      // above (cumulative new-workflow delta: +2 / +3 / +2 / +4).
+      runSteps: 61,
+      actionSteps: 46,
+      inputs: 117,
     });
   });
 });

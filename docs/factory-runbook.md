@@ -491,3 +491,36 @@ Before ratchet evaluation, join every security-surface or randomly sampled
 window record to the ledger by PR number. If any owed audit has no ledger
 entry, the ratchet refuses promotion and reports the missing PR number. Any
 recorded `escape` in the window independently refuses promotion.
+
+## Advisory Codex status (9d)
+
+The dark advisory publisher writes only the PR-scoped context
+`factory/codex-verdict-advisory/pr-<n>`. Its description is one of these three
+bounded forms:
+
+- `clean channel=clean-comment sha=<7-hex>` for a confirmed clean bot comment;
+- `findings source=<review|comment> sha=<7-hex> count=<n>` for findings; or
+- `pending reasons=<reason[,reason...]>[; omitted=<n>]; advice=<advice>` (with
+  the Merge Policy pointer when `advice=due`) when a verdict cannot close.
+
+The operator invariant is: **no `factory/codex-verdict-advisory*` context ever enters the required-checks list**.
+This status is informational and must remain separate from branch-protection
+requirements.
+
+The workflow is inert until both base-owned gates hold:
+`vars.CODEX_ADVISORY_STATUS_ENABLED == 'true'` and
+`vars.FACTORY_PAUSED != 'true'`. The enable variable is deliberately absent
+during this dark launch. Creating or enabling it is the separate 9h hard stop,
+not an action authorized by this wiring PR.
+
+| Stuck `pending` state | Operator action |
+|---|---|
+| `awaiting-retrigger; advice=due` | Follow the Merge Policy: post the single manual re-trigger allowed for the unchanged head, then wait for its verdict. |
+| `evidence-incomplete` | Check the run log for a 50-page-cap overflow or malformed/deleted-account records; correct the evidence source before re-running. |
+| `reaction-clean-unconfirmed; advice=verify` | D148 requires a human to read the PR; reactions alone never certify clean. |
+| `snapshot-inconsistent` or `timeline-incomplete` | Re-run against a fresh, internally consistent GitHub snapshot. |
+
+For recovery, run `workflow_dispatch` from the `main` ref and supply the
+positive decimal `pr_number`. Dispatches from any other ref are rejected by the
+job gate. A recovery run recomputes from GitHub's current PR snapshot and does
+not accept a caller-supplied SHA, context, or event payload.

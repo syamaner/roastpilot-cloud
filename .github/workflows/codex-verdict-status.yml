@@ -1,0 +1,120 @@
+name: Codex Verdict Advisory Status
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, converted_to_draft, synchronize]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  resolve-trusted-revision:
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.CODEX_ADVISORY_STATUS_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      trusted-sha: ${{ steps.resolve.outputs.trusted-sha }}
+    steps:
+      - name: Resolve the trusted revision
+        id: resolve
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
+          case "$DEFAULT_BRANCH" in
+            -*|*[[:space:]]*|*'*'*)
+              echo "::error::default_branch has an unsafe shape; cannot establish a trusted revision"
+              exit 1
+              ;;
+          esac
+
+          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            TRUSTED_SHA="$BASE_SHA"
+            TRUSTED_SOURCE="base-sha"
+          else
+            EXPECTED_REF="refs/heads/$DEFAULT_BRANCH"
+            LS="$(git ls-remote "$REMOTE_URL" "refs/heads/$DEFAULT_BRANCH")"
+            MATCH_COUNT=0
+            TRUSTED_SHA=""
+            while IFS= read -r remote_line; do
+              remote_sha="${remote_line%%$'\t'*}"
+              remote_ref="${remote_line#*$'\t'}"
+              [ "$remote_line" != "$remote_ref" ] || continue
+              [ "$remote_ref" = "$EXPECTED_REF" ] || continue
+              MATCH_COUNT=$((MATCH_COUNT + 1))
+              TRUSTED_SHA="$remote_sha"
+            done <<< "$LS"
+            if [ "$MATCH_COUNT" -ne 1 ]; then
+              echo "::error::default branch lookup returned $MATCH_COUNT exact matches; cannot establish a trusted revision"
+              exit 1
+            fi
+            TRUSTED_SOURCE="default-branch-tip"
+          fi
+
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::trusted revision is not a lowercase 40-hex SHA"
+            exit 1
+          fi
+          {
+            echo "trusted-sha=$TRUSTED_SHA"
+            echo "trusted-source=$TRUSTED_SOURCE"
+          } >> "$GITHUB_OUTPUT"
+
+  post-advisory-status:
+    needs: resolve-trusted-revision
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.CODEX_ADVISORY_STATUS_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    concurrency:
+      group: codex-advisory-status-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/factory
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Validate target PR number
+        id: validate-target
+        env:
+          TARGET_PR_CANDIDATE: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || inputs.pr_number }}
+        run: |
+          if [ -z "$TARGET_PR_CANDIDATE" ]; then
+            echo "::notice::Event does not identify a pull request; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$TARGET_PR_CANDIDATE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Target PR number must be a positive decimal integer."
+            exit 1
+          fi
+          echo "pr_number=$TARGET_PR_CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Post advisory Codex verdict status
+        if: steps.validate-target.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_PR_NUMBER: ${{ steps.validate-target.outputs.pr_number }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node --experimental-strip-types scripts/factory/publish-codex-verdict-status.mts
