@@ -176,6 +176,13 @@ import { appendFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  MAX_PATCH_BYTES,
+  parseAuthoritativePatchAnalysis,
+  parseNumstatZ,
+  type AuthoritativePatchAnalysis,
+  type FactoryPatchLineStat,
+} from "./patch-analysis-format.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   extractOwnedTriageGenerations,
@@ -211,11 +218,8 @@ import {
   NO_AUTO_CHAIN_LABEL_DESCRIPTION,
   NO_REVIEW_AUTOMATION_LABEL,
   NO_REVIEW_AUTOMATION_LABEL_DESCRIPTION,
-  parseNameStatusZ,
-  parseNumstatZ,
   validateProvenanceModelId,
   type ExistingComment,
-  type FactoryPatchLineStat,
   type GamingFlag,
   type ProvenanceContext,
   type PublishStepSummaryContext,
@@ -227,6 +231,18 @@ import {
   sanitizeAndClampUntrustedTextForCommitMessage,
   sanitizeUntrustedInlineText,
 } from "./untrusted-text.mts";
+
+export {
+  MAX_PATCH_BYTES,
+  parseAuthoritativePatchAnalysis,
+  parseNameStatusZ,
+  parseNumstatZ,
+} from "./patch-analysis-format.mts";
+export type {
+  AuthoritativePatchAnalysis,
+  AuthoritativePatchAnalysisOutput,
+  FactoryPatchLineStat,
+} from "./patch-analysis-format.mts";
 
 /**
  * GitHub's documented maximum PR-title length. A title that exceeds it makes
@@ -250,18 +266,6 @@ const GITHUB_PR_TITLE_MAX_LENGTH = 256;
  * half a marker or a lone surrogate in the pushed commit.
  */
 const MAX_COMMIT_SUBJECT_LENGTH = 120;
-
-/**
- * Upper bound on the on-disk patch artifact size, in bytes, checked via
- * `stat` BEFORE the file is read/processed at all — same DoS-guard
- * rationale as `MAX_PAYLOAD_BYTES` in `triage-verdict-schema.mts`, sized
- * up from that verdict-JSON bound since a real code patch is legitimately
- * much larger. 2 MiB comfortably covers the house "thin slice" convention
- * (~400 changed lines, plus diff context and test files) with a lot of
- * headroom, while still being far below anything that could meaningfully
- * stall the runner or `git apply` itself.
- */
-export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 
 /**
  * `maxBuffer` for EVERY `execFileSync("git", ...)` call in
@@ -343,26 +347,6 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
         `${MAX_PATCH_BYTES}-byte limit — rejected before being read into memory`,
     );
   }
-}
-
-/** What {@link getAuthoritativePatchAnalysis} reports about a patch. */
-export interface AuthoritativePatchAnalysis {
-  /** Commit SHA to which the patch was authoritatively applied. */
-  readonly baseSha: string;
-  /** Exact tree object written by the proven scratch index. */
-  readonly treeOid: string;
-  /** Every path git itself reports as touched, both sides of every rename/copy. */
-  readonly changedPaths: string[];
-  /**
-   * A git-REGENERATED, `--text`-forced diff of the same scratch tree —
-   * authoritative content for the anti-gaming classifiers
-   * ({@link findAddedCoverageSuppressions}, {@link findAddedPackageJsonTestScriptEdits})
-   * to scan, never the agent's own raw patch bytes. See this function's
-   * own docstring, point 3.
-   */
-  readonly diffText: string;
-  /** Per-path changed-line rows from the same applied scratch index. */
-  readonly lineStats: FactoryPatchLineStat[];
 }
 
 /**
@@ -687,9 +671,15 @@ export async function getAuthoritativePatchAnalysis(
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    let lineStats: FactoryPatchLineStat[];
+    let analysis: AuthoritativePatchAnalysis;
     try {
-      lineStats = parseNumstatZ(numstatOutput);
+      analysis = parseAuthoritativePatchAnalysis({
+        baseSha,
+        treeOid,
+        nameStatusOutput,
+        numstatOutput,
+        diffText,
+      });
     } catch (err) {
       /* v8 ignore next 3 -- real git output is structurally guaranteed; parser is unit tested separately. */
       throw new PublishRejection(
@@ -697,13 +687,7 @@ export async function getAuthoritativePatchAnalysis(
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return {
-      baseSha,
-      treeOid,
-      changedPaths: parseNameStatusZ(nameStatusOutput),
-      diffText,
-      lineStats,
-    };
+    return analysis;
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }

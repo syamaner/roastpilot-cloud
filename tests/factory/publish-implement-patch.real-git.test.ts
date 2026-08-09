@@ -15,6 +15,7 @@ import {
   getAuthoritativePatchAnalysis,
   main,
 } from "../../scripts/factory/publish-implement-patch.mts";
+import { parseAuthoritativePatchAnalysis } from "../../scripts/factory/patch-analysis-format.mts";
 import {
   buildTriageGenerationMarker,
   TRIAGE_COMMENT_MARKER,
@@ -225,6 +226,72 @@ function rejectionOnlyFetchMock(): ReturnType<typeof vi.fn> {
 }
 
 describe("authoritative scratch-index base-tree parameterisation", () => {
+  it("T-U1.6: leaf parsing of captured git output matches the real wrapper", async () => {
+    const analysis = await getAuthoritativePatchAnalysis(patchPath);
+    const baseTree = "HEAD";
+    const env = {
+      ...process.env,
+      GIT_INDEX_FILE: join(scratchDir, "parser-equivalence-index"),
+    };
+
+    execFileSync("git", ["read-tree", baseTree], { env, stdio: "pipe" });
+    execFileSync("git", ["apply", "--cached", patchPath], {
+      env,
+      stdio: "pipe",
+    });
+    const baseSha = execFileSync(
+      "git",
+      ["rev-parse", `${baseTree}^{commit}`],
+      { env, encoding: "utf8" },
+    ).trim();
+    const treeOid = execFileSync("git", ["write-tree"], {
+      env,
+      encoding: "utf8",
+    }).trim();
+    const nameStatusOutput = execFileSync(
+      "git",
+      [
+        "diff-index",
+        "--cached",
+        "--name-status",
+        "-z",
+        "-M",
+        "-C",
+        "--find-copies-harder",
+        baseTree,
+      ],
+      { env, encoding: "utf8" },
+    );
+    const diffText = execFileSync(
+      "git",
+      ["diff", "--cached", "--text", "--no-color", "--no-renames", baseTree],
+      { env, encoding: "utf8" },
+    );
+    const numstatOutput = execFileSync(
+      "git",
+      ["diff", "--cached", "--numstat", "-z", "-M", baseTree],
+      { env, encoding: "utf8" },
+    );
+
+    const parsed = parseAuthoritativePatchAnalysis({
+      baseSha,
+      treeOid,
+      nameStatusOutput,
+      numstatOutput,
+      diffText,
+    });
+
+    expect({
+      changedPaths: parsed.changedPaths,
+      lineStats: parsed.lineStats,
+      diffText: parsed.diffText,
+    }).toEqual({
+      changedPaths: analysis.changedPaths,
+      lineStats: analysis.lineStats,
+      diffText: analysis.diffText,
+    });
+  });
+
   it("T1: a specific baseTree yields the exact applied scratch-index tree OID", async () => {
     const baseTree = git(localCloneDir, ["rev-parse", "HEAD"]).trim();
     await fsWriteFile(join(localCloneDir, "advanced.txt"), "newer HEAD only\n");
