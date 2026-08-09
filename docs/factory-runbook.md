@@ -524,3 +524,73 @@ For recovery, run `workflow_dispatch` from the `main` ref and supply the
 positive decimal `pr_number`. Dispatches from any other ref are rejected by the
 job gate. A recovery run recomputes from GitHub's current PR snapshot and does
 not accept a caller-supplied SHA, context, or event payload.
+
+## Owner command intake (9e)
+
+The dark owner-command pipeline lets an authorised factory owner from the
+single-source `FACTORY_OWNER_LOGINS` allowlist (currently `syamaner`) comment
+`@claude question ...` or `@claude task ...` on an eligible PR. Per D149, the
+command must be the visible leading content of the comment. A `question`
+receives exactly one bounded, sanitised bot comment; a `task` receives only the
+fixed acknowledgement that task execution is not yet enabled (9f/9g) and no
+patch was produced.
+
+The four jobs keep untrusted command data separate from authority:
+
+- `resolve-trusted-revision` uses the byte-identical shared resolver with
+  `permissions: {}` to select the trusted base-owned revision.
+- `intake` is read-only. It applies a coarse eligibility pre-filter, builds a
+  nonce-fenced prompt that labels the owner question and PR diff as untrusted
+  DATA, and records the authorised PR and command snapshot in `binding.json`.
+- `answer-agent` is read-only and receives no write token. It restores
+  base-owned configuration from the trusted revision, invokes the pinned
+  `claude-code-action`, and permits `Edit(answer-output/answer.md)` plus the
+  `ToolSearch` discovery residual (the same deliberate §1.3 residual as
+  `claude-review`); every model file reader, Bash, network/egress tool, and
+  other write sink is denied by name. `ToolSearch` adds no reachable capability
+  here: it can surface only schemas for already-denied tools, while the sole
+  capability-bearing invocable tool is the scoped `Edit`. Whether to deny and
+  runtime-verify `ToolSearch` with a step-C-style catalog assertion (the #212
+  class) is a hardening decision for the 9h D140 credential-class ratification,
+  not an action enabled by this dark wiring. The untrusted DATA arrives through
+  `--append-system-prompt-file`.
+- `publish` has `pull-requests: write` as its only write permission. It
+  independently re-fetches the source records and re-derives authorization,
+  enforces the `binding.json` snapshot, and posts exactly one response or the
+  fixed stale-snapshot notice when the source has drifted.
+
+The workflow is inert until both base-owned gates hold:
+`vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'` and
+`vars.FACTORY_PAUSED != 'true'`. The enable variable is deliberately absent
+during this dark launch.
+
+The following three ordered items are the separate operator-ratification hard
+stop at 9h and are **not** authorized by this wiring:
+
+1. Before any enabling action, verify through the GitHub API that
+   `vars.FACTORY_PAUSED` is exactly the literal `true` (not absent or `false`):
+   `gh api repos/syamaner/roastpilot-cloud/actions/variables/FACTORY_PAUSED --jq '.value'`
+   must print exactly `true`.
+2. Ratify the answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` under its own D140
+   platform disposition. This is a new external-identity credential job class;
+   it cannot inherit D140 by analogy and is not the built-in-token equivalence.
+3. Only after both preceding items, create
+   `vars.OWNER_COMMAND_INTAKE_ENABLED` as the last deliberate enabling action.
+
+Unpausing `FACTORY_PAUSED`, if and when the broader factory is unpaused, remains
+a separate operator decision; creating the enable variable does not authorize
+that transition.
+
+Unlike the 9d advisory workflow, this workflow declares no
+`workflow_dispatch`; it is triggered only by a newly created `issue_comment`.
+There is no manual recovery dispatch, so the owner's recovery path is to
+re-issue the command.
+
+For a `question`, publish enforces the `binding.json` snapshot: head, base,
+title, body, question-payload, or truncation-state drift after intake produces
+the fixed notice that the command or pull request changed after the run started
+and asks the owner to re-issue the command instead of posting a stale answer. A
+truncated question or diff carries a deterministic truncation disclosure. Verb
+edits are directional: a task→question edit produces the stale notice, while a
+question→task edit produces the fixed task acknowledgement; task commands do
+not enforce the snapshot binding.
