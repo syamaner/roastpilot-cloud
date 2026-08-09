@@ -11,7 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { main } from "../../scripts/factory/publish-implement-patch.mts";
+import {
+  getAuthoritativePatchAnalysis,
+  main,
+} from "../../scripts/factory/publish-implement-patch.mts";
 import {
   buildTriageGenerationMarker,
   TRIAGE_COMMENT_MARKER,
@@ -220,6 +223,61 @@ function rejectionOnlyFetchMock(): ReturnType<typeof vi.fn> {
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
 }
+
+describe("authoritative scratch-index base-tree parameterisation", () => {
+  it("T1: a specific baseTree yields the exact applied scratch-index tree OID", async () => {
+    const baseTree = git(localCloneDir, ["rev-parse", "HEAD"]).trim();
+    await fsWriteFile(join(localCloneDir, "advanced.txt"), "newer HEAD only\n");
+    git(localCloneDir, ["add", "advanced.txt"]);
+    git(localCloneDir, ["commit", "-q", "-m", "advance HEAD"]);
+
+    const analysis = await getAuthoritativePatchAnalysis(patchPath, baseTree);
+
+    expect(analysis.baseSha).toBe(baseTree);
+    expect(analysis.treeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(analysis.changedPaths).toEqual(["lib/new-file.ts"]);
+    expect(git(localCloneDir, [
+      "show",
+      `${analysis.treeOid}:lib/new-file.ts`,
+    ])).toBe("export const x = 1;\n");
+    expect(git(localCloneDir, [
+      "ls-tree",
+      "--name-only",
+      analysis.treeOid,
+      "advanced.txt",
+    ])).toBe("");
+    expect(git(localCloneDir, ["status", "--porcelain"])).toBe("");
+  });
+
+  it("T3: omitting baseTree is bit-identical to explicitly selecting HEAD", async () => {
+    const implicitHead = await getAuthoritativePatchAnalysis(patchPath);
+    const explicitHead = await getAuthoritativePatchAnalysis(patchPath, "HEAD");
+    const resolvedHead = git(localCloneDir, ["rev-parse", "HEAD"]).trim();
+
+    expect(implicitHead).toEqual(explicitHead);
+    expect(implicitHead.baseSha).toBe(resolvedHead);
+  });
+
+  it("rejects a bare-tree base with PublishRejection and returns no admission data", async () => {
+    const bareTree = git(localCloneDir, ["rev-parse", "HEAD^{tree}"]).trim();
+    let analysis: Awaited<ReturnType<typeof getAuthoritativePatchAnalysis>> | undefined;
+    let rejection: unknown;
+
+    try {
+      analysis = await getAuthoritativePatchAnalysis(patchPath, bareTree);
+    } catch (error: unknown) {
+      rejection = error;
+    }
+
+    expect(analysis).toBeUndefined();
+    expect(rejection).toBeInstanceOf(Error);
+    if (!(rejection instanceof Error)) {
+      throw new TypeError("expected getAuthoritativePatchAnalysis to reject");
+    }
+    expect(rejection.constructor.name).toBe("PublishRejection");
+    expect(rejection.message).toContain("could not resolve scratch index base");
+  });
+});
 
 /** A fetch mock covering the issue-fetch + PR-list + PR-create calls a successful run makes. */
 function stubHappyPathFetch(options?: {

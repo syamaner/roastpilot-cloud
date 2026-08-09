@@ -346,7 +346,11 @@ async function assertPatchArtifactSize(path: string): Promise<void> {
 }
 
 /** What {@link getAuthoritativePatchAnalysis} reports about a patch. */
-interface AuthoritativePatchAnalysis {
+export interface AuthoritativePatchAnalysis {
+  /** Commit SHA to which the patch was authoritatively applied. */
+  readonly baseSha: string;
+  /** Exact tree object written by the proven scratch index. */
+  readonly treeOid: string;
   /** Every path git itself reports as touched, both sides of every rename/copy. */
   readonly changedPaths: string[];
   /**
@@ -371,8 +375,8 @@ interface AuthoritativePatchAnalysis {
  * Mechanism, each step run with `GIT_INDEX_FILE` pointed at a fresh
  * temp-file index (never the real `.git/index`, so none of this touches
  * the repo's actual staged state):
- * 1. `git read-tree HEAD` — seeds the scratch index with the CURRENT
- *    HEAD's tree, so a patch that MODIFIES an existing tracked file has
+ * 1. `git read-tree <baseTree>` — seeds the scratch index with the selected
+ *    base tree (HEAD by default), so a patch that MODIFIES an existing tracked file has
  *    a base to apply against (an empty index can only accept brand-new
  *    files).
  * 2. `git apply --cached <patch>` — applies the patch to that scratch
@@ -453,8 +457,9 @@ interface AuthoritativePatchAnalysis {
  *   index at all (malformed, unreadable, or genuinely empty), or if
  *   either authoritative query against the applied scratch index fails.
  */
-async function getAuthoritativePatchAnalysis(
+export async function getAuthoritativePatchAnalysis(
   patchPath: string,
+  baseTree: string = "HEAD",
 ): Promise<AuthoritativePatchAnalysis> {
   const scratchDir = await mkdtemp(join(tmpdir(), "publish-guard-index-"));
   try {
@@ -499,7 +504,7 @@ async function getAuthoritativePatchAnalysis(
       );
     }
     try {
-      execFileSync("git", ["read-tree", "HEAD"], {
+      execFileSync("git", ["read-tree", baseTree], {
         env,
         stdio: "pipe",
         maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
@@ -513,8 +518,27 @@ async function getAuthoritativePatchAnalysis(
       // repository state must never proceed to apply a patch) rather
       // than assumed unreachable.
       throw new PublishRejection(
-        `could not seed a scratch index from HEAD (unexpected repository ` +
-          `state): ${err instanceof Error ? err.message : String(err)}`,
+        `could not seed a scratch index from ${baseTree} (unexpected repository ` +
+        `state): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let baseSha: string;
+    try {
+      baseSha = execFileSync("git", ["rev-parse", `${baseTree}^{commit}`], {
+        env,
+        encoding: "utf8",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+      }).trim();
+      /* v8 ignore next 3 -- successful git rev-parse <base>^{commit} output is always a 40-hex SHA in this repository. */
+      if (!/^[0-9a-f]{40}$/.test(baseSha)) {
+        throw new Error("resolved base is not a 40-hex commit SHA");
+      }
+    } catch (err) {
+      // A bare tree resolves for read-tree but not as a commit; the real-git
+      // suite exercises this reachable fail-closed path.
+      throw new PublishRejection(
+        `could not resolve scratch index base ${baseTree} to a commit SHA: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
       );
     }
     try {
@@ -529,6 +553,22 @@ async function getAuthoritativePatchAnalysis(
           `unreadable patch): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    let treeOid: string;
+    try {
+      treeOid = execFileSync("git", ["write-tree"], {
+        env,
+        encoding: "utf8",
+        maxBuffer: MAX_GIT_QUERY_BUFFER_BYTES,
+      }).trim();
+    } catch (err) {
+      // Not independently exercised by a unit test: after read-tree and
+      // apply --cached succeed, git has a proven-valid scratch index. Kept
+      // defensively, for the same fail-closed reasoning as read-tree above.
+      /* v8 ignore next 3 -- a successfully applied, proven-valid scratch index always writes a tree. */
+      throw new PublishRejection(
+        `could not write the applied scratch index tree: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     let nameStatusOutput: string;
     try {
       nameStatusOutput = execFileSync(
@@ -541,7 +581,7 @@ async function getAuthoritativePatchAnalysis(
           "-M",
           "-C",
           "--find-copies-harder",
-          "HEAD",
+          baseTree,
         ],
         {
           env,
@@ -595,7 +635,7 @@ async function getAuthoritativePatchAnalysis(
           // visibility) is what the forbidden-path and test-path checks
           // need.
           "--no-renames",
-          "HEAD",
+          baseTree,
         ],
         {
           env,
@@ -632,7 +672,7 @@ async function getAuthoritativePatchAnalysis(
           "--numstat",
           "-z",
           "-M",
-          "HEAD",
+          baseTree,
         ],
         {
           env,
@@ -658,6 +698,8 @@ async function getAuthoritativePatchAnalysis(
       );
     }
     return {
+      baseSha,
+      treeOid,
       changedPaths: parseNameStatusZ(nameStatusOutput),
       diffText,
       lineStats,
