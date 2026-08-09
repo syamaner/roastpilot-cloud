@@ -23,7 +23,7 @@ import {
 import {
   MAX_PATCH_BYTES,
   type AuthoritativePatchAnalysis,
-} from "./publish-implement-patch.mts";
+} from "./patch-analysis-format.mts";
 import {
   findCiSkipDirectives,
   sanitizeAndClampUntrustedTextForCommitMessage,
