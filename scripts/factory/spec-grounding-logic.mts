@@ -152,10 +152,14 @@
  */
 
 import MarkdownIt from "markdown-it";
+import { truncateToByteBudget } from "./untrusted-diff-fence.mts";
 import {
   ASCII_WHITESPACE_CHARS,
   UNTRUSTED_DATA_BREAKOUT_PATTERN,
 } from "./untrusted-text.mts";
+
+// Historical public API; implementation lives in the dependency-free leaf.
+export { truncateToByteBudget } from "./untrusted-diff-fence.mts";
 
 /**
  * Which GitHub keyword linked a PR to an issue, and therefore what
@@ -1429,18 +1433,6 @@ const MAX_DATA_BLOCK_BYTES = 32 * 1024;
  * @param maxBytes - The UTF-8 byte budget.
  * @returns The possibly-shortened text, and whether truncation occurred.
  */
-export function truncateToByteBudget(text: string, maxBytes: number): { text: string; truncated: boolean } {
-  const encoded = new TextEncoder().encode(text);
-  if (encoded.length <= maxBytes) {
-    return { text, truncated: false };
-  }
-  const safeMaxBytes = Math.max(0, maxBytes);
-  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(encoded.slice(0, safeMaxBytes), {
-    stream: true,
-  });
-  return { text: decoded, truncated: true };
-}
-
 /**
  * Renders the linked-issue specs into the single block of text slice 3b's
  * review prompt splices in verbatim — the deterministic half of Rider 1's

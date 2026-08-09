@@ -18,6 +18,8 @@ import {
 } from "../../scripts/factory/untrusted-text.mts";
 
 const REPOSITORY = "syamaner/roastpilot-cloud";
+const FULL_DETAIL_LOCATION =
+  "the owner-question-answer artifact from workflow run 12345";
 const TASK_ACKNOWLEDGEMENT =
   "task recognised from an authorised owner; task execution is not yet enabled (9f/9g); no patch produced";
 
@@ -266,11 +268,16 @@ describe("response body rendering", () => {
       commentId: 91,
       command: questionCommand,
       answerText,
+      fullDetailLocation: FULL_DETAIL_LOCATION,
     });
     const marker = buildResponseMarker(91);
 
     expect(body).toContain(
-      renderBoundedUntrustedMultilineBlock(answerText, 8000, "the run log"),
+      renderBoundedUntrustedMultilineBlock(
+        answerText,
+        8000,
+        FULL_DETAIL_LOCATION,
+      ),
     );
     expect(body).toContain(
       sanitizeUntrustedTextForPostedBody(questionCommand.payload),
@@ -278,6 +285,25 @@ describe("response body rendering", () => {
     expect(body).toContain("```text\n");
     expect(body.endsWith(marker)).toBe(true);
     expect(countOccurrences(body, marker)).toBe(1);
+  });
+
+  it("points every lossy answer-rendering disclosure at the retained artifact", () => {
+    const marker = buildResponseMarker(96);
+    const body = buildQuestionResponseBody({
+      commentId: 96,
+      command: {
+        verb: "question",
+        payload: " explain the long answer",
+        truncated: false,
+      },
+      answerText: `\`${"x".repeat(8001)}`,
+      fullDetailLocation: FULL_DETAIL_LOCATION,
+    });
+
+    expect(countOccurrences(body, `full detail in ${FULL_DETAIL_LOCATION}`))
+      .toBe(2);
+    expect(body).not.toContain("the run log");
+    expect(body.endsWith(marker)).toBe(true);
   });
 
   it("Q2 / M11 emits the byte-exact fixed task acknowledgement and no patch", () => {
@@ -317,6 +343,7 @@ describe("response body rendering", () => {
         truncated: false,
       },
       answerText: dangerousAnswer,
+      fullDetailLocation: FULL_DETAIL_LOCATION,
     });
 
     expect(body).toContain("[codex trigger removed]");
@@ -334,6 +361,7 @@ describe("response body rendering", () => {
       commentId: 94,
       command: { verb: "question", payload, truncated: false },
       answerText: "safe answer",
+      fullDetailLocation: FULL_DETAIL_LOCATION,
     });
 
     expect(body).toContain(`**Command:** ${expectedPayload}`);
@@ -354,6 +382,7 @@ describe("response body rendering", () => {
         truncated: false,
       },
       answerText: `answer predicts ${marker}`,
+      fullDetailLocation: FULL_DETAIL_LOCATION,
     });
 
     expect(countOccurrences(body, marker)).toBe(1);
@@ -375,6 +404,7 @@ describe("response body rendering", () => {
         truncated: false,
       },
       answerText: `answer plants ${foreignMarker}`,
+      fullDetailLocation: FULL_DETAIL_LOCATION,
     });
 
     // MUTATION-CHECK: narrowing neutralizeResponseMarkerSpoof back to a

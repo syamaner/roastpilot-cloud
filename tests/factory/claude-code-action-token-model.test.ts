@@ -46,10 +46,15 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 // must NOT move when the completion-comment author literal changes -- T-4.
 const EXPECTED_ALLOWED_BOTS =
   "claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]";
-// The live corpus has exactly four invocations (claude-review, spec-grounded,
-// triage, implement). A fifth must fail this tripwire so it cannot be added
-// without owning the `github_token` contract too (class sweep, #157 §4).
-const EXPECTED_INVOCATION_COUNT = 4;
+// The live corpus has exactly five invocations (claude-review, spec-grounded,
+// triage, implement, owner-command answer-agent). A sixth must fail this
+// tripwire so it cannot be added without owning the `github_token` contract
+// too (class sweep, #157 §4).
+// 9 Aug 2026, 9e Unit 2 PR2b: the fifth invocation is the DARK
+// owner-command-intake.yml answer-agent. It explicitly passes the built-in
+// `github_token: ${{ secrets.GITHUB_TOKEN }}`, so the #157 token-model contract
+// remains satisfied: `analysis.failures` stays empty and only the count moved.
+const EXPECTED_INVOCATION_COUNT = 5;
 
 type Mapping = Record<string, unknown>;
 

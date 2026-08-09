@@ -55,6 +55,8 @@ export interface QuestionResponseInput {
   commentId: number;
   command: QuestionOwnerCommand;
   answerText: string;
+  /** Trusted caller-owned description of the retained full answer. */
+  fullDetailLocation: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -223,7 +225,7 @@ export function buildQuestionResponseBody(
     renderBoundedUntrustedMultilineBlock(
       input.answerText,
       MAX_RENDERED_ANSWER_CODE_POINTS,
-      "the run log",
+      input.fullDetailLocation,
     ),
   );
 
