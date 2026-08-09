@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(8);
+    expect(names).toHaveLength(9);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2000,6 +2000,8 @@ jobs:
         source,
       );
       if (
+        // owner-command-intake.yml is a supported ordinary-job surface and
+        // deliberately remains outside this unsupported-shape skip list.
         [
           "dev-snowflake-contract.yml",
           "implement-ready-issues.yml",
@@ -2078,14 +2080,21 @@ jobs:
       // new dark codex-verdict-status.yml is +2 jobs / +3 run steps / +2
       // action steps / +4 inputs.
       //
+      // 9 Aug 2026, 9e Unit 2 PR2b: owner-command-intake.yml is a supported
+      // ordinary execution shape. Its four jobs contribute +5 run steps
+      // (resolver, intake, restore, output-directory preparation, publish),
+      // +11 pinned action steps, and +33 declared action inputs. The extra
+      // action + two inputs download the question binding into publish. The workflow
+      // stays out of the unsupported-shape list above.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 12,
-      runSteps: 36,
-      actionSteps: 29,
-      inputs: 72,
+      jobs: 16,
+      runSteps: 41,
+      actionSteps: 40,
+      inputs: 105,
     });
   });
 
@@ -2130,7 +2139,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 20,
+      jobs: 24,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2165,9 +2174,13 @@ jobs:
       // 8 Aug 2026, 9d Unit 2 PR2 (D148): same +1 job / +1 run step / +0
       // action steps / +1 input trusted-revision fold over committed PR2 as
       // above (cumulative new-workflow delta: +2 / +3 / +2 / +4).
-      runSteps: 61,
-      actionSteps: 46,
-      inputs: 117,
+      //
+      // 9 Aug 2026, 9e Unit 2 PR2b: same measured supported-workflow delta
+      // as the source-only corpus above: +4 jobs / +5 run steps / +11 action
+      // steps / +33 action inputs.
+      runSteps: 66,
+      actionSteps: 57,
+      inputs: 150,
     });
   });
 });
