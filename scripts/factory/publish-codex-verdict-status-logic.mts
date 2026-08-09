@@ -13,14 +13,17 @@ import {
   isPlainRecord,
   parseStrictIsoUtc,
 } from "./codex-signal-schema.mts";
+import {
+  FACTORY_OWNER_LOGINS,
+  isFactoryOwnerLogin,
+} from "./factory-owner-allowlist.mts";
 
 export const CODEX_RETRIGGER_AUTHORIZED_LOGINS: ReadonlySet<string> =
-  new Set(["syamaner"]);
+  FACTORY_OWNER_LOGINS;
 
 /** Authorize a trigger author by exact, unnormalised login bytes. */
 export function isAuthorizedTriggerAuthor(login: unknown): boolean {
-  return typeof login === "string" &&
-    CODEX_RETRIGGER_AUTHORIZED_LOGINS.has(login);
+  return isFactoryOwnerLogin(login);
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {
