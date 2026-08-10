@@ -439,7 +439,13 @@ backfills. Skipping an applicable step leaves the factory in a wrong state:**
    in resume step 1, the pause flag remains its final blocker, so its outage end
    is `PAUSE_END`. For a workflow left disabled under the fail-closed §3 rule,
    or otherwise re-enabled later, record its eventual deliberate re-enable
-   timestamp as `WORKFLOW_OUTAGE_END`. Until then, its recovery obligation
+   timestamp as `WORKFLOW_OUTAGE_END`, captured conservatively immediately AFTER
+   that workflow's `…/enable` PUT returns
+   (`WORKFLOW_OUTAGE_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"`), so it over-includes
+   the enable request/acknowledgement interval in which GitHub can still suppress
+   an event before the enablement persists — the per-workflow dual of §1's
+   conservative pre-write `PAUSE_START` and resume step 2's post-unpause
+   `PAUSE_END`. Until then, its recovery obligation
    remains explicitly open and cannot be marked complete. Use the conservative
    `PAUSE_START` as its outage start for this halt, or an earlier recorded
    disable timestamp when recovery must cover a pre-existing disable. Extend
@@ -673,7 +679,7 @@ jq -r --arg start "$COMMENT_SWEEP_START" --arg end "$COMMENT_SWEEP_END" '
         | gsub("\\r\\n?"; "\\n")
         | test("^\\n*@claude[ \\t]+(question|task)(\\s|$)"; "i")
       )
-    | [.id, .created_at, .user.login, .issue_url, .html_url, .body]
+    | [.id, .created_at, .updated_at, .user.login, .issue_url, .html_url, .body]
     | @json
   '
 ```
@@ -696,6 +702,20 @@ the admission enforced by `deriveResponseAuthorization` and
 `intake-owner-command.mts`, rather than treating the sweep's coarse regex as
 admission evidence. A comment failing any runtime predicate is not owed: record
 it as `not-admissible`, not as a permanently owed entry or invented skip.
+
+**Admission is derived from the comment as CREATED, never from a possibly-edited
+current body.** `owner-command-intake.yml` triggers only on
+`issue_comment.created`; an edit never triggers intake, so the created body is
+the only body the trigger ever saw. The sweep parses each comment's current
+body, so a comment created with harmless text and later edited to begin with
+`@claude task`/`@claude question` would be emitted and parsed as a command that
+was never present in the triggering event. Therefore treat any comment whose
+`updated_at != created_at` (edited after creation — the added `updated_at`
+output column surfaces this) as **ambiguous**: do not derive admission from its
+current body, withhold automatic replay, and record it for explicit operator
+investigation, UNLESS creation-time body evidence proves the created (not
+edited) body was itself a valid command in an enabled, authorized interval. An
+edited comment without such creation-time evidence is never auto-re-issued.
 
 After runtime admission, a comment is an owed re-issue candidate only when all
 three additional conditions hold: its `created_at` falls inside a reconstructed
