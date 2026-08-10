@@ -46,15 +46,17 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 // must NOT move when the completion-comment author literal changes -- T-4.
 const EXPECTED_ALLOWED_BOTS =
   "claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]";
-// The live corpus has exactly five invocations (claude-review, spec-grounded,
-// triage, implement, owner-command answer-agent). A sixth must fail this
-// tripwire so it cannot be added without owning the `github_token` contract
-// too (class sweep, #157 §4).
+// The live corpus has exactly six invocations (claude-review, spec-grounded,
+// triage, implement, owner-command answer-agent, owner-command task-agent). A
+// seventh must fail this tripwire so it cannot be added without owning the
+// `github_token` contract too (class sweep, #157 §4).
 // 9 Aug 2026, 9e Unit 2 PR2b: the fifth invocation is the DARK
 // owner-command-intake.yml answer-agent. It explicitly passes the built-in
 // `github_token: ${{ secrets.GITHUB_TOKEN }}`, so the #157 token-model contract
 // remains satisfied: `analysis.failures` stays empty and only the count moved.
-const EXPECTED_INVOCATION_COUNT = 5;
+// 10 Aug 2026, F1-S6 slice 9g PR2a: the dark task-agent is the sixth and carries
+// the same explicit built-in token binding.
+const EXPECTED_INVOCATION_COUNT = 6;
 
 type Mapping = Record<string, unknown>;
 
@@ -411,7 +413,7 @@ describe("claude-code-action token model (issue #157)", () => {
     }
   });
 
-  it("T-5: every live claude-code-action invocation passes the built-in token, and there are exactly four", () => {
+  it("T-5: every live claude-code-action invocation passes the built-in token, and there are exactly six", () => {
     const analysis = analyzeTokenModel(collectSourceFiles());
     expect(analysis.failures).toEqual([]);
     expect(analysis.invocationCount).toBe(EXPECTED_INVOCATION_COUNT);
