@@ -207,6 +207,23 @@ jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATIO
 '
 ```
 
+**`gh api --paginate` is not an atomic snapshot.** It fetches pages
+sequentially, so while it walks the pages a concurrent mutation—the unaffected
+CI and review workflows keep creating runs, and runs can be deleted—can shift
+entries across page boundaries. To make the inventory robust to this, do not
+treat a single pass as authoritative: REPEAT both the primary (non-completed)
+and companion (completed boundary-crossing) sweeps and take their union,
+DEDUPLICATED BY RUN ID, until two consecutive full passes return the same set of
+run IDs — a stable fixed point — before proceeding to cancellation. Only then
+treat the enumerated set as complete. Direction of the risk: with the default
+newest-first ordering a concurrent ADDITION pushes older runs toward later,
+as-yet-unread pages, so it typically yields a harmless DUPLICATE (removed by the
+run-ID dedup) rather than a miss; the repeat-to-stable-fixed-point rule
+additionally covers deletion-induced or reordering shifts, so an active
+write-capable run cannot slip through unread. This is the same fail-closed
+spirit as the "a cancellation request by itself never closes the step" rule
+below: the enumeration is complete only when it is stable.
+
 Classify every boundary-crossing row. For each side-effecting run—including an
 `implement-ready-issues.yml` publisher, an `owner-command-intake.yml`
 `task-apply`, or an advisory-status write—verify its conclusion and its durable
