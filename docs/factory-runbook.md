@@ -84,8 +84,9 @@ this notice job exists.
 gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 ```
 
-Treat the successful pause-write timestamp as `PAUSE_START`. Immediately after
-the write, read and record the persisted values of
+Treat the successful pause-write timestamp as `PAUSE_START`. `PAUSE_END` is the
+timestamp of the `FACTORY_PAUSED` → `false` write in resume step 2, which ends
+the paused window. Immediately after the pause write, read and record the persisted values of
 `CODEX_ADVISORY_STATUS_ENABLED`, `OWNER_COMMAND_INTAKE_ENABLED`, and
 `OWNER_TASK_APPLY_ENABLED` as start-of-window evidence, and record every change
 to any of the three during the pause. Setting the pause flag does not alter
@@ -155,13 +156,30 @@ do not proceed past an unknown workflow path:
 gh run cancel <run-id> -R syamaner/roastpilot-cloud
 ```
 
+Cancellation is asynchronous: a successful request does not prove the runner
+has stopped. After each request, repeatedly re-query that exact run until it
+reports terminal `status: "completed"`; do not proceed to §3, resume, or an
+activation write while any targeted run remains non-completed:
+
+```bash
+gh api repos/syamaner/roastpilot-cloud/actions/runs/<run-id> \
+  --jq '{status, conclusion}'
+```
+
 **If a normal cancel doesn't take** (the run ignores the cancellation
-signal — can happen mid-`git push` or mid-API-call, where the runner
-process doesn't check for cancellation until its next step boundary):
+signal — can happen mid-API-call, where the runner process doesn't check for
+cancellation until its next step boundary), force-cancel it:
 
 ```bash
 gh api -X POST repos/syamaner/roastpilot-cloud/actions/runs/<run-id>/force-cancel
 ```
+
+The exception is an `implement-ready-issues.yml` `publish` job already pushing:
+never force-cancel it mid-push. Wait for that job to finish, then verify its run
+is terminal with the same query. After a force-cancel, also keep re-querying
+until the run reports `status: "completed"`. Section §2 is complete only when
+every enumerated gated run is terminal; a cancellation request by itself never
+closes the step.
 
 ### 3. Disable the workflows (optional — extra insurance, not required)
 
@@ -413,9 +431,12 @@ Do not dispatch the next issue until the current one passes both assertions.
 start-of-window capture plus the recorded change history to identify every
 sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
 Record this step as a no-op only when the gate was confirmed false or absent
-for the entire pause window. If any interval is unknown, stop rather than
-treating it as disabled. GitHub does not replay the PR/review/comment events
-consumed during an enabled interval, so when any such interval exists sweep
+for the entire pause window. If its change history cannot be fully
+reconstructed, treat the entire paused window as one enabled interval rather
+than narrowing it; over-inclusion is the safe direction. If the gate state or
+window boundary is truly unknown, stop rather than treating it as disabled.
+GitHub does not replay the PR/review/comment events consumed during an enabled
+interval, so when any such interval exists sweep
 **every currently open PR**. Do not filter the inventory by `updated_at`: a
 later title, label, or other non-triggering update can move a genuinely missed
 PR past `PAUSE_END`. The pause window is only an optional prioritisation hint
@@ -446,25 +467,29 @@ empty result must be recorded too. Never silently drop an entry.
 capture plus the recorded change history to identify every sub-interval in
 which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused. Record this step
 as a no-op only when the gate was confirmed false or absent for the entire
-pause window. If any interval is unknown, stop rather than treating it as
-disabled. This workflow has no dispatch path. Copy the exact current
+pause window. If its change history cannot be fully reconstructed, treat the
+entire paused window as one enabled interval rather than narrowing it;
+over-inclusion is the safe direction. If the gate state or window boundary is
+truly unknown, stop rather than treating it as disabled. This workflow has no
+dispatch path. Copy the exact current
 `FACTORY_OWNER_LOGINS` set from the base-owned
 `scripts/factory/factory-owner-allowlist.mts` into the JSON array below, then
-build the complete inventory as the union of two sources: commands created in
-each enabled sub-interval from authorized comments whose visible leading
-content is `@claude question` or `@claude task`, plus the source comment of every
-`owner-command-intake.yml` run enumerated as non-completed in §2, regardless of
-how that run later terminates. Run this query for every enabled sub-interval:
+build the authoritative inventory from comments. Sweep every enabled
+sub-interval plus a conservative lookback before the first enabled interval,
+covering any command whose run could have been queued or in flight at
+`PAUSE_START`. If the lookback bound is uncertain, widen it; over-inclusion is
+the safe direction. Include only authorized comments whose visible leading
+content is `@claude question` or `@claude task`:
 
 ```bash
-INTERVAL_START=<ENABLED_INTERVAL_START>
-INTERVAL_END=<ENABLED_INTERVAL_END>
+COMMENT_SWEEP_START=<CONSERVATIVE_LOOKBACK_START>
+COMMENT_SWEEP_END=<PAUSE_END>
 FACTORY_OWNER_LOGINS='["syamaner"]'
 gh api --paginate \
-  "repos/syamaner/roastpilot-cloud/issues/comments?since=$INTERVAL_START&per_page=100" \
+  "repos/syamaner/roastpilot-cloud/issues/comments?since=$COMMENT_SWEEP_START&per_page=100" \
   --slurp |
 jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
-  --arg start "$INTERVAL_START" --arg end "$INTERVAL_END" '
+  --arg start "$COMMENT_SWEEP_START" --arg end "$COMMENT_SWEEP_END" '
     .[][]
     | select(.created_at >= $start and .created_at <= $end)
     | select(.user.login as $login | $owners | index($login))
@@ -481,16 +506,26 @@ jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
 This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
 that parser's leading-command grammar changes.
 
-The query output is only the first half of the inventory. Retain every row from
-the §2 enumeration whose path is
-`.github/workflows/owner-command-intake.yml`, identify its triggering source
-comment from the run's event/trigger evidence, and add that comment by ID even
-when its `created_at` precedes the first enabled interval. Keep the row
-regardless of whether the run is later cancelled, fails, or times out; remove
-it from the owed inventory only after verifying that its comment-bound terminal
-effect actually occurred. If an enumerated owner-command run's source comment cannot be
-identified, the inventory is incomplete and the backfill remains blocked
-rather than silently dropping it. Deduplicate the union by source comment ID.
+Deduplicate the comment sweep by source comment ID. For each enumerated
+`@claude question`, verify whether a bot-owned response already ends with the
+comment-bound terminal marker
+`<!-- owner-command-response: <commentId> -->`. For each enumerated
+`@claude task`, apply the existing capability-safe rule below and verify the
+acknowledged or applied terminal effect required for that task's capability.
+A command with its verified effect is already processed; record it done. A
+command without that effect remains owed and must be re-issued or receive a
+recorded operator skip.
+
+Use the §2 owner-command run rows only as a cross-check, never as the primary
+run-to-comment inventory: a run record does not persist its triggering comment
+ID, and a run can finish before the §2 enumeration response is evaluated.
+Every §2-enumerated row whose path is
+`.github/workflows/owner-command-intake.yml` should correspond to a command in
+the comment sweep. If a row does not map to any enumerated comment, flag it for
+explicit operator investigation and widen the lookback when that can resolve
+the gap. Record the investigation disposition; neither silently drop the row
+nor permanently block the deterministic comment inventory. Deduplicate all
+matched commands by source comment ID.
 
 Before re-issuing each `@claude task`, establish the task-apply capability when
 that source command was originally issued from the start-of-window capture and the
@@ -504,7 +539,7 @@ unaffected because it carries no mutation capability. If issuance-time or
 replay-time capability is ambiguous, fail closed: withhold the replay and
 record it still owed, never replay it under an unverified capability.
 
-For every inventoried command, the same authorized owner must re-issue the
+For every owed command, the same authorized owner must re-issue the
 original command as a fresh PR comment after resumption. Never edit the old
 comment: edits do not retrigger `owner-command-intake.yml`. Posting the fresh
 comment is not completion: capture its comment ID, confirm that
@@ -815,7 +850,9 @@ authorized by this dark wiring:
    before the pause can retain snapshotted stale gates and later reach the
    write-capable `task-apply` path. Do not proceed to either write until every
    enumerated run is classified and every applicable queued or in-progress run
-   is cancelled per §2.
+   is cancelled and verified terminal per §2. In this activation context the
+   pause flag was set earlier, so run §2's enumerate-and-cancel mechanics
+   verbatim against the already-paused state.
    Normalize each successful enable-variable read to lowercase before comparing
    it, matching the workflow gates' case-insensitive string semantics. For
    either variable, a confirmed absent-variable `404`, or a successful response
