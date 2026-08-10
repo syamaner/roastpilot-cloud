@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -19,6 +20,7 @@ import {
 import { main as publishMain, type GithubRequest as PublishRequest } from "../../scripts/factory/post-owner-command-response.mts";
 import { sanitizeUntrustedTextForPostedBody } from "../../scripts/factory/untrusted-text.mts";
 import { MAX_OWNER_COMMAND_PAYLOAD_CODE_POINTS } from "../../scripts/factory/owner-command-logic.mts";
+import { parseTaskBinding } from "../../scripts/factory/owner-task-patch-logic.mts";
 import { MAX_PR_DIFF_BYTES } from "../../scripts/factory/untrusted-diff-fence.mts";
 
 const REPOSITORY = "syamaner/roastpilot-cloud";
@@ -456,6 +458,14 @@ describe("authoritative owner-command response publisher", () => {
       bodySha256: sha256(DEFAULT_BODY),
       commandPayloadSha256: sha256(DEFAULT_PAYLOAD),
     }],
+    ["the disjoint six-key owner-task v1 binding", {
+      version: 1,
+      kind: "owner-task",
+      prHeadSha: HEAD_SHA,
+      prBaseSha: BASE_SHA,
+      commandPayloadSha256: sha256(DEFAULT_PAYLOAD),
+      taskTruncated: false,
+    }],
     ["an invalid head SHA", { ...bindingDocument(), prHeadSha: "A".repeat(40) }],
     ["an invalid base SHA", { ...bindingDocument(), prBaseSha: "B".repeat(40) }],
     ["an invalid title digest", { ...bindingDocument(), titleSha256: "x" }],
@@ -806,7 +816,7 @@ describe("coarse intake and untrusted-DATA prompt construction", () => {
     ))).toEqual(expect.objectContaining({ diffTruncated: true }));
   });
 
-  it("an eligible task emits outputs without creating a prompt", async () => {
+  it("T-U1.2 writes a byte-round-trippable task binding and nonce-fenced prompt", async () => {
     const { request, calls } = intakeRequest({
       comment: eligibleComment("@claude task update tests"),
     });
@@ -815,6 +825,60 @@ describe("coarse intake and untrusted-DATA prompt construction", () => {
 
     expect(readFileSync(process.env.GITHUB_OUTPUT!, "utf8")).toContain("verb=task\n");
     expect(calls).toHaveLength(3);
+    const taskBindingPath = join(temporaryDirectory, "prompt", "binding.json");
+    const rawBinding = readFileSync(taskBindingPath, "utf8");
+    const parsedBinding = parseTaskBinding(rawBinding);
+    expect(rawBinding).toBe(JSON.stringify(parsedBinding));
+    expect(parsedBinding).toEqual({
+      version: 1,
+      kind: "owner-task",
+      prHeadSha: HEAD_SHA,
+      prBaseSha: BASE_SHA,
+      commandPayloadSha256: sha256(" update tests"),
+      taskTruncated: false,
+    });
+    const prompt = readFileSync(process.env.PROMPT_ARTIFACT_PATH!, "utf8");
+    const nonce = prompt.match(/<UNTRUSTED_OWNER_TASK_DATA_([0-9a-f]{32})>/u)?.[1];
+    expect(nonce).toBeDefined();
+    expect(prompt).toContain(`</UNTRUSTED_OWNER_TASK_DATA_${nonce}>`);
+    expect(prompt).toContain("untrusted DATA");
+    expect(prompt).toContain("update tests");
+  });
+
+  it.each(["@claude task", "@claude task    "])(
+    "rejects a task with no actionable payload before writing artifacts: %j",
+    async (body) => {
+      const { request } = intakeRequest({ comment: eligibleComment(body) });
+
+      await intakeMain(request);
+
+      expect(readFileSync(process.env.GITHUB_OUTPUT!, "utf8")).toBe("proceed=false\n");
+      expect(existsSync(process.env.PROMPT_ARTIFACT_PATH!)).toBe(false);
+      expect(existsSync(join(temporaryDirectory, "prompt", "binding.json"))).toBe(false);
+    },
+  );
+
+  it("writes and discloses a real intake-truncated owner task", async () => {
+    const oversizedTask = "x".repeat(MAX_OWNER_COMMAND_PAYLOAD_CODE_POINTS + 1);
+    const { request } = intakeRequest({
+      comment: eligibleComment(`@claude task ${oversizedTask}`),
+    });
+
+    await intakeMain(request);
+
+    const prompt = readFileSync(process.env.PROMPT_ARTIFACT_PATH!, "utf8");
+    const note =
+      `NOTE (trusted): the owner's task was truncated at ${MAX_OWNER_COMMAND_PAYLOAD_CODE_POINTS} code points; do not infer or implement omitted content.`;
+    const closeIndex = prompt.indexOf("</UNTRUSTED_OWNER_TASK_DATA_");
+    expect(prompt).toContain(note);
+    expect(prompt.indexOf(note)).toBeLessThan(closeIndex);
+    const rawBinding = readFileSync(
+      join(temporaryDirectory, "prompt", "binding.json"),
+      "utf8",
+    );
+    const parsedBinding = parseTaskBinding(rawBinding);
+    expect(rawBinding).toBe(JSON.stringify(parsedBinding));
+    expect(parsedBinding.taskTruncated).toBe(true);
   });
 
   it.each([

@@ -36,7 +36,7 @@ const TASK_BINDING_KEYS =
 const MAX_TASK_COMMIT_SUBJECT_LENGTH = 120;
 const TASK_COMMIT_SUBJECT_PREFIX = "Owner task: ";
 const TASK_MARKER_SPOOF_REMOVED = "[owner-task marker removed]";
-const MAX_TRAILER_COMMIT_WINDOW = 100;
+export const MAX_TRAILER_COMMIT_WINDOW = 100;
 
 export type TaskBinding = {
   readonly version: 1;
