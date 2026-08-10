@@ -183,16 +183,23 @@ before the first query observed it. The cutoff filters on `created_at`, not
 `run_started_at`, precisely because a run already queued at `CLASSIFICATION_TIME`
 but not yet started has no or a later `run_started_at`; keying on `created_at`
 keeps every run that existed when classification began in one of the two
-inventories:
+inventories. The completed status is selected in jq, not with a server-side
+`status=completed` URL filter, because GitHub's List-workflow-runs endpoint caps
+a `status`-filtered search at 1,000 results — so `--paginate` cannot complete it
+and, under a long pause with more than 1,000 completed runs, older
+boundary-crossing publisher or task runs would be dropped server-side before the
+window predicates apply. This mirrors the reason the primary non-completed query
+also fetches the unfiltered endpoint and filters status in jq:
 
 ```bash
 PAUSE_START=<RECORDED_PAUSE_START>
 CLASSIFICATION_TIME=<TIMESTAMP_WHEN_THE_NON_COMPLETED_QUERY_STARTED>
 gh api --paginate \
-  'repos/syamaner/roastpilot-cloud/actions/runs?status=completed&per_page=100' \
+  'repos/syamaner/roastpilot-cloud/actions/runs?per_page=100' \
   --slurp |
 jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATION_TIME" '
   .[] | .workflow_runs[]
+  | select(.status == "completed")
   | select(.created_at <= $classification_time)
   | select(.updated_at >= $pause_start)
   | [.id, .status, .conclusion, .created_at, .run_started_at, .updated_at, .path]
@@ -425,8 +432,26 @@ backfills. Skipping an applicable step leaves the factory in a wrong state:**
    arriving after the write is issued but before GitHub persists the unpause is
    still suppressed, so a `PAUSE_END` taken before the command returns would end
    the window early and omit it; capturing it afterward safely over-includes
-   that request/acknowledgement interval. Use this `PAUSE_END` as the upper bound
-   for every backfill below.
+   that request/acknowledgement interval.
+
+   **Close each workflow's recovery window at that workflow's own return to
+   service, not automatically at global `PAUSE_END`.** For a workflow re-enabled
+   in resume step 1, the pause flag remains its final blocker, so its outage end
+   is `PAUSE_END`. For a workflow left disabled under the fail-closed §3 rule,
+   or otherwise re-enabled later, record its eventual deliberate re-enable
+   timestamp as `WORKFLOW_OUTAGE_END`. Until then, its recovery obligation
+   remains explicitly open and cannot be marked complete. Use the conservative
+   `PAUSE_START` as its outage start for this halt, or an earlier recorded
+   disable timestamp when recovery must cover a pre-existing disable. Extend
+   that consumer's inventory through its actual `WORKFLOW_OUTAGE_END`; never
+   truncate it at the global unpause.
+
+   Apply this rule to every consumer below: use `TRIAGE_OUTAGE_END` for the
+   Step 1 issue inventory, `CODEX_STATUS_OUTAGE_END` for 9d, and
+   `OWNER_COMMAND_OUTAGE_END` for 9e. Each equals `PAUSE_END` only when that
+   workflow was re-enabled in step 1. If one remains disabled, retain an owed
+   recovery record, continue extending its upper bound, and perform the final
+   backfill only after its deliberate re-enable.
 
 3. **Backfill issues opened during the outage** (below) — the flag and
    workflow state going back to normal does not retroactively process
@@ -447,7 +472,10 @@ without changing issue lifecycle state or relying on label events.
 
 **Step 1 — find every issue opened during the pause/disabled window.** Use the
 conservative pre-write `PAUSE_START` recorded in §1, never the later pause
-acknowledgement time. Replace `<PAUSE_START>`/`<PAUSE_END>` with those exact UTC
+acknowledgement time. In the command below, retain `<PAUSE_END>` as the
+upper-bound placeholder but replace it with the workflow-specific
+`TRIAGE_OUTAGE_END` defined above—not the global `PAUSE_END` when
+`triage-issues.yml` remained disabled. Replace both placeholders with exact UTC
 timestamps.
 Search by creation time, not readiness labels: the story template itself
 adds `needs-triage`, so a missing-label filter would exclude affected
@@ -558,22 +586,25 @@ Do not dispatch the next issue until the current one passes both assertions.
 
 **Conditional Step 4 (9d) — backfill advisory status events.** Use the
 conservative pre-write `PAUSE_START`, the start-of-window capture, and the
-recorded change history to identify every sub-interval in which
-`CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
+recorded change history through `CODEX_STATUS_OUTAGE_END` to identify every
+sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while the
+workflow was paused or disabled.
 Normalize every captured value and change-history value to lowercase before
 classifying those intervals, matching the workflow gate's case-insensitive
-string comparison. Record this step as a no-op only when the gate was
-confirmed false or absent
-for the entire pause window. If its change history cannot be fully
-reconstructed, treat the entire paused window as one enabled interval rather
+string comparison. Record this step as a no-op only when the gate was confirmed
+false or absent for the entire workflow-specific outage. If its change history
+cannot be fully reconstructed, treat the entire
+`PAUSE_START`–`CODEX_STATUS_OUTAGE_END` window as one enabled interval rather
 than narrowing it; over-inclusion is the safe direction. If the gate state or
-window boundary is truly unknown, stop rather than treating it as disabled.
+workflow-specific boundary is truly unknown, stop rather than treating it as
+disabled.
 GitHub does not replay the PR/review/comment events consumed during an enabled
 interval, so when any such interval exists sweep
 **every currently open PR**. Do not filter the inventory by `updated_at`: a
 later title, label, or other non-triggering update can move a genuinely missed
-PR past `PAUSE_END`. The pause window is only an optional prioritisation hint
-for which PRs to inspect first, never a filter that can drop an entry.
+PR past `CODEX_STATUS_OUTAGE_END`. The workflow-specific outage window is only
+an optional prioritisation hint for which PRs to inspect first, never a filter
+that can drop an entry.
 Over-inclusion is the safe direction because each dispatch recomputes the
 current snapshot and overwrites the single PR-scoped status context:
 
@@ -598,18 +629,20 @@ empty result must be recorded too. Never silently drop an entry.
 
 **Conditional Step 5 (9e) — backfill owner commands.** Use the conservative
 pre-write `PAUSE_START`, the start-of-window capture, and the recorded change
-history to identify every sub-interval in which
-`OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused.
+history through `OWNER_COMMAND_OUTAGE_END` to identify every sub-interval in
+which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while the workflow was paused
+or disabled.
 Normalize every captured value and change-history value to lowercase before
 classifying those intervals, matching the workflow gate's case-insensitive
-string comparison. Record this step
-as a no-op only when the gate was confirmed false or absent for the entire
-pause window. If its change history cannot be fully reconstructed, treat the
-entire paused window as one enabled interval rather than narrowing it;
-over-inclusion is the safe direction for inventory, but it does not authorize
+string comparison. Record this step as a no-op only when the gate was confirmed
+false or absent for the entire workflow-specific outage. If its change history
+cannot be fully reconstructed, treat the entire
+`PAUSE_START`–`OWNER_COMMAND_OUTAGE_END` window as one enabled interval rather
+than narrowing it; over-inclusion is the safe direction for inventory, but it
+does not authorize
 automatic replay when one comment's interval membership remains ambiguous.
-If the gate state or window boundary is truly unknown, stop rather than
-treating it as disabled. This workflow has no dispatch path. Reconstruct
+If the gate state or workflow-specific boundary is truly unknown, stop rather
+than treating it as disabled. This workflow has no dispatch path. Reconstruct
 `FACTORY_OWNER_LOGINS` from its change history over
 the sweep window and determine whether each comment author was authorized at
 that comment's `created_at` timestamp. Never filter historical comments using
@@ -628,7 +661,7 @@ issuance-time authorization:
 
 ```bash
 COMMENT_SWEEP_START=<CONSERVATIVE_LOOKBACK_START>
-COMMENT_SWEEP_END=<PAUSE_END>
+COMMENT_SWEEP_END=<OWNER_COMMAND_OUTAGE_END>
 gh api --paginate \
   "repos/syamaner/roastpilot-cloud/issues/comments?since=$COMMENT_SWEEP_START&per_page=100" \
   --slurp |
