@@ -2087,14 +2087,21 @@ jobs:
       // action + two inputs download the question binding into publish. The workflow
       // stays out of the unsupported-shape list above.
       //
+      // 10 Aug 2026, F1-S6 slice 9g PR2a: the dark owner-task path contributes
+      // +2 jobs (task-agent and task-apply), +8 run steps (PR-head checkout,
+      // scoped restore, patch capture; prepare, analysis, decide, mutation,
+      // finalize), +9 action steps (the intake upload; four task-agent actions;
+      // four task-apply actions), and +29 declared action inputs (4 + 17 + 8
+      // across those same groups). No unsupported workflow shape was added.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 16,
-      runSteps: 41,
-      actionSteps: 40,
-      inputs: 105,
+      jobs: 18,
+      runSteps: 49,
+      actionSteps: 49,
+      inputs: 134,
     });
   });
 
@@ -2139,7 +2146,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 24,
+      jobs: 26,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2178,9 +2185,14 @@ jobs:
       // 9 Aug 2026, 9e Unit 2 PR2b: same measured supported-workflow delta
       // as the source-only corpus above: +4 jobs / +5 run steps / +11 action
       // steps / +33 action inputs.
-      runSteps: 66,
-      actionSteps: 57,
-      inputs: 150,
+      //
+      // 10 Aug 2026, F1-S6 slice 9g PR2a: same measured +2 jobs / +8 run
+      // steps / +9 action steps / +29 action inputs as the source-only corpus:
+      // task-agent adds 3 run + 4 action steps (17 inputs), task-apply adds 5
+      // run + 4 action steps (8 inputs), and intake adds 1 action (4 inputs).
+      runSteps: 74,
+      actionSteps: 66,
+      inputs: 179,
     });
   });
 });

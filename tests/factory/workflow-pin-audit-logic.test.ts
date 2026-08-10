@@ -1959,6 +1959,8 @@ describe("live audited manifests (issue #102)", () => {
     ["implement-ready-issues.yml", "publish"],
     ["owner-command-intake.yml", "intake"],
     ["owner-command-intake.yml", "answer-agent"],
+    ["owner-command-intake.yml", "task-agent"],
+    ["owner-command-intake.yml", "task-apply"],
     ["owner-command-intake.yml", "publish"],
     ["triage-issues.yml", "seed"],
     ["triage-issues.yml", "triage"],
