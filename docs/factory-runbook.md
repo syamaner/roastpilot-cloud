@@ -564,22 +564,21 @@ The workflow is inert until both base-owned gates hold:
 `vars.FACTORY_PAUSED != 'true'`. The enable variable is deliberately absent
 during this dark launch.
 
-The following three ordered items are the separate operator-ratification hard
-stop at 9h and are **not** authorized by this wiring:
+The answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` must be ratified under its own
+D140 platform disposition. This is a new external-identity credential job
+class; it cannot inherit D140 by analogy and is not the built-in-token
+equivalence.
 
-1. Before any enabling action, verify through the GitHub API that
-   `vars.FACTORY_PAUSED` is exactly the literal `true` (not absent or `false`):
-   `gh api repos/syamaner/roastpilot-cloud/actions/variables/FACTORY_PAUSED --jq '.value'`
-   must print exactly `true`.
-2. Ratify the answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` under its own D140
-   platform disposition. This is a new external-identity credential job class;
-   it cannot inherit D140 by analogy and is not the built-in-token equivalence.
-3. Only after both preceding items, create
-   `vars.OWNER_COMMAND_INTAKE_ENABLED` as the last deliberate enabling action.
+The authoritative, fail-safe activation order—including the mandatory
+persisted-state preflight that reads both enable variables—is the single
+consolidated sequence in [Owner task apply (9g)](#owner-task-apply-9g). Follow
+that ordered path for any enablement, question or task, rather than a standalone
+question-only procedure. That sequence is the operator-ratification hard stop
+at 9h and is **not** authorized by this dark wiring.
 
 Unpausing `FACTORY_PAUSED`, if and when the broader factory is unpaused, remains
-a separate operator decision; creating the enable variable does not authorize
-that transition.
+a separate operator decision; setting either enable variable to `true` does not
+authorize that transition.
 
 Unlike the 9d advisory workflow, this workflow declares no
 `workflow_dispatch`; it is triggered only by a newly created `issue_comment`.
@@ -591,6 +590,162 @@ title, body, question-payload, or truncation-state drift after intake produces
 the fixed notice that the command or pull request changed after the run started
 and asks the owner to re-issue the command instead of posting a stale answer. A
 truncated question or diff carries a deterministic truncation disclosure. Verb
-edits are directional: a task→question edit produces the stale notice, while a
-question→task edit produces the fixed task acknowledgement; task commands do
-not enforce the snapshot binding.
+edits are directional on the apply-disabled path
+(`vars.OWNER_TASK_APPLY_ENABLED != 'true'`): a task→question edit produces the
+stale notice, while a question→task edit produces the fixed task
+acknowledgement; task commands do not enforce the snapshot binding. When task
+apply is enabled, `task-apply` handles the task path and a task→question edit
+observed before the apply decision currently produces no stale or superseded
+notice, as bounded in the [#239 limitation](#owner-task-apply-9g). Because
+comment edits do not retrigger the workflow, recovery requires a fresh comment
+using the intended current verb: `@claude question` if an answer is now wanted,
+or `@claude task` if a patch is still wanted.
+
+## Owner task apply (9g)
+
+The dark owner-task apply path extends `owner-command-intake.yml` from four to
+six jobs. When an authorised owner's `@claude task` on an eligible pull request
+is admitted and task apply is enabled, the read-only `task-agent` checks out the
+authorised PR-head snapshot with `contents: read`. It restores base-owned
+protected configuration at any depth from the trusted revision before Claude
+edits the working tree. After the model exits, a trusted step resets the local
+`.git/config` and captures the resulting tree delta as a patch.
+
+The credentialed `task-apply` job has `contents: write` and
+`pull-requests: write`. It independently re-fetches the source records and
+re-derives authority, analyses the captured patch against one scratch-index
+apply, and evaluates the merged owner-task decision table. An accepted patch is
+applied as one `commit-tree` commit and pushed with
+`git push --force-with-lease` using the reviewed head as the compare-and-swap
+expectation. This is boundary (b): the Node entrypoint plans the operation, but
+raw Git executes only in base-owned shell steps. A per-comment marker makes
+execution idempotent except across the crash window where the push succeeds but
+`Finalize owner-task apply` fails before posting the marker. A full rerun can
+then re-bind to the new head and apply the same comment again. This durable
+idempotency gap is the accepted residual tracked as
+[#236](https://github.com/syamaner/roastpilot-cloud/issues/236) and is a hard
+precondition before activation.
+
+Both new jobs are unschedulable unless all three base-owned gates hold:
+`vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'`,
+`vars.OWNER_TASK_APPLY_ENABLED == 'true'`, and
+`vars.FACTORY_PAUSED != 'true'`. The two enable variables are deliberately
+separate: `OWNER_COMMAND_INTAKE_ENABLED` controls question answering, while
+`OWNER_TASK_APPLY_ENABLED` additionally controls task mutation. This lets 9h
+light up question answering without enabling mutation. Neither variable was
+created during the dark launch, so both jobs are unschedulable today.
+
+The following ordered items are the fail-safe activation path and are **not**
+authorized by this dark wiring:
+
+1. Before any enabling action, verify through the GitHub API that
+   `vars.FACTORY_PAUSED` is exactly the literal `true` (not absent or `false`):
+   `gh api repos/syamaner/roastpilot-cloud/actions/variables/FACTORY_PAUSED --jq '.value'`
+   must print exactly `true`. Read the persisted command-enable state with
+   `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_COMMAND_INTAKE_ENABLED --jq '.value'`
+   and the persisted task-enable state with
+   `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_TASK_APPLY_ENABLED --jq '.value'`.
+   Normalize each successful enable-variable read to lowercase before comparing
+   it, matching the workflow gates' case-insensitive string semantics. For
+   either variable, a confirmed absent-variable `404`, or a successful response
+   whose normalized value is not `true`, establishes that it is not already
+   enabled; any other read failure stops activation. If
+   `OWNER_COMMAND_INTAKE_ENABLED` normalizes to `true`, the answer-agent
+   preconditions in item 2 are already required and must be confirmed complete
+   before proceeding. If `OWNER_TASK_APPLY_ENABLED` normalizes to `true`, the
+   task-specific preconditions in item 4 are already required and must be
+   completed before item 3. The comparison polarity is deliberately different:
+   `FACTORY_PAUSED` must be the exact literal `true`, so any deviation halts the
+   must-be-paused check, while enable values are normalized so every enabled
+   case variant is caught by the must-not-already-be-enabled checks. The
+   symmetric command-state read is defense in depth: the `FACTORY_PAUSED`
+   master gate prevents a drifted variable from firing a job while paused, and
+   the answer-agent is read-only, so this closes a same-capability disposition
+   skip rather than a cross-capability escalation. This ordering prevents
+   persisted state from bypassing either activation sequence. The item-1
+   snapshot is not sufficient on its own: a variable can change between this
+   initial read and an enable-variable write. Immediately before each write in
+   items 3 and 5, repeat the exact-literal `FACTORY_PAUSED` check and both
+   case-normalized enable-variable reads, applying all the same rules above; if
+   the sibling enable variable now normalizes to `true`, its preconditions are
+   already required and must be complete before the write proceeds. This
+   immediate re-read narrows the time-of-check/time-of-use window as
+   operator-procedure defense in depth; it is not a mechanical guarantee
+   against a truly concurrent actor. The load-bearing `FACTORY_PAUSED` master
+   gate keeps every job unschedulable while paused regardless of enable-variable
+   drift.
+2. Before enabling question answering, complete the answer-agent activation
+   preconditions in [Owner command intake (9e)](#owner-command-intake-9e),
+   including ratification of the answer-agent's `CLAUDE_CODE_OAUTH_TOKEN`
+   credential class under its own D140 platform disposition.
+3. Only after the answer-agent preconditions—and, when item 1 found
+   `OWNER_TASK_APPLY_ENABLED` already `true`, after all task-specific
+   preconditions in item 4—set `vars.OWNER_COMMAND_INTAKE_ENABLED` to `true`,
+   when it is not already enabled, as the last deliberate enabling action for
+   question answering. Immediately before the write, perform the item-1
+   re-check of `FACTORY_PAUSED` and both enable variables; if
+   `OWNER_TASK_APPLY_ENABLED` now normalizes to `true`, complete item 4 before
+   proceeding. Then run:
+   `gh variable set OWNER_COMMAND_INTAKE_ENABLED --body true --repo syamaner/roastpilot-cloud`.
+   This creates the variable after a confirmed `404`, or updates an existing
+   variable whose normalized value is not `true`. If item 1 or the immediate
+   re-check finds it already enabled, no write is required; proceed only after
+   confirming the same prerequisites rather than treating persisted state as
+   satisfying them.
+4. Before enabling task mutation, additionally resolve the remaining hard 9h
+   task preconditions, in addition to #236 above. [#232](https://github.com/syamaner/roastpilot-cloud/issues/232)
+   requires the emergency-halt/resume inventory to include
+   `owner-command-intake.yml` and cancellation of any queued run before
+   activation, because a run queued before the pause can retain snapshotted
+   gates and reach the write-capable `task-apply`. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
+   must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
+   `GITHUB_TOKEN` is reachable by the task-agent model's process through either
+   its process environment or `.git/config`, or must structurally isolate the
+   credential from the reader. [#238](https://github.com/syamaner/roastpilot-cloud/issues/238)
+   must put an operational, tested re-validation path in place and verify its
+   invocation for every applied head, covering CI and the required review
+   roster, because a built-in-`GITHUB_TOKEN` push does not automatically
+   trigger downstream workflows. A recorded decision alone does not satisfy
+   this precondition. Ratify the task-agent's
+   `CLAUDE_CODE_OAUTH_TOKEN` credential class under its own D140 platform
+   disposition; this new external-identity credential job class cannot inherit
+   the answer-agent's disposition by analogy. Separately ratify the
+   `task-apply` job's own D140 platform disposition for its built-in
+   `GITHUB_TOKEN` scope: `contents: write` and `pull-requests: write`, covering
+   pushes to non-default PR branches and PR comments. The base-owned enable
+   variables hold this credential-reachable job dark but do not replace its
+   per-job disposition; that disposition is distinct from #237, #238, and the
+   task-agent OAuth disposition. The fresh disposition is required because
+   `task-apply` introduces the novel `contents: write` push scope, performing
+   `commit-tree` and the lease-qualified push with a materially larger blast
+   radius than comment posting. The `publish` job's `pull-requests: write`
+   single-comment scope remains covered by the pre-existing built-in-token
+   disposition established in the 9e path and is not separately
+   re-dispositioned here.
+5. Only after the task-specific preconditions, set
+   `vars.OWNER_TASK_APPLY_ENABLED` to `true`, when it is not already enabled,
+   as the last deliberate enabling action for task mutation. Immediately before
+   the write, perform the item-1 re-check of `FACTORY_PAUSED` and both enable
+   variables; if `OWNER_COMMAND_INTAKE_ENABLED` now normalizes to `true`, its
+   item-2 preconditions must be complete before proceeding. Then run:
+   `gh variable set OWNER_TASK_APPLY_ENABLED --body true --repo syamaner/roastpilot-cloud`.
+   This creates the variable after a confirmed `404`, or updates an existing
+   variable whose normalized value is not `true`. If item 1 or the immediate
+   re-check finds it already enabled, no write is required because item 4 was
+   already mandatory. The task jobs require both
+   `OWNER_COMMAND_INTAKE_ENABLED` and `OWNER_TASK_APPLY_ENABLED`.
+
+Unpausing `FACTORY_PAUSED` remains a separate operator decision; setting an
+enable variable to `true` does not authorize unpausing.
+
+Known availability limitation [#239](https://github.com/syamaner/roastpilot-cloud/issues/239):
+a `task` comment edited to `question` after intake produces no stale or
+superseded notice only when the edit is observed in the pre-decision
+prepare/decide window; `prepare` re-derives the verb, stops the run, and the
+later decide/apply/finalize phases are skipped. An edit after the apply
+decision—including after the push—but before `finalize` is caught by its source
+re-check, which posts the stale-source notice. The earlier notice gap belongs in
+the merged entrypoint's prepare phase. Because comment edits do not retrigger
+the workflow, recovery requires a fresh comment using the intended current verb:
+`@claude question` if an answer is now wanted, or `@claude task` if a patch is
+still wanted.
