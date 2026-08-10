@@ -26,6 +26,7 @@ import { generateDelimiterNonce as legacyNonce } from "../../scripts/factory/spe
 
 const REPOSITORY_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRYPOINTS = [
+  "scripts/factory/apply-owner-task.mts",
   "scripts/factory/intake-owner-command.mts",
   "scripts/factory/post-owner-command-response.mts",
 ] as const;
@@ -59,8 +60,28 @@ function verify(entrypoints: readonly string[]) {
 }
 
 describe("credentialed sparse-checkout entrypoint import closure", () => {
-  it("admits both entrypoints with Node builtins and repository leaves only", () => {
+  it("T-U1.3 admits all entrypoints with Node builtins and repository leaves only", () => {
     const result = verify(ENTRYPOINTS);
+
+    expect(result.violations).toEqual([]);
+    expect(result.files).toEqual([
+      "scripts/factory/apply-owner-task.mts",
+      "scripts/factory/factory-owner-allowlist.mts",
+      "scripts/factory/github-api.mts",
+      "scripts/factory/implement-patch-logic.mts",
+      "scripts/factory/intake-owner-command.mts",
+      "scripts/factory/owner-command-logic.mts",
+      "scripts/factory/owner-task-patch-logic.mts",
+      "scripts/factory/patch-analysis-format.mts",
+      "scripts/factory/post-owner-command-response-logic.mts",
+      "scripts/factory/post-owner-command-response.mts",
+      "scripts/factory/untrusted-diff-fence.mts",
+      "scripts/factory/untrusted-text.mts",
+    ]);
+  });
+
+  it("T-U1.3 keeps intake's pinned import closure unchanged", () => {
+    const result = verify(["scripts/factory/intake-owner-command.mts"]);
 
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
@@ -69,7 +90,6 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
       "scripts/factory/intake-owner-command.mts",
       "scripts/factory/owner-command-logic.mts",
       "scripts/factory/post-owner-command-response-logic.mts",
-      "scripts/factory/post-owner-command-response.mts",
       "scripts/factory/untrusted-diff-fence.mts",
       "scripts/factory/untrusted-text.mts",
     ]);
