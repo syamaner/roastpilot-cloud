@@ -172,6 +172,17 @@ inspect one workflow with `gh run list --workflow <name>` after disabling it:
 without `-a/--all`, that inspection hides a disabled workflow's runs (verified
 against `gh run list --help`).
 
+**Before running any disable command, capture the pre-halt workflow state.**
+First run the state-check command shown immediately below the disable block
+(`gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100'
+--jq '.workflows[] | {name, id, state}'`) and record which of these four
+workflow IDs are `active`. On resume, re-enable only workflows this halt
+transitions from `active` to `disabled_manually`. A workflow that was already
+`disabled_manually` was deliberately disarmed and must be left out of the
+resume set. If the pre-halt state is missing or ambiguous, fail closed: leave
+that workflow disabled until it is re-enabled through a separate deliberate
+decision.
+
 ```bash
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/disable   # triage-issues.yml
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/disable   # implement-ready-issues.yml
@@ -179,7 +190,8 @@ gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330152328/disabl
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/disable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
 ```
 
-**Check current state (look for `"state": "active"` vs `"disabled_manually"`):**
+**After disabling, re-run the state check to confirm the intended transitions
+(look for `"state": "active"` vs `"disabled_manually"`):**
 
 ```bash
 gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100' \
@@ -235,8 +247,14 @@ workflow once it is safe to reconcile and finish the contract check.
 **Resuming has three always-applicable steps plus two conditional event
 backfills. Skipping an applicable step leaves the factory in a wrong state:**
 
-1. **Re-enable the workflows, if you disabled them** (§3) — otherwise
-   nothing runs at all regardless of the flag:
+1. **Re-enable the workflows you disabled—but only the subset you recorded as
+   `active` before the halt** (§3). The fenced block below is the full candidate set;
+   run only the lines for that recorded subset. A workflow already
+   `disabled_manually` before the incident was deliberately disarmed and must
+   remain disabled. Blanket-enabling it—especially a credentialed workflow
+   such as `owner-command-intake.yml`—could re-arm its jobs when the pause flag
+   is later cleared. When the pre-halt state is unknown, leave the workflow
+   disabled and re-enable it only through a separate deliberate decision:
 
    ```bash
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/enable   # triage-issues.yml
@@ -418,9 +436,10 @@ pre-pause value is unknown, stop rather than treating it as false. This
 workflow has no dispatch path. Copy the exact current
 `FACTORY_OWNER_LOGINS` set from the base-owned
 `scripts/factory/factory-owner-allowlist.mts` into the JSON array below, then
-enumerate created comments in the exact UTC window whose author is in that set
-and whose visible leading content is an `@claude question` or `@claude task`
-command:
+build the complete inventory as the union of two sources: commands created in
+the exact UTC window from authorized comments whose visible leading content is
+`@claude question` or `@claude task`, plus the source comment of every
+`owner-command-intake.yml` run cancelled in §2. The window query is:
 
 ```bash
 PAUSE_START=<PAUSE_START>
@@ -446,6 +465,15 @@ jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
 
 This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
 that parser's leading-command grammar changes.
+
+The query output is only the first half of the inventory. From the §2
+cancellation record, take every cancelled row whose path is
+`.github/workflows/owner-command-intake.yml`, identify its triggering source
+comment from the run's event/trigger evidence, and add that comment by ID even
+when its `created_at` precedes `PAUSE_START`. If a cancelled owner-command run's
+source comment cannot be identified, the inventory is incomplete and the
+backfill remains blocked rather than silently dropping it. Deduplicate the
+union by source comment ID.
 
 For every inventoried command, the same authorized owner must re-issue the
 original command as a fresh PR comment after resumption. Never edit the old
