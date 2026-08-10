@@ -4,8 +4,9 @@ import { describe, expect, it } from "vitest";
 const RUNBOOK_PATH = new URL("../../docs/factory-runbook.md", import.meta.url);
 const WORKFLOW_DIRECTORY = new URL("../../.github/workflows/", import.meta.url);
 const INVENTORY_LINE =
-  /actions\/workflows\/(\d+)\/(disable|enable)\b.*#\s*(\S+\.ya?ml)/;
-const INVENTORY_ACTION = /actions\/workflows\/\d+\/(?:disable|enable)\b/;
+  /^\s*gh api -X PUT repos\/syamaner\/roastpilot-cloud\/actions\/workflows\/(\d+)\/(disable|enable)[ \t]+#[ \t]*(\S+\.ya?ml)(?:[ \t].*)?$/;
+const INVENTORY_ACTION =
+  /^\s*gh api -X PUT repos\/syamaner\/roastpilot-cloud\/actions\/workflows\/\d+\/(?:disable|enable)\b/;
 const UNAFFECTED_WORKFLOWS = new Set([
   "ci.yml",
   "codeql.yml",
@@ -269,10 +270,22 @@ describe("factory halt and resume inventory", () => {
     );
     expect(() =>
       parseInventoryBlock(
-        "gh api -X PUT repos/example/repo/actions/workflows/123/disable # Triage Issues",
+        "gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/123/disable # Triage Issues",
         "disable",
       ),
     ).toThrow("add a .yml filename");
+    expect(() =>
+      parseInventoryBlock(
+        "# gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/123/disable # first.yml",
+        "disable",
+      ),
+    ).toThrow("Inventory has no disable lines");
+    expect(() =>
+      parseInventoryBlock(
+        "gh api repos/syamaner/roastpilot-cloud/actions/workflows/123/disable # first.yml",
+        "disable",
+      ),
+    ).toThrow("Inventory has no disable lines");
     expect(() =>
       filenameIdMap(
         [

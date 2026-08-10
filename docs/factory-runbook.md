@@ -148,9 +148,16 @@ gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/runs?per_page=100' \
   --jq '.workflow_runs[] | select(.status != "completed") | [.id, .status, .path] | @tsv'
 ```
 
-**After classifying every row, cancel each gated factory run found.** Do not
-blanket-cancel the unaffected workflows or the Snowflake exclusion below, and
-do not proceed past an unknown workflow path:
+**After classifying every row, classify the active job before cancelling each
+gated factory run found.** Do not blanket-cancel the unaffected workflows or
+the Snowflake exclusion below, and do not proceed past an unknown workflow
+path. If an `owner-command-intake.yml` `task-apply` run is already in its
+push/finalize window, do not interrupt it: wait for terminal completion, then
+verify its comment-bound terminal marker. If the push succeeded without that
+marker, reconcile it using the [#236 idempotency
+procedure](https://github.com/syamaner/roastpilot-cloud/issues/236) before
+proceeding so replay cannot apply the same source command again. Cancel the
+remaining targeted runs normally:
 
 ```bash
 gh run cancel <run-id> -R syamaner/roastpilot-cloud
@@ -174,12 +181,15 @@ cancellation until its next step boundary), force-cancel it:
 gh api -X POST repos/syamaner/roastpilot-cloud/actions/runs/<run-id>/force-cancel
 ```
 
-The exception is an `implement-ready-issues.yml` `publish` job already pushing:
-never force-cancel it mid-push. Wait for that job to finish, then verify its run
-is terminal with the same query. After a force-cancel, also keep re-querying
-until the run reports `status: "completed"`. Section §2 is complete only when
-every enumerated gated run is terminal; a cancellation request by itself never
-closes the step.
+The exceptions are an `implement-ready-issues.yml` `publish` job already
+pushing and an `owner-command-intake.yml` `task-apply` job in its push/finalize
+window: never force-cancel either one mid-write. Wait for the job to finish,
+then verify its run is terminal with the same query; for `task-apply`, also
+complete the #236 reconciliation above before treating it as settled. After a
+force-cancel, also keep re-querying until the run reports
+`status: "completed"`. Section §2 is complete only when every enumerated gated
+run is terminal and every protected write window is reconciled; a cancellation
+request by itself never closes the step.
 
 ### 3. Disable the workflows (optional — extra insurance, not required)
 
@@ -243,10 +253,12 @@ from the blanket §2 cancel and §3 disable procedures.
 If its run is awaiting Environment approval, reject or withhold approval; that
 is the safest halt. If it is already in flight, let it complete inside its
 20-minute timeout because cancelling mid-migration can leave partially applied,
-auto-committed DDL. If force-cancellation is unavoidable, treat the run as
-incomplete: the schemachange change-history table records which changes
-applied, but the post-deploy grants audit will not have run. Re-dispatch the
-workflow once it is safe to reconcile and finish the contract check.
+auto-committed DDL. Check the terminal conclusion and treat every result other
+than `success`—including `failure`, `timed_out`, or `cancelled`, whether or not
+force-cancellation was involved—as incomplete: the schemachange change-history
+table records which changes applied, but the post-deploy grants audit might not
+have run. Reconcile the recorded changes and re-dispatch the workflow once it
+is safe to finish the contract check.
 
 ### Emergency halt — full procedure
 
@@ -430,7 +442,10 @@ Do not dispatch the next issue until the current one passes both assertions.
 **Conditional Step 4 (9d) — backfill advisory status events.** Use the
 start-of-window capture plus the recorded change history to identify every
 sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
-Record this step as a no-op only when the gate was confirmed false or absent
+Normalize every captured value and change-history value to lowercase before
+classifying those intervals, matching the workflow gate's case-insensitive
+string comparison. Record this step as a no-op only when the gate was
+confirmed false or absent
 for the entire pause window. If its change history cannot be fully
 reconstructed, treat the entire paused window as one enabled interval rather
 than narrowing it; over-inclusion is the safe direction. If the gate state or
@@ -465,34 +480,39 @@ empty result must be recorded too. Never silently drop an entry.
 
 **Conditional Step 5 (9e) — backfill owner commands.** Use the start-of-window
 capture plus the recorded change history to identify every sub-interval in
-which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused. Record this step
+which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused.
+Normalize every captured value and change-history value to lowercase before
+classifying those intervals, matching the workflow gate's case-insensitive
+string comparison. Record this step
 as a no-op only when the gate was confirmed false or absent for the entire
 pause window. If its change history cannot be fully reconstructed, treat the
 entire paused window as one enabled interval rather than narrowing it;
 over-inclusion is the safe direction. If the gate state or window boundary is
 truly unknown, stop rather than treating it as disabled. This workflow has no
-dispatch path. Copy the exact current
-`FACTORY_OWNER_LOGINS` set from the base-owned
-`scripts/factory/factory-owner-allowlist.mts` into the JSON array below, then
-build the authoritative inventory from comments. Sweep every enabled
+dispatch path. Reconstruct `FACTORY_OWNER_LOGINS` from its change history over
+the sweep window and determine whether each comment author was authorized at
+that comment's `created_at` timestamp. Never filter historical comments using
+only the current allowlist: that would omit removed owners and prematurely
+admit newly added owners. If the allowlist history cannot be reconstructed,
+stop or record every affected command-looking comment as owed; never infer
+issuance-time authorization from today's value. Build the authoritative
+inventory from comments by sweeping every enabled
 sub-interval plus a conservative lookback before the first enabled interval,
 covering any command whose run could have been queued or in flight at
 `PAUSE_START`. If the lookback bound is uncertain, widen it; over-inclusion is
-the safe direction. Include only authorized comments whose visible leading
-content is `@claude question` or `@claude task`:
+the safe direction. First enumerate every candidate comment whose visible
+leading content is `@claude question` or `@claude task`, then apply
+issuance-time authorization:
 
 ```bash
 COMMENT_SWEEP_START=<CONSERVATIVE_LOOKBACK_START>
 COMMENT_SWEEP_END=<PAUSE_END>
-FACTORY_OWNER_LOGINS='["syamaner"]'
 gh api --paginate \
   "repos/syamaner/roastpilot-cloud/issues/comments?since=$COMMENT_SWEEP_START&per_page=100" \
   --slurp |
-jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
-  --arg start "$COMMENT_SWEEP_START" --arg end "$COMMENT_SWEEP_END" '
+jq -r --arg start "$COMMENT_SWEEP_START" --arg end "$COMMENT_SWEEP_END" '
     .[][]
     | select(.created_at >= $start and .created_at <= $end)
-    | select(.user.login as $login | $owners | index($login))
     | select(
         .body
         | gsub("\\r\\n?"; "\\n")
@@ -504,14 +524,19 @@ jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
 ```
 
 This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
-that parser's leading-command grammar changes.
+that parser's leading-command grammar changes. The command deliberately emits
+all matching author identities; apply the reconstructed, time-versioned
+allowlist to classify each row after enumeration, retaining ambiguous rows as
+owed.
 
-Deduplicate the comment sweep by source comment ID. For each enumerated
-`@claude question`, verify whether a bot-owned response already ends with the
-comment-bound terminal marker
+Deduplicate the authorized comment sweep by source comment ID. For each
+enumerated `@claude question`, verify whether a response authored by exactly
+`github-actions[bot]` already ends with the comment-bound terminal marker
 `<!-- owner-command-response: <commentId> -->`. For each enumerated
 `@claude task`, apply the existing capability-safe rule below and verify the
 acknowledged or applied terminal effect required for that task's capability.
+A different bot or App does not prove completion; this exact-identity rule
+mirrors the runtime `RESPONSE_BOT_LOGIN` check.
 A command with its verified effect is already processed; record it done. A
 command without that effect remains owed and must be re-issued or receive a
 recorded operator skip.
