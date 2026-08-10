@@ -65,9 +65,10 @@ exists — queued or in-progress — at the moment you set the flag.** Only
 skip §2 if you're certain no factory run was live when you paused.
 
 This is scoped to the **factory** workflows only — `CI`, `CodeQL`,
-`Dependency Review`, and `Claude Code Review` are unaffected, so ordinary
-human development and PR review keep working while the factory is
-paused.
+`Dependency Review`, `Claude Code Review`, and
+`dev-snowflake-contract.yml` are unaffected. Ordinary human development
+and PR review keep working while the factory is paused; the credentialed
+Snowflake workflow has its own handling below.
 
 A `pause-notice` job in both workflows is gated the OPPOSITE way
 (`if: vars.FACTORY_PAUSED == 'true'`) purely for visibility: when paused,
@@ -80,13 +81,51 @@ this notice job exists.
 ### 1. Set the pause flag (do this first, always)
 
 ```bash
+PAUSE_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'PAUSE_START=%s\n' "$PAUSE_START"
 gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 ```
+
+Record the conservative `PAUSE_START` immediately before sending the pause
+write, as shown above. This covers the request/acknowledgement interval in
+which GitHub can persist the pause before `gh` returns; a slightly early lower
+bound only over-includes events. `PAUSE_END` is captured just after the
+successful `FACTORY_PAUSED` → `false` unpause write in resume step 2 — the
+upper-bound dual of the conservative pre-write `PAUSE_START`. Recording it after
+the write returns safely over-includes the request/acknowledgement interval in
+which GitHub can still suppress an event before the unpause persists; a slightly
+late upper bound only over-includes events. It is the upper bound for every
+backfill.
+Use this exact conservative `PAUSE_START` as the lower-bound anchor for every
+backfill: the Step 1 issue sweep, the 9d enabled-interval/PR sweep, and the 9e
+comment sweep's conservative lookback. Never replace it with the later pause
+acknowledgement time. Immediately after the pause write, read and record the
+persisted values of
+`CODEX_ADVISORY_STATUS_ENABLED`, `OWNER_COMMAND_INTAKE_ENABLED`, and
+`OWNER_TASK_APPLY_ENABLED` as start-of-window evidence. Capture each variable's
+`updated_at` at the same time and record every change to any of the three during
+the pause. Setting the pause flag does not alter these enable variables, so
+capturing them immediately afterward does not itself change their state or
+delay the kill switch. However, the post-write value alone does not prove the
+value at `PAUSE_START`: a concurrent enable-variable write can cross that
+boundary. If a variable's `updated_at` is at or after `PAUSE_START`, or its
+change history across the pause cannot be fully audited, classify it as
+**unknown → enabled** for interval reconstruction and use the resulting
+over-inclusive backfill inventory. An enable variable may be treated as
+disabled at `PAUSE_START` only when audited state proves it was disabled and
+that no write crossed the boundary. Record a confirmed absent variable as
+absent rather than silently coercing it to a value. These are read-only state
+captures; do not create or update any enable variable as part of the halt.
+Ambiguous capture or history never authorizes capability-ambiguous task replay.
 
 **Check current state:**
 
 ```bash
 gh variable list --repo syamaner/roastpilot-cloud
+
+gh api repos/syamaner/roastpilot-cloud/actions/variables/CODEX_ADVISORY_STATUS_ENABLED --jq '{name, value, updated_at}'
+gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_COMMAND_INTAKE_ENABLED --jq '{name, value, updated_at}'
+gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_TASK_APPLY_ENABLED --jq '{name, value, updated_at}'
 ```
 
 Reliably covers any run whose job-level `if:` is evaluated *after* this
@@ -110,47 +149,167 @@ already pushing a branch, opening a PR, or posting a comment, it can keep
 doing so even after you've paused. Check for this and cancel it
 explicitly; never assume the flag alone caught everything.
 
-Because you have not disabled the workflows at this point, their runs
-are trivially listable with a plain `gh run list --workflow <name>` —
-no `-a/--all` flag needed (that flag only matters once a workflow is
-*disabled*, see §3).
+Enumerate runs repository-wide rather than naming only today's factory
+workflows. The output includes each run's workflow path so the operator can
+map it to the halt inventory in §3, the unaffected-workflow list above, or the
+special Snowflake exclusion below. An unrecognized path is an operator stop:
+classify it before cancelling or resuming anything.
 
-**List active/queued/pending runs on both factory workflows.** `--status`
-only keeps the LAST value passed if you repeat the flag (a known `gh` CLI
-limitation, cli/cli#7949) — `--status in_progress --status queued` would
-silently only match `queued`. Filter all three statuses — including
-`pending`, the state a run sits in while queued behind another run's
-concurrency group (e.g. behind that non-cancellable `publish` job) — in
-one call via `--json`/`--jq` instead (verified: `gh run list --help`
-lists `status` and `databaseId` as valid `--json` fields, and lists
-`pending` as a status value distinct from `queued`/`in_progress`).
-`--limit`/`-L` defaults to 20 (verified against `gh run list --help`,
-which offers no separate pagination flag — `--limit` is the only lever),
-which would silently truncate a runaway with more in-flight runs than
-that — pass a higher explicit limit; for an exceptionally large incident
-where even that isn't enough, raise it further rather than trust the
-default:
+Two `gh run list` caveats are the reason this procedure uses the REST endpoint
+directly. First, `--status` only keeps the LAST value passed if the flag is
+repeated (a known `gh` CLI limitation, cli/cli#7949). Second, `--limit`/`-L`
+defaults to 20 and is the command's only pagination lever (both facts verified
+against `gh run list --help`). An allowlist of today's known active states is
+also unsafe: `pending` is distinct from `queued`/`in_progress` and is used
+while a run waits behind a concurrency group, while `requested`, `waiting`,
+`action_required`, or a future status could otherwise be missed. Select active
+runs by exclusion: every status other than `completed` requires classification.
+The REST runs endpoint includes runs from disabled workflows, so this same
+enumeration remains complete if §3 was applied early.
+
+**List every non-completed run, without a silent cap:**
 
 ```bash
-gh run list -R syamaner/roastpilot-cloud --workflow triage-issues.yml --limit 200 \
-  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .databaseId'
-gh run list -R syamaner/roastpilot-cloud --workflow implement-ready-issues.yml --limit 200 \
-  --json databaseId,status --jq '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .databaseId'
+gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/runs?per_page=100' \
+  --jq '.workflow_runs[] | select(.status != "completed") | [.id, .status, .path] | @tsv'
 ```
 
-**Cancel each one found:**
+**Also reconcile recently completed runs whose activity crossed the pause
+boundary.** Record `CLASSIFICATION_TIME` when the non-completed query above
+starts, then run this companion paginated query. `updated_at >= PAUSE_START`
+deliberately over-includes runs whose terminal activity might have occurred
+after the pause began, including a run that changed from active to `completed`
+before the first query observed it. The cutoff filters on `created_at`, not
+`run_started_at`, precisely because a run already queued at `CLASSIFICATION_TIME`
+but not yet started has no or a later `run_started_at`; keying on `created_at`
+keeps every run that existed when classification began in one of the two
+inventories. The completed status is selected in jq, not with a server-side
+`status=completed` URL filter, because GitHub's List-workflow-runs endpoint caps
+a `status`-filtered search at 1,000 results — so `--paginate` cannot complete it
+and, under a long pause with more than 1,000 completed runs, older
+boundary-crossing publisher or task runs would be dropped server-side before the
+window predicates apply. This mirrors the reason the primary non-completed query
+also fetches the unfiltered endpoint and filters status in jq:
+
+```bash
+PAUSE_START=<RECORDED_PAUSE_START>
+CLASSIFICATION_TIME=<TIMESTAMP_WHEN_THE_NON_COMPLETED_QUERY_STARTED>
+gh api --paginate \
+  'repos/syamaner/roastpilot-cloud/actions/runs?per_page=100' \
+  --slurp |
+jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATION_TIME" '
+  .[] | .workflow_runs[]
+  | select(.status == "completed")
+  | select(.created_at <= $classification_time)
+  | select(.updated_at >= $pause_start)
+  | [.id, .status, .conclusion, .created_at, .run_started_at, .updated_at, .path]
+  | @tsv
+'
+```
+
+**`gh api --paginate` is not an atomic snapshot.** It fetches pages
+sequentially, so while it walks the pages a concurrent mutation—the unaffected
+CI and review workflows keep creating runs, and runs can be deleted—can shift
+entries across page boundaries. To make the inventory robust to this, do not
+treat a single pass as authoritative: REPEAT both the primary (non-completed)
+and companion (completed boundary-crossing) sweeps and take their union,
+DEDUPLICATED BY RUN ID, until two consecutive full passes return the same set of
+run IDs — a stable fixed point — before proceeding to cancellation. Only then
+treat the enumerated set as complete. Direction of the risk: with the default
+newest-first ordering a concurrent ADDITION pushes older runs toward later,
+as-yet-unread pages, so it typically yields a harmless DUPLICATE (removed by the
+run-ID dedup) rather than a miss; the repeat-to-stable-fixed-point rule
+additionally covers deletion-induced or reordering shifts, so an active
+write-capable run cannot slip through unread. This is the same fail-closed
+spirit as the "a cancellation request by itself never closes the step" rule
+below: the enumeration is complete only when it is stable.
+
+Classify every boundary-crossing row. For each side-effecting run—including an
+`implement-ready-issues.yml` publisher, an `owner-command-intake.yml`
+`task-apply`, or an advisory-status write—verify its conclusion and its durable
+terminal marker or effect. Reconcile every non-`success` conclusion and every
+write whose durable terminal effect is absent before resume; use the #236
+procedure for a task apply that pushed without its marker. This reconciliation
+is required even if Conditional Step 4 or Step 5 would otherwise be recorded
+as a no-op.
+
+**After classifying every row, classify the active job before cancelling each
+gated factory run found.** Do not blanket-cancel the unaffected workflows or
+the Snowflake exclusion below, and do not proceed past an unknown workflow
+path. Treat the entire `Validate and publish the implement patch` step in
+`implement-ready-issues.yml` as a protected write window: its push, PR
+create/refresh, fallback and anti-gaming labels, annotations, and catch-block
+partial-publish diagnostic must finish together. For
+`owner-command-intake.yml`, protect one atomic push-to-marker window spanning
+both `Apply the admitted owner-task commit` and `Finalize owner-task apply`.
+The apply step performs `git push --force-with-lease` and writes
+`applied_commit`; the finalize step verifies reachability and posts the
+`github-actions[bot]` comment-bound marker. Once a task-apply run enters the
+apply step, do not interrupt it: wait for the run to reach terminal through the
+end of the finalize step. Reconcile every non-success result before completing
+the halt. If the push landed without its marker, use the [#236 idempotency
+procedure](https://github.com/syamaner/roastpilot-cloud/issues/236) before
+proceeding so replay cannot apply the same source command again. Cancel the
+remaining targeted runs normally:
 
 ```bash
 gh run cancel <run-id> -R syamaner/roastpilot-cloud
 ```
 
+Cancellation is asynchronous: a successful request does not prove the runner
+has stopped. After each request, repeatedly re-query that exact run until it
+reports terminal `status: "completed"`; do not proceed to §3, resume, or an
+activation write while any targeted run remains non-completed:
+
+```bash
+gh api repos/syamaner/roastpilot-cloud/actions/runs/<run-id> \
+  --jq '{status, conclusion}'
+```
+
+Classification cannot close the race for **any** side-effecting or credentialed
+factory run. For every such run that receives a cancellation request or
+terminates with a non-`success` conclusion, regardless of the step on which it
+was observed, wait for terminal state and then either prove it never entered a
+write step or verify its intended durable effect and reconcile every partial
+effect before resume. This rule covers every run that can push, open or refresh
+a PR, or write labels, comments, or status—including the publisher, privileged
+triage apply, owner-task apply, and advisory-status writer—and future factory
+write surfaces inherit it automatically.
+
+Check the workflow-specific durable effect: for a publisher, reconcile the
+pushed branch and PR state; for triage apply, reconcile the issue labels and
+comments; for advisory status, reconcile the expected status context; and for
+task apply, bind the run to its source comment and require the comment-bound
+terminal marker from exactly `github-actions[bot]`. Task apply remains the
+named #236 instance: if `git push --force-with-lease` landed without that
+marker, complete the #236 reconciliation before resume. A run observed before
+its write step can enter that step before asynchronous cancellation takes
+effect, so a non-atomic step observation never proves any cancelled or failed
+side-effecting run safe.
+
 **If a normal cancel doesn't take** (the run ignores the cancellation
-signal — can happen mid-`git push` or mid-API-call, where the runner
-process doesn't check for cancellation until its next step boundary):
+signal — can happen mid-API-call, where the runner process doesn't check for
+cancellation until its next step boundary), force-cancel it:
 
 ```bash
 gh api -X POST repos/syamaner/roastpilot-cloud/actions/runs/<run-id>/force-cancel
 ```
+
+The exceptions are an `implement-ready-issues.yml` job executing its entire
+side-effecting `Validate and publish the implement patch` step and an
+`owner-command-intake.yml` job anywhere from entry into
+`Apply the admitted owner-task commit` through completion of
+`Finalize owner-task apply`: never force-cancel either protected write window.
+Wait for the entire applicable step span and run to finish, verify the run is
+terminal with the same query, and reconcile every non-success result; for
+`task-apply`, also complete the #236 reconciliation above before treating it as
+settled. After a
+force-cancel, also keep re-querying until the run reports
+`status: "completed"`. Section §2 is complete only when every enumerated gated
+run is terminal, every protected write window is reconciled, and every
+cancelled or non-success side-effecting run has been terminal-reconciled or
+proven never to have entered its write step; a cancellation request by itself
+never closes the step.
 
 ### 3. Disable the workflows (optional — extra insurance, not required)
 
@@ -166,20 +325,40 @@ already queued or in-progress. Reach for it if you want a second,
 independent lever that doesn't depend on the flag/YAML being read
 correctly at all, or to stop *new* runs from starting so they stop
 adding `pause-notice` noise during a busy incident. **If you do disable,
-do it after cancelling (§2)** — or pass `-a/--all` to `gh run list` if
-you need to look at a workflow's runs after it's already disabled (a
-disabled workflow's runs are otherwise invisible to a plain
-`--workflow <name>` list, verified against `gh run list --help`).
+do it after cancelling (§2)**. The repo-wide REST enumeration in §2 includes
+disabled-workflow runs. The `-a/--all` caveat applies only if you optionally
+inspect one workflow with `gh run list --workflow <name>` after disabling it:
+without `-a/--all`, that inspection hides a disabled workflow's runs (verified
+against `gh run list --help`).
+
+**Before running any disable command, capture the pre-halt workflow state.**
+First run the state-check command shown immediately below the disable block
+(`gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100'
+--jq '.workflows[] | {name, id, state}'`) and record which of these four
+workflow IDs are `active`. On resume, re-enable only workflows this halt
+provably transitions from `active` to `disabled_manually`. Bind each transition
+to this halt with audit evidence for this halt's own disable action and
+timestamp, or serialize the state changes so no concurrent operator can cause
+the transition between snapshot and request. A post-check showing only
+`disabled_manually` does not establish which actor disabled it. A workflow that
+was already `disabled_manually`, or whose transition cannot be bound to this
+halt, may be a deliberate disarm and must be left out of the resume set. If the
+pre-halt state, actor, or transition evidence is missing or ambiguous, fail
+closed: leave that workflow disabled until a separate deliberate decision.
 
 ```bash
-gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/disable   # Triage Issues
-gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/disable   # Implement Ready Issues
+gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/disable   # triage-issues.yml
+gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/disable   # implement-ready-issues.yml
+gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330152328/disable   # codex-verdict-status.yml — currently dark — listed for completeness before 9h activation
+gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/disable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
 ```
 
-**Check current state (look for `"state": "active"` vs `"disabled_manually"`):**
+**After disabling, re-run the state check to confirm the intended transitions
+(look for `"state": "active"` vs `"disabled_manually"`):**
 
 ```bash
-gh api repos/syamaner/roastpilot-cloud/actions/workflows --jq '.workflows[] | {name, id, state}'
+gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100' \
+  --jq '.workflows[] | {name, id, state}'
 ```
 
 Workflow IDs are stable for the life of the workflow file (renaming the
@@ -187,10 +366,29 @@ file changes the path, not the ID) — re-verify with the command above if
 these ever look wrong, don't assume they're permanent across a repo
 migration or a workflow file being deleted and recreated.
 
+#### Exclusion: `dev-snowflake-contract.yml`
+
+`dev-snowflake-contract.yml` is credentialed and side-effecting: it runs a
+writable `schemachange deploy`. Its required-reviewer
+`dev-snowflake-ci` Environment, not the factory pause flag, gates access to its
+credential, and it is `workflow_dispatch`-only. It is therefore **EXCLUDED**
+from the blanket §2 cancel and §3 disable procedures.
+
+If its run is awaiting Environment approval, reject or withhold approval; that
+is the safest halt. If it is already in flight, let it complete inside its
+20-minute timeout because cancelling mid-migration can leave partially applied,
+auto-committed DDL. Check the terminal conclusion and treat every result other
+than `success`—including `failure`, `timed_out`, or `cancelled`, whether or not
+force-cancellation was involved—as incomplete: the schemachange change-history
+table records which changes applied, but the post-deploy grants audit might not
+have run. Reconcile the recorded changes and re-dispatch the workflow once it
+is safe to finish the contract check.
+
 ### Emergency halt — full procedure
 
-1. **Set the pause flag** (§1) first, always — instant, and reliably
-   stops the inflow of any run created from this point on.
+1. **Record the conservative `PAUSE_START`, then set the pause flag** (§1)
+   first, always — the timestamp capture is local and the immediately following
+   write reliably stops the inflow of any run created from that point on.
 2. **Check for and cancel any run already queued or in-progress** (§2) —
    **required**, not optional, whenever any factory run exists at the
    moment you set the flag: the flag alone is not proven to stop a run
@@ -212,15 +410,27 @@ migration or a workflow file being deleted and recreated.
 
 ## Resuming after a pause — clear the flag, then don't skip the backfill
 
-**Resuming has three steps, and skipping any one of them leaves the
-factory in a wrong state:**
+**Resuming has three always-applicable steps plus two conditional event
+backfills. Skipping an applicable step leaves the factory in a wrong state:**
 
-1. **Re-enable the workflows, if you disabled them** (§3) — otherwise
-   nothing runs at all regardless of the flag:
+1. **Re-enable the workflows you disabled—but only the subset you recorded as
+   `active` before the halt and whose disable transition is provably bound to
+   this halt** (§3). The fenced block below is the full candidate set; run only
+   the lines for that halt-bound subset. A workflow already
+   `disabled_manually` before the incident was deliberately disarmed and must
+   remain disabled. A transition that cannot be attributed to this halt is
+   ambiguous and must also remain disabled; never undo a possibly concurrent
+   deliberate disarm. Blanket-enabling either case—especially a credentialed
+   workflow such as `owner-command-intake.yml`—could re-arm its jobs when the
+   pause flag is later cleared. When the pre-halt state or halt ownership is
+   unknown, leave the workflow disabled and re-enable it only through a
+   separate deliberate decision:
 
    ```bash
-   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/enable
-   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/enable
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/enable   # triage-issues.yml
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/enable   # implement-ready-issues.yml
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330152328/enable   # codex-verdict-status.yml — currently dark — listed for completeness before 9h activation
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/enable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
    ```
 2. **Set `FACTORY_PAUSED` back to `false`.** This is the step that
    actually restarts the factory — re-enabling the workflows alone does
@@ -230,7 +440,41 @@ factory in a wrong state:**
 
    ```bash
    gh variable set FACTORY_PAUSED --body false --repo syamaner/roastpilot-cloud
+   PAUSE_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   printf 'PAUSE_END=%s\n' "$PAUSE_END"
    ```
+
+   Record `PAUSE_END` only after the unpause command returns, as shown — the
+   upper-bound dual of §1's conservative pre-write `PAUSE_START`. An event
+   arriving after the write is issued but before GitHub persists the unpause is
+   still suppressed, so a `PAUSE_END` taken before the command returns would end
+   the window early and omit it; capturing it afterward safely over-includes
+   that request/acknowledgement interval.
+
+   **Close each workflow's recovery window at that workflow's own return to
+   service, not automatically at global `PAUSE_END`.** For a workflow re-enabled
+   in resume step 1, the pause flag remains its final blocker, so its outage end
+   is `PAUSE_END`. For a workflow left disabled under the fail-closed §3 rule,
+   or otherwise re-enabled later, record its eventual deliberate re-enable
+   timestamp as `WORKFLOW_OUTAGE_END`, captured conservatively immediately AFTER
+   that workflow's `…/enable` PUT returns
+   (`WORKFLOW_OUTAGE_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"`), so it over-includes
+   the enable request/acknowledgement interval in which GitHub can still suppress
+   an event before the enablement persists — the per-workflow dual of §1's
+   conservative pre-write `PAUSE_START` and resume step 2's post-unpause
+   `PAUSE_END`. Until then, its recovery obligation
+   remains explicitly open and cannot be marked complete. Use the conservative
+   `PAUSE_START` as its outage start for this halt, or an earlier recorded
+   disable timestamp when recovery must cover a pre-existing disable. Extend
+   that consumer's inventory through its actual `WORKFLOW_OUTAGE_END`; never
+   truncate it at the global unpause.
+
+   Apply this rule to every consumer below: use `TRIAGE_OUTAGE_END` for the
+   Step 1 issue inventory, `CODEX_STATUS_OUTAGE_END` for 9d, and
+   `OWNER_COMMAND_OUTAGE_END` for 9e. Each equals `PAUSE_END` only when that
+   workflow was re-enabled in step 1. If one remains disabled, retain an owed
+   recovery record, continue extending its upper bound, and perform the final
+   backfill only after its deliberate re-enable.
 
 3. **Backfill issues opened during the outage** (below) — the flag and
    workflow state going back to normal does not retroactively process
@@ -249,8 +493,13 @@ is disabled. It does not replay either missed event after resumption.
 required `issue_number`; this re-runs the current workflow from `main`
 without changing issue lifecycle state or relying on label events.
 
-**Step 1 — find every issue opened during the pause/disabled window.**
-Replace `<PAUSE_START>`/`<PAUSE_END>` with the exact UTC timestamps.
+**Step 1 — find every issue opened during the pause/disabled window.** Use the
+conservative pre-write `PAUSE_START` recorded in §1, never the later pause
+acknowledgement time. In the command below, retain `<PAUSE_END>` as the
+upper-bound placeholder but replace it with the workflow-specific
+`TRIAGE_OUTAGE_END` defined above—not the global `PAUSE_END` when
+`triage-issues.yml` remained disabled. Replace both placeholders with exact UTC
+timestamps.
 Search by creation time, not readiness labels: the story template itself
 adds `needs-triage`, so a missing-label filter would exclude affected
 template-filed issues. `--limit` defaults to 30; raise it above the
@@ -261,6 +510,10 @@ gh issue list --repo syamaner/roastpilot-cloud --state open --limit 200 \
   --search "created:<PAUSE_START>..<PAUSE_END>" \
   --json number,title,createdAt,state
 ```
+
+Tripwire: if the returned count equals the 200-item limit, raise the limit and
+re-run before dispatching anything; equality means the inventory may have been
+silently truncated.
 
 **Step 2 — dispatch and watch the current `main` workflow once per issue.**
 This fetches the issue's current title/body plus bounded,
@@ -353,6 +606,195 @@ generation while increasing the workflow attempt, and it no longer proves
 that the repaired workflow came from current `main`. Every accepted
 backfill therefore has a fresh run ID and the `.1` generation shown above.
 Do not dispatch the next issue until the current one passes both assertions.
+
+**Conditional Step 4 (9d) — backfill advisory status events.** Use the
+conservative pre-write `PAUSE_START`, the start-of-window capture, and the
+recorded change history through `CODEX_STATUS_OUTAGE_END` to identify every
+sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while the
+workflow was paused or disabled.
+Normalize every captured value and change-history value to lowercase before
+classifying those intervals, matching the workflow gate's case-insensitive
+string comparison. Record this step as a no-op only when the gate was confirmed
+false or absent for the entire workflow-specific outage. If its change history
+cannot be fully reconstructed, treat the entire
+`PAUSE_START`–`CODEX_STATUS_OUTAGE_END` window as one enabled interval rather
+than narrowing it; over-inclusion is the safe direction. If the gate state or
+workflow-specific boundary is truly unknown, stop rather than treating it as
+disabled.
+GitHub does not replay the PR/review/comment events consumed during an enabled
+interval, so when any such interval exists sweep
+**every currently open PR**. Do not filter the inventory by `updated_at`: a
+later title, label, or other non-triggering update can move a genuinely missed
+PR past `CODEX_STATUS_OUTAGE_END`. The workflow-specific outage window is only
+an optional prioritisation hint for which PRs to inspect first, never a filter
+that can drop an entry.
+Over-inclusion is the safe direction because each dispatch recomputes the
+current snapshot and overwrites the single PR-scoped status context:
+
+```bash
+gh api --paginate \
+  'repos/syamaner/roastpilot-cloud/pulls?state=open&sort=updated&direction=asc&per_page=100' \
+  --jq '.[] | [.number, .updated_at, .html_url] | @tsv'
+
+PR_NUMBER=<PR_NUMBER>
+gh workflow run codex-verdict-status.yml --ref main --repo syamaner/roastpilot-cloud -f pr_number="$PR_NUMBER"
+```
+
+Work through the resulting PR inventory one at a time. Queuing the dispatch is
+not completion: capture its run ID, wait for that exact run to reach a terminal
+conclusion, and confirm that it wrote a status record on the PR snapshot with
+the exact context `factory/codex-verdict-advisory/pr-<PR_NUMBER>` and a
+`target_url` for that run. A failed run, a run skipped because the enable
+variable is now false, or a terminal run without that status effect remains
+owed; record it as still-owed, not done. Every inventoried PR must end with
+either this verified effect or an operator-recorded skip with a reason; an
+empty result must be recorded too. Never silently drop an entry.
+
+**Conditional Step 5 (9e) — backfill owner commands.** Use the conservative
+pre-write `PAUSE_START`, the start-of-window capture, and the recorded change
+history through `OWNER_COMMAND_OUTAGE_END` to identify every sub-interval in
+which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while the workflow was paused
+or disabled.
+Normalize every captured value and change-history value to lowercase before
+classifying those intervals, matching the workflow gate's case-insensitive
+string comparison. Record this step as a no-op only when the gate was confirmed
+false or absent for the entire workflow-specific outage. If its change history
+cannot be fully reconstructed, treat the entire
+`PAUSE_START`–`OWNER_COMMAND_OUTAGE_END` window as one enabled interval rather
+than narrowing it; over-inclusion is the safe direction for inventory, but it
+does not authorize
+automatic replay when one comment's interval membership remains ambiguous.
+If the gate state or workflow-specific boundary is truly unknown, stop rather
+than treating it as disabled. This workflow has no dispatch path. Reconstruct
+`FACTORY_OWNER_LOGINS` from its change history over
+the sweep window and determine whether each comment author was authorized at
+that comment's `created_at` timestamp. Never filter historical comments using
+only the current allowlist: that would omit removed owners and prematurely
+admit newly added owners. If the allowlist history cannot be reconstructed,
+stop or record every affected command-looking comment as owed for
+investigation, never for automatic replay; never infer issuance-time
+authorization from today's value. Build the authoritative
+inventory from comments by sweeping every enabled
+sub-interval plus a conservative lookback before the first enabled interval,
+covering any command whose run could have been queued or in flight at
+`PAUSE_START`. If the lookback bound is uncertain, widen it; over-inclusion is
+the safe direction. First enumerate every candidate comment whose visible
+leading content is `@claude question` or `@claude task`, then apply
+issuance-time authorization:
+
+```bash
+COMMENT_SWEEP_START=<CONSERVATIVE_LOOKBACK_START>
+COMMENT_SWEEP_END=<OWNER_COMMAND_OUTAGE_END>
+gh api --paginate \
+  "repos/syamaner/roastpilot-cloud/issues/comments?since=$COMMENT_SWEEP_START&per_page=100" \
+  --slurp |
+jq -r --arg start "$COMMENT_SWEEP_START" --arg end "$COMMENT_SWEEP_END" '
+    .[][]
+    | select(.created_at >= $start and .created_at <= $end)
+    | select(
+        .body
+        | gsub("\\r\\n?"; "\\n")
+        | test("^\\n*@claude[ \\t]+(question|task)(\\s|$)"; "i")
+      )
+    | [.id, .created_at, .updated_at, .user.login, .issue_url, .html_url, .body]
+    | @json
+  '
+```
+
+This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
+that parser's leading-command grammar changes. The command deliberately emits
+all matching author identities; apply the reconstructed, time-versioned
+allowlist to classify each row after enumeration, retaining ambiguous rows as
+owed for investigation rather than automatic replay.
+
+Deduplicate the candidate comment sweep by source comment ID. A comment is an
+owed re-issue candidate only after it passes the same runtime admission
+predicates. Confirm that the comment belongs to a same-repository, open,
+unmerged, non-fork PR—not an ordinary issue—mirroring `isPullRequestIssue`,
+`isSameRepositoryPullRequest`, and `isEligiblePullRequestState` in
+`scripts/factory/owner-command-logic.mts`. Parse its visible leading content
+with the exact `parseOwnerCommand` grammar as a supported `@claude question`
+or `@claude task`; for a task, require a non-empty parsed payload. This mirrors
+the admission enforced by `deriveResponseAuthorization` and
+`intake-owner-command.mts`, rather than treating the sweep's coarse regex as
+admission evidence. A comment failing any runtime predicate is not owed: record
+it as `not-admissible`, not as a permanently owed entry or invented skip.
+
+**Admission is derived from the comment as CREATED, never from a possibly-edited
+current body.** `owner-command-intake.yml` triggers only on
+`issue_comment.created`; an edit never triggers intake, so the created body is
+the only body the trigger ever saw. The sweep parses each comment's current
+body, so a comment created with harmless text and later edited to begin with
+`@claude task`/`@claude question` would be emitted and parsed as a command that
+was never present in the triggering event. Therefore treat any comment whose
+`updated_at != created_at` (edited after creation — the added `updated_at`
+output column surfaces this) as **ambiguous**: do not derive admission from its
+current body, withhold automatic replay, and record it for explicit operator
+investigation, UNLESS creation-time body evidence proves the created (not
+edited) body was itself a valid command in an enabled, authorized interval. An
+edited comment without such creation-time evidence is never auto-re-issued.
+
+After runtime admission, a comment is an owed re-issue candidate only when all
+three additional conditions hold: its `created_at` falls inside a reconstructed
+interval where `OWNER_COMMAND_INTAKE_ENABLED` was enabled, its author was
+authorized at that exact issuance time, and its verified terminal effect is
+absent. Apply both time-varying filters per comment; the outer query bounds
+alone prove neither condition. A comment in a disabled gap was never admitted,
+is not owed, and must not be re-issued.
+
+For a candidate `@claude question`, verify whether a response authored by
+exactly `github-actions[bot]` already ends with the comment-bound terminal marker
+`<!-- owner-command-response: <commentId> -->`. For each enumerated
+`@claude task`, apply the existing capability-safe rule below and verify the
+acknowledged or applied terminal effect required for that task's capability.
+A different bot or App does not prove completion; this exact-identity rule
+mirrors the runtime `RESPONSE_BOT_LOGIN` check.
+A fully eligible command with its verified effect is already processed; record
+it done. A fully eligible command without that effect remains owed and must be
+re-issued or receive a recorded operator skip.
+
+A comment from the conservative pre-window lookback is owed only when §2
+boundary-crossing or in-flight run evidence binds that specific source comment
+to a command that was actually consumed or in flight. The same run-bound proof
+is required when interval membership is ambiguous. Without it, record the
+comment for explicit operator investigation and do not auto-re-issue it; an
+unadmitted command must never gain capability through backfill.
+
+Use the §2 owner-command run rows only as a cross-check, never as the primary
+run-to-comment inventory: a run record does not persist its triggering comment
+ID, and a run can finish before the §2 enumeration response is evaluated.
+Every §2-enumerated row whose path is
+`.github/workflows/owner-command-intake.yml` should correspond to a command in
+the comment sweep. If a row does not map to any enumerated comment, flag it for
+explicit operator investigation and widen the lookback when that can resolve
+the gap. Record the investigation disposition; neither silently drop the row
+nor permanently block the deterministic comment inventory. Deduplicate all
+matched commands by source comment ID.
+
+Before re-issuing each `@claude task`, establish the task-apply capability when
+that source command was originally issued from the start-of-window capture and the
+incident record of capability changes, then read its current value. If
+`OWNER_TASK_APPLY_ENABLED` differs, do not silently re-issue the task: require
+explicit operator reauthorization under the current capability or record a
+skip with its reason. This prevents an acknowledgement-only task from gaining
+mutation authority on replay, and prevents a formerly write-enabled task from
+being counted done after only an acknowledgement. `@claude question` is
+unaffected because it carries no mutation capability. If issuance-time or
+replay-time capability is ambiguous, fail closed: withhold the replay and
+record it still owed, never replay it under an unverified capability.
+
+For every owed command, the same authorized owner must re-issue the
+original command as a fresh PR comment after resumption. Never edit the old
+comment: edits do not retrigger `owner-command-intake.yml`. Posting the fresh
+comment is not completion: capture its comment ID, confirm that
+`owner-command-intake.yml` ran for it and reached a terminal conclusion, and
+verify the workflow's documented response effect for that exact fresh comment
+(including its comment-ID-bound terminal marker) before recording it done. A
+failed run, a run skipped because the enable variable is now false, or a fresh
+comment with no workflow response remains owed; record it as still-owed, not
+done. Every inventoried comment must end with either this verified effect or an
+operator-recorded skip with a reason; an empty result must be recorded too.
+Never silently drop an entry.
 
 ## Cost/budget caps — N/A by billing model (D102)
 
@@ -645,6 +1087,16 @@ authorized by this dark wiring:
    `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_COMMAND_INTAKE_ENABLED --jq '.value'`
    and the persisted task-enable state with
    `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_TASK_APPLY_ENABLED --jq '.value'`.
+   As a mandatory part of this item-1 preflight, complete the queued-run sweep
+   and required cancellation procedure in §2 before any enable-variable write
+   in item 3 or item 5. [#232](https://github.com/syamaner/roastpilot-cloud/issues/232)
+   requires this ordering because an `owner-command-intake.yml` run queued
+   before the pause can retain snapshotted stale gates and later reach the
+   write-capable `task-apply` path. Do not proceed to either write until every
+   enumerated run is classified and every applicable queued or in-progress run
+   is cancelled and verified terminal per §2. In this activation context the
+   pause flag was set earlier, so run §2's enumerate-and-cancel mechanics
+   verbatim against the already-paused state.
    Normalize each successful enable-variable read to lowercase before comparing
    it, matching the workflow gates' case-insensitive string semantics. For
    either variable, a confirmed absent-variable `404`, or a successful response
@@ -693,11 +1145,7 @@ authorized by this dark wiring:
    confirming the same prerequisites rather than treating persisted state as
    satisfying them.
 4. Before enabling task mutation, additionally resolve the remaining hard 9h
-   task preconditions, in addition to #236 above. [#232](https://github.com/syamaner/roastpilot-cloud/issues/232)
-   requires the emergency-halt/resume inventory to include
-   `owner-command-intake.yml` and cancellation of any queued run before
-   activation, because a run queued before the pause can retain snapshotted
-   gates and reach the write-capable `task-apply`. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
+   task preconditions, in addition to #236 above. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
    must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the
