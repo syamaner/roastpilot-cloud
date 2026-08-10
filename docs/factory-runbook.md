@@ -80,17 +80,20 @@ this notice job exists.
 
 ### 1. Set the pause flag (do this first, always)
 
-Immediately before pausing, read and record the persisted values of both
-`OWNER_COMMAND_INTAKE_ENABLED` and `OWNER_TASK_APPLY_ENABLED` in the incident
-record. Record a confirmed absent variable as absent rather than silently
-coercing it to a value, and record any changes to either capability during the
-pause. These are read-only state captures; do not create or update either
-variable as part of the halt. This evidence is required for the capability-safe
-9e replay below; an ambiguous capture never authorizes replay.
-
 ```bash
 gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 ```
+
+Treat the successful pause-write timestamp as `PAUSE_START`. Immediately after
+the write, read and record the persisted values of
+`CODEX_ADVISORY_STATUS_ENABLED`, `OWNER_COMMAND_INTAKE_ENABLED`, and
+`OWNER_TASK_APPLY_ENABLED` as start-of-window evidence, and record every change
+to any of the three during the pause. Setting the pause flag does not alter
+these enable variables, so capturing them immediately afterward preserves the
+same evidence without delaying the kill switch. Record a confirmed absent
+variable as absent rather than silently coercing it to a value. These are
+read-only state captures; do not create or update any enable variable as part
+of the halt. Ambiguous capture or change history never authorizes replay.
 
 **Check current state:**
 
@@ -406,11 +409,13 @@ that the repaired workflow came from current `main`. Every accepted
 backfill therefore has a fresh run ID and the `.1` generation shown above.
 Do not dispatch the next issue until the current one passes both assertions.
 
-**Conditional Step 4 (9d) — backfill advisory status events.** Do this only
-if `CODEX_ADVISORY_STATUS_ENABLED` was recorded as `true` immediately before
-the pause. If it was recorded as false, record this step as a no-op. If the
-pre-pause value is unknown, stop rather than treating it as false. GitHub does
-not replay the PR/review/comment events consumed during the window, so sweep
+**Conditional Step 4 (9d) — backfill advisory status events.** Use the
+start-of-window capture plus the recorded change history to identify every
+sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
+Record this step as a no-op only when the gate was confirmed false or absent
+for the entire pause window. If any interval is unknown, stop rather than
+treating it as disabled. GitHub does not replay the PR/review/comment events
+consumed during an enabled interval, so when any such interval exists sweep
 **every currently open PR**. Do not filter the inventory by `updated_at`: a
 later title, label, or other non-triggering update can move a genuinely missed
 PR past `PAUSE_END`. The pause window is only an optional prioritisation hint
@@ -437,28 +442,29 @@ owed; record it as still-owed, not done. Every inventoried PR must end with
 either this verified effect or an operator-recorded skip with a reason; an
 empty result must be recorded too. Never silently drop an entry.
 
-**Conditional Step 5 (9e) — backfill owner commands.** Do this only if
-`OWNER_COMMAND_INTAKE_ENABLED` was recorded as `true` immediately before the
-pause. If it was recorded as false, record this step as a no-op. If the
-pre-pause value is unknown, stop rather than treating it as false. This
-workflow has no dispatch path. Copy the exact current
+**Conditional Step 5 (9e) — backfill owner commands.** Use the start-of-window
+capture plus the recorded change history to identify every sub-interval in
+which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused. Record this step
+as a no-op only when the gate was confirmed false or absent for the entire
+pause window. If any interval is unknown, stop rather than treating it as
+disabled. This workflow has no dispatch path. Copy the exact current
 `FACTORY_OWNER_LOGINS` set from the base-owned
 `scripts/factory/factory-owner-allowlist.mts` into the JSON array below, then
 build the complete inventory as the union of two sources: commands created in
-the exact UTC window from authorized comments whose visible leading content is
-`@claude question` or `@claude task`, plus the source comment of every
+each enabled sub-interval from authorized comments whose visible leading
+content is `@claude question` or `@claude task`, plus the source comment of every
 `owner-command-intake.yml` run enumerated as non-completed in §2, regardless of
-how that run later terminates. The window query is:
+how that run later terminates. Run this query for every enabled sub-interval:
 
 ```bash
-PAUSE_START=<PAUSE_START>
-PAUSE_END=<PAUSE_END>
+INTERVAL_START=<ENABLED_INTERVAL_START>
+INTERVAL_END=<ENABLED_INTERVAL_END>
 FACTORY_OWNER_LOGINS='["syamaner"]'
 gh api --paginate \
-  "repos/syamaner/roastpilot-cloud/issues/comments?since=$PAUSE_START&per_page=100" \
+  "repos/syamaner/roastpilot-cloud/issues/comments?since=$INTERVAL_START&per_page=100" \
   --slurp |
 jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
-  --arg start "$PAUSE_START" --arg end "$PAUSE_END" '
+  --arg start "$INTERVAL_START" --arg end "$INTERVAL_END" '
     .[][]
     | select(.created_at >= $start and .created_at <= $end)
     | select(.user.login as $login | $owners | index($login))
@@ -479,15 +485,15 @@ The query output is only the first half of the inventory. Retain every row from
 the §2 enumeration whose path is
 `.github/workflows/owner-command-intake.yml`, identify its triggering source
 comment from the run's event/trigger evidence, and add that comment by ID even
-when its `created_at` precedes `PAUSE_START`. Keep the row regardless of whether
-the run is later cancelled, fails, or times out; remove it from the owed
-inventory only after verifying that its comment-bound terminal effect actually
-occurred. If an enumerated owner-command run's source comment cannot be
+when its `created_at` precedes the first enabled interval. Keep the row
+regardless of whether the run is later cancelled, fails, or times out; remove
+it from the owed inventory only after verifying that its comment-bound terminal
+effect actually occurred. If an enumerated owner-command run's source comment cannot be
 identified, the inventory is incomplete and the backfill remains blocked
 rather than silently dropping it. Deduplicate the union by source comment ID.
 
 Before re-issuing each `@claude task`, establish the task-apply capability when
-that source command was originally issued from the pre-pause capture and the
+that source command was originally issued from the start-of-window capture and the
 incident record of capability changes, then read its current value. If
 `OWNER_TASK_APPLY_ENABLED` differs, do not silently re-issue the task: require
 explicit operator reauthorization under the current capability or record a
@@ -802,6 +808,14 @@ authorized by this dark wiring:
    `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_COMMAND_INTAKE_ENABLED --jq '.value'`
    and the persisted task-enable state with
    `gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_TASK_APPLY_ENABLED --jq '.value'`.
+   As a mandatory part of this item-1 preflight, complete the queued-run sweep
+   and required cancellation procedure in §2 before any enable-variable write
+   in item 3 or item 5. [#232](https://github.com/syamaner/roastpilot-cloud/issues/232)
+   requires this ordering because an `owner-command-intake.yml` run queued
+   before the pause can retain snapshotted stale gates and later reach the
+   write-capable `task-apply` path. Do not proceed to either write until every
+   enumerated run is classified and every applicable queued or in-progress run
+   is cancelled per §2.
    Normalize each successful enable-variable read to lowercase before comparing
    it, matching the workflow gates' case-insensitive string semantics. For
    either variable, a confirmed absent-variable `404`, or a successful response
@@ -850,11 +864,7 @@ authorized by this dark wiring:
    confirming the same prerequisites rather than treating persisted state as
    satisfying them.
 4. Before enabling task mutation, additionally resolve the remaining hard 9h
-   task preconditions, in addition to #236 above. [#232](https://github.com/syamaner/roastpilot-cloud/issues/232)
-   requires the emergency-halt/resume inventory to include
-   `owner-command-intake.yml` and cancellation of any queued run before
-   activation, because a run queued before the pause can retain snapshotted
-   gates and reach the write-capable `task-apply`. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
+   task preconditions, in addition to #236 above. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
    must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the
