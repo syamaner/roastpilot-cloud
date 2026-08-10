@@ -148,13 +148,52 @@ gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/runs?per_page=100' \
   --jq '.workflow_runs[] | select(.status != "completed") | [.id, .status, .path] | @tsv'
 ```
 
+**Also reconcile recently completed runs whose activity crossed the pause
+boundary.** Record `CLASSIFICATION_TIME` when the non-completed query above
+starts, then run this companion paginated query. `updated_at >= PAUSE_START`
+deliberately over-includes runs whose terminal activity might have occurred
+after the pause began, including a run that changed from active to `completed`
+before the first query observed it:
+
+```bash
+PAUSE_START=<RECORDED_PAUSE_START>
+CLASSIFICATION_TIME=<TIMESTAMP_WHEN_THE_NON_COMPLETED_QUERY_STARTED>
+gh api --paginate \
+  'repos/syamaner/roastpilot-cloud/actions/runs?status=completed&per_page=100' \
+  --slurp |
+jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATION_TIME" '
+  .[] | .workflow_runs[]
+  | select((.run_started_at // .created_at) <= $classification_time)
+  | select(.updated_at >= $pause_start)
+  | [.id, .status, .conclusion, .created_at, .run_started_at, .updated_at, .path]
+  | @tsv
+'
+```
+
+Classify every boundary-crossing row. For each side-effecting run—including an
+`implement-ready-issues.yml` publisher, an `owner-command-intake.yml`
+`task-apply`, or an advisory-status write—verify its conclusion and its durable
+terminal marker or effect. Reconcile every non-`success` conclusion and every
+write whose durable terminal effect is absent before resume; use the #236
+procedure for a task apply that pushed without its marker. This reconciliation
+is required even if Conditional Step 4 or Step 5 would otherwise be recorded
+as a no-op.
+
 **After classifying every row, classify the active job before cancelling each
 gated factory run found.** Do not blanket-cancel the unaffected workflows or
 the Snowflake exclusion below, and do not proceed past an unknown workflow
-path. If an `owner-command-intake.yml` `task-apply` run is already in its
-push/finalize window, do not interrupt it: wait for terminal completion, then
-verify its comment-bound terminal marker. If the push succeeded without that
-marker, reconcile it using the [#236 idempotency
+path. Treat the entire `Validate and publish the implement patch` step in
+`implement-ready-issues.yml` as a protected write window: its push, PR
+create/refresh, fallback and anti-gaming labels, annotations, and catch-block
+partial-publish diagnostic must finish together. For
+`owner-command-intake.yml`, protect one atomic push-to-marker window spanning
+both `Apply the admitted owner-task commit` and `Finalize owner-task apply`.
+The apply step performs `git push --force-with-lease` and writes
+`applied_commit`; the finalize step verifies reachability and posts the
+`github-actions[bot]` comment-bound marker. Once a task-apply run enters the
+apply step, do not interrupt it: wait for the run to reach terminal through the
+end of the finalize step. Reconcile every non-success result before completing
+the halt. If the push landed without its marker, use the [#236 idempotency
 procedure](https://github.com/syamaner/roastpilot-cloud/issues/236) before
 proceeding so replay cannot apply the same source command again. Cancel the
 remaining targeted runs normally:
@@ -181,11 +220,15 @@ cancellation until its next step boundary), force-cancel it:
 gh api -X POST repos/syamaner/roastpilot-cloud/actions/runs/<run-id>/force-cancel
 ```
 
-The exceptions are an `implement-ready-issues.yml` `publish` job already
-pushing and an `owner-command-intake.yml` `task-apply` job in its push/finalize
-window: never force-cancel either one mid-write. Wait for the job to finish,
-then verify its run is terminal with the same query; for `task-apply`, also
-complete the #236 reconciliation above before treating it as settled. After a
+The exceptions are an `implement-ready-issues.yml` job executing its entire
+side-effecting `Validate and publish the implement patch` step and an
+`owner-command-intake.yml` job anywhere from entry into
+`Apply the admitted owner-task commit` through completion of
+`Finalize owner-task apply`: never force-cancel either protected write window.
+Wait for the entire applicable step span and run to finish, verify the run is
+terminal with the same query, and reconcile every non-success result; for
+`task-apply`, also complete the #236 reconciliation above before treating it as
+settled. After a
 force-cancel, also keep re-querying until the run reports
 `status: "completed"`. Section §2 is complete only when every enumerated gated
 run is terminal and every protected write window is reconciled; a cancellation
@@ -487,15 +530,18 @@ string comparison. Record this step
 as a no-op only when the gate was confirmed false or absent for the entire
 pause window. If its change history cannot be fully reconstructed, treat the
 entire paused window as one enabled interval rather than narrowing it;
-over-inclusion is the safe direction. If the gate state or window boundary is
-truly unknown, stop rather than treating it as disabled. This workflow has no
-dispatch path. Reconstruct `FACTORY_OWNER_LOGINS` from its change history over
+over-inclusion is the safe direction for inventory, but it does not authorize
+automatic replay when one comment's interval membership remains ambiguous.
+If the gate state or window boundary is truly unknown, stop rather than
+treating it as disabled. This workflow has no dispatch path. Reconstruct
+`FACTORY_OWNER_LOGINS` from its change history over
 the sweep window and determine whether each comment author was authorized at
 that comment's `created_at` timestamp. Never filter historical comments using
 only the current allowlist: that would omit removed owners and prematurely
 admit newly added owners. If the allowlist history cannot be reconstructed,
-stop or record every affected command-looking comment as owed; never infer
-issuance-time authorization from today's value. Build the authoritative
+stop or record every affected command-looking comment as owed for
+investigation, never for automatic replay; never infer issuance-time
+authorization from today's value. Build the authoritative
 inventory from comments by sweeping every enabled
 sub-interval plus a conservative lookback before the first enabled interval,
 covering any command whose run could have been queued or in flight at
@@ -527,19 +573,33 @@ This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
 that parser's leading-command grammar changes. The command deliberately emits
 all matching author identities; apply the reconstructed, time-versioned
 allowlist to classify each row after enumeration, retaining ambiguous rows as
-owed.
+owed for investigation rather than automatic replay.
 
-Deduplicate the authorized comment sweep by source comment ID. For each
-enumerated `@claude question`, verify whether a response authored by exactly
-`github-actions[bot]` already ends with the comment-bound terminal marker
+Deduplicate the candidate comment sweep by source comment ID. A comment is an
+owed re-issue candidate only when all three conditions hold: its `created_at`
+falls inside a reconstructed interval where `OWNER_COMMAND_INTAKE_ENABLED`
+was enabled, its author was authorized at that exact issuance time, and its
+verified terminal effect is absent. Apply both time-varying filters per
+comment; the outer query bounds alone prove neither condition. A comment in a
+disabled gap was never admitted, is not owed, and must not be re-issued.
+
+For a candidate `@claude question`, verify whether a response authored by
+exactly `github-actions[bot]` already ends with the comment-bound terminal marker
 `<!-- owner-command-response: <commentId> -->`. For each enumerated
 `@claude task`, apply the existing capability-safe rule below and verify the
 acknowledged or applied terminal effect required for that task's capability.
 A different bot or App does not prove completion; this exact-identity rule
 mirrors the runtime `RESPONSE_BOT_LOGIN` check.
-A command with its verified effect is already processed; record it done. A
-command without that effect remains owed and must be re-issued or receive a
-recorded operator skip.
+A fully eligible command with its verified effect is already processed; record
+it done. A fully eligible command without that effect remains owed and must be
+re-issued or receive a recorded operator skip.
+
+A comment from the conservative pre-window lookback is owed only when §2
+boundary-crossing or in-flight run evidence binds that specific source comment
+to a command that was actually consumed or in flight. The same run-bound proof
+is required when interval membership is ambiguous. Without it, record the
+comment for explicit operator investigation and do not auto-re-issue it; an
+unadmitted command must never gain capability through backfill.
 
 Use the §2 owner-command run rows only as a cross-check, never as the primary
 run-to-comment inventory: a run record does not persist its triggering comment
