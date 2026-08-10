@@ -81,12 +81,21 @@ this notice job exists.
 ### 1. Set the pause flag (do this first, always)
 
 ```bash
+PAUSE_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'PAUSE_START=%s\n' "$PAUSE_START"
 gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 ```
 
-Treat the successful pause-write timestamp as `PAUSE_START`. `PAUSE_END` is the
-timestamp of the `FACTORY_PAUSED` → `false` write in resume step 2, which ends
-the paused window. Immediately after the pause write, read and record the persisted values of
+Record the conservative `PAUSE_START` immediately before sending the pause
+write, as shown above. This covers the request/acknowledgement interval in
+which GitHub can persist the pause before `gh` returns; a slightly early lower
+bound only over-includes events. `PAUSE_END` remains the timestamp of the
+`FACTORY_PAUSED` → `false` write in resume step 2, which ends the paused window.
+Use this exact conservative `PAUSE_START` as the lower-bound anchor for every
+backfill: the Step 1 issue sweep, the 9d enabled-interval/PR sweep, and the 9e
+comment sweep's conservative lookback. Never replace it with the later pause
+acknowledgement time. Immediately after the pause write, read and record the
+persisted values of
 `CODEX_ADVISORY_STATUS_ENABLED`, `OWNER_COMMAND_INTAKE_ENABLED`, and
 `OWNER_TASK_APPLY_ENABLED` as start-of-window evidence. Capture each variable's
 `updated_at` at the same time and record every change to any of the three during
@@ -224,16 +233,26 @@ gh api repos/syamaner/roastpilot-cloud/actions/runs/<run-id> \
   --jq '{status, conclusion}'
 ```
 
-Classification cannot close the task-apply race. For **every** task-apply run
-that receives a cancellation request or terminates with a non-`success`
-conclusion, regardless of the step on which it was observed, reconcile its
-effect after it reaches terminal state. Bind the run to its source comment and
-verify the comment-bound terminal marker was posted by exactly
-`github-actions[bot]`. If `git push --force-with-lease` landed but the marker is
-absent, complete the #236 reconciliation before resume. This applies even when
-the run was observed in `Decide owner-task apply`: it can enter the apply step
-before asynchronous cancellation takes effect. Do not rely on a non-atomic
-step observation to declare a cancelled or failed task-apply run safe.
+Classification cannot close the race for **any** side-effecting or credentialed
+factory run. For every such run that receives a cancellation request or
+terminates with a non-`success` conclusion, regardless of the step on which it
+was observed, wait for terminal state and then either prove it never entered a
+write step or verify its intended durable effect and reconcile every partial
+effect before resume. This rule covers every run that can push, open or refresh
+a PR, or write labels, comments, or status—including the publisher, privileged
+triage apply, owner-task apply, and advisory-status writer—and future factory
+write surfaces inherit it automatically.
+
+Check the workflow-specific durable effect: for a publisher, reconcile the
+pushed branch and PR state; for triage apply, reconcile the issue labels and
+comments; for advisory status, reconcile the expected status context; and for
+task apply, bind the run to its source comment and require the comment-bound
+terminal marker from exactly `github-actions[bot]`. Task apply remains the
+named #236 instance: if `git push --force-with-lease` landed without that
+marker, complete the #236 reconciliation before resume. A run observed before
+its write step can enter that step before asynchronous cancellation takes
+effect, so a non-atomic step observation never proves any cancelled or failed
+side-effecting run safe.
 
 **If a normal cancel doesn't take** (the run ignores the cancellation
 signal — can happen mid-API-call, where the runner process doesn't check for
@@ -255,8 +274,9 @@ settled. After a
 force-cancel, also keep re-querying until the run reports
 `status: "completed"`. Section §2 is complete only when every enumerated gated
 run is terminal, every protected write window is reconciled, and every
-cancelled or non-success task-apply run has passed the race-independent effect
-reconciliation above; a cancellation request by itself never closes the step.
+cancelled or non-success side-effecting run has been terminal-reconciled or
+proven never to have entered its write step; a cancellation request by itself
+never closes the step.
 
 ### 3. Disable the workflows (optional — extra insurance, not required)
 
@@ -283,11 +303,15 @@ First run the state-check command shown immediately below the disable block
 (`gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100'
 --jq '.workflows[] | {name, id, state}'`) and record which of these four
 workflow IDs are `active`. On resume, re-enable only workflows this halt
-transitions from `active` to `disabled_manually`. A workflow that was already
-`disabled_manually` was deliberately disarmed and must be left out of the
-resume set. If the pre-halt state is missing or ambiguous, fail closed: leave
-that workflow disabled until it is re-enabled through a separate deliberate
-decision.
+provably transitions from `active` to `disabled_manually`. Bind each transition
+to this halt with audit evidence for this halt's own disable action and
+timestamp, or serialize the state changes so no concurrent operator can cause
+the transition between snapshot and request. A post-check showing only
+`disabled_manually` does not establish which actor disabled it. A workflow that
+was already `disabled_manually`, or whose transition cannot be bound to this
+halt, may be a deliberate disarm and must be left out of the resume set. If the
+pre-halt state, actor, or transition evidence is missing or ambiguous, fail
+closed: leave that workflow disabled until a separate deliberate decision.
 
 ```bash
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/disable   # triage-issues.yml
@@ -329,8 +353,9 @@ is safe to finish the contract check.
 
 ### Emergency halt — full procedure
 
-1. **Set the pause flag** (§1) first, always — instant, and reliably
-   stops the inflow of any run created from this point on.
+1. **Record the conservative `PAUSE_START`, then set the pause flag** (§1)
+   first, always — the timestamp capture is local and the immediately following
+   write reliably stops the inflow of any run created from that point on.
 2. **Check for and cancel any run already queued or in-progress** (§2) —
    **required**, not optional, whenever any factory run exists at the
    moment you set the flag: the flag alone is not proven to stop a run
@@ -356,13 +381,17 @@ is safe to finish the contract check.
 backfills. Skipping an applicable step leaves the factory in a wrong state:**
 
 1. **Re-enable the workflows you disabled—but only the subset you recorded as
-   `active` before the halt** (§3). The fenced block below is the full candidate set;
-   run only the lines for that recorded subset. A workflow already
+   `active` before the halt and whose disable transition is provably bound to
+   this halt** (§3). The fenced block below is the full candidate set; run only
+   the lines for that halt-bound subset. A workflow already
    `disabled_manually` before the incident was deliberately disarmed and must
-   remain disabled. Blanket-enabling it—especially a credentialed workflow
-   such as `owner-command-intake.yml`—could re-arm its jobs when the pause flag
-   is later cleared. When the pre-halt state is unknown, leave the workflow
-   disabled and re-enable it only through a separate deliberate decision:
+   remain disabled. A transition that cannot be attributed to this halt is
+   ambiguous and must also remain disabled; never undo a possibly concurrent
+   deliberate disarm. Blanket-enabling either case—especially a credentialed
+   workflow such as `owner-command-intake.yml`—could re-arm its jobs when the
+   pause flag is later cleared. When the pre-halt state or halt ownership is
+   unknown, leave the workflow disabled and re-enable it only through a
+   separate deliberate decision:
 
    ```bash
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/enable   # triage-issues.yml
@@ -397,8 +426,10 @@ is disabled. It does not replay either missed event after resumption.
 required `issue_number`; this re-runs the current workflow from `main`
 without changing issue lifecycle state or relying on label events.
 
-**Step 1 — find every issue opened during the pause/disabled window.**
-Replace `<PAUSE_START>`/`<PAUSE_END>` with the exact UTC timestamps.
+**Step 1 — find every issue opened during the pause/disabled window.** Use the
+conservative pre-write `PAUSE_START` recorded in §1, never the later pause
+acknowledgement time. Replace `<PAUSE_START>`/`<PAUSE_END>` with those exact UTC
+timestamps.
 Search by creation time, not readiness labels: the story template itself
 adds `needs-triage`, so a missing-label filter would exclude affected
 template-filed issues. `--limit` defaults to 30; raise it above the
@@ -507,8 +538,9 @@ backfill therefore has a fresh run ID and the `.1` generation shown above.
 Do not dispatch the next issue until the current one passes both assertions.
 
 **Conditional Step 4 (9d) — backfill advisory status events.** Use the
-start-of-window capture plus the recorded change history to identify every
-sub-interval in which `CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
+conservative pre-write `PAUSE_START`, the start-of-window capture, and the
+recorded change history to identify every sub-interval in which
+`CODEX_ADVISORY_STATUS_ENABLED` was `true` while paused.
 Normalize every captured value and change-history value to lowercase before
 classifying those intervals, matching the workflow gate's case-insensitive
 string comparison. Record this step as a no-op only when the gate was
@@ -545,9 +577,10 @@ owed; record it as still-owed, not done. Every inventoried PR must end with
 either this verified effect or an operator-recorded skip with a reason; an
 empty result must be recorded too. Never silently drop an entry.
 
-**Conditional Step 5 (9e) — backfill owner commands.** Use the start-of-window
-capture plus the recorded change history to identify every sub-interval in
-which `OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused.
+**Conditional Step 5 (9e) — backfill owner commands.** Use the conservative
+pre-write `PAUSE_START`, the start-of-window capture, and the recorded change
+history to identify every sub-interval in which
+`OWNER_COMMAND_INTAKE_ENABLED` was `true` while paused.
 Normalize every captured value and change-history value to lowercase before
 classifying those intervals, matching the workflow gate's case-insensitive
 string comparison. Record this step
