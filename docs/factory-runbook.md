@@ -80,6 +80,14 @@ this notice job exists.
 
 ### 1. Set the pause flag (do this first, always)
 
+Immediately before pausing, read and record the persisted values of both
+`OWNER_COMMAND_INTAKE_ENABLED` and `OWNER_TASK_APPLY_ENABLED` in the incident
+record. Record a confirmed absent variable as absent rather than silently
+coercing it to a value, and record any changes to either capability during the
+pause. These are read-only state captures; do not create or update either
+variable as part of the halt. This evidence is required for the capability-safe
+9e replay below; an ambiguous capture never authorizes replay.
+
 ```bash
 gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 ```
@@ -439,7 +447,8 @@ workflow has no dispatch path. Copy the exact current
 build the complete inventory as the union of two sources: commands created in
 the exact UTC window from authorized comments whose visible leading content is
 `@claude question` or `@claude task`, plus the source comment of every
-`owner-command-intake.yml` run cancelled in §2. The window query is:
+`owner-command-intake.yml` run enumerated as non-completed in §2, regardless of
+how that run later terminates. The window query is:
 
 ```bash
 PAUSE_START=<PAUSE_START>
@@ -466,14 +475,28 @@ jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
 This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
 that parser's leading-command grammar changes.
 
-The query output is only the first half of the inventory. From the §2
-cancellation record, take every cancelled row whose path is
+The query output is only the first half of the inventory. Retain every row from
+the §2 enumeration whose path is
 `.github/workflows/owner-command-intake.yml`, identify its triggering source
 comment from the run's event/trigger evidence, and add that comment by ID even
-when its `created_at` precedes `PAUSE_START`. If a cancelled owner-command run's
-source comment cannot be identified, the inventory is incomplete and the
-backfill remains blocked rather than silently dropping it. Deduplicate the
-union by source comment ID.
+when its `created_at` precedes `PAUSE_START`. Keep the row regardless of whether
+the run is later cancelled, fails, or times out; remove it from the owed
+inventory only after verifying that its comment-bound terminal effect actually
+occurred. If an enumerated owner-command run's source comment cannot be
+identified, the inventory is incomplete and the backfill remains blocked
+rather than silently dropping it. Deduplicate the union by source comment ID.
+
+Before re-issuing each `@claude task`, establish the task-apply capability when
+that source command was originally issued from the pre-pause capture and the
+incident record of capability changes, then read its current value. If
+`OWNER_TASK_APPLY_ENABLED` differs, do not silently re-issue the task: require
+explicit operator reauthorization under the current capability or record a
+skip with its reason. This prevents an acknowledgement-only task from gaining
+mutation authority on replay, and prevents a formerly write-enabled task from
+being counted done after only an acknowledgement. `@claude question` is
+unaffected because it carries no mutation capability. If issuance-time or
+replay-time capability is ambiguous, fail closed: withhold the replay and
+record it still owed, never replay it under an unverified capability.
 
 For every inventoried command, the same authorized owner must re-issue the
 original command as a fresh PR comment after resumption. Never edit the old

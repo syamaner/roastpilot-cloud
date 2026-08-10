@@ -83,6 +83,52 @@ function parseInventoryBlock(
   });
 }
 
+function filenameIdMap(
+  entries: readonly InventoryEntry[],
+  label: string,
+): Map<string, string> {
+  const byFilename = new Map<string, string>();
+  const filenameById = new Map<string, string>();
+  for (const entry of entries) {
+    if (byFilename.has(entry.filename)) {
+      throw new Error(
+        `${label} inventory repeats workflow filename ${entry.filename}`,
+      );
+    }
+    const existingFilename = filenameById.get(entry.id);
+    if (existingFilename !== undefined) {
+      throw new Error(
+        `${label} inventory reuses workflow ID ${entry.id} for ${existingFilename} and ${entry.filename}`,
+      );
+    }
+    byFilename.set(entry.filename, entry.id);
+    filenameById.set(entry.id, entry.filename);
+  }
+  return byFilename;
+}
+
+function assertGatedMappings(
+  disableIds: ReadonlyMap<string, string>,
+  enableIds: ReadonlyMap<string, string>,
+  gatedFilenames: readonly string[],
+): void {
+  for (const filename of gatedFilenames) {
+    const disableId = disableIds.get(filename);
+    if (disableId === undefined) {
+      throw new Error(`Missing disable workflow ID mapping for ${filename}`);
+    }
+    const enableId = enableIds.get(filename);
+    if (enableId === undefined) {
+      throw new Error(`Missing enable workflow ID mapping for ${filename}`);
+    }
+    if (disableId !== enableId) {
+      throw new Error(
+        `Disable/enable workflow ID mismatch for ${filename}: ${disableId} != ${enableId}`,
+      );
+    }
+  }
+}
+
 const runbook = readFileSync(RUNBOOK_PATH, "utf8");
 const killSwitch = sectionBetween(
   runbook,
@@ -109,6 +155,8 @@ const enableBlock = fencedBashBlockAfter(
 );
 const disableEntries = parseInventoryBlock(disableBlock, "disable");
 const enableEntries = parseInventoryBlock(enableBlock, "enable");
+const disableIdsByFilename = filenameIdMap(disableEntries, "Disable");
+const enableIdsByFilename = filenameIdMap(enableEntries, "Enable");
 
 const workflowFiles = readdirSync(WORKFLOW_DIRECTORY)
   .filter((filename) => /\.ya?ml$/.test(filename))
@@ -128,7 +176,7 @@ describe("factory halt and resume inventory", () => {
   it("disables every workflow gated by FACTORY_PAUSED", () => {
     for (const filename of gatedWorkflows) {
       expect(
-        disableEntries.some((entry) => entry.filename === filename),
+        disableIdsByFilename.has(filename),
         `Missing §3 disable inventory line for gated workflow ${filename}`,
       ).toBe(true);
     }
@@ -137,17 +185,20 @@ describe("factory halt and resume inventory", () => {
   it("re-enables every workflow gated by FACTORY_PAUSED", () => {
     for (const filename of gatedWorkflows) {
       expect(
-        enableEntries.some((entry) => entry.filename === filename),
+        enableIdsByFilename.has(filename),
         `Missing resume enable inventory line for gated workflow ${filename}`,
       ).toBe(true);
     }
   });
 
   it("keeps the disable and enable workflow ID sets strictly equal", () => {
-    const disableIds = [
-      ...new Set(disableEntries.map((entry) => entry.id)),
-    ].sort();
-    const enableIds = [...new Set(enableEntries.map((entry) => entry.id))].sort();
+    assertGatedMappings(
+      disableIdsByFilename,
+      enableIdsByFilename,
+      gatedWorkflows,
+    );
+    const disableIds = [...disableIdsByFilename.values()].sort();
+    const enableIds = [...enableIdsByFilename.values()].sort();
     expect(enableIds).toEqual(disableIds);
   });
 
@@ -160,6 +211,17 @@ describe("factory halt and resume inventory", () => {
     expect(
       unclassified,
       "Gate/classify every new workflow and update the runbook halt inventory or closed unaffected allowlist",
+    ).toEqual([]);
+    const inventoriedUnaffected = [...UNAFFECTED_WORKFLOWS]
+      .filter(
+        (filename) =>
+          disableIdsByFilename.has(filename) ||
+          enableIdsByFilename.has(filename),
+      )
+      .sort();
+    expect(
+      inventoriedUnaffected,
+      "Unaffected workflows must not appear in the halt/resume inventory",
     ).toEqual([]);
   });
 
@@ -201,7 +263,7 @@ describe("factory halt and resume inventory", () => {
     expect(ownerBackfill).toMatch(/re-issue[^.]*fresh PR comment/);
   });
 
-  it("rejects empty and malformed inventory fixtures", () => {
+  it("rejects empty, malformed, and non-bijective inventory fixtures", () => {
     expect(() => parseInventoryBlock("echo no inventory", "disable")).toThrow(
       "Inventory has no disable lines",
     );
@@ -211,5 +273,23 @@ describe("factory halt and resume inventory", () => {
         "disable",
       ),
     ).toThrow("add a .yml filename");
+    expect(() =>
+      filenameIdMap(
+        [
+          { id: "123", action: "disable", filename: "first.yml" },
+          { id: "123", action: "disable", filename: "second.yml" },
+        ],
+        "Fixture",
+      ),
+    ).toThrow(
+      "Fixture inventory reuses workflow ID 123 for first.yml and second.yml",
+    );
+    expect(() =>
+      assertGatedMappings(
+        new Map([["first.yml", "123"]]),
+        new Map<string, string>(),
+        ["first.yml"],
+      ),
+    ).toThrow("Missing enable workflow ID mapping for first.yml");
   });
 });
