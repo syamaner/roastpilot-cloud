@@ -88,18 +88,30 @@ Treat the successful pause-write timestamp as `PAUSE_START`. `PAUSE_END` is the
 timestamp of the `FACTORY_PAUSED` → `false` write in resume step 2, which ends
 the paused window. Immediately after the pause write, read and record the persisted values of
 `CODEX_ADVISORY_STATUS_ENABLED`, `OWNER_COMMAND_INTAKE_ENABLED`, and
-`OWNER_TASK_APPLY_ENABLED` as start-of-window evidence, and record every change
-to any of the three during the pause. Setting the pause flag does not alter
-these enable variables, so capturing them immediately afterward preserves the
-same evidence without delaying the kill switch. Record a confirmed absent
-variable as absent rather than silently coercing it to a value. These are
-read-only state captures; do not create or update any enable variable as part
-of the halt. Ambiguous capture or change history never authorizes replay.
+`OWNER_TASK_APPLY_ENABLED` as start-of-window evidence. Capture each variable's
+`updated_at` at the same time and record every change to any of the three during
+the pause. Setting the pause flag does not alter these enable variables, so
+capturing them immediately afterward does not itself change their state or
+delay the kill switch. However, the post-write value alone does not prove the
+value at `PAUSE_START`: a concurrent enable-variable write can cross that
+boundary. If a variable's `updated_at` is at or after `PAUSE_START`, or its
+change history across the pause cannot be fully audited, classify it as
+**unknown → enabled** for interval reconstruction and use the resulting
+over-inclusive backfill inventory. An enable variable may be treated as
+disabled at `PAUSE_START` only when audited state proves it was disabled and
+that no write crossed the boundary. Record a confirmed absent variable as
+absent rather than silently coercing it to a value. These are read-only state
+captures; do not create or update any enable variable as part of the halt.
+Ambiguous capture or history never authorizes capability-ambiguous task replay.
 
 **Check current state:**
 
 ```bash
 gh variable list --repo syamaner/roastpilot-cloud
+
+gh api repos/syamaner/roastpilot-cloud/actions/variables/CODEX_ADVISORY_STATUS_ENABLED --jq '{name, value, updated_at}'
+gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_COMMAND_INTAKE_ENABLED --jq '{name, value, updated_at}'
+gh api repos/syamaner/roastpilot-cloud/actions/variables/OWNER_TASK_APPLY_ENABLED --jq '{name, value, updated_at}'
 ```
 
 Reliably covers any run whose job-level `if:` is evaluated *after* this
@@ -212,6 +224,17 @@ gh api repos/syamaner/roastpilot-cloud/actions/runs/<run-id> \
   --jq '{status, conclusion}'
 ```
 
+Classification cannot close the task-apply race. For **every** task-apply run
+that receives a cancellation request or terminates with a non-`success`
+conclusion, regardless of the step on which it was observed, reconcile its
+effect after it reaches terminal state. Bind the run to its source comment and
+verify the comment-bound terminal marker was posted by exactly
+`github-actions[bot]`. If `git push --force-with-lease` landed but the marker is
+absent, complete the #236 reconciliation before resume. This applies even when
+the run was observed in `Decide owner-task apply`: it can enter the apply step
+before asynchronous cancellation takes effect. Do not rely on a non-atomic
+step observation to declare a cancelled or failed task-apply run safe.
+
 **If a normal cancel doesn't take** (the run ignores the cancellation
 signal — can happen mid-API-call, where the runner process doesn't check for
 cancellation until its next step boundary), force-cancel it:
@@ -231,8 +254,9 @@ terminal with the same query, and reconcile every non-success result; for
 settled. After a
 force-cancel, also keep re-querying until the run reports
 `status: "completed"`. Section §2 is complete only when every enumerated gated
-run is terminal and every protected write window is reconciled; a cancellation
-request by itself never closes the step.
+run is terminal, every protected write window is reconciled, and every
+cancelled or non-success task-apply run has passed the race-independent effect
+reconciliation above; a cancellation request by itself never closes the step.
 
 ### 3. Disable the workflows (optional — extra insurance, not required)
 
@@ -576,12 +600,25 @@ allowlist to classify each row after enumeration, retaining ambiguous rows as
 owed for investigation rather than automatic replay.
 
 Deduplicate the candidate comment sweep by source comment ID. A comment is an
-owed re-issue candidate only when all three conditions hold: its `created_at`
-falls inside a reconstructed interval where `OWNER_COMMAND_INTAKE_ENABLED`
-was enabled, its author was authorized at that exact issuance time, and its
-verified terminal effect is absent. Apply both time-varying filters per
-comment; the outer query bounds alone prove neither condition. A comment in a
-disabled gap was never admitted, is not owed, and must not be re-issued.
+owed re-issue candidate only after it passes the same runtime admission
+predicates. Confirm that the comment belongs to a same-repository, open,
+unmerged, non-fork PR—not an ordinary issue—mirroring `isPullRequestIssue`,
+`isSameRepositoryPullRequest`, and `isEligiblePullRequestState` in
+`scripts/factory/owner-command-logic.mts`. Parse its visible leading content
+with the exact `parseOwnerCommand` grammar as a supported `@claude question`
+or `@claude task`; for a task, require a non-empty parsed payload. This mirrors
+the admission enforced by `deriveResponseAuthorization` and
+`intake-owner-command.mts`, rather than treating the sweep's coarse regex as
+admission evidence. A comment failing any runtime predicate is not owed: record
+it as `not-admissible`, not as a permanently owed entry or invented skip.
+
+After runtime admission, a comment is an owed re-issue candidate only when all
+three additional conditions hold: its `created_at` falls inside a reconstructed
+interval where `OWNER_COMMAND_INTAKE_ENABLED` was enabled, its author was
+authorized at that exact issuance time, and its verified terminal effect is
+absent. Apply both time-varying filters per comment; the outer query bounds
+alone prove neither condition. A comment in a disabled gap was never admitted,
+is not owed, and must not be re-issued.
 
 For a candidate `@claude question`, verify whether a response authored by
 exactly `github-actions[bot]` already ends with the comment-bound terminal marker

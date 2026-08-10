@@ -130,6 +130,28 @@ function assertGatedMappings(
   }
 }
 
+function assertExactInventoryFilenames(
+  inventoryIds: ReadonlyMap<string, string>,
+  label: string,
+  gatedFilenames: readonly string[],
+): void {
+  const gatedSet = new Set(gatedFilenames);
+  for (const filename of inventoryIds.keys()) {
+    if (!gatedSet.has(filename)) {
+      throw new Error(
+        `${label} inventory contains stale or non-gated workflow ${filename}`,
+      );
+    }
+  }
+  for (const filename of gatedFilenames) {
+    if (!inventoryIds.has(filename)) {
+      throw new Error(
+        `${label} inventory is missing gated workflow ${filename}`,
+      );
+    }
+  }
+}
+
 const runbook = readFileSync(RUNBOOK_PATH, "utf8");
 const killSwitch = sectionBetween(
   runbook,
@@ -175,6 +197,11 @@ const gatedWorkflows = workflowFiles.filter((filename) =>
 
 describe("factory halt and resume inventory", () => {
   it("disables every workflow gated by FACTORY_PAUSED", () => {
+    assertExactInventoryFilenames(
+      disableIdsByFilename,
+      "Disable",
+      gatedWorkflows,
+    );
     for (const filename of gatedWorkflows) {
       expect(
         disableIdsByFilename.has(filename),
@@ -184,6 +211,11 @@ describe("factory halt and resume inventory", () => {
   });
 
   it("re-enables every workflow gated by FACTORY_PAUSED", () => {
+    assertExactInventoryFilenames(
+      enableIdsByFilename,
+      "Enable",
+      gatedWorkflows,
+    );
     for (const filename of gatedWorkflows) {
       expect(
         enableIdsByFilename.has(filename),
@@ -304,5 +336,17 @@ describe("factory halt and resume inventory", () => {
         ["first.yml"],
       ),
     ).toThrow("Missing enable workflow ID mapping for first.yml");
+    expect(() =>
+      assertExactInventoryFilenames(
+        new Map([
+          ["gated.yml", "123"],
+          ["stale.yml", "456"],
+        ]),
+        "Fixture",
+        ["gated.yml"],
+      ),
+    ).toThrow(
+      "Fixture inventory contains stale or non-gated workflow stale.yml",
+    );
   });
 });
