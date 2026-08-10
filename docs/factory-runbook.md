@@ -89,8 +89,13 @@ gh variable set FACTORY_PAUSED --body true --repo syamaner/roastpilot-cloud
 Record the conservative `PAUSE_START` immediately before sending the pause
 write, as shown above. This covers the request/acknowledgement interval in
 which GitHub can persist the pause before `gh` returns; a slightly early lower
-bound only over-includes events. `PAUSE_END` remains the timestamp of the
-`FACTORY_PAUSED` → `false` write in resume step 2, which ends the paused window.
+bound only over-includes events. `PAUSE_END` is captured just after the
+successful `FACTORY_PAUSED` → `false` unpause write in resume step 2 — the
+upper-bound dual of the conservative pre-write `PAUSE_START`. Recording it after
+the write returns safely over-includes the request/acknowledgement interval in
+which GitHub can still suppress an event before the unpause persists; a slightly
+late upper bound only over-includes events. It is the upper bound for every
+backfill.
 Use this exact conservative `PAUSE_START` as the lower-bound anchor for every
 backfill: the Step 1 issue sweep, the 9d enabled-interval/PR sweep, and the 9e
 comment sweep's conservative lookback. Never replace it with the later pause
@@ -174,7 +179,11 @@ boundary.** Record `CLASSIFICATION_TIME` when the non-completed query above
 starts, then run this companion paginated query. `updated_at >= PAUSE_START`
 deliberately over-includes runs whose terminal activity might have occurred
 after the pause began, including a run that changed from active to `completed`
-before the first query observed it:
+before the first query observed it. The cutoff filters on `created_at`, not
+`run_started_at`, precisely because a run already queued at `CLASSIFICATION_TIME`
+but not yet started has no or a later `run_started_at`; keying on `created_at`
+keeps every run that existed when classification began in one of the two
+inventories:
 
 ```bash
 PAUSE_START=<RECORDED_PAUSE_START>
@@ -184,7 +193,7 @@ gh api --paginate \
   --slurp |
 jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATION_TIME" '
   .[] | .workflow_runs[]
-  | select((.run_started_at // .created_at) <= $classification_time)
+  | select(.created_at <= $classification_time)
   | select(.updated_at >= $pause_start)
   | [.id, .status, .conclusion, .created_at, .run_started_at, .updated_at, .path]
   | @tsv
@@ -407,7 +416,17 @@ backfills. Skipping an applicable step leaves the factory in a wrong state:**
 
    ```bash
    gh variable set FACTORY_PAUSED --body false --repo syamaner/roastpilot-cloud
+   PAUSE_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   printf 'PAUSE_END=%s\n' "$PAUSE_END"
    ```
+
+   Record `PAUSE_END` only after the unpause command returns, as shown — the
+   upper-bound dual of §1's conservative pre-write `PAUSE_START`. An event
+   arriving after the write is issued but before GitHub persists the unpause is
+   still suppressed, so a `PAUSE_END` taken before the command returns would end
+   the window early and omit it; capturing it afterward safely over-includes
+   that request/acknowledgement interval. Use this `PAUSE_END` as the upper bound
+   for every backfill below.
 
 3. **Backfill issues opened during the outage** (below) — the flag and
    workflow state going back to normal does not retroactively process
