@@ -113,6 +113,11 @@ const enableEntries = parseInventoryBlock(enableBlock, "enable");
 const workflowFiles = readdirSync(WORKFLOW_DIRECTORY)
   .filter((filename) => /\.ya?ml$/.test(filename))
   .sort();
+// Deliberately coarse: literal-substring over-inclusion is safe. A future
+// workflow could evade this detector by gating through expression indirection;
+// it must instead retain the literal or be consciously added to
+// UNAFFECTED_WORKFLOWS. That .github/** + tests/factory/** change draws the
+// factory-security-reviewer lens.
 const gatedWorkflows = workflowFiles.filter((filename) =>
   readFileSync(new URL(filename, WORKFLOW_DIRECTORY), "utf8").includes(
     "FACTORY_PAUSED",

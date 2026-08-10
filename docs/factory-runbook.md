@@ -385,23 +385,31 @@ if `CODEX_ADVISORY_STATUS_ENABLED` was recorded as `true` immediately before
 the pause. If it was recorded as false, record this step as a no-op. If the
 pre-pause value is unknown, stop rather than treating it as false. GitHub does
 not replay the PR/review/comment events consumed during the window, so sweep
-every currently open PR whose `updated_at` falls within the exact UTC window.
-Over-inclusion is the safe direction:
+**every currently open PR**. Do not filter the inventory by `updated_at`: a
+later title, label, or other non-triggering update can move a genuinely missed
+PR past `PAUSE_END`. The pause window is only an optional prioritisation hint
+for which PRs to inspect first, never a filter that can drop an entry.
+Over-inclusion is the safe direction because each dispatch recomputes the
+current snapshot and overwrites the single PR-scoped status context:
 
 ```bash
-PAUSE_START=<PAUSE_START>
-PAUSE_END=<PAUSE_END>
 gh api --paginate \
   'repos/syamaner/roastpilot-cloud/pulls?state=open&sort=updated&direction=asc&per_page=100' \
-  --jq ".[] | select(.updated_at >= \"$PAUSE_START\" and .updated_at <= \"$PAUSE_END\") | [.number, .updated_at, .html_url] | @tsv"
+  --jq '.[] | [.number, .updated_at, .html_url] | @tsv'
 
 PR_NUMBER=<PR_NUMBER>
 gh workflow run codex-verdict-status.yml --ref main --repo syamaner/roastpilot-cloud -f pr_number="$PR_NUMBER"
 ```
 
-Work through the resulting PR inventory one at a time. Every inventoried PR
-must end with either a dispatch from `main` or an operator-recorded skip with a
-reason; an empty result must be recorded too. Never silently drop an entry.
+Work through the resulting PR inventory one at a time. Queuing the dispatch is
+not completion: capture its run ID, wait for that exact run to reach a terminal
+conclusion, and confirm that it wrote a status record on the PR snapshot with
+the exact context `factory/codex-verdict-advisory/pr-<PR_NUMBER>` and a
+`target_url` for that run. A failed run, a run skipped because the enable
+variable is now false, or a terminal run without that status effect remains
+owed; record it as still-owed, not done. Every inventoried PR must end with
+either this verified effect or an operator-recorded skip with a reason; an
+empty result must be recorded too. Never silently drop an entry.
 
 **Conditional Step 5 (9e) — backfill owner commands.** Do this only if
 `OWNER_COMMAND_INTAKE_ENABLED` was recorded as `true` immediately before the
@@ -429,19 +437,28 @@ jq -r --argjson owners "$FACTORY_OWNER_LOGINS" \
     | select(
         .body
         | gsub("\\r\\n?"; "\\n")
-        | test("^\\n*@claude[ \\t]+(question|task)([ \\t]|$)"; "i")
+        | test("^\\n*@claude[ \\t]+(question|task)(\\s|$)"; "i")
       )
     | [.id, .created_at, .user.login, .issue_url, .html_url, .body]
     | @json
   '
 ```
 
+This leading-command grammar mirrors `parseOwnerCommand`; re-copy it here if
+that parser's leading-command grammar changes.
+
 For every inventoried command, the same authorized owner must re-issue the
 original command as a fresh PR comment after resumption. Never edit the old
-comment: edits do not retrigger `owner-command-intake.yml`. Every inventoried
-comment must end with either a fresh owner re-issue or an operator-recorded
-skip with a reason; an empty result must be recorded too. Never silently drop
-an entry.
+comment: edits do not retrigger `owner-command-intake.yml`. Posting the fresh
+comment is not completion: capture its comment ID, confirm that
+`owner-command-intake.yml` ran for it and reached a terminal conclusion, and
+verify the workflow's documented response effect for that exact fresh comment
+(including its comment-ID-bound terminal marker) before recording it done. A
+failed run, a run skipped because the enable variable is now false, or a fresh
+comment with no workflow response remains owed; record it as still-owed, not
+done. Every inventoried comment must end with either this verified effect or an
+operator-recorded skip with a reason; an empty result must be recorded too.
+Never silently drop an entry.
 
 ## Cost/budget caps — N/A by billing model (D102)
 
