@@ -20,7 +20,11 @@ import {
   main,
   type GithubRequest,
 } from "../../scripts/factory/apply-owner-task.mts";
-import { buildTaskApplyMarker } from "../../scripts/factory/owner-task-patch-logic.mts";
+import {
+  buildTaskApplyNoticeMarker,
+  buildTaskApplySuccessMarker,
+  buildTaskTrailer,
+} from "../../scripts/factory/owner-task-patch-logic.mts";
 
 const REPOSITORY = "syamaner/roastpilot-cloud";
 const PR_NUMBER = 9;
@@ -110,7 +114,7 @@ function prWithHeadSha(sha: string): Record<string, unknown> {
 function contentCommit(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     sha: APPLIED_COMMIT_SHA,
-    commit: { tree: { sha: TREE_OID } },
+    commit: { message: "applied", tree: { sha: TREE_OID } },
     parents: [{ sha: HEAD_SHA }],
     ...overrides,
   };
@@ -201,7 +205,9 @@ function requestHarness(overrides: {
         : overrides.comparison ?? { status: "behind" };
     } else if (path.endsWith(`/pulls/${PR_NUMBER}`)) {
       if (overrides.pullRequestError !== undefined) throw overrides.pullRequestError;
-      response = overrides.pullRequest ?? eligiblePr();
+      response = typeof overrides.pullRequest === "function"
+        ? overrides.pullRequest(path)
+        : overrides.pullRequest ?? eligiblePr();
     } else if (path.includes(`/issues/${PR_NUMBER}/comments?`)) {
       response = overrides.comments ?? [];
     } else {
@@ -318,7 +324,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("owner task was truncated");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
     expect(readFileSync(outputPath, "utf8")).not.toContain("base_sha=");
   });
@@ -333,7 +339,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("no actionable task description");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
   });
 
@@ -389,7 +395,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("repository default branch");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
     expect(calls.some((call) => call.path.includes("/branches/"))).toBe(false);
@@ -413,7 +419,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(postedBody(calls)).toContain(
       "base is not the repository default branch",
     );
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
     expect(calls.some((call) => call.path.includes("/branches/"))).toBe(false);
@@ -451,7 +457,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("head is protected");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
   });
@@ -605,7 +611,7 @@ describe("apply-owner-task phase entrypoint", () => {
     writeFileSync(
       join(analysisDir, "failed"),
       Array.from({ length: 20 }, (_, index) =>
-        `reason ${index} @codex review <!-- owner-task-apply: 101 --> ${"x".repeat(2000)}`
+        `reason ${index} @codex review <!-- owner-task-apply-success: 101 --> ${"x".repeat(2000)}`
       ).join("\n"),
     );
     const { request, calls } = requestHarness();
@@ -620,8 +626,9 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(body).toContain("Reasons shown:");
     expect(body).toContain("reason(s) omitted");
     expect(body).toContain("[codex trigger removed]");
-    expect(body.match(/<!-- owner-task-apply: 101 -->/g)).toHaveLength(1);
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.match(/<!-- owner-task-apply-notice: 101 -->/g)).toHaveLength(1);
+    expect(body).not.toContain(buildTaskApplySuccessMarker(COMMENT_ID));
+    expect(body.endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
   });
 
@@ -641,7 +648,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("snapshot is stale");
     expect(postedBody(calls)).not.toContain("Applied-head roster re-validation");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
   });
 
@@ -666,6 +673,207 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toEqual([]);
     expect(planFiles()).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
+    expect(calls.filter((call) => call.path.endsWith(`/pulls/${PR_NUMBER}`)))
+      .toHaveLength(2);
+  });
+
+  it("R3a records one honest late success when recognition finds the trailer", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: {
+            message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+            tree: { sha: TREE_OID },
+          },
+        })],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    const body = postedBody(calls);
+    expect(body).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
+    expect(body).toContain(APPLIED_HEAD_CAVEAT);
+    expect(body).toContain("produced by content recognition on a replay");
+    expect(body).toContain("advisory patch annotations are unavailable");
+    expect(body.endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);
+    expect(calls.filter((call) => call.path.endsWith(`/pulls/${PR_NUMBER}`)))
+      .toHaveLength(2);
+  });
+
+  it("T-A5c recognition uses a retarget notice from the fresh base", async () => {
+    let pullFetches = 0;
+    const freshRetargetedPullRequest = eligiblePr({
+      head: {
+        sha: APPLIED_COMMIT_SHA,
+        ref: "feature/owner-task",
+        repo: { full_name: REPOSITORY, default_branch: "main" },
+      },
+      base: {
+        sha: BASE_SHA,
+        ref: "feature/retargeted-base",
+        repo: { full_name: REPOSITORY, default_branch: "main" },
+      },
+    });
+    const { request, calls } = requestHarness({
+      pullRequest: () => {
+        pullFetches += 1;
+        return pullFetches === 1
+          ? prWithHeadSha(APPLIED_COMMIT_SHA)
+          : freshRetargetedPullRequest;
+      },
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: {
+            message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+            tree: { sha: TREE_OID },
+          },
+        })],
+      },
+    });
+
+    await main(request);
+
+    expect(pullFetches).toBe(2);
+    expect(posts(calls)).toHaveLength(1);
+    const body = postedBody(calls);
+    expect(body).toContain("base was retargeted after admission");
+    expect(body).toContain("Do NOT merge");
+    expect(body).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
+    expect(body).toContain("retarget notice was produced by content recognition");
+    expect(body).not.toContain("applied successfully");
+    expect(body).not.toContain(buildTaskApplySuccessMarker(COMMENT_ID));
+    expect(body.endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
+  });
+
+  it("R3a late-success record converges without another post on re-replay", async () => {
+    const firstRun = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: {
+            message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+            tree: { sha: TREE_OID },
+          },
+        })],
+      },
+    });
+    await main(firstRun.request);
+    const body = postedBody(firstRun.calls);
+
+    const replay = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comments: [{ user: { login: "github-actions[bot]" }, body }],
+      comparison: (path: string) => {
+        if (path.endsWith(
+          `/compare/${APPLIED_COMMIT_SHA}...${APPLIED_COMMIT_SHA}`,
+        )) return { status: "identical" };
+        throw new Error("content recognition must not run after the success record");
+      },
+    });
+
+    await main(replay.request);
+
+    expect(posts(replay.calls)).toEqual([]);
+    expect(replay.calls.filter((call) => call.path.includes("/compare/")))
+      .toHaveLength(1);
+  });
+
+  it.each([
+    [
+      "forbidden-path",
+      {
+        nameStatus: "M\0.github/workflows/evil.yml\0",
+        numstat: "1\t0\t.github/workflows/evil.yml\0",
+      },
+    ],
+    [
+      "envelope-violating",
+      { numstat: "401\t0\tlib/change.ts\0" },
+    ],
+  ])("recognition refuses inadmissible authoritative analysis: %s", async (
+    _name,
+    analysis,
+  ) => {
+    writeAnalysis(analysis);
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: {
+            message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+            tree: { sha: TREE_OID },
+          },
+        })],
+      },
+    });
+
+    await main(request);
+
+    expect(calls.some((call) => call.path.includes("/compare/"))).toBe(false);
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(postedBody(calls)).not.toContain("Applied-Commit:");
+    expect(postedBody(calls)).not.toContain(buildTaskApplySuccessMarker(COMMENT_ID));
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID)))
+      .toBe(true);
+  });
+
+  it("F7 recognition with a drifted fresh head posts stale, not success", async () => {
+    let pullFetches = 0;
+    const { request, calls } = requestHarness({
+      pullRequest: () => {
+        pullFetches += 1;
+        return pullFetches === 1
+          ? prWithHeadSha(APPLIED_COMMIT_SHA)
+          : prWithHeadSha(DRIFTED_HEAD_SHA);
+      },
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: {
+            message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+            tree: { sha: TREE_OID },
+          },
+        })],
+      },
+    });
+
+    await main(request);
+
+    expect(pullFetches).toBe(2);
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(postedBody(calls)).not.toContain("Applied-Commit:");
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID)))
+      .toBe(true);
+  });
+
+  it("non-string recognised commit message fails closed without posting", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({
+          commit: { message: 7, tree: { sha: TREE_OID } },
+        })],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(/malformed comparison commit message/u);
+    expect(posts(calls)).toEqual([]);
   });
 
   it("T2/G2 keeps stale when only the tree matches", async () => {
@@ -712,7 +920,9 @@ describe("apply-owner-task phase entrypoint", () => {
       comparison: {
         status: "ahead",
         total_commits: 1,
-        commits: [contentCommit({ commit: { tree: { sha: wrongTree } } })],
+        commits: [contentCommit({
+          commit: { message: "applied", tree: { sha: wrongTree } },
+        })],
       },
     });
 
@@ -728,10 +938,15 @@ describe("apply-owner-task phase entrypoint", () => {
     ["non-record entry", null],
     ["bad commit SHA", contentCommit({ sha: "e".repeat(39) })],
     ["non-record commit", contentCommit({ commit: null })],
-    ["non-record tree", contentCommit({ commit: { tree: null } })],
+    [
+      "non-record tree",
+      contentCommit({ commit: { message: "applied", tree: null } }),
+    ],
     [
       "bad tree SHA",
-      contentCommit({ commit: { tree: { sha: "c".repeat(39) } } }),
+      contentCommit({
+        commit: { message: "applied", tree: { sha: "c".repeat(39) } },
+      }),
     ],
     ["non-array parents", contentCommit({ parents: null })],
     ["non-record parent", contentCommit({ parents: [null] })],
@@ -914,12 +1129,12 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(existsSync(outputPath)).toBe(false);
   });
 
-  it("T9 keeps marker replay ahead of content recognition", async () => {
+  it("T9 keeps marker replay ahead of content recognition with no late POST", async () => {
     const { request, calls } = requestHarness({
       pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       comparison: (path: string) => {
         if (path.endsWith(`/compare/${APPLIED_COMMIT_SHA}...${APPLIED_COMMIT_SHA}`)) {
@@ -943,6 +1158,41 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toEqual([]);
     expect(planFiles()).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("R3a records a content-equal replacement after an orphaned prior success", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body: `old\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
+      }],
+      appliedCommit: (path: string) => ({
+        sha: path.endsWith(ORPHANED_COMMIT_SHA)
+          ? ORPHANED_COMMIT_SHA
+          : APPLIED_COMMIT_SHA,
+      }),
+      comparison: (path: string) => path.endsWith(`...${ORPHANED_COMMIT_SHA}`)
+        ? { status: "diverged" }
+        : {
+          status: "ahead",
+          total_commits: 1,
+          commits: [contentCommit({
+            commit: {
+              message: `applied\n\n${buildTaskTrailer(COMMENT_ID)}`,
+              tree: { sha: TREE_OID },
+            },
+          })],
+        },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
+    expect(postedBody(calls)).not.toContain(`Applied-Commit: ${ORPHANED_COMMIT_SHA}`);
+    expect(postedBody(calls).endsWith(buildTaskApplySuccessMarker(COMMENT_ID)))
+      .toBe(true);
   });
 
   it("T10 keeps a base-only drift stale on an identical comparison", async () => {
@@ -995,7 +1245,7 @@ describe("apply-owner-task phase entrypoint", () => {
           contentCommit(),
           contentCommit({
             sha: DRIFTED_HEAD_SHA,
-            commit: { tree: { sha: OTHER_SHA } },
+            commit: { message: "later", tree: { sha: OTHER_SHA } },
             parents: [{ sha: APPLIED_COMMIT_SHA }],
           }),
         ],
@@ -1046,7 +1296,7 @@ describe("apply-owner-task phase entrypoint", () => {
     mkdirSync(planDir);
     writeFileSync(
       join(planDir, "annotations.json"),
-      JSON.stringify({ note: "@codex review <!-- owner-task-apply: 101 -->" }),
+      JSON.stringify({ note: "@codex review <!-- owner-task-apply-notice: 101 -->" }),
     );
     writeFileSync(join(planDir, "applied_commit"), `${APPLIED_COMMIT_SHA}\n`);
     writeFileSync(join(planDir, "tree_oid"), TREE_OID);
@@ -1075,8 +1325,8 @@ describe("apply-owner-task phase entrypoint", () => {
     ]);
     expect(body).toContain("[codex trigger removed]");
     expect(body).not.toMatch(/@codex review/u);
-    expect(body.match(/<!-- owner-task-apply: 101 -->/g)).toHaveLength(1);
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.match(/<!-- owner-task-apply-success: 101 -->/g)).toHaveLength(1);
+    expect(body.endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);
 
     const replay = requestHarness({
       comments: [{
@@ -1108,7 +1358,7 @@ describe("apply-owner-task phase entrypoint", () => {
       body.indexOf("Reasons shown:"),
     );
     expect(body).toContain("[truncated,");
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);
   });
 
   it("T-A5 finalize records an honest marker-bearing notice after a base retarget", async () => {
@@ -1143,7 +1393,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(body).not.toContain("applied successfully");
     expect(body).not.toContain("branch protection blocks merge");
     expect(body).not.toMatch(/@codex review/u);
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
 
     const replay = requestHarness({
       pullRequest: retargetedPullRequest,
@@ -1153,7 +1403,9 @@ describe("apply-owner-task phase entrypoint", () => {
       }],
     });
     await main(replay.request);
-    expect(posts(replay.calls)).toEqual([]);
+    expect(posts(replay.calls)).toHaveLength(1);
+    expect(postedBody(replay.calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID)))
+      .toBe(true);
     expect(replay.calls.some((call) =>
       call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)
     )).toBe(true);
@@ -1184,7 +1436,7 @@ describe("apply-owner-task phase entrypoint", () => {
     ]);
     expect(body).not.toContain("applied successfully");
     expect(body).not.toContain("branch protection blocks merge");
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
   });
 
   it("finalize fails closed on malformed bot-owned comment state", async () => {
@@ -1230,7 +1482,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(postedBody(calls)).toContain("source is stale");
     expect(postedBody(calls)).not.toContain("applied successfully");
     expect(postedBody(calls)).not.toContain("Applied-head roster re-validation");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(calls.some((call) => call.path.includes(`/commits/${APPLIED_COMMIT_SHA}`)))
       .toBe(false);
   });
@@ -1241,7 +1493,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `prior stale notice\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `prior stale notice\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
       }],
       comment: { body: "@claude question changed", user: { login: "syamaner" } },
     });
@@ -1278,7 +1530,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("source");
     expect(postedBody(calls)).toContain("success was not recorded");
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
   });
 
   it.each([
@@ -1356,7 +1608,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
       expect(posts(calls)).toHaveLength(1);
       expect(postedBody(calls)).toContain("no actionable task description");
-      expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+      expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
       expect(planFiles()).toEqual([]);
       expect(existsSync(outputPath)).toBe(false);
     },
@@ -1431,7 +1683,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("rejected at patch-analysis");
     expect(postedBody(calls)).toContain(reason);
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
   });
 
@@ -1442,7 +1694,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `done\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `done\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
       }],
     });
 
@@ -1450,6 +1702,9 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toEqual([]);
     expect(planFiles()).toEqual([]);
+    expect(calls.filter((call) => call.path.endsWith(`/pulls/${PR_NUMBER}`)))
+      .toHaveLength(1);
+    expect(calls.some((call) => call.path.includes("/compare/"))).toBe(false);
   });
 
   it("marker replay with a reachable recorded SHA converges without re-applying", async () => {
@@ -1466,7 +1721,7 @@ describe("apply-owner-task phase entrypoint", () => {
         },
         {
           user: { login: "github-actions[bot]" },
-          body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         },
       ],
     });
@@ -1479,6 +1734,50 @@ describe("apply-owner-task phase entrypoint", () => {
       .toBe(true);
     expect(calls.some((call) => call.path.includes(`/compare/${HEAD_SHA}...${APPLIED_COMMIT_SHA}`)))
       .toBe(true);
+    expect(calls.filter((call) => call.path.endsWith(`/pulls/${PR_NUMBER}`)))
+      .toHaveLength(1);
+  });
+
+  it("authenticated marker replay converges even when a fresh fetch would drift", async () => {
+    let pullFetches = 0;
+    const { request, calls } = requestHarness({
+      pullRequest: () => {
+        pullFetches += 1;
+        return pullFetches === 1 ? eligiblePr() : prWithHeadSha(DRIFTED_HEAD_SHA);
+      },
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
+      }],
+    });
+
+    await main(request);
+
+    expect(pullFetches).toBe(1);
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("F7 recognition malformed fresh head SHA fails closed without posting", async () => {
+    let pullFetches = 0;
+    const { request, calls } = requestHarness({
+      pullRequest: () => {
+        pullFetches += 1;
+        return pullFetches === 1
+          ? prWithHeadSha(APPLIED_COMMIT_SHA)
+          : prWithHeadSha("not-a-full-sha");
+      },
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit()],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(/malformed pull-request head SHA/u);
+    expect(pullFetches).toBe(2);
+    expect(posts(calls)).toEqual([]);
   });
 
   it("marker replay uses the newest matching bot marker SHA", async () => {
@@ -1489,11 +1788,11 @@ describe("apply-owner-task phase entrypoint", () => {
       comments: [
         {
           user: { login: "github-actions[bot]" },
-          body: `old\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `old\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         },
         {
           user: { login: "github-actions[bot]" },
-          body: `new\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `new\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         },
       ],
     });
@@ -1513,11 +1812,11 @@ describe("apply-owner-task phase entrypoint", () => {
       comments: [
         {
           user: { login: "github-actions[bot]" },
-          body: `applied\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `applied\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         },
         {
           user: { login: "github-actions[bot]" },
-          body: `Owner task rejected: stale input.\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `Owner task rejected: stale input.\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
         },
       ],
       comparison: { status: "diverged" },
@@ -1540,7 +1839,7 @@ describe("apply-owner-task phase entrypoint", () => {
       const { request, calls } = requestHarness({
         comments: [{
           user: { login: "github-actions[bot]" },
-          body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         }],
         comparison: { status },
       });
@@ -1557,7 +1856,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       appliedCommitError: new GithubApiError(
         "GET",
@@ -1577,7 +1876,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       comparisonError: new GithubApiError(
         "GET",
@@ -1609,7 +1908,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       ...overrides,
     });
@@ -1628,11 +1927,11 @@ describe("apply-owner-task phase entrypoint", () => {
       comments: [
         {
           user: { login: "attacker" },
-          body: `Applied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `Applied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
         },
         {
           user: { login: "github-actions[bot]" },
-          body: `legacy success\n${buildTaskApplyMarker(COMMENT_ID)}`,
+          body: `legacy success\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
         },
       ],
     });
@@ -1645,6 +1944,23 @@ describe("apply-owner-task phase entrypoint", () => {
       .toBe(false);
   });
 
+  it("markerAppliedCommit ignores an Applied-Commit line on a bot notice", async () => {
+    const { request, calls } = requestHarness({
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body: `retarget\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
+      }],
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toEqual([]);
+    expect(calls.some((call) => call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)))
+      .toBe(false);
+    expect(calls.filter((call) => call.path.endsWith(`/pulls/${PR_NUMBER}`)))
+      .toHaveLength(1);
+  });
+
   it("N9 marker replay converges before the >100-commit window guard", async () => {
     rmSync(bindingPath);
     rmSync(patchPath);
@@ -1653,7 +1969,7 @@ describe("apply-owner-task phase entrypoint", () => {
       pullRequest: eligiblePr({ commits: 101 }),
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `already converged\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `already converged\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
       }],
     });
 
@@ -1778,7 +2094,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `already done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `already done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
     });
 
@@ -1791,13 +2107,37 @@ describe("apply-owner-task phase entrypoint", () => {
       .toBe(false);
   });
 
+  it("finalize recorded success skips even when a fresh fetch would drift", async () => {
+    vi.stubEnv("APPLY_PHASE", "finalize");
+    writeFinalizeArtifacts();
+    let pullFetches = 0;
+    const { request, calls } = requestHarness({
+      pullRequest: () => {
+        pullFetches += 1;
+        return pullFetches === 1 ? eligiblePr() : prWithHeadSha(DRIFTED_HEAD_SHA);
+      },
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body: `already done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
+      }],
+    });
+
+    await main(request);
+
+    expect(pullFetches).toBe(1);
+    expect(calls.filter((call) =>
+      call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)
+    )).toHaveLength(1);
+    expect(posts(calls)).toEqual([]);
+  });
+
   it("finalize re-records a valid replacement after the prior marker commit is orphaned", async () => {
     vi.stubEnv("APPLY_PHASE", "finalize");
     writeFinalizeArtifacts();
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `old success\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `old success\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       appliedCommit: (path: string) => path.endsWith(ORPHANED_COMMIT_SHA)
         ? { sha: ORPHANED_COMMIT_SHA }
@@ -1818,7 +2158,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);
     expect(calls.some((call) => call.path.endsWith(`/commits/${ORPHANED_COMMIT_SHA}`)))
       .toBe(true);
     expect(calls.some((call) => call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)))
@@ -1831,7 +2171,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `legacy success\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `legacy success\n${buildTaskApplyNoticeMarker(COMMENT_ID)}`,
       }],
     });
 
@@ -1839,7 +2179,7 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
-    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(postedBody(calls).endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);
   });
 
   it("finalize fails closed when existing-marker reachability errors", async () => {
@@ -1847,7 +2187,7 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({
       comments: [{
         user: { login: "github-actions[bot]" },
-        body: `old success\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+        body: `old success\nApplied-Commit: ${ORPHANED_COMMIT_SHA}\n${buildTaskApplySuccessMarker(COMMENT_ID)}`,
       }],
       appliedCommitError: new Error("existing marker reachability failed"),
     });

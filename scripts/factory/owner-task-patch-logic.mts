@@ -141,14 +141,24 @@ export function parseTaskBinding(raw: string): TaskBinding {
   };
 }
 
-/** Build the task-application marker, deliberately distinct from 9e. */
-export function buildTaskApplyMarker(commentId: number): string {
-  // MUTATION-CHECK: removing this identifier guard fails "builds the distinct
-  // marker and exact commit trailer" for zero and could emit ambiguity.
+function requireTaskCommentId(commentId: number): void {
+  // MUTATION-CHECK: removing this identifier guard fails "builds byte-distinct
+  // success/notice markers with guarded identifiers" and could emit ambiguity.
   if (!Number.isSafeInteger(commentId) || commentId <= 0) {
     throw new RangeError("commentId must be a positive safe integer");
   }
-  return `<!-- owner-task-apply: ${commentId} -->`;
+}
+
+/** Build the task-application success marker, deliberately distinct from 9e. */
+export function buildTaskApplySuccessMarker(commentId: number): string {
+  requireTaskCommentId(commentId);
+  return `<!-- owner-task-apply-success: ${commentId} -->`;
+}
+
+/** Build the task-application notice marker, deliberately distinct from success. */
+export function buildTaskApplyNoticeMarker(commentId: number): string {
+  requireTaskCommentId(commentId);
+  return `<!-- owner-task-apply-notice: ${commentId} -->`;
 }
 
 function bodyEndsWithStandaloneMarker(body: string, marker: string): boolean {
@@ -162,7 +172,8 @@ export function hasExistingTaskApply(
   commentId: number,
   botLogin: string,
 ): boolean {
-  const marker = buildTaskApplyMarker(commentId);
+  const successMarker = buildTaskApplySuccessMarker(commentId);
+  const noticeMarker = buildTaskApplyNoticeMarker(commentId);
   // MUTATION-CHECK: returning false for malformed persisted state fails N22's
   // malformed-fetch case and could duplicate an already-applied task.
   if (!Array.isArray(comments)) {
@@ -181,15 +192,18 @@ export function hasExistingTaskApply(
     if (typeof comment.body !== "string") {
       throw new TypeError("bot-authored comment has a malformed body");
     }
-    // MUTATION-CHECK: accepting the 9e grammar or a non-terminal/glued marker
-    // fails N22's marker-distinctness and standalone-final-line cases.
-    if (bodyEndsWithStandaloneMarker(comment.body, marker)) return true;
+    // MUTATION-CHECK: accepting the retired/9e grammars or a non-terminal/glued
+    // marker fails N22's closed-grammar and standalone-final-line cases.
+    if (
+      bodyEndsWithStandaloneMarker(comment.body, successMarker) ||
+      bodyEndsWithStandaloneMarker(comment.body, noticeMarker)
+    ) return true;
   }
   return false;
 }
 
 export function buildTaskTrailer(commentId: number): string {
-  buildTaskApplyMarker(commentId);
+  requireTaskCommentId(commentId);
   return `Owner-Task-Comment: ${commentId}`;
 }
 
@@ -224,12 +238,12 @@ export function findTaskTrailerCommit(
   return false;
 }
 
-/** Neutralise both owner-command marker grammars after safe rendering. */
+/** Neutralise all current and retired owner-task marker grammars after rendering. */
 export function neutralizeTaskMarkers(rendered: string): string {
-  // MUTATION-CHECK: narrowing either alternative fails N21 and could forge
-  // replay evidence when rendered owner-controlled text is posted.
+  // MUTATION-CHECK: narrowing the optional suffixed task alternatives fails
+  // N21's four-grammar count and could forge replay evidence in rendered text.
   return rendered.replace(
-    /<!-- owner-(?:command-response|task-apply): \d+ -->/g,
+    /<!-- owner-(?:command-response|task-apply(?:-success|-notice)?): \d+ -->/g,
     TASK_MARKER_SPOOF_REMOVED,
   );
 }
@@ -283,6 +297,21 @@ function hasValidAnalysisShape(
     (stat.sourcePath === undefined || typeof stat.sourcePath === "string") &&
     (stat.additions === null || typeof stat.additions === "number") &&
     (stat.deletions === null || typeof stat.deletions === "number")
+  );
+}
+
+export function isRecognizableAppliedAnalysis(
+  analysis: AuthoritativePatchAnalysis,
+  expectedBaseSha: string,
+): boolean {
+  // MUTATION-CHECK: "recognition refuses inadmissible authoritative analysis"
+  // kills removal of the shared forbidden-path or envelope admission gates.
+  return (
+    hasValidAnalysisShape(analysis) &&
+    analysis.changedPaths.length > 0 &&
+    analysis.baseSha === expectedBaseSha &&
+    findForbiddenPatchPaths(analysis.changedPaths).length === 0 &&
+    findFactoryPatchEnvelopeViolations(analysis.lineStats).length === 0
   );
 }
 

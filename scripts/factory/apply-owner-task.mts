@@ -15,10 +15,12 @@ import { GithubApiError, githubRequest, requireEnv } from "./github-api.mts";
 import { isPullRequestIssue } from "./owner-command-logic.mts";
 import {
   MAX_TRAILER_COMMIT_WINDOW,
-  buildTaskApplyMarker,
+  buildTaskApplyNoticeMarker,
+  buildTaskApplySuccessMarker,
   buildTaskTrailer,
   decideOwnerTaskPatch,
   hasExistingTaskApply,
+  isRecognizableAppliedAnalysis,
   neutralizeTaskMarkers,
   parseTaskBinding,
   type OwnerTaskGamingAnnotations,
@@ -298,7 +300,7 @@ function markerAppliedCommit(
   commentId: number,
   botLogin: string,
 ): string | null {
-  const marker = buildTaskApplyMarker(commentId);
+  const marker = buildTaskApplySuccessMarker(commentId);
   let newestAppliedCommit: string | null = null;
   for (const comment of comments) {
     if (!isRecord(comment) || !isRecord(comment.user)) continue;
@@ -321,16 +323,34 @@ type AppliedCommitReachability =
   | { readonly status: "reachable"; readonly commit: Record<string, unknown> }
   | { readonly status: "not-reachable" };
 
+function requireHeadSha(pullRequest: Record<string, unknown>): string {
+  const head = pullRequest.head;
+  // MUTATION-CHECK: "F7 malformed fresh head SHA fails closed without posting"
+  // kills weakened record, string, and full-lowercase-SHA validation here.
+  if (!isRecord(head) || typeof head.sha !== "string" || !FULL_SHA_PATTERN.test(head.sha)) {
+    throw new TypeError("GitHub API returned a malformed pull-request head SHA");
+  }
+  return head.sha;
+}
+
+async function fetchPullRequestIfHeadStillCurrent(
+  request: GithubRequest,
+  environment: Environment,
+  evidenceHeadSha: string,
+): Promise<Record<string, unknown> | null> {
+  const freshPullRequest = await fetchPullRequest(request, environment);
+  return requireHeadSha(freshPullRequest) === evidenceHeadSha
+    ? freshPullRequest
+    : null;
+}
+
 async function checkAppliedCommitReachability(
   request: GithubRequest,
   environment: Environment,
   pullRequest: Record<string, unknown>,
   appliedCommit: string,
 ): Promise<AppliedCommitReachability> {
-  const head = pullRequest.head;
-  if (!isRecord(head) || typeof head.sha !== "string" || !/^[0-9a-f]{40}$/.test(head.sha)) {
-    throw new TypeError("GitHub API returned a malformed pull-request head SHA");
-  }
+  const headSha = requireHeadSha(pullRequest);
   let rawAppliedCommit: unknown;
   try {
     rawAppliedCommit = await request<unknown>(
@@ -353,7 +373,7 @@ async function checkAppliedCommitReachability(
     "GET",
     // Compare current head as the base and applied commit as the head: a
     // `behind` result means the applied commit is an ancestor of current head.
-    `${environment.repositoryPath}/compare/${head.sha}...${appliedCommit}`,
+    `${environment.repositoryPath}/compare/${headSha}...${appliedCommit}`,
   );
   const comparison = fetchedRecord(rawComparison, "commit comparison");
   if (comparison.status === "behind" || comparison.status === "identical") {
@@ -371,7 +391,7 @@ async function findContentAppliedCommit(
   currentHeadSha: string,
   expectedParent: string,
   expectedTree: string,
-): Promise<string | null> {
+): Promise<{ readonly sha: string; readonly message: string } | null> {
   let rawComparison: unknown;
   try {
     rawComparison = await request<unknown>(
@@ -424,7 +444,7 @@ async function findContentAppliedCommit(
   }
 
   // MUTATION-CHECK: F5 requires scanning every entry after recording a match.
-  const matchedShas: string[] = [];
+  const matches: { sha: string; message: string }[] = [];
   for (const rawCommit of commits) {
     // MUTATION-CHECK: T4 rejects a non-record comparison entry.
     if (!isRecord(rawCommit)) {
@@ -438,6 +458,11 @@ async function findContentAppliedCommit(
     // MUTATION-CHECK: T4 rejects a malformed nested commit record.
     if (!isRecord(commit)) {
       throw new TypeError("GitHub API returned a malformed comparison commit data");
+    }
+    // MUTATION-CHECK: "non-string recognised commit message fails closed"
+    // kills omission or weakening of the nested message evidence guard.
+    if (typeof commit.message !== "string") {
+      throw new TypeError("GitHub API returned a malformed comparison commit message");
     }
     const tree = commit.tree;
     // MUTATION-CHECK: T4 rejects a malformed or non-full comparison tree SHA.
@@ -464,9 +489,9 @@ async function findContentAppliedCommit(
     if (parent.sha !== expectedParent) continue;
     // MUTATION-CHECK: T3 kills weakened, prefix, or case-folded tree matching.
     if (tree.sha !== expectedTree) continue;
-    matchedShas.push(rawCommit.sha);
+    matches.push({ sha: rawCommit.sha, message: commit.message });
   }
-  return matchedShas.at(0) ?? null;
+  return matches.at(0) ?? null;
 }
 
 function requireCommitCount(pullRequest: Record<string, unknown>): number {
@@ -609,8 +634,16 @@ export function buildBoundedMarkedComment(
   heading: string,
   reasons: readonly string[],
   commentId: number,
+  sentinel: "success" | "notice",
 ): string {
-  const marker = buildTaskApplyMarker(commentId);
+  // MUTATION-CHECK: "rejects an unknown comment sentinel at runtime" kills a
+  // type-only/open-ended sentinel selection at this trust boundary.
+  if (sentinel !== "success" && sentinel !== "notice") {
+    throw new TypeError("owner-task comment sentinel must be success or notice");
+  }
+  const marker = sentinel === "success"
+    ? buildTaskApplySuccessMarker(commentId)
+    : buildTaskApplyNoticeMarker(commentId);
   const rendered = reasons.slice(0, MAX_NOTICE_REASONS).map((reason) =>
     neutralizeTaskMarkers(renderBoundedUntrustedReason(
       reason,
@@ -667,6 +700,7 @@ async function postBlankTaskNotice(
     "**Owner task rejected: no actionable task description.**",
     ["the owner task payload is empty or whitespace-only; re-issue it with a concrete change"],
     environment.commentId,
+    "notice",
   ));
 }
 
@@ -678,6 +712,7 @@ async function postTruncatedTaskNotice(
     "**Owner task rejected: task description was truncated.**",
     ["owner task was truncated; reissue a shorter command"],
     environment.commentId,
+    "notice",
   ));
 }
 
@@ -692,6 +727,7 @@ async function postFinalizeStaleNotice(
     "**Owner task source is stale; success was not recorded.**",
     [reason],
     environment.commentId,
+    "notice",
   ));
 }
 
@@ -716,6 +752,7 @@ async function handleNonApplyDecision(
       `**Owner task patch rejected at ${decision.stage}.**`,
       decision.reasons,
       environment.commentId,
+      "notice",
     ));
     return;
   }
@@ -723,6 +760,7 @@ async function handleNonApplyDecision(
     "**Owner task snapshot is stale; no patch was applied.**",
     staleReasons(decision),
     environment.commentId,
+    "notice",
   ));
 }
 
@@ -854,6 +892,26 @@ function writeApplyPlan(
   for (const [name, value] of Object.entries(files)) {
     writeFileSync(join(planDir, name), value, "utf8");
   }
+}
+
+function buildSuccessRecordHeading(appliedCommit: string): string {
+  return [
+    "**Owner task patch applied successfully. The applied head is NOT yet re-validated.**",
+    "",
+    `Applied-Commit: ${appliedCommit}`,
+    "",
+    "This commit was pushed with the built-in GITHUB_TOKEN, which does not auto-trigger downstream workflows: no required check (CI, CodeQL) and no review lens (Claude, Codex) has run on this head. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-trigger the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.",
+  ].join("\n");
+}
+
+function buildRetargetNoticeHeading(appliedCommit: string): string {
+  return [
+    "**Owner task patch applied, but the pull-request base was retargeted after admission.**",
+    "",
+    `Applied-Commit: ${appliedCommit}`,
+    "",
+    "The pull-request base was retargeted away from the protected default branch after admission, so the branch-protection re-validation guarantee no longer holds. Do NOT merge. Retarget the pull-request base back to the repository default branch, then close and reopen the pull request to re-run the required checks on the applied head. There is no alternate-base path.",
+  ].join("\n");
 }
 
 async function prepare(
@@ -1053,32 +1111,72 @@ async function decide(
       // MUTATION-CHECK: T7 requires an ok analysis byte-bound to the reviewed head.
       if (
         replayAnalysis.status === "ok" &&
-        replayAnalysis.analysis.baseSha === beforeAnalysis.expectedHeadSha
+        replayAnalysis.analysis.baseSha === beforeAnalysis.expectedHeadSha &&
+        isRecognizableAppliedAnalysis(
+          replayAnalysis.analysis,
+          beforeAnalysis.expectedHeadSha,
+        )
       ) {
-        const head = pullRequest.head;
-        /* v8 ignore next 3 -- decideOwnerTaskPatch already validates this SHA before producing stale-notice; repeat the boundary check before using it in the API path. */
-        if (!isRecord(head) || typeof head.sha !== "string" || !FULL_SHA_PATTERN.test(head.sha)) {
-          throw new TypeError("GitHub API returned a malformed pull-request head SHA");
-        }
+        const headSha = requireHeadSha(pullRequest);
         const contentAppliedCommit = await findContentAppliedCommit(
           request,
           environment,
-          head.sha,
+          headSha,
           beforeAnalysis.expectedHeadSha,
           replayAnalysis.analysis.treeOid,
         );
-        // MUTATION-CHECK: T1 requires recognition before stale handling and no side effects.
+        // MUTATION-CHECK: "F7 recognition with a drifted fresh head posts stale,
+        // not success" kills this bracket around content-recognition evidence.
         if (contentAppliedCommit !== null) {
-          const markerReplay = decideOwnerTaskPatch({
-            ...ignoredInput(issue, pullRequest, author, commentBody, environment),
-            markerPresent: true,
-          });
-          /* v8 ignore next 3 -- markerPresent on ignored input must produce the existing no-op-success terminal. */
-          if (markerReplay.kind !== "no-op-success") {
-            throw new Error("content-applied replay unexpectedly missed no-op success");
+          const freshPullRequest = await fetchPullRequestIfHeadStillCurrent(
+            request,
+            environment,
+            headSha,
+          );
+          if (freshPullRequest !== null) {
+            const markerReplay = decideOwnerTaskPatch({
+              ...ignoredInput(issue, pullRequest, author, commentBody, environment),
+              markerPresent: true,
+            });
+            /* v8 ignore next 3 -- markerPresent on ignored input must produce the existing no-op-success terminal. */
+            if (markerReplay.kind !== "no-op-success") {
+              throw new Error("content-applied replay unexpectedly missed no-op success");
+            }
+            await handleNonApplyDecision(request, environment, markerReplay);
+            const expectedTrailer = buildTaskTrailer(environment.commentId);
+            // MUTATION-CHECK: "R3a records one honest late success when
+            // recognition finds the trailer" plus T1/T9 kill either weakened
+            // trailer admission or duplicate-success suppression here.
+            if (
+              contentAppliedCommit.message.split(/\r?\n/).some(
+                (line) => line.trim() === expectedTrailer,
+              ) &&
+              recordedCommit !== contentAppliedCommit.sha
+            ) {
+              const freshBaseRef = requireBaseRef(freshPullRequest);
+              const freshDefaultBranch = requireRepositoryDefaultBranch(
+                freshPullRequest,
+              );
+              // MUTATION-CHECK: "T-A5c recognition uses a retarget notice from
+              // the fresh base" kills omission or stale-snapshot base checking.
+              const retargeted = freshBaseRef !== freshDefaultBranch;
+              await postComment(request, environment, buildBoundedMarkedComment(
+                retargeted
+                  ? buildRetargetNoticeHeading(contentAppliedCommit.sha)
+                  : buildSuccessRecordHeading(contentAppliedCommit.sha),
+                retargeted
+                  ? [
+                    "This retarget notice was produced by content recognition on a replay; the original run's advisory patch annotations are unavailable on this path.",
+                  ]
+                  : [
+                    "This success record was produced by content recognition on a replay; the original run's advisory patch annotations are unavailable on this path.",
+                  ],
+                environment.commentId,
+                retargeted ? "notice" : "success",
+              ));
+            }
+            return;
           }
-          await handleNonApplyDecision(request, environment, markerReplay);
-          return;
         }
       }
     }
@@ -1100,6 +1198,7 @@ async function decide(
       "**Owner task patch rejected at replay-window.**",
       ["PR has too many commits for the owner-task replay window; reduce commits and re-issue"],
       environment.commentId,
+      "notice",
     ));
     return;
   }
@@ -1114,6 +1213,7 @@ async function decide(
         "the pull-request base is not the repository default branch; owner-task apply targets pull requests into the protected default branch",
       ],
       environment.commentId,
+      "notice",
     ));
     return;
   }
@@ -1122,6 +1222,7 @@ async function decide(
       "**Owner task patch rejected at branch-boundary.**",
       ["the pull-request head is the repository default branch; use an unprotected topic branch"],
       environment.commentId,
+      "notice",
     ));
     return;
   }
@@ -1130,6 +1231,7 @@ async function decide(
       "**Owner task patch rejected at branch-boundary.**",
       ["the pull-request head is protected; use an unprotected topic branch"],
       environment.commentId,
+      "notice",
     ));
     return;
   }
@@ -1282,30 +1384,20 @@ async function finalize(
   // authoritative base and prevents a retargeted PR from receiving success.
   if (finalBaseRef !== finalDefaultBranch) {
     await postComment(request, environment, buildBoundedMarkedComment(
-      [
-        "**Owner task patch applied, but the pull-request base was retargeted after admission.**",
-        "",
-        `Applied-Commit: ${appliedCommit}`,
-        "",
-        "The pull-request base was retargeted away from the protected default branch after admission, so the branch-protection re-validation guarantee no longer holds. Do NOT merge. Retarget the pull-request base back to the repository default branch, then close and reopen the pull request to re-run the required checks on the applied head. There is no alternate-base path.",
-      ].join("\n"),
+      buildRetargetNoticeHeading(appliedCommit),
       [`Advisory patch annotations: ${annotations}`],
       environment.commentId,
+      "notice",
     ));
     return;
   }
   // MUTATION-CHECK: T-A1 through T-A4 protect the trusted re-validation caveat,
   // its reason-cap survival, connector-safe wording, and Applied-Commit parsing.
   await postComment(request, environment, buildBoundedMarkedComment(
-    [
-      "**Owner task patch applied successfully. The applied head is NOT yet re-validated.**",
-      "",
-      `Applied-Commit: ${appliedCommit}`,
-      "",
-      "This commit was pushed with the built-in GITHUB_TOKEN, which does not auto-trigger downstream workflows: no required check (CI, CodeQL) and no review lens (Claude, Codex) has run on this head. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-trigger the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.",
-    ].join("\n"),
+    buildSuccessRecordHeading(appliedCommit),
     [`Advisory patch annotations: ${annotations}`],
     environment.commentId,
+    "success",
   ));
 }
 

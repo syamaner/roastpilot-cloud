@@ -23,7 +23,10 @@ import {
   readPatchAnalysis,
   type GithubRequest,
 } from "../../scripts/factory/apply-owner-task.mts";
-import { buildTaskApplyMarker } from "../../scripts/factory/owner-task-patch-logic.mts";
+import {
+  buildTaskApplyNoticeMarker,
+  buildTaskApplySuccessMarker,
+} from "../../scripts/factory/owner-task-patch-logic.mts";
 
 const REPOSITORY = "syamaner/roastpilot-cloud";
 const PR_NUMBER = 9;
@@ -159,7 +162,9 @@ function harness(overrides: {
     } else if (path.includes("/compare/")) {
       response = overrides.comparison ?? { status: "behind" };
     } else if (path.endsWith(`/pulls/${PR_NUMBER}`)) {
-      response = overrides.pullRequest ?? pullRequest();
+      response = typeof overrides.pullRequest === "function"
+        ? overrides.pullRequest(path)
+        : overrides.pullRequest ?? pullRequest();
     } else if (path.includes(`/issues/${PR_NUMBER}/comments?`)) {
       const page = Number(new URL(`https://example.test${path}`).searchParams.get("page"));
       response = typeof overrides.comments === "function"
@@ -418,13 +423,13 @@ describe("owner-task bounded comments and plan guards", () => {
   it("drops reasons at the byte cap with a visible omission count", () => {
     const reasons = Array.from({ length: 10 }, () => "😀".repeat(1200));
 
-    const body = buildBoundedMarkedComment("heading", reasons, COMMENT_ID);
+    const body = buildBoundedMarkedComment("heading", reasons, COMMENT_ID, "notice");
     const shown = Number(/Reasons shown: (\d+) of 10/u.exec(body)?.[1]);
     expect(shown).toBeGreaterThan(0);
     expect(shown).toBeLessThan(10);
     expect(body).toContain(`${10 - shown} reason(s) omitted`);
     expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(MAX_OWNER_TASK_COMMENT_BYTES);
-    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(body.endsWith(buildTaskApplyNoticeMarker(COMMENT_ID))).toBe(true);
   });
 
   it("rejects trusted framing that alone exceeds the byte cap", () => {
@@ -432,7 +437,17 @@ describe("owner-task bounded comments and plan guards", () => {
       "x".repeat(MAX_OWNER_TASK_COMMENT_BYTES + 1),
       [],
       COMMENT_ID,
+      "notice",
     )).toThrow(/framing exceeds/u);
+  });
+
+  it("rejects an unknown comment sentinel at runtime", () => {
+    expect(() => buildBoundedMarkedComment(
+      "heading",
+      [],
+      COMMENT_ID,
+      "unknown" as "notice",
+    )).toThrow(TypeError);
   });
 
   it.each([
@@ -497,7 +512,8 @@ describe("owner-task bounded comments and plan guards", () => {
     const post = finalizeRun.calls.find((call) => call.method === "POST");
     const body = (post?.body as { body?: unknown } | undefined)?.body;
     expect(body).toEqual(expect.stringContaining("full advisory annotations exceeded"));
-    expect(body).toEqual(expect.stringMatching(/<!-- owner-task-apply: 101 -->$/u));
+    expect(body).toEqual(expect.stringMatching(/<!-- owner-task-apply-success: 101 -->$/u));
+    expect(body).toEqual(expect.stringContaining(buildTaskApplySuccessMarker(COMMENT_ID)));
   });
 
   it("decide exits silently for an ordinary issue through the ignore handler", async () => {
@@ -527,7 +543,7 @@ describe("owner-task replay-window and finalize convergence", () => {
       "PR has too many commits for the owner-task replay window; reduce commits and re-issue",
     );
     expect((posts[0]!.body as { body: string }).body.endsWith(
-      buildTaskApplyMarker(COMMENT_ID),
+      buildTaskApplyNoticeMarker(COMMENT_ID),
     )).toBe(true);
     expect(() => readFileSync(join(planDir, "kind"), "utf8")).toThrow();
     expect(() => readFileSync(outputPath, "utf8")).toThrow();
