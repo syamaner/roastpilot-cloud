@@ -677,7 +677,7 @@ describe("apply-owner-task phase entrypoint", () => {
       .toHaveLength(2);
   });
 
-  it("R3a records one honest late success when recognition finds the trailer", async () => {
+  it("R3a posts a provenance-neutral late success record", async () => {
     const { request, calls } = requestHarness({
       pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
       comparison: {
@@ -697,7 +697,15 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     const body = postedBody(calls);
     expect(body).toContain(`Applied-Commit: ${APPLIED_COMMIT_SHA}`);
-    expect(body).toContain(APPLIED_HEAD_CAVEAT);
+    expect(body).toContain("tree and parent match the admitted owner-task plan");
+    expect(body).toContain("recognised on a replay");
+    expect(body).toContain("does not claim who pushed the commit");
+    expect(body).not.toContain("pushed with the built-in GITHUB_TOKEN");
+    expect(body).not.toContain("does not auto-trigger downstream workflows");
+    expect(body).toContain("Do NOT merge yet");
+    expect(body).toContain("docs/factory-runbook.md");
+    expect(body).toContain("Applied-head roster re-validation");
+    expect(body).toContain("Branch protection blocks merge");
     expect(body).toContain("produced by content recognition on a replay");
     expect(body).toContain("advisory patch annotations are unavailable");
     expect(body.endsWith(buildTaskApplySuccessMarker(COMMENT_ID))).toBe(true);

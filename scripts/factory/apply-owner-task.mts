@@ -904,6 +904,18 @@ function buildSuccessRecordHeading(appliedCommit: string): string {
   ].join("\n");
 }
 
+function buildRecognizedSuccessRecordHeading(appliedCommit: string): string {
+  // MUTATION-CHECK: "R3a posts a provenance-neutral late success record"
+  // kills reuse of finalize's run-known GITHUB_TOKEN provenance claim here.
+  return [
+    "**Owner task patch content recognised on replay. The applied head is NOT yet re-validated.**",
+    "",
+    `Applied-Commit: ${appliedCommit}`,
+    "",
+    "This commit's tree and parent match the admitted owner-task plan, and the commit was recognised on a replay. This record does not claim who pushed the commit or whether downstream workflows were triggered. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-run the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.",
+  ].join("\n");
+}
+
 function buildRetargetNoticeHeading(appliedCommit: string): string {
   return [
     "**Owner task patch applied, but the pull-request base was retargeted after admission.**",
@@ -1144,9 +1156,9 @@ async function decide(
             }
             await handleNonApplyDecision(request, environment, markerReplay);
             const expectedTrailer = buildTaskTrailer(environment.commentId);
-            // MUTATION-CHECK: "R3a records one honest late success when
-            // recognition finds the trailer" plus T1/T9 kill either weakened
-            // trailer admission or duplicate-success suppression here.
+            // MUTATION-CHECK: "R3a posts a provenance-neutral late success
+            // record" plus T1/T9 kill either weakened trailer admission or
+            // duplicate-success suppression here.
             if (
               contentAppliedCommit.message.split(/\r?\n/).some(
                 (line) => line.trim() === expectedTrailer,
@@ -1163,7 +1175,7 @@ async function decide(
               await postComment(request, environment, buildBoundedMarkedComment(
                 retargeted
                   ? buildRetargetNoticeHeading(contentAppliedCommit.sha)
-                  : buildSuccessRecordHeading(contentAppliedCommit.sha),
+                  : buildRecognizedSuccessRecordHeading(contentAppliedCommit.sha),
                 retargeted
                   ? [
                     "This retarget notice was produced by content recognition on a replay; the original run's advisory patch annotations are unavailable on this path.",
