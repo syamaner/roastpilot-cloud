@@ -1060,13 +1060,17 @@ apply, and evaluates the merged owner-task decision table. An accepted patch is
 applied as one `commit-tree` commit and pushed with
 `git push --force-with-lease` using the reviewed head as the compare-and-swap
 expectation. This is boundary (b): the Node entrypoint plans the operation, but
-raw Git executes only in base-owned shell steps. A per-comment marker makes
-execution idempotent except across the crash window where the push succeeds but
-`Finalize owner-task apply` fails before posting the marker. A full rerun can
-then re-bind to the new head and apply the same comment again. This durable
-idempotency gap is the accepted residual tracked as
-[#236](https://github.com/syamaner/roastpilot-cloud/issues/236) and is a hard
-precondition before activation.
+raw Git executes only in base-owned shell steps. The
+[#236](https://github.com/syamaner/roastpilot-cloud/issues/236) crash-window
+idempotency gap is resolved in the dark path by content-based replay recognition
+(root 1, [#247](https://github.com/syamaner/roastpilot-cloud/issues/247)) plus
+per-outcome success/notice marker sentinels and an honest late success record
+(roots 2 and 3, [#250](https://github.com/syamaner/roastpilot-cloud/issues/250)).
+On a rerun, decide recognises the already-applied commit from PR compare history
+by byte-exact parent and tree, then converges to a silent no-op, posting an
+honest late success record when the owner-task trailer is present, instead of
+re-binding to the new head and re-applying. The four availability-only residuals
+are tracked in [#249](https://github.com/syamaner/roastpilot-cloud/issues/249).
 
 Both new jobs are unschedulable unless all three base-owned gates hold:
 `vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'`,
@@ -1240,7 +1244,8 @@ authorized by this dark wiring:
    confirming the same prerequisites rather than treating persisted state as
    satisfying them.
 4. Before enabling task mutation, additionally resolve the remaining hard 9h
-   task preconditions, in addition to #236 above. [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
+   task preconditions: [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
+   and [#245](https://github.com/syamaner/roastpilot-cloud/issues/245). #237
    must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the

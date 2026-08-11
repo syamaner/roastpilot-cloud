@@ -8,7 +8,8 @@ import { FACTORY_OWNER_LOGINS } from
   "../../scripts/factory/factory-owner-allowlist.mts";
 import {
   decideOwnerTaskPatch,
-  buildTaskApplyMarker,
+  buildTaskApplyNoticeMarker,
+  buildTaskApplySuccessMarker,
   buildTaskTrailer,
   findTaskTrailerCommit,
   hasExistingTaskApply,
@@ -150,28 +151,42 @@ describe("owner-task binding grammar", () => {
 });
 
 describe("task markers and replay helpers", () => {
-  it("builds the distinct marker and exact commit trailer", () => {
-    expect(buildTaskApplyMarker(73)).toBe("<!-- owner-task-apply: 73 -->");
+  it("builds byte-distinct success/notice markers with guarded identifiers", () => {
+    const success = buildTaskApplySuccessMarker(73);
+    const notice = buildTaskApplyNoticeMarker(73);
+    expect(success).toBe("<!-- owner-task-apply-success: 73 -->");
+    expect(notice).toBe("<!-- owner-task-apply-notice: 73 -->");
+    expect(success).not.toBe(notice);
+    expect(success.startsWith(notice)).toBe(false);
+    expect(notice.startsWith(success)).toBe(false);
     expect(buildTaskTrailer(73)).toBe("Owner-Task-Comment: 73");
-    expect(() => buildTaskApplyMarker(0)).toThrow(RangeError);
+    for (const malformedId of [0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => buildTaskApplySuccessMarker(malformedId)).toThrow(RangeError);
+      expect(() => buildTaskApplyNoticeMarker(malformedId)).toThrow(RangeError);
+    }
   });
 
-  it("N22: a 9e owner-command-response marker does not satisfy task replay", () => {
-    expect(hasExistingTaskApply([{
-      user: { login: BOT_LOGIN },
-      body: "<!-- owner-command-response: 73 -->",
-    }], 73, BOT_LOGIN)).toBe(false);
+  it("N22: recognises either closed terminal grammar", () => {
+    for (const marker of [
+      buildTaskApplySuccessMarker(73),
+      buildTaskApplyNoticeMarker(73),
+    ]) {
+      expect(hasExistingTaskApply([
+        { user: { login: BOT_LOGIN }, body: `done\n${marker}\n \t` },
+      ], 73, BOT_LOGIN)).toBe(true);
+    }
   });
 
-  it("N22: requires bot identity and a terminal standalone final line", () => {
-    const marker = buildTaskApplyMarker(73);
+  it("N22: rejects retired, 9e, glued, trailing, and attacker marker variants", () => {
+    const marker = buildTaskApplySuccessMarker(73);
     expect(hasExistingTaskApply([
-      { user: { login: BOT_LOGIN }, body: `done\n${marker}\n \t` },
-    ], 73, BOT_LOGIN)).toBe(true);
-    expect(hasExistingTaskApply([
+      { user: { login: BOT_LOGIN }, body: "<!-- owner-command-response: 73 -->" },
+      { user: { login: BOT_LOGIN }, body: "<!-- owner-task-apply: 73 -->" },
       { user: { login: "attacker" }, body: marker },
       { user: { login: BOT_LOGIN }, body: `prefix${marker}` },
       { user: { login: BOT_LOGIN }, body: `${marker}\ntrailing` },
+      { user: { login: BOT_LOGIN }, body: "<!-- owner-task-apply-success: 730 -->" },
+      { user: { login: BOT_LOGIN }, body: "<!-- owner-task-apply-success: 73 -->suffix" },
       null,
     ], 73, BOT_LOGIN)).toBe(false);
   });
@@ -203,13 +218,14 @@ describe("task markers and replay helpers", () => {
     expect(() => findTaskTrailerCommit([{}], 73)).toThrow(TypeError);
   });
 
-  it("N21: neutralises both marker grammars in rendered untrusted text", () => {
+  it("N21: neutralises the 9e, retired, success, and notice grammars", () => {
     const rendered =
-      "x <!-- owner-command-response: 8 --> y\n<!-- owner-task-apply: 9 -->";
+      "x <!-- owner-command-response: 8 -->\n<!-- owner-task-apply: 9 -->\n" +
+      "<!-- owner-task-apply-success: 10 -->\n<!-- owner-task-apply-notice: 11 -->";
     const neutralized = neutralizeTaskMarkers(rendered);
     expect(neutralized).not.toContain("owner-command-response");
     expect(neutralized).not.toContain("owner-task-apply");
-    expect(neutralized.match(/\[owner-task marker removed\]/g)).toHaveLength(2);
+    expect(neutralized.match(/\[owner-task marker removed\]/g)).toHaveLength(4);
   });
 });
 
