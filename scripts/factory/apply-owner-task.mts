@@ -646,6 +646,14 @@ function requireHeadRef(pullRequest: Record<string, unknown>): string {
   return ref;
 }
 
+function requireBaseRef(pullRequest: Record<string, unknown>): string {
+  const base = pullRequest.base;
+  if (!isRecord(base) || typeof base.ref !== "string" || base.ref.length === 0) {
+    throw new TypeError("GitHub API returned a malformed pull-request base ref");
+  }
+  return base.ref;
+}
+
 function repositoryDefaultBranch(
   repository: Record<string, unknown>,
   label: string,
@@ -958,6 +966,18 @@ async function decide(
   }
   const refName = requireHeadRef(pullRequest);
   const defaultBranch = requireRepositoryDefaultBranch(pullRequest);
+  const baseRef = requireBaseRef(pullRequest);
+  // MUTATION-CHECK: T-U1.5b rejects a non-default base before plan creation.
+  if (baseRef !== defaultBranch) {
+    await postComment(request, environment, buildBoundedMarkedComment(
+      "**Owner task patch rejected at branch-boundary.**",
+      [
+        "the pull-request base is not the repository default branch; owner-task apply targets pull requests into the protected default branch",
+      ],
+      environment.commentId,
+    ));
+    return;
+  }
   if (refName === defaultBranch) {
     await postComment(request, environment, buildBoundedMarkedComment(
       "**Owner task patch rejected at branch-boundary.**",
@@ -1117,11 +1137,33 @@ async function finalize(
     join(environment.planDir, "annotations.json"),
     MAX_PLAN_ANNOTATIONS_BYTES,
   );
+  const finalBaseRef = requireBaseRef(pullRequest);
+  const finalDefaultBranch = requireRepositoryDefaultBranch(pullRequest);
+  // MUTATION-CHECK: T-A5 binds the marker-bearing finalize notice to the live
+  // authoritative base and prevents a retargeted PR from receiving success.
+  if (finalBaseRef !== finalDefaultBranch) {
+    await postComment(request, environment, buildBoundedMarkedComment(
+      [
+        "**Owner task patch applied, but the pull-request base was retargeted after admission.**",
+        "",
+        `Applied-Commit: ${appliedCommit}`,
+        "",
+        "The pull-request base was retargeted away from the protected default branch after admission, so the branch-protection re-validation guarantee no longer holds. Do NOT merge. Retarget the pull-request base back to the repository default branch, then close and reopen the pull request to re-run the required checks on the applied head. There is no alternate-base path.",
+      ].join("\n"),
+      [`Advisory patch annotations: ${annotations}`],
+      environment.commentId,
+    ));
+    return;
+  }
+  // MUTATION-CHECK: T-A1 through T-A4 protect the trusted re-validation caveat,
+  // its reason-cap survival, connector-safe wording, and Applied-Commit parsing.
   await postComment(request, environment, buildBoundedMarkedComment(
     [
-      "**Owner task patch applied successfully.**",
+      "**Owner task patch applied successfully. The applied head is NOT yet re-validated.**",
       "",
       `Applied-Commit: ${appliedCommit}`,
+      "",
+      "This commit was pushed with the built-in GITHUB_TOKEN, which does not auto-trigger downstream workflows: no required check (CI, CodeQL) and no review lens (Claude, Codex) has run on this head. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-trigger the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.",
     ].join("\n"),
     [`Advisory patch annotations: ${annotations}`],
     environment.commentId,

@@ -332,7 +332,7 @@ describe("owner-command intake workflow contract", () => {
     expect(sha256(runBody("task-apply", "Build authoritative owner-task patch analysis")))
       .toBe("182d8864751656fb142dab4bf3b8acbcc661947760a2bb27998d1be02f436a11");
     expect(sha256(runBody("task-apply", "Apply the admitted owner-task commit")))
-      .toBe("763ee80bdff8cf30042746acf04c8085137aca42759e07625cebcf970888d314");
+      .toBe("6d7ec94f6144a138ff80b3502f4aca6cc0199247d1efed46a4db9f654a7c916d");
   });
 
   it("W-T3 rejects the shell-injection mutation set", () => {
