@@ -32,6 +32,8 @@ const DRIFTED_HEAD_SHA = "d".repeat(40);
 const APPLIED_COMMIT_SHA = "e".repeat(40);
 const ORPHANED_COMMIT_SHA = "f".repeat(40);
 const PAYLOAD = " update tests";
+const APPLIED_HEAD_CAVEAT =
+  "This commit was pushed with the built-in GITHUB_TOKEN, which does not auto-trigger downstream workflows: no required check (CI, CodeQL) and no review lens (Claude, Codex) has run on this head. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-trigger the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.";
 
 type RequestCall = {
   readonly method: string;
@@ -84,6 +86,7 @@ function eligiblePr(overrides: Record<string, unknown> = {}): Record<string, unk
     },
     base: {
       sha: BASE_SHA,
+      ref: "main",
       repo: { full_name: REPOSITORY, default_branch: "main" },
     },
     state: "open",
@@ -371,6 +374,53 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(calls.some((call) => call.path.includes("/branches/"))).toBe(false);
   });
 
+  it("T-U1.5b rejects an apply whose base ref is not the repository default branch", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: eligiblePr({
+        base: {
+          sha: BASE_SHA,
+          ref: "feature/stack-base",
+          repo: { full_name: REPOSITORY, default_branch: "main" },
+        },
+      }),
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("rejected at branch-boundary");
+    expect(postedBody(calls)).toContain(
+      "base is not the repository default branch",
+    );
+    expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(calls.some((call) => call.path.includes("/branches/"))).toBe(false);
+  });
+
+  it("T-U1.5c byte-exactly rejects a base ref prefixed by the default branch", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: eligiblePr({
+        base: {
+          sha: BASE_SHA,
+          ref: "main-stack",
+          repo: { full_name: REPOSITORY, default_branch: "main" },
+        },
+      }),
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("rejected at branch-boundary");
+    expect(postedBody(calls)).toContain(
+      "base is not the repository default branch",
+    );
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(calls.some((call) => call.path.includes("/branches/"))).toBe(false);
+  });
+
   it("rejects an apply whose non-default head ref is protected", async () => {
     const { request, calls } = requestHarness({
       branch: { protected: true },
@@ -430,6 +480,7 @@ describe("apply-owner-task phase entrypoint", () => {
         },
         base: {
           sha: BASE_SHA,
+          ref: "main",
           repo: { full_name: REPOSITORY, default_branch: defaultBranch },
         },
       }),
@@ -446,7 +497,7 @@ describe("apply-owner-task phase entrypoint", () => {
     [
       "malformed repository records",
       eligiblePr({
-        base: { sha: BASE_SHA, repo: null },
+        base: { sha: BASE_SHA, ref: "main", repo: null },
       }),
       /malformed pull-request repositories/u,
     ],
@@ -458,7 +509,7 @@ describe("apply-owner-task phase entrypoint", () => {
           ref: "feature/owner-task",
           repo: { full_name: REPOSITORY },
         },
-        base: { sha: BASE_SHA, repo: { full_name: REPOSITORY } },
+        base: { sha: BASE_SHA, ref: "main", repo: { full_name: REPOSITORY } },
       }),
       /omitted the repository default branch/u,
     ],
@@ -472,6 +523,7 @@ describe("apply-owner-task phase entrypoint", () => {
         },
         base: {
           sha: BASE_SHA,
+          ref: "main",
           repo: { full_name: REPOSITORY, default_branch: "trunk" },
         },
       }),
@@ -481,6 +533,27 @@ describe("apply-owner-task phase entrypoint", () => {
     const { request, calls } = requestHarness({ pullRequest });
 
     await expect(main(request)).rejects.toThrow(expectedError);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["non-string", 7],
+  ])("fails closed for a %s pull-request base ref", async (_name, baseRef) => {
+    const base: Record<string, unknown> = {
+      sha: BASE_SHA,
+      repo: { full_name: REPOSITORY, default_branch: "main" },
+    };
+    if (baseRef !== undefined) base.ref = baseRef;
+    const { request, calls } = requestHarness({
+      pullRequest: eligiblePr({ base }),
+    });
+
+    await expect(main(request)).rejects.toThrow(/malformed pull-request base ref/u);
 
     expect(posts(calls)).toEqual([]);
     expect(planFiles()).toEqual([]);
@@ -546,11 +619,12 @@ describe("apply-owner-task phase entrypoint", () => {
 
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(postedBody(calls)).not.toContain("Applied-head roster re-validation");
     expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
   });
 
-  it("T-U1.8 finalize posts a sanitised marker-bearing confirmation", async () => {
+  it("T-U1.8/T-A1/T-A3/T-A4 posts and re-associates an honest marker-bearing confirmation", async () => {
     vi.stubEnv("APPLY_PHASE", "finalize");
     mkdirSync(planDir);
     writeFileSync(
@@ -576,9 +650,123 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     const body = postedBody(calls);
     expect(body).toContain("applied successfully");
-    expect(body).toContain(`\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n`);
+    expect(body).toContain(APPLIED_HEAD_CAVEAT);
+    expect(body).toContain("docs/factory-runbook.md");
+    expect(body).toContain("Applied-head roster re-validation");
+    expect(body.match(/^Applied-Commit: [0-9a-f]{40}$/gmu)).toEqual([
+      `Applied-Commit: ${APPLIED_COMMIT_SHA}`,
+    ]);
     expect(body).toContain("[codex trigger removed]");
+    expect(body).not.toMatch(/@codex review/u);
     expect(body.match(/<!-- owner-task-apply: 101 -->/g)).toHaveLength(1);
+    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+
+    const replay = requestHarness({
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body,
+      }],
+    });
+    await main(replay.request);
+    expect(posts(replay.calls)).toEqual([]);
+    expect(replay.calls.some((call) =>
+      call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)
+    )).toBe(true);
+  });
+
+  it("T-A2 keeps the trusted caveat intact with oversized annotations near their byte cap", async () => {
+    vi.stubEnv("APPLY_PHASE", "finalize");
+    writeFinalizeArtifacts();
+    writeFileSync(
+      join(planDir, "annotations.json"),
+      JSON.stringify({ note: "😀".repeat(16_000) }),
+    );
+    const { request, calls } = requestHarness();
+
+    await main(request);
+
+    const body = postedBody(calls);
+    expect(body).toContain(APPLIED_HEAD_CAVEAT);
+    expect(body.indexOf(APPLIED_HEAD_CAVEAT)).toBeLessThan(
+      body.indexOf("Reasons shown:"),
+    );
+    expect(body).toContain("[truncated,");
+    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+  });
+
+  it("T-A5 finalize records an honest marker-bearing notice after a base retarget", async () => {
+    vi.stubEnv("APPLY_PHASE", "finalize");
+    writeFinalizeArtifacts();
+    const retargetedPullRequest = eligiblePr({
+      base: {
+        sha: BASE_SHA,
+        ref: "feature/retargeted-base",
+        repo: { full_name: REPOSITORY, default_branch: "main" },
+      },
+    });
+    const { request, calls } = requestHarness({
+      pullRequest: retargetedPullRequest,
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    const body = postedBody(calls);
+    expect(body).toContain("base was retargeted after admission");
+    expect(body).toContain("re-validation guarantee no longer holds");
+    expect(body).toContain("Retarget the pull-request base back to the repository default branch");
+    expect(body).toContain("close and reopen the pull request");
+    expect(body).toContain("There is no alternate-base path");
+    expect(body.indexOf("base was retargeted after admission")).toBeLessThan(
+      body.indexOf("Reasons shown:"),
+    );
+    expect(body.match(/^Applied-Commit: [0-9a-f]{40}$/gmu)).toEqual([
+      `Applied-Commit: ${APPLIED_COMMIT_SHA}`,
+    ]);
+    expect(body).not.toContain("applied successfully");
+    expect(body).not.toContain("branch protection blocks merge");
+    expect(body).not.toMatch(/@codex review/u);
+    expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
+
+    const replay = requestHarness({
+      pullRequest: retargetedPullRequest,
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body,
+      }],
+    });
+    await main(replay.request);
+    expect(posts(replay.calls)).toEqual([]);
+    expect(replay.calls.some((call) =>
+      call.path.endsWith(`/commits/${APPLIED_COMMIT_SHA}`)
+    )).toBe(true);
+  });
+
+  // MUTATION-CHECK: T-A5b rejects a startsWith weakening of the authoritative
+  // finalize base comparison by exercising a default-branch-prefixed base.
+  it("T-A5b byte-exactly records the retarget notice for a prefixed base", async () => {
+    vi.stubEnv("APPLY_PHASE", "finalize");
+    writeFinalizeArtifacts();
+    const { request, calls } = requestHarness({
+      pullRequest: eligiblePr({
+        base: {
+          sha: BASE_SHA,
+          ref: "main-stack",
+          repo: { full_name: REPOSITORY, default_branch: "main" },
+        },
+      }),
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    const body = postedBody(calls);
+    expect(body).toContain("base was retargeted after admission");
+    expect(body.match(/^Applied-Commit: [0-9a-f]{40}$/gmu)).toEqual([
+      `Applied-Commit: ${APPLIED_COMMIT_SHA}`,
+    ]);
+    expect(body).not.toContain("applied successfully");
+    expect(body).not.toContain("branch protection blocks merge");
     expect(body.endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
   });
 
@@ -624,6 +812,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(posts(calls)).toHaveLength(1);
     expect(postedBody(calls)).toContain("source is stale");
     expect(postedBody(calls)).not.toContain("applied successfully");
+    expect(postedBody(calls)).not.toContain("Applied-head roster re-validation");
     expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
     expect(calls.some((call) => call.path.includes(`/commits/${APPLIED_COMMIT_SHA}`)))
       .toBe(false);

@@ -71,6 +71,7 @@ function pullRequest(overrides: Record<string, unknown> = {}): Record<string, un
     },
     base: {
       sha: BASE_SHA,
+      ref: "main",
       repo: { full_name: REPOSITORY, default_branch: "main" },
     },
     state: "open",

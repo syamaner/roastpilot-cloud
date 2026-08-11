@@ -530,7 +530,7 @@ jobs:
             echo "::error::commit-tree returned a non-canonical object ID"
             exit 1
           fi
-          # The checkout's built-in GITHUB_TOKEN does not auto-trigger downstream workflows; required-roster revalidation of the applied head before merge is a 9h activation precondition.
+          # The checkout's built-in GITHUB_TOKEN does not auto-trigger downstream workflows; the applied head must be re-validated via the documented operator procedure (docs/factory-runbook.md, 'Applied-head roster re-validation') before merge; branch protection blocks merge until required checks pass on that head (#238).
           /usr/bin/git push --force-with-lease="refs/heads/$REF_NAME:$LEASE_SHA" origin "$COMMIT_OID:refs/heads/$REF_NAME"
           printf '%s\n' "$COMMIT_OID" > "$PLAN_DIR/applied_commit"
       - name: Finalize owner-task apply

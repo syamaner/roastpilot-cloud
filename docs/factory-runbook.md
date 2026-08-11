@@ -1077,6 +1077,101 @@ separate: `OWNER_COMMAND_INTAKE_ENABLED` controls question answering, while
 light up question answering without enabling mutation. Neither variable was
 created during the dark launch, so both jobs are unschedulable today.
 
+### Applied-head roster re-validation (#238 decided path)
+
+For every owner-task commit pushed by `task-apply`, complete this procedure on
+the current PR head that contains the applied work before merge. Owner-task
+apply admits only pull requests targeting the protected default branch, which
+is why branch protection mechanically gates CI, CodeQL, and mutation testing
+on the applied head. Dependency review and `codecov/patch` are operator-verified
+gates rather than branch-protection-required status checks:
+
+The trigger rule is categorical: CI, CodeQL, and dependency review use the
+default `pull_request` activity types (`opened`, `synchronize`, and `reopened`).
+They do not run on `ready_for_review` or `edited`; only the Claude review
+workflow explicitly subscribes to `ready_for_review`. Closing and reopening the
+PR is therefore the only way to re-run these pull-request-triggered checks on
+an unchanged head. Marking a draft ready and retargeting the base do not re-run
+them.
+
+This gate assumes the default branch is protected by classic protection or a
+ruleset with the required checks required. That global factory invariant is a
+9h-activation precondition tracked in
+[#245](https://github.com/syamaner/roastpilot-cloud/issues/245) and is verified
+by the activation checklist, not by this path.
+
+1. Read the current PR head with `gh pr view <n> --json headRefOid` and treat
+   that `headRefOid` as the re-validation target. Locate the applied commit from
+   the `Applied-Commit:` SHA in the finalize comment, then confirm that SHA is
+   the current head or an ancestor of it. Fetch the current head object first
+   with `git fetch origin <headRefOid>`, then run
+   `git merge-base --is-ancestor <applied-sha> <headRefOid>`. This ancestry
+   check is commit-provenance evidence only: it proves that the applied commit
+   is in the current head's history. It does not prove that the intended change
+   is retained in the tree that will merge, because a later commit may revert
+   or overwrite it. Separately inspect the relevant paths or diff to confirm
+   that the intended change is present in the current head's tree. The current
+   head SHA remains the re-validation target.
+2. Re-trigger the required roster without changing the head, using only the
+   existing trigger surfaces. For a draft PR, close and reopen it while it is
+   still a draft. The `reopened` event re-runs CI, CodeQL, and dependency review
+   on the unchanged draft head, while the Claude jobs skip under their
+   `draft == false` guards. Wait for the required checks and dependency review
+   to complete on the stable head, then have the independent operator mark the
+   PR ready exactly once. The `ready_for_review` event fires the Claude and
+   Codex review lenses once on that same head. For an already-ready PR, close
+   and reopen it once; that single `reopened` boundary re-runs the required
+   checks, dependency review, and the Claude review lens together. These paths
+   add no dispatch or App identity. For
+   Codex, the re-validation boundary is the ready transition on the draft path
+   and the reopened event on the already-ready path. If the connector shows no
+   bot-authored signal associated with the current head and postdating the
+   applicable boundary within the PR Merge Policy's approximately 30-minute
+   timeout, post `@codex review` once on the unchanged head as that policy
+   directs. A stale reaction or review from before the applicable boundary is
+   not completion evidence. `AGENTS.md` is the single source of truth for
+   accepted verdict channels.
+3. Re-read `headRefOid` and `baseRefName` after the trigger with
+   `gh pr view <n> --json headRefOid,baseRefName`. If a new push landed and the
+   head drifted, restart from step 1 on the new head. Confirm that `baseRefName`
+   still byte-equals the protected default branch. A base retarget invalidates
+   the required-check and dependency-review evidence because CodeQL and
+   dependency review do not run on another base. If the base is not the default
+   branch, do not merge. Retarget it back to the default branch, then close and
+   reopen the PR to re-run the pull-request-triggered checks on the applied
+   head. The `edited` event from retargeting alone is insufficient; there is no
+   alternate-base path. On the stable current head SHA, verify that every
+   required status check is green and every review lens has a current-head
+   clean verdict postdating the re-validation boundary on an accepted channel
+   per the PR Merge Policy. Also verify that every inline thread is resolved,
+   but do not treat the absence of unresolved inline threads as sufficient
+   evidence that a review lens completed cleanly. Also confirm the
+   `dependency-review` and `codecov/patch` results on that applied head. Treat a
+   red dependency-review result or a coverage regression as blocking for merge
+   even though branch protection does not mechanically stop it. Branch
+   protection blocks merge on the required checks. The advisory review lenses
+   are operator-enforced. Conversation resolution gates inline findings only;
+   it does not substitute for a clean verdict in a top-level comment.
+4. A stale-notice head that received a push is equally un-revalidated and
+   follows these same steps if it is ever merged. Because the terminal stale
+   notice has no `Applied-Commit:` line, recover the applied SHA from the head
+   branch's latest commit carrying the matching `Owner-Task-Comment: <id>`
+   trailer. Find it with `git log` or `git show` after fetching the head branch,
+   or use the GitHub commits API. Then apply the same current-head re-validation
+   procedure.
+5. Confirm the re-trigger mechanism's live behaviour during the supervised 9h
+   session, per this runbook's fill-from-observed rule. The item-3 checklist is
+   load-bearing either way.
+6. After all required checks, operator-verified gates, and review lenses have
+   completed, immediately re-read `headRefOid` and `baseRefName` with
+   `gh pr view <n> --json headRefOid,baseRefName` before declaring
+   re-validation complete. Declare completion only when `headRefOid` matches
+   the head on which that evidence ran and `baseRefName` still byte-equals the
+   repository default branch. If the head differs, it drifted during the wait;
+   restart from step 1 on the new head. If the base differs, it was retargeted
+   during the wait; retarget it back to the default branch, then restart from
+   step 1 and close and reopen the PR as that procedure requires.
+
 The following ordered items are the fail-safe activation path and are **not**
 authorized by this dark wiring:
 
@@ -1150,11 +1245,18 @@ authorized by this dark wiring:
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the
    credential from the reader. [#238](https://github.com/syamaner/roastpilot-cloud/issues/238)
-   must put an operational, tested re-validation path in place and verify its
-   invocation for every applied head, covering CI and the required review
-   roster, because a built-in-`GITHUB_TOKEN` push does not automatically
-   trigger downstream workflows. A recorded decision alone does not satisfy
-   this precondition. Ratify the task-agent's
+   is resolved by the documented
+   [manual re-validation procedure](#applied-head-roster-re-validation-238-decided-path)
+   plus the honest finalize signal. Branch protection mechanically blocks merge
+   until the applied head's required status checks (CI, CodeQL, and mutation)
+   pass. A built-in `GITHUB_TOKEN` push runs none of them on that head, so they
+   cannot be green until the roster is re-triggered on it.
+   The advisory review lenses (Claude Code Review and Codex) are not required
+   status checks and are not mechanically enforced. The operator runs the
+   documented procedure and explicitly verifies a current-head clean verdict
+   for each lens on an accepted channel per the PR Merge Policy; conversation
+   resolution alone is insufficient. The first live execution is observed
+   during the supervised 9h session. Ratify the task-agent's
    `CLAUDE_CODE_OAUTH_TOKEN` credential class under its own D140 platform
    disposition; this new external-identity credential job class cannot inherit
    the answer-agent's disposition by analogy. Separately ratify the
