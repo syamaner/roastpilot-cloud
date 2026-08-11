@@ -991,10 +991,11 @@ The four jobs keep untrusted command data separate from authority:
   `claude-review`); every model file reader, Bash, network/egress tool, and
   other write sink is denied by name. `ToolSearch` adds no reachable capability
   here: it can surface only schemas for already-denied tools, while the sole
-  capability-bearing invocable tool is the scoped `Edit`. Whether to deny and
-  runtime-verify `ToolSearch` with a step-C-style catalog assertion (the #212
-  class) is a hardening decision for the 9h D140 credential-class ratification,
-  not an action enabled by this dark wiring. The untrusted DATA arrives through
+  capability-bearing invocable tool is the scoped `Edit`. Whether to
+  additionally deny and runtime-verify `ToolSearch` with a step-C-style catalog
+  assertion (the #212 class) was not settled by the 11 Aug 2026 credential-class
+  ratification and remains an open #212-class hardening item, not an action
+  enabled by this dark wiring. The untrusted DATA arrives through
   `--append-system-prompt-file`.
 - `publish` has `pull-requests: write` as its only write permission. It
   independently re-fetches the source records and re-derives authorization,
@@ -1006,10 +1007,10 @@ The workflow is inert until both base-owned gates hold:
 `vars.FACTORY_PAUSED != 'true'`. The enable variable is deliberately absent
 during this dark launch.
 
-The answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` must be ratified under its own
-D140 platform disposition. This is a new external-identity credential job
-class; it cannot inherit D140 by analogy and is not the built-in-token
-equivalence.
+The answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` was operator-ratified under its
+own D140 platform disposition on 11 Aug 2026. This is a distinct
+external-identity credential job class; it could not inherit D140 by analogy
+and is not the built-in-token equivalence.
 
 The authoritative, fail-safe activation order—including the mandatory
 persisted-state preflight that reads both enable variables—is the single
@@ -1099,10 +1100,14 @@ an unchanged head. Marking a draft ready and retargeting the base do not re-run
 them.
 
 This gate assumes the default branch is protected by classic protection or a
-ruleset with the required checks required. That global factory invariant is a
-9h-activation precondition tracked in
-[#245](https://github.com/syamaner/roastpilot-cloud/issues/245) and is verified
-by the activation checklist, not by this path.
+ruleset with the required checks required. That global factory invariant,
+tracked in [#245](https://github.com/syamaner/roastpilot-cloud/issues/245), is
+now satisfied with nine required status contexts. This path relies on that
+contract rather than re-verifying it: it confirms that the currently required
+contexts pass, not that the contract still lists all nine, so a dropped context
+would shrink the checked set undetected. Deterministic re-verification of the
+contract, at enable time and on each applied head, is tracked in
+[#254](https://github.com/syamaner/roastpilot-cloud/issues/254).
 
 1. Read the current PR head with `gh pr view <n> --json headRefOid` and treat
    that `headRefOid` as the re-validation target. Locate the applied commit from
@@ -1226,9 +1231,9 @@ authorized by this dark wiring:
    gate keeps every job unschedulable while paused regardless of enable-variable
    drift.
 2. Before enabling question answering, complete the answer-agent activation
-   preconditions in [Owner command intake (9e)](#owner-command-intake-9e),
-   including ratification of the answer-agent's `CLAUDE_CODE_OAUTH_TOKEN`
-   credential class under its own D140 platform disposition.
+   preconditions in [Owner command intake (9e)](#owner-command-intake-9e). The
+   answer-agent's `CLAUDE_CODE_OAUTH_TOKEN` credential class was
+   operator-ratified under its own D140 platform disposition on 11 Aug 2026.
 3. Only after the answer-agent preconditions—and, when item 1 found
    `OWNER_TASK_APPLY_ENABLED` already `true`, after all task-specific
    preconditions in item 4—set `vars.OWNER_COMMAND_INTAKE_ENABLED` to `true`,
@@ -1244,8 +1249,14 @@ authorized by this dark wiring:
    confirming the same prerequisites rather than treating persisted state as
    satisfying them.
 4. Before enabling task mutation, additionally resolve the remaining hard 9h
-   task preconditions: [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)
-   and [#245](https://github.com/syamaner/roastpilot-cloud/issues/245). #237
+   task precondition: [#237](https://github.com/syamaner/roastpilot-cloud/issues/237);
+   [#245](https://github.com/syamaner/roastpilot-cloud/issues/245) is resolved,
+   with the default branch configured with nine required status contexts as of
+   11 Aug 2026. Because that protection is mutable and the `task-apply` path
+   checks only the target-branch identity, confirming that the #245
+   branch-protection contract still holds remains a fail-closed precondition of
+   enabling task mutation; its deterministic live re-verification is tracked in
+   [#254](https://github.com/syamaner/roastpilot-cloud/issues/254). #237
    must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the
@@ -1264,13 +1275,14 @@ authorized by this dark wiring:
    during the supervised 9h session. Ratify the task-agent's
    `CLAUDE_CODE_OAUTH_TOKEN` credential class under its own D140 platform
    disposition; this new external-identity credential job class cannot inherit
-   the answer-agent's disposition by analogy. Separately ratify the
-   `task-apply` job's own D140 platform disposition for its built-in
-   `GITHUB_TOKEN` scope: `contents: write` and `pull-requests: write`, covering
-   pushes to non-default PR branches and PR comments. The base-owned enable
+   the answer-agent's disposition by analogy. The `task-apply` job's own D140
+   platform disposition for its built-in `GITHUB_TOKEN` scope was
+   operator-ratified on 11 Aug 2026: `contents: write` and
+   `pull-requests: write`, covering pushes to non-default PR branches and PR
+   comments. The base-owned enable
    variables hold this credential-reachable job dark but do not replace its
    per-job disposition; that disposition is distinct from #237, #238, and the
-   task-agent OAuth disposition. The fresh disposition is required because
+   task-agent OAuth disposition. The fresh disposition was required because
    `task-apply` introduces the novel `contents: write` push scope, performing
    `commit-tree` and the lease-qualified push with a materially larger blast
    radius than comment posting. The `publish` job's `pull-requests: write`
