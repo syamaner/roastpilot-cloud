@@ -62,6 +62,17 @@ const STUB_STRUCK = [
   "- [ ] ~~Post findings~~ (metadata-only run: no findings available)",
 ].join("\n");
 
+// Real zero-turn placeholder from run 31097582641, comment 5204083997,
+// authored by github-actions[bot]. Its run-bound header is retained verbatim
+// so the fixture reaches the metadata-only completion branch.
+const STUB_PLACEHOLDER_RUN_ID = "31097582641";
+const STUB_PLACEHOLDER = [
+  `**Claude finished @syamaner's task in 5s** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${STUB_PLACEHOLDER_RUN_ID})`,
+  "",
+  "---",
+  "I'll analyze this and get back to you.",
+].join("\n");
+
 // Issue #183. PR #182's re-review posted its tracking comment as PROSE (a
 // `### Review summary` heading and plain `-` bullets, but NO task-list box),
 // captured verbatim with `gh api ...issues/182/comments`. A prose body has no
@@ -86,6 +97,8 @@ const PR182_RUN_ID = "30547564749";
 // fails a test rather than silently shipping an inert instruction.
 const SENTINEL =
   "REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)";
+const STUB_NOOP_SENTINEL = `${STUB_NOOP}\n\n${SENTINEL}`;
+const STUB_STRUCK_SENTINEL = `${STUB_STRUCK}\n\n${SENTINEL}`;
 
 // The execution-transcript fixture is schema-accurate rather than captured:
 // claude-code-action's execution file is a single pretty-printed JSON array
@@ -962,21 +975,24 @@ describe("claude-review completion-assertion step (step B)", () => {
 
 describe("claude-review metadata-only completion recognition (step B)", () => {
   it.each([
-    ["MO-T1", STUB_NOOP],
-    ["MO-T2", STUB_STRUCK],
-  ])("%s: true/true accepts a run-bound metadata-only stub", (_id, body) => {
-    const result = runStepB({
-      pages: [[completionComment(body)]],
-      runId: PR152_RUN_ID,
-      catalogMetadataOnly: "true",
-      resultClean: "true",
-    });
-    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain(
-      "metadata-only review configuration with a clean terminal exit",
-    );
-    expect(result.stdout).not.toContain("no unfinished work advertised");
-  });
+    ["MO-T1", STUB_NOOP_SENTINEL],
+    ["MO-T2", STUB_STRUCK_SENTINEL],
+  ])(
+    "%s: true/true accepts a run-bound metadata-only stub with the sentinel",
+    (_id, body) => {
+      const result = runStepB({
+        pages: [[completionComment(body)]],
+        runId: PR152_RUN_ID,
+        catalogMetadataOnly: "true",
+        resultClean: "true",
+      });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain(
+        "metadata-only review configuration with a clean terminal exit and the terminal completion sentinel; checklist tick-state is not required (issues #192 Unit 2, #217)",
+      );
+      expect(result.stdout).not.toContain("no unfinished work advertised");
+    },
+  );
 
   it("MO-T3: a non-clean result falls through to the unticked alarm", () => {
     const result = runStepB({
@@ -1029,7 +1045,7 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
 
   it("MO-T7: true/true cannot bypass author, run-id, or freshness bindings", () => {
     const mallory = runStepB({
-      pages: [[{ login: "mallory", body: STUB_NOOP }]],
+      pages: [[{ login: "mallory", body: STUB_NOOP_SENTINEL }]],
       runId: PR152_RUN_ID,
       catalogMetadataOnly: "true",
       resultClean: "true",
@@ -1038,7 +1054,7 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
     expect(mallory.stdout).toContain("posted no tracking comment");
 
     const wrongRun = runStepB({
-      pages: [[completionComment(STUB_NOOP)]],
+      pages: [[completionComment(STUB_NOOP_SENTINEL)]],
       runId: "99999999999",
       catalogMetadataOnly: "true",
       resultClean: "true",
@@ -1050,7 +1066,7 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
       pages: [
         [
           {
-            ...completionComment(STUB_NOOP),
+            ...completionComment(STUB_NOOP_SENTINEL),
             updatedAt: "2026-07-27T12:59:59Z",
           },
         ],
@@ -1099,7 +1115,7 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
 
   it("MO-T11: true/true cannot bypass the action-outcome guard", () => {
     const result = runStepB({
-      pages: [[completionComment(STUB_NOOP)]],
+      pages: [[completionComment(STUB_NOOP_SENTINEL)]],
       runId: PR152_RUN_ID,
       outcome: "failure",
       catalogMetadataOnly: "true",
@@ -1108,6 +1124,118 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("did not genuinely run to success");
   });
+
+  it("MO-T12: the real zero-turn placeholder fails closed without the sentinel", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("MO-T13: an unticked sentinel-less stub falls through to the checklist alarm", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_NOOP)]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("finished with unticked checklist items");
+  });
+
+  it("MO-T14: a fully-ticked checklist without the sentinel keeps its existing accept path", () => {
+    const result = runStepB({
+      pages: [
+        [trackingComment({ runId: PR152_RUN_ID, ticked: true })],
+      ],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("no unfinished work advertised");
+  });
+
+  it("MO-T15: prose with a terminal sentinel takes the metadata-only accept path", () => {
+    const body = proseBody(
+      PR182_RUN_ID,
+      "The metadata-only review completed without findings.",
+      "",
+      SENTINEL,
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      "metadata-only review configuration with a clean terminal exit and the terminal completion sentinel; checklist tick-state is not required (issues #192 Unit 2, #217)",
+    );
+  });
+
+  it("MO-T16: an in-progress prose heading blocks metadata-only acceptance", () => {
+    const body = proseBody(
+      PR182_RUN_ID,
+      "### Code review in progress",
+      "",
+      "Still reviewing.",
+      "",
+      SENTINEL,
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("still reports work in progress");
+  });
+
+  it("MO-T17: a sentinel quoted mid-body does not satisfy the final-line gate", () => {
+    const body = proseBody(
+      PR182_RUN_ID,
+      "The expected terminal marker is:",
+      SENTINEL,
+      "",
+      "The review is not complete.",
+    );
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR182_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it.each([
+    ["result_clean=false", "true", "false"],
+    ["metadata_only=false", "false", "true"],
+  ])(
+    "MO-T18: %s preserves the struck-checklist alarm despite a terminal sentinel",
+    (_case, catalogMetadataOnly, resultClean) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_STRUCK_SENTINEL)]],
+        runId: PR152_RUN_ID,
+        catalogMetadataOnly,
+        resultClean,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("finished with unticked checklist items");
+    },
+  );
 });
 
 // A prose tracking-comment body whose [View job] header link carries `runId`
@@ -1407,7 +1535,9 @@ describe("claude-review completion-assertion sentinel branch (step B, #183)", ()
     expect(instructionMarker).toBe(SENTINEL);
     // (2) the assertion grammar's SENTINEL literal equals it exactly, so the
     // instruction marker and the grammar are transitively byte-identical.
-    const grammarLiteral = reviewJobStepRun(STEP_B).match(
+    const assertionRun = reviewJobStepRun(STEP_B);
+    expect(assertionRun.match(/SENTINEL='/g) ?? []).toHaveLength(1);
+    const grammarLiteral = assertionRun.match(
       /SENTINEL='([^']*)'/,
     )?.[1];
     expect(grammarLiteral).toBe(SENTINEL);

@@ -946,9 +946,25 @@ jobs:
             exit 1
           fi
 
-          if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ]; then
-            echo "confirmed: metadata-only review configuration with a clean terminal exit; tracking-comment checklist state is not required (issue #192 Unit 2)"
-            exit 0
+          SENTINEL='REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)'
+          LAST_LINE="$(printf '%s\n' "$BODY" | sed 's/[[:space:]]*$//' | awk 'length {last=$0} END {print last}')"
+
+          # Metadata-only catalog closure can waive the action-owned checklist
+          # tick-state (#192 Unit 2), but it cannot waive positive model-authored
+          # completion evidence. The zero-turn placeholder captured in #217 can
+          # pair a clean terminal result with a run-bound body while no review
+          # occurred, so this accept path also requires #183's exact terminal
+          # sentinel and rejects an in-progress heading. Any failed conjunct
+          # falls through (there is deliberately no reject here) to the existing
+          # checklist/sentinel grammar below, which fails that placeholder closed
+          # while preserving the checklist branch's established availability.
+          if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ] \
+            && [ "$LAST_LINE" = "$SENTINEL" ]; then
+            MO_HEADER="$(printf '%s\n' "$BODY" | awk '{ print } /^#+[[:space:]]/ && !/^#######/ { exit }')"
+            if ! printf '%s' "$MO_HEADER" | grep -qiE 'review in progress'; then
+              echo "confirmed: metadata-only review configuration with a clean terminal exit and the terminal completion sentinel; checklist tick-state is not required (issues #192 Unit 2, #217)"
+              exit 0
+            fi
           fi
 
           # The signals below (a `- [ ]` checklist box and a "review in
@@ -1024,8 +1040,6 @@ jobs:
             # instruction above and the test fixtures; C-T11 in
             # tests/factory/claude-review-completion-contract.test.ts pins that
             # lockstep so the instruction and this grammar cannot drift apart.
-            SENTINEL='REVIEW-COMPLETE: all code-review steps finished (claude-code-review completion sentinel, issue #183)'
-
             # (a) The final NON-EMPTY line, after stripping trailing whitespace
             #     and any trailing CR, must byte-equal the sentinel — no
             #     case-fold, no substring, no prefix. `sed` strips per-line
@@ -1033,7 +1047,6 @@ jobs:
             #     trailing-space or CRLF sentinel still matches, and
             #     `awk 'length'` keeps the last line that is non-empty after
             #     that strip, so trailing blank lines are tolerated.
-            LAST_LINE="$(printf '%s\n' "$BODY" | sed 's/[[:space:]]*$//' | awk 'length {last=$0} END {print last}')"
             if [ "$LAST_LINE" != "$SENTINEL" ]; then
               echo "::error::this run's tracking comment has no tracking checklist and its final line is not the terminal completion sentinel, so review completion cannot be proved (issues #146, #183)"
               exit 1

@@ -423,7 +423,7 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(JSON.stringify(stepCEnv)).not.toMatch(/GH_TOKEN|secrets\./u);
   });
 
-  it("T36 locks step C output names to step B's exact-string gate", () => {
+  it("T36 locks step C output names to step B's exact-string gate and its #217 sentinel conjunct", () => {
     const stepB = jobStep(
       parseWorkflow(),
       "claude-review",
@@ -440,9 +440,13 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     );
     expect(run).toContain('[ "$CATALOG_METADATA_ONLY" = "true" ]');
     expect(run).toContain('[ "$RESULT_CLEAN" = "true" ]');
+    // The metadata-only accept gate opens with the two step-C conjuncts…
     expect(run).toContain(
-      'if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ]; then',
+      'if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ]',
     );
+    // …and is fail-closed by the #217 sentinel conjunct terminating the gate (a
+    // regression back to the two-conjunct fail-open would break this lock).
+    expect(run).toContain('&& [ "$LAST_LINE" = "$SENTINEL" ]; then');
   });
 
   it("T37 locks the immutable permitted residual policy to the fixture anchor", () => {
