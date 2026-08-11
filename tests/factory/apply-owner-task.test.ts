@@ -31,6 +31,7 @@ const TREE_OID = "c".repeat(40);
 const DRIFTED_HEAD_SHA = "d".repeat(40);
 const APPLIED_COMMIT_SHA = "e".repeat(40);
 const ORPHANED_COMMIT_SHA = "f".repeat(40);
+const OTHER_SHA = "1".repeat(40);
 const PAYLOAD = " update tests";
 const APPLIED_HEAD_CAVEAT =
   "This commit was pushed with the built-in GITHUB_TOKEN, which does not auto-trigger downstream workflows: no required check (CI, CodeQL) and no review lens (Claude, Codex) has run on this head. Do NOT merge yet. An operator must follow the applied-head re-validation procedure in docs/factory-runbook.md (\"Applied-head roster re-validation\") to re-trigger the required roster on this exact head and confirm every required check passes and every review lens completes per the PR Merge Policy. Branch protection blocks merge until required checks pass on this head.";
@@ -92,6 +93,25 @@ function eligiblePr(overrides: Record<string, unknown> = {}): Record<string, unk
     state: "open",
     merged: false,
     commits: 1,
+    ...overrides,
+  };
+}
+
+function prWithHeadSha(sha: string): Record<string, unknown> {
+  return eligiblePr({
+    head: {
+      sha,
+      ref: "feature/owner-task",
+      repo: { full_name: REPOSITORY, default_branch: "main" },
+    },
+  });
+}
+
+function contentCommit(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    sha: APPLIED_COMMIT_SHA,
+    commit: { tree: { sha: TREE_OID } },
+    parents: [{ sha: HEAD_SHA }],
     ...overrides,
   };
 }
@@ -351,6 +371,7 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(calls.some((call) =>
       call.path.endsWith("/branches/feature%2Fowner-task")
     )).toBe(true);
+    expect(calls.some((call) => call.path.includes("/compare/"))).toBe(false);
   });
 
   it("rejects an apply whose head ref is the repository default branch", async () => {
@@ -622,6 +643,402 @@ describe("apply-owner-task phase entrypoint", () => {
     expect(postedBody(calls)).not.toContain("Applied-head roster re-validation");
     expect(postedBody(calls).endsWith(buildTaskApplyMarker(COMMENT_ID))).toBe(true);
     expect(planFiles()).toEqual([]);
+  });
+
+  it("T1/G4 recognises the exact applied content as one silent no-op", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit()],
+      },
+    });
+
+    await main(request);
+
+    expect(calls.filter((call) => call.path.includes("/compare/"))).toEqual([
+      expect.objectContaining({
+        method: "GET",
+        path: `/repos/${REPOSITORY}/compare/${HEAD_SHA}...${APPLIED_COMMIT_SHA}`,
+      }),
+    ]);
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T2/G2 keeps stale when only the tree matches", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({ parents: [{ sha: OTHER_SHA }] })],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("F1 byte-exactly rejects a parent with the same 39-hex prefix", async () => {
+    const wrongParent = `${HEAD_SHA.slice(0, 39)}d`;
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({ parents: [{ sha: wrongParent }] })],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T3/G1 byte-exactly rejects a tree with the same 39-hex prefix", async () => {
+    const wrongTree = `${TREE_OID.slice(0, 39)}d`;
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({ commit: { tree: { sha: wrongTree } } })],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    ["non-record entry", null],
+    ["bad commit SHA", contentCommit({ sha: "e".repeat(39) })],
+    ["non-record commit", contentCommit({ commit: null })],
+    ["non-record tree", contentCommit({ commit: { tree: null } })],
+    [
+      "bad tree SHA",
+      contentCommit({ commit: { tree: { sha: "c".repeat(39) } } }),
+    ],
+    ["non-array parents", contentCommit({ parents: null })],
+    ["non-record parent", contentCommit({ parents: [null] })],
+    ["bad parent SHA", contentCommit({ parents: [{ sha: "a".repeat(39) }] })],
+  ])("T4/G3 fails closed for a %s", async (_name, candidate) => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [candidate],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(TypeError);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("F4 rejects non-null non-array parent evidence at the array-shape guard", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({ parents: "xx" })],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(
+      /malformed comparison commit parents/u,
+    );
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("F5 validates malformed evidence after an earlier content match", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 2,
+        commits: [contentCommit(), null],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(TypeError);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("F6 validates every parent of a trailing multi-parent commit", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 2,
+        commits: [
+          contentCommit(),
+          contentCommit({
+            sha: OTHER_SHA,
+            parents: [{ sha: HEAD_SHA }, { sha: "z".repeat(40) }],
+          }),
+        ],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(
+      /malformed comparison commit parent/u,
+    );
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    ["zero-parent", []],
+    ["multi-parent", [{ sha: HEAD_SHA }, { sha: OTHER_SHA }]],
+  ])("F3 skips a valid %s non-candidate", async (_name, parents) => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 1,
+        commits: [contentCommit({ parents })],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    [
+      "unknown status",
+      { status: "sideways", total_commits: 1, commits: [contentCommit()] },
+    ],
+    [
+      "missing commits",
+      { status: "ahead", total_commits: 1 },
+    ],
+    [
+      "missing total_commits",
+      { status: "ahead", commits: [contentCommit()] },
+    ],
+  ])("T5/G3/G6 rejects %s", async (_name, comparison) => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison,
+    });
+
+    await expect(main(request)).rejects.toThrow(TypeError);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T6/G7 rejects silently truncated comparison evidence", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 2,
+        commits: [contentCommit()],
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(/truncated comparison commits/u);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T6/G7 rejects comparisons beyond the replay window", async () => {
+    const commits = Array.from({ length: 101 }, () => contentCommit());
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: commits.length,
+        commits,
+      },
+    });
+
+    await expect(main(request)).rejects.toThrow(RangeError);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T7/G5 does not compare when analysis is bound to another base", async () => {
+    writeAnalysis({ baseSha: OTHER_SHA });
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparison: () => {
+        throw new Error("recognition comparison must not be issued");
+      },
+    });
+
+    await main(request);
+
+    expect(calls.some((call) => call.path.includes("/compare/"))).toBe(false);
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T9 keeps marker replay ahead of content recognition", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comments: [{
+        user: { login: "github-actions[bot]" },
+        body: `done\nApplied-Commit: ${APPLIED_COMMIT_SHA}\n${buildTaskApplyMarker(COMMENT_ID)}`,
+      }],
+      comparison: (path: string) => {
+        if (path.endsWith(`/compare/${APPLIED_COMMIT_SHA}...${APPLIED_COMMIT_SHA}`)) {
+          return { status: "identical" };
+        }
+        return {
+          status: "ahead",
+          total_commits: 1,
+          commits: [contentCommit()],
+        };
+      },
+    });
+
+    await main(request);
+
+    expect(calls.filter((call) => call.path.includes("/compare/"))).toEqual([
+      expect.objectContaining({
+        path: `/repos/${REPOSITORY}/compare/${APPLIED_COMMIT_SHA}...${APPLIED_COMMIT_SHA}`,
+      }),
+    ]);
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T10 keeps a base-only drift stale on an identical comparison", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: eligiblePr({
+        base: {
+          sha: OTHER_SHA,
+          ref: "main",
+          repo: { full_name: REPOSITORY, default_branch: "main" },
+        },
+      }),
+      comparison: { status: "identical" },
+    });
+
+    await main(request);
+
+    expect(calls.some((call) =>
+      call.path.endsWith(`/compare/${HEAD_SHA}...${HEAD_SHA}`)
+    )).toBe(true);
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each(["behind", "diverged"])(
+    "T11 keeps stale when content comparison is %s",
+    async (status) => {
+      const { request, calls } = requestHarness({
+        pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+        comparison: { status },
+      });
+
+      await main(request);
+
+      expect(posts(calls)).toHaveLength(1);
+      expect(postedBody(calls)).toContain("snapshot is stale");
+      expect(planFiles()).toEqual([]);
+      expect(existsSync(outputPath)).toBe(false);
+    },
+  );
+
+  it("T12 recognises an applied commit that is reachable but not head", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(DRIFTED_HEAD_SHA),
+      comparison: {
+        status: "ahead",
+        total_commits: 2,
+        commits: [
+          contentCommit(),
+          contentCommit({
+            sha: DRIFTED_HEAD_SHA,
+            commit: { tree: { sha: OTHER_SHA } },
+            parents: [{ sha: APPLIED_COMMIT_SHA }],
+          }),
+        ],
+      },
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T13 treats comparison 404 as a stale miss", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparisonError: new GithubApiError(
+        "GET",
+        `/repos/${REPOSITORY}/compare/${HEAD_SHA}...${APPLIED_COMMIT_SHA}`,
+        404,
+        "Not Found",
+      ),
+    });
+
+    await main(request);
+
+    expect(posts(calls)).toHaveLength(1);
+    expect(postedBody(calls)).toContain("snapshot is stale");
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("T13 propagates a generic comparison failure", async () => {
+    const { request, calls } = requestHarness({
+      pullRequest: prWithHeadSha(APPLIED_COMMIT_SHA),
+      comparisonError: new Error("comparison failed"),
+    });
+
+    await expect(main(request)).rejects.toThrow(/comparison failed/u);
+
+    expect(posts(calls)).toEqual([]);
+    expect(planFiles()).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
   });
 
   it("T-U1.8/T-A1/T-A3/T-A4 posts and re-associates an honest marker-bearing confirmation", async () => {

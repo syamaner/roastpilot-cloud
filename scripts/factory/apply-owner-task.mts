@@ -365,6 +365,110 @@ async function checkAppliedCommitReachability(
   throw new TypeError("GitHub API returned a malformed commit comparison status");
 }
 
+async function findContentAppliedCommit(
+  request: GithubRequest,
+  environment: Environment,
+  currentHeadSha: string,
+  expectedParent: string,
+  expectedTree: string,
+): Promise<string | null> {
+  let rawComparison: unknown;
+  try {
+    rawComparison = await request<unknown>(
+      environment.token,
+      "GET",
+      `${environment.repositoryPath}/compare/${expectedParent}...${currentHeadSha}`,
+    );
+  } catch (error: unknown) {
+    // MUTATION-CHECK: T13 keeps only a 404 comparison miss fail-safe.
+    if (error instanceof GithubApiError && error.status === 404) return null;
+    throw error;
+  }
+  const comparison = fetchedRecord(rawComparison, "content-applied comparison");
+  // MUTATION-CHECK: T10/T11 keep non-ahead closed statuses as misses.
+  if (
+    comparison.status === "identical" ||
+    comparison.status === "behind" ||
+    comparison.status === "diverged"
+  ) {
+    return null;
+  }
+  // MUTATION-CHECK: T5 rejects every comparison status outside the closed grammar.
+  if (comparison.status !== "ahead") {
+    throw new TypeError("GitHub API returned a malformed commit comparison status");
+  }
+
+  const totalCommits = comparison.total_commits;
+  const commits = comparison.commits;
+  // MUTATION-CHECK: T5 rejects a missing or malformed total_commits field.
+  if (
+    typeof totalCommits !== "number" ||
+    !Number.isSafeInteger(totalCommits) ||
+    totalCommits < 0
+  ) {
+    throw new TypeError("GitHub API returned a malformed comparison commit count");
+  }
+  // MUTATION-CHECK: T5 rejects a missing or malformed commits field.
+  if (!Array.isArray(commits)) {
+    throw new TypeError("GitHub API returned malformed comparison commits");
+  }
+  // MUTATION-CHECK: T6 rejects silently truncated comparison evidence.
+  if (totalCommits !== commits.length) {
+    throw new TypeError("GitHub API returned truncated comparison commits");
+  }
+  // MUTATION-CHECK: T6 rejects evidence beyond the closed replay window.
+  if (commits.length > MAX_TRAILER_COMMIT_WINDOW) {
+    throw new RangeError(
+      `comparison exceeds the ${MAX_TRAILER_COMMIT_WINDOW}-commit replay window`,
+    );
+  }
+
+  // MUTATION-CHECK: F5 requires scanning every entry after recording a match.
+  const matchedShas: string[] = [];
+  for (const rawCommit of commits) {
+    // MUTATION-CHECK: T4 rejects a non-record comparison entry.
+    if (!isRecord(rawCommit)) {
+      throw new TypeError("GitHub API returned a malformed comparison commit");
+    }
+    // MUTATION-CHECK: T4 rejects a non-full comparison commit SHA.
+    if (typeof rawCommit.sha !== "string" || !FULL_SHA_PATTERN.test(rawCommit.sha)) {
+      throw new TypeError("GitHub API returned a malformed comparison commit SHA");
+    }
+    const commit = rawCommit.commit;
+    // MUTATION-CHECK: T4 rejects a malformed nested commit record.
+    if (!isRecord(commit)) {
+      throw new TypeError("GitHub API returned a malformed comparison commit data");
+    }
+    const tree = commit.tree;
+    // MUTATION-CHECK: T4 rejects a malformed or non-full comparison tree SHA.
+    if (!isRecord(tree) || typeof tree.sha !== "string" || !FULL_SHA_PATTERN.test(tree.sha)) {
+      throw new TypeError("GitHub API returned a malformed comparison commit tree");
+    }
+    const parents = rawCommit.parents;
+    // MUTATION-CHECK: T4 rejects malformed parent evidence.
+    if (!Array.isArray(parents)) {
+      throw new TypeError("GitHub API returned malformed comparison commit parents");
+    }
+    const validatedParents: Record<string, unknown>[] = [];
+    for (const parent of parents) {
+      // MUTATION-CHECK: T4/F6 validate every parent object before classification.
+      if (!isRecord(parent) || typeof parent.sha !== "string" || !FULL_SHA_PATTERN.test(parent.sha)) {
+        throw new TypeError("GitHub API returned a malformed comparison commit parent");
+      }
+      validatedParents.push(parent);
+    }
+    // MUTATION-CHECK: F3's zero/multi-parent cases stay valid non-candidates.
+    if (parents.length !== 1) continue;
+    const parent = validatedParents[0]!;
+    // MUTATION-CHECK: F1 kills weakened prefix parent matching; T2 kills a dropped match.
+    if (parent.sha !== expectedParent) continue;
+    // MUTATION-CHECK: T3 kills weakened, prefix, or case-folded tree matching.
+    if (tree.sha !== expectedTree) continue;
+    matchedShas.push(rawCommit.sha);
+  }
+  return matchedShas.at(0) ?? null;
+}
+
 function requireCommitCount(pullRequest: Record<string, unknown>): number {
   const count = pullRequest.commits;
   if (!Number.isSafeInteger(count) || typeof count !== "number" || count < 0) {
@@ -942,6 +1046,41 @@ async function decide(
     /* v8 ignore next 3 -- a deliberately unread failed analysis cannot produce apply under decideOwnerTaskPatch's contract. */
     if (beforeAnalysis.kind === "apply") {
       throw new Error("unread patch analysis unexpectedly reached an apply decision");
+    }
+    // MUTATION-CHECK: T1/T8 keep content recognition scoped to this stale gate.
+    if (beforeAnalysis.kind === "stale-notice") {
+      const replayAnalysis = readPatchAnalysis(environment.analysisDir);
+      // MUTATION-CHECK: T7 requires an ok analysis byte-bound to the reviewed head.
+      if (
+        replayAnalysis.status === "ok" &&
+        replayAnalysis.analysis.baseSha === beforeAnalysis.expectedHeadSha
+      ) {
+        const head = pullRequest.head;
+        /* v8 ignore next 3 -- decideOwnerTaskPatch already validates this SHA before producing stale-notice; repeat the boundary check before using it in the API path. */
+        if (!isRecord(head) || typeof head.sha !== "string" || !FULL_SHA_PATTERN.test(head.sha)) {
+          throw new TypeError("GitHub API returned a malformed pull-request head SHA");
+        }
+        const contentAppliedCommit = await findContentAppliedCommit(
+          request,
+          environment,
+          head.sha,
+          beforeAnalysis.expectedHeadSha,
+          replayAnalysis.analysis.treeOid,
+        );
+        // MUTATION-CHECK: T1 requires recognition before stale handling and no side effects.
+        if (contentAppliedCommit !== null) {
+          const markerReplay = decideOwnerTaskPatch({
+            ...ignoredInput(issue, pullRequest, author, commentBody, environment),
+            markerPresent: true,
+          });
+          /* v8 ignore next 3 -- markerPresent on ignored input must produce the existing no-op-success terminal. */
+          if (markerReplay.kind !== "no-op-success") {
+            throw new Error("content-applied replay unexpectedly missed no-op success");
+          }
+          await handleNonApplyDecision(request, environment, markerReplay);
+          return;
+        }
+      }
     }
     await handleNonApplyDecision(request, environment, beforeAnalysis);
     return;
