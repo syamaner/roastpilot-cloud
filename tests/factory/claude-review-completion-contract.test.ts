@@ -946,6 +946,113 @@ describe("claude-review completion-assertion step (step B)", () => {
     expect(result.stdout).toContain("posted no tracking comment");
   });
 
+  it("B-T16: a ticked criterion quoted in truncated review prose is rejected (#184)", () => {
+    const body = [
+      `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+      "",
+      "---",
+      "### Review summary",
+      "",
+      "The review reached this discussion before it was truncated.",
+      "",
+      "- [x] a quoted ticked criterion",
+      "",
+      "Trailing truncated prose.",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("B-T17: a ticked criterion below a second heading is rejected (#184)", () => {
+    const body = [
+      `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+      "",
+      "---",
+      "### Code review",
+      "",
+      "### Quoted acceptance criteria",
+      "",
+      "- [x] criterion quoted",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("B-T18: the real action shape keeps its first checklist and ignores a later quoted box", () => {
+    const body = [
+      `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+      "",
+      "---",
+      "### Code review",
+      "",
+      "- [x] Gather context",
+      "- [x] Post findings",
+      "",
+      "The review quotes a satisfied criterion below.",
+      "",
+      "### Quoted acceptance criteria",
+      "",
+      "- [x] criterion quoted",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("no unfinished work advertised");
+  });
+
+  it("B-T19: a headingless body can start its checklist after prose (#184 widening (a))", () => {
+    const body = [
+      `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+      "",
+      "---",
+      "The action emitted a headingless tracking body.",
+      "",
+      "- [x] Gather context",
+      "- [x] Post findings",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("no unfinished work advertised");
+  });
+
+  it("B-T20: a heading terminates the checklist block, excluding a later unticked quoted box", () => {
+    const body = [
+      `**Claude finished** —— [View job](https://github.com/syamaner/roastpilot-cloud/actions/runs/${PR152_RUN_ID})`,
+      "",
+      "---",
+      "### Code review",
+      "",
+      "- [x] Gather context",
+      "- [x] Post findings",
+      "### Later section",
+      "",
+      "- [ ] a quoted unfinished item",
+    ].join("\n");
+    const result = runStepB({
+      pages: [[completionComment(body)]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("no unfinished work advertised");
+  });
+
   it("T-8: a same-run github-actions[bot] sibling with no [View job] link does not satisfy step B", () => {
     // #157 made the genuine tracker's author github-actions[bot] -- the SAME
     // identity the spec-grounded-review publisher posts its verdict under, in
@@ -1088,7 +1195,7 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
     expect(result.stdout).toContain("finished with unticked checklist items");
   });
 
-  it("MO-T9: the #184 prose-truncation boundary remains closed", () => {
+  it("MO-T9: the no-box prose-truncation boundary remains closed (B-T16 covers the quoted-box variant)", () => {
     const result = runStepB({
       pages: [[completionComment(PR182_PROSE_TRUNCATED)]],
       runId: PR182_RUN_ID,

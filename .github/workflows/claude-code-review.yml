@@ -978,7 +978,10 @@ jobs:
           # a real tracking comment and update
           # tests/factory/claude-review-completion-contract.test.ts), or a
           # reworded checklist will silently stop matching and this gate
-          # will pass a truncated review. The same pin bump must ALSO
+          # will pass a truncated review. The same pin bump must re-verify the
+          # tracking checklist still renders blank-line-adjacent below its first
+          # ATX heading (re-capture a real comment and update the fixtures).
+          # The same pin bump must ALSO
           # re-verify that `claude_args` passthrough of the
           # `--append-system-prompt` sentinel instruction (added #183) still
           # reaches the model — if a future action version stops forwarding
@@ -987,21 +990,24 @@ jobs:
           # direction, but a compliant prose review would then red every time).
           # The sentinel LITERAL itself is repo-owned and pin-independent.
           #
-          # Inspect only the first contiguous task-list block. This is the
-          # action's tracking checklist, and excludes later review prose
-          # that may legitimately quote unticked acceptance criteria or say
-          # "review in progress".
+          # Treat the first contiguous task-list block as the action checklist
+          # only when its first box is above every ATX heading, or separated
+          # from the first ATX heading by blank lines only. Issue #184 keeps a
+          # box after intervening prose or a second heading in review prose, so
+          # the excluded-box body routes to the sentinel branch, which requires the terminal completion sentinel.
           CHECKLIST="$(printf '%s\n' "$BODY" | awk '
-            /^[[:space:]]*[-*+][[:space:]]+\[[ xX]\]/ {
-              if (!seen || in_block) {
-                seen = 1
-                in_block = 1
-                print
-                next
-              }
+            /^#+[[:space:]]/ && !/^#######/ {
+              if (in_block) exit
+              headings++
+              adjacent = (headings == 1)
+              next
             }
-            in_block && /^[[:space:]]*$/ { print; next }
-            in_block { exit }
+            /^[[:space:]]*[-*+][[:space:]]+\[[ xX]\]/ {
+              if (in_block || headings == 0 || adjacent) { in_block = 1; print }
+              next
+            }
+            /^[[:space:]]*$/ { if (in_block) print; next }
+            { if (in_block) exit; adjacent = 0 }
           ')"
           # The heading sits ABOVE the first checklist item, so it is never inside
           # CHECKLIST and the heading grep below was dead code (local codex
