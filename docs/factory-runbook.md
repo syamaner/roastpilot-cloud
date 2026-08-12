@@ -492,6 +492,14 @@ is disabled. It does not replay either missed event after resumption.
 `triage-issues.yml` therefore exposes a manual `workflow_dispatch` with a
 required `issue_number`; this re-runs the current workflow from `main`
 without changing issue lifecycle state or relying on label events.
+Nor is re-running the paused-era run a substitute: during a pause GitHub still
+creates a run for the `issues.opened` event, but its factory jobs are skipped by
+the pause gate. Re-running that run re-executes the workflow file from its
+original pinned commit rather than current `main`, so a workflow fix merged
+since then would be bypassed. The issue title and body are re-fetched fresh via
+`gh issue view` at execution time and are current either way; use a fresh
+`workflow_dispatch`, which runs the current `main` workflow—the fresh-trigger
+mechanism from #51.
 
 **Step 1 — find every issue opened during the pause/disabled window.** Use the
 conservative pre-write `PAUSE_START` recorded in §1, never the later pause
