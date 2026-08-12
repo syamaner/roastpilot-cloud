@@ -207,6 +207,25 @@ jq -r --arg pause_start "$PAUSE_START" --arg classification_time "$CLASSIFICATIO
 '
 ```
 
+Both §2 enumerations above rely on the same pre-existing assumption: the
+unfiltered workflow-runs endpoint paginates to exhaustion. The documented
+1,000-result cap applies to status-filtered searches; the unfiltered listing is
+not documented to carry that cap. But because a repository can accumulate more
+than 1,000 workflow runs in total, if the unfiltered listing ever proves
+bounded—returning only the newest results—an older still-active run, such as a
+publisher queued before the pause, could be hidden from both queries regardless
+of how many runs the pause window itself created, and the
+repeat-to-stable-fixed-point check below would not detect the omission (every
+pass returns the same truncated set). Overcoming that requires enumerating by
+the endpoint's `created=` range filter across the repository's full run
+history—from a deterministic absolute lower bound (the repository's
+first-possible run time), never the earliest visible run—with each range proven
+under the 1,000-result cap by its `total_count` and recursively bisected until
+it is; if completeness cannot be proven this way, treat the inventory as
+unproven and stop rather than infer it, then take the union DEDUPLICATED BY RUN
+ID and feed it into the fixed-point rule below. This is a documented
+completeness boundary of an existing assumption, not a new fail-open.
+
 **`gh api --paginate` is not an atomic snapshot.** It fetches pages
 sequentially, so while it walks the pages a concurrent mutation—the unaffected
 CI and review workflows keep creating runs, and runs can be deleted—can shift
