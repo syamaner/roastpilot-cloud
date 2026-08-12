@@ -1486,8 +1486,9 @@ describe("bounded triage context contract", () => {
       "gh issue list --repo syamaner/roastpilot-cloud --state open --limit 200",
     );
     expect(backfill).toContain(
-      '--search "created:<PAUSE_START>..<PAUSE_END>"',
+      '--search "created:<PAUSE_START>..<TRIAGE_OUTAGE_END>"',
     );
+    expect(backfill).not.toContain("<PAUSE_END>");
     expect(backfill).toContain("--ref main");
     expect(backfill).toContain('-f issue_number="$ISSUE_NUMBER"');
     expect(backfill).toContain("gh run watch");
