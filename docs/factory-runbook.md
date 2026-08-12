@@ -522,11 +522,11 @@ mechanism from #51.
 
 **Step 1 — find every issue opened during the pause/disabled window.** Use the
 conservative pre-write `PAUSE_START` recorded in §1, never the later pause
-acknowledgement time. In the command below, retain `<PAUSE_END>` as the
-upper-bound placeholder but replace it with the workflow-specific
-`TRIAGE_OUTAGE_END` defined above—not the global `PAUSE_END` when
-`triage-issues.yml` remained disabled. Replace both placeholders with exact UTC
-timestamps.
+acknowledgement time. The upper bound in the command below is the
+workflow-specific `<TRIAGE_OUTAGE_END>` defined above. It equals the global
+`PAUSE_END` only when `triage-issues.yml` was re-enabled in step 1 and is the
+workflow's later deliberate re-enable timestamp when it remained disabled.
+Replace both placeholders with exact UTC timestamps.
 Search by creation time, not readiness labels: the story template itself
 adds `needs-triage`, so a missing-label filter would exclude affected
 template-filed issues. `--limit` defaults to 30; raise it above the
@@ -534,7 +534,7 @@ maximum possible issues in the window:
 
 ```bash
 gh issue list --repo syamaner/roastpilot-cloud --state open --limit 200 \
-  --search "created:<PAUSE_START>..<PAUSE_END>" \
+  --search "created:<PAUSE_START>..<TRIAGE_OUTAGE_END>" \
   --json number,title,createdAt,state
 ```
 
