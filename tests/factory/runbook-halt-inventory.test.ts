@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { isMap, isScalar, parseDocument } from "yaml";
 
 const RUNBOOK_PATH = new URL("../../docs/factory-runbook.md", import.meta.url);
 const WORKFLOW_DIRECTORY = new URL("../../.github/workflows/", import.meta.url);
@@ -22,20 +22,66 @@ const PAUSE_NOTICE_ALLOWLIST: ReadonlyMap<string, ReadonlySet<string>> =
     ["triage-issues.yml", new Set(["pause-notice"])],
     ["implement-ready-issues.yml", new Set(["pause-notice"])],
   ]);
-const PAUSE_NOTICE_JOB_KEYS = new Set([
-  "if",
-  "name",
-  "runs-on",
-  "permissions",
-  "steps",
-]);
-const PAUSE_NOTICE_STEP_KEYS = new Set([
-  "name",
-  "run",
-  "shell",
-  "working-directory",
-]);
-const SECRET_CONTEXT_INTERPOLATION = /\$\{\{[^}]*\bsecrets\b/i;
+const PAUSE_NOTICE_JOB_PINS = {
+  "triage-issues.yml#pause-notice": {
+    name: "Factory pause notice",
+    if: "(github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED == 'true'",
+    "runs-on": "ubuntu-latest",
+    permissions: {},
+    steps: [
+      {
+        name: "Announce that the factory is paused",
+        run: `echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — seed/triage/apply will NOT run for this event. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
+{
+  echo "## ⏸ Factory paused"
+  echo "\\\`FACTORY_PAUSED\\\` is \\\`true\\\` — no triage jobs ran for this event."
+  echo "See [docs/factory-runbook.md](https://github.com/\${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
+} >> "$GITHUB_STEP_SUMMARY"
+`,
+      },
+    ],
+  },
+  "implement-ready-issues.yml#pause-notice": {
+    name: "Factory pause notice",
+    if: "vars.FACTORY_PAUSED == 'true'",
+    "runs-on": "ubuntu-latest",
+    permissions: {},
+    steps: [
+      {
+        name: "Announce that the factory is paused",
+        run: `echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — this dispatch will NOT implement or publish anything. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
+{
+  echo "## ⏸ Factory paused"
+  echo "\\\`FACTORY_PAUSED\\\` is \\\`true\\\` — this dispatch did not implement or publish anything."
+  echo "See [docs/factory-runbook.md](https://github.com/\${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
+} >> "$GITHUB_STEP_SUMMARY"
+`,
+      },
+    ],
+  },
+} as const;
+const PAUSE_NOTICE_ROOT_KEY_PINS: Readonly<Record<string, readonly string[]>> =
+  {
+    "triage-issues.yml": [
+      "name",
+      "run-name",
+      "on",
+      "env",
+      "permissions",
+      "jobs",
+    ],
+    "implement-ready-issues.yml": [
+      "name",
+      "on",
+      "concurrency",
+      "permissions",
+      "jobs",
+    ],
+  };
+const TRIAGE_ROOT_ENV_PIN = {
+  TARGET_ISSUE_NUMBER:
+    "${{ github.event.issue.number || inputs.issue_number }}",
+} as const;
 
 type InventoryEntry = {
   id: string;
@@ -94,15 +140,6 @@ function splitTopLevelConjuncts(expr: string): string[] | null {
   return conjuncts;
 }
 
-function mappingHasKey(mapping: unknown, key: string): boolean {
-  return (
-    isMap(mapping) &&
-    mapping.items.some(
-      (pair) => isScalar(pair.key) && pair.key.value === key,
-    )
-  );
-}
-
 function mappingValue(mapping: unknown, key: string): unknown {
   if (!isMap(mapping)) return undefined;
   const pair = mapping.items.find(
@@ -112,19 +149,83 @@ function mappingValue(mapping: unknown, key: string): unknown {
   return pair?.value;
 }
 
-function firstDisallowedMappingKey(
-  mapping: unknown,
-  allowedKeys: ReadonlySet<string>,
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isStructuralScalar(
+  value: unknown,
+): value is string | number | boolean | null {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+function firstStructuralMismatch(
+  actual: unknown,
+  expected: unknown,
+  path = "$",
 ): string | undefined {
-  if (!isMap(mapping)) return "<non-mapping>";
-  for (const pair of mapping.items) {
-    const key =
-      isScalar(pair.key) && typeof pair.key.value === "string"
-        ? pair.key.value
-        : "<non-string-key>";
-    if (!allowedKeys.has(key)) return key;
+  if (isStructuralScalar(actual) || isStructuralScalar(expected)) {
+    return isStructuralScalar(actual) &&
+      isStructuralScalar(expected) &&
+      actual === expected
+      ? undefined
+      : path;
+  }
+
+  if (Array.isArray(actual) || Array.isArray(expected)) {
+    if (!Array.isArray(actual) || !Array.isArray(expected)) return path;
+    if (actual.length !== expected.length) return `${path}.length`;
+    for (let index = 0; index < actual.length; index += 1) {
+      const mismatch = firstStructuralMismatch(
+        actual[index],
+        expected[index],
+        `${path}[${index}]`,
+      );
+      if (mismatch !== undefined) return mismatch;
+    }
+    return undefined;
+  }
+
+  if (!isPlainObject(actual) || !isPlainObject(expected)) return path;
+  const actualKeys = Object.keys(actual);
+  const expectedKeys = Object.keys(expected);
+  for (const key of actualKeys) {
+    if (!Object.hasOwn(expected, key)) return `${path}.${key}`;
+  }
+  for (const key of expectedKeys) {
+    if (!Object.hasOwn(actual, key)) return `${path}.${key}`;
+  }
+  for (const key of actualKeys) {
+    const mismatch = firstStructuralMismatch(
+      actual[key],
+      expected[key],
+      `${path}.${key}`,
+    );
+    if (mismatch !== undefined) return mismatch;
   }
   return undefined;
+}
+
+function hasExactKeySet(
+  value: unknown,
+  expectedKeys: readonly string[],
+): boolean {
+  if (!isPlainObject(value)) return false;
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key) => expectedKeys.includes(key)) &&
+    expectedKeys.every((key) => Object.hasOwn(value, key))
+  );
 }
 
 function classifyWorkflow(
@@ -181,58 +282,42 @@ function classifyWorkflow(
       if (hasNoticeConjunct) {
         const noticeAllowed =
           PAUSE_NOTICE_ALLOWLIST.get(filename)?.has(jobName) === true;
-        const extraJobKey = firstDisallowedMappingKey(
-          job,
-          PAUSE_NOTICE_JOB_KEYS,
-        );
-        const permissions = mappingValue(job, "permissions");
-        const hasEmptyPermissions =
-          isMap(permissions) && permissions.items.length === 0;
-        const steps = mappingValue(job, "steps");
-        const stepsHaveRun =
-          isSeq(steps) &&
-          steps.items.every(
-            (step) => isMap(step) && mappingHasKey(step, "run"),
-          );
-        let extraStepKey: string | undefined;
-        if (isSeq(steps) && stepsHaveRun) {
-          for (const step of steps.items) {
-            extraStepKey = firstDisallowedMappingKey(
-              step,
-              PAUSE_NOTICE_STEP_KEYS,
-            );
-            if (extraStepKey !== undefined) break;
-          }
-        }
-        const hasSecretInterpolation =
-          isSeq(steps) &&
-          steps.items.some((step) => {
-            const run = mappingValue(step, "run");
-            return (
-              isScalar(run) &&
-              typeof run.value === "string" &&
-              SECRET_CONTEXT_INTERPOLATION.test(run.value)
-            );
-          });
-
         if (!noticeAllowed) {
           reasons.push(`${reasonPrefix}:pause-notice-not-allowlisted`);
-        } else if (extraJobKey !== undefined) {
+          continue;
+        }
+
+        const pinKey = `${filename}#${jobName}`;
+        const expectedJob = Object.hasOwn(PAUSE_NOTICE_JOB_PINS, pinKey)
+          ? PAUSE_NOTICE_JOB_PINS[
+              pinKey as keyof typeof PAUSE_NOTICE_JOB_PINS
+            ]
+          : undefined;
+        const jobMismatch = firstStructuralMismatch(
+          job.toJSON(),
+          expectedJob,
+        );
+        if (jobMismatch !== undefined) {
           reasons.push(
-            `${reasonPrefix}:pause-notice-extra-job-key:${extraJobKey}`,
+            `${reasonPrefix}:pause-notice-pin-mismatch:${jobMismatch}`,
           );
-        } else if (!hasEmptyPermissions) {
-          reasons.push(`${reasonPrefix}:pause-notice-permissions-not-empty`);
-        } else if (!stepsHaveRun) {
-          reasons.push(`${reasonPrefix}:pause-notice-steps-not-run-only`);
-        } else if (extraStepKey !== undefined) {
-          reasons.push(
-            `${reasonPrefix}:pause-notice-step-extra-key:${extraStepKey}`,
-          );
-        } else if (hasSecretInterpolation) {
-          reasons.push(
-            `${reasonPrefix}:pause-notice-step-secret-interpolation`,
-          );
+        }
+
+        const root = document.toJSON();
+        const expectedRootKeys = PAUSE_NOTICE_ROOT_KEY_PINS[filename];
+        if (
+          expectedRootKeys === undefined ||
+          !hasExactKeySet(root, expectedRootKeys)
+        ) {
+          reasons.push(`${reasonPrefix}:pause-notice-root-key-set-mismatch`);
+        }
+        if (
+          filename === "triage-issues.yml" &&
+          (!isPlainObject(root) ||
+            firstStructuralMismatch(root.env, TRIAGE_ROOT_ENV_PIN) !==
+              undefined)
+        ) {
+          reasons.push(`${reasonPrefix}:pause-notice-root-env-mismatch`);
         }
         continue;
       }
@@ -423,25 +508,74 @@ const workflowTexts = new Map(
     readFileSync(new URL(filename, WORKFLOW_DIRECTORY), "utf8"),
   ]),
 );
+
+function liveWorkflowText(filename: string): string {
+  const text = workflowTexts.get(filename);
+  if (text === undefined) throw new Error(`Missing live workflow ${filename}`);
+  return text;
+}
+
+function mutateLiveWorkflow(
+  filename: string,
+  needle: string,
+  replacement: string,
+): string {
+  const original = liveWorkflowText(filename);
+  const mutated = original.replace(needle, replacement);
+  expect(mutated).not.toBe(original);
+  return mutated;
+}
+
+function expectNoticePinMismatch(
+  classification: WorkflowClassification,
+): void {
+  expect(classification.gated).toBe(false);
+  expect(classification.reasons).toEqual(
+    expect.arrayContaining([
+      expect.stringMatching(
+        /^job:pause-notice:pause-notice-pin-mismatch:\$/,
+      ),
+    ]),
+  );
+}
 // Parse-based and fail-closed: every job needs the byte-exact top-level
 // `vars.FACTORY_PAUSED != 'true'` conjunct, except the inverse-gated
-// `pause-notice` allowlist. As defense in depth, that exemption restricts the
-// job/step key-shape (rejecting env/secrets/environment/container, job uses, and
-// step env/with), requires permissions: {} plus run-only steps, and rejects
-// direct or nested secrets-context interpolation found in run text. This scan
-// does not prove inertness: workflow-level env inheritance, format()/fromJSON()
-// secret access, and unvalidated runs-on values are residuals tracked for a
-// definitive byte-pin in #259. The authoritative guarantee is structural: an
-// allowlisted notice edit is a protected .github/workflows/** change drawing the
-// factory-security-reviewer lens, while a full halt disables the inventoried
-// workflow entirely. Changing this detector under tests/factory/** draws that
-// lens too; triage's notice `if:` also has a byte-pin.
+// `pause-notice` allowlist. Each exemption is pinned as one complete plain
+// object: exact keys, scalar representations, step count/order, and block-scalar
+// bytes. The brittleness is intentional. Any notice-message or job edit must
+// re-pin it in the same reviewed diff; that coupling is the security property.
+// The root key set is pinned only for workflows containing an allowlisted
+// notice, and triage's legitimate non-secret root env is value-pinned. Trigger,
+// run-name, concurrency, and root-permissions values are deliberately not
+// pinned: the job has its own `permissions: {}`, concurrency is
+// availability-only, and its sole interpolation (`github.repository`) is
+// benign for every trigger. Keep
+// triage's notice condition in step with its complementary byte-pin at
+// tests/factory/triage-workflow-contract.test.ts:1460-1462.
 const gatedWorkflows = workflowFiles.filter((filename) => {
   const text = workflowTexts.get(filename);
   return text !== undefined && classifyWorkflow(filename, text).gated;
 });
 
 describe("factory halt and resume inventory", () => {
+  it("T1 accepts the live triage pause notice pin", () => {
+    expect(
+      classifyWorkflow(
+        "triage-issues.yml",
+        liveWorkflowText("triage-issues.yml"),
+      ),
+    ).toEqual({ gated: true, reasons: [] });
+  });
+
+  it("T2 accepts the live implement pause notice pin", () => {
+    expect(
+      classifyWorkflow(
+        "implement-ready-issues.yml",
+        liveWorkflowText("implement-ready-issues.yml"),
+      ),
+    ).toEqual({ gated: true, reasons: [] });
+  });
+
   it("pins the exact live set of FACTORY_PAUSED-gated workflows", () => {
     expect(gatedWorkflows).toEqual([
       "codex-verdict-status.yml",
@@ -609,15 +743,28 @@ jobs:
     );
   });
 
-  it("F10 rejects an otherwise valid notice-only workflow", () => {
+  it("T5 rejects a pin-matching implement notice-only workflow", () => {
     const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
+      "implement-ready-issues.yml",
+      `name: Implement Ready Issues
+on: workflow_dispatch
+concurrency: {}
+permissions: {}
+jobs:
   pause-notice:
+    name: Factory pause notice
     if: vars.FACTORY_PAUSED == 'true'
+    runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - run: echo paused
+      - name: Announce that the factory is paused
+        run: |
+          echo "::warning::Factory is PAUSED (vars.FACTORY_PAUSED=true) — this dispatch will NOT implement or publish anything. Unset the FACTORY_PAUSED repo variable (or set it to 'false') to resume, or see docs/factory-runbook.md for the full-halt option."
+          {
+            echo "## ⏸ Factory paused"
+            echo "\\\`FACTORY_PAUSED\\\` is \\\`true\\\` — this dispatch did not implement or publish anything."
+            echo "See [docs/factory-runbook.md](https://github.com/\${{ github.repository }}/blob/main/docs/factory-runbook.md) for how to resume or fully halt."
+          } >> "$GITHUB_STEP_SUMMARY"
 `,
     );
 
@@ -643,124 +790,204 @@ jobs:
     ).toEqual({ gated: true, reasons: [] });
   });
 
-  it("F12 rejects structurally unsafe allowlisted notice jobs", () => {
-    const withUses = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    steps:
-      - uses: example/action@0123456789abcdef
-`,
-    );
-    const withoutEmptyPermissions = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    steps:
-      - run: echo paused
-`,
+  it("N1 rejects an appended notice command", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `          } >> "$GITHUB_STEP_SUMMARY"\n\n  # --- implement:`,
+      `          } >> "$GITHUB_STEP_SUMMARY"\n          echo "tampered"\n\n  # --- implement:`,
     );
 
-    expect(withUses.gated).toBe(false);
-    expect(withUses.reasons).toContain(
-      "job:pause-notice:pause-notice-steps-not-run-only",
-    );
-    expect(withoutEmptyPermissions.gated).toBe(false);
-    expect(withoutEmptyPermissions.reasons).toContain(
-      "job:pause-notice:pause-notice-permissions-not-empty",
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
     );
   });
 
-  it("F13 rejects an allowlisted notice job carrying job-level env", () => {
+  it("N2a rejects inherited root env in the implement workflow", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `permissions: {}\n\njobs:`,
+      `permissions: {}\nenv:\n  LEAK: \${{ secrets.X }}\n\njobs:`,
+    );
     const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    env:
-      SECRET_VALUE: secret
-    steps:
-      - run: echo paused
-`,
+      "implement-ready-issues.yml",
+      mutated,
     );
 
     expect(classification.gated).toBe(false);
     expect(classification.reasons).toContain(
-      "job:pause-notice:pause-notice-extra-job-key:env",
+      "job:pause-notice:pause-notice-root-key-set-mismatch",
     );
   });
 
-  it("F14 rejects an allowlisted notice step carrying env", () => {
-    const classification = classifyWorkflow(
+  it("N2b rejects an extra triage root env value", () => {
+    const mutated = mutateLiveWorkflow(
       "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    steps:
-      - run: echo paused
-        env:
-          SECRET_VALUE: secret
-`,
+      `  TARGET_ISSUE_NUMBER: \${{ github.event.issue.number || inputs.issue_number }}\n`,
+      `  TARGET_ISSUE_NUMBER: \${{ github.event.issue.number || inputs.issue_number }}\n  LEAK: \${{ secrets.X }}\n`,
+    );
+    const classification = classifyWorkflow("triage-issues.yml", mutated);
+
+    expect(classification.gated).toBe(false);
+    expect(classification.reasons).toContain(
+      "job:pause-notice:pause-notice-root-env-mismatch",
+    );
+  });
+
+  it("N2c rejects a format-wrapped secret in triage root env", () => {
+    const mutated = mutateLiveWorkflow(
+      "triage-issues.yml",
+      `  TARGET_ISSUE_NUMBER: \${{ github.event.issue.number || inputs.issue_number }}`,
+      `  TARGET_ISSUE_NUMBER: \${{ format('{0}', secrets.X) }}`,
+    );
+    const classification = classifyWorkflow("triage-issues.yml", mutated);
+
+    expect(classification.gated).toBe(false);
+    expect(classification.reasons).toContain(
+      "job:pause-notice:pause-notice-root-env-mismatch",
+    );
+  });
+
+  it("N3 rejects a different notice runner", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "    runs-on: ubuntu-latest",
+      "    runs-on: self-hosted",
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("N4 rejects format-wrapped secret access in a notice run", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `\${{ github.repository }}`,
+      `\${{ format('{0}', secrets.X) }}`,
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("rejects direct secret access in a notice run", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `\${{ github.repository }}`,
+      `\${{ secrets.FOO }}`,
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("N5 rejects an extra notice job key", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "    runs-on: ubuntu-latest\n    permissions: {}",
+      "    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    permissions: {}",
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("N6 rejects a uses key on the notice step", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "      - name: Announce that the factory is paused\n        run: |",
+      "      - uses: example/action@0123456789abcdef\n        run: |",
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("N6b rejects a duplicate notice run step", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `          } >> "$GITHUB_STEP_SUMMARY"\n\n  # --- implement:`,
+      `          } >> "$GITHUB_STEP_SUMMARY"\n      - run: echo duplicate\n\n  # --- implement:`,
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("N7 rejects non-empty notice permissions", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "    permissions: {}",
+      "    permissions:\n      contents: read",
+    );
+
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
+  });
+
+  it("rejects missing notice permissions at the pinned path", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "\n    permissions: {}",
+      "",
+    );
+
+    expect(classifyWorkflow("implement-ready-issues.yml", mutated)).toEqual({
+      gated: false,
+      reasons: [
+        "job:pause-notice:pause-notice-pin-mismatch:$.permissions",
+      ],
+    });
+  });
+
+  it("N8 rejects workflow-level defaults beside a notice", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      `permissions: {}\n\njobs:`,
+      `permissions: {}\ndefaults:\n  run:\n    shell: bash\n\njobs:`,
+    );
+    const classification = classifyWorkflow(
+      "implement-ready-issues.yml",
+      mutated,
     );
 
     expect(classification.gated).toBe(false);
     expect(classification.reasons).toContain(
-      "job:pause-notice:pause-notice-step-extra-key:env",
+      "job:pause-notice:pause-notice-root-key-set-mismatch",
     );
   });
 
-  it("F15 rejects an allowlisted notice job carrying environment", () => {
-    const classification = classifyWorkflow(
+  it("rejects a missing triage root run-name key", () => {
+    const mutated = mutateLiveWorkflow(
       "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    environment: production
-    steps:
-      - run: echo paused
-`,
+      `run-name: "Triage issue #\${{ github.event.issue.number || inputs.issue_number }}"\n`,
+      "",
     );
 
-    expect(classification.gated).toBe(false);
-    expect(classification.reasons).toContain(
-      "job:pause-notice:pause-notice-extra-job-key:environment",
-    );
+    expect(classifyWorkflow("triage-issues.yml", mutated)).toEqual({
+      gated: false,
+      reasons: [
+        "job:pause-notice:pause-notice-root-key-set-mismatch",
+      ],
+    });
   });
 
-  it("F16 accepts the live inert notice key-shape beside a blocked job", () => {
-    const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    name: Factory pause notice
-    if: vars.FACTORY_PAUSED == 'true'
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - name: Announce that the factory is paused
-        run: echo paused
-`,
+  it("N9 rejects a sequence-form notice runner", () => {
+    const mutated = mutateLiveWorkflow(
+      "implement-ready-issues.yml",
+      "    runs-on: ubuntu-latest",
+      "    runs-on: [ubuntu-latest]",
     );
 
-    expect(classification).toEqual({ gated: true, reasons: [] });
+    expectNoticePinMismatch(
+      classifyWorkflow("implement-ready-issues.yml", mutated),
+    );
   });
 
   it("F17 rejects a duplicated exact pause-block conjunct", () => {
@@ -819,63 +1046,6 @@ jobs:
     );
 
     expect(classification).toEqual({ gated: true, reasons: [] });
-  });
-
-  it("F21 rejects secrets-context interpolation in a notice run", () => {
-    const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    steps:
-      - run: echo \${{ secrets.FOO }}
-`,
-    );
-
-    expect(classification.gated).toBe(false);
-    expect(classification.reasons).toContain(
-      "job:pause-notice:pause-notice-step-secret-interpolation",
-    );
-  });
-
-  it("F22 accepts benign github-context interpolation in a notice run", () => {
-    const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    steps:
-      - run: echo \${{ github.repository }}
-`,
-    );
-
-    expect(classification).toEqual({ gated: true, reasons: [] });
-  });
-
-  it("F23 rejects nested secrets context in a notice run", () => {
-    const classification = classifyWorkflow(
-      "triage-issues.yml",
-      `jobs:
-  blocked:
-    if: vars.FACTORY_PAUSED != 'true'
-  pause-notice:
-    if: vars.FACTORY_PAUSED == 'true'
-    permissions: {}
-    steps:
-      - run: echo \${{ toJSON(secrets) }}
-`,
-    );
-
-    expect(classification.gated).toBe(false);
-    expect(classification.reasons).toContain(
-      "job:pause-notice:pause-notice-step-secret-interpolation",
-    );
   });
 
   it("disables every workflow gated by FACTORY_PAUSED", () => {
