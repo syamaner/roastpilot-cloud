@@ -713,6 +713,59 @@ describe("branch-protection contract comparator", () => {
     expect(verifyBranchProtectionContract(allowed).violations).toEqual([]);
   });
 
+  it("L1 rejects contexts_url on a URL-bearing boolean wrapper", () => {
+    const snapshot = cloneSnapshot();
+    snapshot.enforce_admins.contexts_url = "x";
+    expect(verifyBranchProtectionContract(snapshot).violations).toEqual([
+      "$.enforce_admins.contexts_url:value-mismatch",
+    ]);
+  });
+
+  it("L2 rejects url on a required-check entry", () => {
+    const snapshot = cloneSnapshot();
+    checksOf(snapshot)[0]!.url = "x";
+    expect(verifyBranchProtectionContract(snapshot).violations).toEqual([
+      "$.required_status_checks.checks[0].url:value-mismatch",
+    ]);
+  });
+
+  it("L3 rejects contexts_url on a required-check entry", () => {
+    const snapshot = cloneSnapshot();
+    checksOf(snapshot)[0]!.contexts_url = "x";
+    expect(verifyBranchProtectionContract(snapshot).violations).toEqual([
+      "$.required_status_checks.checks[0].contexts_url:value-mismatch",
+    ]);
+  });
+
+  it.each(["lock_branch", "required_conversation_resolution"] as const)(
+    "L4 rejects url on non-URL-bearing wrapper %s",
+    (key) => {
+      const snapshot = cloneSnapshot();
+      snapshot[key].url = "x";
+      expect(verifyBranchProtectionContract(snapshot).violations).toEqual([
+        `$.${key}.url:value-mismatch`,
+      ]);
+    },
+  );
+
+  it("L5 leaves required_signatures.url value unpinned", () => {
+    const snapshot = cloneSnapshot();
+    snapshot.required_signatures.url = { arbitrary: "value" };
+    expect(verifyBranchProtectionContract(snapshot)).toEqual({
+      ok: true,
+      violations: [],
+    });
+  });
+
+  it("L6 leaves enforce_admins.url optional", () => {
+    const snapshot = cloneSnapshot();
+    Reflect.deleteProperty(snapshot.enforce_admins, "url");
+    expect(verifyBranchProtectionContract(snapshot)).toEqual({
+      ok: true,
+      violations: [],
+    });
+  });
+
   it("rejects an unobserved URL-suffixed key on a boolean wrapper", () => {
     const snapshot = cloneSnapshot();
     snapshot.enforce_admins.future_permission_url = false;

@@ -59,6 +59,20 @@ const ENABLED_PINS = [
   ["allow_fork_syncing", false],
 ] as const;
 
+const REQUIRED_STATUS_CHECK_KEYS = new Set([
+  "strict",
+  "contexts",
+  "checks",
+  "url",
+  "contexts_url",
+]);
+const URL_BEARING_WRAPPERS = new Set([
+  "enforce_admins",
+  "required_signatures",
+]);
+const ENABLED_WRAPPER_KEYS = new Set(["enabled"]);
+const URL_BEARING_WRAPPER_KEYS = new Set(["enabled", "url"]);
+
 type PlainObject = Record<string, unknown>;
 
 function isPlainObject(value: unknown): value is PlainObject {
@@ -69,19 +83,14 @@ function isPlainObject(value: unknown): value is PlainObject {
   return prototype === Object.prototype || prototype === null;
 }
 
-function isIgnoredLocatorKey(key: string): boolean {
-  return key === "url" || key === "contexts_url";
-}
-
 function unexpectedNestedKeyCodes(
   value: unknown,
   path: string,
-  semanticKeys: readonly string[],
+  allowedKeys: ReadonlySet<string>,
 ): string[] {
   if (!isPlainObject(value)) return [];
-  const allowed = new Set(semanticKeys);
   return Object.keys(value)
-    .filter((key) => !allowed.has(key) && !isIgnoredLocatorKey(key))
+    .filter((key) => !allowedKeys.has(key))
     .sort()
     .map((key) => `$.${path}.${key}:value-mismatch`);
 }
@@ -197,11 +206,7 @@ function checkEntryClosureViolations(checks: unknown): string[] {
   checks.forEach((check, index) => {
     if (!isPlainObject(check)) return;
     for (const key of Object.keys(check).sort()) {
-      if (
-        key !== "context" &&
-        key !== "app_id" &&
-        !isIgnoredLocatorKey(key)
-      ) {
+      if (key !== "context" && key !== "app_id") {
         violations.push(
           `$.required_status_checks.checks[${index}].${key}:value-mismatch`,
         );
@@ -242,11 +247,11 @@ export function verifyBranchProtectionContract(input: unknown): {
   if (Object.hasOwn(input, "required_status_checks")) {
     const statusChecks = input.required_status_checks;
     violations.push(
-      ...unexpectedNestedKeyCodes(statusChecks, "required_status_checks", [
-        "strict",
-        "contexts",
-        "checks",
-      ]),
+      ...unexpectedNestedKeyCodes(
+        statusChecks,
+        "required_status_checks",
+        REQUIRED_STATUS_CHECK_KEYS,
+      ),
     );
 
     if (
@@ -287,7 +292,10 @@ export function verifyBranchProtectionContract(input: unknown): {
   for (const [key, expected] of ENABLED_PINS) {
     if (!Object.hasOwn(input, key)) continue;
     const wrapper = input[key];
-    violations.push(...unexpectedNestedKeyCodes(wrapper, key, ["enabled"]));
+    const allowedKeys = URL_BEARING_WRAPPERS.has(key)
+      ? URL_BEARING_WRAPPER_KEYS
+      : ENABLED_WRAPPER_KEYS;
+    violations.push(...unexpectedNestedKeyCodes(wrapper, key, allowedKeys));
     if (
       !isPlainObject(wrapper) ||
       !Object.hasOwn(wrapper, "enabled") ||
