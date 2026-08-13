@@ -74,6 +74,52 @@ function jobSteps(workflow: Mapping, jobName: string): Mapping[] {
   return steps.map(asMapping);
 }
 
+function marketplaceMachineryFindings(source: string): string[] {
+  const workflow = parseWorkflowSource(source);
+  const jobs = asMapping(workflow.jobs);
+  const findings: string[] = [];
+  const forbiddenStepNames = [
+    "Clear Claude Code plugin marketplace path",
+    "Checkout Claude Code plugin marketplace",
+    "Rename pinned marketplace to a non-reserved name",
+  ];
+
+  for (const jobName of Object.keys(jobs)) {
+    for (const step of jobSteps(workflow, jobName)) {
+      if (
+        typeof step.name === "string" &&
+        forbiddenStepNames.includes(step.name)
+      ) {
+        findings.push(`forbidden marketplace step: ${step.name}`);
+      }
+      if (
+        typeof step.uses === "string" &&
+        step.uses.startsWith("anthropics/claude-code-action@")
+      ) {
+        const inputs = step.with === undefined ? {} : asMapping(step.with);
+        for (const input of ["plugins", "plugin_marketplaces"]) {
+          if (Object.prototype.hasOwnProperty.call(inputs, input)) {
+            findings.push(`forbidden Claude action input: ${input}`);
+          }
+        }
+      }
+    }
+  }
+
+  for (const literal of [
+    ".claude-marketplace",
+    "claude-code-plugins",
+    "roastpilot-pinned-plugins",
+    "code-review@",
+  ]) {
+    if (source.includes(literal)) {
+      findings.push(`forbidden workflow literal: ${literal}`);
+    }
+  }
+
+  return findings;
+}
+
 function hasPayloadFrozenHeadBinding(source: string): boolean {
   const step = jobStep(
     parseWorkflowSource(source),
@@ -511,12 +557,11 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
       (candidate) => candidate.name === "Restore base-owned configuration",
     );
     const diffIndex = steps.indexOf(step);
-    const clearIndex = steps.findIndex(
-      (candidate) =>
-        candidate.name === "Clear Claude Code plugin marketplace path",
+    const actionIndex = steps.findIndex(
+      (candidate) => candidate.name === "Run Claude Code Review",
     );
     expect(diffIndex).toBe(restoreIndex + 1);
-    expect(diffIndex).toBeLessThan(clearIndex);
+    expect(diffIndex).toBeLessThan(actionIndex);
     expect(step).not.toHaveProperty("if");
     expect(step).not.toHaveProperty("continue-on-error");
     expect(asMapping(step.env)).toEqual({
@@ -695,5 +740,45 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     const run = String(step.run);
     expect(run).toContain('OUTPUT_DELIMITER="PRDIFF-$NONCE"');
     expect(run).toContain('FENCE_MARKER="PR-DIFF-FENCE-$NONCE"');
+  });
+
+  it("T43 removes all Claude Code marketplace machinery and rejects regressions", () => {
+    const source = readFileSync(WORKFLOW_PATH, "utf8");
+
+    expect(marketplaceMachineryFindings(source)).toEqual([]);
+
+    const inputMutant = source.replace(
+      "          show_full_output: false\n",
+      [
+        "          show_full_output: false",
+        "          plugin_marketplaces: './.claude-marketplace'",
+        "          plugins: 'code-review@roastpilot-pinned-plugins'",
+        "",
+      ].join("\n"),
+    );
+    expect(inputMutant).not.toBe(source);
+    expect(marketplaceMachineryFindings(inputMutant)).toEqual(
+      expect.arrayContaining([
+        "forbidden Claude action input: plugins",
+        "forbidden Claude action input: plugin_marketplaces",
+      ]),
+    );
+
+    const stepMutant = source.replace(
+      "      - name: Run Claude Code Review\n",
+      [
+        "      - name: Checkout Claude Code plugin marketplace",
+        "        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+        "        with:",
+        "          repository: anthropics/claude-code",
+        "",
+        "      - name: Run Claude Code Review",
+        "",
+      ].join("\n"),
+    );
+    expect(stepMutant).not.toBe(source);
+    expect(marketplaceMachineryFindings(stepMutant)).toContain(
+      "forbidden marketplace step: Checkout Claude Code plugin marketplace",
+    );
   });
 });
