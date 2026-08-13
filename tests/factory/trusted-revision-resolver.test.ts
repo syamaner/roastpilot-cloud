@@ -21,6 +21,7 @@ const GIT = "/usr/bin/git";
 const RESOLVER = "resolve-trusted-revision";
 const RESOLVER_STEP = "Resolve the trusted revision";
 const REVIEW_RESTORE = "Restore base-owned configuration";
+const REVIEW_DIFF = "Compute the PR diff from trusted revisions";
 const SPEC_RESTORE =
   "Restore trusted configuration + manifests from the trusted revision";
 const PUBLISH_JOB = "publish-spec-grounding-review";
@@ -542,15 +543,20 @@ describe("trusted revision workflow structure", () => {
     expect(run).not.toMatch(/git\b[^\n]*\$\{?BASE_REF/);
   });
 
-  it("R19 leaves one event binding per resolver input and no event checkout ref", () => {
+  it("R19 admits only the payload-base diff's extra base.sha binding and no event checkout ref", () => {
     const source = readFileSync(WORKFLOW_PATH, "utf8");
+    expect(source.split("github.event.pull_request.base.sha")).toHaveLength(3);
     for (const expression of [
-      "github.event.pull_request.base.sha",
       "github.event.pull_request.base.ref",
       "github.event.repository.default_branch",
     ]) {
       expect(source.split(expression)).toHaveLength(2);
     }
+    expect(asMapping(namedStep("claude-review", REVIEW_DIFF).env)).toEqual({
+      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+      HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+      DIFF_MAX_BYTES: "65536",
+    });
     for (const jobValue of Object.values(asMapping(workflow().jobs))) {
       const jobSteps = asMapping(jobValue).steps;
       if (!Array.isArray(jobSteps)) continue;

@@ -20,7 +20,11 @@ function asMapping(value: unknown): Mapping {
 }
 
 function parseWorkflow(): Mapping {
-  const document = parseDocument(readFileSync(WORKFLOW_PATH, "utf8"));
+  return parseWorkflowSource(readFileSync(WORKFLOW_PATH, "utf8"));
+}
+
+function parseWorkflowSource(source: string): Mapping {
+  const document = parseDocument(source);
   expect(document.errors).toEqual([]);
   return document.toJS() as Mapping;
 }
@@ -60,6 +64,34 @@ function jobStep(workflow: Mapping, jobName: string, stepName: string): Mapping 
     throw new Error(`${jobName} has no "${stepName}" step`);
   }
   return asMapping(step);
+}
+
+function jobSteps(workflow: Mapping, jobName: string): Mapping[] {
+  const steps = asMapping(asMapping(workflow.jobs)[jobName]).steps;
+  if (!Array.isArray(steps)) {
+    throw new Error(`${jobName} has no steps array`);
+  }
+  return steps.map(asMapping);
+}
+
+function hasPayloadFrozenHeadBinding(source: string): boolean {
+  const step = jobStep(
+    parseWorkflowSource(source),
+    "claude-review",
+    "Compute the PR diff from trusted revisions",
+  );
+  return asMapping(step.env).HEAD_SHA ===
+    "${{ github.event.pull_request.head.sha }}";
+}
+
+function hasPayloadFrozenBaseBinding(source: string): boolean {
+  const step = jobStep(
+    parseWorkflowSource(source),
+    "claude-review",
+    "Compute the PR diff from trusted revisions",
+  );
+  return asMapping(step.env).BASE_SHA ===
+    "${{ github.event.pull_request.base.sha }}";
 }
 
 const INLINE_COMMENT_TOOL =
@@ -463,5 +495,205 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(JSON.parse(literal) as unknown).toEqual(
       fixtureStringArray(parseToolCatalogFixture(), "permittedResidual"),
     );
+  });
+
+  it("T38 pins the trusted diff step's identity, placement, and closed environment", () => {
+    const workflow = parseWorkflow();
+    const steps = jobSteps(workflow, "claude-review");
+    const named = steps.filter(
+      (step) => step.name === "Compute the PR diff from trusted revisions",
+    );
+    expect(named).toHaveLength(1);
+    const step = named[0];
+    expect(step.id).toBe("pr-diff");
+
+    const restoreIndex = steps.findIndex(
+      (candidate) => candidate.name === "Restore base-owned configuration",
+    );
+    const diffIndex = steps.indexOf(step);
+    const clearIndex = steps.findIndex(
+      (candidate) =>
+        candidate.name === "Clear Claude Code plugin marketplace path",
+    );
+    expect(diffIndex).toBe(restoreIndex + 1);
+    expect(diffIndex).toBeLessThan(clearIndex);
+    expect(step).not.toHaveProperty("if");
+    expect(step).not.toHaveProperty("continue-on-error");
+    expect(asMapping(step.env)).toEqual({
+      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+      HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+      DIFF_MAX_BYTES: "65536",
+    });
+    const run = String(step.run);
+    expect(run).not.toContain("${{");
+    expect(run).not.toContain("secrets.");
+    expect(run).not.toContain("GH_TOKEN");
+  });
+
+  it("T39 binds BASE_SHA and HEAD_SHA only to payload-frozen commits", () => {
+    const source = readFileSync(WORKFLOW_PATH, "utf8");
+    expect(hasPayloadFrozenBaseBinding(source)).toBe(true);
+    expect(hasPayloadFrozenHeadBinding(source)).toBe(true);
+
+    for (const mutant of [
+      "${{ github.event.pull_request.base.ref }}",
+      "${{ github.base_ref }}",
+      "${{ needs.resolve-trusted-revision.outputs.trusted-sha }}",
+      "${{ steps.compute-base.outputs.sha }}",
+    ]) {
+      const mutated = source.replace(
+        "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n" +
+          "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+        `          BASE_SHA: ${mutant}\n` +
+          "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+      );
+      expect(mutated).not.toBe(source);
+      expect(hasPayloadFrozenBaseBinding(mutated), mutant).toBe(false);
+    }
+
+    for (const mutant of [
+      "${{ github.event.pull_request.head.ref }}",
+      "${{ github.head_ref }}",
+      "${{ steps.compute-head.outputs.sha }}",
+    ]) {
+      const mutated = source.replace(
+        "HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+        `HEAD_SHA: ${mutant}`,
+      );
+      expect(mutated).not.toBe(source);
+      expect(hasPayloadFrozenHeadBinding(mutated), mutant).toBe(false);
+    }
+  });
+
+  it("T40 injects only nonce-fenced untrusted diff data into the repo-owned prompt", () => {
+    const action = jobStep(
+      parseWorkflow(),
+      "claude-review",
+      "Run Claude Code Review",
+    );
+    const withInputs = asMapping(action.with);
+    const prompt = String(withInputs.prompt);
+    const claudeArgs = String(withInputs.claude_args);
+    const appendLine = claudeArgs
+      .split("\n")
+      .find((line) => line.trimStart().startsWith("--append-system-prompt"));
+    const sentinel = appendLine?.match(/interim update: ([^"]+)"\s*$/)?.[1];
+    expect(sentinel).toBeTruthy();
+
+    expect(prompt).toContain(
+      "PR-DIFF-FENCE-${{ steps.pr-diff.outputs.nonce }}-BEGIN",
+    );
+    expect(prompt).toContain("${{ steps.pr-diff.outputs.diff }}");
+    expect(prompt).toContain(
+      "PR-DIFF-FENCE-${{ steps.pr-diff.outputs.nonce }}-END",
+    );
+    expect(prompt).toContain(
+      "${{ steps.pr-diff.outputs.changeset_empty }}",
+    );
+    expect(prompt).toContain("If it is exactly `true`");
+    expect(prompt).toContain("Never infer emptiness by");
+    expect(prompt).not.toContain("If the diff contains");
+    expect(prompt).toContain("The available tools are `ToolSearch`");
+    expect(prompt).toContain("MUST use to load");
+    expect(prompt).toContain("Use ToolSearch to load both sinks");
+    expect(prompt).toMatch(
+      /ALWAYS write\s+the tracking comment via\s+`mcp__github_comment__update_claude_comment`/u,
+    );
+    expect(prompt).toMatch(
+      /`mcp__github_inline_comment__create_inline_comment` ONLY for an actual\s+blocker, medium, or low finding on a changed line/u,
+    );
+    expect(prompt).toMatch(
+      /If there are no\s+findings, or `changeset_empty` is exactly `true`, post NO inline\s+comments/u,
+    );
+    expect(prompt).toContain(
+      "Loading both sinks does not require calling the inline sink",
+    );
+    expect(prompt).not.toContain("then use them");
+    expect(prompt).toContain(
+      "Never attempt any tool beyond ToolSearch",
+    );
+    expect(prompt).not.toContain("The ONLY tools that exist are the inline-comment sink");
+    expect(prompt).not.toContain("Never attempt to use any other tool");
+    expect(prompt).toContain("mcp__github_inline_comment__create_inline_comment");
+    expect(prompt).toContain("mcp__github_comment__update_claude_comment");
+    expect(prompt).toContain("There is NO file");
+    expect(prompt).toContain("repository, network, or subprocess access");
+    for (const mustBlock of [
+      "any grant to PUBLIC",
+      "secure roast-by-slug and",
+      "reviews-by-roast views",
+      "USAGE ON PROCEDURE",
+      "never `EXECUTE`",
+      "containing database/schema and shared warehouse",
+      "flag those prerequisite grants",
+      "flag `EXECUTE` on the",
+      "visibility <> 'private'",
+      "differs between Zod and Pydantic",
+      "does not cascade reviews, telemetry",
+      "a raw IP address",
+      "any Fahrenheit value or conversion",
+      "login, session, or account concept reachable from /r/[slug]",
+    ]) {
+      expect(prompt, mustBlock).toContain(mustBlock);
+    }
+    expect(prompt).toContain(
+      "${{ github.event.pull_request.user.login }}",
+    );
+    for (const factorySurfacePin of [
+      "exactly `roastpilot-factory[bot]`",
+      "implementing-agent patch",
+      "must never grant itself more pipeline power",
+      ".github/**",
+      "workflows and composite actions",
+      "scripts/factory/**",
+      "privileged glue/publisher script",
+      "CODEOWNERS",
+      "branch-protection config",
+      "tests/factory/**",
+      ".claude/**",
+      ".codex/**",
+      "AGENTS.md",
+      "AGENTS.override.md",
+      "CLAUDE.md",
+      "CLAUDE.local.md",
+      ".claudeignore",
+      ".mcp.json",
+      ".npmrc",
+      "docs/state/registry.md",
+      "If the author is anyone else",
+      "conventional human-directed work",
+      "do not flag them on that basis",
+    ]) {
+      expect(prompt, factorySurfacePin).toContain(factorySurfacePin);
+    }
+    expect(prompt).toContain("blocker, medium, and low findings as INLINE comments");
+    expect(prompt).not.toContain("/code-review:code-review");
+    expect(prompt).not.toContain(sentinel);
+  });
+
+  it("T41 pins the immutable diff cap and forbids payload truncation", () => {
+    const step = jobStep(
+      parseWorkflow(),
+      "claude-review",
+      "Compute the PR diff from trusted revisions",
+    );
+    expect(asMapping(step.env).DIFF_MAX_BYTES).toBe("65536");
+    const run = String(step.run);
+    expect(run).toContain(
+      'DIFF_BYTES="$(wc -c < "$DIFF_FILE" | tr -d \'[:space:]\')"',
+    );
+    expect(run).toContain('[ "$DIFF_BYTES" -gt "$DIFF_MAX_BYTES" ]');
+    expect(run).not.toMatch(/\bhead\s+-c\b|\btruncate\b/u);
+  });
+
+  it("T42 byte-pins both nonce-derived collision sentinels", () => {
+    const step = jobStep(
+      parseWorkflow(),
+      "claude-review",
+      "Compute the PR diff from trusted revisions",
+    );
+    const run = String(step.run);
+    expect(run).toContain('OUTPUT_DELIMITER="PRDIFF-$NONCE"');
+    expect(run).toContain('FENCE_MARKER="PR-DIFF-FENCE-$NONCE"');
   });
 });
