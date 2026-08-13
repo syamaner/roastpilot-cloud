@@ -1114,9 +1114,9 @@ created during the dark launch, so both jobs are unschedulable today.
 For every owner-task commit pushed by `task-apply`, complete this procedure on
 the current PR head that contains the applied work before merge. Owner-task
 apply admits only pull requests targeting the protected default branch, which
-is why branch protection mechanically gates CI, CodeQL, and mutation testing
-on the applied head. Dependency review and `codecov/patch` are operator-verified
-gates rather than branch-protection-required status checks:
+is why branch protection mechanically gates CI, CodeQL, dependency review, and
+mutation testing on the applied head. Dependency review is
+branch-protection-required; only `codecov/patch` is an operator-verified gate.
 
 The trigger rule is categorical: CI, CodeQL, and dependency review use the
 default `pull_request` activity types (`opened`, `synchronize`, and `reopened`).
@@ -1129,12 +1129,30 @@ them.
 This gate assumes the default branch is protected by classic protection or a
 ruleset with the required checks required. That global factory invariant,
 tracked in [#245](https://github.com/syamaner/roastpilot-cloud/issues/245), is
-now satisfied with nine required status contexts. This path relies on that
-contract rather than re-verifying it: it confirms that the currently required
-contexts pass, not that the contract still lists all nine, so a dropped context
-would shrink the checked set undetected. Deterministic re-verification of the
-contract, at enable time and on each applied head, is tracked in
-[#254](https://github.com/syamaner/roastpilot-cloud/issues/254).
+now satisfied with nine required status contexts. This procedure mechanically
+verifies both that the repository default branch byte-equals `main` and that
+`main`'s closed branch-protection payload conforms before trusting that gate,
+so a default-branch repoint, a dropped, added, duplicated, or renamed context,
+and any other pinned drift fail closed.
+The applied head and ambient local Git remote are untrusted, so every invocation
+loads the comparator from the hard-coded authenticated
+`syamaner/roastpilot-cloud` contents API at explicit `ref=main`—the same source
+as the protection payload—rather than executing a working-tree or local-remote
+copy. A redirected local remote therefore cannot substitute the comparator.
+
+The pinned required-context set is:
+
+<!-- branch-protection-required-contexts:start -->
+- `Lint, typecheck, unit tests`
+- `Playwright smoke`
+- `Snowflake migrations (offline)`
+- `CodeQL`
+- `dependency-review`
+- `Mutation testing (security-critical Python)`
+- `Analyze (javascript-typescript)`
+- `Analyze (actions)`
+- `Analyze (python)`
+<!-- branch-protection-required-contexts:end -->
 
 1. Read the current PR head with `gh pr view <n> --json headRefOid` and treat
    that `headRefOid` as the re-validation target. Locate the applied commit from
@@ -1167,7 +1185,27 @@ contract, at enable time and on each applied head, is tracked in
    directs. A stale reaction or review from before the applicable boundary is
    not completion evidence. `AGENTS.md` is the single source of truth for
    accepted verdict channels.
-3. Re-read `headRefOid` and `baseRefName` after the trigger with
+3. As the first action on the stable head, mechanically re-verify the live
+   branch-protection contract:
+
+   ```bash
+   set -euo pipefail
+   tmpdir="$(mktemp -d)"
+   gh api "repos/syamaner/roastpilot-cloud/contents/scripts/factory/branch-protection-contract.mts?ref=main" \
+     -H "Accept: application/vnd.github.raw" > "$tmpdir/bpc.mts"
+   test -s "$tmpdir/bpc.mts" || { echo 'BRANCH-PROTECTION: comparator load failed; fail closed'; exit 1; }
+   test "$(gh api repos/syamaner/roastpilot-cloud --jq '.default_branch')" = main \
+     || { echo 'BRANCH-PROTECTION: default-branch drift — not main; fail closed'; exit 1; }
+   gh api repos/syamaner/roastpilot-cloud/branches/main/protection \
+     | node --experimental-strip-types "$tmpdir/bpc.mts"
+   ```
+
+   Comparator-load failure, default-branch drift, or any output other than the
+   `BRANCH-PROTECTION-CONTRACT: OK` line with exit 0 means the applied head is
+   not gated: do not merge; restore the repository default branch to `main` and
+   branch protection to the pinned contract, re-run both assertions until the
+   comparator reports OK, then restart from step 1. After they pass, re-read
+   `headRefOid` and `baseRefName` after the trigger with
    `gh pr view <n> --json headRefOid,baseRefName`. If a new push landed and the
    head drifted, restart from step 1 on the new head. Confirm that `baseRefName`
    still byte-equals the protected default branch. A base retarget invalidates
@@ -1183,11 +1221,11 @@ contract, at enable time and on each applied head, is tracked in
    but do not treat the absence of unresolved inline threads as sufficient
    evidence that a review lens completed cleanly. Also confirm the
    `dependency-review` and `codecov/patch` results on that applied head. Treat a
-   red dependency-review result or a coverage regression as blocking for merge
-   even though branch protection does not mechanically stop it. Branch
-   protection blocks merge on the required checks. The advisory review lenses
-   are operator-enforced. Conversation resolution gates inline findings only;
-   it does not substitute for a clean verdict in a top-level comment.
+   red `dependency-review` result as mechanically blocking under branch
+   protection, and treat a `codecov/patch` coverage regression as
+   operator-blocking for merge. The advisory review lenses are
+   operator-enforced. Conversation resolution gates inline findings only; it
+   does not substitute for a clean verdict in a top-level comment.
 4. A stale-notice head that received a push is equally un-revalidated and
    follows these same steps if it is ever merged. Because the terminal stale
    notice has no `Applied-Commit:` line, recover the applied SHA from the head
@@ -1199,14 +1237,36 @@ contract, at enable time and on each applied head, is tracked in
    session, per this runbook's fill-from-observed rule. The item-3 checklist is
    load-bearing either way.
 6. After all required checks, operator-verified gates, and review lenses have
-   completed, immediately re-read `headRefOid` and `baseRefName` with
-   `gh pr view <n> --json headRefOid,baseRefName` before declaring
-   re-validation complete. Declare completion only when `headRefOid` matches
-   the head on which that evidence ran and `baseRefName` still byte-equals the
-   repository default branch. If the head differs, it drifted during the wait;
-   restart from step 1 on the new head. If the base differs, it was retargeted
-   during the wait; retarget it back to the default branch, then restart from
-   step 1 and close and reopen the PR as that procedure requires.
+   completed, re-run the live contract comparator:
+
+   ```bash
+   set -euo pipefail
+   tmpdir="$(mktemp -d)"
+   gh api "repos/syamaner/roastpilot-cloud/contents/scripts/factory/branch-protection-contract.mts?ref=main" \
+     -H "Accept: application/vnd.github.raw" > "$tmpdir/bpc.mts"
+   test -s "$tmpdir/bpc.mts" || { echo 'BRANCH-PROTECTION: comparator load failed; fail closed'; exit 1; }
+   test "$(gh api repos/syamaner/roastpilot-cloud --jq '.default_branch')" = main \
+     || { echo 'BRANCH-PROTECTION: default-branch drift — not main; fail closed'; exit 1; }
+   gh api repos/syamaner/roastpilot-cloud/branches/main/protection \
+     | node --experimental-strip-types "$tmpdir/bpc.mts"
+   ```
+
+   After that comparator block passes, as the last read before declaring
+   re-validation complete, immediately re-read `headRefOid` and `baseRefName`
+   with `gh pr view <n> --json headRefOid,baseRefName`. Require `headRefOid` to
+   still match the head on which the review evidence ran and `baseRefName` to
+   still byte-equal `main`. The default branch must byte-equal `main`, and the
+   comparator must report the `BRANCH-PROTECTION-CONTRACT: OK` line with exit 0
+   at the declaration boundary. Declare completion only when
+   `headRefOid` matches the head on which that evidence ran and `baseRefName`
+   still byte-equals the repository default branch. Comparator-load failure,
+   default-branch drift, or comparator drift means the applied head is not
+   gated: do not merge; restore the default branch to `main` and branch
+   protection to the pinned contract, re-run the hardened block, then restart
+   from step 1. If the head differs, it drifted during the wait; restart from
+   step 1 on the new head. If the base differs, it was retargeted during the
+   wait; retarget it back to the default branch, then restart from step 1 and
+   close and reopen the PR as that procedure requires.
 
 The following ordered items are the fail-safe activation path and are **not**
 authorized by this dark wiring:
@@ -1282,8 +1342,28 @@ authorized by this dark wiring:
    11 Aug 2026. Because that protection is mutable and the `task-apply` path
    checks only the target-branch identity, confirming that the #245
    branch-protection contract still holds remains a fail-closed precondition of
-   enabling task mutation; its deterministic live re-verification is tracked in
-   [#254](https://github.com/syamaner/roastpilot-cloud/issues/254). #237
+   enabling task mutation. Mechanically verify both that the repository default
+   branch byte-equals `main` and that `main`'s closed branch-protection payload
+   conforms:
+
+   ```bash
+   set -euo pipefail
+   tmpdir="$(mktemp -d)"
+   gh api "repos/syamaner/roastpilot-cloud/contents/scripts/factory/branch-protection-contract.mts?ref=main" \
+     -H "Accept: application/vnd.github.raw" > "$tmpdir/bpc.mts"
+   test -s "$tmpdir/bpc.mts" || { echo 'BRANCH-PROTECTION: comparator load failed; fail closed'; exit 1; }
+   test "$(gh api repos/syamaner/roastpilot-cloud --jq '.default_branch')" = main \
+     || { echo 'BRANCH-PROTECTION: default-branch drift — not main; fail closed'; exit 1; }
+   gh api repos/syamaner/roastpilot-cloud/branches/main/protection \
+     | node --experimental-strip-types "$tmpdir/bpc.mts"
+   ```
+
+   Comparator-load failure, default-branch drift, or any output other than the
+   `BRANCH-PROTECTION-CONTRACT: OK` line with exit 0 blocks enabling task
+   mutation; do not proceed to item 5 until the default branch is restored to
+   `main`, branch protection is restored to the pinned contract, and both the
+   identity assertion and comparator pass.
+   #237
    must verify that neither `CLAUDE_CODE_OAUTH_TOKEN` nor the built-in
    `GITHUB_TOKEN` is reachable by the task-agent model's process through either
    its process environment or `.git/config`, or must structurally isolate the
@@ -1291,9 +1371,9 @@ authorized by this dark wiring:
    is resolved by the documented
    [manual re-validation procedure](#applied-head-roster-re-validation-238-decided-path)
    plus the honest finalize signal. Branch protection mechanically blocks merge
-   until the applied head's required status checks (CI, CodeQL, and mutation)
-   pass. A built-in `GITHUB_TOKEN` push runs none of them on that head, so they
-   cannot be green until the roster is re-triggered on it.
+   until the applied head's required status checks (CI, CodeQL, dependency
+   review, and mutation) pass. A built-in `GITHUB_TOKEN` push runs none of them
+   on that head, so they cannot be green until the roster is re-triggered on it.
    The advisory review lenses (Claude Code Review and Codex) are not required
    status checks and are not mechanically enforced. The operator runs the
    documented procedure and explicitly verifies a current-head clean verdict
@@ -1321,13 +1401,57 @@ authorized by this dark wiring:
    as the last deliberate enabling action for task mutation. Immediately before
    the write, perform the item-1 re-check of `FACTORY_PAUSED` and both enable
    variables; if `OWNER_COMMAND_INTAKE_ENABLED` now normalizes to `true`, its
-   item-2 preconditions must be complete before proceeding. Then run:
+   item-2 preconditions must be complete before proceeding. Also re-run the
+   item-4 comparator immediately before the write:
+
+   ```bash
+   set -euo pipefail
+   tmpdir="$(mktemp -d)"
+   gh api "repos/syamaner/roastpilot-cloud/contents/scripts/factory/branch-protection-contract.mts?ref=main" \
+     -H "Accept: application/vnd.github.raw" > "$tmpdir/bpc.mts"
+   test -s "$tmpdir/bpc.mts" || { echo 'BRANCH-PROTECTION: comparator load failed; fail closed'; exit 1; }
+   test "$(gh api repos/syamaner/roastpilot-cloud --jq '.default_branch')" = main \
+     || { echo 'BRANCH-PROTECTION: default-branch drift — not main; fail closed'; exit 1; }
+   gh api repos/syamaner/roastpilot-cloud/branches/main/protection \
+     | node --experimental-strip-types "$tmpdir/bpc.mts"
+   ```
+
+   Comparator-load failure, default-branch drift, or comparator drift aborts the
+   write and blocks enabling task mutation until the default branch is restored
+   to `main`, branch protection is restored to the pinned contract, and the
+   hardened block passes. This immediate re-read narrows the
+   time-of-check/time-of-use window as operator-procedure defense in depth; it
+   is not a mechanical guarantee against a truly concurrent admin actor. Then
+   run:
    `gh variable set OWNER_TASK_APPLY_ENABLED --body true --repo syamaner/roastpilot-cloud`.
    This creates the variable after a confirmed `404`, or updates an existing
    variable whose normalized value is not `true`. If item 1 or the immediate
    re-check finds it already enabled, no write is required because item 4 was
    already mandatory. The task jobs require both
    `OWNER_COMMAND_INTAKE_ENABLED` and `OWNER_TASK_APPLY_ENABLED`.
+
+Task-mutation unpause boundary: before any `FACTORY_PAUSED` change to `false`
+that would activate task mutation, re-run the same hardened trusted-comparator
+block immediately before the unpause:
+
+```bash
+set -euo pipefail
+tmpdir="$(mktemp -d)"
+gh api "repos/syamaner/roastpilot-cloud/contents/scripts/factory/branch-protection-contract.mts?ref=main" \
+  -H "Accept: application/vnd.github.raw" > "$tmpdir/bpc.mts"
+test -s "$tmpdir/bpc.mts" || { echo 'BRANCH-PROTECTION: comparator load failed; fail closed'; exit 1; }
+test "$(gh api repos/syamaner/roastpilot-cloud --jq '.default_branch')" = main \
+  || { echo 'BRANCH-PROTECTION: default-branch drift — not main; fail closed'; exit 1; }
+gh api repos/syamaner/roastpilot-cloud/branches/main/protection \
+  | node --experimental-strip-types "$tmpdir/bpc.mts"
+```
+
+Comparator-load failure, default-branch drift, or comparator drift aborts the
+unpause until the default branch is restored to `main`, branch protection is
+restored to the pinned contract, and the hardened block passes. This immediate
+re-read narrows the time-of-check/time-of-use window as operator-procedure
+defense in depth; it is not a mechanical guarantee against a truly concurrent
+admin actor.
 
 Unpausing `FACTORY_PAUSED` remains a separate operator decision; setting an
 enable variable to `true` does not authorize unpausing.
