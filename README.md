@@ -38,7 +38,7 @@ npm install
 npm run dev        # serves the placeholder page at http://localhost:3000
 npm run lint
 npm run typecheck
-npm run test        # Vitest unit tests
+npm run test        # Vitest unit + contract tests
 npm run test:e2e    # Playwright boot smoke spec (requires: npx playwright install chromium)
 npm run build
 ```
