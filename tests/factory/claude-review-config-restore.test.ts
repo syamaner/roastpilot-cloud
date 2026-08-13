@@ -26,7 +26,6 @@ const REVIEW_RESTORE_STEP = "Restore base-owned configuration";
 const SIBLING_RESTORE_STEP =
   "Restore trusted configuration + manifests from the trusted revision";
 const REVIEW_ACTION_STEP = "Run Claude Code Review";
-const MARKETPLACE_CLEAR_STEP = "Clear Claude Code plugin marketplace path";
 const GIT = "/usr/bin/git";
 const HERMETIC_GIT_HOME = mkdtempSync(
   join(tmpdir(), "claude-review-git-home-"),
@@ -239,14 +238,10 @@ describe("claude-review base-owned configuration restore", () => {
     const restoreIndex = steps.findIndex(
       (step) => step.name === REVIEW_RESTORE_STEP,
     );
-    const clearIndex = steps.findIndex(
-      (step) => step.name === MARKETPLACE_CLEAR_STEP,
-    );
     const actionIndex = steps.findIndex((step) => step.name === REVIEW_ACTION_STEP);
     const restore = namedStep("claude-review", REVIEW_RESTORE_STEP);
 
     expect(restoreIndex).toBe(checkoutIndex + 1);
-    expect(restoreIndex).toBeLessThan(clearIndex);
     expect(restoreIndex).toBeLessThan(actionIndex);
     expect(asMapping(restore.env)).toEqual({
       TRUSTED_SHA:
@@ -284,7 +279,7 @@ describe("claude-review base-owned configuration restore", () => {
         write(fixture.repository, path, `malicious tracked config: ${path}\n`);
       }
       commitAll(fixture.repository, "add startup config");
-      write(fixture.repository, ".claude-marketplace/manifest.json", "untracked\n");
+      write(fixture.repository, "untracked-neighbour/manifest.json", "untracked\n");
       write(fixture.repository, "scratch.tmp", "untracked scratch\n");
 
       const result = runReviewRestore(fixture);
@@ -295,7 +290,7 @@ describe("claude-review base-owned configuration restore", () => {
       }
       expect(
         readFileSync(
-          join(fixture.repository, ".claude-marketplace/manifest.json"),
+          join(fixture.repository, "untracked-neighbour/manifest.json"),
           "utf8",
         ),
       ).toBe("untracked\n");
@@ -548,7 +543,7 @@ describe("claude-review base-owned configuration restore", () => {
       write(fixture.repository, "lib/existing.ts", "export const value = 'head';\n");
       write(fixture.repository, "lib/added.ts", "export const added = true;\n");
       commitAll(fixture.repository, "lib-only change");
-      write(fixture.repository, ".claude-marketplace/cache", "neighbour\n");
+      write(fixture.repository, "untracked-neighbour/cache", "neighbour\n");
       write(fixture.repository, "scratch.tmp", "scratch\n");
 
       const result = runReviewRestore(fixture);
@@ -560,7 +555,7 @@ describe("claude-review base-owned configuration restore", () => {
         "scratch\n",
       );
       expect(
-        readFileSync(join(fixture.repository, ".claude-marketplace/cache"), "utf8"),
+        readFileSync(join(fixture.repository, "untracked-neighbour/cache"), "utf8"),
       ).toBe("neighbour\n");
     });
   });

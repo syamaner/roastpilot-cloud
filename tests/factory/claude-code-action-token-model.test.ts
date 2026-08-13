@@ -16,9 +16,9 @@ import { parseDocument } from "yaml";
 // gate: T-5 (every invocation passes the built-in token, with a count tripwire)
 // and T-6 (no `id-token` anywhere) mechanically stop the class from returning.
 //
-// Structure mirrors `claude-marketplace-pin.test.ts`: parse the real corpus,
-// assert the invariants against it, and exercise the negative space with
-// synthetic YAML fed through the same validator.
+// Structure mirrors the claude-code-review workflow-contract tests: parse the
+// real corpus, assert the invariants against it, and exercise the negative
+// space with synthetic YAML fed through the same validator.
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const WORKFLOWS_DIR = join(REPOSITORY_ROOT, ".github", "workflows");
