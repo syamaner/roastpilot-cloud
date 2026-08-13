@@ -2073,6 +2073,10 @@ jobs:
       // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
       // actionSteps, and inputs are unchanged.
       //
+      // Issue #266 slice 1 moved runSteps 33 -> 34: claude-review gained
+      // exactly one `run:` step, `Compute the PR diff from trusted revisions`;
+      // jobs, actionSteps, and inputs are unchanged.
+      //
       // 8 Aug 2026, 9d Unit 2 PR2 (D148): the trusted-revision review fold is
       // +1 job / +1 run step / +0 action steps / +1 input over the committed
       // PR2 totals: the credential-free resolver adds its job/run step, and
@@ -2099,7 +2103,7 @@ jobs:
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 18,
-      runSteps: 49,
+      runSteps: 50,
       actionSteps: 49,
       inputs: 134,
     });
@@ -2178,6 +2182,10 @@ jobs:
       // Issue #192 Unit 2 moved runSteps 57 -> 58: claude-review gained exactly
       // one `run:` step, `Enforce the SDK tool-catalog closure`; jobs,
       // actionSteps, and inputs are unchanged.
+      //
+      // Issue #266 slice 1 moved runSteps 58 -> 59: claude-review gained
+      // exactly one `run:` step, `Compute the PR diff from trusted revisions`;
+      // jobs, actionSteps, and inputs are unchanged.
       // 8 Aug 2026, 9d Unit 2 PR2 (D148): same +1 job / +1 run step / +0
       // action steps / +1 input trusted-revision fold over committed PR2 as
       // above (cumulative new-workflow delta: +2 / +3 / +2 / +4).
@@ -2190,7 +2198,7 @@ jobs:
       // steps / +9 action steps / +29 action inputs as the source-only corpus:
       // task-agent adds 3 run + 4 action steps (17 inputs), task-apply adds 5
       // run + 4 action steps (8 inputs), and intake adds 1 action (4 inputs).
-      runSteps: 74,
+      runSteps: 75,
       actionSteps: 66,
       inputs: 179,
     });
