@@ -336,9 +336,10 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
     if (reaction.content !== "eyes" || !isCodexBot(reaction.authorLogin) ||
       !postdatesBoundary(reaction.createdAt, input.boundary)) continue;
     const instant = parseStrictIsoUtc(reaction.createdAt);
-    // Defensive fail-closed: unreachable past isReactionRecord (:311; schema
-    // codex-signal-schema.mts:141-142) and postdatesBoundary's null-rejection
-    // (:117-121); kept so a lone eyes can never anchor "due" on an unparsed time.
+    /* v8 ignore next -- Defensive fail-closed: unreachable past isReactionRecord
+     * (:311; schema codex-signal-schema.mts:141-142) and postdatesBoundary's
+     * null-rejection (:117-121); kept so a lone eyes can never anchor "due" on
+     * an unparsed time. */
     if (instant === null) return "wait";
     engagedEyesInstants.push(instant);
   }
