@@ -774,6 +774,16 @@ describe("closed input grammar and operator advice", () => {
     expect(containsCodexTriggerPhrase("please review")).toBe(false);
   });
 
+  it("keeps already-posted precedence over eyes-stale-escalate when a trigger was posted for this head", () => {
+    const manuallyTriggeredThenStalled = input({
+      triggerComments: [{ createdAt: AFTER, onHeadSha: HEAD }],
+      reactions: [{ ...pair()[0], createdAt: "2026-08-07T10:10:00Z" }],
+      evaluatedAt: "2026-08-07T11:00:00Z",
+    });
+    // Deliberate precedence: manually-triggered-then-stalled stays already-posted, not eyes-stale-escalate.
+    expect(manualTriggerAdvice(manuallyTriggeredThenStalled)).toBe("already-posted");
+  });
+
   it("T30 advises escalation when a lone engaged eyes is stale past 30 minutes", () => {
     const reactions: readonly CodexReactionRecord[] = [{
       ...pair()[0],

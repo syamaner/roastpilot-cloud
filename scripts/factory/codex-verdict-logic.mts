@@ -323,6 +323,7 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
             trigger.createdAt === input.boundary.occurredAt)),
     )
   ) {
+    // Intentional: already-posted suppresses duplicates before stale-eyes escalation.
     return "already-posted";
   }
   if (!(input.evidenceComplete.reviews &&
