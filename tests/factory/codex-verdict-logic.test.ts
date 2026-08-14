@@ -774,16 +774,59 @@ describe("closed input grammar and operator advice", () => {
     expect(containsCodexTriggerPhrase("please review")).toBe(false);
   });
 
-  it("never advises due after a bot eyes engages the review", () => {
+  it("T30 advises due when a lone engaged eyes is stale past 30 minutes", () => {
     const reactions: readonly CodexReactionRecord[] = [{
       ...pair()[0],
       createdAt: "2026-08-07T10:10:00Z",
     }];
     const engaged = input({ reactions, evaluatedAt: "2026-08-07T11:00:00Z" });
+    expect(manualTriggerAdvice(engaged)).toBe("due");
+    expect(reduceCodexVerdict(engaged)).toMatchObject({
+      verdict: "unknown-pending", manualTriggerAdvice: "due",
+    });
+  });
+
+  it("T31 keeps waiting on a fresh engaged eyes even past the boundary timeout", () => {
+    const reactions: readonly CodexReactionRecord[] = [{
+      ...pair()[0],
+      createdAt: "2026-08-07T10:10:00Z",
+    }];
+    const engaged = input({ reactions, evaluatedAt: "2026-08-07T10:35:00Z" });
     expect(manualTriggerAdvice(engaged)).toBe("wait");
     expect(reduceCodexVerdict(engaged)).toMatchObject({
       verdict: "unknown-pending", manualTriggerAdvice: "wait",
     });
+  });
+
+  it("T32 trips the eyes bound at exactly 30 minutes (>= tie-break)", () => {
+    expect(manualTriggerAdvice(input({
+      reactions: [{ ...pair()[0], createdAt: "2026-08-07T10:10:00Z" }],
+      evaluatedAt: "2026-08-07T10:40:00Z",
+    }))).toBe("due");
+  });
+
+  it("T33 measures the bound from the latest of multiple engaged eyes", () => {
+    const reactions: readonly CodexReactionRecord[] = [
+      { ...pair()[0], createdAt: "2026-08-07T10:05:00Z", subjectId: "issue:1" },
+      { ...pair()[0], createdAt: "2026-08-07T10:20:00Z", subjectId: "issue:2" },
+    ];
+    expect(manualTriggerAdvice(input({
+      reactions,
+      evaluatedAt: "2026-08-07T10:45:00Z",
+    }))).toBe("wait");
+    expect(manualTriggerAdvice(input({
+      reactions,
+      evaluatedAt: "2026-08-07T10:51:00Z",
+    }))).toBe("due");
+  });
+
+  it("T34 fails closed to wait on a malformed eyes createdAt", () => {
+    // Exercises the grammar gate (:303-315 via isReactionRecord); the inner
+    // defensive guard is unreachable through the public surface.
+    expect(manualTriggerAdvice({
+      ...input(),
+      reactions: [{ ...pair()[0], createdAt: "not-a-timestamp" }],
+    } as unknown as CodexSignalInput)).toBe("wait");
   });
 
   it("ignores a head-agnostic non-verdict bot comment for fallback advice", () => {

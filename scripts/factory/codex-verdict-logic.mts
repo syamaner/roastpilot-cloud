@@ -330,12 +330,23 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   const evaluatedAt = parseStrictIsoUtc(input.evaluatedAt);
   const boundaryAt = parseStrictIsoUtc(input.boundary.occurredAt);
   if (evaluatedAt === null || boundaryAt === null) return "wait";
-  const botSignalEngaged = input.reactions.some((reaction) =>
-    reaction.content === "eyes" &&
-    isCodexBot(reaction.authorLogin) &&
-    postdatesBoundary(reaction.createdAt, input.boundary));
-  if (botSignalEngaged) return "wait";
   const timeoutMilliseconds = CODEX_WAIT_TIMEOUT_MINUTES * 60 * 1000;
+  const engagedEyesInstants: number[] = [];
+  for (const reaction of input.reactions) {
+    if (reaction.content !== "eyes" || !isCodexBot(reaction.authorLogin) ||
+      !postdatesBoundary(reaction.createdAt, input.boundary)) continue;
+    const instant = parseStrictIsoUtc(reaction.createdAt);
+    /* v8 ignore next -- Defensive fail-closed: unreachable past isReactionRecord
+     * (:311; schema codex-signal-schema.mts:141-142) and postdatesBoundary's
+     * null-rejection (:117-121); kept so a lone eyes can never anchor "due" on
+     * an unparsed time. */
+    if (instant === null) return "wait";
+    engagedEyesInstants.push(instant);
+  }
+  if (engagedEyesInstants.length > 0) {
+    const eyesAt = Math.max(...engagedEyesInstants);
+    return evaluatedAt - eyesAt >= timeoutMilliseconds ? "due" : "wait";
+  }
   return evaluatedAt - boundaryAt >= timeoutMilliseconds
     ? "due"
     : "wait";
