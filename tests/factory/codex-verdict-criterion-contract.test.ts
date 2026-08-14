@@ -97,6 +97,11 @@ const CONDITIONS = [
     /A 👀 reaction means the review is \*\*in\s+progress, keep waiting\*\*/,
   ],
   [
+    "escalates a stalled engaged review instead of re-triggering the same head",
+    /👀 has appeared but no verdict follows within roughly 30 minutes[\s\S]{0,120}escalate and investigate the stalled review rather than posting the\s+trigger[\s\S]{0,100}timeout re-trigger is only for the no-signal case/,
+    /bound expires\s+without a verdict, escalate and investigate the stalled review rather than\s+posting `@codex review` again on the same head[\s\S]{0,160}manual-trigger clause applies only when no signal appeared/,
+  ],
+  [
     "records that the 👍 carries no sha, so it holds only while the head is unchanged",
     /👍 carries no sha,\s+so it holds only while the head is unchanged/,
     /👍\s+reaction carries no sha, so it is valid only while the head stays unchanged/,

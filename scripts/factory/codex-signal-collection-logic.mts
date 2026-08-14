@@ -565,10 +565,11 @@ export function assembleInput(parts: AssembleInputParts): CodexSignalInput {
 
 function pendingDescription(
   reasons: readonly string[],
-  advice: "wait" | "due" | "already-posted" | "not-applicable-draft" | "verify",
+  advice: "wait" | "due" | "eyes-stale-escalate" | "already-posted" |
+    "not-applicable-draft" | "verify",
 ): string {
-  const suffix = advice === "due"
-    ? "; advice=due; see AGENTS.md PR Merge Policy"
+  const suffix = advice === "due" || advice === "eyes-stale-escalate"
+    ? `; advice=${advice}; see AGENTS.md PR Merge Policy`
     : `; advice=${advice}`;
   const kept: string[] = [];
   for (let index = 0; index < reasons.length; index += 1) {

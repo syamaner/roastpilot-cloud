@@ -970,7 +970,8 @@ bounded forms:
 - `clean channel=clean-comment sha=<7-hex>` for a confirmed clean bot comment;
 - `findings source=<review|comment> sha=<7-hex> count=<n>` for findings; or
 - `pending reasons=<reason[,reason...]>[; omitted=<n>]; advice=<advice>` (with
-  the Merge Policy pointer when `advice=due`) when a verdict cannot close.
+  the Merge Policy pointer when `advice=due` or
+  `advice=eyes-stale-escalate`) when a verdict cannot close.
 
 The operator invariant is: **no `factory/codex-verdict-advisory*` context ever enters the required-checks list**.
 This status is informational and must remain separate from branch-protection
@@ -985,6 +986,7 @@ not an action authorized by this wiring PR.
 | Stuck `pending` state | Operator action |
 |---|---|
 | `awaiting-retrigger; advice=due` | Follow the Merge Policy: post the single manual re-trigger allowed for the unchanged head, then wait for its verdict. |
+| `unpaired-or-misordered-reactions; advice=eyes-stale-escalate` | The automatic review began with a 👀 but stalled past roughly 30 minutes. Escalate and investigate the stalled review; do not post `@codex review` again on the same head. |
 | `evidence-incomplete` | Check the run log for a 50-page-cap overflow or malformed/deleted-account records; correct the evidence source before re-running. |
 | `reaction-clean-unconfirmed; advice=verify` | D148 requires a human to read the PR; reactions alone never certify clean. |
 | `snapshot-inconsistent` or `timeline-incomplete` | Re-run against a fresh, internally consistent GitHub snapshot. |

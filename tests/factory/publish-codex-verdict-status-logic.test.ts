@@ -19,7 +19,7 @@ import {
 
 const CREATED = "2026-08-08T10:00:00Z";
 const TRIGGER_BODY = "please @codex review this head";
-const STATUS_GRAMMAR = /^(?:clean channel=clean-comment sha=[0-9a-f]{7}|findings source=(?:review|comment) sha=[0-9a-f]{7} count=\d+|pending reasons=[a-z-]+(?:,[a-z-]+)*(?:; omitted=\d+)?; advice=(?:wait|already-posted|not-applicable-draft|due|verify)(?:; see AGENTS\.md PR Merge Policy)?)$/u;
+const STATUS_GRAMMAR = /^(?:clean channel=clean-comment sha=[0-9a-f]{7}|findings source=(?:review|comment) sha=[0-9a-f]{7} count=\d+|pending reasons=[a-z-]+(?:,[a-z-]+)*(?:; omitted=\d+)?; advice=(?:wait|already-posted|not-applicable-draft|due|eyes-stale-escalate|verify)(?:; see AGENTS\.md PR Merge Policy)?)$/u;
 
 function issueComment(
   overrides: Partial<RawIssueComment> = {},

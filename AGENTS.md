@@ -230,8 +230,12 @@ exception. The load-bearing points:
   not needed for that first review; it remains the way to re-trigger a
   review on a new head after the automatic one, once, on the final commit,
   never on intermediate pushes. A 👀 reaction means the review is **in
-  progress, keep waiting** (bounded ~30 min from the 👀); it does **not**
-  clear the merge by itself. A CLEAN verdict, **in either channel, and ONLY
+  progress, keep waiting** (bounded ~30 min from the 👀). If that bound expires
+  without a verdict, escalate and investigate the stalled review rather than
+  posting `@codex review` again on the same head; the roughly 30-minute
+  manual-trigger clause applies only when no signal appeared, because a duplicate
+  trigger on an engaged head withdraws a pending 👍 and burns a round. It does
+  **not** clear the merge by itself. A CLEAN verdict, **in either channel, and ONLY
   when authored by the Codex bot identity (`chatgpt-codex-connector[bot]`)**,
   is either a **👍 reaction (after the bot's OWN 👀 — that preceding 👀 must itself be
   bot-authored, since on a public repo a stranger can leave one and a rule that
