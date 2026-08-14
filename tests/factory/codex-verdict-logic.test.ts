@@ -774,15 +774,17 @@ describe("closed input grammar and operator advice", () => {
     expect(containsCodexTriggerPhrase("please review")).toBe(false);
   });
 
-  it("T30 advises due when a lone engaged eyes is stale past 30 minutes", () => {
+  it("T30 advises escalation when a lone engaged eyes is stale past 30 minutes", () => {
     const reactions: readonly CodexReactionRecord[] = [{
       ...pair()[0],
       createdAt: "2026-08-07T10:10:00Z",
     }];
     const engaged = input({ reactions, evaluatedAt: "2026-08-07T11:00:00Z" });
-    expect(manualTriggerAdvice(engaged)).toBe("due");
+    expect(manualTriggerAdvice(engaged)).toBe("eyes-stale-escalate");
     expect(reduceCodexVerdict(engaged)).toMatchObject({
-      verdict: "unknown-pending", manualTriggerAdvice: "due",
+      verdict: "unknown-pending",
+      manualTriggerAdvice: "eyes-stale-escalate",
+      ratchetEligible: false,
     });
   });
 
@@ -802,7 +804,7 @@ describe("closed input grammar and operator advice", () => {
     expect(manualTriggerAdvice(input({
       reactions: [{ ...pair()[0], createdAt: "2026-08-07T10:10:00Z" }],
       evaluatedAt: "2026-08-07T10:40:00Z",
-    }))).toBe("due");
+    }))).toBe("eyes-stale-escalate");
   });
 
   it("T33 measures the bound from the latest of multiple engaged eyes", () => {
@@ -817,7 +819,7 @@ describe("closed input grammar and operator advice", () => {
     expect(manualTriggerAdvice(input({
       reactions,
       evaluatedAt: "2026-08-07T10:51:00Z",
-    }))).toBe("due");
+    }))).toBe("eyes-stale-escalate");
   });
 
   it("T34 fails closed to wait on a malformed eyes createdAt", () => {

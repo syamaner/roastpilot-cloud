@@ -472,7 +472,10 @@ export const CODEX_VERDICT_CRITERION =
   "blocks on: fold it, push, and re-trigger once on the new head. If NO trigger " +
   "has yet been posted for this head, and neither a verdict nor a 👀 appears " +
   "within roughly 30 minutes, post `@codex review` once — but ONLY IF THIS PR IS " +
-  "READY. On a DRAFT there is nothing to wait for and nothing to trigger: a " +
+  "READY. If a 👀 has appeared but no verdict follows within roughly 30 minutes " +
+  "of it, escalate and investigate the stalled review rather than posting the " +
+  "trigger; the timeout re-trigger is only for the no-signal case. On a DRAFT " +
+  "there is nothing to wait for and nothing to trigger: a " +
   "manual review on a draft posts findings yet can never complete the " +
   "clean-verdict flow (D105), so triggering one there buys findings worth " +
   "folding and a wait that cannot end. Marking the draft ready is what starts " +

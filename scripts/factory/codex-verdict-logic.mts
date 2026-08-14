@@ -50,6 +50,7 @@ export type PendingReason =
 export type ManualTriggerAdvice =
   | "wait"
   | "due"
+  | "eyes-stale-escalate"
   | "already-posted"
   | "not-applicable-draft";
 
@@ -345,7 +346,7 @@ export function manualTriggerAdvice(input: CodexSignalInput): ManualTriggerAdvic
   }
   if (engagedEyesInstants.length > 0) {
     const eyesAt = Math.max(...engagedEyesInstants);
-    return evaluatedAt - eyesAt >= timeoutMilliseconds ? "due" : "wait";
+    return evaluatedAt - eyesAt >= timeoutMilliseconds ? "eyes-stale-escalate" : "wait";
   }
   return evaluatedAt - boundaryAt >= timeoutMilliseconds
     ? "due"

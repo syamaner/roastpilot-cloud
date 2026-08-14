@@ -45,7 +45,7 @@ const LATER = "2026-08-08T10:12:00Z";
 const LATEST = "2026-08-08T10:13:00Z";
 const EVALUATED = "2026-08-08T11:00:00Z";
 const OPENED: CodexBoundary = { kind: "opened", occurredAt: CREATED };
-const STATUS_GRAMMAR = /^(?:clean channel=clean-comment sha=[0-9a-f]{7}|findings source=(?:review|comment) sha=[0-9a-f]{7} count=\d+|pending reasons=[a-z-]+(?:,[a-z-]+)*(?:; omitted=\d+)?; advice=(?:wait|already-posted|not-applicable-draft|due|verify)(?:; see AGENTS\.md PR Merge Policy)?)$/u;
+const STATUS_GRAMMAR = /^(?:clean channel=clean-comment sha=[0-9a-f]{7}|findings source=(?:review|comment) sha=[0-9a-f]{7} count=\d+|pending reasons=[a-z-]+(?:,[a-z-]+)*(?:; omitted=\d+)?; advice=(?:wait|already-posted|not-applicable-draft|due|eyes-stale-escalate|verify)(?:; see AGENTS\.md PR Merge Policy)?)$/u;
 type RetiredSuiteKey = `check${"Suites"}`;
 type CollectionRejectsRetiredSuiteKey = RetiredSuiteKey extends keyof RawCollectionInput
   ? false
@@ -187,6 +187,17 @@ describe("f-1 head-freshness and boundary regressions", () => {
     expect(write?.description).toBe(
       "pending reasons=reaction-clean-unconfirmed; advice=verify",
     );
+  });
+
+  it("N4 renders stale engaged eyes as escalation end to end", () => {
+    const write = expectDescription(collectAndPlan(raw({
+      reactions: [{
+        authorLogin: CODEX_BOT_LOGIN,
+        content: "eyes",
+        createdAt: EARLY,
+      }],
+    })), "pending");
+    expect(write?.description).toContain("advice=eyes-stale-escalate");
   });
 
   it("T2 clean-comment success remains a byte-exact current-head check", () => {
@@ -1226,6 +1237,23 @@ describe("supporting mapping and structural-scope guards", () => {
 });
 
 describe("status mapping and output grammar", () => {
+  it("N3 renders stale engaged eyes advice exactly and within the status bound", () => {
+    const plan = verdictToStatusPlan({
+      verdict: "unknown-pending",
+      reasons: ["unpaired-or-misordered-reactions"],
+      manualTriggerAdvice: "eyes-stale-escalate",
+      ratchetEligible: false,
+    });
+    expect(plan).toEqual({
+      context: CODEX_ADVISORY_STATUS_CONTEXT,
+      state: "pending",
+      description: "pending reasons=unpaired-or-misordered-reactions; " +
+        "advice=eyes-stale-escalate; see AGENTS.md PR Merge Policy",
+    });
+    expect(plan.description).toMatch(STATUS_GRAMMAR);
+    expect(plan.description.length).toBeLessThanOrEqual(MAX_STATUS_DESCRIPTION_LENGTH);
+  });
+
   it("reaction-pair clean is the only clean verdict shape demoted", () => {
     const reactionVerdict: CodexVerdict = {
       verdict: "clean",
