@@ -211,6 +211,7 @@ interface StepBResult {
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
+  readonly summary: string;
 }
 
 // This attempt's start time and a default comment `updated_at` after it, so a
@@ -237,6 +238,9 @@ function runStepB(options: {
   readonly runAttempt?: string;
   readonly catalogMetadataOnly?: string;
   readonly resultClean?: string;
+  readonly resultNumTurns?: string;
+  readonly toolInvocations?: string;
+  readonly substantiveOutput?: string;
 }): StepBResult {
   const run = reviewJobStepRun(STEP_B);
   const workdir = mkdtempSync(join(tmpdir(), "review-step-b-"));
@@ -244,6 +248,7 @@ function runStepB(options: {
   const ghPath = join(bin, "gh");
   const commentsPath = join(workdir, "comments.json");
   const attemptStartPath = join(workdir, "attempt-start");
+  const summaryPath = join(workdir, "step-summary");
   try {
     mkdirSync(bin);
     writeFileSync(
@@ -262,6 +267,7 @@ function runStepB(options: {
       attemptStartPath,
       `${options.attemptStartedAt ?? DEFAULT_ATTEMPT_START}\n`,
     );
+    writeFileSync(summaryPath, "");
     // Route by URL: the attempts endpoint carries `/attempts/`; everything
     // else is the comments call.
     writeFileSync(
@@ -299,12 +305,17 @@ function runStepB(options: {
         REVIEW_STEP_CONCLUSION: options.conclusion ?? "success",
         CATALOG_METADATA_ONLY: options.catalogMetadataOnly ?? "",
         RESULT_CLEAN: options.resultClean ?? "",
+        RESULT_NUM_TURNS: options.resultNumTurns ?? "",
+        TOOL_INVOCATIONS: options.toolInvocations ?? "",
+        SUBSTANTIVE_OUTPUT: options.substantiveOutput ?? "",
+        GITHUB_STEP_SUMMARY: summaryPath,
       },
     });
     return {
       status: result.status,
       stdout: result.stdout,
       stderr: result.stderr,
+      summary: readFileSync(summaryPath, "utf8"),
     };
   } finally {
     rmSync(workdir, { recursive: true, force: true });
@@ -1341,6 +1352,243 @@ describe("claude-review metadata-only completion recognition (step B)", () => {
       });
       expect(result.status).toBe(1);
       expect(result.stdout).toContain("finished with unticked checklist items");
+    },
+  );
+});
+
+describe("claude-review proven-inert zero-turn recognition (step B, #274)", () => {
+  const benignOptions = {
+    catalogMetadataOnly: "true",
+    resultClean: "true",
+    resultNumTurns: "1",
+    toolInvocations: "0",
+    substantiveOutput: "0",
+  } as const;
+  const notice =
+    "benign inert zero-turn no-op: the model made zero tool calls; NO review was produced; this is not a clean review verdict (issue #274)";
+  const confirmation =
+    "confirmed: accepted only the proven-inert zero-turn no-op envelope (issue #274)";
+  const existingAcceptStrings = [
+    "metadata-only review configuration with a clean terminal exit",
+    "the review posted a prose tracking comment carrying the terminal completion sentinel",
+    "the review posted a tracking comment with no unfinished work advertised",
+  ] as const;
+
+  it("P1/G5: accepts the real inert placeholder with distinct annotations on both channels", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(`::notice::${notice}`);
+    expect(result.summary).toContain(notice);
+    expect(result.stdout).toContain(confirmation);
+    for (const existing of existingAcceptStrings) {
+      expect(result.stdout).not.toContain(existing);
+    }
+  });
+
+  it("P2: sentinel-bearing metadata-only completion keeps its existing accept path", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_NOOP_SENTINEL)]],
+      runId: PR152_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+      resultNumTurns: "14",
+      toolInvocations: "6",
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(existingAcceptStrings[0]);
+    expect(result.stdout).not.toContain(confirmation);
+  });
+
+  it("P3: a fully ticked checklist keeps its existing accept path without envelope signals", () => {
+    const result = runStepB({
+      pages: [[trackingComment({ runId: PR152_RUN_ID, ticked: true })]],
+      runId: PR152_RUN_ID,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(existingAcceptStrings[2]);
+    expect(result.stdout).not.toContain(confirmation);
+  });
+
+  it("N1: a truncation-shaped checklist envelope still fails on its unticked box", () => {
+    const result = runStepB({
+      pages: [[completionComment(PR150_TRUNCATED)]],
+      runId: PR150_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+      resultNumTurns: "2",
+      toolInvocations: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("finished with unticked checklist items");
+  });
+
+  it("N2: a truncation-shaped prose envelope still fails on the sentinel", () => {
+    const result = runStepB({
+      pages: [[completionComment(PR182_PROSE_TRUNCATED)]],
+      runId: PR182_RUN_ID,
+      catalogMetadataOnly: "true",
+      resultClean: "true",
+      resultNumTurns: "2",
+      toolInvocations: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("N3/G6: the tracking-comment guard precedes the benign accept", () => {
+    const result = runStepB({
+      pages: [[]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("posted no tracking comment");
+  });
+
+  it("N4/G1: metadata_only is the sole rejecting conjunct", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+      catalogMetadataOnly: "false",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("N5/G2: result_clean is the sole rejecting conjunct", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+      resultClean: "false",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("N6/G3: num_turns==1 is the sole rejecting conjunct", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+      resultNumTurns: "3",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("N7/G4: a single tool call is the sole rejecting conjunct", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+      toolInvocations: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("N8/G14: substantive assistant text is the sole rejecting conjunct", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+      substantiveOutput: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      "final line is not the terminal completion sentinel",
+    );
+  });
+
+  it("P4: an explicit no-substantive-output signal keeps the benign accept", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      ...benignOptions,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(confirmation);
+  });
+
+  it.each([
+    ["RESULT_NUM_TURNS", "", "0", "0"],
+    ["TOOL_INVOCATIONS", "1", "", "0"],
+    ["SUBSTANTIVE_OUTPUT", "1", "0", ""],
+  ])(
+    "N9: an empty %s preserves the placeholder failure",
+    (_field, resultNumTurns, toolInvocations, substantiveOutput) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_PLACEHOLDER)]],
+        runId: STUB_PLACEHOLDER_RUN_ID,
+        catalogMetadataOnly: "true",
+        resultClean: "true",
+        resultNumTurns,
+        toolInvocations,
+        substantiveOutput,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(
+        "final line is not the terminal completion sentinel",
+      );
+    },
+  );
+
+  it("N10: action outcome failure takes precedence over the benign signature", () => {
+    const result = runStepB({
+      pages: [[completionComment(STUB_PLACEHOLDER)]],
+      runId: STUB_PLACEHOLDER_RUN_ID,
+      outcome: "failure",
+      ...benignOptions,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("did not genuinely run to success");
+  });
+
+  it.each(["01", "1.0", " 1", "True"])(
+    "N11: num_turns variant %j fails the closed grammar",
+    (resultNumTurns) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_PLACEHOLDER)]],
+        runId: STUB_PLACEHOLDER_RUN_ID,
+        ...benignOptions,
+        resultNumTurns,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(
+        "final line is not the terminal completion sentinel",
+      );
+    },
+  );
+
+  it.each(["00", "-0", " 0"])(
+    "N11: tool_invocations variant %j fails the closed grammar",
+    (toolInvocations) => {
+      const result = runStepB({
+        pages: [[completionComment(STUB_PLACEHOLDER)]],
+        runId: STUB_PLACEHOLDER_RUN_ID,
+        ...benignOptions,
+        toolInvocations,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(
+        "final line is not the terminal completion sentinel",
+      );
     },
   );
 });

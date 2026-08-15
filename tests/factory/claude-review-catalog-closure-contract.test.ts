@@ -170,8 +170,261 @@ describe("claude-review SDK tool-catalog closure (step C)", () => {
     expect(result.outputs).toMatchObject({
       metadata_only: "true",
       result_clean: "true",
+      result_num_turns: "1",
+      tool_invocations: "0",
+      substantive_output: "0",
     });
     expect(result.stdout).toContain("SDK tool-catalog closure holds");
+  });
+
+  it("SC-P2/G7: counts every real top-level assistant tool_use block", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "ToolSearch" },
+            { type: "text", text: "intermediate" },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", name: "ToolSearch" }],
+        },
+      },
+      { ...asMapping(CLEAN_TRANSCRIPT[1]), num_turns: 3 },
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).toMatchObject({
+      result_num_turns: "3",
+      tool_invocations: "2",
+      substantive_output: "1",
+    });
+  });
+
+  it("SC-P1: emits a pure non-negative integer source literal", () => {
+    const result = runStepCWith(
+      '[{"type":"system","subtype":"init","tools":["ToolSearch"]},{"type":"result","is_error":false,"subtype":"success","num_turns":1}]',
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs.result_num_turns).toBe("1");
+  });
+
+  it("SC-P1b: emits jq's integer value for exponent literal 1e0", () => {
+    const result = runStepCWith(
+      '[{"type":"system","subtype":"init","tools":["ToolSearch"]},{"type":"result","is_error":false,"subtype":"success","num_turns":1e0}]',
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs.result_num_turns).toBe("1");
+  });
+
+  it.each(["0.9999999999999999", "1.5", "1.0", "2e1"])(
+    "SC-N1/G8a: withholds non-integer source literal %s",
+    (literal) => {
+      const result = runStepCWith(
+        `[{"type":"system","subtype":"init","tools":["ToolSearch"]},{"type":"result","is_error":false,"subtype":"success","num_turns":${literal}}]`,
+      );
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.outputs).not.toHaveProperty("result_num_turns");
+    },
+  );
+
+  it.each([
+    ["string", [{ ...asMapping(CLEAN_TRANSCRIPT[1]), num_turns: "1" }]],
+    ["fraction", [{ ...asMapping(CLEAN_TRANSCRIPT[1]), num_turns: 2.5 }]],
+    ["negative", [{ ...asMapping(CLEAN_TRANSCRIPT[1]), num_turns: -1 }]],
+    [
+      "absent",
+      [{ type: "result", is_error: false, subtype: "success" }],
+    ],
+    ["two result records", [CLEAN_TRANSCRIPT[1], CLEAN_TRANSCRIPT[1]]],
+  ])("SC-N1/G8: %s num_turns is not emitted", (_case, resultRecords) => {
+    const result = runStepCWith([CLEAN_TRANSCRIPT[0], ...resultRecords]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).not.toHaveProperty("result_num_turns");
+    expect(result.outputs.tool_invocations).toBe("0");
+  });
+
+  it("SC-N2/G15: a top-level user tool_result counts once without counting nested content", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              is_error: false,
+              content: [{ type: "tool_use", name: "forged" }],
+            },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "" }],
+        },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs.tool_invocations).toBe("1");
+    expect(result.outputs.substantive_output).toBe("0");
+  });
+
+  it("SC-N2c/G16: withholds assistant metrics for an unrecognized user block type", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "user",
+        message: {
+          content: [{ type: "future_user_block" }],
+        },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.outputs).not.toHaveProperty("tool_invocations");
+    expect(result.outputs).not.toHaveProperty("substantive_output");
+  });
+
+  it("SC-P5: a user text prompt is inert input, not assistant output", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "user",
+        message: {
+          content: [{ type: "text", text: "Review this change" }],
+        },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.outputs.tool_invocations).toBe("0");
+    expect(result.outputs.substantive_output).toBe("0");
+  });
+
+  it.each([
+    ["a bare object", { type: "tool_result", is_error: false }],
+    [
+      "an array containing a non-object block",
+      ["malformed block", { type: "tool_result", is_error: false }],
+    ],
+  ])(
+    "SC-N2b: withholds assistant metrics for malformed user content: %s",
+    (_case, content) => {
+      const result = runStepCWith([
+        CLEAN_TRANSCRIPT[0],
+        { type: "user", message: { content } },
+        CLEAN_TRANSCRIPT[1],
+      ]);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.outputs).not.toHaveProperty("tool_invocations");
+      expect(result.outputs).not.toHaveProperty("substantive_output");
+    },
+  );
+
+  it.each([
+    [
+      "a bare tool_use object",
+      { type: "tool_use", name: "ToolSearch" },
+    ],
+    [
+      "an array containing a non-object block",
+      ["malformed block", { type: "tool_use", name: "ToolSearch" }],
+    ],
+  ])(
+    "SC-N3/G10: withholds tool_invocations for %s",
+    (_case, content) => {
+      const result = runStepCWith([
+        CLEAN_TRANSCRIPT[0],
+        { type: "assistant", message: { content } },
+        CLEAN_TRANSCRIPT[1],
+      ]);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.outputs).not.toHaveProperty("tool_invocations");
+      expect(result.outputs).not.toHaveProperty("substantive_output");
+      expect(result.outputText).not.toContain("tool_invocations=");
+      expect(result.outputText).not.toContain("substantive_output=");
+    },
+  );
+
+  it("SC-P3/G11: counts every closed invocation discriminator", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "mcp_tool_use", name: "mcp__example" },
+            { type: "server_tool_use", name: "web_search" },
+          ],
+        },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).toMatchObject({
+      tool_invocations: "2",
+      substantive_output: "0",
+    });
+  });
+
+  it("SC-N4/G12: withholds assistant metrics for an unrecognized block type", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "assistant",
+        message: { content: [{ type: "future_block" }] },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).not.toHaveProperty("tool_invocations");
+    expect(result.outputs).not.toHaveProperty("substantive_output");
+  });
+
+  it("SC-N5/G13: reports substantive non-empty inert output", () => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "The model produced output." }],
+        },
+      },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).toMatchObject({
+      tool_invocations: "0",
+      substantive_output: "1",
+    });
+  });
+
+  it.each([
+    ["empty content", []],
+    [
+      "ASCII-whitespace-only inert content",
+      [{ type: "text", text: " \t\r\n\f\u000b" }],
+    ],
+  ])("SC-P4: reports no substantive output for %s", (_case, content) => {
+    const result = runStepCWith([
+      CLEAN_TRANSCRIPT[0],
+      { type: "assistant", message: { content } },
+      CLEAN_TRANSCRIPT[1],
+    ]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.outputs).toMatchObject({
+      tool_invocations: "0",
+      substantive_output: "0",
+    });
   });
 
   it("SC-T2: rejects an unknown init tool name", () => {
@@ -403,7 +656,34 @@ describe("claude-review SDK tool-catalog closure (step C)", () => {
     expect(result.outputs).toMatchObject({
       metadata_only: "false",
       result_clean: "true",
+      result_num_turns: "1",
+      tool_invocations: "0",
+      substantive_output: "0",
     });
+    expect(result.outputText.indexOf("result_num_turns=1\n")).toBeGreaterThan(
+      result.outputText.indexOf("result_clean=true\n"),
+    );
+    expect(result.outputText.indexOf("tool_invocations=0\n")).toBeGreaterThan(
+      result.outputText.indexOf("result_num_turns=1\n"),
+    );
+    expect(result.outputText.indexOf("substantive_output=0\n")).toBeGreaterThan(
+      result.outputText.indexOf("tool_invocations=0\n"),
+    );
+    for (const name of ["result_num_turns", "tool_invocations"] as const) {
+      expect(result.outputs[name]).toMatch(/^(0|[1-9][0-9]*)$/u);
+    }
+    const run = stepCRun();
+    expect(run).toContain(
+      'if [[ "$result_num_turns" =~ ^(0|[1-9][0-9]*)$ ]]; then',
+    );
+    expect(run).toContain(
+      'if [[ "$tool_invocations" =~ ^(0|[1-9][0-9]*)$ ]]; then',
+    );
+    expect(run).toContain(
+      'if [[ "$substantive_output" =~ ^(0|1)$ ]]; then',
+    );
+    expect(run).toContain('then ($results[0].num_turns | tostring)');
+    expect(run).not.toContain("| floor");
   });
 
   it("SC-T20: bounds adversarial diagnostic volume", () => {

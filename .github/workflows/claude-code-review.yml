@@ -853,6 +853,83 @@ jobs:
           fi
           printf 'result_clean=%s\n' "$result_clean" >> "$GITHUB_OUTPUT"
 
+          result_num_turns="$(jq -r '
+            [.[] | select(.type == "result")] as $results
+            | if (($results | length) == 1)
+                and (($results[0].num_turns | type) == "number")
+              then ($results[0].num_turns | tostring)
+              else empty
+              end
+          ' "$messages")"
+          if [[ "$result_num_turns" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            printf 'result_num_turns=%s\n' "$result_num_turns" >> "$GITHUB_OUTPUT"
+          fi
+
+          assistant_metrics="$(jq -c '
+            def inert: ["text", "thinking", "redacted_thinking"];
+            def invocation: ["tool_use", "server_tool_use", "mcp_tool_use"];
+            def user_content: ["text", "tool_result"];
+            def inert_payload:
+              if .type == "text" then .text
+              elif .type == "thinking" then .thinking
+              else .data
+              end;
+            [.[] | select(.type == "assistant")] as $assistants
+            | [.[] | select(.type == "user")] as $users
+            | if all($assistants[];
+                (.message | type) == "object"
+                and (.message.content | type) == "array"
+                and all(.message.content[];
+                  . as $block
+                  | type == "object"
+                  and (.type | type) == "string"
+                  and ((inert + invocation) | index($block.type)) != null
+                  and (if (inert | index($block.type)) != null
+                    then (inert_payload | type) == "string"
+                    else true
+                    end)))
+                and all($users[];
+                  (.message | type) == "object"
+                  and (.message.content | type) == "array"
+                  and all(.message.content[];
+                    . as $block
+                    | type == "object"
+                    and (.type | type) == "string"
+                    and (user_content | index($block.type)) != null))
+              then {
+                tool_invocations: (([$assistants[]
+                    | .message.content[]
+                    | . as $block
+                    | select((invocation | index($block.type)) != null)
+                  ] | length)
+                  + ([$users[]
+                    | .message.content[]
+                    | select(.type == "tool_result")
+                  ] | length)),
+                substantive_output: ([$assistants[]
+                  | .message.content[]
+                  | . as $block
+                  | select((inert | index($block.type)) != null)
+                  | inert_payload
+                  | select(test("[^ \t\r\n\f\u000b]"))
+                ] | if length == 0 then 0 else 1 end)
+              }
+              else empty
+              end
+          ' "$messages")"
+          tool_invocations=""
+          substantive_output=""
+          if [ -n "$assistant_metrics" ]; then
+            tool_invocations="$(jq -r '.tool_invocations | tostring' <<< "$assistant_metrics")"
+            substantive_output="$(jq -r '.substantive_output | tostring' <<< "$assistant_metrics")"
+          fi
+          if [[ "$tool_invocations" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            printf 'tool_invocations=%s\n' "$tool_invocations" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$substantive_output" =~ ^(0|1)$ ]]; then
+            printf 'substantive_output=%s\n' "$substantive_output" >> "$GITHUB_OUTPUT"
+          fi
+
           init_records="$(jq '[.[] | select(.type == "system" and .subtype == "init")] | length' "$messages")"
           if [ "$init_records" -eq 0 ]; then
             echo "::error::SDK execution output contains no top-level system/init record"
@@ -983,6 +1060,9 @@ jobs:
           REVIEW_STEP_CONCLUSION: ${{ steps.claude-review.conclusion }}
           CATALOG_METADATA_ONLY: ${{ steps.catalog-closure.outputs.metadata_only }}
           RESULT_CLEAN: ${{ steps.catalog-closure.outputs.result_clean }}
+          RESULT_NUM_TURNS: ${{ steps.catalog-closure.outputs.result_num_turns }}
+          TOOL_INVOCATIONS: ${{ steps.catalog-closure.outputs.tool_invocations }}
+          SUBSTANTIVE_OUTPUT: ${{ steps.catalog-closure.outputs.substantive_output }}
         run: |
           set -euo pipefail
           if [ "$REVIEW_STEP_OUTCOME" != "success" ] || [ "$REVIEW_STEP_CONCLUSION" != "success" ]; then
@@ -1060,11 +1140,15 @@ jobs:
           # tick-state (#192 Unit 2), but it cannot waive positive model-authored
           # completion evidence. The zero-turn placeholder captured in #217 can
           # pair a clean terminal result with a run-bound body while no review
-          # occurred, so this accept path also requires #183's exact terminal
-          # sentinel and rejects an in-progress heading. Any failed conjunct
-          # falls through (there is deliberately no reject here) to the existing
-          # checklist/sentinel grammar below, which fails that placeholder closed
-          # while preserving the checklist branch's established availability.
+          # occurred, so this first accept path also requires #183's exact terminal
+          # sentinel and rejects an in-progress heading. Issue #274 adds one
+          # separate acceptance for the proven-inert signature: exactly one turn,
+          # zero top-level assistant invocation blocks, and no substantive inert
+          # content, per plan decision D152 (amending D150's Defect-A disposition).
+          # Any failed conjunct in
+          # either accept falls through (there is deliberately no reject here) to
+          # the existing checklist/sentinel grammar below, which keeps genuine
+          # truncation closed while preserving the established availability paths.
           if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ] \
             && [ "$LAST_LINE" = "$SENTINEL" ]; then
             MO_HEADER="$(printf '%s\n' "$BODY" | awk '{ print } /^#+[[:space:]]/ && !/^#######/ { exit }')"
@@ -1072,6 +1156,16 @@ jobs:
               echo "confirmed: metadata-only review configuration with a clean terminal exit and the terminal completion sentinel; checklist tick-state is not required (issues #192 Unit 2, #217)"
               exit 0
             fi
+          fi
+
+          if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ] \
+            && [ "$RESULT_NUM_TURNS" = "1" ] && [ "$TOOL_INVOCATIONS" = "0" ] \
+            && [ "$SUBSTANTIVE_OUTPUT" = "0" ]; then
+            BENIGN_NOOP_NOTICE='benign inert zero-turn no-op: the model made zero tool calls; NO review was produced; this is not a clean review verdict (issue #274)'
+            echo "::notice::$BENIGN_NOOP_NOTICE"
+            printf '%s\n' "$BENIGN_NOOP_NOTICE" >> "$GITHUB_STEP_SUMMARY"
+            echo "confirmed: accepted only the proven-inert zero-turn no-op envelope (issue #274)"
+            exit 0
           fi
 
           # The signals below (a `- [ ]` checklist box and a "review in
