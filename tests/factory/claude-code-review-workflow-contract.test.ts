@@ -501,7 +501,7 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(JSON.stringify(stepCEnv)).not.toMatch(/GH_TOKEN|secrets\./u);
   });
 
-  it("T36 locks step C output names to step B's exact-string gate and its #217 sentinel conjunct", () => {
+  it("T36 locks step C output names to step B's exact-string gates and its #217 sentinel conjunct", () => {
     const stepB = jobStep(
       parseWorkflow(),
       "claude-review",
@@ -516,6 +516,15 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(env.RESULT_CLEAN).toBe(
       "${{ steps.catalog-closure.outputs.result_clean }}",
     );
+    expect(env.RESULT_NUM_TURNS).toBe(
+      "${{ steps.catalog-closure.outputs.result_num_turns }}",
+    );
+    expect(env.TOOL_INVOCATIONS).toBe(
+      "${{ steps.catalog-closure.outputs.tool_invocations }}",
+    );
+    expect(env.SUBSTANTIVE_OUTPUT).toBe(
+      "${{ steps.catalog-closure.outputs.substantive_output }}",
+    );
     expect(run).toContain('[ "$CATALOG_METADATA_ONLY" = "true" ]');
     expect(run).toContain('[ "$RESULT_CLEAN" = "true" ]');
     // The metadata-only accept gate opens with the two step-C conjuncts…
@@ -525,6 +534,13 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     // …and is fail-closed by the #217 sentinel conjunct terminating the gate (a
     // regression back to the two-conjunct fail-open would break this lock).
     expect(run).toContain('&& [ "$LAST_LINE" = "$SENTINEL" ]; then');
+    // The proven-inert accept is one closed five-conjunct gate. Removing any
+    // conjunct widens the newly admitted outcome and breaks this byte pin.
+    expect(run).toContain(
+      'if [ "$CATALOG_METADATA_ONLY" = "true" ] && [ "$RESULT_CLEAN" = "true" ] \\\n' +
+        '  && [ "$RESULT_NUM_TURNS" = "1" ] && [ "$TOOL_INVOCATIONS" = "0" ] \\\n' +
+        '  && [ "$SUBSTANTIVE_OUTPUT" = "0" ]; then',
+    );
   });
 
   it("T37 locks the immutable permitted residual policy to the fixture anchor", () => {
