@@ -2804,7 +2804,6 @@ describe("ordinary-run workflow resource ceilings", () => {
         expect.objectContaining({ kind: "resource-limit" }),
       ]);
     },
-    15_000,
   );
 
   it("charges each expanded alias occurrence to canonical evidence", () => {
@@ -2906,7 +2905,6 @@ ${matrixEntries}
         },
       ]);
     },
-    15_000,
   );
 
   it("rejects amplified nested aliases", () => {
