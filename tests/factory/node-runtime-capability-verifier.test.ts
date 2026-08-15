@@ -609,7 +609,7 @@ describe("verifyNodeExecutableClosure closed runtime grammar", () => {
       "resource-limit",
       `${MAX_NODE_AST_NODES} nodes`,
     );
-  }, 15_000);
+  });
 });
 
 describe("verifyNodeExecutableClosure D126 adapter boundary", () => {
