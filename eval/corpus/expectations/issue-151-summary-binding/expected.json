@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-151-summary-binding",
+  "issueType": "security-fix",
+  "triageOutcomeClass": "ready",
+  "execution": "conventional",
+  "sizeClass": "small",
+  "outcomeClass": "clean-pass",
+  "provenance": "reconstructed-from-outcome",
+  "triage": {
+    "expectedReadiness": "ready-for-conventional-implementation"
+  },
+  "implement": {
+    "compile": "pass",
+    "tests": "pass",
+    "implementLogicLines": 13,
+    "diffBound": {
+      "expectedWithinEnvelope": true
+    },
+    "mutation": null,
+    "prOutcome": {
+      "merged": true,
+      "firstPassCiGreen": true,
+      "postOpenReviewRounds": 0
+    }
+  }
+}

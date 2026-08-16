@@ -1,0 +1,6 @@
+{
+  "issue_number": 274,
+  "readiness": "ready-for-conventional-implementation",
+  "reasoning": "Execution path: CONVENTIONAL / interactive. This diff edits .github/workflows/claude-code-review.yml and tests/factory/**, both on the protected factory surface, so it is never factory-dispatchable. Readiness label: ready-for-conventional-implementation, never ready-to-implement.",
+  "missing_info_questions": []
+}

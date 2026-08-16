@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "description": "Held-out recorded-mode regression corpus of twelve frozen roastpilot-cloud factory work items. Replay inputs and scorer expectations are stored in separate subtrees.",
+  "cases": [
+    {
+      "caseId": "issue-009-registry-reconciliation",
+      "issueNumber": 9,
+      "prNumber": 152,
+      "stage": "triage-and-implement",
+      "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-009-registry-reconciliation/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-009-registry-reconciliation/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-009-registry-reconciliation/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-009-registry-reconciliation/recorded/implement.patch"
+      },
+      "notes": "The raw body is the creation-time GitHub revision; the later operator authorization and bounded registry plan are frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-026-health-route-dryrun",
+      "issueNumber": 26,
+      "prNumber": 45,
+      "stage": "triage-and-implement",
+      "baseSha": "13aa3d62e7852110a96a3ece190b3ffc410f6677",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "0443844f7fb0adb34c19e52ec52d6666cf736fc5",
+        "implementPromptVersion": "0443844f7fb0adb34c19e52ec52d6666cf736fc5"
+      },
+      "issueSnapshotPath": "inputs/issue-026-health-route-dryrun/issue-snapshot.json",
+      "decisionContextPath": null,
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-026-health-route-dryrun/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-026-health-route-dryrun/recorded/implement.patch"
+      },
+      "notes": "The creation-time issue snapshot and recorded replay artifacts are preserved at the canonical case paths."
+    },
+    {
+      "caseId": "issue-058-grant-hardening",
+      "issueNumber": 58,
+      "prNumber": 150,
+      "stage": "triage-and-implement",
+      "baseSha": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-058-grant-hardening/issue-snapshot.json",
+      "decisionContextPath": null,
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-058-grant-hardening/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-058-grant-hardening/recorded/implement.patch"
+      },
+      "notes": "The raw body is the creation-time GitHub revision; the recorded replay artifacts are preserved at the canonical case paths."
+    },
+    {
+      "caseId": "issue-151-summary-binding",
+      "issueNumber": 151,
+      "prNumber": 153,
+      "stage": "triage-and-implement",
+      "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-151-summary-binding/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-151-summary-binding/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-151-summary-binding/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-151-summary-binding/recorded/implement.patch"
+      },
+      "notes": "The raw body byte-matches the GitHub issue; the bounded pre-outcome implementation plan is frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-023-dryrun-second",
+      "issueNumber": 23,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-023-dryrun-second/issue-snapshot.json",
+      "decisionContextPath": null,
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-023-dryrun-second/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The creation-time issue snapshot and recorded triage artifact are preserved at the canonical case paths."
+    },
+    {
+      "caseId": "issue-059-public-grant-audit",
+      "issueNumber": 59,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-059-public-grant-audit/issue-snapshot.json",
+      "decisionContextPath": null,
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-059-public-grant-audit/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The creation-time issue snapshot and recorded triage artifact are preserved at the canonical case paths."
+    },
+    {
+      "caseId": "issue-120-executable-closure",
+      "issueNumber": 120,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "d5225f69e6432d9346d321310cadb401f2dac87b",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-120-executable-closure/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-120-executable-closure/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-120-executable-closure/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The raw body is the creation-time GitHub revision; authorized later plan substance is frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-194-comment-injection",
+      "issueNumber": 194,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-194-comment-injection/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-194-comment-injection/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-194-comment-injection/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The raw body byte-matches the GitHub issue; the prior D104 security boundary is frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-205-retarget-hardening",
+      "issueNumber": 205,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "01e1ebee52d09d48303a3e5652dd6d42dc016b55",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-205-retarget-hardening/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-205-retarget-hardening/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-205-retarget-hardening/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-274-inert-noop",
+      "issueNumber": 274,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "9d6fe2b3efde46b3765dbffb5a09a01d0ec2181b",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-274-inert-noop/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-274-inert-noop/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-274-inert-noop/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
+    },
+    {
+      "caseId": "issue-281-dryrun-utility",
+      "issueNumber": 281,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-281-dryrun-utility/issue-snapshot.json",
+      "decisionContextPath": null,
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-281-dryrun-utility/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The snapshot reflects the final pre-boundary issue-body revision and retains the recorded triage artifact at its canonical path."
+    },
+    {
+      "caseId": "issue-284-vitest-timeout",
+      "issueNumber": 284,
+      "prNumber": null,
+      "stage": "triage-only",
+      "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-284-vitest-timeout/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-284-vitest-timeout/decision-context.md",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-284-vitest-timeout/recorded/triage-verdict.json",
+        "implementPatchPath": null
+      },
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
+    }
+  ]
+}

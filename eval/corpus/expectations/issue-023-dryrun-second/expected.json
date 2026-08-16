@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-023-dryrun-second",
+  "issueType": "documentation",
+  "triageOutcomeClass": "bounced",
+  "execution": "factory",
+  "sizeClass": null,
+  "outcomeClass": null,
+  "provenance": "historical-artifact",
+  "triage": {
+    "expectedReadiness": "wontfix"
+  },
+  "implement": null
+}

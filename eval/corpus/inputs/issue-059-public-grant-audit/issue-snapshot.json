@@ -1,0 +1,11 @@
+{
+  "issueNumber": 59,
+  "title": "F1-S8: complete PUBLIC-grant auditing needs a MANAGE GRANTS role (completeness vs minimal-role tradeoff)",
+  "body": "From #57 (F1-S8) round-5 Codex P1 :596.\n\n**Limitation:** `SHOW GRANTS TO ROLE PUBLIC` run from the deliberately DEV-scoped `ROASTPILOT_DEV_CI_ROLE` is NOT account-complete — Snowflake only returns a full result if the active role holds `MANAGE GRANTS` (an account-level privilege the minimal CI role can't have). So a PUBLIC grant on an object outside the DEV role's visibility isn't seen by the audit.\n\n**Why not just fix it in #57:** giving the audit connection MANAGE GRANTS (or a separate account-level audit role) contradicts the whole F1-S8 point — a minimal, DEV-only credential. That's a real completeness-vs-minimalism design decision, not a bug.\n\n**What actually enforces 'no PUBLIC grants' today (documented in #57):** (a) the pre-deploy migration scan (`check_forbidden_grants.py`) catches a migration-introduced `GRANT ... TO PUBLIC` — the primary CI vector — BEFORE it's applied; (b) the AGENTS.md invariant + operator provisioning discipline; (c) the DEV-visibility-scoped PUBLIC audit as a best-effort detective layer. A PUBLIC grant that escapes all three is still contained to the isolated DEV database, never PROD.\n\n**Options to weigh later:** a dedicated minimal audit role with ONLY MANAGE GRANTS (read-only for grants) used solely by the assert connection; or accept the documented best-effort audit + migration scan as sufficient for a DEV env. Decision, not a defect. Refs #11.",
+  "labels": [
+    "needs-triage"
+  ],
+  "state": "OPEN",
+  "snapshotAt": "2026-07-18T23:07:43Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/59"
+}

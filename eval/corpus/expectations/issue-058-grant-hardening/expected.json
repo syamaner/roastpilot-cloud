@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-058-grant-hardening",
+  "issueType": "hardening",
+  "triageOutcomeClass": "bounced",
+  "execution": "conventional",
+  "sizeClass": "largest-available",
+  "outcomeClass": "non-pass",
+  "provenance": "historical-artifact",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": {
+    "compile": "pass",
+    "tests": "pass",
+    "implementLogicLines": 119,
+    "diffBound": {
+      "expectedWithinEnvelope": true
+    },
+    "mutation": {
+      "expectedGatePass": true
+    },
+    "prOutcome": {
+      "merged": true,
+      "firstPassCiGreen": false,
+      "postOpenReviewRounds": 1
+    }
+  }
+}

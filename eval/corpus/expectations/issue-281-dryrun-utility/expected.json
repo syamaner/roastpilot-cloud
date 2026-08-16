@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-281-dryrun-utility",
+  "issueType": "feature",
+  "triageOutcomeClass": "ready",
+  "execution": "factory",
+  "sizeClass": null,
+  "outcomeClass": null,
+  "provenance": "historical-artifact",
+  "triage": {
+    "expectedReadiness": "ready-to-implement"
+  },
+  "implement": null
+}

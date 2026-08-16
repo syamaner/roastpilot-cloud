@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-026-health-route-dryrun",
+  "issueType": "feature",
+  "triageOutcomeClass": "bounced",
+  "execution": "factory",
+  "sizeClass": "small",
+  "outcomeClass": "clean-pass",
+  "provenance": "historical-artifact",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": {
+    "compile": "pass",
+    "tests": "pass",
+    "implementLogicLines": 5,
+    "diffBound": {
+      "expectedWithinEnvelope": true
+    },
+    "mutation": null,
+    "prOutcome": {
+      "merged": true,
+      "firstPassCiGreen": true,
+      "postOpenReviewRounds": 0
+    }
+  }
+}

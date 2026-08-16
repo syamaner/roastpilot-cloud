@@ -1,0 +1,243 @@
+diff --git a/.github/workflows/dev-snowflake-contract.yml b/.github/workflows/dev-snowflake-contract.yml
+index 8e8c0be..aa98faa 100644
+--- a/.github/workflows/dev-snowflake-contract.yml
++++ b/.github/workflows/dev-snowflake-contract.yml
+@@ -370,6 +370,13 @@ jobs:
+         # step's REAL pass/fail result. Never a reason to fail the job on
+         # its own — if: always() runs this regardless of what came before.
+         if: always()
++        # Bind repository variables as data rather than interpolating them
++        # textually before shell parsing, where `$(...)` in a value would
++        # execute as command substitution (issue #151).
++        env:
++          SUMMARY_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
++          SUMMARY_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
++          SUMMARY_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+         run: |
+           {
+             echo "## DEV Snowflake contract check"
+@@ -378,7 +385,7 @@ jobs:
+             echo "- **Grants stay within DEV (pre-deploy):** ${{ steps.grants.outcome }}"
+             echo "- **Migrations deployed:** ${{ steps.deploy.outcome }}"
+             echo "- **Grants stay within DEV (post-deploy):** ${{ steps.grants-post.outcome }}"
+-            echo "- **Database:** \`${{ vars.SNOWFLAKE_DEV_DATABASE }}\`"
+-            echo "- **Role:** \`${{ vars.SNOWFLAKE_DEV_ROLE }}\`"
+-            echo "- **Warehouse:** \`${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}\`"
++            echo "- **Database:** \`${SUMMARY_DATABASE}\`"
++            echo "- **Role:** \`${SUMMARY_ROLE}\`"
++            echo "- **Warehouse:** \`${SUMMARY_WAREHOUSE}\`"
+           } >> "$GITHUB_STEP_SUMMARY"
+diff --git a/tests/factory/workflow-run-expression-injection.test.ts b/tests/factory/workflow-run-expression-injection.test.ts
+new file mode 100644
+index 0000000..8e44ac5
+--- /dev/null
++++ b/tests/factory/workflow-run-expression-injection.test.ts
+@@ -0,0 +1,208 @@
++import { readFileSync, readdirSync } from "node:fs";
++import { join, relative } from "node:path";
++import { fileURLToPath } from "node:url";
++import { describe, expect, it } from "vitest";
++import { parseDocument } from "yaml";
++import { isWorkflowPinAuditManifestPath } from "../../scripts/factory/workflow-pin-audit-logic.mts";
++
++const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
++const GITHUB_DIRECTORY = join(REPOSITORY_ROOT, ".github");
++const RUN_EXPRESSION = /\$\{\{[\s\S]*?\}\}/g;
++const ALLOWED_RUN_EXPRESSIONS = [
++  /^steps\.[A-Za-z_][A-Za-z0-9_-]*\.outcome$/i,
++  /^github\.repository$/i,
++];
++
++type Mapping = Record<string, unknown>;
++
++interface WorkflowFile {
++  readonly path: string;
++  readonly content: string;
++}
++
++function asMapping(value: unknown): Mapping | undefined {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++    ? (value as Mapping)
++    : undefined;
++}
++
++function readWorkflowFiles(directory = GITHUB_DIRECTORY): WorkflowFile[] {
++  return readdirSync(directory, { withFileTypes: true })
++    .flatMap((entry) => {
++      const path = join(directory, entry.name);
++      if (entry.isDirectory()) {
++        return readWorkflowFiles(path);
++      }
++      const repositoryPath = relative(REPOSITORY_ROOT, path).replaceAll(
++        "\\",
++        "/",
++      );
++      if (!isWorkflowPinAuditManifestPath(repositoryPath)) {
++        return [];
++      }
++      return {
++        path: repositoryPath,
++        content: readFileSync(path, "utf8"),
++      };
++    })
++    .sort((left, right) => left.path.localeCompare(right.path));
++}
++
++function normalizedExpressionInnerText(expression: string): string {
++  return expression.slice(3, -2).trim().replace(/\s+/g, " ");
++}
++
++function findUnrecognisedRunExpressions(
++  value: unknown,
++  location: string,
++): string[] {
++  if (Array.isArray(value)) {
++    return value.flatMap((item, index) =>
++      findUnrecognisedRunExpressions(item, `${location}[${index}]`),
++    );
++  }
++
++  const mapping = asMapping(value);
++  if (mapping === undefined) {
++    return [];
++  }
++
++  const failures: string[] = [];
++  for (const [key, child] of Object.entries(mapping)) {
++    const childLocation = `${location}.${key}`;
++    if (key === "run" && typeof child === "string") {
++      for (const match of child.matchAll(RUN_EXPRESSION)) {
++        const expression = match[0];
++        const normalized = normalizedExpressionInnerText(expression);
++        if (
++          !ALLOWED_RUN_EXPRESSIONS.some((pattern) => pattern.test(normalized))
++        ) {
++          failures.push(`${childLocation}: ${expression}`);
++        }
++      }
++    }
++    failures.push(...findUnrecognisedRunExpressions(child, childLocation));
++  }
++  return failures;
++}
++
++/**
++ * Audits one workflow or composite action without trusting expression syntax.
++ *
++ * The previous deny-list was defeated by equivalent bracket access, function
++ * calls, case changes, and other forms. A closed allow-list fails safely for
++ * every expression form that has not received explicit review.
++ */
++export function validateWorkflowRunExpressions(
++  workflow: WorkflowFile,
++): string[] {
++  const document = parseDocument(workflow.content);
++  if (document.errors.length > 0) {
++    return [`${workflow.path}: workflow must be valid YAML`];
++  }
++  try {
++    return findUnrecognisedRunExpressions(
++      document.toJS({ maxAliasCount: 100 }),
++      workflow.path,
++    );
++  } catch {
++    return [
++      `${workflow.path}: workflow aliases must stay within the permitted bound`,
++    ];
++  }
++}
++
++export function validateWorkflowRunExpressionCorpus(
++  workflows: readonly WorkflowFile[],
++): string[] {
++  if (workflows.length === 0) {
++    return ["workflow run expression corpus must not be empty"];
++  }
++  return workflows.flatMap(validateWorkflowRunExpressions);
++}
++
++describe("workflow run expression injection guard (issue #151)", () => {
++  it("allows only reviewed expressions in every workflow and composite action", () => {
++    expect(validateWorkflowRunExpressionCorpus(readWorkflowFiles())).toEqual(
++      [],
++    );
++  });
++
++  it.each([
++    "${{ vars['SNOWFLAKE_DEV_DATABASE'] }}",
++    "${{ github['event'].issue.title }}",
++    "${{ github.event['issue'].title }}",
++    "${{ inputs['issue_number'] }}",
++    "${{ github['head_ref'] }}",
++    "${{ format('{0}', vars.SNOWFLAKE_DEV_DATABASE) }}",
++    "${{ toJSON(github.event.issue) }}",
++    "${{ join(github.event.issue.labels.*.name, ',') }}",
++    "${{ fromJSON(vars.CFG).db }}",
++    "${{ steps.x.outcome || github.event.issue.title }}",
++    "${{ github.event_name == 'issues' && github.event.issue.title || '' }}",
++    "${{ env.ISSUE_TITLE }}",
++    "${{ needs.agent.outputs.title }}",
++    "${{ steps.agent.outputs.result }}",
++    "${{ matrix.target }}",
++    "${{ github.ref_name }}",
++    "${{ github.base_ref }}",
++    "${{ github.triggering_actor }}",
++    "${{ VARS.SNOWFLAKE_DEV_DATABASE }}",
++    "${{ GITHUB.EVENT.ISSUE.TITLE }}",
++    "${{ vars .X }}",
++    "${{ github . repository }}",
++    "${{ vars.SNOWFLAKE_DEV_DATABASE }}",
++    "${{ github.event.issue.title }}",
++  ])("rejects unrecognised run expression %s", (expression) => {
++    const vulnerableWorkflow = {
++      path: ".github/workflows/vulnerable.yml",
++      content: `jobs:\n  test:\n    steps:\n      - run: |\n          echo "${expression}"\n`,
++    };
++    expect(validateWorkflowRunExpressions(vulnerableWorkflow)).toContainEqual(
++      expect.stringContaining(
++        `${vulnerableWorkflow.path}.jobs.test.steps[0].run: ${expression}`,
++      ),
++    );
++  });
++
++  it.each([
++    "${{ steps.deploy.outcome }}",
++    "${{ steps.grants-post.outcome }}",
++    "${{ github.repository }}",
++    "${{   github.repository   }}",
++  ])("allows reviewed run expression %s", (expression) => {
++    const allowedWorkflow = {
++      path: ".github/workflows/allowed.yml",
++      content: `jobs:\n  test:\n    steps:\n      - run: |\n          echo "${expression}"\n`,
++    };
++    expect(validateWorkflowRunExpressions(allowedWorkflow)).toEqual([]);
++  });
++
++  it("catches a composite action run expression", () => {
++    const compositeAction = {
++      path: ".github/actions/foo/action.yml",
++      content:
++        "runs:\n  using: composite\n  steps:\n    - run: 'echo \"${{ vars.ATTACKER }}\"'\n      shell: bash\n",
++    };
++    expect(validateWorkflowRunExpressions(compositeAction)).toEqual([
++      `${compositeAction.path}.runs.steps[0].run: \${{ vars.ATTACKER }}`,
++    ]);
++  });
++
++  it("fails when the audited corpus is empty", () => {
++    expect(validateWorkflowRunExpressionCorpus([])).toEqual([
++      "workflow run expression corpus must not be empty",
++    ]);
++  });
++
++  it("fails closed for invalid YAML", () => {
++    expect(
++      validateWorkflowRunExpressions({
++        path: ".github/workflows/invalid.yml",
++        content: "jobs: [",
++      }),
++    ).toEqual([
++      ".github/workflows/invalid.yml: workflow must be valid YAML",
++    ]);
++  });
++});

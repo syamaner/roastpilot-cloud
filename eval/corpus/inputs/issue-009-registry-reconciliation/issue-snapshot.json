@@ -1,0 +1,9 @@
+{
+  "issueNumber": 9,
+  "title": "[F1-S6] Factory end-to-end dry run + runbook + metrics baseline",
+  "body": "## Plan link\nhttps://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md — §3, §10 (metrics + ratchet), §11\n\n## Acceptance criteria\n- [ ] End-to-end dry run on a sacrificial issue: filed via the story template → triaged → human dispatch → PR opens → CI + review run → PM adjudicates → merged (trivial change) or closed with reasoning\n- [ ] `docs/factory-runbook.md`: stuck states and recovery (triage failed, half-published branch, budget cap hit, malformed verdict), where each log lives, cost log location + format\n- [ ] §10 metrics baseline recorded (triage accuracy, first-pass-green, human-touch minutes for the dry run) as the ratchet's starting point\n- [ ] Any spec-vs-reality gap found in the dry run fed back to factory.md in the plan repo (same-session rule)\n\n## In-scope surface\n`docs/factory-runbook.md`, one sacrificial issue + PR, plan-repo amendment if needed.\n\n## Out of scope\nEnabling triage→implement chaining (ratchet step 1 needs ~5 clean stories, not one dry run).\n\n## Verification notes\nThe dry run IS the verification; the runbook is reviewed against what actually happened, not what was expected to happen.\n\n## Size declaration\nThin slice (≤ ~400 lines expected)\n",
+  "labels": [],
+  "state": "OPEN",
+  "snapshotAt": "2026-07-27T21:29:02Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/9"
+}

@@ -1,0 +1,6 @@
+{
+  "issue_number": 194,
+  "readiness": "ready-for-conventional-implementation",
+  "reasoning": "Reconstructed from the issue's creation-time ready-for-conventional-implementation label and retained outcome record: this P0 factory-workflow credential-exposure report required protected-surface conventional execution and was subsequently addressed through the #195/#204 security work.",
+  "missing_info_questions": []
+}

@@ -1,0 +1,11 @@
+{
+  "issueNumber": 58,
+  "title": "assert_dev_ci_grants: optional hardening (delimiter-safe boundary, umask, role interpolation)",
+  "body": "Low-severity hardening from the F1-S8 #57 security review (core boundary VERIFIED SAFE — these are optional, non-blocking):\n\n- **L1 (delimiter confusion):** `is_allowed_grant` uses `name.startswith(f\"{allowed_database}.\")`. A DB created as `\"ROASTPILOT_DEV.evil\"` (a name literally containing a dot) could false-match IF SHOW GRANTS renders a nested object unquoted. Exotic + already mitigated (the trailing-dot test rejects ROASTPILOT_DEV_EVIL; the SHOW DATABASES visibility check independently flags out-of-bounds DBs). Optional fix: reject any `name` containing a quote char, or split on `.` and compare the first component exactly.\n- **L2 (dead defense):** `umask 077` is set AFTER `mktemp` (which already creates 0600), so it has no effect. No exposure (perms are 0600 throughout). Move umask above mktemp if kept, or drop it.\n- **L3 (informational):** role name (vars.SNOWFLAKE_DEV_ROLE) is f-string-interpolated into `SHOW GRANTS TO ROLE {role}`. Operator-controlled repo var, not PR-controllable, connector doesn't multi-statement — not exploitable in the current threat model; noted for completeness.\n\nRefs #11 (F1-S8). Do when convenient; the boundary is safe as-is.",
+  "labels": [
+    "needs-triage"
+  ],
+  "state": "OPEN",
+  "snapshotAt": "2026-07-18T21:46:26Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/58"
+}

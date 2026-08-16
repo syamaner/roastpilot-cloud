@@ -1,0 +1,9 @@
+{
+  "issueNumber": 26,
+  "title": "[TEST] Factory implement dry-run: add /api/health liveness route",
+  "body": "## Plan link\n(factory implement dry-run — a genuine small, self-contained change to validate the implement workflow end-to-end; safe to close after.)\n\n## Acceptance criteria\n- [ ] Add a Next.js App Router route handler at `app/api/health/route.ts` that responds to `GET` with HTTP 200 and JSON body `{ \"status\": \"ok\" }`\n- [ ] Add a Vitest unit test asserting the 200 status and the `{ status: \"ok\" }` body\n\n## In-scope surface\n`app/api/health/route.ts` and one unit test under `tests/` (or colocated per repo convention).\n\n## Out of scope\nAuth, database/Snowflake checks, any change to existing routes or config.\n\n## Verification notes\n`npx vitest run` passes the new test; `npx tsc --noEmit` and `npx eslint .` clean.\n\n## Size declaration\nThin (~30 lines).",
+  "labels": [],
+  "state": "OPEN",
+  "snapshotAt": "2026-07-18T07:56:16Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/26"
+}

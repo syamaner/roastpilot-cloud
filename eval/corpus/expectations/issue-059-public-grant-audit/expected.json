@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-059-public-grant-audit",
+  "issueType": "schema",
+  "triageOutcomeClass": "bounced",
+  "execution": "conventional",
+  "sizeClass": null,
+  "outcomeClass": null,
+  "provenance": "historical-artifact",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": null
+}
