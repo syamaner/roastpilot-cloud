@@ -23,6 +23,22 @@ export function isSafePositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
+/** True only for a non-negative integer that JSON numbers represent exactly. */
+export function isSafeNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/** Finds a case-insensitive token bounded by non-alphanumeric delimiters. */
+export function containsDelimiterBoundedToken(
+  text: string,
+  token: string,
+): boolean {
+  const lowercaseText = text.toLowerCase();
+  return new RegExp(`(?:^|[^a-z0-9])${token}(?:$|[^a-z0-9])`).test(
+    lowercaseText,
+  );
+}
+
 /** True only for a lowercase, byte-exact 40-character hexadecimal SHA. */
 export function isSha40Hex(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
