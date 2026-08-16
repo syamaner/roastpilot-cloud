@@ -1,0 +1,361 @@
+diff --git a/.github/workflows/dev-snowflake-contract.yml b/.github/workflows/dev-snowflake-contract.yml
+index dafb1d4..8e8c0be 100644
+--- a/.github/workflows/dev-snowflake-contract.yml
++++ b/.github/workflows/dev-snowflake-contract.yml
+@@ -314,9 +314,17 @@ jobs:
+           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
+         run: |
+           set -euo pipefail
++          # `umask 077` FIRST, before mktemp (#58's L2). It used to sit after
++          # the mktemp call, where it protected nothing at all: mktemp had
++          # already created the file, and redirecting onto an ALREADY-EXISTING
++          # file does not re-apply the umask to its mode. mktemp's own 0600 is
++          # what actually held the key private, so this was dead defense, not
++          # a live second layer. Ordered correctly it becomes the real second
++          # layer it was meant to be, and it now also covers anything else
++          # this step creates rather than the key file alone.
++          umask 077
+           KEY_FILE="$(mktemp)"
+           trap 'rm -f "$KEY_FILE"' EXIT
+-          umask 077
+           printf '%s' "$SNOWFLAKE_DEV_PRIVATE_KEY" > "$KEY_FILE"
+           export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
+           python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
+diff --git a/snowflake/assert_dev_ci_grants.py b/snowflake/assert_dev_ci_grants.py
+index bf5158f..d5a7b6d 100644
+--- a/snowflake/assert_dev_ci_grants.py
++++ b/snowflake/assert_dev_ci_grants.py
+@@ -145,6 +145,13 @@ Deliberately fails CLOSED: an unrecognized object type (a Snowflake
+ privilege/object kind this allowlist doesn't know about) is treated as a
+ VIOLATION, never silently permitted — see `is_allowed_grant`.
+ 
++The role and CI user are interpolated into four `SHOW` statements below
++(Snowflake takes an identifier there, in a position that accepts no bind
++parameter). `main()` refuses either value up front unless it is a bare
++unquoted identifier — see `assert_sql_identifier_safe` for why that check
++exists even though a hostile value already fails closed without it (#58's
++L3).
++
+ Every identifier comparison (database, warehouse, role, and object name)
+ routes through ONE function, `identifiers_match` — a categorical fix
+ (Codex P1, PR #57, round 3), replacing three independently-patched bugs
+@@ -231,6 +238,7 @@ than trusting it happened.
+ from __future__ import annotations
+ 
+ import os
++import re
+ import sys
+ 
+ import snowflake.connector
+@@ -268,6 +276,12 @@ _DATABASE_SCOPED_OBJECT_TYPES = frozenset(
+ _EXPECTED_DATABASE = "ROASTPILOT_DEV"
+ _EXPECTED_WAREHOUSE = "DEV_CI_WH"
+ 
++# Snowflake's own unquoted-identifier grammar: a letter or underscore, then
++# any number of letters, digits, underscores, or dollar signs. The only two
++# values this script interpolates into SQL text (the role and the CI user)
++# must match it exactly -- see assert_sql_identifier_safe.
++_UNQUOTED_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
++
+ 
+ def require_env(name: str) -> str:
+     """Reads a required environment variable, failing loudly if missing."""
+@@ -310,6 +324,95 @@ def assert_boundary_vars_not_drifted(database: str, warehouse: str) -> None:
+         )
+ 
+ 
++def assert_sql_identifier_safe(value: str, var_name: str) -> None:
++    """Fails CLOSED unless `value` is a bare Snowflake unquoted identifier,
++    before it is ever interpolated into a SQL statement (#58's L3).
++
++    Four statements in `main()` are built by string interpolation -- `SHOW
++    GRANTS TO ROLE <role>`, `SHOW GRANTS TO USER <user>`, `SHOW FUTURE
++    GRANTS TO ROLE <role>`, and `SHOW USERS LIKE '<user>'`. That is not a
++    missed parameterization: Snowflake's `SHOW` commands take an identifier
++    in a position that accepts no bind parameter, so there is no
++    parameterized form to use instead.
++
++    Both values come from operator-controlled repository variables
++    (`vars.SNOWFLAKE_DEV_ROLE`/`vars.SNOWFLAKE_DEV_USER`, see
++    `dev-snowflake-contract.yml`), which no agent-authored patch can reach.
++    A hostile value ALREADY fails closed today -- but only EMERGENTLY, via
++    three mechanisms this repo does not itself assert:
++
++    (i) Only one statement per `execute()` runs. Note this is NOT the
++        connector pinning it, which an earlier version of this docstring
++        claimed (factory-security review, #58): `cursor.execute`'s
++        `num_statements` defaults to `None`, so snowflake-connector-python
++        sends NO `MULTI_STATEMENT_COUNT` at all. The restriction is
++        Snowflake's own SERVER-side session-parameter default of 1, which
++        an account-, user-, or session-level `ALTER ... SET
++        MULTI_STATEMENT_COUNT = 0` moves. So this leg is mutable Snowflake
++        account state -- the same category as `DEFAULT_SECONDARY_ROLES`,
++        which check #8 verifies rather than assumes, and which nothing
++        verifies here.
++    (ii) Snowflake's own syntax errors on a malformed statement.
++    (iii) `find_default_secondary_roles_violation`'s exact-name post-filter.
++
++    Leg (i) being account state rather than a pinned dependency is the
++    strongest argument FOR this guard, not against it. The check turns an
++    emergent property into an asserted one, the same "anchor the assumption
++    rather than trust the environment to hold the right value" discipline
++    `assert_boundary_vars_not_drifted` already applies to the
++    database/warehouse boundary.
++
++    Deliberately NOT a general Snowflake identifier parser or a quoting
++    helper (explicitly out of scope on #58): this repo's own tooling only
++    ever creates unquoted identifiers, so anything outside that grammar --
++    a quote, semicolon, whitespace, comment marker, trailing newline, or
++    empty value -- is REFUSED rather than escaped. The failure direction is
++    availability only: a legitimate but exotic (quoted) identifier would be
++    rejected loudly, never silently admitted.
++
++    NOT an exhaustive model of Snowflake's identifier rules, and does not
++    claim to be: it does not encode Snowflake's 255-character limit, and it
++    admits reserved words (including `PUBLIC` as a role name). Both fail
++    closed downstream rather than here -- an over-long name is a Snowflake
++    error, and `PUBLIC` still meets the unconditional zero-grants standard
++    `find_public_grants`/`find_public_future_grants` apply. This guard's one
++    job is that the interpolated text cannot carry a quote, backslash,
++    semicolon, whitespace, or comment marker.
++
++    Only `role` and `user` are checked, because they are the only two values
++    that reach SQL text this module composes. This is NOT an exhaustive
++    account of the module's inputs (factory-security review, #58):
++    - `database`/`warehouse` reach `connect()` as parameters, never
++      statement text, and are separately pinned to exact literals by
++      `assert_boundary_vars_not_drifted` -- strictly stronger than a
++      grammar check.
++    - `SNOWFLAKE_ACCOUNT` reaches `connect(account=...)` and is neither
++      pinned nor grammar-checked, despite deciding WHERE the private key's
++      JWT is sent. It is bounded operationally rather than in this module,
++      by the workflow's `egress-policy: block` allowlist
++      (`*.snowflakecomputing.com:443`) and by repository-variable writes
++      needing admin. Out of #58's scope; tracked separately rather than
++      widened into here.
++
++    Deliberately does NOT use `re.IGNORECASE`: that flag would admit the
++    Kelvin sign (U+212A), dotless i (U+0131), long s (U+017F), and U+0130
++    into an otherwise pure-ASCII grammar.
++
++    @param value: The identifier as the environment actually holds it.
++    @param var_name: The environment variable's name, for the error message.
++    @raises SystemExit: If `value` is not a bare unquoted identifier.
++    """
++    # `fullmatch`, not `match`/`search` -- and deliberately not an `^...$`
++    # pattern, since `$` also matches just before a TRAILING NEWLINE, which
++    # would admit `"ROASTPILOT_DEV_CI_ROLE\n"` as if it were clean.
++    if not _UNQUOTED_IDENTIFIER.fullmatch(value):
++        raise SystemExit(
++            f"error: {var_name} is {value!r}, which is not a bare Snowflake unquoted "
++            "identifier ([A-Za-z_][A-Za-z0-9_$]*) -- refusing to interpolate it into a "
++            "SHOW statement"
++        )
++
++
+ def identifiers_match(candidate: str, expected: str) -> bool:
+     """True when two Snowflake identifiers are the EXACT same string
+     (Codex P1, PR #57, round 3 — the categorical fix for :276/:376 and
+@@ -698,6 +801,12 @@ def main() -> int:
+     passphrase = os.environ.get("SNOWFLAKE_DEV_PRIVATE_KEY_PASSPHRASE") or None
+ 
+     assert_boundary_vars_not_drifted(database, warehouse)
++    # #58 L3 -- the role and the CI user are the only two values this script
++    # interpolates into SQL text; refuse anything outside Snowflake's
++    # unquoted-identifier grammar before building a statement from it, and
++    # before the private key is even loaded. See assert_sql_identifier_safe.
++    assert_sql_identifier_safe(role, "SNOWFLAKE_DEV_ROLE")
++    assert_sql_identifier_safe(user, "SNOWFLAKE_DEV_USER")
+ 
+     private_key_der = load_private_key_der(private_key_pem, passphrase)
+ 
+diff --git a/snowflake/mutation-baseline.json b/snowflake/mutation-baseline.json
+index 3c7f686..160e125 100644
+--- a/snowflake/mutation-baseline.json
++++ b/snowflake/mutation-baseline.json
+@@ -1,8 +1,8 @@
+ {
+-  "_comment": "F1-S9 slice 2 (issue #12): the mutation-testing baseline for snowflake/assert_dev_ci_grants.py + snowflake/check_forbidden_grants.py + snowflake/validate_migrations.py (the last added in the ready round -- a Codex finding: check_forbidden_grants.py directly calls validate_migrations.find_candidate_migration_files to decide which files get scanned for a forbidden PUBLIC grant, so it's genuinely part of the grant-boundary security surface, not unrelated filename/render validation). Re-measured after two later Codex findings on this same PR: (1) every python invocation in the mutation-testing and snowflake-migrations CI jobs now runs under `-P` (PYTHONSAFEPATH) to close a module-shadowing class -- see ci.yml's own comments; (2) check_forbidden_grants.py's own `from validate_migrations import ...` had to become a path-anchored importlib load (`_load_sibling_module`) since -P removes the automatic sys.path entry that bare import relied on, adding ~16 mutants to check_forbidden_grants.py's own surface (its `main()`'s pre-existing survivors are unchanged; the two NEW survivors are both inside a `# pragma: no cover`-marked, provably-unreachable defensive branch in _load_sibling_module -- equivalent mutants, not a real gap; see the function's own docstring). Earlier in this same PR's history, the bounded survivor-triage skim killed 2 real survivors (both continue -> break mutants in find_unexpected_user_role_grants, on the empty-role-field and PUBLIC-role branches respectively -- a genuine row-ordering-dependent gap where an empty-role or PUBLIC row sorting before a violating row would have silently stopped the scan; see test_assert_dev_ci_grants.py's own new tests). Re-measured on main via `mutmut run` + `mutmut export-cicd-stats` (19 Jul 2026, mutmut==3.6.0) -- deterministic across repeated runs at this final state (a rare, pre-existing 1-mutant flake was observed once during an earlier wider-scope re-measurement, always in the score-IMPROVING direction, noted in the PR body -- not present across the runs that produced this final number). check_mutation_score.py fails the check if a later run's killed/(killed+survived) ratio drops below this baseline's ratio, if total drops below this baseline's total, or if any UNRESOLVED_MUTANT_CATEGORIES count (no_tests/suspicious/timeout/segfault) rises above this baseline's (all zero here). Recorded as raw counts (not a pre-computed percentage) so a reviewer can recompute the ratio by hand and so a future re-baseline (after genuinely strengthening the test suite, or a legitimate scope change like this one) is an honest, auditable count update, not an opaque number. Per the operator scoping decision on issue #12: this starts at whatever the surface's REAL baseline is, not an aspirational target -- 593 mutants, 437 killed, 156 survived (~73.69% mutation score) on this final pass. The four UNRESOLVED_MUTANT_CATEGORIES keys below are now RECORDED EXPLICITLY (all 0), not left to load_baseline's implicit default (independent factory-security-reviewer finding, F1-S9 slice 2, issue #12): load_baseline now fail-closes on any REQUIRED_STATS_KEYS field missing from this file, the same schema load_stats already enforces on the current run's JSON -- a rebaseline that silently OMITTED a field (e.g. 'total') would otherwise default to 0 and disable that field's regression check entirely.",
+-  "killed": 437,
++  "_comment": "F1-S9 slice 2 (issue #12): the mutation-testing baseline for snowflake/assert_dev_ci_grants.py + snowflake/check_forbidden_grants.py + snowflake/validate_migrations.py (the last added in the ready round -- a Codex finding: check_forbidden_grants.py directly calls validate_migrations.find_candidate_migration_files to decide which files get scanned for a forbidden PUBLIC grant, so it's genuinely part of the grant-boundary security surface, not unrelated filename/render validation). Re-measured after two later Codex findings on this same PR: (1) every python invocation in the mutation-testing and snowflake-migrations CI jobs now runs under `-P` (PYTHONSAFEPATH) to close a module-shadowing class -- see ci.yml's own comments; (2) check_forbidden_grants.py's own `from validate_migrations import ...` had to become a path-anchored importlib load (`_load_sibling_module`) since -P removes the automatic sys.path entry that bare import relied on, adding ~16 mutants to check_forbidden_grants.py's own surface (its `main()`'s pre-existing survivors are unchanged; the two NEW survivors are both inside a `# pragma: no cover`-marked, provably-unreachable defensive branch in _load_sibling_module -- equivalent mutants, not a real gap; see the function's own docstring). Earlier in this same PR's history, the bounded survivor-triage skim killed 2 real survivors (both continue -> break mutants in find_unexpected_user_role_grants, on the empty-role-field and PUBLIC-role branches respectively -- a genuine row-ordering-dependent gap where an empty-role or PUBLIC row sorting before a violating row would have silently stopped the scan; see test_assert_dev_ci_grants.py's own new tests). Re-measured on main via `mutmut run` + `mutmut export-cicd-stats` (19 Jul 2026, mutmut==3.6.0) -- deterministic across repeated runs at this final state (a rare, pre-existing 1-mutant flake was observed once during an earlier wider-scope re-measurement, always in the score-IMPROVING direction, noted in the PR body -- not present across the runs that produced this final number). check_mutation_score.py fails the check if a later run's killed/(killed+survived) ratio drops below this baseline's ratio, if total drops below this baseline's total, or if any UNRESOLVED_MUTANT_CATEGORIES count (no_tests/suspicious/timeout/segfault) rises above this baseline's (all zero here). Recorded as raw counts (not a pre-computed percentage) so a reviewer can recompute the ratio by hand and so a future re-baseline (after genuinely strengthening the test suite, or a legitimate scope change like this one) is an honest, auditable count update, not an opaque number. Per the operator scoping decision on issue #12: this starts at whatever the surface's REAL baseline is, not an aspirational target -- 593 mutants, 437 killed, 156 survived (~73.69% mutation score) as measured AT THAT TIME (F1-S9; SUPERSEDED -- the counts recorded in the fields below are the current ones, see the F1-S6 slice 9a re-measurement at the end of this comment). The four UNRESOLVED_MUTANT_CATEGORIES keys below are now RECORDED EXPLICITLY (all 0), not left to load_baseline's implicit default (independent factory-security-reviewer finding, F1-S9 slice 2, issue #12): load_baseline now fail-closes on any REQUIRED_STATS_KEYS field missing from this file, the same schema load_stats already enforces on the current run's JSON -- a rebaseline that silently OMITTED a field (e.g. 'total') would otherwise default to 0 and disable that field's regression check entirely. RE-MEASURED for F1-S6 slice 9a (issue #58, L3): `assert_sql_identifier_safe` -- the closed unquoted-identifier guard on the only two values this script interpolates into SHOW statements -- adds 21 mutants to assert_dev_ci_grants.py's surface. All 21 are killed, by TestAssertSqlIdentifierSafe plus the two TestMain tests that pin the guard ahead of connect(). Note the arithmetic against the previous baseline is killed +22 / survived -1, NOT killed +21 / survived +0: the two new TestMain tests exercise main() and incidentally kill one PRE-EXISTING survivor there as well. Getting to all-21 took two corrections, both of the same class and both worth recording because the first attempt looked adequate. Every mutant that initially survived was a STRING mutant on an operator-facing message or label, and mutmut's `XX`-wrapping form (\"SNOWFLAKE_DEV_ROLE\" -> \"XXSNOWFLAKE_DEV_ROLEXX\") cannot be killed by a substring assertion, because the corrupted value still CONTAINS the expected one. Correction 1 killed six survivors inside the guard by asserting the whole diagnostic instead of a substring. Correction 2 killed the last two -- `x_main__mutmut_38`/`_44`, the `var_name` literals at main()'s two call sites, which are the only place the label->variable binding is pinned -- by anchoring those assertions with `startswith` rather than `in`; the same fix was swept to TestAssertSqlIdentifierSafe's shared `_assert_refused` helper, which had the identical weakness. Correction 2 was found by a local `codex review` and independently by the schema-migration reviewer, AFTER correction 1 had already been committed with a (then wrong) claim that all 21 were killed -- the counts in that commit were honest measurements, the prose was not. Score RISES 0.7369 -> 0.7476. The previous baseline would have passed throughout, including while those two mutants were alive, which is exactly why it is ratcheted up here rather than left stale: a stale 593 total would also let a later change silently stop generating ~20 mutants and still clear the total-drop check. MEASURE THIS ON CI, NOT LOCALLY -- the two do not agree, and CI is authoritative because CI is the gate. A local macOS venv reports 459/155; the GitHub runner reports 458/156, and the runner's survivor set is a strict SUPERSET of the local one. The single differing mutant is `validate_migrations.x__schemachange_executable__mutmut_3`, which rewrites `shutil.which(\"schemachange\")` to a name that cannot resolve. That is NOT a random flake, it is environment-dependent and deterministic within each environment: `_schemachange_executable` falls back to `Path(sys.executable).parent / \"schemachange\"`, and on the runner pip installs the console script exactly there, so the mutant returns the identical path and is behaviourally invisible (survives); in a local venv the fallback misses, behaviour diverges, and the same mutant dies. No test change can kill it on CI without making the fallback itself observable. This number is therefore pinned at the RUNNER's value, which is the pessimistic end -- a local run scoring 459 passes against it, and pinning the local 459 instead makes the required check fail on every CI run, which is exactly what happened on PR #150's first push (observed: `mutation score dropped: 0.7459 (458 killed / 614 total) is below the baseline 0.7476`). Any future rebaseline must take its numbers from a CI run's `mutation-testing-stats` artifact, never from a local run, however many times the local run repeats. Five identical local runs are not reproducibility when the disagreement is environmental. (Separately, the pre-open factory-security review measured a genuine run-to-run flip in `check_forbidden_grants.x_main__mutmut_36` in an isolated venv; that mutant survives in BOTH environments here and is not the local/CI differentiator, but a rebaseline should still confirm its state rather than assume it.)",
++  "killed": 458,
+   "survived": 156,
+-  "total": 593,
++  "total": 614,
+   "no_tests": 0,
+   "suspicious": 0,
+   "timeout": 0,
+diff --git a/snowflake/tests/test_assert_dev_ci_grants.py b/snowflake/tests/test_assert_dev_ci_grants.py
+index 4f898a5..a3b2595 100644
+--- a/snowflake/tests/test_assert_dev_ci_grants.py
++++ b/snowflake/tests/test_assert_dev_ci_grants.py
+@@ -63,6 +63,11 @@ class TestLoadPrivateKeyDer:
+ _DEV_DB = "ROASTPILOT_DEV"
+ _DEV_WH = "DEV_CI_WH"
+ _DEV_ROLE = "ROASTPILOT_DEV_CI_ROLE"
++# Hoisted here from further down the file (it used to sit just above
++# TestFindDefaultSecondaryRolesViolation) so it reads alongside the other
++# three identity constants, now that TestAssertSqlIdentifierSafe above also
++# needs it.
++_CI_USER = "ROASTPILOT_DEV_CI"
+ 
+ 
+ class TestAssertBoundaryVarsNotDrifted:
+@@ -93,6 +98,102 @@ class TestAssertBoundaryVarsNotDrifted:
+             assert "SOME_OTHER_WH" in str(exc)
+ 
+ 
++class TestAssertSqlIdentifierSafe:
++    """#58's L3: the role and the CI user are interpolated into four `SHOW`
++    statements (Snowflake accepts no bind parameter in that position), so
++    both are refused up front unless they're bare unquoted identifiers.
++
++    A hostile value already failed closed WITHOUT this check, via the
++    connector's num_statements default, Snowflake syntax errors, and the
++    exact-name post-filter -- these tests cover the check that makes that
++    property asserted rather than emergent. See the function's docstring.
++    """
++
++    def test_accepts_the_real_dev_role_and_ci_user(self) -> None:
++        # The values actually held by vars.SNOWFLAKE_DEV_ROLE/_USER -- this
++        # check must never reject the live configuration.
++        assert_dev_ci_grants.assert_sql_identifier_safe(_DEV_ROLE, "SNOWFLAKE_DEV_ROLE")
++        assert_dev_ci_grants.assert_sql_identifier_safe(_CI_USER, "SNOWFLAKE_DEV_USER")
++
++    def test_accepts_a_leading_underscore_and_dollar_sign(self) -> None:
++        # Both are legal in Snowflake's unquoted-identifier grammar; the
++        # check enforces that grammar, not a narrower house style.
++        assert_dev_ci_grants.assert_sql_identifier_safe("_ROLE$1", "SNOWFLAKE_DEV_ROLE")
++
++    def test_accepts_a_lowercase_identifier(self) -> None:
++        # Case is NOT this check's job: a lowercase unquoted identifier is
++        # grammatically fine (Snowflake folds it), and it still fails the
++        # downstream identifiers_match boundary compares if it's wrong.
++        assert_dev_ci_grants.assert_sql_identifier_safe("roastpilot_dev_ci_role", "SNOWFLAKE_DEV_ROLE")
++
++    def _assert_refused(self, value: str) -> None:
++        try:
++            assert_dev_ci_grants.assert_sql_identifier_safe(value, "SNOWFLAKE_DEV_ROLE")
++            raise AssertionError(f"expected SystemExit for {value!r}")
++        except SystemExit as exc:
++            # Anchored prefix rather than two `in` checks: a substring
++            # assertion passes against a corrupted variable name or a
++            # corrupted value echo that merely CONTAINS the expected text.
++            assert str(exc).startswith(f"error: SNOWFLAKE_DEV_ROLE is {value!r}, ")
++
++    def test_refuses_a_statement_separator(self) -> None:
++        self._assert_refused(f"{_DEV_ROLE}; DROP TABLE T")
++
++    def test_refuses_a_single_quote(self) -> None:
++        # The `SHOW USERS LIKE '<user>'` site is the one quoted-string
++        # context, so a quote is the escape that matters there.
++        self._assert_refused("ROASTPILOT_DEV_CI' --")
++
++    def test_refuses_a_comment_marker(self) -> None:
++        self._assert_refused(f"{_DEV_ROLE} -- ")
++
++    def test_refuses_embedded_whitespace(self) -> None:
++        self._assert_refused("ROASTPILOT DEV CI ROLE")
++
++    def test_refuses_a_trailing_newline(self) -> None:
++        # Specifically covers `fullmatch` over an `^...$` pattern: `$` also
++        # matches just before a trailing newline, so an `^...$` version of
++        # this check would ADMIT this value.
++        self._assert_refused(f"{_DEV_ROLE}\n")
++
++    def test_refuses_a_leading_newline(self) -> None:
++        self._assert_refused(f"\n{_DEV_ROLE}")
++
++    def test_refuses_an_empty_value(self) -> None:
++        self._assert_refused("")
++
++    def test_refuses_a_leading_digit(self) -> None:
++        self._assert_refused("1ROLE")
++
++    def test_refuses_a_quoted_identifier(self) -> None:
++        # Deliberately refused rather than escaped: this repo's tooling only
++        # ever creates unquoted identifiers (see the function's docstring).
++        self._assert_refused('"ROASTPILOT_DEV_CI_ROLE"')
++
++    def test_refuses_a_qualified_name(self) -> None:
++        self._assert_refused("ROASTPILOT_DEV.PUBLIC")
++
++    def test_reports_the_whole_operator_facing_diagnostic(self) -> None:
++        # Asserted in FULL, not by substring. This message is the entire
++        # operator-facing output of a fail-closed check on a credentialed
++        # job: it has to name WHICH of the two variables was rejected (both
++        # call sites share this one function), echo the offending value, and
++        # state the grammar that was actually applied -- otherwise the
++        # operator sees a refusal with no way to tell what to fix.
++        # A substring assertion is specifically NOT enough here: it still
++        # passes against a message whose tail has been corrupted around an
++        # intact fragment.
++        try:
++            assert_dev_ci_grants.assert_sql_identifier_safe("bad value", "SNOWFLAKE_DEV_USER")
++            raise AssertionError("expected SystemExit")
++        except SystemExit as exc:
++            assert str(exc) == (
++                "error: SNOWFLAKE_DEV_USER is 'bad value', which is not a bare Snowflake "
++                "unquoted identifier ([A-Za-z_][A-Za-z0-9_$]*) -- refusing to interpolate "
++                "it into a SHOW statement"
++            )
++
++
+ class TestIdentifiersMatch:
+     """Codex P1, PR #57, round 3: the ONE categorical exact-match function
+     every name/role/db/warehouse comparison in this module routes through
+@@ -474,9 +575,6 @@ class TestFindUnexpectedUserRoleGrants:
+         assert result == ["ACCOUNTADMIN"]
+ 
+ 
+-_CI_USER = "ROASTPILOT_DEV_CI"
+-
+-
+ _LOOKALIKE_USER = "ROASTPILOT0DEV0CI"  # matches ROASTPILOT_DEV_CI under LIKE's `_` wildcard
+ 
+ 
+@@ -648,6 +746,44 @@ class TestMain:
+         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
+         mock_conn.close.assert_called_once()
+ 
++    def test_refuses_a_role_that_is_not_a_bare_identifier_before_connecting(self, monkeypatch) -> None:
++        # #58's L3. Position matters as much as the check: it must run
++        # BEFORE connect(), so a hostile value never reaches a statement and
++        # never opens a credentialed session in the first place.
++        self._set_required_env(monkeypatch, _generate_test_pem())
++        monkeypatch.setenv("SNOWFLAKE_DEV_ROLE", f"{_DEV_ROLE}; DROP TABLE T")
++
++        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
++            try:
++                assert_dev_ci_grants.main()
++                raise AssertionError("expected SystemExit")
++            except SystemExit as exc:
++                # `startswith`, not `in`: a substring assertion still passes
++                # against a CORRUPTED variable name that merely CONTAINS the
++                # real one (e.g. "XXSNOWFLAKE_DEV_ROLEXX"), so it would not
++                # actually pin which variable main() passed at this call
++                # site. The message's full text is pinned once, in
++                # TestAssertSqlIdentifierSafe -- here we only need the name.
++                assert str(exc).startswith("error: SNOWFLAKE_DEV_ROLE is ")
++
++        mock_connect.assert_not_called()
++
++    def test_refuses_a_user_that_is_not_a_bare_identifier_before_connecting(self, monkeypatch) -> None:
++        # The user is checked as well as the role -- it reaches both `SHOW
++        # GRANTS TO USER <user>` and the quoted `SHOW USERS LIKE '<user>'`.
++        self._set_required_env(monkeypatch, _generate_test_pem())
++        monkeypatch.setenv("SNOWFLAKE_DEV_USER", "ROASTPILOT_DEV_CI' --")
++
++        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
++            try:
++                assert_dev_ci_grants.main()
++                raise AssertionError("expected SystemExit")
++            except SystemExit as exc:
++                # Exact prefix, same reasoning as the role test above.
++                assert str(exc).startswith("error: SNOWFLAKE_DEV_USER is ")
++
++        mock_connect.assert_not_called()
++
+     def test_disables_secondary_roles_via_a_real_sql_statement_codex_p1_round2(self, monkeypatch) -> None:
+         # The exact bug this closes (Codex P1, PR #57, round 2): an earlier
+         # fix passed session_parameters={"USE_SECONDARY_ROLES": "NONE"} to

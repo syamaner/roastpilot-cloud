@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-026-health-route-dryrun",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": {
+    "compile": "pass",
+    "tests": "pass",
+    "diffBound": {
+      "expectedWithinEnvelope": true
+    },
+    "mutation": null,
+    "prOutcome": {
+      "merged": true,
+      "firstPassCiGreen": true,
+      "postOpenReviewRounds": 0
+    }
+  }
+}

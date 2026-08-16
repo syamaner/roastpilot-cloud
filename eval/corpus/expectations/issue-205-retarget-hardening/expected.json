@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-205-retarget-hardening",
+  "triage": {
+    "expectedReadiness": "ready-for-conventional-implementation"
+  },
+  "implement": null
+}

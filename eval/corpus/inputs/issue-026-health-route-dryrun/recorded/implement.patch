@@ -1,0 +1,27 @@
+diff --git a/app/api/health/route.ts b/app/api/health/route.ts
+new file mode 100644
+index 0000000..f7d3295
+--- /dev/null
++++ b/app/api/health/route.ts
+@@ -0,0 +1,5 @@
++import { NextResponse } from "next/server";
++
++export function GET() {
++  return NextResponse.json({ status: "ok" });
++}
+diff --git a/tests/health-route.test.ts b/tests/health-route.test.ts
+new file mode 100644
+index 0000000..fcffe7f
+--- /dev/null
++++ b/tests/health-route.test.ts
+@@ -0,0 +1,10 @@
++import { describe, expect, it } from "vitest";
++import { GET } from "../app/api/health/route";
++
++describe("GET /api/health", () => {
++  it("responds with 200 and { status: \"ok\" }", async () => {
++    const response = GET();
++    expect(response.status).toBe(200);
++    expect(await response.json()).toEqual({ status: "ok" });
++  });
++});

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-058-grant-hardening",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": {
+    "compile": "pass",
+    "tests": "pass",
+    "diffBound": {
+      "expectedWithinEnvelope": true
+    },
+    "mutation": {
+      "expectedGatePass": true
+    },
+    "prOutcome": {
+      "merged": true,
+      "firstPassCiGreen": false,
+      "postOpenReviewRounds": 1
+    }
+  }
+}

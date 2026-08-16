@@ -1,0 +1,6 @@
+{
+  "issue_number": 9,
+  "readiness": "ready-for-conventional-implementation",
+  "reasoning": "Reconstructed from the dated operator authorization immediately preceding PR #152 and the merged slice outcome: the F1-S6 registry reconciliation was an explicitly authorized conventional/interactive review unit, with the protected registry path requiring the conventional execution label.",
+  "missing_info_questions": []
+}

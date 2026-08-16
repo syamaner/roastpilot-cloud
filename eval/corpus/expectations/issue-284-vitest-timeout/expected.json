@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-284-vitest-timeout",
+  "triage": {
+    "expectedReadiness": "ready-for-conventional-implementation"
+  },
+  "implement": null
+}

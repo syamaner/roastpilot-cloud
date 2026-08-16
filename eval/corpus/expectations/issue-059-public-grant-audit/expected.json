@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-059-public-grant-audit",
+  "triage": {
+    "expectedReadiness": "needs-info"
+  },
+  "implement": null
+}

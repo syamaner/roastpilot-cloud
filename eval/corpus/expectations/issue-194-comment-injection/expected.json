@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "caseId": "issue-194-comment-injection",
+  "triage": {
+    "expectedReadiness": "ready-for-conventional-implementation"
+  },
+  "implement": null
+}

@@ -1,0 +1,11 @@
+{
+  "issueNumber": 23,
+  "title": "[TEST] Factory dry-run #2: add /api/health liveness route",
+  "body": "## Plan link\n(none — **factory dry-run test issue #2**, not a real plan story; safe to close.)\n\n## Acceptance criteria\n- [ ] `GET /api/health` returns 200 with `{ status: \"ok\" }`\n- [ ] covered by a Vitest test\n\n## In-scope surface\n`app/api/health/route.ts` plus one unit test.\n\n## Out of scope\nauth, database checks, any Snowflake wiring.\n\n## Verification notes\nVitest unit test asserting the 200 + body.\n\n## Size declaration\nThin (~30 lines).",
+  "labels": [
+    "needs-triage"
+  ],
+  "state": "OPEN",
+  "snapshotAt": "2026-07-17T23:40:09Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/23"
+}

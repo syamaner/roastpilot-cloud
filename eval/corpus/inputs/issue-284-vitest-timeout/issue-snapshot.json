@@ -1,0 +1,12 @@
+{
+  "issueNumber": 284,
+  "title": "Implement local-gate is exposed to full-suite flakiness: workflow-execution-surface-logic.test.ts:1935 timed out at 5000ms (F1-S6 dry-run finding)",
+  "body": "Surfaced by the F1-S6 supervised dry run (#9, 15 Aug 2026).\n\n**Finding.** The implement job's \"Run local gates\" step runs the **entire** Vitest suite (4084 tests) as an independent check on the agent's self-report. On one dry-run dispatch it failed with `Test timed out in 5000ms` at `tests/factory/workflow-execution-surface-logic.test.ts:1935` (`1 failed | 4083 passed`) — **unrelated to the agent's change** (the agent's `tests/dryrun-smoke.test.ts` passed), and it **passed on the next dispatch**. So it is an environment-dependent flake (a slow test occasionally exceeding the 5s per-test timeout on a loaded runner), not a reliable failure.\n\n**Impact.** Every factory implement run is exposed to suite-wide flakiness in this gate: a single slow/flaky test times out → the implement job fails → the publisher fail-closes → **no PR**, even when the agent's work is perfect. That is a real reliability tax on factory throughput (it cost one wasted dispatch here).\n\n**Options to weigh (conventional; `tests/factory/**` → `factory-security-reviewer` if the test itself changes).**\n- Raise the timeout for the specific slow test(s) (e.g. `workflow-execution-surface-logic.test.ts:1935`) or de-flake them.\n- Or make the implement local-gate more flake-resilient (bounded retry on a timeout-class failure only, never on an assertion failure).\n\nPriority: medium (throughput reliability). Refs #9.",
+  "labels": [
+    "needs-triage",
+    "epic:F1"
+  ],
+  "state": "OPEN",
+  "snapshotAt": "2026-08-15T19:10:51Z",
+  "sourceUrl": "https://github.com/syamaner/roastpilot-cloud/issues/284"
+}

@@ -1,0 +1,6 @@
+{
+  "issue_number": 284,
+  "readiness": "ready-for-conventional-implementation",
+  "reasoning": "Execution class: conventional / interactive. The D104-verified contract fixed the implement-gate timeout flake with one bounded review unit, mandatory factory-security review, no new execution class, and the explicit label ready-for-conventional-implementation.",
+  "missing_info_questions": []
+}

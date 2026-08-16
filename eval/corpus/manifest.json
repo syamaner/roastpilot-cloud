@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "description": "Held-out recorded-mode regression corpus of twelve frozen roastpilot-cloud factory work items. Replay inputs and scorer expectations are stored in separate subtrees.",
+  "cases": [
+    {
+      "caseId": "issue-009-registry-reconciliation",
+      "issueNumber": 9,
+      "prNumber": 152,
+      "issueType": "documentation",
+      "execution": "conventional",
+      "stage": "triage-and-implement",
+      "triageOutcomeClass": "ready",
+      "sizeClass": "small",
+      "outcomeClass": "non-pass",
+      "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-009-registry-reconciliation/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-009-registry-reconciliation/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-009-registry-reconciliation/recorded/implement.patch",
+        "provenance": "reconstructed-from-outcome"
+      },
+      "expectationsPath": "expectations/issue-009-registry-reconciliation/expected.json",
+      "notes": "Verdict reconstructed from the dated operator authorization and PR #152 outcome; the creation-time body is retained because no machine triage artifact exists for this pre-backfill epic."
+    },
+    {
+      "caseId": "issue-026-health-route-dryrun",
+      "issueNumber": 26,
+      "prNumber": 45,
+      "issueType": "feature",
+      "execution": "factory",
+      "stage": "triage-and-implement",
+      "triageOutcomeClass": "bounced",
+      "sizeClass": "small",
+      "outcomeClass": "clean-pass",
+      "baseSha": "13aa3d62e7852110a96a3ece190b3ffc410f6677",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "0443844f7fb0adb34c19e52ec52d6666cf736fc5",
+        "implementPromptVersion": "0443844f7fb0adb34c19e52ec52d6666cf736fc5"
+      },
+      "issueSnapshotPath": "inputs/issue-026-health-route-dryrun/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-026-health-route-dryrun/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-026-health-route-dryrun/recorded/implement.patch",
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-026-health-route-dryrun/expected.json",
+      "notes": "Automated needs-info verdict and factory patch are preserved; the publisher initially failed to open the PR, which was later opened manually as #45 and merged."
+    },
+    {
+      "caseId": "issue-058-grant-hardening",
+      "issueNumber": 58,
+      "prNumber": 150,
+      "issueType": "hardening",
+      "execution": "conventional",
+      "stage": "triage-and-implement",
+      "triageOutcomeClass": "bounced",
+      "sizeClass": "near-cap",
+      "outcomeClass": "non-pass",
+      "baseSha": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-058-grant-hardening/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-058-grant-hardening/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-058-grant-hardening/recorded/implement.patch",
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-058-grant-hardening/expected.json",
+      "notes": "Creation-time body and automated needs-info verdict are preserved. PR #150 later implemented the authorized conventional slice and hit the first-pass mutation-gate failure recorded in the baseline."
+    },
+    {
+      "caseId": "issue-151-summary-binding",
+      "issueNumber": 151,
+      "prNumber": 153,
+      "issueType": "security-fix",
+      "execution": "conventional",
+      "stage": "triage-and-implement",
+      "triageOutcomeClass": "ready",
+      "sizeClass": "near-cap",
+      "outcomeClass": "clean-pass",
+      "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-151-summary-binding/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-151-summary-binding/recorded/triage-verdict.json",
+        "implementPatchPath": "inputs/issue-151-summary-binding/recorded/implement.patch",
+        "provenance": "reconstructed-from-outcome"
+      },
+      "expectationsPath": "expectations/issue-151-summary-binding/expected.json",
+      "notes": "No published triage verdict survived; readiness is reconstructed from the filed security issue and merged conventional PR #153. The unedited creation body is retained."
+    },
+    {
+      "caseId": "issue-023-dryrun-wontfix",
+      "issueNumber": 23,
+      "prNumber": null,
+      "issueType": "documentation",
+      "execution": "factory",
+      "stage": "triage-only",
+      "triageOutcomeClass": "bounced",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-023-dryrun-wontfix/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-023-dryrun-wontfix/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-023-dryrun-wontfix/expected.json",
+      "notes": "Synthetic historical dry-run issue retained as a genuine wontfix triage case; no implementation patch was produced."
+    },
+    {
+      "caseId": "issue-059-public-grant-audit",
+      "issueNumber": 59,
+      "prNumber": null,
+      "issueType": "schema",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "bounced",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-059-public-grant-audit/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-059-public-grant-audit/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-059-public-grant-audit/expected.json",
+      "notes": "Genuine automated needs-info decision on the MANAGE GRANTS completeness tradeoff; retained as a schema/grant-boundary bounce."
+    },
+    {
+      "caseId": "issue-120-executable-closure",
+      "issueNumber": 120,
+      "prNumber": null,
+      "issueType": "hardening",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "d5225f69e6432d9346d321310cadb401f2dac87b",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-120-executable-closure/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-120-executable-closure/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-120-executable-closure/expected.json",
+      "notes": "Human triage is preserved by the D117 operator-decision comment and subsequent conventional-readiness label; the creation snapshot precedes all readiness labels."
+    },
+    {
+      "caseId": "issue-194-comment-injection",
+      "issueNumber": 194,
+      "prNumber": null,
+      "issueType": "security-fix",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-194-comment-injection/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-194-comment-injection/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "reconstructed-from-outcome"
+      },
+      "expectationsPath": "expectations/issue-194-comment-injection/expected.json",
+      "notes": "No machine verdict artifact was published; conventional readiness is reconstructed from the creation-time label event and the retained #195/#204 mitigation outcome."
+    },
+    {
+      "caseId": "issue-205-retarget-hardening",
+      "issueNumber": 205,
+      "prNumber": null,
+      "issueType": "security-fix",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "01e1ebee52d09d48303a3e5652dd6d42dc016b55",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-205-retarget-hardening/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-205-retarget-hardening/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-205-retarget-hardening/expected.json",
+      "notes": "Human triage record and D104-verified conventional contract are retained directly from issue comments; no implementation patch is part of this triage-only case."
+    },
+    {
+      "caseId": "issue-274-inert-noop",
+      "issueNumber": 274,
+      "prNumber": null,
+      "issueType": "hardening",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "9d6fe2b3efde46b3765dbffb5a09a01d0ec2181b",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-274-inert-noop/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-274-inert-noop/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-274-inert-noop/expected.json",
+      "notes": "The retained story-planner contract explicitly records conventional execution and the readiness label before implementation."
+    },
+    {
+      "caseId": "issue-281-dryrun-ready",
+      "issueNumber": 281,
+      "prNumber": null,
+      "issueType": "feature",
+      "execution": "factory",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-281-dryrun-ready/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-281-dryrun-ready/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-281-dryrun-ready/expected.json",
+      "notes": "Final revised issue body and genuine automated ready-to-implement verdict from triage generation 31897287883.1 are retained; the later sacrificial PR is intentionally not part of this triage-only case."
+    },
+    {
+      "caseId": "issue-284-vitest-timeout",
+      "issueNumber": 284,
+      "prNumber": null,
+      "issueType": "hardening",
+      "execution": "conventional",
+      "stage": "triage-only",
+      "triageOutcomeClass": "ready",
+      "sizeClass": null,
+      "outcomeClass": null,
+      "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
+      "pin": {
+        "actionRef": "v1.0.176",
+        "actionCommit": "700e7f8316990de46bed556429765647af760efc",
+        "resolvedModel": null,
+        "triageSkillVersion": null,
+        "implementPromptVersion": null
+      },
+      "issueSnapshotPath": "inputs/issue-284-vitest-timeout/issue-snapshot.json",
+      "recorded": {
+        "triageVerdictPath": "inputs/issue-284-vitest-timeout/recorded/triage-verdict.json",
+        "implementPatchPath": null,
+        "provenance": "historical-artifact"
+      },
+      "expectationsPath": "expectations/issue-284-vitest-timeout/expected.json",
+      "notes": "The retained D104-verified implementation contract explicitly records the conventional execution class and readiness label before PR #285."
+    }
+  ]
+}

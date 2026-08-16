@@ -1,0 +1,6 @@
+{
+  "issue_number": 151,
+  "readiness": "ready-for-conventional-implementation",
+  "reasoning": "Reconstructed from the issue and merged PR #153 outcome: the repository-variable interpolation defect was a concrete security fix on the protected workflow surface, implemented conventionally with focused tests and therefore ready-for-conventional-implementation.",
+  "missing_info_questions": []
+}
