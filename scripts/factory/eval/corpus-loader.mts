@@ -27,12 +27,23 @@ function byteLimit(path: string): number {
 
 export async function loadCorpus(root: string): Promise<LoadResult> {
   const errors: string[] = [];
-  let canonicalRoot: string;
+  let rootMetadata;
   try {
-    canonicalRoot = await realpath(root);
+    rootMetadata = await lstat(root);
   } catch {
     return { ok: false, errors: [`corpus root ${root} cannot be resolved`] };
   }
+  if (rootMetadata.isSymbolicLink()) {
+    return { ok: false, errors: [`corpus root ${root} is a symlink`] };
+  }
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await realpath(root);
+  /* v8 ignore start -- TOCTOU/permission-only: lstat already proved a present non-symlink root */
+  } catch {
+    return { ok: false, errors: [`corpus root ${root} cannot be resolved`] };
+  }
+  /* v8 ignore stop */
   const files = new Map<string, string>();
   const pending = [canonicalRoot];
   while (pending.length > 0) {

@@ -84,6 +84,23 @@ describe("validateExpectedResult", () => {
     expect(validateExpectedResult(null).ok).toBe(false);
   });
 
+  it("fails closed for uninspectable expected-result objects", () => {
+    const throwingOwnKeys = new Proxy(validExpected(), {
+      ownKeys() { throw new Error("hostile ownKeys"); },
+    });
+    const throwingGetter = validExpected();
+    Object.defineProperty(throwingGetter, "schemaVersion", {
+      enumerable: true,
+      get() { throw new Error("hostile getter"); },
+    });
+    for (const raw of [throwingOwnKeys, throwingGetter]) {
+      expect(() => validateExpectedResult(raw)).not.toThrow();
+      const result = validateExpectedResult(raw);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toContain("not inspectable");
+    }
+  });
+
   it("rejects a non-object value at every nested object position", () => {
     const mutations: readonly ((raw: Record<string, unknown>) => void)[] = [
       (raw) => { raw.triage = "needs-info"; },

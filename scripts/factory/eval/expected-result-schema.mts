@@ -91,13 +91,18 @@ function closedObject(
   keys: ReadonlySet<string>,
   errors: string[],
 ): raw is Record<string, unknown> {
-  if (!isPlainObject(raw)) {
-    errors.push(`${path} must be an object`);
+  try {
+    if (!isPlainObject(raw)) {
+      errors.push(`${path} must be an object`);
+      return false;
+    }
+    const unknown = unexpectedKeys(raw, keys);
+    if (unknown.length > 0) errors.push(`${path} has unexpected key(s): ${unknown.join(", ")}`);
+    return true;
+  } catch {
+    errors.push(`${path} is not inspectable`);
     return false;
   }
-  const unknown = unexpectedKeys(raw, keys);
-  if (unknown.length > 0) errors.push(`${path} has unexpected key(s): ${unknown.join(", ")}`);
-  return true;
 }
 
 function validateImplement(raw: unknown, errors: string[]): void {
@@ -130,20 +135,25 @@ function validateImplement(raw: unknown, errors: string[]): void {
 
 export function validateExpectedResult(raw: unknown): ValidationResult<ExpectedResult> {
   const errors: string[] = [];
-  if (!closedObject(raw, "expected", EXPECTED_ALLOWED_KEYS, errors)) return { ok: false, errors };
-  if (raw.schemaVersion !== 1) errors.push("expected.schemaVersion must be the integer 1");
-  if (typeof raw.caseId !== "string" || !CASE_ID_PATTERN.test(raw.caseId)) errors.push("expected.caseId must match the corpus case-id pattern");
-  if (!inDomain(raw.issueType, ISSUE_TYPES)) errors.push(`expected.issueType must be one of ${ISSUE_TYPES.join(", ")}`);
-  if (!inDomain(raw.triageOutcomeClass, TRIAGE_OUTCOME_CLASSES)) errors.push(`expected.triageOutcomeClass must be one of ${TRIAGE_OUTCOME_CLASSES.join(", ")}`);
-  if (!inDomain(raw.execution, EXECUTIONS)) errors.push(`expected.execution must be one of ${EXECUTIONS.join(", ")}`);
-  if (raw.sizeClass !== null && !inDomain(raw.sizeClass, SIZE_CLASSES)) errors.push(`expected.sizeClass must be null or one of ${SIZE_CLASSES.join(", ")}`);
-  if (raw.outcomeClass !== null && !inDomain(raw.outcomeClass, OUTCOME_CLASSES)) errors.push(`expected.outcomeClass must be null or one of ${OUTCOME_CLASSES.join(", ")}`);
-  if (!inDomain(raw.provenance, PROVENANCES)) errors.push(`expected.provenance must be one of ${PROVENANCES.join(", ")}`);
-  if (closedObject(raw.triage, "expected.triage", TRIAGE_ALLOWED_KEYS, errors)) {
-    if (!inDomain(raw.triage.expectedReadiness, READINESS_LABELS)) errors.push(`expected.triage.expectedReadiness must be one of ${READINESS_LABELS.join(", ")}`);
+  try {
+    if (!closedObject(raw, "expected", EXPECTED_ALLOWED_KEYS, errors)) return { ok: false, errors };
+    if (raw.schemaVersion !== 1) errors.push("expected.schemaVersion must be the integer 1");
+    if (typeof raw.caseId !== "string" || !CASE_ID_PATTERN.test(raw.caseId)) errors.push("expected.caseId must match the corpus case-id pattern");
+    if (!inDomain(raw.issueType, ISSUE_TYPES)) errors.push(`expected.issueType must be one of ${ISSUE_TYPES.join(", ")}`);
+    if (!inDomain(raw.triageOutcomeClass, TRIAGE_OUTCOME_CLASSES)) errors.push(`expected.triageOutcomeClass must be one of ${TRIAGE_OUTCOME_CLASSES.join(", ")}`);
+    if (!inDomain(raw.execution, EXECUTIONS)) errors.push(`expected.execution must be one of ${EXECUTIONS.join(", ")}`);
+    if (raw.sizeClass !== null && !inDomain(raw.sizeClass, SIZE_CLASSES)) errors.push(`expected.sizeClass must be null or one of ${SIZE_CLASSES.join(", ")}`);
+    if (raw.outcomeClass !== null && !inDomain(raw.outcomeClass, OUTCOME_CLASSES)) errors.push(`expected.outcomeClass must be null or one of ${OUTCOME_CLASSES.join(", ")}`);
+    if (!inDomain(raw.provenance, PROVENANCES)) errors.push(`expected.provenance must be one of ${PROVENANCES.join(", ")}`);
+    if (closedObject(raw.triage, "expected.triage", TRIAGE_ALLOWED_KEYS, errors)) {
+      if (!inDomain(raw.triage.expectedReadiness, READINESS_LABELS)) errors.push(`expected.triage.expectedReadiness must be one of ${READINESS_LABELS.join(", ")}`);
+    }
+    if (raw.implement !== null) validateImplement(raw.implement, errors);
+    const nullCount = [raw.implement, raw.sizeClass, raw.outcomeClass].filter((value) => value === null).length;
+    if (nullCount !== 0 && nullCount !== 3) errors.push("expected.implement, sizeClass, and outcomeClass must be null together");
+    return errors.length > 0 ? { ok: false, errors } : { ok: true, value: raw as unknown as ExpectedResult };
+  } catch {
+    errors.push("expected is not inspectable");
+    return { ok: false, errors };
   }
-  if (raw.implement !== null) validateImplement(raw.implement, errors);
-  const nullCount = [raw.implement, raw.sizeClass, raw.outcomeClass].filter((value) => value === null).length;
-  if (nullCount !== 0 && nullCount !== 3) errors.push("expected.implement, sizeClass, and outcomeClass must be null together");
-  return errors.length > 0 ? { ok: false, errors } : { ok: true, value: raw as unknown as ExpectedResult };
 }

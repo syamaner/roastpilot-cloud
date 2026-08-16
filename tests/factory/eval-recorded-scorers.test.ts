@@ -56,4 +56,22 @@ describe("recorded scorers", () => {
   it("T61 scores expected zero against produced zero", () => {
     expect(scorePrOutcome({ merged: true, firstPassCiGreen: false, postOpenReviewRounds: 0 }, expected())).toEqual({ pass: true });
   });
+
+  it("fails closed for uninspectable PR-outcome objects", () => {
+    const throwingOwnKeys = new Proxy({}, {
+      ownKeys() { throw new Error("hostile ownKeys"); },
+    });
+    const throwingGetter = {
+      get merged() { throw new Error("hostile getter"); },
+      firstPassCiGreen: false,
+      postOpenReviewRounds: 0,
+    };
+    for (const produced of [throwingOwnKeys, throwingGetter]) {
+      expect(() => scorePrOutcome(produced, expected())).not.toThrow();
+      expect(scorePrOutcome(produced, expected())).toEqual({
+        pass: false,
+        reason: "produced PR outcome is not inspectable",
+      });
+    }
+  });
 });

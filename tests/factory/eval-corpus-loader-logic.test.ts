@@ -281,7 +281,7 @@ describe("assembleCorpus", () => {
       if (!result.ok) expect(result.errors.join(" ")).toMatch(/needs-info|answer-verdict/);
       if (!result.ok && surface.startsWith("manifest pin.")) {
         expect(result.errors.join(" ")).toContain(
-          `issue-009-example manifest.case.${surface.slice("manifest ".length)} leaks readiness label needs-info`,
+          `issue-009-example manifest.case.${surface.slice("manifest ".length)} leaks answer-verdict token needs-info`,
         );
       }
     }
@@ -305,10 +305,26 @@ describe("assembleCorpus", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.join(" ")).toContain(
-        "issue-009-example manifest.case.pin.actionRef leaks readiness label wontfix",
+        "issue-009-example manifest.case.pin.actionRef leaks answer-verdict token wontfix",
       );
     }
   });
+
+  it.each(["non-pass", "clean-pass", "bounced", "merged"])(
+    "rejects outcome token %s in a producer-readable manifest pin",
+    (token) => {
+      const value = fixture({ implement: true });
+      (firstCase(value).pin as Record<string, unknown>).actionRef = token;
+
+      const result = load(value);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.join(" ")).toContain(
+          `issue-009-example manifest.case.pin.actionRef leaks answer-verdict token ${token}`,
+        );
+      }
+    },
+  );
 
   it("allows another case's readiness label in case-relative input files", () => {
     const first = fixture({ readiness: "needs-info" });

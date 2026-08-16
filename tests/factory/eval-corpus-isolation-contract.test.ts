@@ -66,6 +66,15 @@ describe("corpus isolation contract", () => {
     if (!result.ok) expect(result.errors.join(" ")).toContain("cannot be resolved");
   });
 
+  it("rejects a symlinked corpus root", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "corpus-root-link-")); temporaryDirectories.push(parent);
+    const target = join(parent, "corpus"); const root = join(parent, "corpus-link");
+    await mkdir(target); await writeFile(join(target, "manifest.json"), '{"schemaVersion":1}');
+    await symlink(target, root);
+    const result = await loadCorpus(root); expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain(`corpus root ${root} is a symlink`);
+  });
+
   it("rejects a regular file supplied as the corpus root", async () => {
     const parent = await mkdtemp(join(tmpdir(), "corpus-file-root-")); temporaryDirectories.push(parent);
     const root = join(parent, "corpus.txt"); await writeFile(root, "not a directory");

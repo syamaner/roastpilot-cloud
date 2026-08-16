@@ -1,4 +1,5 @@
 import {
+  ANSWER_VERDICT_TOKENS,
   MAX_MANIFEST_BYTES,
   validateCorpusManifest,
   type CorpusCase,
@@ -116,27 +117,27 @@ function scanInputAnswerNeutrality(
 function noteManifestLeak(
   surface: string,
   text: string,
-  label: string,
+  token: string,
   errors: string[],
 ): void {
-  if (containsDelimiterBoundedToken(text, label)) {
-    errors.push(`${surface} leaks readiness label ${label}`);
+  if (containsDelimiterBoundedToken(text, token)) {
+    errors.push(`${surface} leaks answer-verdict token ${token}`);
   }
 }
 
 function scanManifestStrings(
   value: unknown,
   surface: string,
-  labels: ReadonlySet<string>,
+  tokens: ReadonlySet<string>,
   errors: string[],
 ): void {
   if (typeof value === "string") {
-    for (const label of labels) noteManifestLeak(surface, value, label, errors);
+    for (const token of tokens) noteManifestLeak(surface, value, token, errors);
     return;
   }
   if (value === null || typeof value !== "object") return;
   for (const [key, nestedValue] of Object.entries(value)) {
-    scanManifestStrings(nestedValue, `${surface}.${key}`, labels, errors);
+    scanManifestStrings(nestedValue, `${surface}.${key}`, tokens, errors);
   }
 }
 
@@ -162,7 +163,6 @@ export function assembleCorpus(
 
   const canonicalPaths = new Set<string>();
   const loadedCases: LoadedCase[] = [];
-  const allLabels = new Set<string>();
   for (const corpusCase of manifest.cases) {
     const caseErrors: string[] = [];
     const snapshotPath = corpusCase.issueSnapshotPath;
@@ -226,7 +226,6 @@ export function assembleCorpus(
         if (!result.ok) caseErrors.push(...result.errors.map((error) => `${expectedPath}: ${error}`));
         else {
           expected = result.value;
-          allLabels.add(expected.triage.expectedReadiness);
           const directoryCaseId = expectedPath.split("/")[1];
           if (expected.caseId !== directoryCaseId || expected.caseId !== corpusCase.caseId) {
             caseErrors.push(`${expectedPath} caseId must match directory and manifest case ${corpusCase.caseId}`);
@@ -261,10 +260,10 @@ export function assembleCorpus(
   }
 
   for (const corpusCase of manifest.cases) {
-    scanManifestStrings(corpusCase, `${corpusCase.caseId} manifest.case`, allLabels, errors);
+    scanManifestStrings(corpusCase, `${corpusCase.caseId} manifest.case`, ANSWER_VERDICT_TOKENS, errors);
   }
-  for (const label of allLabels) {
-    noteManifestLeak("manifest.description", manifest.description, label, errors);
+  for (const token of ANSWER_VERDICT_TOKENS) {
+    noteManifestLeak("manifest.description", manifest.description, token, errors);
   }
 
   for (const path of files.keys()) {
