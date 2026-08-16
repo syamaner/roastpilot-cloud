@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { assembleCorpus } from "../../scripts/factory/eval/corpus-loader-logic.mts";
+import {
+  MAX_DECISION_CONTEXT_BYTES,
+  assembleCorpus,
+} from "../../scripts/factory/eval/corpus-loader-logic.mts";
+import { MAX_MANIFEST_BYTES } from "../../scripts/factory/eval/corpus-manifest-schema.mts";
+import { MAX_PAYLOAD_BYTES } from "../../scripts/factory/triage-verdict-schema.mts";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -106,6 +111,11 @@ describe("assembleCorpus", () => {
     expect(load(value).ok).toBe(false);
   });
 
+  it("rejects a disallowed root-level entry", () => {
+    const value = fixture(); value.files.set("answers.txt", "not allowed");
+    expect(load(value).ok).toBe(false);
+  });
+
   it("T46 rejects an expected caseId that differs from its directory and manifest", () => {
     const value = fixture();
     const path = "expectations/issue-009-example/expected.json";
@@ -121,6 +131,37 @@ describe("assembleCorpus", () => {
     value.files.set(path, JSON.stringify(raw)); expect(load(value).ok).toBe(false);
   });
 
+  it("propagates parsed snapshot and expectation validation failures", () => {
+    const invalidSnapshot = fixture();
+    const snapshotPath = "inputs/issue-009-example/issue-snapshot.json";
+    const snapshot = JSON.parse(invalidSnapshot.files.get(snapshotPath) as string) as Record<string, unknown>;
+    snapshot.state = "open";
+    invalidSnapshot.files.set(snapshotPath, JSON.stringify(snapshot));
+    const snapshotResult = load(invalidSnapshot);
+    expect(snapshotResult.ok).toBe(false);
+    if (!snapshotResult.ok) expect(snapshotResult.errors.join(" ")).toContain("snapshot.state");
+
+    const invalidExpected = fixture();
+    const expectedPath = "expectations/issue-009-example/expected.json";
+    const expected = JSON.parse(invalidExpected.files.get(expectedPath) as string) as Record<string, unknown>;
+    expected.execution = "Factory";
+    invalidExpected.files.set(expectedPath, JSON.stringify(expected));
+    const expectedResult = load(invalidExpected);
+    expect(expectedResult.ok).toBe(false);
+    if (!expectedResult.ok) expect(expectedResult.errors.join(" ")).toContain("expected.execution");
+  });
+
+  it("rejects invalid JSON in a snapshot and expectation without throwing", () => {
+    for (const path of [
+      "inputs/issue-009-example/issue-snapshot.json",
+      "expectations/issue-009-example/expected.json",
+    ]) {
+      const value = fixture(); value.files.set(path, "{");
+      const result = load(value); expect(result.ok, path).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toContain(`${path} is not valid JSON`);
+    }
+  });
+
   it("T48 enforces decision-context presence in both directions", () => {
     const absentReference = fixture({ decision: true });
     absentReference.files.delete("inputs/issue-009-example/decision-context.md");
@@ -128,6 +169,52 @@ describe("assembleCorpus", () => {
     const unexpectedFile = fixture();
     unexpectedFile.files.set("inputs/issue-009-example/decision-context.md", "unexpected");
     expect(load(unexpectedFile).ok).toBe(false);
+  });
+
+  it("rejects an implement patch when implementPatchPath is null", () => {
+    const value = fixture();
+    value.files.set("inputs/issue-009-example/recorded/implement.patch", "unexpected");
+    const result = load(value); expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toContain("implementPatchPath is null");
+  });
+
+  it("rejects every present-but-empty required artifact", () => {
+    const paths = [
+      "inputs/issue-009-example/issue-snapshot.json",
+      "inputs/issue-009-example/recorded/triage-verdict.json",
+      "expectations/issue-009-example/expected.json",
+    ];
+    for (const path of paths) {
+      const value = fixture(); value.files.set(path, "");
+      const result = load(value); expect(result.ok, path).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toContain(`${path} is empty`);
+    }
+    for (const [options, path] of [
+      [{ decision: true }, "inputs/issue-009-example/decision-context.md"],
+      [{ implement: true }, "inputs/issue-009-example/recorded/implement.patch"],
+    ] as const) {
+      const value = fixture(options); value.files.set(path, "");
+      const result = load(value); expect(result.ok, path).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toContain(`${path} is empty`);
+    }
+  });
+
+  it("rejects oversized parsed JSON and opaque required evidence", () => {
+    const manifestValue = fixture();
+    manifestValue.manifest.description = "x".repeat(MAX_MANIFEST_BYTES);
+    const manifestResult = load(manifestValue); expect(manifestResult.ok).toBe(false);
+    if (!manifestResult.ok) expect(manifestResult.errors.join(" ")).toContain(String(MAX_MANIFEST_BYTES));
+
+    const verdictValue = fixture();
+    const verdictPath = "inputs/issue-009-example/recorded/triage-verdict.json";
+    verdictValue.files.set(verdictPath, "x".repeat(MAX_PAYLOAD_BYTES + 1));
+    const verdictResult = load(verdictValue); expect(verdictResult.ok).toBe(false);
+    if (!verdictResult.ok) expect(verdictResult.errors.join(" ")).toContain(String(MAX_PAYLOAD_BYTES));
+
+    const decisionValue = fixture({ decision: true });
+    const decisionPath = "inputs/issue-009-example/decision-context.md";
+    decisionValue.files.set(decisionPath, "x".repeat(MAX_DECISION_CONTEXT_BYTES + 1));
+    expect(load(decisionValue).ok).toBe(false);
   });
 
   it("T49 enforces stage iff implement-null in both directions", () => {
@@ -170,19 +257,24 @@ describe("assembleCorpus", () => {
       ["implement.patch", (value) => { value.files.set("inputs/issue-009-example/recorded/implement.patch", "needs-info"); }],
       ["manifest notes", (value) => { firstCase(value).notes = "needs-info"; }],
       ["manifest description", (value) => { value.manifest.description = "needs-info"; }],
+      ["manifest pin.actionRef", (value) => {
+        (firstCase(value).pin as Record<string, unknown>).actionRef = "release needs-info candidate";
+      }],
+      ["manifest pin.resolvedModel", (value) => {
+        (firstCase(value).pin as Record<string, unknown>).resolvedModel = "model-needs-info-preview";
+      }],
     ];
     for (const [surface, mutate] of mutations) {
       const value = fixture({ implement: true, decision: true }); mutate(value);
       const result = load(value); expect(result.ok, surface).toBe(false);
       if (!result.ok) expect(result.errors.join(" ")).toMatch(/needs-info|answer-verdict/);
+      if (!result.ok && surface.startsWith("manifest pin.")) {
+        expect(result.errors.join(" ")).toContain(
+          `issue-009-example manifest.case.${surface.slice("manifest ".length)} leaks own readiness label needs-info`,
+        );
+      }
     }
-    const caseIdLeak = load(fixture({ caseId: "issue-009-needs-info" }));
-    expect(caseIdLeak.ok).toBe(false);
-    if (!caseIdLeak.ok) {
-      expect(caseIdLeak.errors.join(" ")).toContain(
-        "issue-009-needs-info manifest caseId leaks own readiness label needs-info",
-      );
-    }
+    expect(load(fixture({ caseId: "issue-009-needs-info" })).ok).toBe(false);
   });
 
   it("T63 allows a different readiness label in body and labels", () => {

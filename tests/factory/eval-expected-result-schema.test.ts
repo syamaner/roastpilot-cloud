@@ -75,6 +75,29 @@ describe("validateExpectedResult", () => {
     }
   });
 
+  it("rejects schemaVersion other than integer 1 and a malformed caseId", () => {
+    expect(validateExpectedResult({ ...validExpected(), schemaVersion: 2 }).ok).toBe(false);
+    expect(validateExpectedResult({ ...validExpected(), caseId: "Issue-009-example" }).ok).toBe(false);
+  });
+
+  it("rejects a non-object expected-result root", () => {
+    expect(validateExpectedResult(null).ok).toBe(false);
+  });
+
+  it("rejects a non-object value at every nested object position", () => {
+    const mutations: readonly ((raw: Record<string, unknown>) => void)[] = [
+      (raw) => { raw.triage = "needs-info"; },
+      (raw) => { raw.implement = "pass"; },
+      (raw) => { implementation(raw).diffBound = true; },
+      (raw) => { implementation(raw).mutation = false; },
+      (raw) => { implementation(raw).prOutcome = []; },
+    ];
+    for (const mutate of mutations) {
+      const raw = clone(); mutate(raw);
+      expect(validateExpectedResult(raw).ok).toBe(false);
+    }
+  });
+
   it("T31 rejects out-of-domain and case-variant enums", () => {
     const rows: readonly [string, readonly string[]][] = [
       ["issueType", ISSUE_TYPES], ["triageOutcomeClass", TRIAGE_OUTCOME_CLASSES],
@@ -109,6 +132,11 @@ describe("validateExpectedResult", () => {
     expect(validateExpectedResult(raw).ok).toBe(false);
   });
 
+  it("rejects tests other than pass", () => {
+    const raw = clone(); implementation(raw).tests = "fail";
+    expect(validateExpectedResult(raw).ok).toBe(false);
+  });
+
   it.each([-1, 3.5, "119"])("T35 rejects implementLogicLines %s", (value) => {
     const raw = clone(); implementation(raw).implementLogicLines = value;
     expect(validateExpectedResult(raw).ok).toBe(false);
@@ -127,6 +155,18 @@ describe("validateExpectedResult", () => {
     for (const mutation of [null, { expectedGatePass: false }]) {
       const raw = clone(); implementation(raw).mutation = mutation;
       expect(validateExpectedResult(raw).ok).toBe(true);
+    }
+  });
+
+  it("rejects non-boolean nested implementation results", () => {
+    const diffBound = clone();
+    (implementation(diffBound).diffBound as Record<string, unknown>).expectedWithinEnvelope = "true";
+    expect(validateExpectedResult(diffBound).ok).toBe(false);
+
+    for (const field of ["merged", "firstPassCiGreen"] as const) {
+      const raw = clone();
+      (implementation(raw).prOutcome as Record<string, unknown>)[field] = 1;
+      expect(validateExpectedResult(raw).ok).toBe(false);
     }
   });
 

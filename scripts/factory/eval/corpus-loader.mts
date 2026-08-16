@@ -64,28 +64,44 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
       let metadata;
       try {
         metadata = await stat(canonicalPath);
+      /* v8 ignore start -- TOCTOU-only: the entry would have to disappear after successful realpath */
       } catch {
         errors.push(`${lexicalPath} cannot be inspected`);
         continue;
       }
+      /* v8 ignore stop */
       if (metadata.isDirectory()) {
         pending.push(canonicalPath);
-      } else if (metadata.isFile()) {
-        const corpusPath = relative(canonicalRoot, lexicalPath).split(sep).join("/");
-        const limit = byteLimit(corpusPath);
-        if (metadata.size > limit) {
-          errors.push(`${corpusPath} exceeds ${String(limit)} bytes`);
-          continue;
-        }
-        try {
-          const content = await readFile(canonicalPath);
-          if (content.byteLength > limit) {
+      } else {
+        /* v8 ignore else -- non-regular nodes are outside the enumerate-regular-files contract and cannot be created in the sandbox */
+        if (metadata.isFile()) {
+          const corpusPath = relative(canonicalRoot, lexicalPath).split(sep).join("/");
+          const limit = byteLimit(corpusPath);
+          if (metadata.size > limit) {
             errors.push(`${corpusPath} exceeds ${String(limit)} bytes`);
             continue;
           }
-          files.set(corpusPath, content.toString("utf8"));
-        } catch {
-          errors.push(`${corpusPath} cannot be read`);
+          try {
+            const content = await readFile(canonicalPath);
+            /* v8 ignore start -- TOCTOU-only: the file would have to grow after the pre-read stat */
+            if (content.byteLength > limit) {
+              errors.push(`${corpusPath} exceeds ${String(limit)} bytes`);
+              continue;
+            }
+            /* v8 ignore stop */
+            let text: string;
+            try {
+              text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+            } catch {
+              errors.push(`${corpusPath} is not valid UTF-8`);
+              continue;
+            }
+            files.set(corpusPath, text);
+          /* v8 ignore start -- TOCTOU/permission-only: stat succeeded immediately before this read */
+          } catch {
+            errors.push(`${corpusPath} cannot be read`);
+          }
+          /* v8 ignore stop */
         }
       }
     }

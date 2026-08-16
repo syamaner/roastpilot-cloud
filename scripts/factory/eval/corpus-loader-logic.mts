@@ -72,6 +72,10 @@ function requiredText(
     errors.push(`${path} is missing`);
     return undefined;
   }
+  if (text.length === 0) {
+    errors.push(`${path} is empty`);
+    return undefined;
+  }
   if (!isUtf8PayloadWithinLimit(text, maximumBytes)) {
     errors.push(`${path} exceeds ${String(maximumBytes)} UTF-8 bytes`);
     return undefined;
@@ -108,9 +112,25 @@ function scanAnswerNeutrality(
   );
   if (decisionContextText !== null) noteLeak(corpusCase.caseId, "decision-context.md", decisionContextText, label, errors);
   if (patchText !== null) noteLeak(corpusCase.caseId, "recorded/implement.patch", patchText, label, errors);
-  noteLeak(corpusCase.caseId, "manifest caseId", corpusCase.caseId, label, errors);
-  noteLeak(corpusCase.caseId, "manifest notes", corpusCase.notes, label, errors);
+  scanManifestStrings(corpusCase, corpusCase.caseId, "manifest.case", label, errors);
   noteLeak(corpusCase.caseId, "manifest description", manifest.description, label, errors);
+}
+
+function scanManifestStrings(
+  value: unknown,
+  caseId: string,
+  surface: string,
+  label: string,
+  errors: string[],
+): void {
+  if (typeof value === "string") {
+    noteLeak(caseId, surface, value, label, errors);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, nestedValue] of Object.entries(value)) {
+    scanManifestStrings(nestedValue, caseId, `${surface}.${key}`, label, errors);
+  }
 }
 
 export function assembleCorpus(
@@ -121,19 +141,11 @@ export function assembleCorpus(
   const manifestRaw = parseBoundedJson(manifestText, MAX_MANIFEST_BYTES, "manifest.json", errors);
   if (manifestRaw === undefined) return { ok: false, errors };
   const manifestResult = validateCorpusManifest(manifestRaw);
-  let manifest: CorpusManifest;
   if (!manifestResult.ok) {
     errors.push(...manifestResult.errors);
-    const onlyExistingLeakErrors = manifestResult.errors.every((error) =>
-      error.includes("leaks an answer-verdict token"),
-    );
-    if (!onlyExistingLeakErrors) return { ok: false, errors };
-    // The PR-1 validator accumulated no structural/type error, so the raw
-    // value is safe to traverse solely to produce the narrower N9 diagnostic.
-    manifest = manifestRaw as CorpusManifest;
-  } else {
-    manifest = manifestResult.value;
+    return { ok: false, errors };
   }
+  const manifest = manifestResult.value;
 
   for (const path of files.keys()) {
     if (path !== "README.md" && !path.startsWith("inputs/") && !path.startsWith("expectations/")) {
@@ -152,11 +164,14 @@ export function assembleCorpus(
     canonicalPaths.add(verdictPath);
     canonicalPaths.add(expectedPath);
 
-    const snapshotText = files.get(snapshotPath);
+    const snapshotText = requiredText(
+      files,
+      snapshotPath,
+      MAX_SNAPSHOT_BYTES,
+      caseErrors,
+    );
     let snapshot: IssueSnapshot | undefined;
-    if (snapshotText === undefined) {
-      caseErrors.push(`${snapshotPath} is missing for ${corpusCase.caseId}`);
-    } else {
+    if (snapshotText !== undefined) {
       const snapshotRaw = parseBoundedJson(snapshotText, MAX_SNAPSHOT_BYTES, snapshotPath, caseErrors);
       if (snapshotRaw !== undefined) {
         const result = validateIssueSnapshot(snapshotRaw);
@@ -189,10 +204,13 @@ export function assembleCorpus(
     }
 
     let expected: ExpectedResult | undefined;
-    const expectedText = files.get(expectedPath);
-    if (expectedText === undefined) {
-      caseErrors.push(`${expectedPath} is missing for ${corpusCase.caseId}`);
-    } else {
+    const expectedText = requiredText(
+      files,
+      expectedPath,
+      MAX_EXPECTED_BYTES,
+      caseErrors,
+    );
+    if (expectedText !== undefined) {
       const expectedRaw = parseBoundedJson(expectedText, MAX_EXPECTED_BYTES, expectedPath, caseErrors);
       if (expectedRaw !== undefined) {
         const result = validateExpectedResult(expectedRaw);
@@ -247,9 +265,12 @@ export function assembleCorpus(
     loadedCase.scorerOnly.forEach((path) => scorerVisiblePaths.add(path));
   }
   for (const path of producerVisiblePaths) {
+    /* v8 ignore next -- unreachable: producer set is built solely from manifest/inputs paths, never expectations paths */
     if (path.startsWith("expectations/")) errors.push(`producer-visible path ${path} must not be an expectation`);
+    /* v8 ignore next -- unreachable: producer and scorer sets are built from disjoint canonical path families */
     if (scorerVisiblePaths.has(path)) errors.push(`path ${path} is both producer-visible and scorer-visible`);
   }
+  /* v8 ignore next -- unreachable: the construction-only assertions above cannot add an error */
   return errors.length > 0
     ? { ok: false, errors }
     : { ok: true, value: { manifest, cases: loadedCases, producerVisiblePaths, scorerVisiblePaths } };
