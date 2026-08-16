@@ -4,7 +4,7 @@
   "issueType": "hardening",
   "triageOutcomeClass": "bounced",
   "execution": "conventional",
-  "sizeClass": "near-cap",
+  "sizeClass": "largest-available",
   "outcomeClass": "non-pass",
   "provenance": "historical-artifact",
   "triage": {
@@ -13,6 +13,7 @@
   "implement": {
     "compile": "pass",
     "tests": "pass",
+    "implementLogicLines": 119,
     "diffBound": {
       "expectedWithinEnvelope": true
     },

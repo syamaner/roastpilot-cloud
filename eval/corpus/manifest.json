@@ -8,6 +8,7 @@
       "prNumber": 152,
       "stage": "triage-and-implement",
       "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -29,6 +30,7 @@
       "prNumber": 45,
       "stage": "triage-and-implement",
       "baseSha": "13aa3d62e7852110a96a3ece190b3ffc410f6677",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -50,6 +52,7 @@
       "prNumber": 150,
       "stage": "triage-and-implement",
       "baseSha": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -71,6 +74,7 @@
       "prNumber": 153,
       "stage": "triage-and-implement",
       "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -92,6 +96,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -113,6 +118,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -134,6 +140,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "d5225f69e6432d9346d321310cadb401f2dac87b",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -155,6 +162,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -176,6 +184,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "01e1ebee52d09d48303a3e5652dd6d42dc016b55",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -197,6 +206,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "9d6fe2b3efde46b3765dbffb5a09a01d0ec2181b",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -218,6 +228,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -239,6 +250,7 @@
       "prNumber": null,
       "stage": "triage-only",
       "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
+      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",

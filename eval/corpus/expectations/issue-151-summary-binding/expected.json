@@ -13,6 +13,7 @@
   "implement": {
     "compile": "pass",
     "tests": "pass",
+    "implementLogicLines": 13,
     "diffBound": {
       "expectedWithinEnvelope": true
     },
