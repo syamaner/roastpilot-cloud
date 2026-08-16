@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "caseId": "issue-058-grant-hardening",
+  "issueType": "hardening",
+  "triageOutcomeClass": "bounced",
+  "execution": "conventional",
+  "sizeClass": "near-cap",
+  "outcomeClass": "non-pass",
+  "provenance": "historical-artifact",
   "triage": {
     "expectedReadiness": "needs-info"
   },

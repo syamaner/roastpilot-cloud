@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "caseId": "issue-009-registry-reconciliation",
+  "issueType": "documentation",
+  "triageOutcomeClass": "ready",
+  "execution": "conventional",
+  "sizeClass": "small",
+  "outcomeClass": "non-pass",
+  "provenance": "reconstructed-from-outcome",
   "triage": {
     "expectedReadiness": "ready-for-conventional-implementation"
   },

@@ -6,14 +6,8 @@
       "caseId": "issue-009-registry-reconciliation",
       "issueNumber": 9,
       "prNumber": 152,
-      "issueType": "documentation",
-      "execution": "conventional",
       "stage": "triage-and-implement",
-      "triageOutcomeClass": "ready",
-      "sizeClass": "small",
-      "outcomeClass": "non-pass",
       "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -22,27 +16,19 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-009-registry-reconciliation/issue-snapshot.json",
-      "decisionContextPath": null,
+      "decisionContextPath": "inputs/issue-009-registry-reconciliation/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-009-registry-reconciliation/recorded/triage-verdict.json",
-        "implementPatchPath": "inputs/issue-009-registry-reconciliation/recorded/implement.patch",
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": "inputs/issue-009-registry-reconciliation/recorded/implement.patch"
       },
-      "expectationsPath": "expectations/issue-009-registry-reconciliation/expected.json",
-      "notes": "Verdict reconstructed from the dated operator authorization and PR #152 outcome; the creation-time body is retained because no machine triage artifact exists for this pre-backfill epic."
+      "notes": "The raw body is the creation-time GitHub revision; the later operator authorization and bounded registry plan are frozen separately in decision-context.md."
     },
     {
       "caseId": "issue-026-health-route-dryrun",
       "issueNumber": 26,
       "prNumber": 45,
-      "issueType": "feature",
-      "execution": "factory",
       "stage": "triage-and-implement",
-      "triageOutcomeClass": "bounced",
-      "sizeClass": "small",
-      "outcomeClass": "clean-pass",
       "baseSha": "13aa3d62e7852110a96a3ece190b3ffc410f6677",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -54,24 +40,16 @@
       "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-026-health-route-dryrun/recorded/triage-verdict.json",
-        "implementPatchPath": "inputs/issue-026-health-route-dryrun/recorded/implement.patch",
-        "provenance": "historical-artifact"
+        "implementPatchPath": "inputs/issue-026-health-route-dryrun/recorded/implement.patch"
       },
-      "expectationsPath": "expectations/issue-026-health-route-dryrun/expected.json",
-      "notes": "Automated needs-info verdict and factory patch are preserved; the publisher initially failed to open the PR, which was later opened manually as #45 and merged."
+      "notes": "The creation-time issue snapshot and recorded replay artifacts are preserved at the canonical case paths."
     },
     {
       "caseId": "issue-058-grant-hardening",
       "issueNumber": 58,
       "prNumber": 150,
-      "issueType": "hardening",
-      "execution": "conventional",
       "stage": "triage-and-implement",
-      "triageOutcomeClass": "bounced",
-      "sizeClass": "near-cap",
-      "outcomeClass": "non-pass",
       "baseSha": "43e48e9ddcc7e8fda9852435858b0085b765d4e0",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -83,24 +61,16 @@
       "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-058-grant-hardening/recorded/triage-verdict.json",
-        "implementPatchPath": "inputs/issue-058-grant-hardening/recorded/implement.patch",
-        "provenance": "historical-artifact"
+        "implementPatchPath": "inputs/issue-058-grant-hardening/recorded/implement.patch"
       },
-      "expectationsPath": "expectations/issue-058-grant-hardening/expected.json",
-      "notes": "Creation-time body and automated needs-info verdict are preserved. PR #150 later implemented the authorized conventional slice and hit the first-pass mutation-gate failure recorded in the baseline."
+      "notes": "The raw body is the creation-time GitHub revision; the recorded replay artifacts are preserved at the canonical case paths."
     },
     {
       "caseId": "issue-151-summary-binding",
       "issueNumber": 151,
       "prNumber": 153,
-      "issueType": "security-fix",
-      "execution": "conventional",
       "stage": "triage-and-implement",
-      "triageOutcomeClass": "ready",
-      "sizeClass": "small",
-      "outcomeClass": "clean-pass",
       "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -109,27 +79,19 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-151-summary-binding/issue-snapshot.json",
-      "decisionContextPath": null,
+      "decisionContextPath": "inputs/issue-151-summary-binding/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-151-summary-binding/recorded/triage-verdict.json",
-        "implementPatchPath": "inputs/issue-151-summary-binding/recorded/implement.patch",
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": "inputs/issue-151-summary-binding/recorded/implement.patch"
       },
-      "expectationsPath": "expectations/issue-151-summary-binding/expected.json",
-      "notes": "No published triage verdict survived; readiness is reconstructed from the filed security issue and merged conventional PR #153. The unedited creation body is retained."
+      "notes": "The raw body byte-matches the GitHub issue; the bounded pre-outcome implementation plan is frozen separately in decision-context.md."
     },
     {
-      "caseId": "issue-023-dryrun-wontfix",
+      "caseId": "issue-023-dryrun-second",
       "issueNumber": 23,
       "prNumber": null,
-      "issueType": "documentation",
-      "execution": "factory",
       "stage": "triage-only",
-      "triageOutcomeClass": "bounced",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -137,28 +99,20 @@
         "triageSkillVersion": "a8a222b3bd1ae99ed358f250f300de9484e9e83e",
         "implementPromptVersion": null
       },
-      "issueSnapshotPath": "inputs/issue-023-dryrun-wontfix/issue-snapshot.json",
+      "issueSnapshotPath": "inputs/issue-023-dryrun-second/issue-snapshot.json",
       "decisionContextPath": null,
       "recorded": {
-        "triageVerdictPath": "inputs/issue-023-dryrun-wontfix/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "triageVerdictPath": "inputs/issue-023-dryrun-second/recorded/triage-verdict.json",
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-023-dryrun-wontfix/expected.json",
-      "notes": "Synthetic historical dry-run issue retained as a genuine wontfix triage case; no implementation patch was produced."
+      "notes": "The creation-time issue snapshot and recorded triage artifact are preserved at the canonical case paths."
     },
     {
       "caseId": "issue-059-public-grant-audit",
       "issueNumber": 59,
       "prNumber": null,
-      "issueType": "schema",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "bounced",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "ce2e8629cbabd71b1a21d94265786af0f9f3afee",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -170,24 +124,16 @@
       "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-059-public-grant-audit/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-059-public-grant-audit/expected.json",
-      "notes": "Genuine automated needs-info decision on the MANAGE GRANTS completeness tradeoff; retained as a schema/grant-boundary bounce."
+      "notes": "The creation-time issue snapshot and recorded triage artifact are preserved at the canonical case paths."
     },
     {
       "caseId": "issue-120-executable-closure",
       "issueNumber": 120,
       "prNumber": null,
-      "issueType": "hardening",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "d5225f69e6432d9346d321310cadb401f2dac87b",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -199,24 +145,16 @@
       "decisionContextPath": "inputs/issue-120-executable-closure/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-120-executable-closure/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-120-executable-closure/expected.json",
-      "notes": "The stored disposition is reconstructed from the D117 operator decision, not the earlier bot bounce. The raw body is the creation-time version that received that bounce; authorized later plan substance is frozen separately in decision-context.md with disposition text excluded."
+      "notes": "The raw body is the creation-time GitHub revision; authorized later plan substance is frozen separately in decision-context.md."
     },
     {
       "caseId": "issue-194-comment-injection",
       "issueNumber": 194,
       "prNumber": null,
-      "issueType": "security-fix",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "b8867a91b13702f7b4cb21e074a989b6b5f8ac5c",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -225,27 +163,19 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-194-comment-injection/issue-snapshot.json",
-      "decisionContextPath": null,
+      "decisionContextPath": "inputs/issue-194-comment-injection/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-194-comment-injection/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-194-comment-injection/expected.json",
-      "notes": "No machine verdict artifact was published; conventional readiness is reconstructed from the creation-time label event and the retained #195/#204 mitigation outcome."
+      "notes": "The raw body byte-matches the GitHub issue; the prior D104 security boundary is frozen separately in decision-context.md."
     },
     {
       "caseId": "issue-205-retarget-hardening",
       "issueNumber": 205,
       "prNumber": null,
-      "issueType": "security-fix",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "01e1ebee52d09d48303a3e5652dd6d42dc016b55",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -257,24 +187,16 @@
       "decisionContextPath": "inputs/issue-205-retarget-hardening/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-205-retarget-hardening/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-205-retarget-hardening/expected.json",
-      "notes": "No bot verdict was posted. The disposition is reconstructed from the D104-verified contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
     },
     {
       "caseId": "issue-274-inert-noop",
       "issueNumber": 274,
       "prNumber": null,
-      "issueType": "hardening",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "9d6fe2b3efde46b3765dbffb5a09a01d0ec2181b",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -286,24 +208,16 @@
       "decisionContextPath": "inputs/issue-274-inert-noop/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-274-inert-noop/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-274-inert-noop/expected.json",
-      "notes": "No bot verdict was posted. The disposition is reconstructed from the story-planner contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
     },
     {
-      "caseId": "issue-281-dryrun-ready",
+      "caseId": "issue-281-dryrun-utility",
       "issueNumber": 281,
       "prNumber": null,
-      "issueType": "feature",
-      "execution": "factory",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -311,28 +225,20 @@
         "triageSkillVersion": "673a756e51cff3bc4cbb272df114c1edb67311b0",
         "implementPromptVersion": null
       },
-      "issueSnapshotPath": "inputs/issue-281-dryrun-ready/issue-snapshot.json",
+      "issueSnapshotPath": "inputs/issue-281-dryrun-utility/issue-snapshot.json",
       "decisionContextPath": null,
       "recorded": {
-        "triageVerdictPath": "inputs/issue-281-dryrun-ready/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "triageVerdictPath": "inputs/issue-281-dryrun-utility/recorded/triage-verdict.json",
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-281-dryrun-ready/expected.json",
-      "notes": "Final revised issue body and genuine automated ready-to-implement verdict from triage generation 31897287883.1 are retained; the later sacrificial PR is intentionally not part of this triage-only case."
+      "notes": "The snapshot reflects the final pre-boundary issue-body revision and retains the recorded triage artifact at its canonical path."
     },
     {
       "caseId": "issue-284-vitest-timeout",
       "issueNumber": 284,
       "prNumber": null,
-      "issueType": "hardening",
-      "execution": "conventional",
       "stage": "triage-only",
-      "triageOutcomeClass": "ready",
-      "sizeClass": null,
-      "outcomeClass": null,
       "baseSha": "673a756e51cff3bc4cbb272df114c1edb67311b0",
-      "capturedAt": "2026-08-16T08:57:42Z",
       "pin": {
         "actionRef": "v1.0.176",
         "actionCommit": "700e7f8316990de46bed556429765647af760efc",
@@ -344,11 +250,9 @@
       "decisionContextPath": "inputs/issue-284-vitest-timeout/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-284-vitest-timeout/recorded/triage-verdict.json",
-        "implementPatchPath": null,
-        "provenance": "reconstructed-from-outcome"
+        "implementPatchPath": null
       },
-      "expectationsPath": "expectations/issue-284-vitest-timeout/expected.json",
-      "notes": "No bot verdict was posted. The disposition is reconstructed from the D104-verified contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
+      "notes": "The raw body byte-matches the GitHub issue; the authorized pre-boundary contract is frozen separately in decision-context.md."
     }
   ]
 }

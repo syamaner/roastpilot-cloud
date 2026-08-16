@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "caseId": "issue-151-summary-binding",
+  "issueType": "security-fix",
+  "triageOutcomeClass": "ready",
+  "execution": "conventional",
+  "sizeClass": "small",
+  "outcomeClass": "clean-pass",
+  "provenance": "reconstructed-from-outcome",
   "triage": {
     "expectedReadiness": "ready-for-conventional-implementation"
   },

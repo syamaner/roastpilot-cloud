@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "caseId": "issue-281-dryrun-ready",
-  "triage": {
-    "expectedReadiness": "ready-to-implement"
-  },
-  "implement": null
-}

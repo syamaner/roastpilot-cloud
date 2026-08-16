@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "caseId": "issue-059-public-grant-audit",
-  "issueType": "schema",
+  "caseId": "issue-023-dryrun-second",
+  "issueType": "documentation",
   "triageOutcomeClass": "bounced",
-  "execution": "conventional",
+  "execution": "factory",
   "sizeClass": null,
   "outcomeClass": null,
   "provenance": "historical-artifact",
   "triage": {
-    "expectedReadiness": "needs-info"
+    "expectedReadiness": "wontfix"
   },
   "implement": null
 }

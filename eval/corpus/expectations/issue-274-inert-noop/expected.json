@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "caseId": "issue-274-inert-noop",
+  "issueType": "hardening",
+  "triageOutcomeClass": "ready",
+  "execution": "conventional",
+  "sizeClass": null,
+  "outcomeClass": null,
+  "provenance": "reconstructed-from-outcome",
   "triage": {
     "expectedReadiness": "ready-for-conventional-implementation"
   },

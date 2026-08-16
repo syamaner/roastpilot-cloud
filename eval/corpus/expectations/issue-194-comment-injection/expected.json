@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "caseId": "issue-194-comment-injection",
+  "issueType": "security-fix",
+  "triageOutcomeClass": "ready",
+  "execution": "conventional",
+  "sizeClass": null,
+  "outcomeClass": null,
+  "provenance": "reconstructed-from-outcome",
   "triage": {
     "expectedReadiness": "ready-for-conventional-implementation"
   },
