@@ -94,7 +94,7 @@
       "execution": "conventional",
       "stage": "triage-and-implement",
       "triageOutcomeClass": "ready",
-      "sizeClass": "near-cap",
+      "sizeClass": "small",
       "outcomeClass": "clean-pass",
       "baseSha": "e441faeec73c5697635239d121c8497b0b298395",
       "capturedAt": "2026-08-16T08:57:42Z",
