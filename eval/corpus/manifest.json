@@ -22,6 +22,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-009-registry-reconciliation/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-009-registry-reconciliation/recorded/triage-verdict.json",
         "implementPatchPath": "inputs/issue-009-registry-reconciliation/recorded/implement.patch",
@@ -50,6 +51,7 @@
         "implementPromptVersion": "0443844f7fb0adb34c19e52ec52d6666cf736fc5"
       },
       "issueSnapshotPath": "inputs/issue-026-health-route-dryrun/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-026-health-route-dryrun/recorded/triage-verdict.json",
         "implementPatchPath": "inputs/issue-026-health-route-dryrun/recorded/implement.patch",
@@ -78,6 +80,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-058-grant-hardening/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-058-grant-hardening/recorded/triage-verdict.json",
         "implementPatchPath": "inputs/issue-058-grant-hardening/recorded/implement.patch",
@@ -106,6 +109,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-151-summary-binding/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-151-summary-binding/recorded/triage-verdict.json",
         "implementPatchPath": "inputs/issue-151-summary-binding/recorded/implement.patch",
@@ -134,6 +138,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-023-dryrun-wontfix/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-023-dryrun-wontfix/recorded/triage-verdict.json",
         "implementPatchPath": null,
@@ -162,6 +167,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-059-public-grant-audit/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-059-public-grant-audit/recorded/triage-verdict.json",
         "implementPatchPath": null,
@@ -190,13 +196,14 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-120-executable-closure/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-120-executable-closure/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-120-executable-closure/recorded/triage-verdict.json",
         "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "provenance": "reconstructed-from-outcome"
       },
       "expectationsPath": "expectations/issue-120-executable-closure/expected.json",
-      "notes": "Human triage is preserved by the D117 operator-decision comment and subsequent conventional-readiness label; the creation snapshot precedes all readiness labels."
+      "notes": "The stored disposition is reconstructed from the D117 operator decision, not the earlier bot bounce. The raw body is the creation-time version that received that bounce; authorized later plan substance is frozen separately in decision-context.md with disposition text excluded."
     },
     {
       "caseId": "issue-194-comment-injection",
@@ -218,6 +225,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-194-comment-injection/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-194-comment-injection/recorded/triage-verdict.json",
         "implementPatchPath": null,
@@ -246,13 +254,14 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-205-retarget-hardening/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-205-retarget-hardening/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-205-retarget-hardening/recorded/triage-verdict.json",
         "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "provenance": "reconstructed-from-outcome"
       },
       "expectationsPath": "expectations/issue-205-retarget-hardening/expected.json",
-      "notes": "Human triage record and D104-verified conventional contract are retained directly from issue comments; no implementation patch is part of this triage-only case."
+      "notes": "No bot verdict was posted. The disposition is reconstructed from the D104-verified contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
     },
     {
       "caseId": "issue-274-inert-noop",
@@ -274,13 +283,14 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-274-inert-noop/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-274-inert-noop/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-274-inert-noop/recorded/triage-verdict.json",
         "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "provenance": "reconstructed-from-outcome"
       },
       "expectationsPath": "expectations/issue-274-inert-noop/expected.json",
-      "notes": "The retained story-planner contract explicitly records conventional execution and the readiness label before implementation."
+      "notes": "No bot verdict was posted. The disposition is reconstructed from the story-planner contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
     },
     {
       "caseId": "issue-281-dryrun-ready",
@@ -302,6 +312,7 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-281-dryrun-ready/issue-snapshot.json",
+      "decisionContextPath": null,
       "recorded": {
         "triageVerdictPath": "inputs/issue-281-dryrun-ready/recorded/triage-verdict.json",
         "implementPatchPath": null,
@@ -330,13 +341,14 @@
         "implementPromptVersion": null
       },
       "issueSnapshotPath": "inputs/issue-284-vitest-timeout/issue-snapshot.json",
+      "decisionContextPath": "inputs/issue-284-vitest-timeout/decision-context.md",
       "recorded": {
         "triageVerdictPath": "inputs/issue-284-vitest-timeout/recorded/triage-verdict.json",
         "implementPatchPath": null,
-        "provenance": "historical-artifact"
+        "provenance": "reconstructed-from-outcome"
       },
       "expectationsPath": "expectations/issue-284-vitest-timeout/expected.json",
-      "notes": "The retained D104-verified implementation contract explicitly records the conventional execution class and readiness label before PR #285."
+      "notes": "No bot verdict was posted. The disposition is reconstructed from the D104-verified contract; its pre-verdict substance is frozen in decision-context.md with disposition text excluded."
     }
   ]
 }
