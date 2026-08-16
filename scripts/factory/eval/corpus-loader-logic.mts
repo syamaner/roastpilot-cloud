@@ -95,9 +95,8 @@ function noteLeak(
   }
 }
 
-function scanAnswerNeutrality(
+function scanInputAnswerNeutrality(
   corpusCase: CorpusCase,
-  manifest: CorpusManifest,
   snapshot: IssueSnapshot,
   expected: ExpectedResult,
   decisionContextText: string | null,
@@ -112,24 +111,32 @@ function scanAnswerNeutrality(
   );
   if (decisionContextText !== null) noteLeak(corpusCase.caseId, "decision-context.md", decisionContextText, label, errors);
   if (patchText !== null) noteLeak(corpusCase.caseId, "recorded/implement.patch", patchText, label, errors);
-  scanManifestStrings(corpusCase, corpusCase.caseId, "manifest.case", label, errors);
-  noteLeak(corpusCase.caseId, "manifest description", manifest.description, label, errors);
+}
+
+function noteManifestLeak(
+  surface: string,
+  text: string,
+  label: string,
+  errors: string[],
+): void {
+  if (containsDelimiterBoundedToken(text, label)) {
+    errors.push(`${surface} leaks readiness label ${label}`);
+  }
 }
 
 function scanManifestStrings(
   value: unknown,
-  caseId: string,
   surface: string,
-  label: string,
+  labels: ReadonlySet<string>,
   errors: string[],
 ): void {
   if (typeof value === "string") {
-    noteLeak(caseId, surface, value, label, errors);
+    for (const label of labels) noteManifestLeak(surface, value, label, errors);
     return;
   }
   if (value === null || typeof value !== "object") return;
   for (const [key, nestedValue] of Object.entries(value)) {
-    scanManifestStrings(nestedValue, caseId, `${surface}.${key}`, label, errors);
+    scanManifestStrings(nestedValue, `${surface}.${key}`, labels, errors);
   }
 }
 
@@ -155,6 +162,7 @@ export function assembleCorpus(
 
   const canonicalPaths = new Set<string>();
   const loadedCases: LoadedCase[] = [];
+  const allLabels = new Set<string>();
   for (const corpusCase of manifest.cases) {
     const caseErrors: string[] = [];
     const snapshotPath = corpusCase.issueSnapshotPath;
@@ -218,6 +226,7 @@ export function assembleCorpus(
         if (!result.ok) caseErrors.push(...result.errors.map((error) => `${expectedPath}: ${error}`));
         else {
           expected = result.value;
+          allLabels.add(expected.triage.expectedReadiness);
           const directoryCaseId = expectedPath.split("/")[1];
           if (expected.caseId !== directoryCaseId || expected.caseId !== corpusCase.caseId) {
             caseErrors.push(`${expectedPath} caseId must match directory and manifest case ${corpusCase.caseId}`);
@@ -230,7 +239,7 @@ export function assembleCorpus(
     }
 
     if (snapshot !== undefined && expected !== undefined) {
-      scanAnswerNeutrality(corpusCase, manifest, snapshot, expected, decisionContextText, patchText, caseErrors);
+      scanInputAnswerNeutrality(corpusCase, snapshot, expected, decisionContextText, patchText, caseErrors);
     }
 
     errors.push(...caseErrors);
@@ -249,6 +258,13 @@ export function assembleCorpus(
         scorerOnly: new Set<string>([expectedPath]),
       });
     }
+  }
+
+  for (const corpusCase of manifest.cases) {
+    scanManifestStrings(corpusCase, `${corpusCase.caseId} manifest.case`, allLabels, errors);
+  }
+  for (const label of allLabels) {
+    noteManifestLeak("manifest.description", manifest.description, label, errors);
   }
 
   for (const path of files.keys()) {

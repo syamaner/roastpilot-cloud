@@ -281,11 +281,52 @@ describe("assembleCorpus", () => {
       if (!result.ok) expect(result.errors.join(" ")).toMatch(/needs-info|answer-verdict/);
       if (!result.ok && surface.startsWith("manifest pin.")) {
         expect(result.errors.join(" ")).toContain(
-          `issue-009-example manifest.case.${surface.slice("manifest ".length)} leaks own readiness label needs-info`,
+          `issue-009-example manifest.case.${surface.slice("manifest ".length)} leaks readiness label needs-info`,
         );
       }
     }
     expect(load(fixture({ caseId: "issue-009-needs-info" })).ok).toBe(false);
+  });
+
+  it("rejects a cross-case readiness-label leak in the shared manifest", () => {
+    const first = fixture({ readiness: "needs-info" });
+    const second = fixture({ caseId: "issue-023-other", readiness: "wontfix" });
+    const combined = {
+      ...first,
+      manifest: {
+        ...first.manifest,
+        cases: [...first.manifest.cases as unknown[], ...second.manifest.cases as unknown[]],
+      },
+    };
+    second.files.forEach((text, path) => { if (path !== "README.md") combined.files.set(path, text); });
+    (firstCase(combined).pin as Record<string, unknown>).actionRef = "wontfix";
+
+    const result = load(combined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toContain(
+        "issue-009-example manifest.case.pin.actionRef leaks readiness label wontfix",
+      );
+    }
+  });
+
+  it("allows another case's readiness label in case-relative input files", () => {
+    const first = fixture({ readiness: "needs-info" });
+    const second = fixture({ caseId: "issue-023-other", readiness: "wontfix" });
+    const combined = {
+      ...first,
+      manifest: {
+        ...first.manifest,
+        cases: [...first.manifest.cases as unknown[], ...second.manifest.cases as unknown[]],
+      },
+    };
+    second.files.forEach((text, path) => { if (path !== "README.md") combined.files.set(path, text); });
+    mutateSnapshot(combined, (raw) => {
+      raw.body = "Historical disposition was wontfix.";
+      raw.labels = ["wontfix"];
+    });
+
+    expect(load(combined).ok).toBe(true);
   });
 
   it("T63 allows a different readiness label in body and labels", () => {
