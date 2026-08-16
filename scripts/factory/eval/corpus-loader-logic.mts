@@ -31,6 +31,7 @@ export interface LoadedCase {
   readonly expected: ExpectedResult;
   readonly decisionContextText: string | null;
   readonly recordedTriageVerdictText: string;
+  readonly recordedImplementPatchText: string | null;
   readonly triageProducerInputs: ReadonlySet<string>;
   readonly replayArtifacts: ReadonlySet<string>;
   readonly scorerOnly: ReadonlySet<string>;
@@ -254,6 +255,7 @@ export function assembleCorpus(
         expected,
         decisionContextText,
         recordedTriageVerdictText,
+        recordedImplementPatchText: patchText,
         triageProducerInputs,
         replayArtifacts,
         scorerOnly: new Set<string>([expectedPath]),

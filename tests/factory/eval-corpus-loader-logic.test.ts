@@ -372,6 +372,20 @@ describe("assembleCorpus", () => {
       expect(result.value.cases[0].recordedTriageVerdictText).toBe("recorded opaque verdict");
     }
   });
+
+  it("T77 carries recorded implement patch text verbatim or null", () => {
+    const implementation = load(fixture({ implement: true }));
+    expect(implementation.ok).toBe(true);
+    if (implementation.ok) {
+      expect(implementation.value.cases[0].recordedImplementPatchText).toBe("Neutral recorded patch.");
+    }
+
+    const triageOnly = load(fixture());
+    expect(triageOnly.ok).toBe(true);
+    if (triageOnly.ok) {
+      expect(triageOnly.value.cases[0].recordedImplementPatchText).toBeNull();
+    }
+  });
 });
 
 function mutateSnapshot(
