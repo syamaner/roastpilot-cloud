@@ -131,6 +131,17 @@ describe("assembleCorpus", () => {
     value.files.set(path, JSON.stringify(raw)); expect(load(value).ok).toBe(false);
   });
 
+  it("rejects a snapshot captured after the manifest capture boundary", () => {
+    const value = fixture();
+    mutateSnapshot(value, (raw) => { raw.snapshotAt = "2026-08-16T08:57:43Z"; });
+    const result = load(value); expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join(" ")).toContain(
+        "issue-009-example snapshotAt is later than capturedAt",
+      );
+    }
+  });
+
   it("propagates parsed snapshot and expectation validation failures", () => {
     const invalidSnapshot = fixture();
     const snapshotPath = "inputs/issue-009-example/issue-snapshot.json";

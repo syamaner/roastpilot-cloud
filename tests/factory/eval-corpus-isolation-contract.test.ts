@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,7 +56,7 @@ describe("corpus isolation contract", () => {
     await mkdir(root); await writeFile(join(root, "manifest.json"), '{"schemaVersion":1}');
     await writeFile(outside, "secret"); await symlink(outside, join(root, "escape.txt"));
     const result = await loadCorpus(root); expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.join(" ")).toContain("outside corpus root");
+    if (!result.ok) expect(result.errors.join(" ")).toContain("escape.txt is a symlink");
   });
 
   it("rejects a corpus root that cannot be resolved", async () => {
@@ -78,15 +78,19 @@ describe("corpus isolation contract", () => {
     await writeFile(join(root, "manifest.json"), '{"schemaVersion":1}');
     await symlink(join(root, "missing.txt"), join(root, "broken.txt"));
     const result = await loadCorpus(root); expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.join(" ")).toContain("broken.txt cannot be resolved");
+    if (!result.ok) expect(result.errors.join(" ")).toContain("broken.txt is a symlink");
   });
 
-  it("bounds an internal symlink directory cycle", async () => {
-    const root = await mkdtemp(join(tmpdir(), "corpus-link-cycle-")); temporaryDirectories.push(root);
-    await writeFile(join(root, "manifest.json"), '{"schemaVersion":1}');
-    await symlink(root, join(root, "loop"));
+  it("rejects an in-root producer path symlinked to scorer-only content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "corpus-answer-alias-")); temporaryDirectories.push(root);
+    await cp(CORPUS_ROOT, root, { recursive: true });
+    const caseId = "issue-023-dryrun-second";
+    const verdictPath = join(root, "inputs", caseId, "recorded", "triage-verdict.json");
+    const expectedPath = join(root, "expectations", caseId, "expected.json");
+    await rm(verdictPath);
+    await symlink(expectedPath, verdictPath);
     const result = await loadCorpus(root); expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.join(" ")).toContain("manifest");
+    if (!result.ok) expect(result.errors.join(" ")).toContain("triage-verdict.json is a symlink");
   });
 
   it("rejects an IO corpus with no manifest", async () => {

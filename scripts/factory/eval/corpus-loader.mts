@@ -1,4 +1,4 @@
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   MAX_DECISION_CONTEXT_BYTES,
@@ -35,11 +35,8 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
   }
   const files = new Map<string, string>();
   const pending = [canonicalRoot];
-  const visitedDirectories = new Set<string>();
   while (pending.length > 0) {
     const directory = pending.pop() as string;
-    if (visitedDirectories.has(directory)) continue;
-    visitedDirectories.add(directory);
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -49,18 +46,35 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
     }
     for (const entry of entries) {
       const lexicalPath = resolve(directory, entry.name);
+      let lexicalMetadata;
+      try {
+        lexicalMetadata = await lstat(lexicalPath);
+      /* v8 ignore start -- TOCTOU-only: the entry would have to disappear after readdir */
+      } catch {
+        errors.push(`${lexicalPath} cannot be inspected without following links`);
+        continue;
+      }
+      /* v8 ignore stop */
+      if (lexicalMetadata.isSymbolicLink()) {
+        errors.push(`${lexicalPath} is a symlink`);
+        continue;
+      }
       let canonicalPath: string;
       try {
         canonicalPath = await realpath(lexicalPath);
+      /* v8 ignore start -- TOCTOU-only: lstat already proved a present non-symlink entry */
       } catch {
         errors.push(`${lexicalPath} cannot be resolved`);
         continue;
       }
+      /* v8 ignore stop */
       // Containment is checked before stat, recursion, or content reads.
+      /* v8 ignore start -- TOCTOU-only: requires replacement with an external symlink after lstat */
       if (!contained(canonicalRoot, canonicalPath)) {
         errors.push(`${lexicalPath} resolves outside corpus root`);
         continue;
       }
+      /* v8 ignore stop */
       let metadata;
       try {
         metadata = await stat(canonicalPath);

@@ -179,6 +179,7 @@ export function assembleCorpus(
         else {
           snapshot = result.value;
           if (snapshot.issueNumber !== corpusCase.issueNumber) caseErrors.push(`${snapshotPath} issueNumber does not match manifest case ${corpusCase.caseId}`);
+          if (snapshot.snapshotAt > corpusCase.capturedAt) caseErrors.push(`${corpusCase.caseId} snapshotAt is later than capturedAt`);
         }
       }
     }
