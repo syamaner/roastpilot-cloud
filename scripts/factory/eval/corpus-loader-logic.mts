@@ -30,6 +30,7 @@ export interface LoadedCase {
   readonly snapshot: IssueSnapshot;
   readonly expected: ExpectedResult;
   readonly decisionContextText: string | null;
+  readonly recordedTriageVerdictText: string;
   readonly triageProducerInputs: ReadonlySet<string>;
   readonly replayArtifacts: ReadonlySet<string>;
   readonly scorerOnly: ReadonlySet<string>;
@@ -201,7 +202,7 @@ export function assembleCorpus(
       decisionContextText = requiredText(files, corpusCase.decisionContextPath, MAX_DECISION_CONTEXT_BYTES, caseErrors) ?? null;
     }
 
-    requiredText(files, verdictPath, MAX_PAYLOAD_BYTES, caseErrors);
+    const recordedTriageVerdictText = requiredText(files, verdictPath, MAX_PAYLOAD_BYTES, caseErrors);
 
     let patchText: string | null = null;
     const canonicalPatchPath = `inputs/${corpusCase.caseId}/recorded/implement.patch`;
@@ -242,7 +243,7 @@ export function assembleCorpus(
     }
 
     errors.push(...caseErrors);
-    if (caseErrors.length === 0 && snapshot !== undefined && expected !== undefined) {
+    if (caseErrors.length === 0 && snapshot !== undefined && expected !== undefined && recordedTriageVerdictText !== undefined) {
       const triageProducerInputs = new Set<string>([snapshotPath]);
       if (corpusCase.decisionContextPath !== null) triageProducerInputs.add(corpusCase.decisionContextPath);
       const replayArtifacts = new Set<string>([verdictPath]);
@@ -252,6 +253,7 @@ export function assembleCorpus(
         snapshot,
         expected,
         decisionContextText,
+        recordedTriageVerdictText,
         triageProducerInputs,
         replayArtifacts,
         scorerOnly: new Set<string>([expectedPath]),

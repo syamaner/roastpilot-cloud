@@ -364,6 +364,14 @@ describe("assembleCorpus", () => {
     const value = fixture(); mutateSnapshot(value, (raw) => { raw.body = body; });
     expect(load(value).ok).toBe(clean);
   });
+
+  it("T76 carries the recorded triage verdict text verbatim without parsing", () => {
+    const result = load(fixture());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.cases[0].recordedTriageVerdictText).toBe("recorded opaque verdict");
+    }
+  });
 });
 
 function mutateSnapshot(
