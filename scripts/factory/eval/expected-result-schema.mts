@@ -79,7 +79,7 @@ export interface ExpectedResult {
   readonly implement: ExpectedImplement | null;
 }
 
-const CASE_ID_PATTERN = /^issue-(\d{3,})-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
+export const CASE_ID_PATTERN = /^issue-(\d{3,})-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 
 function inDomain<T extends string>(value: unknown, domain: readonly T[]): value is T {
   return typeof value === "string" && (domain as readonly string[]).includes(value);
