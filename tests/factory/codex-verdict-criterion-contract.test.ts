@@ -38,6 +38,14 @@ import {
  * These are deliberately literal rather than semantic. A regex cannot judge
  * whether prose still means the same thing, but it CAN catch a condition being
  * deleted outright, which is the failure that actually happened, three times.
+ *
+ * NOTE (D153, 18 Aug 2026): the 👀-before-👍 ordering referenced above was
+ * later SUPERSEDED. The connector withdraws its 👀 at the instant it posts the
+ * 👍, so an observable preceding 👀 is unsatisfiable and the anti-spoof now
+ * binds on the 👍's OWN bot-authorship (`chatgpt-codex-connector[bot]`, which a
+ * stranger cannot forge). Rows A/B below pin the corrected rule; the
+ * postdate-boundary guard is unaffected. Do not reinstate the 👀-before-👍
+ * ordering.
  */
 
 const AGENTS_MD = readFileSync(new URL("../../AGENTS.md", import.meta.url), "utf8");

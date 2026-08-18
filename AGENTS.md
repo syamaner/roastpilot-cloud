@@ -246,7 +246,7 @@ exception. The load-bearing points:
   EXPECTED and MUST NOT disqualify the verdict; the #155 P2 "any 👀 lets a third
   party supply half the verdict" spoof is closed by requiring the 👍 ITSELF to be
   bot-authored, and the distinct rule that an in-progress 👀 relied on as the
-  keep-waiting signal must also be bot-authored is retained above; staleness
+  keep-waiting signal must also be bot-authored is retained separately; staleness
   corrected #303) OR a **top-level "Codex Review: Didn't
   find any major issues" comment carrying a `Reviewed commit: <sha>` line** whose
   sha matches the PR head. The repo is public, so anyone can add a 👍 reaction OR
@@ -750,7 +750,7 @@ and draws on a **separate, weekly-capped subscription**.
   bot-authored signal on the PR itself, validated per channel exactly as the PR
   Merge Policy above defines it. **Do not restate the channel rules here.** This
   parenthetical used to, and had already drifted from the policy it points at:
-  it omitted the 👀-before-👍 ordering, and admitted "a commit-naming review" as
+  it omitted the 👍's own bot-authorship requirement, and admitted "a commit-naming review" as
   clean where the Merge Policy counts a posted review with inline threads as
   findings. It was the sixth surviving restatement of a rule that #155 collapsed
   precisely because five copies could not be kept in agreement. One statement,
