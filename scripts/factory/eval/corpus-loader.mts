@@ -4,12 +4,32 @@ import {
   MAX_DECISION_CONTEXT_BYTES,
   MAX_RECORDED_PATCH_BYTES,
   assembleCorpus,
+  type LoadedCorpus,
   type LoadResult,
 } from "./corpus-loader-logic.mts";
 import { MAX_EXPECTED_BYTES } from "./expected-result-schema.mts";
 import { MAX_MANIFEST_BYTES } from "./corpus-manifest-schema.mts";
 import { MAX_SNAPSHOT_BYTES } from "./issue-snapshot-schema.mts";
 import { MAX_PAYLOAD_BYTES } from "../triage-verdict-schema.mts";
+import type { CorpusFileInput } from "./eval-corpus-hash.mts";
+
+export const CORPUS_REPO_PREFIX = "eval/corpus/";
+
+export type CorpusSnapshotResult =
+  | {
+      readonly ok: true;
+      readonly value: LoadedCorpus;
+      readonly hashInput: readonly CorpusFileInput[];
+    }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+type CorpusFilesResult =
+  | {
+      readonly ok: true;
+      readonly rawFiles: CorpusFileInput[];
+      readonly textFiles: Map<string, string>;
+    }
+  | { readonly ok: false; readonly errors: readonly string[] };
 
 function contained(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
@@ -25,7 +45,10 @@ function byteLimit(path: string): number {
   return MAX_DECISION_CONTEXT_BYTES;
 }
 
-export async function loadCorpus(root: string): Promise<LoadResult> {
+async function readCorpusFiles(
+  root: string,
+  repoRelativePrefix: string,
+): Promise<CorpusFilesResult> {
   const errors: string[] = [];
   let rootMetadata;
   try {
@@ -44,7 +67,8 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
     return { ok: false, errors: [`corpus root ${root} cannot be resolved`] };
   }
   /* v8 ignore stop */
-  const files = new Map<string, string>();
+  const rawFiles: CorpusFileInput[] = [];
+  const textFiles = new Map<string, string>();
   const pending = [canonicalRoot];
   while (pending.length > 0) {
     const directory = pending.pop() as string;
@@ -119,7 +143,11 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
                 errors.push(`${corpusPath} is not valid UTF-8`);
                 continue;
               }
-              files.set(corpusPath, text);
+              rawFiles.push({
+                relativePath: `${repoRelativePrefix}${corpusPath}`,
+                bytes: content,
+              });
+              textFiles.set(corpusPath, text);
             /* v8 ignore start -- descriptor I/O can fail after a successful open */
             } catch {
               errors.push(`${corpusPath} cannot be read`);
@@ -139,8 +167,35 @@ export async function loadCorpus(root: string): Promise<LoadResult> {
     }
   }
   if (errors.length > 0) return { ok: false, errors };
-  const manifestText = files.get("manifest.json");
+  return { ok: true, rawFiles, textFiles };
+}
+
+function assembleLoadedCorpus(
+  textFiles: Map<string, string>,
+): LoadResult {
+  const manifestText = textFiles.get("manifest.json");
   if (manifestText === undefined) return { ok: false, errors: ["manifest.json is missing"] };
-  files.delete("manifest.json");
-  return assembleCorpus(manifestText, files);
+  textFiles.delete("manifest.json");
+  return assembleCorpus(manifestText, textFiles);
+}
+
+export async function loadCorpus(root: string): Promise<LoadResult> {
+  const loaded = await readCorpusFiles(root, CORPUS_REPO_PREFIX);
+  if (!loaded.ok) return loaded;
+  return assembleLoadedCorpus(loaded.textFiles);
+}
+
+export async function loadCorpusSnapshot(
+  root: string,
+  repoRelativePrefix: string,
+): Promise<CorpusSnapshotResult> {
+  const loaded = await readCorpusFiles(root, repoRelativePrefix);
+  if (!loaded.ok) return loaded;
+  const assembled = assembleLoadedCorpus(loaded.textFiles);
+  if (!assembled.ok) return assembled;
+  return {
+    ok: true,
+    value: assembled.value,
+    hashInput: loaded.rawFiles,
+  };
 }
