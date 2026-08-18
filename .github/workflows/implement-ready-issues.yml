@@ -683,7 +683,9 @@ jobs:
         id: restore-implement-cost-scripts
         if: always()
         continue-on-error: true
-        run: git checkout HEAD -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts
+        env:
+          DISPATCH_SHA: ${{ github.sha }}
+        run: git checkout "$DISPATCH_SHA" -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts
 
       - name: Extract bounded implement cost
         id: extract-implement-cost
@@ -699,7 +701,7 @@ jobs:
         run: node --experimental-strip-types scripts/factory/extract-implement-cost.mts
 
       - name: Upload implement cost artifact
-        if: always()
+        if: steps.extract-implement-cost.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

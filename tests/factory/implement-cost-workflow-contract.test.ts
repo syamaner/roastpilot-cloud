@@ -60,9 +60,12 @@ describe("implement cost workflow contract", () => {
     expect(restoreIndex).toBeGreaterThan(-1);
     expect(extractorIndex).toBeGreaterThan(restoreIndex);
     const restore = step("implement", "Restore trusted implement cost extractor");
+    expect(mapping(restore.env).DISPATCH_SHA).toBe("${{ github.sha }}");
     expect(restore.run).toBe(
-      "git checkout HEAD -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts",
+      'git checkout "$DISPATCH_SHA" -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts',
     );
+    expect(String(restore.run)).not.toContain("${{");
+    expect(String(restore.run)).not.toContain("github.sha");
     expect(names.indexOf("Extract bounded implement cost")).toBeGreaterThan(-1);
     expect(extractorIndex).toBeLessThan(
       names.indexOf("Run local gates (independent of the agent's own self-report)"),
@@ -132,9 +135,12 @@ describe("implement cost workflow contract", () => {
     expect(source).toContain("process.env.IMPLEMENT_NUM_TURNS");
   });
 
-  it("W8: uploads implement-cost with if always", () => {
+  it("W8: uploads implement-cost only after trusted extraction succeeds", () => {
     const upload = step("implement", "Upload implement cost artifact");
-    expect(upload.if).toBe("always()");
+    expect(upload.if).toBe(
+      "steps.extract-implement-cost.outcome == 'success'",
+    );
+    expect(upload["continue-on-error"]).toBe(true);
     expect(mapping(upload.with)).toMatchObject({
       name: "implement-cost",
       path: "${{ runner.temp }}/implement-cost/cost.json",
