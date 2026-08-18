@@ -1342,6 +1342,8 @@ describe("bounded triage context contract", () => {
       triage_generation:
         "${{ steps.issue-context.outputs.triage_generation }}",
       model_id: "${{ steps.extract-model-id.outputs.model_id }}",
+      cost_usd: "${{ steps.extract-implement-cost.outputs.cost_usd }}",
+      num_turns: "${{ steps.extract-implement-cost.outputs.num_turns }}",
     });
     expect(
       stepIndex(implement, "Checkout roastpilot-cloud (read-only)"),

@@ -9,7 +9,13 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
 
-const { main, MAX_PATCH_BYTES } = await import(
+const {
+  appendImplementCostToPrBody,
+  appendImplementCostToStepSummary,
+  buildImplementCostNote,
+  main,
+  MAX_PATCH_BYTES,
+} = await import(
   "../../scripts/factory/publish-implement-patch.mts"
 );
 
@@ -66,6 +72,57 @@ index 0000000..abc1234
 @@ -0,0 +1,1 @@
 +export const x = 1;
 `;
+
+describe("implement cost provenance", () => {
+  it("P1: renders one valid inert line in the PR provenance and publisher summary", () => {
+    const note = buildImplementCostNote("2.9373", "62");
+    expect(note).toBe(
+      "- **Implement run:** cost: `$2.9373 USD across 62 turns`",
+    );
+    expect(note.split("\n")).toHaveLength(1);
+
+    const body = appendImplementCostToPrBody(
+      "## Provenance\n\n- **Model:** `claude`\n- **Prompt/skill version:** `sha`\n",
+      note,
+    );
+    const summary = appendImplementCostToStepSummary(
+      "## Factory publish summary\n\n- **PR:** #1\n",
+      note,
+    );
+    expect(body).toContain(`- **Model:** \`claude\`\n${note}\n- **Prompt/skill version:**`);
+    expect(summary).toContain(`- **PR:** #1\n${note}\n`);
+    expect(body.match(/\*\*Implement run:\*\*/g)).toHaveLength(1);
+    expect(summary.match(/\*\*Implement run:\*\*/g)).toHaveLength(1);
+  });
+
+  it("P2/G9: malformed crossed values render unavailable and never render raw input", () => {
+    const rawCost = "1e3";
+    const rawTurns = "01";
+    const note = buildImplementCostNote(rawCost, rawTurns);
+    expect(note).toBe("- **Implement run:** cost: unavailable");
+    expect(note).not.toContain(rawCost);
+    expect(note).not.toContain(rawTurns);
+    expect(buildImplementCostNote("10000.01", "62")).toBe(
+      "- **Implement run:** cost: unavailable",
+    );
+    expect(buildImplementCostNote("1", "100001")).toBe(
+      "- **Implement run:** cost: unavailable",
+    );
+  });
+
+  it("P3: neutralizes the posted note so no live Codex trigger can escape", () => {
+    const raw = "0\n\n@codex review";
+    const note = buildImplementCostNote(raw, "62");
+    const body = appendImplementCostToPrBody(
+      "## Provenance\n\n- **Model:** unavailable\n- **Prompt/skill version:** sha\n",
+      note,
+    );
+    const summary = appendImplementCostToStepSummary("summary\n", note);
+    expect(note).toBe("- **Implement run:** cost: unavailable");
+    expect(`${body}\n${summary}`).not.toContain(raw);
+    expect(`${body}\n${summary}`).not.toContain("@codex review");
+  });
+});
 
 let workdir: string;
 

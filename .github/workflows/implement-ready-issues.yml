@@ -105,6 +105,8 @@ jobs:
     outputs:
       triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
       model_id: ${{ steps.extract-model-id.outputs.model_id }}
+      cost_usd: ${{ steps.extract-implement-cost.outputs.cost_usd }}
+      num_turns: ${{ steps.extract-implement-cost.outputs.num_turns }}
     permissions:
       contents: read
       # Needed to fetch the target issue's title/body/labels:
@@ -670,6 +672,30 @@ jobs:
           fi
           echo "model_id=$model_id" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Node for implement cost extraction
+        if: always()
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Extract bounded implement cost
+        id: extract-implement-cost
+        if: always()
+        env:
+          # The agent-influenced action output is data passed through the
+          # environment, never interpolated into the shell program below.
+          INPUT_EXECUTION_FILE: ${{ steps.implement.outputs.execution_file }}
+        run: node --experimental-strip-types scripts/factory/extract-implement-cost.mts
+
+      - name: Upload implement cost artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: implement-cost
+          path: cost.json
+          if-no-files-found: warn
+          retention-days: 30
+
       # The implement agent's full execution transcript is deliberately NOT
       # uploaded as an artifact any more (#164, the same credential-exposure
       # class #146 removed from claude-review): `implement-agent-transcript`
@@ -1083,6 +1109,8 @@ jobs:
           # force-push a fresh implementation commit under a different
           # human's authorization than the original dispatch.
           IMPLEMENT_MODEL_ID: ${{ needs.implement.outputs.model_id }}
+          IMPLEMENT_COST_USD: ${{ needs.implement.outputs.cost_usd }}
+          IMPLEMENT_NUM_TURNS: ${{ needs.implement.outputs.num_turns }}
           IMPLEMENT_PROMPT_VERSION: ${{ github.sha }}
           DISPATCH_ACTOR: ${{ github.triggering_actor }}
         run: node --experimental-strip-types scripts/factory/publish-implement-patch.mts
