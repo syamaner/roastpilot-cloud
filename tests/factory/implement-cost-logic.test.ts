@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -43,6 +44,7 @@ function runExtractor(
   absentFile = false,
   preexistingCostFile = false,
   plantedOutputDirectorySymlink = false,
+  omitCostOutputDirectory = false,
 ) {
   const cwd = mkdtempSync(join(tmpdir(), "implement-cost-"));
   temporaryDirectories.push(cwd);
@@ -68,7 +70,9 @@ function runExtractor(
     ...process.env,
     GITHUB_OUTPUT: outputPath,
     GITHUB_STEP_SUMMARY: summaryPath,
-    INPUT_COST_OUTPUT_DIR: costOutputDirectory,
+    INPUT_COST_OUTPUT_DIR: omitCostOutputDirectory
+      ? undefined
+      : costOutputDirectory,
     ...(executionContent === undefined
       ? { INPUT_EXECUTION_FILE: undefined }
       : { INPUT_EXECUTION_FILE: executionPath }),
@@ -80,10 +84,15 @@ function runExtractor(
   );
   return {
     run,
-    output: readFileSync(outputPath, "utf8"),
-    summary: readFileSync(summaryPath, "utf8"),
-    artifact: readFileSync(join(costOutputDirectory, "cost.json"), "utf8"),
+    output: existsSync(outputPath) ? readFileSync(outputPath, "utf8") : "",
+    summary: existsSync(summaryPath) ? readFileSync(summaryPath, "utf8") : "",
+    artifact: existsSync(join(costOutputDirectory, "cost.json"))
+      ? readFileSync(join(costOutputDirectory, "cost.json"), "utf8")
+      : "",
     repositoryCostExists: existsSync(join(cwd, "cost.json")),
+    costFiles: readdirSync(cwd, { recursive: true })
+      .map(String)
+      .filter((path) => path.split("/").at(-1) === "cost.json"),
   };
 }
 
@@ -214,6 +223,22 @@ describe("extract-implement-cost entrypoint", () => {
     expect(extracted.artifact).toBe(
       '{"cost_usd":null,"num_turns":null}\n',
     );
+  });
+
+  it("R2: missing cost output directory returns cleanly without writing anything", () => {
+    const extracted = runExtractor(
+      JSON.stringify(result(2.9373, 62)),
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(extracted.run.status).toBe(0);
+    expect(extracted.output).toBe("");
+    expect(extracted.summary).toBe("");
+    expect(extracted.artifact).toBe("");
+    expect(extracted.repositoryCostExists).toBe(false);
+    expect(extracted.costFiles).toEqual([]);
   });
 
   it("writes only validated scalars to outputs, summary, and cost.json", () => {

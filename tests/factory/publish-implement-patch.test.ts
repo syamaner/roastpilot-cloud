@@ -30,7 +30,6 @@ const {
   buildImplementCostNote,
   main,
   MAX_PATCH_BYTES,
-  refreshImplementCostInPrBody,
 } = await import(
   "../../scripts/factory/publish-implement-patch.mts"
 );
@@ -139,24 +138,6 @@ describe("implement cost provenance", () => {
     expect(sanitizeSpy).toHaveBeenCalledWith("$2.9373 USD across 62 turns");
   });
 
-  it("F4: refresh inserts a missing cost line without changing other PR-body content", () => {
-    const original = [
-      "## Provenance",
-      "",
-      "- **Model:** `claude`",
-      "- **Prompt/skill version:** `sha`",
-      "",
-      "## Review routing",
-      "",
-      "Human content.",
-    ].join("\n");
-    const note = buildImplementCostNote("2", "10");
-    expect(refreshImplementCostInPrBody(original, note)).toBe(
-      original.replace("- **Prompt/skill version:**", `${note}\n- **Prompt/skill version:**`),
-    );
-    expect(refreshImplementCostInPrBody("No provenance section", note)).toBeNull();
-    expect(refreshImplementCostInPrBody(null, note)).toBeNull();
-  });
 });
 
 let workdir: string;

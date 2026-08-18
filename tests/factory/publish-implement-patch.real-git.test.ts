@@ -355,7 +355,6 @@ function stubHappyPathFetch(options?: {
     number: number;
     head: { ref: string; repo?: { full_name: string } | null };
     base?: { ref: string };
-    body?: string | null;
   }>;
   createResponse?: { number: number; html_url: string };
   issueLabels?: readonly string[];
@@ -425,7 +424,6 @@ function stubHappyPathFetch(options?: {
               : pr.head.repo,
         },
         base: pr.base ?? { ref: "main" },
-        body: pr.body ?? null,
       }));
       return jsonResponse(prs);
     }
@@ -437,9 +435,6 @@ function stubHappyPathFetch(options?: {
         },
         201,
       );
-    }
-    if (method === "PATCH" && /\/pulls\/\d+$/.test(url)) {
-      return jsonResponse({}, 200);
     }
     if (method === "GET" && url.includes("/comments")) {
       // postFailureComment's upsert now looks this up BEFORE ever
@@ -4536,71 +4531,6 @@ describe("publish-implement-patch — implement cost, main() end-to-end", () => 
     expect(published.body).not.toContain("$1.0 USD");
   });
 
-  it("F8e/F4: refresh replaces only the prior PR-body cost line with the current run", async () => {
-    process.env.IMPLEMENT_COST_USD = "3.25";
-    process.env.IMPLEMENT_NUM_TURNS = "70";
-    const summaryPath = join(scratchDir, "refresh-cost-summary.md");
-    process.env.GITHUB_STEP_SUMMARY = summaryPath;
-    const originalBody = [
-      "## Story",
-      "",
-      "Closes #6",
-      "",
-      "## Provenance",
-      "",
-      "- **Model:** `claude`",
-      "- **Implement run:** cost: `$1 USD across 5 turns`",
-      "- **Prompt/skill version:** `old-sha`",
-      "",
-      "## Review routing",
-      "",
-      "Keep this human-authored content.",
-    ].join("\n");
-    const fetchMock = stubHappyPathFetch({
-      existingPrs: [
-        {
-          number: 50,
-          head: { ref: "feature/6-implement-workflow" },
-          body: originalBody,
-        },
-      ],
-    });
-
-    await main();
-
-    expect(process.exitCode).toBeUndefined();
-    const calls = fetchMock.mock.calls as Array<
-      [string | URL, RequestInit | undefined]
-    >;
-    expect(
-      calls.some(
-        ([url, init]) =>
-          String(url).endsWith("/pulls") && init?.method === "POST",
-      ),
-    ).toBe(false);
-    const refreshCall = calls.find(
-      ([url, init]) =>
-        String(url).endsWith("/pulls/50") && init?.method === "PATCH",
-    );
-    expect(refreshCall).toBeDefined();
-    const refreshed = JSON.parse(refreshCall?.[1]?.body as string) as {
-      body: string;
-    };
-    expect(refreshed.body).toContain(
-      "- **Implement run:** cost: `$3.25 USD across 70 turns`",
-    );
-    expect(refreshed.body).not.toContain("$1 USD across 5 turns");
-    expect(refreshed.body).toContain("Keep this human-authored content.");
-    expect(refreshed.body).toBe(
-      originalBody.replace(
-        "- **Implement run:** cost: `$1 USD across 5 turns`",
-        "- **Implement run:** cost: `$3.25 USD across 70 turns`",
-      ),
-    );
-    expect(await readFile(summaryPath, "utf8")).toContain(
-      "- **Implement run:** cost: `$3.25 USD across 70 turns`",
-    );
-  });
 });
 
 describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): provenance trailer, end-to-end", () => {
@@ -4703,7 +4633,7 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
     expect(commitBody).toContain("Provenance-Model: unavailable");
   });
 
-  it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation", async () => {
+  it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation (unlike the PR body's Provenance section, which stays creation-time-only)", async () => {
     process.env.DISPATCH_ACTOR = "second-dispatcher";
     stubHappyPathFetch({
       existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],
