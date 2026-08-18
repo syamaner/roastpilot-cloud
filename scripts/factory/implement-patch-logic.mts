@@ -459,8 +459,11 @@ export const CODEX_VERDICT_CRITERION =
   "comment sounds clean, because the connector also posts bot-authored " +
   "head-naming comments that are not verdicts at all (queued, skipped, or " +
   "unable-to-review notices) and none of those satisfies the wait. Or the " +
-  "bot's 👍 AFTER its own 👀 — a 👍 " +
-  "with no preceding 👀 is not a completed review, and the 👍 carries no sha, " +
+  "bot's 👍 whose OWN author is `chatgpt-codex-connector[bot]`; the anti-spoof " +
+  "lives in the 👍's own authorship, which a stranger cannot forge, not in a " +
+  "visible preceding 👀, because the connector WITHDRAWS its 👀 at the instant it " +
+  "posts the 👍, so the 👀 is normally already gone when the 👍 is observed and its " +
+  "absence then is EXPECTED, not disqualifying. The 👍 carries no sha, " +
   "so it holds only while the head is unchanged. Matching the head is NOT " +
   "sufficient on its own: the signal must also POSTDATE the event that started " +
   "this PR's review (`opened` for a PR created ready, `ready_for_review` for a " +

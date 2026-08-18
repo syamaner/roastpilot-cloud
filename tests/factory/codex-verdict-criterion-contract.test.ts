@@ -38,6 +38,14 @@ import {
  * These are deliberately literal rather than semantic. A regex cannot judge
  * whether prose still means the same thing, but it CAN catch a condition being
  * deleted outright, which is the failure that actually happened, three times.
+ *
+ * NOTE (D153, 18 Aug 2026): the 👀-before-👍 ordering referenced above was
+ * later SUPERSEDED. The connector withdraws its 👀 at the instant it posts the
+ * 👍, so an observable preceding 👀 is unsatisfiable and the anti-spoof now
+ * binds on the 👍's OWN bot-authorship (`chatgpt-codex-connector[bot]`, which a
+ * stranger cannot forge). Rows A/B below pin the corrected rule; the
+ * postdate-boundary guard is unaffected. Do not reinstate the 👀-before-👍
+ * ordering.
  */
 
 const AGENTS_MD = readFileSync(new URL("../../AGENTS.md", import.meta.url), "utf8");
@@ -80,21 +88,17 @@ const CONDITIONS = [
     /\*\*top-level "Codex Review: Didn't\s+find any major issues" comment carrying a `Reviewed commit: <sha>` line\*\* whose\s+sha matches the PR head/,
   ],
   [
-    "requires the 👍 to follow the bot's own 👀",
-    /👍 AFTER its own 👀/,
-    // NOT a bare /👀/: that matches the emoji anywhere in the file, so the
-    // ordering condition could be deleted outright and this would still pass.
-    // Must require the preceding 👀 to be the BOT'S OWN. The earlier matcher
-    // accepted any "👍 reaction (after the 👀)" wording, so AGENTS.md could
-    // stay weaker than the constant while this contract reported the two as
-    // aligned — and on a public repo a third party can supply that 👀
-    // (Codex P2, #155).
-    /👍 reaction \(after the bot's OWN 👀[\s\S]{0,200}must itself be\s+bot-authored/,
+    "requires the clean 👍 reaction to be authored by the Codex bot ITSELF (the anti-spoof), with no observable preceding 👀 required",
+    /👍 whose OWN author is `chatgpt-codex-connector\[bot\]`/,
+    /bot-authored 👍 reaction whose OWN author is\s+`chatgpt-codex-connector\[bot\]`/,
   ],
   [
-    "records that a bare 👍 with no preceding 👀 is not a completed review",
-    /👍\s+with no preceding 👀 is not a completed review/,
-    /A 👀 reaction means the review is \*\*in\s+progress, keep waiting\*\*/,
+    "records that the connector WITHDRAWS its 👀 when it posts the 👍, so the 👀's absence at 👍-time is EXPECTED not disqualifying (corrects #303), and that a 👀 still present means in-progress",
+    /connector WITHDRAWS its 👀 at the instant it\s+posts the 👍[\s\S]{0,120}absence then is EXPECTED/,
+    [
+      /connector WITHDRAWS its 👀 at the instant it posts the 👍[\s\S]{0,200}absence at 👍-observation time is\s+EXPECTED and MUST NOT disqualify/,
+      /A 👀 reaction means the review is \*\*in\s+progress, keep waiting\*\*/,
+    ],
   ],
   [
     "escalates a stalled engaged review instead of re-triggering the same head",
