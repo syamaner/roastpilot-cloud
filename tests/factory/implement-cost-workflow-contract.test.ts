@@ -144,6 +144,7 @@ describe("implement cost workflow contract", () => {
   it("F3: all cost-observability steps are explicitly non-blocking", () => {
     for (const name of [
       "Set up Node for implement cost extraction",
+      "Restore trusted implement cost extractor",
       "Extract bounded implement cost",
       "Upload implement cost artifact",
     ]) {

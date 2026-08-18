@@ -682,6 +682,7 @@ jobs:
       - name: Restore trusted implement cost extractor
         id: restore-implement-cost-scripts
         if: always()
+        continue-on-error: true
         run: git checkout HEAD -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts
 
       - name: Extract bounded implement cost
