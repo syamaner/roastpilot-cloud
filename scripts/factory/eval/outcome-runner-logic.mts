@@ -136,7 +136,8 @@ async function runChecked(
       return { ok: false, gate: nonPass(`${name} returned invalid output`) };
     }
     if (!result.spawned || result.exitCode !== 0) {
-      const detail = result.stderr || result.stdout || "no diagnostic output";
+      const streams = [result.stderr, result.stdout].filter((text) => text !== "");
+      const detail = streams.length === 0 ? "no diagnostic output" : streams.join("\n--- stdout ---\n");
       return { ok: false, gate: nonPass(`${name} failed: ${truncate(detail)}`) };
     }
     return { ok: true, stdout: result.stdout };

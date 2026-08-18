@@ -652,25 +652,27 @@ recorded in the plan repo.
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
 | `pr-triage` | `sonnet` | independent adjudication of review feedback, so the author never self-triages (D23). |
-| `story-planner` | `fable` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). Read-only **by construction** — no shell, no write tools (Read/Grep/Glob + retrieval only). That removes the execution and mutation channels, **not every channel**: poisoned retrieval can still steer what it reads and what its returned text contains (#162), so the orchestrator reads the contract before posting it and retrieval stays off credentialed trees (Axis A). The orchestrator supplies the story text and posts the contract; under-specification is the expensive failure this pin exists for. |
+| `story-planner` | `opus` | every story, before any implementation — turns it into the contract topology v2 describes (spec, tests including per-guard mutation checks, class sweep, D104 PR plan, routing, risk profile). Read-only **by construction** — no shell, no write tools (Read/Grep/Glob + retrieval only). That removes the execution and mutation channels, **not every channel**: poisoned retrieval can still steer what it reads and what its returned text contains (#162), so the orchestrator reads the contract before posting it and retrieval stays off credentialed trees (Axis A). The orchestrator supplies the story text and posts the contract; under-specification is the expensive failure this pin exists for. |
 | `implementer` | `opus` | **Fallback implementer only** (credit pivot, D145): Codex-MCP is the default for specced work — including security-adjacent and protected-path diffs — so this agent runs only when Codex is unavailable or its weekly quota is below the Axis-A budget stop. Own worktree, gates before hand-back, never adjudicates findings on its own PR (D23). |
 
 **Pins are mandatory and enforced.** An agent with no `model:` **inherits the
 parent**, so an unpinned definition spawned from an Opus main loop silently runs
 Opus across a whole fan-out. `tests/factory/agent-model-pin.test.ts` asserts
 every definition carries an explicit `model:` from the allowed set, that the two
-adversarial security reviewers stay on `opus`, that `story-planner` stays on
-`fable` and `implementer` on `opus`, that a `fable` pin on any other role is
-rejected outright, and that a definition nested below the roster's top level
-is rejected rather than skipped. An empty roster fails rather than passing
-vacuously. A documented default that nothing enforces is not a default.
+adversarial security reviewers stay on `opus`, that `story-planner` and
+`implementer` stay on `opus`, that a `fable` pin anywhere is rejected outright
+because the tier was retired by D-topo-1, and that a definition nested below
+the roster's top level is rejected rather than skipped. An empty roster fails
+rather than passing vacuously. A documented default that nothing enforces is
+not a default.
 
-**Three tiers — `fable`, `opus`, and `sonnet`.** `fable` exists for exactly one
-role: planning and spec-writing, where under-specification is the expensive
-failure (an implementer, Codex or Opus alike, executes a weak spec faithfully,
-and the cost lands post-open as review rounds). Still no Haiku tier: nothing
-here is both high-volume and correctness-insensitive, and mechanical extraction
-is better served by `gh`/`grep` than by a fourth model to get wrong.
+**Two tiers: `opus` and `sonnet`.** `fable`, formerly the planner-only spec
+tier, was retired by D-topo-1. Planning and spec-writing stay on `opus`, where
+under-specification is the expensive failure (an implementer, Codex or Opus
+alike, executes a weak spec faithfully, and the cost lands post-open as review
+rounds). Still no Haiku tier: nothing here is both high-volume and
+correctness-insensitive, and mechanical extraction is better served by
+`gh`/`grep` than by a fourth model to get wrong.
 
 **The Opus triggers are not narrowed to save budget** (operator, 27 Jul 2026).
 Both adversarial reviewers fire on S6's first slice, and that is accepted:
@@ -783,13 +785,10 @@ and draws on a **separate, weekly-capped subscription**.
 
 ### Axis C — which model
 
-- **`fable`** for planning and spec-writing only — the contract the other
-  models implement. Never for implementation or review volume.
-- **`opus`** for adversarial security reasoning and hard adjudication, where a
-  miss is the expensive failure.
+- **`opus`** for planning and spec-writing, adversarial security reasoning and
+  hard adjudication, where a miss or weak contract is the expensive failure.
 - **`sonnet`** for scoped implementation, routine review, test-quality judgment,
   triage, and inventories.
 
 When unsure, pick `sonnet` and escalate a specific spawn to `opus` with a stated
-reason — never leave the model unset to "let it decide". `fable` is role-scoped
-to the planner, not a general escalation tier.
+reason — never leave the model unset to "let it decide".

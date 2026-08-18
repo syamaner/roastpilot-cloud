@@ -11,19 +11,13 @@ const AGENTS_DIRECTORY = join(REPOSITORY_ROOT, ".claude", "agents");
  * Every sub-agent definition must pin its model explicitly. An agent with no
  * `model:` INHERITS THE PARENT, so an unpinned definition spawned from an Opus
  * main loop silently runs Opus across a whole fan-out — the cost failure this
- * test exists to make impossible rather than merely documented.
+ * test exists to make impossible rather than merely documented. Only Opus and
+ * Sonnet are admitted tiers.
  */
-const ALLOWED_MODELS = new Set(["fable", "opus", "sonnet"]);
+const ALLOWED_MODELS = new Set(["opus", "sonnet"]);
 
-/**
- * `fable` is admitted for exactly one role, the `story-planner` spec tier
- * (topology v2, issue #159). The validator itself rejects a fable pin on any
- * other definition — a describe-block assertion on the planner alone would
- * pin story-planner → fable but not fable → story-planner, leaving every
- * other agent free to adopt the tier silently.
- */
-const FABLE_ONLY_AGENT = "story-planner";
-
+// `fable` was role-scoped to `story-planner` under #159, then retired by
+// D-topo-1. Reintroducing it requires deliberately widening ALLOWED_MODELS.
 /**
  * The adversarial security lenses stay on Opus (operator, 27 Jul 2026). A
  * missed pipeline-security or grant-boundary defect is the expensive failure,
@@ -113,9 +107,6 @@ export function validateAgentModelPins(files: AgentFile[]): string[] {
         `${fileName}: model must be one of ${[...ALLOWED_MODELS].sort().join(", ")}`,
       );
     }
-    if (model === "fable" && name !== FABLE_ONLY_AGENT) {
-      failures.push(`${fileName}: fable is role-scoped to ${FABLE_ONLY_AGENT}`);
-    }
     if (typeof name === "string" && REQUIRED_OPUS_AGENTS.has(name) && model !== "opus") {
       failures.push(`${fileName}: adversarial security reviewers must stay on opus`);
     }
@@ -143,12 +134,12 @@ describe("sub-agent model pins (issue #148)", () => {
     expect(parseFrontMatter(triage!.content)?.model).toBe("sonnet");
   });
 
-  it("pins the story planner to fable, so the spec tier cannot silently downgrade (issue #159)", () => {
+  it("pins the story planner to opus (D-topo-1, issue #159)", () => {
     const planner = readAgentFiles().find(
       ({ fileName }) => fileName === "story-planner.md",
     );
     expect(planner).toBeDefined();
-    expect(parseFrontMatter(planner!.content)?.model).toBe("fable");
+    expect(parseFrontMatter(planner!.content)?.model).toBe("opus");
   });
 
   it("pins the implementer to opus (issue #159)", () => {
@@ -176,9 +167,9 @@ describe("sub-agent model pins (issue #148)", () => {
       "name must match the file name",
     ],
     [
-      "a fable pin outside the planner role",
+      "a retired fable pin",
       "---\nname: example\nmodel: fable\n---\n",
-      "fable is role-scoped to story-planner",
+      "model must be one of",
     ],
     [
       "front matter that is not a mapping",
@@ -201,14 +192,14 @@ describe("sub-agent model pins (issue #148)", () => {
     ).toContainEqual(expect.stringContaining(expectedFailure));
   });
 
-  it("rejects widening fable beyond the planner role, on the live roster", () => {
+  it("rejects reintroducing the retired fable tier on the live roster", () => {
     const widened = readAgentFiles().map(({ fileName, content }) =>
-      fileName === "qa.md"
-        ? { fileName, content: content.replace("model: sonnet", "model: fable") }
+      fileName === "story-planner.md"
+        ? { fileName, content: content.replace("model: opus", "model: fable") }
         : { fileName, content },
     );
     expect(validateAgentModelPins(widened)).toContainEqual(
-      expect.stringContaining("fable is role-scoped to story-planner"),
+      expect.stringContaining("model must be one of"),
     );
   });
 

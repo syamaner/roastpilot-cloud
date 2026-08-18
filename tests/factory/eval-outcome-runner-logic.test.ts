@@ -369,6 +369,66 @@ describe("recorded outcome runner logic", () => {
     expect(multibyteOutcome.compile).toMatchObject({ status: "non-pass" });
   });
 
+  it("T169 retains stderr and stdout from a failing gate", async () => {
+    const executor = new FakeExecutor((step) => {
+      if (step.args.includes("--numstat")) return result("1\t0\tsrc/a.ts\0");
+      if (step.args.includes("tsc")) {
+        return result("compiler stdout", {
+          exitCode: 1,
+          stderr: "compiler stderr",
+        });
+      }
+      return result();
+    });
+    const outcome = await runOutcomePlan(plan(), executor);
+    expect(outcome.compile).toEqual({
+      status: "non-pass",
+      reason: "typecheck failed: compiler stderr\n--- stdout ---\ncompiler stdout",
+    });
+  });
+
+  it("T179 orders and bounds combined diagnostics while preserving stdout-only text", async () => {
+    const bothStreams = new FakeExecutor((step) => {
+      if (step.args.includes("--numstat")) return result("1\t0\tsrc/a.ts\0");
+      if (step.args.includes("tsc")) {
+        return result("stdout detail", { exitCode: 1, stderr: "stderr detail" });
+      }
+      return result();
+    });
+    const combined = await runOutcomePlan(plan(), bothStreams);
+    expect(combined.compile).toEqual({
+      status: "non-pass",
+      reason: "typecheck failed: stderr detail\n--- stdout ---\nstdout detail",
+    });
+
+    const oversized = new FakeExecutor((step) => {
+      if (step.args.includes("--numstat")) return result("1\t0\tsrc/a.ts\0");
+      if (step.args.includes("tsc")) {
+        return result("o".repeat(3_000), {
+          exitCode: 1,
+          stderr: "e".repeat(3_000),
+        });
+      }
+      return result();
+    });
+    const truncated = await runOutcomePlan(plan(), oversized);
+    expect(truncated.compile).toMatchObject({ status: "non-pass" });
+    if (truncated.compile.status === "non-pass") {
+      expect(truncated.compile.reason).toContain("[truncated");
+      expect(Buffer.byteLength(truncated.compile.reason, "utf8")).toBeLessThan(4_200);
+    }
+
+    const stdoutOnly = new FakeExecutor((step) => {
+      if (step.args.includes("--numstat")) return result("1\t0\tsrc/a.ts\0");
+      if (step.args.includes("tsc")) return result("stdout only", { exitCode: 1 });
+      return result();
+    });
+    expect((await runOutcomePlan(plan(), stdoutOnly)).compile).toEqual({
+      status: "non-pass",
+      reason: "typecheck failed: stdout only",
+    });
+  });
+
   it("T105 maps hostile executor values and throwing getters to total non-pass outcomes", async () => {
     const hostileValues = [
       null,
