@@ -237,9 +237,17 @@ exception. The load-bearing points:
   trigger on an engaged head withdraws a pending 👍 and burns a round. It does
   **not** clear the merge by itself. A CLEAN verdict, **in either channel, and ONLY
   when authored by the Codex bot identity (`chatgpt-codex-connector[bot]`)**,
-  is either a **👍 reaction (after the bot's OWN 👀 — that preceding 👀 must itself be
-  bot-authored, since on a public repo a stranger can leave one and a rule that
-  accepts any 👀 lets a third party supply half the verdict; Codex P2, #155)** OR a **top-level "Codex Review: Didn't
+  is either a **bot-authored 👍 reaction whose OWN author is
+  `chatgpt-codex-connector[bot]`** (the anti-spoof property lives in the 👍's own
+  authorship, which a stranger cannot forge because the reactions API returns
+  each reaction's `user.login`; a preceding 👀 is NOT required, because the
+  connector WITHDRAWS its 👀 at the instant it posts the 👍, so the 👀 is normally
+  already gone when the 👍 is observed, and its absence at 👍-observation time is
+  EXPECTED and MUST NOT disqualify the verdict; the #155 P2 "any 👀 lets a third
+  party supply half the verdict" spoof is closed by requiring the 👍 ITSELF to be
+  bot-authored, and the distinct rule that an in-progress 👀 relied on as the
+  keep-waiting signal must also be bot-authored is retained above; staleness
+  corrected #303) OR a **top-level "Codex Review: Didn't
   find any major issues" comment carrying a `Reviewed commit: <sha>` line** whose
   sha matches the PR head. The repo is public, so anyone can add a 👍 reaction OR
   post a comment copying that title plus the visible head sha; **bot-authorship is
