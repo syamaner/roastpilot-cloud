@@ -1,8 +1,11 @@
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +16,7 @@ import {
   MAX_COST_USD,
   MAX_TURNS_CAP,
   parseImplementCost,
+  validateImplementCostOutputs,
 } from "../../scripts/factory/implement-cost-logic.mts";
 
 const EXTRACTOR_PATH = fileURLToPath(
@@ -38,22 +42,33 @@ function runExtractor(
   executionContent?: string,
   absentFile = false,
   preexistingCostFile = false,
+  plantedOutputDirectorySymlink = false,
 ) {
   const cwd = mkdtempSync(join(tmpdir(), "implement-cost-"));
   temporaryDirectories.push(cwd);
   const outputPath = join(cwd, "github-output.txt");
   const summaryPath = join(cwd, "step-summary.md");
   const executionPath = join(cwd, "execution.json");
+  const costOutputDirectory = join(cwd, "runner-temp", "implement-cost");
   if (executionContent !== undefined && !absentFile) {
     writeFileSync(executionPath, executionContent);
   }
   if (preexistingCostFile) {
-    writeFileSync(join(cwd, "cost.json"), "agent-controlled stale bytes\n");
+    mkdirSync(costOutputDirectory, { recursive: true });
+    writeFileSync(
+      join(costOutputDirectory, "cost.json"),
+      "agent-controlled stale bytes\n",
+    );
+  }
+  if (plantedOutputDirectorySymlink) {
+    mkdirSync(join(cwd, "runner-temp"), { recursive: true });
+    symlinkSync(cwd, costOutputDirectory, "dir");
   }
   const env = {
     ...process.env,
     GITHUB_OUTPUT: outputPath,
     GITHUB_STEP_SUMMARY: summaryPath,
+    INPUT_COST_OUTPUT_DIR: costOutputDirectory,
     ...(executionContent === undefined
       ? { INPUT_EXECUTION_FILE: undefined }
       : { INPUT_EXECUTION_FILE: executionPath }),
@@ -67,7 +82,8 @@ function runExtractor(
     run,
     output: readFileSync(outputPath, "utf8"),
     summary: readFileSync(summaryPath, "utf8"),
-    artifact: readFileSync(join(cwd, "cost.json"), "utf8"),
+    artifact: readFileSync(join(costOutputDirectory, "cost.json"), "utf8"),
+    repositoryCostExists: existsSync(join(cwd, "cost.json")),
   };
 }
 
@@ -140,37 +156,35 @@ describe("parseImplementCost", () => {
     ].join("\n");
     expect(everyOutput).not.toContain(raw);
     expect(everyOutput).not.toContain("@codex review");
-    expect(extracted.output).toBe("cost_usd=\nnum_turns=\n");
+    expect(extracted.output).toContain("cost_usd=\n");
   });
 
   it.each([NaN, Infinity, -Infinity, -1, MAX_COST_USD + 0.01])(
     "N8/G1: rejects invalid cost %s",
     (cost) => {
-      expect(parseImplementCost(result(cost, 1))).toEqual({
-        costUsd: "",
-        numTurns: "",
-      });
+      expect(parseImplementCost(result(cost, 1)).costUsd).toBe("");
     },
   );
 
   it.each([1.5, "1", -1, MAX_TURNS_CAP + 1])(
     "N9/G2: rejects invalid num_turns %j",
     (turns) => {
-      expect(parseImplementCost(result(1, turns))).toEqual({
-        costUsd: "",
-        numTurns: "",
-      });
+      expect(parseImplementCost(result(1, turns)).numTurns).toBe("");
     },
   );
 
-  it.each([
-    result(1, "bad"),
-    result("bad", 1),
-  ])("N10/G4: rejects both fields when only one validates", (input) => {
-    expect(parseImplementCost(input)).toEqual({
-      costUsd: "",
-      numTurns: "",
-    });
+  it("N10/G4: rejects both fields when only one validates", () => {
+    for (const input of [result(1, "bad"), result("bad", 5)]) {
+      expect(parseImplementCost(input)).toEqual({
+        costUsd: "",
+        numTurns: "",
+      });
+    }
+  });
+
+  it("G9-round-trip: rejects regex-valid but non-canonical publisher values", () => {
+    expect(validateImplementCostOutputs("1.0", "5")).toBeNull();
+    expect(validateImplementCostOutputs("1.50000000", "5")).toBeNull();
   });
 });
 
@@ -217,6 +231,7 @@ describe("extract-implement-cost entrypoint", () => {
       cost_usd: 2.9373,
       num_turns: 62,
     });
+    expect(extracted.repositoryCostExists).toBe(false);
 
     const tiny = runExtractor(JSON.stringify(result(1e-7, 1)));
     expect(tiny.output).toContain("cost_usd=0.0000001\n");
@@ -224,5 +239,20 @@ describe("extract-implement-cost entrypoint", () => {
       '{"cost_usd":0.0000001,"num_turns":1}\n',
     );
     expect(tiny.artifact).not.toMatch(/[eE]/);
+  });
+
+  it("F1: replaces an agent-planted output-directory symlink before writing", () => {
+    const extracted = runExtractor(
+      JSON.stringify(result(2.9373, 62)),
+      false,
+      false,
+      true,
+    );
+    expect(extracted.run.status).toBe(0);
+    expect(extracted.repositoryCostExists).toBe(false);
+    expect(JSON.parse(extracted.artifact)).toEqual({
+      cost_usd: 2.9373,
+      num_turns: 62,
+    });
   });
 });

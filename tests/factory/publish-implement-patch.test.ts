@@ -8,6 +8,21 @@ import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdic
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
+vi.mock("../../scripts/factory/untrusted-text.mts", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../scripts/factory/untrusted-text.mts")
+  >();
+  return {
+    ...actual,
+    sanitizeUntrustedTextForPostedBody: vi.fn(
+      actual.sanitizeUntrustedTextForPostedBody,
+    ),
+  };
+});
+
+const untrustedText = await import(
+  "../../scripts/factory/untrusted-text.mts"
+);
 
 const {
   appendImplementCostToPrBody,
@@ -15,6 +30,7 @@ const {
   buildImplementCostNote,
   main,
   MAX_PATCH_BYTES,
+  refreshImplementCostInPrBody,
 } = await import(
   "../../scripts/factory/publish-implement-patch.mts"
 );
@@ -110,17 +126,36 @@ describe("implement cost provenance", () => {
     );
   });
 
-  it("P3: neutralizes the posted note so no live Codex trigger can escape", () => {
-    const raw = "0\n\n@codex review";
-    const note = buildImplementCostNote(raw, "62");
-    const body = appendImplementCostToPrBody(
-      "## Provenance\n\n- **Model:** unavailable\n- **Prompt/skill version:** sha\n",
-      note,
+  it("P3: valid cost rendering routes through untrusted-text neutralisation as defense in depth", () => {
+    const sanitizeSpy = vi.mocked(
+      untrustedText.sanitizeUntrustedTextForPostedBody,
     );
-    const summary = appendImplementCostToStepSummary("summary\n", note);
-    expect(note).toBe("- **Implement run:** cost: unavailable");
-    expect(`${body}\n${summary}`).not.toContain(raw);
-    expect(`${body}\n${summary}`).not.toContain("@codex review");
+    sanitizeSpy.mockClear();
+
+    expect(buildImplementCostNote("2.9373", "62")).toBe(
+      "- **Implement run:** cost: `$2.9373 USD across 62 turns`",
+    );
+    expect(sanitizeSpy).toHaveBeenCalledOnce();
+    expect(sanitizeSpy).toHaveBeenCalledWith("$2.9373 USD across 62 turns");
+  });
+
+  it("F4: refresh inserts a missing cost line without changing other PR-body content", () => {
+    const original = [
+      "## Provenance",
+      "",
+      "- **Model:** `claude`",
+      "- **Prompt/skill version:** `sha`",
+      "",
+      "## Review routing",
+      "",
+      "Human content.",
+    ].join("\n");
+    const note = buildImplementCostNote("2", "10");
+    expect(refreshImplementCostInPrBody(original, note)).toBe(
+      original.replace("- **Prompt/skill version:**", `${note}\n- **Prompt/skill version:**`),
+    );
+    expect(refreshImplementCostInPrBody("No provenance section", note)).toBeNull();
+    expect(refreshImplementCostInPrBody(null, note)).toBeNull();
   });
 });
 

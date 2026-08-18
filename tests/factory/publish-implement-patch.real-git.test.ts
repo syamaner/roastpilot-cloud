@@ -108,6 +108,9 @@ afterEach(async () => {
   delete process.env.IMPLEMENT_PROMPT_VERSION;
   delete process.env.DISPATCH_ACTOR;
   delete process.env.IMPLEMENT_MODEL_ID;
+  delete process.env.IMPLEMENT_COST_USD;
+  delete process.env.IMPLEMENT_NUM_TURNS;
+  delete process.env.GITHUB_STEP_SUMMARY;
   process.exitCode = undefined;
 });
 
@@ -352,6 +355,7 @@ function stubHappyPathFetch(options?: {
     number: number;
     head: { ref: string; repo?: { full_name: string } | null };
     base?: { ref: string };
+    body?: string | null;
   }>;
   createResponse?: { number: number; html_url: string };
   issueLabels?: readonly string[];
@@ -421,6 +425,7 @@ function stubHappyPathFetch(options?: {
               : pr.head.repo,
         },
         base: pr.base ?? { ref: "main" },
+        body: pr.body ?? null,
       }));
       return jsonResponse(prs);
     }
@@ -432,6 +437,9 @@ function stubHappyPathFetch(options?: {
         },
         201,
       );
+    }
+    if (method === "PATCH" && /\/pulls\/\d+$/.test(url)) {
+      return jsonResponse({}, 200);
     }
     if (method === "GET" && url.includes("/comments")) {
       // postFailureComment's upsert now looks this up BEFORE ever
@@ -4458,6 +4466,143 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
   });
 });
 
+describe("publish-implement-patch — implement cost, main() end-to-end", () => {
+  async function publishNewPrWithCost(
+    costUsd: string | undefined,
+    numTurns: string | undefined,
+  ): Promise<{ body: string; summary: string }> {
+    if (costUsd === undefined) {
+      delete process.env.IMPLEMENT_COST_USD;
+    } else {
+      process.env.IMPLEMENT_COST_USD = costUsd;
+    }
+    if (numTurns === undefined) {
+      delete process.env.IMPLEMENT_NUM_TURNS;
+    } else {
+      process.env.IMPLEMENT_NUM_TURNS = numTurns;
+    }
+    const summaryPath = join(scratchDir, "cost-summary.md");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const createCall = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(createCall).toBeDefined();
+    const request = JSON.parse(createCall?.[1]?.body as string) as {
+      body: string;
+    };
+    return {
+      body: request.body,
+      summary: await readFile(summaryPath, "utf8"),
+    };
+  }
+
+  it("F8a: canonical cost reaches the created PR body and step summary", async () => {
+    const published = await publishNewPrWithCost("2.9373", "62");
+    const note = "- **Implement run:** cost: `$2.9373 USD across 62 turns`";
+    expect(published.body).toContain(note);
+    expect(published.summary).toContain(note);
+  });
+
+  it("F8b/AC4: malformed cost degrades without raw echo and still publishes", async () => {
+    const raw = "0\n\n@codex review";
+    const published = await publishNewPrWithCost(raw, "62");
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.summary).toContain("- **Implement run:** cost: unavailable");
+    expect(`${published.body}\n${published.summary}`).not.toContain(raw);
+    const costLines = `${published.body}\n${published.summary}`
+      .split("\n")
+      .filter((line) => line.startsWith("- **Implement run:** cost:"));
+    expect(costLines).not.toContainEqual(expect.stringContaining("@codex review"));
+  });
+
+  it("F8c/AC4: unset cost degrades to unavailable and still publishes", async () => {
+    const published = await publishNewPrWithCost(undefined, undefined);
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.summary).toContain("- **Implement run:** cost: unavailable");
+  });
+
+  it("F8d/F5: non-canonical cost fails the publisher round trip and still publishes", async () => {
+    const published = await publishNewPrWithCost("1.0", "5");
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.body).not.toContain("$1.0 USD");
+  });
+
+  it("F8e/F4: refresh replaces only the prior PR-body cost line with the current run", async () => {
+    process.env.IMPLEMENT_COST_USD = "3.25";
+    process.env.IMPLEMENT_NUM_TURNS = "70";
+    const summaryPath = join(scratchDir, "refresh-cost-summary.md");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    const originalBody = [
+      "## Story",
+      "",
+      "Closes #6",
+      "",
+      "## Provenance",
+      "",
+      "- **Model:** `claude`",
+      "- **Implement run:** cost: `$1 USD across 5 turns`",
+      "- **Prompt/skill version:** `old-sha`",
+      "",
+      "## Review routing",
+      "",
+      "Keep this human-authored content.",
+    ].join("\n");
+    const fetchMock = stubHappyPathFetch({
+      existingPrs: [
+        {
+          number: 50,
+          head: { ref: "feature/6-implement-workflow" },
+          body: originalBody,
+        },
+      ],
+    });
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url).endsWith("/pulls") && init?.method === "POST",
+      ),
+    ).toBe(false);
+    const refreshCall = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/pulls/50") && init?.method === "PATCH",
+    );
+    expect(refreshCall).toBeDefined();
+    const refreshed = JSON.parse(refreshCall?.[1]?.body as string) as {
+      body: string;
+    };
+    expect(refreshed.body).toContain(
+      "- **Implement run:** cost: `$3.25 USD across 70 turns`",
+    );
+    expect(refreshed.body).not.toContain("$1 USD across 5 turns");
+    expect(refreshed.body).toContain("Keep this human-authored content.");
+    expect(refreshed.body).toBe(
+      originalBody.replace(
+        "- **Implement run:** cost: `$1 USD across 5 turns`",
+        "- **Implement run:** cost: `$3.25 USD across 70 turns`",
+      ),
+    );
+    expect(await readFile(summaryPath, "utf8")).toContain(
+      "- **Implement run:** cost: `$3.25 USD across 70 turns`",
+    );
+  });
+});
+
 describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): provenance trailer, end-to-end", () => {
   afterEach(() => {
     delete process.env.PUBLISHED_VIA_FALLBACK;
@@ -4558,7 +4703,7 @@ describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): 
     expect(commitBody).toContain("Provenance-Model: unavailable");
   });
 
-  it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation (unlike the PR body's Provenance section, which stays creation-time-only)", async () => {
+  it("applies the trailer on a re-dispatch's force-pushed refresh too, not just the original creation", async () => {
     process.env.DISPATCH_ACTOR = "second-dispatcher";
     stubHappyPathFetch({
       existingPrs: [{ number: 50, head: { ref: "feature/6-implement-workflow" } }],

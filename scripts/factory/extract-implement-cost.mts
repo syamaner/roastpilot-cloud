@@ -1,6 +1,7 @@
 /** Extract bounded implement-run cost metadata without blocking publish. */
 
-import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   parseImplementCost,
   UNAVAILABLE_IMPLEMENT_COST,
@@ -38,11 +39,20 @@ export async function main(): Promise<void> {
         ? '{"cost_usd":null,"num_turns":null}'
         : `{"cost_usd":${cost.costUsd},"num_turns":${cost.numTurns}}`;
 
-    // The workspace was agent-writable before this trusted step. Remove any
-    // pre-existing file, directory, or symlink so upload-artifact can only see
-    // the bounded regular file this extractor creates.
-    await rm("cost.json", { recursive: true, force: true });
-    await writeFile("cost.json", `${artifact}\n`, {
+    const outputDirectory = process.env.INPUT_COST_OUTPUT_DIR;
+    if (!outputDirectory) {
+      return;
+    }
+    // Replace the dedicated directory too: the preceding agent step could
+    // otherwise plant a parent symlink that redirects cost.json into the
+    // checkout even though the configured path is under RUNNER_TEMP.
+    await rm(outputDirectory, { recursive: true, force: true });
+    await mkdir(outputDirectory, { recursive: true });
+    const artifactPath = join(outputDirectory, "cost.json");
+    // Preserve the exact-path remove plus exclusive create as the final guard
+    // against any pre-existing file, directory, or symlink at the artifact.
+    await rm(artifactPath, { recursive: true, force: true });
+    await writeFile(artifactPath, `${artifact}\n`, {
       encoding: "utf8",
       flag: "wx",
     });

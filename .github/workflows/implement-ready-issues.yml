@@ -674,25 +674,36 @@ jobs:
 
       - name: Set up Node for implement cost extraction
         if: always()
+        continue-on-error: true
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
+      - name: Restore trusted implement cost extractor
+        id: restore-implement-cost-scripts
+        if: always()
+        run: git checkout HEAD -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts
+
       - name: Extract bounded implement cost
         id: extract-implement-cost
-        if: always()
+        if: always() && steps.restore-implement-cost-scripts.outcome == 'success'
+        continue-on-error: true
         env:
           # The agent-influenced action output is data passed through the
           # environment, never interpolated into the shell program below.
           INPUT_EXECUTION_FILE: ${{ steps.implement.outputs.execution_file }}
+          # Generated observability output stays outside the checkout so the
+          # later `git add -A` patch capture cannot stage it into every PR.
+          INPUT_COST_OUTPUT_DIR: ${{ runner.temp }}/implement-cost
         run: node --experimental-strip-types scripts/factory/extract-implement-cost.mts
 
       - name: Upload implement cost artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: implement-cost
-          path: cost.json
+          path: ${{ runner.temp }}/implement-cost/cost.json
           if-no-files-found: warn
           retention-days: 30
 

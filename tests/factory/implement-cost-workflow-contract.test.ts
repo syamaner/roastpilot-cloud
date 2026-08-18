@@ -53,10 +53,18 @@ describe("implement cost workflow contract", () => {
     });
   });
 
-  it("W2/G6: runs the extractor before Run local gates", () => {
+  it("W2/G6/F2: restores trusted scripts, then extracts before Run local gates", () => {
     const names = steps("implement").map((candidate) => candidate.name);
+    const restoreIndex = names.indexOf("Restore trusted implement cost extractor");
+    const extractorIndex = names.indexOf("Extract bounded implement cost");
+    expect(restoreIndex).toBeGreaterThan(-1);
+    expect(extractorIndex).toBeGreaterThan(restoreIndex);
+    const restore = step("implement", "Restore trusted implement cost extractor");
+    expect(restore.run).toBe(
+      "git checkout HEAD -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts",
+    );
     expect(names.indexOf("Extract bounded implement cost")).toBeGreaterThan(-1);
-    expect(names.indexOf("Extract bounded implement cost")).toBeLessThan(
+    expect(extractorIndex).toBeLessThan(
       names.indexOf("Run local gates (independent of the agent's own self-report)"),
     );
   });
@@ -65,6 +73,9 @@ describe("implement cost workflow contract", () => {
     const extractor = step("implement", "Extract bounded implement cost");
     expect(mapping(extractor.env).INPUT_EXECUTION_FILE).toBe(
       "${{ steps.implement.outputs.execution_file }}",
+    );
+    expect(mapping(extractor.env).INPUT_COST_OUTPUT_DIR).toBe(
+      "${{ runner.temp }}/implement-cost",
     );
     expect(extractor.run).toBe(
       "node --experimental-strip-types scripts/factory/extract-implement-cost.mts",
@@ -97,7 +108,13 @@ describe("implement cost workflow contract", () => {
     );
     expect(
       uploads.map((candidate) => mapping(candidate.with).path),
-    ).toEqual(["cost.json", "patch-output/patch.diff"]);
+    ).toEqual([
+      "${{ runner.temp }}/implement-cost/cost.json",
+      "patch-output/patch.diff",
+    ]);
+    const costPath = mapping(uploads[0].with).path;
+    expect(costPath).toContain("runner.temp");
+    expect(costPath).not.toBe("cost.json");
     const serialized = JSON.stringify(uploads);
     expect(serialized).not.toContain("execution_file");
     expect(serialized).not.toContain("transcript");
@@ -120,7 +137,17 @@ describe("implement cost workflow contract", () => {
     expect(upload.if).toBe("always()");
     expect(mapping(upload.with)).toMatchObject({
       name: "implement-cost",
-      path: "cost.json",
+      path: "${{ runner.temp }}/implement-cost/cost.json",
     });
+  });
+
+  it("F3: all cost-observability steps are explicitly non-blocking", () => {
+    for (const name of [
+      "Set up Node for implement cost extraction",
+      "Extract bounded implement cost",
+      "Upload implement cost artifact",
+    ]) {
+      expect(step("implement", name)["continue-on-error"], name).toBe(true);
+    }
   });
 });

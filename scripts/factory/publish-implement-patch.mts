@@ -315,6 +315,7 @@ interface GitHubComment {
 interface GitHubPullRequestApi {
   readonly html_url: string;
   readonly number: number;
+  readonly body?: string | null;
   readonly head: {
     readonly ref: string;
     // `null` when the source repo (e.g. a fork) has since been deleted —
@@ -322,6 +323,10 @@ interface GitHubPullRequestApi {
     readonly repo: { readonly full_name: string } | null;
   };
   readonly base: { readonly ref: string };
+}
+
+interface ExistingPullRequest extends PullRequestSummary {
+  readonly body: string | null;
 }
 
 /** Page size for listing open PRs — GitHub's own per-page maximum. */
@@ -832,9 +837,9 @@ async function findExistingPrForIssue(
   owner: string,
   repo: string,
   issueNumber: number,
-): Promise<PullRequestSummary | null> {
+): Promise<ExistingPullRequest | null> {
   const expectedHeadRepoFullName = `${owner}/${repo}`;
-  const summaries: PullRequestSummary[] = [];
+  const summaries: ExistingPullRequest[] = [];
   for (let page = 1; page <= MAX_PR_PAGES; page++) {
     const results = await githubRequest<GitHubPullRequestApi[]>(
       token,
@@ -847,6 +852,7 @@ async function findExistingPrForIssue(
         headRef: pr.head.ref,
         headRepoFullName: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
+        body: pr.body ?? null,
       });
     }
     if (results.length < PR_PAGE_SIZE) {
@@ -860,7 +866,14 @@ async function findExistingPrForIssue(
       );
     }
   }
-  return findPrForIssueNumber(summaries, issueNumber, expectedHeadRepoFullName);
+  const match = findPrForIssueNumber(
+    summaries,
+    issueNumber,
+    expectedHeadRepoFullName,
+  );
+  return match === null
+    ? null
+    : summaries.find((summary) => summary.number === match.number) ?? null;
 }
 
 /** Page size for listing issue comments — GitHub's own per-page maximum. */
@@ -1617,6 +1630,73 @@ export function appendImplementCostToPrBody(
   return body.replace(promptLine, `\n${note}${promptLine}`);
 }
 
+/** Replaces or inserts only the cost line inside an existing Provenance section. */
+export function refreshImplementCostInPrBody(
+  body: string | null,
+  note: string,
+): string | null {
+  if (body === null) {
+    return null;
+  }
+  const provenanceStart = body.indexOf("## Provenance");
+  if (provenanceStart === -1) {
+    return null;
+  }
+  const nextSection = body.indexOf("\n## ", provenanceStart + 1);
+  const provenanceEnd = nextSection === -1 ? body.length : nextSection;
+  let provenance = body.slice(provenanceStart, provenanceEnd);
+  const existingCostLine = /^- \*\*Implement run:\*\* cost: [^\r\n]*$/m;
+  if (existingCostLine.test(provenance)) {
+    provenance = provenance.replace(existingCostLine, note);
+  } else {
+    const promptLine = "- **Prompt/skill version:**";
+    const promptIndex = provenance.indexOf(promptLine);
+    if (promptIndex !== -1) {
+      provenance =
+        provenance.slice(0, promptIndex) +
+        `${note}\n` +
+        provenance.slice(promptIndex);
+    } else {
+      const headingEnd = provenance.indexOf("\n", "## Provenance".length);
+      if (headingEnd === -1) {
+        return null;
+      }
+      provenance =
+        provenance.slice(0, headingEnd + 1) +
+        `${note}\n` +
+        provenance.slice(headingEnd + 1);
+    }
+  }
+  return body.slice(0, provenanceStart) + provenance + body.slice(provenanceEnd);
+}
+
+async function refreshExistingPrCostBestEffort(
+  token: string,
+  owner: string,
+  repo: string,
+  pr: ExistingPullRequest,
+  note: string,
+): Promise<void> {
+  const body = refreshImplementCostInPrBody(pr.body, note);
+  if (body === null || body === pr.body) {
+    return;
+  }
+  try {
+    await githubRequest(
+      token,
+      "PATCH",
+      `/repos/${owner}/${repo}/pulls/${pr.number}`,
+      { body },
+    );
+  } catch (err) {
+    console.error(
+      `Failed to refresh implement-cost provenance on PR #${pr.number} ` +
+        `(observability only, publish itself is unaffected): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 export function appendImplementCostToStepSummary(
   summary: string,
   note: string,
@@ -1897,6 +1977,13 @@ export async function main(): Promise<void> {
       console.log(
         `PR #${existingPr.number} already exists for issue #${issueNumber} ` +
           `(branch ${branchName}); refreshed, not opening a duplicate.`,
+      );
+      await refreshExistingPrCostBestEffort(
+        token,
+        owner,
+        repo,
+        existingPr,
+        implementCostNote,
       );
       if (publishedViaFallback) {
         // Adjudicated fix (Codex round-3 P2, #40 rework): the ORIGINAL F2

@@ -2209,10 +2209,11 @@ jobs:
       // task-agent adds 3 run + 4 action steps (17 inputs), task-apply adds 5
       // run + 4 action steps (8 inputs), and intake adds 1 action (4 inputs).
       //
-      // Issue #320 adds one bounded cost-extractor run step and two pinned
-      // actions (setup-node with one input, upload-artifact with four inputs)
-      // to implement-ready-issues.yml. Jobs are unchanged.
-      runSteps: 74,
+      // Issue #320 adds two bounded run steps (trusted-script restore + cost
+      // extractor) and two pinned actions (setup-node with one input,
+      // upload-artifact with four inputs) to implement-ready-issues.yml. Jobs
+      // are unchanged.
+      runSteps: 75,
       actionSteps: 67,
       inputs: 177,
     });
