@@ -1,0 +1,122 @@
+{
+    "schemaVersion": 1,
+    "corpus": {
+        "corpusSha256": "7cf2f79e648903364c3e11053311b31a055c3afd8a8b9764e7f39452096a504a",
+        "caseIds": [
+            "issue-009-registry-reconciliation",
+            "issue-023-dryrun-second",
+            "issue-026-health-route-dryrun",
+            "issue-058-grant-hardening",
+            "issue-059-public-grant-audit",
+            "issue-120-executable-closure",
+            "issue-151-summary-binding",
+            "issue-194-comment-injection",
+            "issue-205-retarget-hardening",
+            "issue-274-inert-noop",
+            "issue-281-dryrun-utility",
+            "issue-284-vitest-timeout"
+        ]
+    },
+    "cases": [
+        {
+            "caseId": "issue-009-registry-reconciliation",
+            "issueType": "documentation",
+            "dimensions": [
+                "compile",
+                "diffBound",
+                "mutation",
+                "tests",
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-023-dryrun-second",
+            "issueType": "documentation",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-026-health-route-dryrun",
+            "issueType": "feature",
+            "dimensions": [
+                "compile",
+                "diffBound",
+                "mutation",
+                "tests",
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-058-grant-hardening",
+            "issueType": "hardening",
+            "dimensions": [
+                "compile",
+                "diffBound",
+                "mutation",
+                "tests",
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-059-public-grant-audit",
+            "issueType": "schema",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-120-executable-closure",
+            "issueType": "hardening",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-151-summary-binding",
+            "issueType": "security-fix",
+            "dimensions": [
+                "compile",
+                "diffBound",
+                "mutation",
+                "tests",
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-194-comment-injection",
+            "issueType": "security-fix",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-205-retarget-hardening",
+            "issueType": "security-fix",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-274-inert-noop",
+            "issueType": "hardening",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-281-dryrun-utility",
+            "issueType": "feature",
+            "dimensions": [
+                "triageLabel"
+            ]
+        },
+        {
+            "caseId": "issue-284-vitest-timeout",
+            "issueType": "hardening",
+            "dimensions": [
+                "triageLabel"
+            ]
+        }
+    ]
+}
