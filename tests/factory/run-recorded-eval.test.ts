@@ -43,8 +43,7 @@ class FakeExecutor implements GateExecutor {
 }
 
 interface CallCounts {
-  loadCorpus: number;
-  enumerateCorpusFiles: number;
+  loadCorpusSnapshot: number;
   readFile: number;
   makeScratchDirectory: number;
   runEval: number;
@@ -110,8 +109,7 @@ function dependencies(
   overrides: Partial<RecordedEvalMainDependencies> = {},
 ): { deps: RecordedEvalMainDependencies; counts: CallCounts; output: string[] } {
   const counts: CallCounts = {
-    loadCorpus: 0,
-    enumerateCorpusFiles: 0,
+    loadCorpusSnapshot: 0,
     readFile: 0,
     makeScratchDirectory: 0,
     runEval: 0,
@@ -125,13 +123,9 @@ function dependencies(
       counts.readFile += 1;
       return JSON.stringify(matchingBaseline());
     },
-    loadCorpus: async () => {
-      counts.loadCorpus += 1;
-      return { ok: true, value: corpus };
-    },
-    enumerateCorpusFiles: async () => {
-      counts.enumerateCorpusFiles += 1;
-      return [...HASH_FILES];
+    loadCorpusSnapshot: async () => {
+      counts.loadCorpusSnapshot += 1;
+      return { ok: true, value: corpus, hashInput: [...HASH_FILES] };
     },
     runEval: async () => {
       counts.runEval += 1;
@@ -149,8 +143,7 @@ function dependencies(
 
 function expectNoOperationalCalls(counts: CallCounts): void {
   expect(counts).toEqual({
-    loadCorpus: 0,
-    enumerateCorpusFiles: 0,
+    loadCorpusSnapshot: 0,
     readFile: 0,
     makeScratchDirectory: 0,
     runEval: 0,
@@ -169,33 +162,29 @@ describe("recorded evaluation entrypoint", () => {
     }
   });
 
-  it("T163 returns pass and wires a scratch HOME into the recorded run", async () => {
+  it("T198 loads one snapshot, attests its digest, and wires a scratch HOME into the recorded run", async () => {
     let runDependencies:
       | Parameters<RecordedEvalMainDependencies["runEval"]>[1]
       | undefined;
+    let evaluatedCorpus: LoadedCorpus | undefined;
     let loadedPath: string | undefined;
-    let enumeratedRoot: string | undefined;
-    let enumeratedPrefix: string | undefined;
+    let loadedPrefix: string | undefined;
     let baselinePath: string | undefined;
     const fixture = dependencies({
-      loadCorpus: async (path) => {
-        fixture.counts.loadCorpus += 1;
+      loadCorpusSnapshot: async (path, prefix) => {
+        fixture.counts.loadCorpusSnapshot += 1;
         loadedPath = path;
-        return { ok: true, value: corpus };
-      },
-      enumerateCorpusFiles: async (root, prefix) => {
-        fixture.counts.enumerateCorpusFiles += 1;
-        enumeratedRoot = root;
-        enumeratedPrefix = prefix;
-        return [...HASH_FILES];
+        loadedPrefix = prefix;
+        return { ok: true, value: corpus, hashInput: [...HASH_FILES] };
       },
       readFile: async (path) => {
         fixture.counts.readFile += 1;
         baselinePath = path;
         return JSON.stringify(matchingBaseline());
       },
-      runEval: async (_corpus, deps) => {
+      runEval: async (loadedCorpus, deps) => {
         fixture.counts.runEval += 1;
+        evaluatedCorpus = loadedCorpus;
         runDependencies = deps;
         return passingReport();
       },
@@ -217,9 +206,9 @@ describe("recorded evaluation entrypoint", () => {
       "corpus",
     );
     expect(loadedPath).toBe(expectedCorpusRoot);
-    expect(enumeratedRoot).toBe(expectedCorpusRoot);
-    expect(loadedPath).toBe(enumeratedRoot);
-    expect(enumeratedPrefix).toBe("eval/corpus/");
+    expect(loadedPrefix).toBe("eval/corpus/");
+    expect(fixture.counts.loadCorpusSnapshot).toBe(1);
+    expect(evaluatedCorpus).toBe(corpus);
     expect(baselinePath).toBe(
       join(
         fileURLToPath(new URL("../../", import.meta.url)),
@@ -264,30 +253,54 @@ describe("recorded evaluation entrypoint", () => {
       expect(candidate.corpus.caseIds).toEqual(matchingBaseline().corpus.caseIds);
     }
 
-    for (const loadCorpusFailure of [
-      async () => ({ ok: false as const, errors: ["synthetic corpus error"] }),
-      async () => { throw new Error("synthetic corpus exception"); },
-    ]) {
-      const fixture = dependencies({ loadCorpus: loadCorpusFailure });
+  });
+
+  it("T196 fails closed when snapshot loading rejects or throws", async () => {
+    const failures: Array<{
+      loadCorpusSnapshot: RecordedEvalMainDependencies["loadCorpusSnapshot"];
+      output: string;
+    }> = [
+      {
+        loadCorpusSnapshot: async () => ({
+          ok: false,
+          errors: ["synthetic corpus error"],
+        }),
+        output: JSON.stringify({ pass: false, reasons: ["synthetic corpus error"] }),
+      },
+      {
+        loadCorpusSnapshot: async () => {
+          throw new Error("synthetic corpus exception");
+        },
+        output: JSON.stringify({ pass: false, reasons: ["corpus load failed"] }),
+      },
+    ];
+    for (const failure of failures) {
+      const fixture = dependencies({
+        loadCorpusSnapshot: failure.loadCorpusSnapshot,
+      });
       await expect(mainRecordedEval(fixture.deps)).resolves.toBe(1);
-      expect(fixture.output[0]).toMatch(/corpus (?:error|load failed)/);
-      expect(fixture.counts.enumerateCorpusFiles).toBe(0);
+      expect(fixture.output).toEqual([failure.output]);
+      expect(fixture.counts.readFile).toBe(0);
       expect(fixture.counts.makeScratchDirectory).toBe(0);
       expect(fixture.counts.runEval).toBe(0);
     }
+  });
 
-    const hashFailure = dependencies({
-      enumerateCorpusFiles: async () => {
-        throw new Error("synthetic enumeration failure");
-      },
+  it("T197 fails closed when hashing the loaded snapshot throws", async () => {
+    const fixture = dependencies({
+      loadCorpusSnapshot: async () => ({
+        ok: true,
+        value: corpus,
+        hashInput: [],
+      }),
     });
-    await expect(mainRecordedEval(hashFailure.deps)).resolves.toBe(1);
-    expect(hashFailure.output).toEqual([
+    await expect(mainRecordedEval(fixture.deps)).resolves.toBe(1);
+    expect(fixture.output).toEqual([
       JSON.stringify({ pass: false, reasons: ["corpus hashing failed"] }),
     ]);
-    expect(hashFailure.counts.readFile).toBe(0);
-    expect(hashFailure.counts.makeScratchDirectory).toBe(0);
-    expect(hashFailure.counts.runEval).toBe(0);
+    expect(fixture.counts.readFile).toBe(0);
+    expect(fixture.counts.makeScratchDirectory).toBe(0);
+    expect(fixture.counts.runEval).toBe(0);
   });
 
   it("T165 never emits a candidate when any scored dimension is non-pass", async () => {
@@ -335,6 +348,18 @@ describe("recorded evaluation entrypoint", () => {
       "utf8",
     );
     expect(entrypoint).not.toMatch(/readonly\s+(?:write|append)/);
+  });
+
+  it("T195 keeps the entrypoint on the snapshot's single corpus walk", () => {
+    const source = readFileSync(
+      new URL("../../scripts/factory/eval/run-recorded-eval.mts", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toContain("enumerateCorpusFiles");
+    expect(source).not.toMatch(/\bloadCorpus\s*\(/);
+    expect(source.match(/deps\.loadCorpusSnapshot\s*\(/g)).toHaveLength(1);
+    expect(source).toContain("computeCorpusSha256(hashInput)");
+    expect(source).not.toMatch(/(?:readTextFile|deps\.readFile)\s*\(\s*CORPUS_ROOT/);
   });
 
   it("T168 keeps the dark evaluation surface out of every GitHub workflow file", () => {
@@ -416,7 +441,11 @@ describe("recorded evaluation entrypoint", () => {
     const changingCorpus: LoadedCorpus = { ...corpus, cases: changingCases };
     const fixture = dependencies({
       argv: ["--emit-candidate"],
-      loadCorpus: async () => ({ ok: true, value: changingCorpus }),
+      loadCorpusSnapshot: async () => ({
+        ok: true,
+        value: changingCorpus,
+        hashInput: [...HASH_FILES],
+      }),
       runEval: async () => ({ cases: [passingRecord(first)] }),
     });
     await expect(mainRecordedEval(fixture.deps)).resolves.toBe(1);

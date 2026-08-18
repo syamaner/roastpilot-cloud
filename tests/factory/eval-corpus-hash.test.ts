@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { loadCorpusSnapshot } from "../../scripts/factory/eval/corpus-loader.mts";
 import {
   computeCorpusSha256,
   enumerateCorpusFiles,
@@ -31,6 +32,20 @@ function manualDigest(files: readonly CorpusFileInput[]): string {
 }
 
 describe("full corpus SHA-256", () => {
+  it("T188 snapshot hashing is byte-identical to the independent corpus oracle", async () => {
+    const root = fileURLToPath(new URL("../../eval/corpus/", import.meta.url));
+    const snapshot = await loadCorpusSnapshot(root, "eval/corpus/");
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) throw new Error(snapshot.errors.join("\n"));
+    const enumerated = await enumerateCorpusFiles(root, "eval/corpus/");
+    expect(snapshot.hashInput.map((entry) => entry.relativePath).sort()).toEqual(
+      enumerated.map((entry) => entry.relativePath).sort(),
+    );
+    expect(computeCorpusSha256(snapshot.hashInput)).toBe(
+      computeCorpusSha256(enumerated),
+    );
+  });
+
   it("T170 is deterministic and emits lowercase 64-hex", () => {
     const files = [
       file("eval/corpus/manifest.json", "manifest"),

@@ -2,8 +2,12 @@ import { readFile as readTextFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadCorpus } from "./corpus-loader.mts";
+import {
+  CORPUS_REPO_PREFIX,
+  loadCorpusSnapshot,
+} from "./corpus-loader.mts";
 import type { LoadedCorpus } from "./corpus-loader-logic.mts";
+import type { CorpusFileInput } from "./eval-corpus-hash.mts";
 import {
   IMPLEMENT_DIMENSIONS,
   MAX_BASELINE_BYTES,
@@ -11,10 +15,7 @@ import {
   validateEvalBaseline,
   type EvalBaseline,
 } from "./eval-baseline-schema.mts";
-import {
-  computeCorpusSha256,
-  enumerateCorpusFiles,
-} from "./eval-corpus-hash.mts";
+import { computeCorpusSha256 } from "./eval-corpus-hash.mts";
 import {
   FACTORY_EVAL_ENABLED_VARIABLE,
   isEvalEnabled,
@@ -28,7 +29,6 @@ import {
 import { SpawnSyncGateExecutor } from "./outcome-runner.mts";
 import type { GateExecutor } from "./outcome-runner-logic.mts";
 
-const CORPUS_PREFIX = "eval/corpus/";
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const CORPUS_ROOT = join(REPOSITORY_ROOT, "eval", "corpus");
 const BASELINE_PATH = join(
@@ -43,8 +43,7 @@ export interface RecordedEvalMainDependencies {
   readonly argv: readonly string[];
   readonly stdout: (line: string) => void;
   readonly readFile: (path: string) => Promise<string>;
-  readonly loadCorpus: typeof loadCorpus;
-  readonly enumerateCorpusFiles?: typeof enumerateCorpusFiles;
+  readonly loadCorpusSnapshot: typeof loadCorpusSnapshot;
   readonly runEval: typeof runRecordedEval;
   readonly makeScratchDirectory: () => Promise<string>;
   readonly executor?: GateExecutor;
@@ -142,13 +141,15 @@ export async function mainRecordedEval(
   }
 
   let corpus: LoadedCorpus;
+  let hashInput: readonly CorpusFileInput[];
   try {
-    const loaded = await deps.loadCorpus(CORPUS_ROOT);
+    const loaded = await deps.loadCorpusSnapshot(CORPUS_ROOT, CORPUS_REPO_PREFIX);
     if (!loaded.ok) {
       deps.stdout(JSON.stringify({ pass: false, reasons: loaded.errors }));
       return 1;
     }
     corpus = loaded.value;
+    hashInput = loaded.hashInput;
   } catch {
     deps.stdout(JSON.stringify({ pass: false, reasons: ["corpus load failed"] }));
     return 1;
@@ -156,10 +157,7 @@ export async function mainRecordedEval(
 
   let corpusSha256: string;
   try {
-    /* v8 ignore next -- unit tests inject corpus enumeration; the real fallback reads the filesystem */
-    const enumerateFiles = deps.enumerateCorpusFiles ?? enumerateCorpusFiles;
-    const files = await enumerateFiles(CORPUS_ROOT, CORPUS_PREFIX);
-    corpusSha256 = computeCorpusSha256(files);
+    corpusSha256 = computeCorpusSha256(hashInput);
   } catch {
     deps.stdout(JSON.stringify({ pass: false, reasons: ["corpus hashing failed"] }));
     return 1;
@@ -209,8 +207,7 @@ if (
     argv: process.argv.slice(2),
     stdout: (line) => console.log(line),
     readFile: (path) => readTextFile(path, "utf8"),
-    loadCorpus,
-    enumerateCorpusFiles,
+    loadCorpusSnapshot,
     runEval: runRecordedEval,
     makeScratchDirectory,
   });
