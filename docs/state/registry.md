@@ -5,12 +5,15 @@ repo, then the GitHub issue, before starting any story.
 
 ## Active epic
 
-**F1 Factory** (conventional build, per D98 — the factory itself is built by
-hand before any issue is triaged/implemented automatically). C1 Scaffold is
-complete.
+**C2 Schema** — kicked off 18 Aug 2026 (factory-first, per the Build process
+below); the DAG-root story C2-S1 (#307, base DDL) is the first delivered C2
+feature. Two **F1** tails remain in progress (they do not block C2 delivery):
+F1-S6 9h operator-driven activation ([#9](https://github.com/syamaner/roastpilot-cloud/issues/9))
+and F1-S11 live-provider eval ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14),
+harness-validated in recorded mode). C1 Scaffold complete.
 
-Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table);
-factory pipeline/security model/label taxonomy: `factory.md`.
+Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table) and §4
+(C2 data model); factory pipeline/security model/label taxonomy: `factory.md`.
 
 ## C1 story status — complete
 
@@ -38,6 +41,18 @@ Order (operator): S5 → S10 → S8 → S9 → S7 (operator actions remain) → 
 | F1-S9 Anti-gaming quality gates (mutation testing + test-edit rule) | [#12](https://github.com/syamaner/roastpilot-cloud/issues/12) | Done — mutation testing (#68), the anti-gaming diff classifier (#64), and the spec-grounded review pipeline (read-only agent #74/#82/#83/#86/#87, privileged publish wiring #91) all merged. Reconciliation/revalidation completeness (#88/#89/#90) is complete, including complete reviewed-closing provenance, all-paths reference checks, generation-safe delete ownership, current-applicable reporting, and resolution-aware fallback exclusion. Publish is wired but NOT yet enabled for factory PRs; #47 remains the enable/security story and is no longer blocked on this completeness axis. |
 | F1-S10 Factory operational safety (kill-switch, idempotency guards, provenance trailer) | [#13](https://github.com/syamaner/roastpilot-cloud/issues/13) | Done — 3 slices: kill-switch + runbook merged via #50; 429/Retry-After idempotency backoff merged via #53, with D114/#54 completing the bounded primary-reset and headerless-429 response contract; full provenance trailer (model ID, prompt/skill version, `Co-Authored-By`/`Signed-off-by`) merged via [#55](https://github.com/syamaner/roastpilot-cloud/pull/55). D116/#51 completes deterministic pause/disabled-window triage backfill with exact-generation authorization across its seven thin slices. Aggregate cost caps (factory.md §13 point 7) are **N/A by billing model, not a pending operator task** (D102, 18 Jul 2026 — no metered Anthropic/Actions spend to cap; see `docs/factory-runbook.md`). |
 | F1-S11 Factory regression-eval harness | [#14](https://github.com/syamaner/roastpilot-cloud/issues/14) | **In progress.** The F1-S6 dry-run baseline now exists (#9), unblocking S11. **14a authorization/product contract is complete** — operator-ratified 15 Aug 2026 ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14) `issuecomment-5304260445` / `-5304442943`): **recorded-mode first** behind a `RecordedProvider` seam, so #14 reaches a *harness-validated / model-regression-pending* state and does **not** fully close — live pinned-provider execution is a separate later transition owning its own D140 platform disposition, a fresh `factory-security-reviewer` re-evaluation, and a [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)-style read-confinement analysis; and a **separate fail-closed `FACTORY_EVAL_ENABLED`** eval pause (independent of `FACTORY_PAUSED`, created dark, not during the build) gates any future eval-job activation, with 14g manual/inactive through the 14h proof. The remaining D136 slices (14b held-out corpus → 14c schema/loader + deterministic scorers → 14d/14e write-credential-free replay producers → 14f fresh-checkout outcome runner → 14g orchestration/drift gate → 14h supervised proof) are delivered serially from `main`, conventional/interactive, each with factory-security + QA review (corpus, contract, and baseline slices also product-PM). Under D140, no eval job activates without its operator-ratified platform disposition plus that fail-closed eval pause; `FACTORY_PAUSED` stays exactly `true` and the eval enable variable is not created during the build.<br>Decisions: [D136, D140](https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md). |
+
+## C2 story status
+
+C2 Schema kicked off 18 Aug 2026 (factory-first). Stories
+[#307](https://github.com/syamaner/roastpilot-cloud/issues/307)–[#317](https://github.com/syamaner/roastpilot-cloud/issues/317)
+filed under `epic:C2` (see GitHub for per-issue detail). Build the DAG in order:
+the base DDL (C2-S1, #307) lands before its dependents.
+
+| Story | Issue | Status |
+|---|---|---|
+| C2-S1 Base DDL migration (five tables + artifact stage) | [#307](https://github.com/syamaner/roastpilot-cloud/issues/307) | **Done — merged via [#323](https://github.com/syamaner/roastpilot-cloud/pull/323).** Enumerated-column AC rebuild of the closed #318 (bounced on 5 schema divergences from a compare-to-§4 AC); `schema-migration-reviewer` + `privacy-auditor` clean pre-open. Routed conventional: 506 combined lines exceeded the factory envelope (coverage kept, not trimmed). Deferred residual [#321](https://github.com/syamaner/roastpilot-cloud/issues/321) is unrelated (a #320 factory-pipeline note). |
+| C2-S2..S11 (schema, procs, secure views, seed, grant keystone) | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308)–[#317](https://github.com/syamaner/roastpilot-cloud/issues/317) | Filed; in triage/spec. Each schema story gets an enumerated-column `story-planner` contract before dispatch (the #318 lesson). Open sequencing flags: #11 (F1-S8 live DEV-CI) for any live-SQL AC; #309 real MCP fixture availability. |
 
 This registry is authoritative for current delivery status. Verify GitHub
 issue, project, label, and PR fields against it before and after each
