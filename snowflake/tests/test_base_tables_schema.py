@@ -42,6 +42,7 @@ class ColumnDef:
     name: str
     type: str
     not_null: bool
+    primary_key: bool
     default: str | None
 
 
@@ -89,13 +90,20 @@ def parse_column(col_text: str) -> ColumnDef:
     col_type = type_match.group(1).lower() if type_match else ""
 
     not_null = bool(re.search(r"\bnot\s+null\b", col_text, re.IGNORECASE))
+    primary_key = bool(re.search(r"\bprimary\s+key\b", col_text, re.IGNORECASE))
 
     cleaned = re.sub(r"\bnot\s+null\b", " ", col_text, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bprimary\s+key\b", " ", cleaned, flags=re.IGNORECASE)
     default_match = re.search(r"\bdefault\s+(.+)$", cleaned, re.IGNORECASE)
     default = default_match.group(1).strip() if default_match else None
 
-    return ColumnDef(name=name, type=col_type, not_null=not_null, default=default)
+    return ColumnDef(
+        name=name,
+        type=col_type,
+        not_null=not_null,
+        primary_key=primary_key,
+        default=default,
+    )
 
 
 def parse_migration(text: str) -> dict[str, list[ColumnDef]]:
@@ -128,73 +136,73 @@ def parse_migration(text: str) -> dict[str, list[ColumnDef]]:
 
 EXPECTED_SCHEMA: dict[str, list[ColumnDef]] = {
     "cloud_roasts": [
-        ColumnDef("id", "string", False, "uuid_string()"),
-        ColumnDef("idempotency_key", "string", True, None),
-        ColumnDef("owner_id", "string", False, None),
-        ColumnDef("public_slug", "string", True, None),
-        ColumnDef("visibility", "string", True, "'unlisted'"),
-        ColumnDef("bean_origin", "string", False, None),
-        ColumnDef("bean_varietal", "string", False, None),
-        ColumnDef("bean_weight_g", "float", False, None),
-        ColumnDef("profile_name", "string", False, None),
-        ColumnDef("roast_level", "string", False, None),
-        ColumnDef("summary", "variant", True, None),
-        ColumnDef("operator_rating", "int", False, None),
-        ColumnDef("operator_notes", "string", False, None),
-        ColumnDef("contributed_to_learning", "boolean", True, "true"),
-        ColumnDef("roasted_at_utc", "timestamp_tz", False, None),
-        ColumnDef("created_at", "timestamp_tz", True, "current_timestamp()"),
-        ColumnDef("updated_at", "timestamp_tz", True, "current_timestamp()"),
+        ColumnDef("id", "string", False, True, "uuid_string()"),
+        ColumnDef("idempotency_key", "string", True, False, None),
+        ColumnDef("owner_id", "string", False, False, None),
+        ColumnDef("public_slug", "string", True, False, None),
+        ColumnDef("visibility", "string", True, False, "'unlisted'"),
+        ColumnDef("bean_origin", "string", False, False, None),
+        ColumnDef("bean_varietal", "string", False, False, None),
+        ColumnDef("bean_weight_g", "float", False, False, None),
+        ColumnDef("profile_name", "string", False, False, None),
+        ColumnDef("roast_level", "string", False, False, None),
+        ColumnDef("summary", "variant", True, False, None),
+        ColumnDef("operator_rating", "int", False, False, None),
+        ColumnDef("operator_notes", "string", False, False, None),
+        ColumnDef("contributed_to_learning", "boolean", True, False, "true"),
+        ColumnDef("roasted_at_utc", "timestamp_tz", False, False, None),
+        ColumnDef("created_at", "timestamp_tz", True, False, "current_timestamp()"),
+        ColumnDef("updated_at", "timestamp_tz", True, False, "current_timestamp()"),
     ],
     "roast_telemetry": [
-        ColumnDef("roast_id", "string", True, None),
-        ColumnDef("elapsed_s", "float", True, None),
-        ColumnDef("bean_temp_c", "float", False, None),
-        ColumnDef("env_temp_c", "float", False, None),
-        ColumnDef("heat_percent", "int", False, None),
-        ColumnDef("fan_percent", "int", False, None),
-        ColumnDef("ror_c_per_min", "float", False, None),
-        ColumnDef("raw", "variant", False, None),
+        ColumnDef("roast_id", "string", True, False, None),
+        ColumnDef("elapsed_s", "float", True, False, None),
+        ColumnDef("bean_temp_c", "float", False, False, None),
+        ColumnDef("env_temp_c", "float", False, False, None),
+        ColumnDef("heat_percent", "int", False, False, None),
+        ColumnDef("fan_percent", "int", False, False, None),
+        ColumnDef("ror_c_per_min", "float", False, False, None),
+        ColumnDef("raw", "variant", False, False, None),
     ],
     "roast_artifacts": [
-        ColumnDef("id", "string", False, "uuid_string()"),
-        ColumnDef("roast_id", "string", True, None),
-        ColumnDef("kind", "string", True, None),
-        ColumnDef("stage_path", "string", True, None),
-        ColumnDef("byte_size", "int", False, None),
-        ColumnDef("created_at", "timestamp_tz", True, "current_timestamp()"),
+        ColumnDef("id", "string", False, True, "uuid_string()"),
+        ColumnDef("roast_id", "string", True, False, None),
+        ColumnDef("kind", "string", True, False, None),
+        ColumnDef("stage_path", "string", True, False, None),
+        ColumnDef("byte_size", "int", False, False, None),
+        ColumnDef("created_at", "timestamp_tz", True, False, "current_timestamp()"),
     ],
     "tasting_reviews": [
-        ColumnDef("id", "string", False, "uuid_string()"),
-        ColumnDef("roast_id", "string", True, None),
-        ColumnDef("reviewer_name", "string", False, None),
-        ColumnDef("score", "int", True, None),
-        ColumnDef("aroma", "smallint", False, None),
-        ColumnDef("acidity", "smallint", False, None),
-        ColumnDef("sweetness", "smallint", False, None),
-        ColumnDef("body", "smallint", False, None),
-        ColumnDef("aftertaste", "smallint", False, None),
-        ColumnDef("brew_method", "string", False, None),
-        ColumnDef("notes", "string", False, None),
-        ColumnDef("submitted_ip_hash", "string", False, None),
-        ColumnDef("created_at", "timestamp_tz", True, "current_timestamp()"),
+        ColumnDef("id", "string", False, True, "uuid_string()"),
+        ColumnDef("roast_id", "string", True, False, None),
+        ColumnDef("reviewer_name", "string", False, False, None),
+        ColumnDef("score", "int", True, False, None),
+        ColumnDef("aroma", "smallint", False, False, None),
+        ColumnDef("acidity", "smallint", False, False, None),
+        ColumnDef("sweetness", "smallint", False, False, None),
+        ColumnDef("body", "smallint", False, False, None),
+        ColumnDef("aftertaste", "smallint", False, False, None),
+        ColumnDef("brew_method", "string", False, False, None),
+        ColumnDef("notes", "string", False, False, None),
+        ColumnDef("submitted_ip_hash", "string", False, False, None),
+        ColumnDef("created_at", "timestamp_tz", True, False, "current_timestamp()"),
     ],
     "reference_roast_summaries": [
-        ColumnDef("id", "string", False, "uuid_string()"),
-        ColumnDef("bean_origin", "string", True, None),
-        ColumnDef("roast_level", "string", True, None),
-        ColumnDef("roast_count", "int", True, None),
-        ColumnDef("review_count", "int", True, None),
-        ColumnDef("avg_rating", "float", False, None),
-        ColumnDef("first_crack_temp_avg_c", "float", False, None),
-        ColumnDef("first_crack_temp_stddev_c", "float", False, None),
-        ColumnDef("drop_temp_avg_c", "float", False, None),
-        ColumnDef("drop_temp_stddev_c", "float", False, None),
-        ColumnDef("development_percent_avg", "float", False, None),
-        ColumnDef("first_crack_time_avg_s", "float", False, None),
-        ColumnDef("total_time_avg_s", "float", False, None),
-        ColumnDef("key_patterns", "variant", False, "parse_json('[]')"),
-        ColumnDef("updated_at", "timestamp_tz", True, "current_timestamp()"),
+        ColumnDef("id", "string", False, True, "uuid_string()"),
+        ColumnDef("bean_origin", "string", True, False, None),
+        ColumnDef("roast_level", "string", True, False, None),
+        ColumnDef("roast_count", "int", True, False, None),
+        ColumnDef("review_count", "int", True, False, None),
+        ColumnDef("avg_rating", "float", False, False, None),
+        ColumnDef("first_crack_temp_avg_c", "float", False, False, None),
+        ColumnDef("first_crack_temp_stddev_c", "float", False, False, None),
+        ColumnDef("drop_temp_avg_c", "float", False, False, None),
+        ColumnDef("drop_temp_stddev_c", "float", False, False, None),
+        ColumnDef("development_percent_avg", "float", False, False, None),
+        ColumnDef("first_crack_time_avg_s", "float", False, False, None),
+        ColumnDef("total_time_avg_s", "float", False, False, None),
+        ColumnDef("key_patterns", "variant", False, False, "parse_json('[]')"),
+        ColumnDef("updated_at", "timestamp_tz", True, False, "current_timestamp()"),
     ],
 }
 
@@ -243,26 +251,28 @@ class TestSplitColumns:
 
 class TestParseColumn:
     def test_parses_a_plain_nullable_column(self) -> None:
-        assert parse_column("owner_id string") == ColumnDef("owner_id", "string", False, None)
+        assert parse_column("owner_id string") == ColumnDef(
+            "owner_id", "string", False, False, None
+        )
 
     def test_parses_a_not_null_column(self) -> None:
         assert parse_column("idempotency_key string not null") == ColumnDef(
-            "idempotency_key", "string", True, None
+            "idempotency_key", "string", True, False, None
         )
 
     def test_parses_default_before_primary_key(self) -> None:
         assert parse_column("id string default uuid_string() primary key") == ColumnDef(
-            "id", "string", False, "uuid_string()"
+            "id", "string", False, True, "uuid_string()"
         )
 
     def test_parses_not_null_before_default(self) -> None:
         assert parse_column("visibility string not null default 'unlisted'") == ColumnDef(
-            "visibility", "string", True, "'unlisted'"
+            "visibility", "string", True, False, "'unlisted'"
         )
 
     def test_parses_default_with_nested_parens(self) -> None:
         assert parse_column("key_patterns variant default parse_json('[]')") == ColumnDef(
-            "key_patterns", "variant", False, "parse_json('[]')"
+            "key_patterns", "variant", False, False, "parse_json('[]')"
         )
 
 
@@ -295,9 +305,35 @@ class TestFullSchema:
         assert PARSED_SCHEMA == EXPECTED_SCHEMA
 
 
+# T-PK: exactly the four documented id columns carry PRIMARY KEY, and
+# roast_telemetry explicitly has no primary-key column (AC-2-NEG).
+class TestPrimaryKeys:
+    def test_exactly_the_four_documented_id_columns_are_primary_keys(self) -> None:
+        expected_primary_keys = {
+            ("cloud_roasts", "id"),
+            ("roast_artifacts", "id"),
+            ("tasting_reviews", "id"),
+            ("reference_roast_summaries", "id"),
+        }
+        actual_primary_keys = {
+            (table, column.name)
+            for table, columns in PARSED_SCHEMA.items()
+            for column in columns
+            if column.primary_key
+        }
+        assert actual_primary_keys == expected_primary_keys
+
+    def test_roast_telemetry_has_no_primary_key_column(self) -> None:
+        primary_key_columns = [
+            column.name for column in PARSED_SCHEMA["roast_telemetry"] if column.primary_key
+        ]
+        assert primary_key_columns == []
+
+
 # T-B1 (blocker 1): reference_roast_summaries named exactly that, and its
-# logical key (bean_origin, roast_level) is both NOT NULL. Renaming the
-# table or dropping either NOT NULL fails this test and only this test.
+# logical key (bean_origin, roast_level) is both NOT NULL. This is the
+# dedicated hardcoded guard; T-FULL and T-B3 intentionally overlap it for
+# defense-in-depth.
 class TestBlocker1ReferenceRoastSummariesKey:
     def test_table_is_named_exactly_reference_roast_summaries(self) -> None:
         assert "reference_roast_summaries" in PARSED_SCHEMA
@@ -356,13 +392,24 @@ class TestCelsiusOnly:
         assert pattern.search(strip_line_comments(MIGRATION_TEXT)) is None
 
 
-# T-SCOPE: no grant/role/view/proc anywhere -- this migration is base tables
-# and a stage only.
+# T-SCOPE: exactly five tables and one stage are the only CREATE object types;
+# grants and role creation remain explicitly forbidden.
 class TestScopeFence:
-    def test_no_grant_role_view_or_procedure_statement(self) -> None:
+    def test_only_five_tables_and_one_stage_are_created(self) -> None:
+        stripped = strip_line_comments(MIGRATION_TEXT)
+        object_types = re.findall(
+            r"\bcreate\s+(?:or\s+replace\s+)?([a-z_]+)\b",
+            stripped,
+            re.IGNORECASE,
+        )
+        normalized_types = [object_type.lower() for object_type in object_types]
+        assert set(normalized_types) == {"table", "stage"}
+        assert normalized_types.count("table") == 5
+        assert normalized_types.count("stage") == 1
+
+    def test_no_grant_or_create_role_statement(self) -> None:
         pattern = re.compile(
-            r"\bgrant\s|\bcreate\s+role\b|\bcreate\s+(?:or\s+replace\s+)?(?:secure\s+)?view\b|"
-            r"\bcreate\s+(?:or\s+replace\s+)?procedure\b",
+            r"\bgrant\b|\bcreate\s+(?:or\s+replace\s+)?role\b",
             re.IGNORECASE,
         )
         assert pattern.search(strip_line_comments(MIGRATION_TEXT)) is None
