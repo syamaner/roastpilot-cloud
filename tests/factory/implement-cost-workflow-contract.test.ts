@@ -146,7 +146,7 @@ describe("implement cost workflow contract", () => {
   it("W8: uploads implement-cost only after trusted extraction succeeds", () => {
     const upload = step("implement", "Upload implement cost artifact");
     expect(upload.if).toBe(
-      "steps.extract-implement-cost.outcome == 'success'",
+      "always() && steps.extract-implement-cost.outcome == 'success'",
     );
     expect(upload["continue-on-error"]).toBe(true);
     expect(mapping(upload.with)).toMatchObject({
