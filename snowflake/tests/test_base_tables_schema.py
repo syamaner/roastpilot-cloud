@@ -44,6 +44,7 @@ class ColumnDef:
     not_null: bool
     primary_key: bool
     default: str | None
+    unexpected_tokens: str | None = None
 
 
 def strip_line_comments(text: str) -> str:
@@ -76,26 +77,119 @@ def split_columns(body: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
-def parse_column(col_text: str) -> ColumnDef:
-    """Parses one column-def string into a ColumnDef, treating `not null`
-    and `primary key` as constraint tokens (not part of the type), and
-    `default` as capturing everything after it once those two constraint
-    tokens are removed -- independent of whether `default` or `primary key`
-    appears first in the source text.
+def _default_expression_length(text: str) -> int:
+    """Returns the length of one allowlisted default expression at `text[0]`.
+
+    The migration only needs scalar literals, bare constants, and function
+    calls. Returning just one expression leaves any trailing constraint or
+    token for `parse_column` to flag instead of silently folding it into the
+    default.
     """
-    tokens = col_text.split()
-    name = tokens[0]
-    without_name = col_text[len(name) :].strip()
-    type_match = re.match(r"(\w+)", without_name)
-    col_type = type_match.group(1).lower() if type_match else ""
+    if not text:
+        return 0
 
-    not_null = bool(re.search(r"\bnot\s+null\b", col_text, re.IGNORECASE))
-    primary_key = bool(re.search(r"\bprimary\s+key\b", col_text, re.IGNORECASE))
+    if text[0] == "'":
+        i = 1
+        while i < len(text):
+            if text[i] == "'":
+                if i + 1 < len(text) and text[i + 1] == "'":
+                    i += 2
+                    continue
+                return i + 1
+            i += 1
+        return 0
 
-    cleaned = re.sub(r"\bnot\s+null\b", " ", col_text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bprimary\s+key\b", " ", cleaned, flags=re.IGNORECASE)
-    default_match = re.search(r"\bdefault\s+(.+)$", cleaned, re.IGNORECASE)
-    default = default_match.group(1).strip() if default_match else None
+    number_match = re.match(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", text)
+    if number_match:
+        return number_match.end()
+
+    identifier_match = re.match(r"[a-z_]\w*", text, re.IGNORECASE)
+    if not identifier_match:
+        return 0
+
+    end = identifier_match.end()
+    while end < len(text) and text[end].isspace():
+        end += 1
+    if end == len(text) or text[end] != "(":
+        return identifier_match.end()
+
+    depth = 0
+    in_string = False
+    i = end
+    while i < len(text):
+        char = text[i]
+        if char == "'":
+            if in_string and i + 1 < len(text) and text[i + 1] == "'":
+                i += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return 0
+
+
+def parse_column(col_text: str) -> ColumnDef:
+    """Parses one allowlisted column declaration into a `ColumnDef`.
+
+    Only name, type (including an optional parenthesised modifier), NOT NULL,
+    DEFAULT, and PRIMARY KEY are modeled. Any remaining text is retained in
+    `unexpected_tokens`, so an unknown inline constraint can never disappear
+    during parsing and compare equal to the expected declaration.
+    """
+    name_match = re.match(r"\s*([a-z_]\w*)\b", col_text, re.IGNORECASE)
+    assert name_match is not None, f"column declaration has no valid name: {col_text!r}"
+    name = name_match.group(1)
+    remaining = col_text[name_match.end() :].lstrip()
+
+    type_match = re.match(r"([a-z_]\w*(?:\s*\([^()]*\))?)(?=\s|$)", remaining, re.IGNORECASE)
+    if type_match is None:
+        return ColumnDef(name, "", False, False, None, remaining or "<missing type>")
+    col_type = re.sub(r"\s+\(", "(", type_match.group(1)).lower()
+    remaining = remaining[type_match.end() :]
+
+    not_null = False
+    primary_key = False
+    default: str | None = None
+    unexpected_tokens: str | None = None
+
+    while remaining.strip():
+        remaining = remaining.lstrip()
+        not_null_match = re.match(r"not\s+null\b", remaining, re.IGNORECASE)
+        primary_key_match = re.match(r"primary\s+key\b", remaining, re.IGNORECASE)
+        default_match = re.match(r"default\b", remaining, re.IGNORECASE)
+
+        if not_null_match:
+            if not_null:
+                unexpected_tokens = remaining
+                break
+            not_null = True
+            remaining = remaining[not_null_match.end() :]
+        elif primary_key_match:
+            if primary_key:
+                unexpected_tokens = remaining
+                break
+            primary_key = True
+            remaining = remaining[primary_key_match.end() :]
+        elif default_match:
+            if default is not None:
+                unexpected_tokens = remaining
+                break
+            expression_text = remaining[default_match.end() :].lstrip()
+            expression_length = _default_expression_length(expression_text)
+            if expression_length == 0:
+                unexpected_tokens = remaining
+                break
+            default = expression_text[:expression_length]
+            remaining = expression_text[expression_length:]
+        else:
+            unexpected_tokens = remaining
+            break
 
     return ColumnDef(
         name=name,
@@ -103,6 +197,7 @@ def parse_column(col_text: str) -> ColumnDef:
         not_null=not_null,
         primary_key=primary_key,
         default=default,
+        unexpected_tokens=unexpected_tokens,
     )
 
 
@@ -303,6 +398,49 @@ class TestColumnCounts:
 class TestFullSchema:
     def test_parsed_schema_matches_expected_schema_exactly(self) -> None:
         assert PARSED_SCHEMA == EXPECTED_SCHEMA
+
+
+# T-DECL: column declarations use only the modeled grammar. This hardcoded
+# guard includes the no-UNIQUE idempotency invariant: replay safety is MERGE
+# ... ON idempotency_key, never a UNIQUE constraint.
+class TestColumnDeclarations:
+    def test_no_column_has_unmodeled_tokens_or_constraints(self) -> None:
+        unexpected = [
+            (table, column.name, column.unexpected_tokens)
+            for table, columns in PARSED_SCHEMA.items()
+            for column in columns
+            if column.unexpected_tokens is not None
+        ]
+        assert unexpected == []
+
+    def test_idempotency_key_is_plain_string_without_an_inline_constraint(self) -> None:
+        columns = {column.name: column for column in PARSED_SCHEMA["cloud_roasts"]}
+        idempotency_key = columns["idempotency_key"]
+        assert idempotency_key.type == "string"
+        assert idempotency_key.unexpected_tokens is None
+
+    def test_public_slug_uses_the_unmodified_string_type(self) -> None:
+        columns = {column.name: column for column in PARSED_SCHEMA["cloud_roasts"]}
+        public_slug = columns["public_slug"]
+        assert public_slug.type == "string"
+        assert public_slug.unexpected_tokens is None
+
+    def test_parser_flags_unique_instead_of_discarding_it(self) -> None:
+        parsed = parse_column("idempotency_key string unique not null")
+        assert parsed.unexpected_tokens == "unique not null"
+
+    def test_parser_preserves_a_parenthesized_type_modifier(self) -> None:
+        string_column = parse_column("public_slug string(1) not null")
+        number_column = parse_column("amount number(38,0)")
+        assert string_column.type == "string(1)"
+        assert string_column.not_null is True
+        assert string_column.unexpected_tokens is None
+        assert number_column.type == "number(38,0)"
+        assert number_column.unexpected_tokens is None
+
+    def test_parser_flags_any_other_inline_constraint(self) -> None:
+        parsed = parse_column("owner_id string collate 'en-ci'")
+        assert parsed.unexpected_tokens == "collate 'en-ci'"
 
 
 # T-PK: exactly the four documented id columns carry PRIMARY KEY, and
