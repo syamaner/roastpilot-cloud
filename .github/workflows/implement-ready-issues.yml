@@ -685,7 +685,12 @@ jobs:
         continue-on-error: true
         env:
           DISPATCH_SHA: ${{ github.sha }}
-        run: git checkout "$DISPATCH_SHA" -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts
+        run: |
+          set -euo pipefail
+          for f in scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts; do
+            rm -f "$f"
+            git show "$DISPATCH_SHA:$f" > "$f"
+          done
 
       - name: Extract bounded implement cost
         id: extract-implement-cost

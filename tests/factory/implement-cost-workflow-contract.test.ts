@@ -61,11 +61,16 @@ describe("implement cost workflow contract", () => {
     expect(extractorIndex).toBeGreaterThan(restoreIndex);
     const restore = step("implement", "Restore trusted implement cost extractor");
     expect(mapping(restore.env).DISPATCH_SHA).toBe("${{ github.sha }}");
-    expect(restore.run).toBe(
-      'git checkout "$DISPATCH_SHA" -- scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts',
+    const restoreRun = String(restore.run);
+    expect(restoreRun).toContain("set -euo pipefail");
+    expect(restoreRun).toContain(
+      "for f in scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts; do",
     );
-    expect(String(restore.run)).not.toContain("${{");
-    expect(String(restore.run)).not.toContain("github.sha");
+    expect(restoreRun).toContain('rm -f "$f"');
+    expect(restoreRun).toContain('git show "$DISPATCH_SHA:$f" > "$f"');
+    expect(restoreRun).not.toContain("git checkout");
+    expect(restoreRun).not.toContain("${{");
+    expect(restoreRun).not.toContain("github.sha");
     expect(names.indexOf("Extract bounded implement cost")).toBeGreaterThan(-1);
     expect(extractorIndex).toBeLessThan(
       names.indexOf("Run local gates (independent of the agent's own self-report)"),
