@@ -67,8 +67,11 @@ describe("implement cost workflow contract", () => {
       "for f in scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts; do",
     );
     expect(restoreRun).toContain('rm -f "$f"');
-    expect(restoreRun).toContain('git show "$DISPATCH_SHA:$f" > "$f"');
+    expect(restoreRun).toContain(
+      'git --no-replace-objects show "$DISPATCH_SHA:$f" > "$f"',
+    );
     expect(restoreRun).not.toContain("git checkout");
+    expect(restoreRun).not.toMatch(/(^|\n)\s*git show\s/);
     expect(restoreRun).not.toContain("${{");
     expect(restoreRun).not.toContain("github.sha");
     expect(names.indexOf("Extract bounded implement cost")).toBeGreaterThan(-1);

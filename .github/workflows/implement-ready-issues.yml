@@ -689,7 +689,7 @@ jobs:
           set -euo pipefail
           for f in scripts/factory/extract-implement-cost.mts scripts/factory/implement-cost-logic.mts; do
             rm -f "$f"
-            git show "$DISPATCH_SHA:$f" > "$f"
+            git --no-replace-objects show "$DISPATCH_SHA:$f" > "$f"
           done
 
       - name: Extract bounded implement cost
