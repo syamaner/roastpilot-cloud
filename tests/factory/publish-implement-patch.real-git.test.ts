@@ -108,6 +108,9 @@ afterEach(async () => {
   delete process.env.IMPLEMENT_PROMPT_VERSION;
   delete process.env.DISPATCH_ACTOR;
   delete process.env.IMPLEMENT_MODEL_ID;
+  delete process.env.IMPLEMENT_COST_USD;
+  delete process.env.IMPLEMENT_NUM_TURNS;
+  delete process.env.GITHUB_STEP_SUMMARY;
   process.exitCode = undefined;
 });
 
@@ -4456,6 +4459,78 @@ describe("publish-implement-patch — F1-S10 slice 2 (#13): 429/Retry-After back
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rate-limited"));
     warnSpy.mockRestore();
   });
+});
+
+describe("publish-implement-patch — implement cost, main() end-to-end", () => {
+  async function publishNewPrWithCost(
+    costUsd: string | undefined,
+    numTurns: string | undefined,
+  ): Promise<{ body: string; summary: string }> {
+    if (costUsd === undefined) {
+      delete process.env.IMPLEMENT_COST_USD;
+    } else {
+      process.env.IMPLEMENT_COST_USD = costUsd;
+    }
+    if (numTurns === undefined) {
+      delete process.env.IMPLEMENT_NUM_TURNS;
+    } else {
+      process.env.IMPLEMENT_NUM_TURNS = numTurns;
+    }
+    const summaryPath = join(scratchDir, "cost-summary.md");
+    process.env.GITHUB_STEP_SUMMARY = summaryPath;
+    const fetchMock = stubHappyPathFetch();
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const calls = fetchMock.mock.calls as Array<
+      [string | URL, RequestInit | undefined]
+    >;
+    const createCall = calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(createCall).toBeDefined();
+    const request = JSON.parse(createCall?.[1]?.body as string) as {
+      body: string;
+    };
+    return {
+      body: request.body,
+      summary: await readFile(summaryPath, "utf8"),
+    };
+  }
+
+  it("F8a: canonical cost reaches the created PR body and step summary", async () => {
+    const published = await publishNewPrWithCost("2.9373", "62");
+    const note = "- **Implement run:** cost: `$2.9373 USD across 62 turns`";
+    expect(published.body).toContain(note);
+    expect(published.summary).toContain(note);
+  });
+
+  it("F8b/AC4: malformed cost degrades without raw echo and still publishes", async () => {
+    const raw = "0\n\n@codex review";
+    const published = await publishNewPrWithCost(raw, "62");
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.summary).toContain("- **Implement run:** cost: unavailable");
+    expect(`${published.body}\n${published.summary}`).not.toContain(raw);
+    const costLines = `${published.body}\n${published.summary}`
+      .split("\n")
+      .filter((line) => line.startsWith("- **Implement run:** cost:"));
+    expect(costLines).not.toContainEqual(expect.stringContaining("@codex review"));
+  });
+
+  it("F8c/AC4: unset cost degrades to unavailable and still publishes", async () => {
+    const published = await publishNewPrWithCost(undefined, undefined);
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.summary).toContain("- **Implement run:** cost: unavailable");
+  });
+
+  it("F8d/F5: non-canonical cost fails the publisher round trip and still publishes", async () => {
+    const published = await publishNewPrWithCost("1.0", "5");
+    expect(published.body).toContain("- **Implement run:** cost: unavailable");
+    expect(published.body).not.toContain("$1.0 USD");
+  });
+
 });
 
 describe("publish-implement-patch — F1-S10 slice 3 (#13, factory.md §13.12): provenance trailer, end-to-end", () => {

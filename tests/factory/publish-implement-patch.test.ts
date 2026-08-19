@@ -8,8 +8,29 @@ import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdic
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
+vi.mock("../../scripts/factory/untrusted-text.mts", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../scripts/factory/untrusted-text.mts")
+  >();
+  return {
+    ...actual,
+    sanitizeUntrustedTextForPostedBody: vi.fn(
+      actual.sanitizeUntrustedTextForPostedBody,
+    ),
+  };
+});
 
-const { main, MAX_PATCH_BYTES } = await import(
+const untrustedText = await import(
+  "../../scripts/factory/untrusted-text.mts"
+);
+
+const {
+  appendImplementCostToPrBody,
+  appendImplementCostToStepSummary,
+  buildImplementCostNote,
+  main,
+  MAX_PATCH_BYTES,
+} = await import(
   "../../scripts/factory/publish-implement-patch.mts"
 );
 
@@ -66,6 +87,58 @@ index 0000000..abc1234
 @@ -0,0 +1,1 @@
 +export const x = 1;
 `;
+
+describe("implement cost provenance", () => {
+  it("P1: renders one valid inert line in the PR provenance and publisher summary", () => {
+    const note = buildImplementCostNote("2.9373", "62");
+    expect(note).toBe(
+      "- **Implement run:** cost: `$2.9373 USD across 62 turns`",
+    );
+    expect(note.split("\n")).toHaveLength(1);
+
+    const body = appendImplementCostToPrBody(
+      "## Provenance\n\n- **Model:** `claude`\n- **Prompt/skill version:** `sha`\n",
+      note,
+    );
+    const summary = appendImplementCostToStepSummary(
+      "## Factory publish summary\n\n- **PR:** #1\n",
+      note,
+    );
+    expect(body).toContain(`- **Model:** \`claude\`\n${note}\n- **Prompt/skill version:**`);
+    expect(summary).toContain(`- **PR:** #1\n${note}\n`);
+    expect(body.match(/\*\*Implement run:\*\*/g)).toHaveLength(1);
+    expect(summary.match(/\*\*Implement run:\*\*/g)).toHaveLength(1);
+  });
+
+  it("P2/G9: malformed crossed values render unavailable and never render raw input", () => {
+    const rawCost = "1e3";
+    const rawTurns = "01";
+    const note = buildImplementCostNote(rawCost, rawTurns);
+    expect(note).toBe("- **Implement run:** cost: unavailable");
+    expect(note).not.toContain(rawCost);
+    expect(note).not.toContain(rawTurns);
+    expect(buildImplementCostNote("10000.01", "62")).toBe(
+      "- **Implement run:** cost: unavailable",
+    );
+    expect(buildImplementCostNote("1", "100001")).toBe(
+      "- **Implement run:** cost: unavailable",
+    );
+  });
+
+  it("P3: valid cost rendering routes through untrusted-text neutralisation as defense in depth", () => {
+    const sanitizeSpy = vi.mocked(
+      untrustedText.sanitizeUntrustedTextForPostedBody,
+    );
+    sanitizeSpy.mockClear();
+
+    expect(buildImplementCostNote("2.9373", "62")).toBe(
+      "- **Implement run:** cost: `$2.9373 USD across 62 turns`",
+    );
+    expect(sanitizeSpy).toHaveBeenCalledOnce();
+    expect(sanitizeSpy).toHaveBeenCalledWith("$2.9373 USD across 62 turns");
+  });
+
+});
 
 let workdir: string;
 

@@ -161,6 +161,9 @@
  *   read from). Re-validated here via {@link validateProvenanceModelId}; a
  *   missing/empty/rejected value degrades the trailer's model-ID field to
  *   "unavailable", never blocks an otherwise-valid publish.
+ * - `IMPLEMENT_COST_USD` / `IMPLEMENT_NUM_TURNS` — bounded implement-job
+ *   outputs extracted from the execution file in the read-only job. Both
+ *   are authoritatively re-validated here and rendered all-or-nothing.
  * - `IMPLEMENT_PROMPT_VERSION` — stands in for a prompt/skill version;
  *   see {@link ProvenanceContext.promptVersion}'s doc for why this is the
  *   repository commit SHA rather than a named skill version. Soft-
@@ -225,10 +228,12 @@ import {
   type PublishStepSummaryContext,
   type PullRequestSummary,
 } from "./implement-patch-logic.mts";
+import { validateImplementCostOutputs } from "./implement-cost-logic.mts";
 import {
   findCiSkipDirectives,
   sanitizeAndClampUntrustedInlineText,
   sanitizeAndClampUntrustedTextForCommitMessage,
+  sanitizeUntrustedTextForPostedBody,
   sanitizeUntrustedInlineText,
 } from "./untrusted-text.mts";
 
@@ -1586,6 +1591,45 @@ function writeStepSummary(markdown: string): void {
   }
 }
 
+/**
+ * Re-validates the crossed cost outputs and builds the single inert line used
+ * in the creation-time PR provenance section and each run's publisher summary.
+ */
+export function buildImplementCostNote(
+  costCandidate: string | undefined,
+  turnsCandidate: string | undefined,
+): string {
+  const cost = validateImplementCostOutputs(costCandidate, turnsCandidate);
+  const rendered =
+    cost === null
+      ? "unavailable"
+      : sanitizeUntrustedTextForPostedBody(
+          `$${cost.costUsd} USD across ${cost.numTurns} turns`,
+        );
+  return `- **Implement run:** cost: ${rendered}`;
+}
+
+/**
+ * Adds creation-time PR-body provenance at PR open, alongside model ID,
+ * prompt version, and dispatcher; it is intentionally not updated on refresh.
+ * Per-run cost for every run, including refreshes, is authoritatively retained
+ * in the publisher step summary and the `implement-cost` artifact.
+ */
+export function appendImplementCostToPrBody(
+  body: string,
+  note: string,
+): string {
+  const promptLine = "\n- **Prompt/skill version:**";
+  return body.replace(promptLine, `\n${note}${promptLine}`);
+}
+
+export function appendImplementCostToStepSummary(
+  summary: string,
+  note: string,
+): string {
+  return `${summary.trimEnd()}\n${note}\n`;
+}
+
 export async function main(): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
@@ -1625,6 +1669,10 @@ export async function main(): Promise<void> {
     process.env.IMPLEMENT_PROMPT_VERSION ?? "unknown (IMPLEMENT_PROMPT_VERSION not set)";
   const dispatchActor = process.env.DISPATCH_ACTOR ?? "unknown-dispatcher";
   const modelId = validateProvenanceModelId(process.env.IMPLEMENT_MODEL_ID);
+  const implementCostNote = buildImplementCostNote(
+    process.env.IMPLEMENT_COST_USD,
+    process.env.IMPLEMENT_NUM_TURNS,
+  );
   const provenance: ProvenanceContext = { modelId, promptVersion, dispatchActor };
   // Which login `postFailureComment` treats as "our own prior comment"
   // (factory.md §13's publisher-identity switch). Soft-defaulted to the
@@ -1916,22 +1964,25 @@ export async function main(): Promise<void> {
         );
       }
       writeStepSummary(
-        buildPublishSuccessStepSummary({
-          ...summaryContext,
-          labelApplied,
-          gamingFlagged,
-          gamingLabelApplied,
-          gamingAnnotationPosted,
-          gamingLabelRemoved,
-          prNumber: existingPr.number,
-          // findExistingPrForIssue's underlying query doesn't fetch
-          // html_url (PullRequestSummary has no such field) — a GitHub PR
-          // URL has a fixed, well-known shape, so it's constructed here
-          // rather than adding an unused-elsewhere API field just for
-          // this summary line.
-          prUrl: `https://github.com/${owner}/${repo}/pull/${existingPr.number}`,
-          wasRefresh: true,
-        }),
+        appendImplementCostToStepSummary(
+          buildPublishSuccessStepSummary({
+            ...summaryContext,
+            labelApplied,
+            gamingFlagged,
+            gamingLabelApplied,
+            gamingAnnotationPosted,
+            gamingLabelRemoved,
+            prNumber: existingPr.number,
+            // findExistingPrForIssue's underlying query doesn't fetch
+            // html_url (PullRequestSummary has no such field) — a GitHub PR
+            // URL has a fixed, well-known shape, so it's constructed here
+            // rather than adding an unused-elsewhere API field just for
+            // this summary line.
+            prUrl: `https://github.com/${owner}/${repo}/pull/${existingPr.number}`,
+            wasRefresh: true,
+          }),
+          implementCostNote,
+        ),
       );
       if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
         console.error(
@@ -1973,13 +2024,16 @@ export async function main(): Promise<void> {
         )}`,
         head: branchName,
         base: FACTORY_PR_BASE_REF,
-        body: buildImplementPrBody({
-          issueNumber,
-          runUrl,
-          agentActionRef,
-          publishedViaFallback,
-          ...provenance,
-        }),
+        body: appendImplementCostToPrBody(
+          buildImplementPrBody({
+            issueNumber,
+            runUrl,
+            agentActionRef,
+            publishedViaFallback,
+            ...provenance,
+          }),
+          implementCostNote,
+        ),
       },
     );
     console.log(`Opened PR #${created.number}: ${created.html_url}`);
@@ -2024,16 +2078,19 @@ export async function main(): Promise<void> {
       );
     }
     writeStepSummary(
-      buildPublishSuccessStepSummary({
-        ...summaryContext,
-        labelApplied,
-        gamingFlagged,
-        gamingLabelApplied,
-        gamingAnnotationPosted,
-        prNumber: created.number,
-        prUrl: created.html_url,
-        wasRefresh: false,
-      }),
+      appendImplementCostToStepSummary(
+        buildPublishSuccessStepSummary({
+          ...summaryContext,
+          labelApplied,
+          gamingFlagged,
+          gamingLabelApplied,
+          gamingAnnotationPosted,
+          prNumber: created.number,
+          prUrl: created.html_url,
+          wasRefresh: false,
+        }),
+        implementCostNote,
+      ),
     );
     if (gamingSignalsBothLost(gamingFlagged, gamingLabelApplied, gamingAnnotationPosted)) {
       console.error(
