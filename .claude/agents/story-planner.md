@@ -44,7 +44,10 @@ weak spec faithfully, and the cost lands post-open as review rounds.
 
 1. **Spec** — inputs/outputs, closed grammar for any parsed surface, explicit
    fail-closed behaviour for every unknown, with `file:line` citations for
-   each claim about existing code.
+   each claim about existing code. Every acceptance criterion you draft must
+   enumerate its observable property inline so it is verifiable from the diff;
+   an external-document reference may provide parenthetical provenance but
+   must not supply the criterion's operative content.
 2. **Test list** — behavioural and negative cases per acceptance criterion,
    and for every guard the change adds or moves, one mutation-style check
    named as "removing/inverting guard X must fail test Y". A guard without

@@ -229,11 +229,15 @@ export function hasBlockingTriageGeneration(
  *
  * @param verdict - The validated verdict.
  * @param generation - The final trusted triage execution.
+ * @param effectiveReadiness - Readiness after deterministic intake guards.
+ * @param downgradeNotice - Optional trusted deterministic guard notice.
  * @returns The Markdown comment body, ending with the tracking marker.
  */
 export function buildVerdictCommentBody(
   verdict: TriageVerdict,
   generation: string,
+  effectiveReadiness: ReadinessLabel = verdict.readiness,
+  downgradeNotice: string | null = null,
 ): string {
   // `verdict.readiness` is a closed enum validated by the schema (trusted).
   // `verdict.reasoning` is untrusted multi-line agent prose: render it as an
@@ -241,7 +245,7 @@ export function buildVerdictCommentBody(
   // marker-breakout attempt cannot reach the connector or the terminal-anchored
   // generation markers this comment carries.
   const lines: string[] = [
-    `**Automated triage verdict: \`${verdict.readiness}\`**`,
+    `**Automated triage verdict: \`${effectiveReadiness}\`**`,
     "",
     renderBoundedUntrustedMultilineBlock(
       verdict.reasoning,
@@ -259,6 +263,13 @@ export function buildVerdictCommentBody(
         `- ${renderBoundedUntrustedReason(q, MAX_RENDERED_QUESTION_CODE_POINTS, "the run log")}`,
       );
     }
+  }
+
+  if (downgradeNotice !== null) {
+    // This is trusted static text produced only by the deterministic intake
+    // guard. It never contains issue-body text and therefore must not pass
+    // through the untrusted-text renderer used for agent-authored prose.
+    lines.push("", downgradeNotice);
   }
 
   if (verdict.readiness === "wontfix") {
