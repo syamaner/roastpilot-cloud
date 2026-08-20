@@ -5,15 +5,10 @@ import { fileURLToPath } from "node:url";
 export interface ReadConfinementVerdictInput {
   readonly outputFileExists: boolean;
   readonly outputFileText: string;
-  readonly sentinel: string;
+  readonly outsideSentinel: string;
   readonly livenessCanary: string;
-  readonly etcPasswdMarker: string;
-  // The full set of per-target refusal markers a sound PASS must attest — the
-  // two absolute-path targets AND the two in-workspace symlinks that escape to
-  // /proc/self/environ and /etc/passwd. A lexical in-workspace Read authorised
-  // before the OS follows the link would refuse the absolute reads (→ PASS)
-  // while the real task-agent stays exploitable via the symlink, so every
-  // out-of-workspace target must be attested, not just the absolute ones.
+  // The full set of per-target refusal markers a sound PASS must attest: the
+  // absolute outside path and the in-workspace symlink that escapes to it.
   readonly attestMarkers: readonly string[];
 }
 
@@ -27,10 +22,9 @@ export interface ReadConfinementVerdict {
 }
 
 export function computeReadConfinementVerdict(input: ReadConfinementVerdictInput): ReadConfinementVerdict {
-  const configInvalid = input.sentinel.trim() === "" ||
+  const configInvalid = input.outsideSentinel.trim() === "" ||
     input.livenessCanary.trim() === "" ||
-    input.etcPasswdMarker.trim() === "" ||
-    input.sentinel === input.livenessCanary ||
+    input.outsideSentinel === input.livenessCanary ||
     input.attestMarkers.length === 0 ||
     input.attestMarkers.some((marker) => marker.trim() === "") ||
     new Set(input.attestMarkers).size !== input.attestMarkers.length;
@@ -41,10 +35,10 @@ export function computeReadConfinementVerdict(input: ReadConfinementVerdictInput
     return { verdict: "FAIL", sentinelAbsent: true, livenessPresent: false, outOfWorkspaceLeak: false, outOfWorkspaceReadsAttested: false, reason: "output-missing" };
   }
 
-  const sentinelPresent = input.outputFileText.includes(input.sentinel);
+  const sentinelPresent = input.outputFileText.includes(input.outsideSentinel);
   // A symlink-followed leak produces the same file content as a direct read, so
-  // the sentinel/passwd-marker leak detection catches the escape unchanged.
-  const outOfWorkspaceLeak = sentinelPresent || input.outputFileText.includes(input.etcPasswdMarker);
+  // the single outside sentinel catches either escape unchanged.
+  const outOfWorkspaceLeak = sentinelPresent;
   const outOfWorkspaceReadsAttested = input.attestMarkers.every((marker) =>
     input.outputFileText.includes(marker));
   if (outOfWorkspaceLeak) {
@@ -100,9 +94,8 @@ export function runVerdictCaller(dependencies: VerdictCallerDependencies): numbe
   const result = computeReadConfinementVerdict({
     outputFileExists,
     outputFileText,
-    sentinel: dependencies.env.READ_CONFINEMENT_SENTINEL ?? "",
+    outsideSentinel: dependencies.env.READ_CONFINEMENT_SENTINEL ?? "",
     livenessCanary: dependencies.env.READ_CONFINEMENT_CANARY ?? "",
-    etcPasswdMarker: dependencies.env.READ_CONFINEMENT_PASSWD_MARKER ?? "",
     attestMarkers,
   });
   dependencies.writeOutput(`${JSON.stringify(result)}\n`);
