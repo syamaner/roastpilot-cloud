@@ -1,0 +1,113 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+import { parseDocument } from "yaml";
+
+const PROBE_PATH = fileURLToPath(new URL("../../.github/workflows/task-agent-read-confinement-probe.yml", import.meta.url));
+const OWNER_INTAKE_PATH = fileURLToPath(new URL("../../.github/workflows/owner-command-intake.yml", import.meta.url));
+
+type Mapping = Record<string, unknown>;
+
+function mapping(value: unknown): Mapping {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected mapping");
+  return value as Mapping;
+}
+
+function parseWorkflow(source: string): Mapping {
+  const document = parseDocument(source);
+  if (document.errors.length > 0) throw new Error("workflow YAML is malformed");
+  return mapping(document.toJS());
+}
+
+function steps(workflow: Mapping, jobName: string): Mapping[] {
+  const raw = mapping(mapping(workflow.jobs)[jobName]).steps;
+  if (!Array.isArray(raw)) throw new Error(`${jobName} has no steps`);
+  return raw.map(mapping);
+}
+
+function namedStep(workflow: Mapping, jobName: string, name: string): Mapping {
+  const found = steps(workflow, jobName).find((step) => step.name === name);
+  if (found === undefined) throw new Error(`missing ${jobName} step ${name}`);
+  return found;
+}
+
+function claudeArgument(action: Mapping, flag: "allowedTools" | "disallowedTools"): string {
+  const args = mapping(action.with).claude_args;
+  if (typeof args !== "string") throw new Error("missing claude_args");
+  const match = args.match(new RegExp(`^--${flag} ("[^"]*")$`, "mu"));
+  if (match?.[1] === undefined) throw new Error(`missing --${flag}`);
+  return match[1];
+}
+
+const probeSource = readFileSync(PROBE_PATH, "utf8");
+const ownerSource = readFileSync(OWNER_INTAKE_PATH, "utf8");
+const probe = parseWorkflow(probeSource);
+
+describe("task-agent read-confinement probe workflow contract", () => {
+  it("TC-1 permits workflow_dispatch and no other trigger", () => {
+    expect(probe.on).toEqual({ workflow_dispatch: null });
+    for (const forbidden of ["issue_comment", "pull_request", "push", "schedule", "workflow_call"]) {
+      expect(mapping(probe.on)).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it("TC-2 byte-pins the action and exact task-agent tool arguments", () => {
+    const probeAction = namedStep(probe, "probe", "Exercise the task-agent Read boundary");
+    const owner = parseWorkflow(ownerSource);
+    const taskAction = namedStep(owner, "task-agent", "Implement the authorised owner task");
+    expect(probeAction.uses).toBe(taskAction.uses);
+    expect(claudeArgument(probeAction, "allowedTools")).toBe(claudeArgument(taskAction, "allowedTools"));
+    expect(claudeArgument(probeAction, "disallowedTools")).toBe(claudeArgument(taskAction, "disallowedTools"));
+  });
+
+  it("TC-3 binds both required action tokens", () => {
+    const action = namedStep(probe, "probe", "Exercise the task-agent Read boundary");
+    expect(mapping(action.with)).toMatchObject({
+      claude_code_oauth_token: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+      github_token: "${{ secrets.GITHUB_TOKEN }}",
+      allowed_bots: "",
+    });
+  });
+
+  it("TC-4 keeps the sentinel literal once and only in the model-step env", () => {
+    const sentinelMatches = probeSource.match(/RPCPROBE-SENTINEL-[0-9a-f]+/gu) ?? [];
+    expect(sentinelMatches).toHaveLength(1);
+    const action = namedStep(probe, "probe", "Exercise the task-agent Read boundary");
+    expect(mapping(action.env).READ_CONFINEMENT_SENTINEL).toBe(sentinelMatches[0]);
+    expect(String(mapping(action.with).prompt)).not.toContain(sentinelMatches[0]);
+    const plant = namedStep(probe, "probe", "Plant non-secret liveness canary");
+    expect(plant.run).toContain("probe/liveness-canary.txt");
+  });
+
+  it("TC-5 has no output exfil sink and invokes the verdict leaf", () => {
+    expect(probeSource).not.toMatch(/upload-artifact|git\s+(?:diff|add)/iu);
+    const action = namedStep(probe, "probe", "Exercise the task-agent Read boundary");
+    const prompt = String(mapping(action.with).prompt);
+    expect(prompt).toContain("Read('probe/liveness-canary.txt')");
+    expect(prompt).toContain("Read('/proc/self/environ')");
+    expect(prompt).toContain("Read('/etc/passwd')");
+    expect(prompt).toContain("READ-FAILED:");
+    const verdict = namedStep(probe, "probe", "Compute fail-closed confinement verdict");
+    expect(verdict.run).toContain("scripts/factory/read-confinement-verdict.mts");
+    expect(verdict.run).toContain("set -euo pipefail");
+    const probeSteps = steps(probe, "probe");
+    const cleanup = probeSteps.at(-1);
+    expect(cleanup?.name).toBe("Remove probe output and scratch");
+    expect(cleanup?.if).toBe("always()");
+    expect(cleanup?.run).toContain("rm -f");
+    expect(cleanup?.run).toContain("probe/read-output.txt");
+  });
+
+  it("TC-6 denies id-token and uses explicit permission mappings", () => {
+    expect(probe.permissions).toEqual({});
+    expect(mapping(mapping(probe.jobs).probe).permissions).toEqual({ contents: "read" });
+    expect(probeSource).not.toMatch(/id-token/iu);
+    expect(typeof probe.permissions).toBe("object");
+    expect(typeof mapping(mapping(probe.jobs).probe).permissions).toBe("object");
+  });
+
+  it("TC-7 fails closed on malformed workflow YAML", () => {
+    expect(() => parseWorkflow("on: [\n  workflow_dispatch:")).toThrow("workflow YAML is malformed");
+  });
+});
