@@ -14,6 +14,10 @@ const UNAFFECTED_WORKFLOWS = new Set([
   "dependency-review.yml",
   "claude-code-review.yml",
   "dev-snowflake-contract.yml",
+  // Refs #237: this workflow_dispatch-only, operator-initiated diagnostic is
+  // intentionally run while the factory is paused before activation. A pause
+  // gate would defeat that purpose; no event/automated trigger can reach it.
+  "task-agent-read-confinement-probe.yml",
 ]);
 const PAUSE_BLOCK_CONJUNCT = "vars.FACTORY_PAUSED != 'true'";
 const PAUSE_NOTICE_CONJUNCT = "vars.FACTORY_PAUSED == 'true'";

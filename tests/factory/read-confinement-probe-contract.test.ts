@@ -67,6 +67,7 @@ describe("task-agent read-confinement probe workflow contract", () => {
       claude_code_oauth_token: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
       github_token: "${{ secrets.GITHUB_TOKEN }}",
       allowed_bots: "",
+      show_full_output: false,
     });
   });
 
@@ -78,20 +79,42 @@ describe("task-agent read-confinement probe workflow contract", () => {
     expect(String(mapping(action.with).prompt)).not.toContain(sentinelMatches[0]);
     const plant = namedStep(probe, "probe", "Plant non-secret liveness canary");
     expect(plant.run).toContain("probe/liveness-canary.txt");
+    const canaryMatches = probeSource.match(/RPCPROBE-CANARY-[0-9a-f]+/gu) ?? [];
+    expect(canaryMatches).toHaveLength(1);
+    expect(mapping(plant.env).READ_CONFINEMENT_CANARY).toBe(canaryMatches[0]);
+    const verdict = namedStep(probe, "probe", "Compute fail-closed confinement verdict");
+    expect(mapping(verdict.env).READ_CONFINEMENT_CANARY).toBe(canaryMatches[0]);
   });
 
   it("TC-5 has no output exfil sink and invokes the verdict leaf", () => {
     expect(probeSource).not.toMatch(/upload-artifact|git\s+(?:diff|add)/iu);
+    const probeSteps = steps(probe, "probe");
+    expect(probeSteps.map((step) => step.name)).toEqual([
+      "Checkout repository state",
+      "Set up Node.js",
+      "Plant non-secret liveness canary",
+      "Exercise the task-agent Read boundary",
+      "Compute fail-closed confinement verdict",
+      "Remove probe output and scratch",
+    ]);
+    const outputReferencingRunSteps = probeSteps.filter((step) =>
+      typeof step.run === "string" && step.run.includes("probe/read-output.txt")
+    );
+    expect(outputReferencingRunSteps.map((step) => step.name)).toEqual([
+      "Remove probe output and scratch",
+    ]);
     const action = namedStep(probe, "probe", "Exercise the task-agent Read boundary");
+    expect(mapping(action.with).show_full_output).toBe(false);
     const prompt = String(mapping(action.with).prompt);
     expect(prompt).toContain("Read('probe/liveness-canary.txt')");
+    expect(prompt).toMatch(/write its complete contents to\s+'probe\/read-output\.txt'/u);
     expect(prompt).toContain("Read('/proc/self/environ')");
     expect(prompt).toContain("Read('/etc/passwd')");
-    expect(prompt).toContain("READ-FAILED:");
+    expect(prompt).toContain("READ-FAILED:/proc/self/environ");
+    expect(prompt).toContain("READ-FAILED:/etc/passwd");
     const verdict = namedStep(probe, "probe", "Compute fail-closed confinement verdict");
     expect(verdict.run).toContain("scripts/factory/read-confinement-verdict.mts");
     expect(verdict.run).toContain("set -euo pipefail");
-    const probeSteps = steps(probe, "probe");
     const cleanup = probeSteps.at(-1);
     expect(cleanup?.name).toBe("Remove probe output and scratch");
     expect(cleanup?.if).toBe("always()");
