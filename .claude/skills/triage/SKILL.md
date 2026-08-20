@@ -56,7 +56,11 @@ and each is independently checkable:
    sacrificial-dry-run story) for the plan link. Do NOT route such an issue to
    `needs-info` on the missing plan link alone; judge it on the rest of the bar.
 2. **Acceptance criteria** — a checkbox list, each item independently
-   verifiable (not vague aspirational language).
+   verifiable (not vague aspirational language). A criterion that delegates
+   its verifiable content to an external document (for example, "matches §4"
+   or "per plan.md") is `ready-to-spec`, not implementation-ready. A
+   parenthetical provenance citation is fine when the observable property is
+   enumerated inline.
 3. **In-scope surface** — concrete files/areas, not "the whole feature."
 4. **Out-of-scope statement** — what this story deliberately does not do.
 5. **Verification notes** — which suite proves it (unit / contract vs
@@ -115,7 +119,9 @@ Default to the more conservative bucket when in doubt — `ready-to-spec` or
 `needs-info` over either implementation-ready state. A false factory-ready
 wastes an
 implementation run and a review cycle; a false "needs-info" just costs one
-human read.
+human read. In particular, do not infer the missing verifiable content of an
+acceptance criterion from its external-document reference; require the
+observable property inline and choose `ready-to-spec` when it is absent.
 
 ## Output — write this JSON, and only this, to `triage-output/verdict.json`
 

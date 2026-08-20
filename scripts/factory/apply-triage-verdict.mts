@@ -43,6 +43,10 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
+import {
+  enforceDiffVerifiableAc,
+  type DiffVerifiableAcResult,
+} from "./diff-verifiable-ac.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   MAX_PAYLOAD_BYTES,
@@ -65,6 +69,7 @@ interface GitHubIssueLabel {
 
 interface GitHubIssue {
   readonly state: string;
+  readonly body: string | null;
 }
 
 interface GitHubComment {
@@ -220,6 +225,7 @@ async function applyValidVerdict(
   owner: string,
   repo: string,
   result: Extract<TriageVerdictValidationResult, { ok: true }>,
+  diffVerifiableAc: DiffVerifiableAcResult,
   commentId: number,
   generation: string,
 ): Promise<void> {
@@ -235,6 +241,8 @@ async function applyValidVerdict(
     JSON.stringify({
       issue_number: verdict.issue_number,
       readiness: verdict.readiness,
+      effective_readiness: diffVerifiableAc.effectiveReadiness,
+      diff_verifiable_ac_pattern_id: diffVerifiableAc.patternId,
       reasoning: verdict.reasoning,
       missing_info_questions: verdict.missing_info_questions,
     }),
@@ -245,7 +253,12 @@ async function applyValidVerdict(
     owner,
     repo,
     commentId,
-    buildVerdictCommentBody(verdict, generation),
+    buildVerdictCommentBody(
+      verdict,
+      generation,
+      diffVerifiableAc.effectiveReadiness,
+      diffVerifiableAc.downgradeNotice,
+    ),
   );
 
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
@@ -255,7 +268,7 @@ async function applyValidVerdict(
   );
   const newLabelSet = computeNewLabelSet(
     currentLabels.map((l) => l.name),
-    verdict.readiness,
+    diffVerifiableAc.effectiveReadiness,
   );
   try {
     await githubRequest(
@@ -286,7 +299,7 @@ async function applyValidVerdict(
   }
 
   console.log(
-    `Applied verdict for #${verdict.issue_number}: readiness=${verdict.readiness}, ` +
+    `Applied verdict for #${verdict.issue_number}: readiness=${diffVerifiableAc.effectiveReadiness}, ` +
       `labels=[${newLabelSet.join(", ")}]`,
   );
 }
@@ -455,11 +468,17 @@ export async function main(): Promise<void> {
     return;
   }
 
+  const diffVerifiableAc = enforceDiffVerifiableAc(
+    result.verdict.readiness,
+    issue.body ?? "",
+  );
+
   await applyValidVerdict(
     token,
     owner,
     repo,
     result,
+    diffVerifiableAc,
     trustedCommentId,
     generation,
   );

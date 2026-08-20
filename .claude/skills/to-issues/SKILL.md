@@ -138,9 +138,15 @@ reference_roast_summaries, the roast_artifacts stage)".}
 
 **Acceptance criteria**
 - [ ] {Independently verifiable. Not "schema is correct" — "the five
-  tables and the stage in plan.md §4 exist via schemachange migrations,
-  applied cleanly against a fresh ROASTPILOT_DEV".}
+  tables `cloud_roasts`, `roast_telemetry`, `roast_artifacts`,
+  `tasting_reviews`, and `reference_roast_summaries`, plus the
+  `roast_artifacts` stage, exist via schemachange migrations applied cleanly
+  against a fresh ROASTPILOT_DEV (see plan.md §4)".}
 - [ ] {...}
+
+Enumerate every observable property inline; never delegate a criterion's
+verifiable content to an external document (a parenthetical provenance
+citation after the inline enumeration is fine).
 
 **In-scope surface**
 - {Concrete files/paths this story touches, e.g.

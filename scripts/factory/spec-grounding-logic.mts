@@ -152,6 +152,11 @@
  */
 
 import MarkdownIt from "markdown-it";
+import {
+  ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN,
+  ANY_HEADING_LINE_PATTERN,
+  CHECKBOX_LINE_PATTERN,
+} from "./acceptance-criteria-lines.mts";
 import { truncateToByteBudget } from "./untrusted-diff-fence.mts";
 import {
   ASCII_WHITESPACE_CHARS,
@@ -160,6 +165,11 @@ import {
 
 // Historical public API; implementation lives in the dependency-free leaf.
 export { truncateToByteBudget } from "./untrusted-diff-fence.mts";
+export {
+  ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN,
+  ANY_HEADING_LINE_PATTERN,
+  CHECKBOX_LINE_PATTERN,
+} from "./acceptance-criteria-lines.mts";
 
 /**
  * Which GitHub keyword linked a PR to an issue, and therefore what
@@ -921,12 +931,10 @@ export interface AcceptanceCriterion {
 // own `#{1,6}` range (which already accepted level 1 for section-
 // TERMINATION purposes; only the SECTION-START pattern here had the
 // narrower, inconsistent range).
-const ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s*acceptance criteria(?:\s+#+)?\s*$/i;
 // Any Markdown heading line, any level — used both to find the section's
 // own heading level and to detect where the section ends (see
 // {@link parseAcceptanceCriteria}'s level comparison). Same 0-3-leading-
 // space tolerance as {@link ACCEPTANCE_CRITERIA_HEADING_LINE_PATTERN}.
-const ANY_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s+\S/;
 // The marker alternation covers every GFM list marker this repo's own
 // story.yml issue-form output happens to use (`-`) PLUS every OTHER
 // valid GFM task-list marker (Codex finding, PR #70 review round 5): the
@@ -936,8 +944,6 @@ const ANY_HEADING_LINE_PATTERN = /^ {0,3}(#{1,6})\s+\S/;
 // markdown-it's own parser (every one of these six forms produces a real
 // list-item token) — so it's enumerated completely once here, not
 // patched incrementally.
-const CHECKBOX_LINE_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s*\[( |x|X)\]\s*(.+)$/;
-
 /** Extracts the trimmed text from any non-empty GFM checkbox-shaped line. */
 export function extractCheckboxLineText(line: string): string | null {
   const match = CHECKBOX_LINE_PATTERN.exec(line);

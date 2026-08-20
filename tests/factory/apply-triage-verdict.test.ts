@@ -46,7 +46,7 @@ function mockFetch(
     const handler =
       handlers[key] ??
       (key === "GET /repos/syamaner/roastpilot-cloud/issues/42"
-        ? () => jsonResponse({ state: "open" })
+        ? () => jsonResponse({ state: "open", body: null })
         : key ===
             "GET /repos/syamaner/roastpilot-cloud/issues/comments/99"
           ? () =>
@@ -111,6 +111,54 @@ afterEach(async () => {
 });
 
 describe("main — valid verdict path", () => {
+  it("B8/G9: deterministically downgrades a delegating AC without echoing it", async () => {
+    const rawCriterion =
+      "UNTRUSTED-SENTINEL: the cloud schema matches §4 exactly";
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "The submitted story meets the intake bar.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({
+          state: "open",
+          body: `### Acceptance criteria\n- [ ] ${rawCriterion}`,
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }, { name: "epic:F1" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const putBody = calls.find((call) => call.method === "PUT")?.body as {
+      readonly labels: readonly string[];
+    };
+    expect(putBody.labels).toContain("ready-to-spec");
+    expect(putBody.labels).not.toContain("ready-to-implement");
+    const commentBody = (
+      calls.find((call) => call.method === "PATCH")?.body as {
+        readonly body: string;
+      }
+    ).body;
+    expect(commentBody).toContain("Automated intake downgrade");
+    expect(commentBody).toContain("matched: `matches-section`");
+    expect(commentBody).not.toContain(rawCriterion);
+    expect(commentBody).toContain(
+      "Automated triage verdict: `ready-to-spec`",
+    );
+  });
+
   it("replaces the hold before enabling and verifying readiness", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
