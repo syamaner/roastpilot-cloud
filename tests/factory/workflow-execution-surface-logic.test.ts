@@ -2005,6 +2005,9 @@ jobs:
         [
           "dev-snowflake-contract.yml",
           "implement-ready-issues.yml",
+          // Refs #237: the required hyphenated Environment name is
+          // deliberately deferred by the portable-name canonicalizer.
+          "task-agent-read-confinement-probe.yml",
           "triage-issues.yml",
         ].includes(name)
       ) {
@@ -2103,21 +2106,18 @@ jobs:
       // four task-apply actions), and +29 declared action inputs (4 + 17 + 8
       // across those same groups). No unsupported workflow shape was added.
       //
-      // 20 Aug 2026, Refs #237: the manual-only read-confinement probe is a
-      // supported ordinary workflow and contributes +1 job, +3 run steps,
-      // +3 action steps, and +8 declared inputs. The actions are deliberately
-      // admitted under the same conservative read-write workspace and
-      // GitHub-token-material-accessible classification as task-agent. The
-      // eighth input is the load-bearing `show_full_output: false` hardening.
+      // 20 Aug 2026, Refs #237: binding the probe to its required hyphenated
+      // Environment moves it to the deferred live-corpus class, removing its
+      // 1 job, 3 run steps, 3 action steps, and 8 inputs from these totals.
       //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 19,
-      runSteps: 51,
-      actionSteps: 51,
-      inputs: 135,
+      jobs: 18,
+      runSteps: 48,
+      actionSteps: 48,
+      inputs: 127,
     });
   });
 
@@ -2138,6 +2138,12 @@ jobs:
         .replace(
           /^    environment: dev-snowflake-ci$/mu,
           "    environment: dev_snowflake_ci",
+        )
+        // Refs #237: normalize the pinned hyphenated Environment name only
+        // for this exhaustive admitted-surface inventory pass.
+        .replace(
+          /^    environment: read-confinement-probe$/mu,
+          "    environment: read_confinement_probe",
         )
         .replace(/^[ \t]+queue: max[ \t]*$/gmu, "");
       const result = evidence(

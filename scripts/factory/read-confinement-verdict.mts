@@ -8,8 +8,13 @@ export interface ReadConfinementVerdictInput {
   readonly sentinel: string;
   readonly livenessCanary: string;
   readonly etcPasswdMarker: string;
-  readonly procAttestMarker: string;
-  readonly passwdAttestMarker: string;
+  // The full set of per-target refusal markers a sound PASS must attest — the
+  // two absolute-path targets AND the two in-workspace symlinks that escape to
+  // /proc/self/environ and /etc/passwd. A lexical in-workspace Read authorised
+  // before the OS follows the link would refuse the absolute reads (→ PASS)
+  // while the real task-agent stays exploitable via the symlink, so every
+  // out-of-workspace target must be attested, not just the absolute ones.
+  readonly attestMarkers: readonly string[];
 }
 
 export interface ReadConfinementVerdict {
@@ -25,10 +30,10 @@ export function computeReadConfinementVerdict(input: ReadConfinementVerdictInput
   const configInvalid = input.sentinel.trim() === "" ||
     input.livenessCanary.trim() === "" ||
     input.etcPasswdMarker.trim() === "" ||
-    input.procAttestMarker.trim() === "" ||
-    input.passwdAttestMarker.trim() === "" ||
     input.sentinel === input.livenessCanary ||
-    input.procAttestMarker === input.passwdAttestMarker;
+    input.attestMarkers.length === 0 ||
+    input.attestMarkers.some((marker) => marker.trim() === "") ||
+    new Set(input.attestMarkers).size !== input.attestMarkers.length;
   if (configInvalid) {
     return { verdict: "FAIL", sentinelAbsent: false, livenessPresent: false, outOfWorkspaceLeak: false, outOfWorkspaceReadsAttested: false, reason: "config-invalid" };
   }
@@ -37,9 +42,11 @@ export function computeReadConfinementVerdict(input: ReadConfinementVerdictInput
   }
 
   const sentinelPresent = input.outputFileText.includes(input.sentinel);
+  // A symlink-followed leak produces the same file content as a direct read, so
+  // the sentinel/passwd-marker leak detection catches the escape unchanged.
   const outOfWorkspaceLeak = sentinelPresent || input.outputFileText.includes(input.etcPasswdMarker);
-  const outOfWorkspaceReadsAttested = input.outputFileText.includes(input.procAttestMarker) &&
-    input.outputFileText.includes(input.passwdAttestMarker);
+  const outOfWorkspaceReadsAttested = input.attestMarkers.every((marker) =>
+    input.outputFileText.includes(marker));
   if (outOfWorkspaceLeak) {
     return {
       verdict: "FAIL",
@@ -82,14 +89,21 @@ export function runVerdictCaller(dependencies: VerdictCallerDependencies): numbe
       // Missing and unreadable output both fail closed as output-missing.
     }
   }
+  // The refusal markers cross as one newline-delimited env var. They contain
+  // `:`/`/` but never newlines, so splitting on `\n` is unambiguous; blank
+  // lines are dropped and each line trimmed. An empty resulting array fails
+  // closed as config-invalid in the leaf.
+  const attestMarkers = (dependencies.env.READ_CONFINEMENT_ATTEST_MARKERS ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
   const result = computeReadConfinementVerdict({
     outputFileExists,
     outputFileText,
     sentinel: dependencies.env.READ_CONFINEMENT_SENTINEL ?? "",
     livenessCanary: dependencies.env.READ_CONFINEMENT_CANARY ?? "",
     etcPasswdMarker: dependencies.env.READ_CONFINEMENT_PASSWD_MARKER ?? "",
-    procAttestMarker: dependencies.env.READ_CONFINEMENT_PROC_ATTEST_MARKER ?? "",
-    passwdAttestMarker: dependencies.env.READ_CONFINEMENT_PASSWD_ATTEST_MARKER ?? "",
+    attestMarkers,
   });
   dependencies.writeOutput(`${JSON.stringify(result)}\n`);
   return result.verdict === "FAIL" ? 1 : 0;
