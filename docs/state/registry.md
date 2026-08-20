@@ -28,6 +28,10 @@ Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table) and §4
 
 Order (operator): S5 → S10 → S8 → S9 → S7 (operator actions remain) → **S6 (in progress)** → **S11 (in progress)** → C2 draft.
 
+**D135 sync, 20 Aug 2026 (Refs #237):** the dark task-agent
+read-confinement probe harness is built. Issue #237 stays **OPEN** pending an
+operator run with the real OAuth secret; this build does not run or activate it.
+
 | Story | Issue | Status |
 |---|---|---|
 | F1-S1 Labels, issue templates, milestones, story issues for C1/F1 | — (no issue; done at prep, 16 Jul 2026) | Done |

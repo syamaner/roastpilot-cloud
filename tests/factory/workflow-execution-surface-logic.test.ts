@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(9);
+    expect(names).toHaveLength(10);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2005,6 +2005,9 @@ jobs:
         [
           "dev-snowflake-contract.yml",
           "implement-ready-issues.yml",
+          // Refs #237: the required hyphenated Environment name is
+          // deliberately deferred by the portable-name canonicalizer.
+          "task-agent-read-confinement-probe.yml",
           "triage-issues.yml",
         ].includes(name)
       ) {
@@ -2103,6 +2106,10 @@ jobs:
       // four task-apply actions), and +29 declared action inputs (4 + 17 + 8
       // across those same groups). No unsupported workflow shape was added.
       //
+      // 20 Aug 2026, Refs #237: binding the probe to its required hyphenated
+      // Environment moves it to the deferred live-corpus class, removing its
+      // 1 job, 3 run steps, 3 action steps, and 8 inputs from these totals.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
@@ -2132,6 +2139,12 @@ jobs:
           /^    environment: dev-snowflake-ci$/mu,
           "    environment: dev_snowflake_ci",
         )
+        // Refs #237: normalize the pinned hyphenated Environment name only
+        // for this exhaustive admitted-surface inventory pass.
+        .replace(
+          /^    environment: read-confinement-probe$/mu,
+          "    environment: read_confinement_probe",
+        )
         .replace(/^[ \t]+queue: max[ \t]*$/gmu, "");
       const result = evidence(
         admittedSource,
@@ -2155,7 +2168,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 26,
+      jobs: 27,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2213,9 +2226,14 @@ jobs:
       // extractor) and two pinned actions (setup-node with one input,
       // upload-artifact with four inputs) to implement-ready-issues.yml. Jobs
       // are unchanged.
-      runSteps: 75,
-      actionSteps: 67,
-      inputs: 177,
+      //
+      // 20 Aug 2026, Refs #237: the supported ordinary probe adds +1 job,
+      // +3 run steps, +3 conservatively admitted action steps, and +8 inputs.
+      // The reviewed 184 estimate predated the required
+      // `show_full_output: false` input; measured canonical evidence is 185.
+      runSteps: 78,
+      actionSteps: 70,
+      inputs: 185,
     });
   });
 });
