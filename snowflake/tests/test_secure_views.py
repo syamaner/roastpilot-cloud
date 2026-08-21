@@ -30,7 +30,7 @@ FORBIDDEN_REVIEWS = {"owner_id", "submitted_ip_hash", "visibility"}
 
 def _view_region(name: str) -> str:
     pattern = re.compile(
-        rf"create\s+or\s+replace\s+secure\s+view\s+{name}\s+as\b(.*?)"
+        rf"create\s+or\s+replace\s+secure\s+view\s+{name}\s+(?:copy\s+grants\s+)?as\b(.*?)"
         rf"(?=create\s+or\s+replace\s+secure\s+view|\Z)",
         re.IGNORECASE | re.DOTALL,
     )
@@ -78,6 +78,12 @@ def test_both_definitions_use_the_word_secure():
     matches = re.findall(r"create\s+or\s+replace\s+(\w+)\s+view\b", STRIPPED, re.IGNORECASE)
     assert [m.lower() for m in matches] == ["secure", "secure"]
 
+def test_both_views_have_copy_grants():
+    matches = re.findall(
+        r"create\s+or\s+replace\s+secure\s+view\s+\w+\s+copy\s+grants\s+as", STRIPPED, re.IGNORECASE
+    )
+    assert len(matches) == 2
+
 def test_scope_fence_no_grant_role_proc_table_stage():
     forbidden = r"\bgrant\b|\bto\s+public\b|create\s+(?:or\s+replace\s+)?(role|procedure|function|table|stage)\b"
     assert re.search(forbidden, STRIPPED, re.IGNORECASE) is None
@@ -108,7 +114,7 @@ def test_reviews_by_roast_projects_expected_and_no_forbidden_cols():
     assert cols == EXPECTED_REVIEW_COLS and not (set(cols) & FORBIDDEN_REVIEWS)
 
 def test_curve_object_construct_has_exactly_six_celsius_keys():
-    start = SLUG_REGION.lower().index("object_construct(") + len("object_construct(")
+    start = SLUG_REGION.lower().index("object_construct_keep_null(") + len("object_construct_keep_null(")
     depth, i = 1, start
     while depth > 0:
         depth += {"(": 1, ")": -1}.get(SLUG_REGION[i], 0)
