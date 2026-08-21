@@ -7,7 +7,10 @@ repo, then the GitHub issue, before starting any story.
 
 **C2 Schema** — kicked off 18 Aug 2026 (factory-first, per the Build process
 below); the DAG-root story C2-S1 (#307, base DDL) is the first delivered C2
-feature. Two **F1** tails remain in progress (they do not block C2 delivery):
+feature, and C2-S3 (#311, secure views) is the second — the first C2 story
+built **hands-off** by the factory (raised issue → agents build/review on
+Actions → human merge). Two **F1** tails remain in progress (they do not
+block C2 delivery):
 F1-S6 9h operator-driven activation ([#9](https://github.com/syamaner/roastpilot-cloud/issues/9))
 and F1-S11 live-provider eval ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14),
 harness-validated in recorded mode). C1 Scaffold complete.
@@ -56,7 +59,8 @@ the base DDL (C2-S1, #307) lands before its dependents.
 | Story | Issue | Status |
 |---|---|---|
 | C2-S1 Base DDL migration (five tables + artifact stage) | [#307](https://github.com/syamaner/roastpilot-cloud/issues/307) | **Done — merged via [#323](https://github.com/syamaner/roastpilot-cloud/pull/323).** Enumerated-column AC rebuild of the closed #318 (bounced on 5 schema divergences from a compare-to-§4 AC); `schema-migration-reviewer` + `privacy-auditor` clean pre-open. Routed conventional: 506 combined lines exceeded the factory envelope (coverage kept, not trimmed). Deferred residual [#321](https://github.com/syamaner/roastpilot-cloud/issues/321) is unrelated (a #320 factory-pipeline note). |
-| C2-S2..S11 (schema, procs, secure views, seed, grant keystone) | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308)–[#317](https://github.com/syamaner/roastpilot-cloud/issues/317) | Filed; in triage/spec. Each schema story gets an enumerated-column `story-planner` contract before dispatch (the #318 lesson). Open sequencing flags: #11 (F1-S8 live DEV-CI) for any live-SQL AC; #309 real MCP fixture availability. |
+| C2-S3 Secure views (`roast_by_slug` + `reviews_by_roast`) | [#311](https://github.com/syamaner/roastpilot-cloud/issues/311) | **Done — merged via [#332](https://github.com/syamaner/roastpilot-cloud/pull/332).** First **hands-off** factory C2 build: raised issue → enumerated-AC `story-planner` contract → triage bot `ready-to-implement` → factory implement agent → publisher opened the PR (single commit, 199 combined lines, envelope-passed) with no orchestrator code involvement. The Codex connector then found two genuine fixes the factory cannot self-fold (owner-task-apply / dial-1 dark pending [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)) — `OBJECT_CONSTRUCT_KEEP_NULL` (six-key curve contract holds for nullable telemetry) and `COPY GRANTS` (grants survive the repeatable re-apply once #317 lands) — folded conventionally. `schema-migration-reviewer` + `privacy-auditor` CONFIRMED-SOUND. Documented residuals: correlated-subquery FP (live #11 verify only); duplicate-id write-path-owned (#313/#317); whole-`summary` PII constraint owned by C4/#315. Proof: the factory's build-half runs hands-off end-to-end; the fold-half is the concrete #237/dial-1 gap. |
+| C2-S2, S4..S11 (schema, procs, seed, grant keystone) | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308)–[#310](https://github.com/syamaner/roastpilot-cloud/issues/310), [#312](https://github.com/syamaner/roastpilot-cloud/issues/312)–[#317](https://github.com/syamaner/roastpilot-cloud/issues/317) | Filed; in triage/spec. Each schema story gets an enumerated-column `story-planner` contract before dispatch (the #318 lesson). Open sequencing flags: #11 (F1-S8 live DEV-CI) for any live-SQL AC; #309 real MCP fixture availability; #310 (RECOMPUTE_REFERENCE_SUMMARY) blocks #313/#314. |
 
 This registry is authoritative for current delivery status. Verify GitHub
 issue, project, label, and PR fields against it before and after each
