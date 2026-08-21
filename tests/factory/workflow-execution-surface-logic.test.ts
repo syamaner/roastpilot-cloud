@@ -2231,7 +2231,8 @@ jobs:
       // +3 run steps, +3 conservatively admitted action steps, and +8 inputs.
       // The reviewed 184 estimate predated the required
       // `show_full_output: false` input; measured canonical evidence is 185.
-      runSteps: 78,
+      // 2026-08-20 Refs #237: +1 run step (workspace-inventory diagnostic).
+      runSteps: 79,
       actionSteps: 70,
       inputs: 185,
     });
