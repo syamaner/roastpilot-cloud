@@ -1,10 +1,10 @@
 """Token-presence/region-slice tests for the C2-S4 aggregation proc
 migration (issue #310): R__proc_recompute_summary.sql. Deliberately not a
 SQL parser (#307-bounce pre-emption, same style as test_secure_views.py) --
-reuses strip_line_comments from test_base_tables_schema.py. NEG-E and
-deterministic selection under a telemetry-distance tie are live-Snowflake-
-semantics claims this text-parse suite cannot prove; their structural guards
-are asserted here and their behavior remains reviewer-verified.
+reuses strip_line_comments from test_base_tables_schema.py. NEG-E (including
+true VARIANT JSON-null behavior) and deterministic selection under a telemetry-
+distance tie are live-Snowflake-semantics claims this text-parse suite cannot
+prove; their structural guards are asserted here and behavior remains reviewer-verified.
 Hard ceiling: <=250 lines.
 """
 from __future__ import annotations
@@ -106,7 +106,9 @@ def test_telemetry_join_offset_is_started_at_anchored():
 
 def test_rankings_guard_null_targets_and_break_ties_deterministically():
     for region, target in ((FC_RANKED_REGION, "first_crack_at_utc"), (DROP_RANKED_REGION, "beans_dropped_at_utc")):
-        assert re.search(rf"where\s+c\.summary:{target}\s+is\s+not\s+null", region, re.IGNORECASE)
+        assert re.search(
+            rf"where\s+c\.summary:{target}::timestamp_tz\s+is\s+not\s+null", region, re.IGNORECASE
+        )
         assert re.search(r"order\s+by\s+abs\([^)]*elapsed_s.*?\)\s+asc\s*,\s*tm\.elapsed_s\s+asc",
                          region, re.IGNORECASE | re.DOTALL)
     assert re.search(r"fc\.fc_rank\s*=\s*1", PER_ROAST_REGION, re.IGNORECASE)

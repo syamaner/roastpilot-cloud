@@ -63,7 +63,7 @@ begin
         ) as fc_rank
       from contributing c
       join app.roast_telemetry tm on tm.roast_id = c.id
-      where c.summary:first_crack_at_utc is not null
+      where c.summary:first_crack_at_utc::timestamp_tz is not null
     ),
     drop_telemetry_ranked as (
       select
@@ -80,7 +80,7 @@ begin
         ) as drop_rank
       from contributing c
       join app.roast_telemetry tm on tm.roast_id = c.id
-      where c.summary:beans_dropped_at_utc is not null
+      where c.summary:beans_dropped_at_utc::timestamp_tz is not null
     ),
     per_roast as (
       select
