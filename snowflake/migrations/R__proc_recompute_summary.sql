@@ -48,6 +48,40 @@ begin
         and r.roast_level = :roast_level
         and r.contributed_to_learning = true
     ),
+    fc_telemetry_ranked as (
+      select
+        c.id as roast_id,
+        tm.bean_temp_c,
+        row_number() over (
+          partition by c.id
+          order by
+            abs(tm.elapsed_s
+              - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
+                                      c.summary:first_crack_at_utc::timestamp_tz) / 1000.0) asc,
+            tm.elapsed_s asc,
+            tm.bean_temp_c asc nulls last
+        ) as fc_rank
+      from contributing c
+      join app.roast_telemetry tm on tm.roast_id = c.id
+      where c.summary:first_crack_at_utc is not null
+    ),
+    drop_telemetry_ranked as (
+      select
+        c.id as roast_id,
+        tm.bean_temp_c,
+        row_number() over (
+          partition by c.id
+          order by
+            abs(tm.elapsed_s
+              - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
+                                      c.summary:beans_dropped_at_utc::timestamp_tz) / 1000.0) asc,
+            tm.elapsed_s asc,
+            tm.bean_temp_c asc nulls last
+        ) as drop_rank
+      from contributing c
+      join app.roast_telemetry tm on tm.roast_id = c.id
+      where c.summary:beans_dropped_at_utc is not null
+    ),
     per_roast as (
       select
         c.id,
@@ -55,27 +89,9 @@ begin
         -- FC elapsed offset. NULL-guarded (NEG-E): a roast with no
         -- first_crack_at_utc contributes a NULL FC temp, never a spurious
         -- nearest row.
-        case
-          when c.summary:first_crack_at_utc is null then null
-          else (
-            select min_by(tm.bean_temp_c, abs(tm.elapsed_s
-              - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
-                                      c.summary:first_crack_at_utc::timestamp_tz) / 1000.0))
-            from app.roast_telemetry tm
-            where tm.roast_id = c.id
-          )
-        end as fc_temp_c,
+        fc.bean_temp_c as fc_temp_c,
         -- Drop temp: same started_at-anchored join, against the drop offset.
-        case
-          when c.summary:beans_dropped_at_utc is null then null
-          else (
-            select min_by(tm.bean_temp_c, abs(tm.elapsed_s
-              - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
-                                      c.summary:beans_dropped_at_utc::timestamp_tz) / 1000.0))
-            from app.roast_telemetry tm
-            where tm.roast_id = c.id
-          )
-        end as drop_temp_c,
+        drop_sample.bean_temp_c as drop_temp_c,
         c.summary:development_time_percent::float as dev_pct,
         -- FC time: charge-relative (beans_added_at_utc-anchored), matching
         -- summary:total_roast_seconds -- NOT the started_at anchor above.
@@ -83,6 +99,10 @@ begin
                               c.summary:first_crack_at_utc::timestamp_tz) / 1000.0 as fc_time_s,
         c.summary:total_roast_seconds::float as total_s
       from contributing c
+      left join fc_telemetry_ranked fc
+        on fc.roast_id = c.id and fc.fc_rank = 1
+      left join drop_telemetry_ranked drop_sample
+        on drop_sample.roast_id = c.id and drop_sample.drop_rank = 1
     ),
     review_rollup as (
       select count(*) as review_count, avg(tr.score) as avg_rating

@@ -1,10 +1,10 @@
 """Token-presence/region-slice tests for the C2-S4 aggregation proc
 migration (issue #310): R__proc_recompute_summary.sql. Deliberately not a
 SQL parser (#307-bounce pre-emption, same style as test_secure_views.py) --
-reuses strip_line_comments from test_base_tables_schema.py. NEG-E (a NULL
-first_crack_at_utc contributes a NULL FC temp, not a spurious nearest row)
-is a live-Snowflake-semantics claim this text-parse suite cannot prove --
-that is a reviewer-verified check per the issue, not a gap in this file.
+reuses strip_line_comments from test_base_tables_schema.py. NEG-E and
+deterministic selection under a telemetry-distance tie are live-Snowflake-
+semantics claims this text-parse suite cannot prove; their structural guards
+are asserted here and their behavior remains reviewer-verified.
 Hard ceiling: <=250 lines.
 """
 from __future__ import annotations
@@ -33,7 +33,9 @@ def _region(start_pattern: str, end_pattern: str) -> str:
     return rest[: end.start()]
 
 
-CONTRIBUTING_REGION = _region(r"with\s+contributing\s+as\s*\(", r"\)\s*,\s*per_roast\s+as\s*\(")
+CONTRIBUTING_REGION = _region(r"with\s+contributing\s+as\s*\(", r"\)\s*,\s*fc_telemetry_ranked\s+as\s*\(")
+FC_RANKED_REGION = _region(r"fc_telemetry_ranked\s+as\s*\(", r"\)\s*,\s*drop_telemetry_ranked\s+as\s*\(")
+DROP_RANKED_REGION = _region(r"drop_telemetry_ranked\s+as\s*\(", r"\)\s*,\s*per_roast\s+as\s*\(")
 PER_ROAST_REGION = _region(r"per_roast\s+as\s*\(", r"\)\s*,\s*review_rollup\s+as\s*\(")
 REVIEW_ROLLUP_REGION = _region(r"review_rollup\s+as\s*\(", r"\)\s*\n\s*select\s*\n\s*:bean_origin")
 OUTER_SELECT_REGION = _region(r":bean_origin\s+as\s+bean_origin", r"from\s+per_roast\s+pr")
@@ -90,19 +92,40 @@ def test_filter_params_are_bind_prefixed_not_bare_tautologies():
 
 
 def test_temperature_derivation_reads_only_roast_telemetry():
-    for token in (
-        "roast_telemetry", "bean_temp_c", "first_crack_at_utc", "beans_dropped_at_utc", "elapsed_s",
-    ):
-        assert re.search(re.escape(token), PER_ROAST_REGION, re.IGNORECASE), token
+    for region, target in ((FC_RANKED_REGION, "first_crack_at_utc"), (DROP_RANKED_REGION, "beans_dropped_at_utc")):
+        for token in ("app.roast_telemetry", "bean_temp_c", target, "elapsed_s", "row_number"):
+            assert re.search(re.escape(token), region, re.IGNORECASE), token
 
 
 def test_telemetry_join_offset_is_started_at_anchored():
-    fc_join = _region(r"first_crack_at_utc\s+is\s+null\s+then\s+null\s+else", r"end\s+as\s+fc_temp_c")
-    drop_join = _region(r"beans_dropped_at_utc\s+is\s+null\s+then\s+null\s+else", r"end\s+as\s+drop_temp_c")
-    for region, anchor_target in ((fc_join, "first_crack_at_utc"), (drop_join, "beans_dropped_at_utc")):
+    for region, anchor_target in ((FC_RANKED_REGION, "first_crack_at_utc"), (DROP_RANKED_REGION, "beans_dropped_at_utc")):
         assert re.search(
             rf"(datediff|timestampdiff)\([^)]*started_at_utc[^)]*{anchor_target}", region, re.IGNORECASE | re.DOTALL
         )
+
+
+def test_rankings_guard_null_targets_and_break_ties_deterministically():
+    for region, target in ((FC_RANKED_REGION, "first_crack_at_utc"), (DROP_RANKED_REGION, "beans_dropped_at_utc")):
+        assert re.search(rf"where\s+c\.summary:{target}\s+is\s+not\s+null", region, re.IGNORECASE)
+        assert re.search(r"order\s+by\s+abs\([^)]*elapsed_s.*?\)\s+asc\s*,\s*tm\.elapsed_s\s+asc",
+                         region, re.IGNORECASE | re.DOTALL)
+    assert re.search(r"fc\.fc_rank\s*=\s*1", PER_ROAST_REGION, re.IGNORECASE)
+    assert re.search(r"drop_sample\.drop_rank\s*=\s*1", PER_ROAST_REGION, re.IGNORECASE)
+
+
+def test_no_correlated_min_by_scalar_subquery():
+    assert re.search(r"\bmin_by\s*\(", USING_REGION, re.IGNORECASE) is None
+    assert re.search(r"\(\s*select\b", PER_ROAST_REGION, re.IGNORECASE) is None
+
+
+def test_null_grouping_key_guard_precedes_merge():
+    pre_merge = _region(r"\$\$\s*\n\s*begin", r"merge\s+into")
+    assert re.search(
+        r"if\s*\(\s*bean_origin\s+is\s+null\s+or\s+roast_level\s+is\s+null\s*\)\s*then"
+        r".*?return\s+'skipped:\s*null\s+grouping\s+key'\s*;.*?end\s+if\s*;",
+        pre_merge,
+        re.IGNORECASE | re.DOTALL,
+    )
 
 
 def test_first_crack_time_is_charge_relative_beans_added_anchored():
@@ -120,7 +143,7 @@ def test_no_roast_level_value_reads_summary_metrics():
 
 
 def test_no_temperature_read_from_a_summary_path():
-    for region in (PER_ROAST_REGION,):
+    for region in (FC_RANKED_REGION, DROP_RANKED_REGION, PER_ROAST_REGION):
         assert re.search(r"summary\s*:\s*\w*temp", region, re.IGNORECASE) is None
 
 
