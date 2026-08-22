@@ -8,8 +8,10 @@ independent things, all of which must pass:
 
 1. ``SHOW GRANTS TO ROLE <role>`` — every CURRENT object grant on the
    primary role stays within the DEV database/warehouse.
-2. ``SHOW DATABASES`` / ``SHOW WAREHOUSES`` — the role can't even SEE
-   another database/warehouse (Codex P1, PR #57: a future grant, or any
+2. ``SHOW DATABASES`` / ``SHOW WAREHOUSES`` — apart from an exact
+   allowlist of Snowflake-owned, non-writable account defaults (D-11-A),
+   the role can't even SEE another database/warehouse (Codex P1, PR #57:
+   a future grant, or any
    other account-level visibility path, can hand this role access to an
    object with no corresponding row in #1's `SHOW GRANTS` output at all —
    visibility is the thing that's actually exploitable, so it's checked
@@ -37,16 +39,16 @@ independent things, all of which must pass:
    ``ALTER USER ROASTPILOT_DEV_CI SET DEFAULT_SECONDARY_ROLES = ()``,
    which stops secondary roles activating by default on ANY connection
    this user makes, this script's included.
-4. ``SHOW GRANTS TO ROLE PUBLIC`` — EVERY grant PUBLIC holds that's
-   VISIBLE TO THIS DEV-SCOPED ROLE is a violation, not merely one that
-   reaches outside the DEV boundary (Codex P1, PR #57, round 3). `AGENTS
-   .md`'s own Architecture Invariant is "No grants to `PUBLIC`, anywhere"
-   — a PUBLIC grant scoped entirely inside `ROASTPILOT_DEV`/`DEV_CI_WH` is
-   still a violation of that invariant, so this check (`find_public_
-   grants`) does NOT reuse the boundary-aware `is_allowed_grant`/`find_
-   violations` logic checks #1 and #5 use — PUBLIC is held to a stricter,
-   unconditional standard: zero grants, full stop, for whatever this role
-   can see.
+4. ``SHOW GRANTS TO ROLE PUBLIC`` — a visible PUBLIC grant is flagged iff
+   it targets our DEV database container, our DEV warehouse, or any role
+   other than an enumerated Snowflake-owned account default. A role granted
+   to PUBLIC hands every principal that role's access, so a non-default
+   role-to-PUBLIC grant is never legitimate for us. Other Snowflake-owned,
+   account-default, and account-level PUBLIC grants are structurally out of
+   scope because they can never reach our data. The property is deliberately
+   independent from both the visibility allowlist and `is_allowed_grant`'s
+   known-type gate: every known or unknown object type whose exact container
+   is `ROASTPILOT_DEV` fails closed.
    COMPLETENESS LIMIT (Codex P1, PR #57, round 5, :596 — tracked #59,
    don't over-fix here): `SHOW GRANTS TO ROLE PUBLIC`, run BY this
    DEV-scoped role, is only guaranteed to show grants within this role's
@@ -267,6 +269,10 @@ _DATABASE_SCOPED_OBJECT_TYPES = frozenset(
     }
 )
 
+_SNOWFLAKE_DEFAULT_DATABASES = frozenset({"SNOWFLAKE", "SNOWFLAKE_SAMPLE_DATA", "SNOWFLAKE_LEARNING_DB"})
+_SNOWFLAKE_DEFAULT_WAREHOUSES = frozenset({"SNOWFLAKE_LEARNING_WH", "SYSTEM$STREAMLIT_NOTEBOOK_WH"})
+_SNOWFLAKE_DEFAULT_ROLES = frozenset({"SNOWFLAKE_LEARNING_ROLE"})
+
 # The known-correct DEV boundary (Codex P2, PR #57, round 2). Every check in
 # this script trusts SNOWFLAKE_DEV_DATABASE/SNOWFLAKE_DEV_WAREHOUSE (env
 # vars, sourced the same way the deploy step's connection is) AS the allowed
@@ -462,6 +468,10 @@ def load_private_key_der(pem_text: str, passphrase: str | None) -> bytes:
     )
 
 
+def _object_container(name: str) -> str:
+    return name.split(".", 1)[0]
+
+
 def is_allowed_grant(
     granted_on: str, name: str, role_name: str, allowed_database: str, allowed_warehouse: str
 ) -> bool:
@@ -515,8 +525,7 @@ def is_allowed_grant(
         # splitting first and matching the resulting component with the
         # same exact-match discipline as every other identifier here,
         # rather than a substring-prefix check, is what closes #58's L1.
-        first_component = name.split(".", 1)[0]
-        return identifiers_match(first_component, allowed_database)
+        return identifiers_match(_object_container(name), allowed_database)
 
     return False
 
@@ -552,18 +561,49 @@ def find_violations(
     return violations
 
 
-def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
-    """Returns a human-readable description of EVERY grant PUBLIC holds
-    that's VISIBLE TO THIS DEV-SCOPED ROLE — empty only if none are visible
-    (Codex P1, PR #57, round 3).
+def _public_grant_targets_owned_object(
+    granted_on: str, name: str, role_name: str, allowed_database: str, allowed_warehouse: str
+) -> bool:
+    """True when a PUBLIC grant targets our DEV database/warehouse or a non-default role.
 
-    Deliberately does NOT reuse `find_violations`'s boundary-aware logic:
-    `AGENTS.md`'s Architecture Invariant is "No grants to `PUBLIC`,
-    anywhere" -- a PUBLIC grant scoped entirely inside
-    `ROASTPILOT_DEV`/`DEV_CI_WH` is still a violation of that invariant, so
-    checking PUBLIC against the DEV boundary (as an earlier version of
-    this audit did) would wrongly ALLOW it. PUBLIC should have zero
-    grants, full stop -- every row here is unconditionally a violation.
+    This property deliberately does not reuse `is_allowed_grant`: that
+    predicate type-gates database-scoped objects and returns False for an
+    unknown type, while here True means "flag". Reusing or mirroring that
+    gate would therefore fail open for a new object type inside our DEV
+    database. Every non-warehouse/non-role kind is judged by its exact
+    container instead, so unknown types fail closed. Every ROLE grant is
+    flagged except the byte-exact enumerated Snowflake-owned account
+    defaults, because a role granted to PUBLIC hands its access to every
+    principal.
+    """
+    kind = granted_on.strip().upper()
+    if kind == "WAREHOUSE":
+        # SHOW GRANTS emits bare identifiers, not db-qualified names, for account warehouses.
+        return identifiers_match(name, allowed_warehouse)
+    if kind == "ROLE":
+        # SHOW GRANTS emits bare identifiers for account roles; database roles use DATABASE_ROLE.
+        # A role granted to PUBLIC hands every principal that role's access,
+        # so it is never legitimate for us — flag every ROLE-to-PUBLIC grant
+        # EXCEPT the enumerated Snowflake-owned account defaults (which every
+        # account carries and which cannot reach our data). Byte-exact, so a
+        # lookalike of a default role still flags. role_name is intentionally
+        # no longer special-cased: our own CI role granted to PUBLIC is itself
+        # a violation and must flag.
+        return not any(identifiers_match(name, r) for r in _SNOWFLAKE_DEFAULT_ROLES)
+    return identifiers_match(_object_container(name), allowed_database)
+
+
+def find_public_grants(
+    grant_rows: list[dict[str, object]], role_name: str, allowed_database: str, allowed_warehouse: str
+) -> list[str]:
+    """Returns visible PUBLIC grants targeting our DEV boundary or non-default roles.
+
+    A grant is flagged iff it targets our DEV database container, our DEV
+    warehouse, or any role other than an enumerated Snowflake-owned account
+    default. A role-to-PUBLIC grant is never legitimate for us because it
+    hands that role's access to every principal. Other Snowflake-owned,
+    account-default, and account-level PUBLIC grants are structurally out of
+    scope because they can never reach our data.
 
     COMPLETENESS LIMIT (Codex P1, PR #57, round 5, :596 -- tracked #59):
     the caller's `SHOW GRANTS TO ROLE PUBLIC` rows are only what's visible
@@ -576,12 +616,23 @@ def find_public_grants(grant_rows: list[dict[str, object]]) -> list[str]:
 
     @param grant_rows: Rows as returned by a `DictCursor` running `SHOW
         GRANTS TO ROLE PUBLIC`.
-    @returns: Descriptions of every grant PUBLIC holds, empty if none.
+    @param role_name: The DEV role, retained for signature symmetry with the
+        other boundary predicates; ROLE grants use the default-role allowlist.
+    @param allowed_database: The DEV database whose exact container is owned.
+    @param allowed_warehouse: The DEV warehouse whose exact identifier is owned.
+    @returns: Descriptions of every grant flagged by the D-11-C property.
     """
-    return [
-        f"{row.get('privilege', '')} on {row.get('granted_on', '')} {row.get('name', '')}"
-        for row in grant_rows
-    ]
+    violations = []
+    for row in grant_rows:
+        privilege = str(row.get("privilege", ""))
+        granted_on = str(row.get("granted_on", ""))
+        name = str(row.get("name", ""))
+        # DictCursor does not return NULL for these columns; catch empty strings after str() coercion.
+        if not granted_on or not name or _public_grant_targets_owned_object(
+            granted_on, name, role_name, allowed_database, allowed_warehouse
+        ):
+            violations.append(f"{privilege} on {granted_on} {name}")
+    return violations
 
 
 def find_future_grant_violations(
@@ -645,10 +696,12 @@ def find_public_future_grants(future_grant_rows: list[dict[str, object]]) -> lis
     ]
 
 
-def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> list[str]:
+def find_out_of_bounds_names(
+    visible_names: list[str], allowed_name: str, default_allowlist: frozenset[str] = frozenset()
+) -> list[str]:
     """Filters a list of visible object names (from `SHOW DATABASES` or
-    `SHOW WAREHOUSES`) down to whichever ones are NOT the one allowed name
-    — i.e. anything this role can see beyond its intended boundary.
+    `SHOW WAREHOUSES`) down to whichever ones are neither the one allowed
+    name nor a D-11-A Snowflake-owned, non-writable account default.
 
     Catches what `SHOW GRANTS TO ROLE` alone can miss (Codex P1, PR #57):
     a future grant, an account-level visibility path, or any other
@@ -660,9 +713,13 @@ def find_out_of_bounds_names(visible_names: list[str], allowed_name: str) -> lis
     @param visible_names: Object names as returned by `SHOW DATABASES`/
         `SHOW WAREHOUSES` (the `name` column).
     @param allowed_name: The one name this role should see.
-    @returns: Every visible name that isn't the allowed one.
+    @param default_allowlist: Exact built-in names this role may also see;
+        empty by default so existing callers retain the strict behavior.
+    @returns: Every visible name that isn't allowed.
     """
-    return [name for name in visible_names if not identifiers_match(name, allowed_name)]
+    return [name for name in visible_names
+            if not identifiers_match(name, allowed_name)
+            and not any(identifiers_match(name, d) for d in default_allowlist)]
 
 
 def find_unexpected_user_role_grants(
@@ -862,15 +919,18 @@ def main() -> int:
         conn.close()
 
     violations = find_violations(grant_rows, role, database, warehouse)
-    # Codex P1, PR #57, round 3: PUBLIC is held to an unconditional
-    # zero-grants standard (AGENTS.md's "No grants to PUBLIC, anywhere"),
-    # not the boundary-aware check the primary role gets -- see
-    # find_public_grants's own docstring, including its COMPLETENESS LIMIT
-    # (round 5, :596, tracked #59): this is DEV-visibility-scoped, not an
-    # account-wide guarantee.
-    public_violations = find_public_grants(public_grant_rows)
-    out_of_bounds_databases = find_out_of_bounds_names(visible_databases, database)
-    out_of_bounds_warehouses = find_out_of_bounds_names(visible_warehouses, warehouse)
+    # PUBLIC grants are flagged for the exact DEV database container or
+    # warehouse, plus every role except enumerated Snowflake-owned defaults.
+    # Other account-default/account-level grants are structurally out of scope.
+    # The COMPLETENESS LIMIT in find_public_grants still applies: this is a
+    # DEV-visibility-scoped detective control, not an account-wide guarantee.
+    public_violations = find_public_grants(public_grant_rows, role, database, warehouse)
+    out_of_bounds_databases = find_out_of_bounds_names(
+        visible_databases, database, _SNOWFLAKE_DEFAULT_DATABASES
+    )
+    out_of_bounds_warehouses = find_out_of_bounds_names(
+        visible_warehouses, warehouse, _SNOWFLAKE_DEFAULT_WAREHOUSES
+    )
     unexpected_user_roles = find_unexpected_user_role_grants(user_role_rows, role)
     future_violations = find_future_grant_violations(future_grant_rows, role, database, warehouse)
     public_future_violations = find_public_future_grants(public_future_grant_rows)
@@ -893,7 +953,10 @@ def main() -> int:
         for violation in violations:
             print(f"  - grant on {role} outside {database}/{warehouse}: {violation}", file=sys.stderr)
         for violation in public_violations:
-            print(f"  - PUBLIC grant visible to {role} (PUBLIC must have none visible): {violation}", file=sys.stderr)
+            print(
+                f"  - PUBLIC grant on a DEV-owned object (our database/warehouse/role): {violation}",
+                file=sys.stderr,
+            )
         for extra_database in out_of_bounds_databases:
             print(f"  - visible database beyond the DEV boundary: {extra_database}", file=sys.stderr)
         for extra_warehouse in out_of_bounds_warehouses:
@@ -913,9 +976,10 @@ def main() -> int:
 
     print(
         f"confirmed: all {len(grant_rows)} grant(s) (+ {len(future_grant_rows)} future grant(s)) on "
-        f"{role} stay within {database}/{warehouse}, PUBLIC holds zero current or future grants "
-        f"visible to this role, no other database/warehouse is visible, {user} has no unexpected "
-        f"role grants, and {user}'s DEFAULT_SECONDARY_ROLES is verified empty"
+        f"{role} stay within {database}/{warehouse}, no PUBLIC grant targets a DEV-owned object, "
+        f"PUBLIC holds zero future grants visible to this role, no other database/warehouse is "
+        f"visible, {user} has no unexpected role grants, and {user}'s DEFAULT_SECONDARY_ROLES is "
+        f"verified empty"
     )
     return 0
 
