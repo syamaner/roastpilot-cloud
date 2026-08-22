@@ -62,7 +62,7 @@ def test_procedure_signature_matches_exactly():
 
 
 def test_single_merge_into_reference_roast_summaries():
-    merges = re.findall(r"merge\s+into\s+reference_roast_summaries\b", STRIPPED, re.IGNORECASE)
+    merges = re.findall(r"merge\s+into\s+(?:app\.)?reference_roast_summaries\b", STRIPPED, re.IGNORECASE)
     assert len(merges) == 1
 
 
@@ -140,7 +140,7 @@ def test_aggregate_functions_match_expected_columns():
     for col in ("first_crack_temp_stddev_c", "drop_temp_stddev_c"):
         assert re.search(rf"stddev\(pr\.\w+\)\s+as\s+{col}\b", OUTER_SELECT_REGION, re.IGNORECASE)
     assert re.search(r"count\(\*\)", USING_REGION, re.IGNORECASE)
-    assert re.search(r"count\(tr\.id\)\s+as\s+review_count", REVIEW_ROLLUP_REGION, re.IGNORECASE)
+    assert re.search(r"count\(\*\)\s+as\s+review_count", REVIEW_ROLLUP_REGION, re.IGNORECASE)
     assert re.search(r"avg\(tr\.score\)\s+as\s+avg_rating", REVIEW_ROLLUP_REGION, re.IGNORECASE)
 
 
@@ -166,12 +166,26 @@ def test_merge_source_has_no_group_by():
 
 
 def test_copy_grants_present_on_procedure():
-    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*begin")
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
     assert re.search(r"\bcopy\s+grants\b", header, re.IGNORECASE)
 
 
+def test_copy_grants_follows_arguments_and_precedes_returns():
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
+    arguments_end = re.search(r"\(\s*bean_origin\s+string\s*,\s*roast_level\s+string\s*\)", header, re.IGNORECASE)
+    copy_grants = re.search(r"\bcopy\s+grants\b", header, re.IGNORECASE)
+    returns = re.search(r"\breturns\s+string\b", header, re.IGNORECASE)
+    assert arguments_end and copy_grants and returns
+    assert arguments_end.end() < copy_grants.start() < returns.start()
+
+
+def test_procedure_body_is_dollar_quote_delimited():
+    assert re.search(r"\bas\b\s*\n\s*\$\$\s*\n\s*begin\b", STRIPPED, re.IGNORECASE)
+    assert re.search(r"\bend\s*;\s*\n\s*\$\$\s*;\s*$", STRIPPED, re.IGNORECASE)
+
+
 def test_execute_as_owner_present():
-    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*begin")
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
     assert re.search(r"\bexecute\s+as\s+owner\b", header, re.IGNORECASE)
 
 
@@ -191,7 +205,7 @@ def test_no_grant_or_second_create_object():
 
 
 def test_only_one_contribution_source():
-    sources = re.findall(r"from\s+cloud_roasts\b", STRIPPED, re.IGNORECASE)
+    sources = re.findall(r"from\s+(?:app\.)?cloud_roasts\b", STRIPPED, re.IGNORECASE)
     assert len(sources) == 1
 
 

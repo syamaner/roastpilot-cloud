@@ -28,17 +28,22 @@
 use schema app;
 
 create or replace procedure recompute_reference_summary(bean_origin string, roast_level string)
+copy grants
 returns string
 language sql
 execute as owner
-copy grants
 as
+$$
 begin
-  merge into reference_roast_summaries t
+  if (bean_origin is null or roast_level is null) then
+    return 'skipped: null grouping key';
+  end if;
+
+  merge into app.reference_roast_summaries t
   using (
     with contributing as (
       select r.id, r.summary
-      from cloud_roasts r
+      from app.cloud_roasts r
       where r.bean_origin = :bean_origin
         and r.roast_level = :roast_level
         and r.contributed_to_learning = true
@@ -56,7 +61,7 @@ begin
             select min_by(tm.bean_temp_c, abs(tm.elapsed_s
               - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
                                       c.summary:first_crack_at_utc::timestamp_tz) / 1000.0))
-            from roast_telemetry tm
+            from app.roast_telemetry tm
             where tm.roast_id = c.id
           )
         end as fc_temp_c,
@@ -67,7 +72,7 @@ begin
             select min_by(tm.bean_temp_c, abs(tm.elapsed_s
               - datediff(millisecond, c.summary:started_at_utc::timestamp_tz,
                                       c.summary:beans_dropped_at_utc::timestamp_tz) / 1000.0))
-            from roast_telemetry tm
+            from app.roast_telemetry tm
             where tm.roast_id = c.id
           )
         end as drop_temp_c,
@@ -80,9 +85,9 @@ begin
       from contributing c
     ),
     review_rollup as (
-      select count(tr.id) as review_count, avg(tr.score) as avg_rating
+      select count(*) as review_count, avg(tr.score) as avg_rating
       from contributing c
-      join tasting_reviews tr on tr.roast_id = c.id
+      join app.tasting_reviews tr on tr.roast_id = c.id
     )
     select
       :bean_origin as bean_origin,
@@ -133,3 +138,4 @@ begin
   );
   return 'recomputed';
 end;
+$$;
