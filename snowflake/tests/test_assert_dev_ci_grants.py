@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -357,39 +358,263 @@ class TestFindViolations:
         assert len(violations) == 1
 
 
+def _find_public_grants(rows: list[dict[str, object]]) -> list[str]:
+    return assert_dev_ci_grants.find_public_grants(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
+
+
+def _public_grant_corpus() -> list[dict[str, object]]:
+    """Representative hand-authored defaults across 9 granted_on kinds; not an MCP capture."""
+    return [
+        {
+            "privilege": "SELECT",
+            "granted_on": "TABLE",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.PARTSUPP",
+        },
+        {
+            "privilege": "SELECT",
+            "granted_on": "TABLE",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.REGION",
+        },
+        {
+            "privilege": "SELECT",
+            "granted_on": "TABLE",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.SUPPLIER",
+        },
+        {
+            "privilege": "SELECT",
+            "granted_on": "TABLE",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCDS_SF10TCL.CUSTOMER",
+        },
+        {"privilege": "USAGE", "granted_on": "DATABASE", "name": "SNOWFLAKE_SAMPLE_DATA"},
+        {
+            "privilege": "USAGE",
+            "granted_on": "SCHEMA",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1",
+        },
+        {
+            "privilege": "USAGE",
+            "granted_on": "SCHEMA",
+            "name": "SNOWFLAKE_SAMPLE_DATA.TPCDS_SF10TCL",
+        },
+        {"privilege": "USAGE", "granted_on": "DATABASE_ROLE", "name": "SNOWFLAKE.CORTEX_USER"},
+        {"privilege": "USAGE", "granted_on": "DATABASE_ROLE", "name": "SNOWFLAKE.ML_USER"},
+        {"privilege": "USAGE", "granted_on": "DATABASE_ROLE", "name": "SNOWFLAKE.CORE_VIEWER"},
+        {
+            "privilege": "USAGE",
+            "granted_on": "APPLICATION_ROLE",
+            "name": 'SNOWFLAKE."CORTEX-MODEL-ROLE-ALL"',
+        },
+        {"privilege": "USAGE", "granted_on": "APPLICATION_ROLE", "name": "SNOWFLAKE.PUBLIC"},
+        {"privilege": "USAGE", "granted_on": "ROLE", "name": "SNOWFLAKE_LEARNING_ROLE"},
+        {"privilege": "USAGE", "granted_on": "COMPUTE_POOL", "name": "SYSTEM_COMPUTE_POOL_CPU"},
+        {"privilege": "USAGE", "granted_on": "COMPUTE_POOL", "name": "SYSTEM_COMPUTE_POOL_GPU"},
+        {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": "SNOWFLAKE_LEARNING_WH"},
+        {"privilege": "BIND SERVICE ENDPOINT", "granted_on": "ACCOUNT", "name": "IO03393"},
+        {"privilege": "EXECUTE AGENT TASK", "granted_on": "ACCOUNT", "name": "IO03393"},
+        {"privilege": "MANAGE ARTIFACT PUBLICATION", "granted_on": "ACCOUNT", "name": "IO03393"},
+        {"privilege": "USE AI FUNCTIONS", "granted_on": "ACCOUNT", "name": "IO03393"},
+        {"privilege": "VIEW LINEAGE", "granted_on": "ACCOUNT", "name": "IO03393"},
+    ]
+
+
 class TestFindPublicGrants:
-    """Codex P1, PR #57, round 3: PUBLIC is held to an UNCONDITIONAL
-    zero-grants standard (AGENTS.md's "No grants to PUBLIC, anywhere"),
-    not the boundary-aware check `find_violations`/`is_allowed_grant` give
-    the primary role -- deliberately NOT reused for PUBLIC's own audit.
-    """
+    """D-11-D flags PUBLIC grants by DEV/account reach, minus exact defaults."""
 
-    def test_empty_when_public_has_no_grants(self) -> None:
-        assert assert_dev_ci_grants.find_public_grants([]) == []
+    @pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE", "OWNERSHIP"])
+    def test_flags_every_privilege_on_a_dev_table(self, privilege: str) -> None:
+        rows = [{"privilege": privilege, "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.T"}]
+        assert _find_public_grants(rows) == [f"{privilege} on TABLE {_DEV_DB}.APP.T"]
 
-    def test_flags_a_grant_outside_the_dev_boundary(self) -> None:
-        rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"}]
-        violations = assert_dev_ci_grants.find_public_grants(rows)
-        assert len(violations) == 1
-        assert "ROASTPILOT_PREVIEW" in violations[0]
-
-    def test_flags_a_grant_even_INSIDE_the_dev_boundary_codex_p1_round3(self) -> None:
-        # The exact regression this round closes: reusing the
-        # boundary-aware find_violations here would wrongly ALLOW a PUBLIC
-        # grant that happens to sit inside ROASTPILOT_DEV/DEV_CI_WH --
-        # AGENTS.md's invariant is "no grants to PUBLIC, anywhere", full
-        # stop, regardless of what's granted or where.
-        rows = [{"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.SOME_TABLE"}]
-        violations = assert_dev_ci_grants.find_public_grants(rows)
-        assert len(violations) == 1
-        assert "SOME_TABLE" in violations[0]
-
-    def test_flags_multiple_grants_independently(self) -> None:
+    def test_flags_unknown_object_type_inside_dev_without_type_gate(self) -> None:
         rows = [
-            {"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB},
-            {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": _DEV_WH},
+            {
+                "privilege": "SELECT",
+                "granted_on": "SOME_FUTURE_OBJECT_TYPE",
+                "name": f"{_DEV_DB}.APP.T",
+            }
         ]
-        assert len(assert_dev_ci_grants.find_public_grants(rows)) == 2
+        assert _find_public_grants(rows) == [f"SELECT on SOME_FUTURE_OBJECT_TYPE {_DEV_DB}.APP.T"]
+
+    def test_flags_the_dev_warehouse(self) -> None:
+        rows = [{"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": _DEV_WH}]
+        assert _find_public_grants(rows) == [f"USAGE on WAREHOUSE {_DEV_WH}"]
+
+    @pytest.mark.parametrize(
+        "role",
+        ["ROASTPILOT_AGENT", "PUBLIC_WEB", _DEV_ROLE, "SOME_CUSTOM_ROLE"],
+    )
+    def test_flags_every_non_default_role(self, role: str) -> None:
+        # The CI role is not special: like every non-default role, granting it
+        # to PUBLIC hands that role's access to every principal.
+        rows = [{"privilege": "USAGE", "granted_on": "ROLE", "name": role}]
+        assert _find_public_grants(rows) == [f"USAGE on ROLE {role}"]
+
+    def test_ignores_the_exact_snowflake_default_role(self) -> None:
+        rows = [{"privilege": "USAGE", "granted_on": "ROLE", "name": "SNOWFLAKE_LEARNING_ROLE"}]
+        assert _find_public_grants(rows) == []
+
+    @pytest.mark.parametrize(
+        "role",
+        ["snowflake_learning_role", "SNOWFLAKE_LEARNING_ROLE ", "SNOWFLAKE_LEARNING_ROLE_EVIL"],
+    )
+    def test_flags_snowflake_default_role_lookalikes_byte_exact(self, role: str) -> None:
+        rows = [{"privilege": "USAGE", "granted_on": "ROLE", "name": role}]
+        assert _find_public_grants(rows) == [f"USAGE on ROLE {role}"]
+
+    @pytest.mark.parametrize(
+        ("granted_on", "name"),
+        [("  role  ", "ROASTPILOT_AGENT"), ("warehouse", _DEV_WH)],
+    )
+    def test_normalizes_object_kind_before_routing(self, granted_on: str, name: str) -> None:
+        rows = [{"privilege": "USAGE", "granted_on": granted_on, "name": name}]
+        assert _find_public_grants(rows) == [f"USAGE on {granted_on} {name}"]
+
+    def test_flags_the_bare_dev_database(self) -> None:
+        rows = [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        assert _find_public_grants(rows) == [f"USAGE on DATABASE {_DEV_DB}"]
+
+    @pytest.mark.parametrize(
+        "privilege",
+        ["MANAGE GRANTS", "CREATE DATABASE", "CREATE ROLE", "APPLY MASKING POLICY"],
+    )
+    def test_flags_dangerous_account_privileges(self, privilege: str) -> None:
+        rows = [{"privilege": privilege, "granted_on": "ACCOUNT", "name": "IO03393"}]
+        assert _find_public_grants(rows) == [f"{privilege} on ACCOUNT IO03393"]
+
+    def test_flags_unknown_account_privilege_fail_closed(self) -> None:
+        rows = [
+            {
+                "privilege": "SOME_FUTURE_ACCOUNT_PRIVILEGE",
+                "granted_on": "ACCOUNT",
+                "name": "IO03393",
+            }
+        ]
+        assert _find_public_grants(rows) == ["SOME_FUTURE_ACCOUNT_PRIVILEGE on ACCOUNT IO03393"]
+
+    def test_account_privilege_allowlist_polarity_direct(self) -> None:
+        args = ("ACCOUNT", "IO03393", _DEV_ROLE, _DEV_DB, _DEV_WH)
+        assert not assert_dev_ci_grants._public_grant_targets_owned_object(" view lineage ", *args)
+        assert assert_dev_ci_grants._public_grant_targets_owned_object("MANAGE GRANTS", *args)
+
+    @pytest.mark.parametrize(
+        ("row", "expected"),
+        [
+            ({"privilege": "USAGE", "granted_on": "", "name": _DEV_DB}, f"USAGE on  {_DEV_DB}"),
+            (
+                {"privilege": "USAGE", "granted_on": "", "name": "SNOWFLAKE_SAMPLE_DATA.FOO"},
+                "USAGE on  SNOWFLAKE_SAMPLE_DATA.FOO",
+            ),
+            ({"privilege": "USAGE", "granted_on": "DATABASE", "name": ""}, "USAGE on DATABASE "),
+        ],
+    )
+    def test_flags_malformed_rows(self, row: dict[str, object], expected: str) -> None:
+        assert _find_public_grants([row]) == [expected]
+
+    def test_mixed_corpus_and_dev_row_returns_only_the_dev_violation(self) -> None:
+        dev_row = {"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.T"}
+        assert _find_public_grants([_public_grant_corpus()[0], dev_row]) == [
+            f"SELECT on TABLE {_DEV_DB}.APP.T"
+        ]
+
+    @pytest.mark.parametrize("row", _public_grant_corpus())
+    def test_ignores_each_account_default_corpus_row(self, row: dict[str, object]) -> None:
+        assert _find_public_grants([row]) == []
+
+    def test_full_representative_account_default_corpus_passes(self) -> None:
+        corpus = _public_grant_corpus()
+        assert _find_public_grants(corpus) == []
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"privilege": "SELECT", "granted_on": "TABLE", "name": "ROASTPILOT_DEV_EVIL.APP.T"},
+            {"privilege": "SELECT", "granted_on": "TABLE", "name": "roastpilot_dev.app.t"},
+            {"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB} .APP.T"},
+            {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": f"{_DEV_WH}_EVIL"},
+            {"privilege": "USAGE", "granted_on": "DATABASE", "name": "ROASTPILOT_PREVIEW"},
+        ],
+    )
+    def test_ignores_non_owned_lookalikes_and_preview(self, row: dict[str, object]) -> None:
+        assert _find_public_grants([row]) == []
+
+    def test_empty_rows_are_ignored(self) -> None:
+        assert _find_public_grants([]) == []
+
+
+class TestFindDefaultRoleBoundaryReaches:
+    def test_flags_dev_table_reachable_via_default_role(self) -> None:
+        grants = {
+            "SNOWFLAKE_LEARNING_ROLE": [
+                {"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.T"}
+            ]
+        }
+        assert assert_dev_ci_grants.find_default_role_boundary_reaches(grants, _DEV_DB, _DEV_WH) == [
+            f"SELECT on TABLE {_DEV_DB}.APP.T "
+            "(reachable by PUBLIC via default role SNOWFLAKE_LEARNING_ROLE)"
+        ]
+
+    def test_ignores_snowflake_internal_database_and_role_grants(self) -> None:
+        grants = {
+            "SNOWFLAKE_LEARNING_ROLE": [
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "DATABASE",
+                    "name": "SNOWFLAKE_LEARNING_DB",
+                },
+                {"privilege": "USAGE", "granted_on": "ROLE", "name": "X"},
+            ]
+        }
+        assert assert_dev_ci_grants.find_default_role_boundary_reaches(grants, _DEV_DB, _DEV_WH) == []
+
+    def test_flags_dev_warehouse_reachable_via_default_role(self) -> None:
+        grants = {
+            "SNOWFLAKE_LEARNING_ROLE": [
+                {"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": _DEV_WH}
+            ]
+        }
+        violations = assert_dev_ci_grants.find_default_role_boundary_reaches(grants, _DEV_DB, _DEV_WH)
+        assert violations == [
+            f"USAGE on WAREHOUSE {_DEV_WH} "
+            "(reachable by PUBLIC via default role SNOWFLAKE_LEARNING_ROLE)"
+        ]
+
+    def test_flags_unknown_object_type_on_dev_container_fail_closed(self) -> None:
+        grants = {
+            "SNOWFLAKE_LEARNING_ROLE": [
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "SOME_FUTURE_OBJECT_TYPE",
+                    "name": f"{_DEV_DB}.APP.T",
+                }
+            ]
+        }
+        violations = assert_dev_ci_grants.find_default_role_boundary_reaches(grants, _DEV_DB, _DEV_WH)
+        assert violations == [
+            f"USAGE on SOME_FUTURE_OBJECT_TYPE {_DEV_DB}.APP.T "
+            "(reachable by PUBLIC via default role SNOWFLAKE_LEARNING_ROLE)"
+        ]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {
+                "privilege": "USAGE",
+                "granted_on": "",
+                "name": "SNOWFLAKE_LEARNING_DB.PUBLIC.T",
+            },
+            {"privilege": "USAGE", "granted_on": "DATABASE", "name": ""},
+        ],
+    )
+    def test_flags_malformed_rows_on_non_owned_targets(self, row: dict[str, object]) -> None:
+        grants = {"SNOWFLAKE_LEARNING_ROLE": [row]}
+        violations = assert_dev_ci_grants.find_default_role_boundary_reaches(grants, _DEV_DB, _DEV_WH)
+        assert violations == [
+            f"USAGE on {row['granted_on']} {row['name']} "
+            "(reachable by PUBLIC via default role SNOWFLAKE_LEARNING_ROLE)"
+        ]
+
+    def test_empty_mapping_has_no_reaches(self) -> None:
+        assert assert_dev_ci_grants.find_default_role_boundary_reaches({}, _DEV_DB, _DEV_WH) == []
 
 
 class TestFindFutureGrantViolations:
@@ -484,6 +709,49 @@ class TestFindOutOfBoundsNames:
 
     def test_empty_list_of_visible_names_is_never_a_violation(self) -> None:
         assert assert_dev_ci_grants.find_out_of_bounds_names([], _DEV_DB) == []
+
+    def test_admits_the_five_snowflake_defaults_when_the_matching_sets_are_passed(self) -> None:
+        databases = [_DEV_DB, "SNOWFLAKE", "SNOWFLAKE_SAMPLE_DATA", "SNOWFLAKE_LEARNING_DB"]
+        warehouses = [_DEV_WH, "SNOWFLAKE_LEARNING_WH", "SYSTEM$STREAMLIT_NOTEBOOK_WH"]
+        assert (
+            assert_dev_ci_grants.find_out_of_bounds_names(
+                databases, _DEV_DB, assert_dev_ci_grants._SNOWFLAKE_DEFAULT_DATABASES
+            )
+            == []
+        )
+        assert (
+            assert_dev_ci_grants.find_out_of_bounds_names(
+                warehouses, _DEV_WH, assert_dev_ci_grants._SNOWFLAKE_DEFAULT_WAREHOUSES
+            )
+            == []
+        )
+
+    def test_flags_non_default_databases_alongside_real_defaults(self) -> None:
+        names = [
+            _DEV_DB,
+            "SNOWFLAKE",
+            "SNOWFLAKE_SAMPLE_DATA",
+            "SNOWFLAKE_LEARNING_DB",
+            "ROASTPILOT_PREVIEW",
+            "FOO_DB",
+        ]
+        result = assert_dev_ci_grants.find_out_of_bounds_names(
+            names, _DEV_DB, assert_dev_ci_grants._SNOWFLAKE_DEFAULT_DATABASES
+        )
+        assert result == ["ROASTPILOT_PREVIEW", "FOO_DB"]
+
+    def test_empty_default_set_preserves_the_old_behavior(self) -> None:
+        defaults = ["SNOWFLAKE", "SNOWFLAKE_SAMPLE_DATA", "SNOWFLAKE_LEARNING_DB"]
+        assert assert_dev_ci_grants.find_out_of_bounds_names(defaults, _DEV_DB, frozenset()) == defaults
+
+    def test_default_allowlist_identifier_matching_is_byte_exact(self) -> None:
+        lookalikes = ["SNOWFLAKE_EVIL", "snowflake", "SNOWFLAKE "]
+        assert (
+            assert_dev_ci_grants.find_out_of_bounds_names(
+                lookalikes, _DEV_DB, assert_dev_ci_grants._SNOWFLAKE_DEFAULT_DATABASES
+            )
+            == lookalikes
+        )
 
 
 class TestFindUnexpectedUserRoleGrants:
@@ -682,13 +950,15 @@ class TestMain:
     correctly, which is what's actually testable without live
     infrastructure access.
 
-    main() now issues NINE sequential statements on the same cursor: `USE
+    main() issues NINE fixed sequential statements on the same cursor: `USE
     SECONDARY ROLES NONE` (no fetchall), then SHOW GRANTS TO ROLE, SHOW
     DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, SHOW GRANTS TO
     USER, SHOW FUTURE GRANTS TO ROLE, SHOW FUTURE GRANTS TO ROLE PUBLIC, and
-    SHOW USERS LIKE (each followed by a fetchall) -- mock_cursor.fetchall's
-    side_effect is a LIST of eight return values, one per query, in that
-    order.
+    SHOW USERS LIKE (each followed by a fetchall). It then issues a variable
+    sorted trailing `SHOW GRANTS TO ROLE <default_role>` query for each
+    allowlisted default role granted to PUBLIC. `mock_cursor.fetchall` keeps
+    the original eight return values as a fixed prefix, followed by those
+    per-default-role results in sorted role order.
     """
 
     def _set_required_env(self, monkeypatch, pem: str) -> None:
@@ -709,6 +979,7 @@ class TestMain:
         future_grant_rows: list[dict[str, object]] | None = None,
         public_future_grant_rows: list[dict[str, object]] | None = None,
         show_user_rows: list[dict[str, object]] | None = None,
+        default_role_grant_results: dict[str, list[dict[str, object]]] | None = None,
     ) -> MagicMock:
         mock_cursor = MagicMock()
         mock_cursor.fetchall.side_effect = [
@@ -722,6 +993,7 @@ class TestMain:
             show_user_rows
             if show_user_rows is not None
             else [{"name": _CI_USER, "default_secondary_roles": "[]"}],
+            *[grants for _, grants in sorted((default_role_grant_results or {}).items())],
         ]
         return mock_cursor
 
@@ -745,6 +1017,133 @@ class TestMain:
         assert connect_kwargs["role"] == "ROASTPILOT_DEV_CI_ROLE"
         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
         mock_conn.close.assert_called_once()
+
+    def test_returns_0_for_account_default_public_grant_corpus(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            visible_databases=[
+                {"name": _DEV_DB},
+                {"name": "SNOWFLAKE"},
+                {"name": "SNOWFLAKE_SAMPLE_DATA"},
+                {"name": "SNOWFLAKE_LEARNING_DB"},
+            ],
+            visible_warehouses=[
+                {"name": _DEV_WH},
+                {"name": "SNOWFLAKE_LEARNING_WH"},
+                {"name": "SYSTEM$STREAMLIT_NOTEBOOK_WH"},
+            ],
+            public_grant_rows=_public_grant_corpus(),
+            default_role_grant_results={"SNOWFLAKE_LEARNING_ROLE": []},
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 0
+        stdout = capsys.readouterr().out
+        assert "no PUBLIC current grant violates the DEV/account boundary" in stdout
+        assert "no PUBLIC-granted default role directly reaches DEV" in stdout
+        assert "PUBLIC holds zero future grants visible" in stdout
+        mock_cursor.execute.assert_any_call("SHOW GRANTS TO ROLE SNOWFLAKE_LEARNING_ROLE")
+
+    def test_returns_1_when_default_role_granted_to_public_reaches_dev(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_grant_rows=_public_grant_corpus(),
+            default_role_grant_results={
+                "SNOWFLAKE_LEARNING_ROLE": [
+                    {"privilege": "SELECT", "granted_on": "TABLE", "name": f"{_DEV_DB}.APP.T"}
+                ]
+            },
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "PUBLIC transitively reaches a DEV object via a default role" in stderr
+        assert f"SELECT on TABLE {_DEV_DB}.APP.T" in stderr
+        assert "reachable by PUBLIC via default role SNOWFLAKE_LEARNING_ROLE" in stderr
+
+    def test_returns_1_for_dangerous_account_privilege_granted_to_public(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_grant_rows=[
+                {"privilege": "MANAGE GRANTS", "granted_on": "ACCOUNT", "name": "IO03393"}
+            ],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "MANAGE GRANTS on ACCOUNT IO03393" in stderr
+        assert "PUBLIC grant violating the DEV/account boundary" in stderr
+
+    def test_snowflake_defaults_do_not_mask_a_non_default_visible_database(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            visible_databases=[
+                {"name": _DEV_DB},
+                {"name": "SNOWFLAKE"},
+                {"name": "SNOWFLAKE_SAMPLE_DATA"},
+                {"name": "SNOWFLAKE_LEARNING_DB"},
+                {"name": "FOO_DB"},
+            ],
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        assert "FOO_DB" in capsys.readouterr().err
+
+    def test_account_defaults_do_not_mask_a_public_grant_on_a_dev_owned_object(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            visible_databases=[
+                {"name": _DEV_DB},
+                {"name": "SNOWFLAKE"},
+                {"name": "SNOWFLAKE_SAMPLE_DATA"},
+                {"name": "SNOWFLAKE_LEARNING_DB"},
+            ],
+            public_grant_rows=[
+                *_public_grant_corpus(),
+                {
+                    "privilege": "SELECT",
+                    "granted_on": "TABLE",
+                    "name": f"{_DEV_DB}.APP.T",
+                }
+            ],
+            default_role_grant_results={"SNOWFLAKE_LEARNING_ROLE": []},
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert f"SELECT on TABLE {_DEV_DB}.APP.T" in stderr
+        assert "PUBLIC grant violating the DEV/account boundary" in stderr
 
     def test_refuses_a_role_that_is_not_a_bare_identifier_before_connecting(self, monkeypatch) -> None:
         # #58's L3. Position matters as much as the check: it must run
@@ -999,9 +1398,7 @@ class TestMain:
         assert exit_code == 1
         assert "PREVIEW_WH" in capsys.readouterr().err
 
-    def test_returns_1_when_public_has_a_grant_outside_dev_codex_p1_round2(self, monkeypatch, capsys) -> None:
-        # PUBLIC's own grants never show up in SHOW GRANTS TO ROLE
-        # <primary role> -- this is the audit that closes that gap.
+    def test_returns_0_when_public_grant_does_not_target_a_dev_owned_object(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
         mock_cursor = self._mock_cursor(
             [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
@@ -1013,18 +1410,10 @@ class TestMain:
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
             exit_code = assert_dev_ci_grants.main()
 
-        assert exit_code == 1
-        stderr = capsys.readouterr().err
-        assert "ROASTPILOT_PREVIEW" in stderr
-        assert "PUBLIC grant" in stderr
+        assert exit_code == 0
+        assert "no PUBLIC current grant violates the DEV/account boundary" in capsys.readouterr().out
 
-    def test_returns_1_when_public_has_a_grant_INSIDE_dev_codex_p1_round3(self, monkeypatch, capsys) -> None:
-        # The exact regression Codex P1, PR #57, round 3 closes: a PUBLIC
-        # grant on a table INSIDE ROASTPILOT_DEV must still FAIL --
-        # AGENTS.md's invariant is "no grants to PUBLIC, anywhere", not
-        # merely "PUBLIC stays inside the DEV boundary". An earlier version
-        # of this audit reused the boundary-aware find_violations for
-        # PUBLIC and would have wrongly ALLOWED this.
+    def test_returns_1_when_public_grant_targets_a_dev_owned_object(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
         mock_cursor = self._mock_cursor(
             [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
@@ -1041,7 +1430,7 @@ class TestMain:
         assert exit_code == 1
         stderr = capsys.readouterr().err
         assert "SOME_TABLE" in stderr
-        assert "PUBLIC grant" in stderr
+        assert "PUBLIC grant violating the DEV/account boundary" in stderr
 
     def test_returns_1_when_the_user_has_an_unexpected_role_codex_p1_round2(self, monkeypatch, capsys) -> None:
         # Even with secondary roles disabled for THIS session, an extra
