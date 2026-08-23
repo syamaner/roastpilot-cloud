@@ -155,6 +155,12 @@ describe("validateSeedOutput", () => {
     expectField(output, "bean_temp_f");
   });
 
+  it("rejects a capitalised top-level telemetry *_F key", () => {
+    const output = validOutput();
+    Object.assign(output.roastTelemetry[0], { bean_temp_F: 400 });
+    expectField(output, "bean_temp_F");
+  });
+
   it("rejects a nested cloud summary key with an *_f suffix", () => {
     const output = validOutput();
     output.cloudRoasts[0].summary = { profile: { bean_temp_f: 400 } };
@@ -240,6 +246,29 @@ describe("validateSeedOutput", () => {
       contributed_to_learning: false,
     });
     expectField(output, "id");
+  });
+
+  it("rejects duplicate public slugs across cloud roasts", () => {
+    const output = validOutput();
+    output.cloudRoasts.push({
+      ...output.cloudRoasts[0],
+      id: "roast-2",
+      idempotency_key: "idem-2",
+      contributed_to_learning: false,
+    });
+    expectField(output, "public_slug");
+  });
+
+  it("accepts distinct public slugs across cloud roasts", () => {
+    const output = validOutput();
+    output.cloudRoasts.push({
+      ...output.cloudRoasts[0],
+      id: "roast-2",
+      idempotency_key: "idem-2",
+      public_slug: "TUVWXYZabcdefghijk",
+      contributed_to_learning: false,
+    });
+    expectNoField(output, "public_slug");
   });
 
   it("accepts distinct and null explicit ids", () => {

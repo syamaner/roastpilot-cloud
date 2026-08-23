@@ -73,6 +73,12 @@ function inRange(value: unknown, range: { min: number; max: number }): boolean {
 
 // This is a key-name heuristic only: source data and typed Celsius columns
 // remain the real guarantee when a differently named key hides a Fahrenheit value.
+function isFahrenheitKey(key: string): boolean {
+  const lowerKey = key.toLowerCase();
+  return lowerKey.endsWith("_" + "f") ||
+    lowerKey.includes("fahren" + "heit");
+}
+
 function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
   if (Array.isArray(payload)) {
     return payload.flatMap((item, index) =>
@@ -84,11 +90,8 @@ function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
 
   return Object.entries(payload).flatMap(([key, nested]) => {
     const path = parentPath ? `${parentPath}.${key}` : key;
-    const lowerKey = key.toLowerCase();
-    const violation = lowerKey.endsWith("_" + "f") ||
-      lowerKey.includes("fahren" + "heit");
     return [
-      ...(violation ? [path] : []),
+      ...(isFahrenheitKey(key) ? [path] : []),
       ...nonCelsiusKeyPaths(nested, path),
     ];
   });
@@ -129,7 +132,7 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
 
   if (table === "roast_telemetry") {
     for (const field of Object.keys(value)) {
-      if (field.endsWith("_" + "f")) {
+      if (isFahrenheitKey(field)) {
         add(field, "temperature keys must use Celsius naming");
       }
     }
@@ -243,6 +246,21 @@ export function validateSeedOutput(output: SeedOutput): Violation[] {
       });
     }
     seenKeys.add(row.idempotency_key);
+  }
+
+  const seenSlugs = new Set<string>();
+  for (const row of output.cloudRoasts) {
+    if (typeof row.public_slug === "string" && seenSlugs.has(row.public_slug)) {
+      violations.push({
+        table: "cloud_roasts",
+        rowIdentity: row.id ?? row.idempotency_key,
+        field: "public_slug",
+        rule: "must be unique across cloud roasts; duplicate slugs are forbidden",
+      });
+    }
+    if (typeof row.public_slug === "string") {
+      seenSlugs.add(row.public_slug);
+    }
   }
 
   const seenSummaryKeys = new Set<string>();
