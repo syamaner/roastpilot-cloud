@@ -312,6 +312,30 @@ describe("validateSeedOutput", () => {
     expectField(output, "roast_count");
   });
 
+  it("accepts the authoritative empty key_patterns array", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].key_patterns = [];
+    expectNoField(output, "key_patterns");
+  });
+
+  it("allows null key_patterns for the database default", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].key_patterns = null;
+    expectNoField(output, "key_patterns");
+  });
+
+  it("rejects non-empty key_patterns", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].key_patterns = [{ x: 1 }];
+    expectField(output, "key_patterns");
+  });
+
+  it("rejects non-array key_patterns", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].key_patterns = "not-an-array";
+    expectField(output, "key_patterns");
+  });
+
   it("rejects a duplicate reference-summary logical key", () => {
     const output = validOutput();
     output.referenceRoastSummaries.push({

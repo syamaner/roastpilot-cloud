@@ -221,6 +221,14 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
     }
   }
 
+  if (table === "reference_roast_summaries") {
+    const keyPatterns = value.key_patterns;
+    if (keyPatterns !== null && keyPatterns !== undefined &&
+        (!Array.isArray(keyPatterns) || keyPatterns.length !== 0)) {
+      add("key_patterns", "must be the authoritative empty array in C2");
+    }
+  }
+
   return violations;
 }
 
