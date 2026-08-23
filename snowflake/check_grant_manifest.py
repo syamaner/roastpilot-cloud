@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline exact-set enforcement for R__z_roles_grants.sql (issue #317).
 
-The migration is rendered by schemachange before parsing, so Jinja environment
-lookups are checked as the concrete Snowflake identifiers deployment will see.
+The migration is rendered through schemachange's in-process Jinja engine before
+parsing, matching deployed text; it is currently environment-independent.
 The grammar and manifest are closed: an unrecognised statement, grantee,
 object type, privilege set, missing grant, or extra grant is a violation.
 """

@@ -37,9 +37,13 @@ def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> N
 
 
 def test_render_migration_ignores_database_environment_override(monkeypatch) -> None:
+    monkeypatch.delenv("SNOWFLAKE_DATABASE", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_WAREHOUSE", raising=False)
+    baseline_sql = check_grant_manifest.render_migration()
     monkeypatch.setenv("SNOWFLAKE_DATABASE", "ROASTPILOT_PREVIEW")
+    monkeypatch.setenv("SNOWFLAKE_WAREHOUSE", "PREVIEW_WH")
     overridden_sql = check_grant_manifest.render_migration()
-    assert overridden_sql == check_grant_manifest.render_migration()
+    assert overridden_sql == baseline_sql
     assert "ROASTPILOT_PREVIEW" not in overridden_sql
 
 
