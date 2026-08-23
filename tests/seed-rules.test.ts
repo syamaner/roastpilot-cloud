@@ -155,15 +155,40 @@ describe("validateSeedOutput", () => {
     expectField(output, "bean_temp_f");
   });
 
+  it("rejects a nested cloud summary key with an *_f suffix", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { profile: { bean_temp_f: 400 } };
+    expectField(output, "summary.profile.bean_temp_f");
+  });
+
+  it("rejects a nested telemetry raw key with an *_f suffix", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].raw = { samples: [{ env_temp_f: 390 }] };
+    expectField(output, "raw.samples[0].env_temp_f");
+  });
+
+  it("rejects a case-insensitive nested key containing fahrenheit", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { notes: { FahrenheitReading: 400 } };
+    expectField(output, "summary.notes.FahrenheitReading");
+  });
+
+  it("accepts clean nested Celsius variant payloads", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { notes: { bean_temp_c: 200 } };
+    output.roastTelemetry[0].raw = { samples: [{ env_temp_c: 190 }] };
+    expect(validateSeedOutput(output)).toEqual([]);
+  });
+
   it("rejects an unsupported artifact kind", () => {
     const output = validOutput();
     output.roastArtifacts[0].kind = "png";
     expectField(output, "kind");
   });
 
-  it("rejects an artifact stage path with a bad shape", () => {
+  it("rejects an empty artifact stage path", () => {
     const output = validOutput();
-    output.roastArtifacts[0].stage_path = "@roast_artifacts/run-1/jsonl/file";
+    output.roastArtifacts[0].stage_path = "";
     expectField(output, "stage_path");
   });
 
@@ -173,10 +198,10 @@ describe("validateSeedOutput", () => {
     expectField(output, "stage_path");
   });
 
-  it("rejects an artifact stage path whose run id equals its roast id", () => {
+  it("accepts any non-empty artifact stage path pending the C3 contract", () => {
     const output = validOutput();
-    output.roastArtifacts[0].stage_path = "@roast_artifacts/roast-1/jsonl";
-    expectField(output, "stage_path");
+    output.roastArtifacts[0].stage_path = "run-1/arbitrary-name.bin";
+    expectNoField(output, "stage_path");
   });
 
   it("rejects a raw IP in submitted_ip_hash", () => {
@@ -204,6 +229,38 @@ describe("validateSeedOutput", () => {
       id: "summary-2",
     });
     expectField(output, "bean_origin|roast_level");
+  });
+
+  it("rejects duplicate explicit cloud roast ids", () => {
+    const output = validOutput();
+    output.cloudRoasts.push({
+      ...output.cloudRoasts[0],
+      idempotency_key: "idem-2",
+      public_slug: "TUVWXYZabcdefghijk",
+      contributed_to_learning: false,
+    });
+    expectField(output, "id");
+  });
+
+  it("accepts distinct and null explicit ids", () => {
+    const output = validOutput();
+    output.cloudRoasts.push(
+      {
+        ...output.cloudRoasts[0],
+        id: "roast-2",
+        idempotency_key: "idem-2",
+        public_slug: "TUVWXYZabcdefghijk",
+        contributed_to_learning: false,
+      },
+      {
+        ...output.cloudRoasts[0],
+        id: null,
+        idempotency_key: "idem-3",
+        public_slug: "mnopqrstuvwxyz12345",
+        contributed_to_learning: false,
+      },
+    );
+    expectNoField(output, "id");
   });
 
   it("accepts distinct reference-summary logical keys", () => {

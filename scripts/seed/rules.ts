@@ -52,9 +52,6 @@ const REQUIRED_FIELDS: Record<SeedTable, readonly string[]> = {
 const SLIDER_FIELDS = [
   "aroma", "acidity", "sweetness", "body", "aftertaste",
 ] as const;
-const STAGE_PATH_PATTERN = new RegExp(
-  `^@roast_artifacts/([^/]+)/(${ARTIFACT_KINDS.join("|")})$`,
-);
 
 function recordOf(row: unknown): Record<string, unknown> {
   return typeof row === "object" && row !== null
@@ -72,6 +69,29 @@ function identity(table: SeedTable, row: Record<string, unknown>): string {
 function inRange(value: unknown, range: { min: number; max: number }): boolean {
   return typeof value === "number" && Number.isInteger(value) &&
     value >= range.min && value <= range.max;
+}
+
+// This is a key-name heuristic only: source data and typed Celsius columns
+// remain the real guarantee when a differently named key hides a Fahrenheit value.
+function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
+  if (Array.isArray(payload)) {
+    return payload.flatMap((item, index) =>
+      nonCelsiusKeyPaths(item, `${parentPath}[${index}]`));
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return [];
+  }
+
+  return Object.entries(payload).flatMap(([key, nested]) => {
+    const path = parentPath ? `${parentPath}.${key}` : key;
+    const lowerKey = key.toLowerCase();
+    const violation = lowerKey.endsWith("_" + "f") ||
+      lowerKey.includes("fahren" + "heit");
+    return [
+      ...(violation ? [path] : []),
+      ...nonCelsiusKeyPaths(nested, path),
+    ];
+  });
 }
 
 export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
@@ -102,6 +122,9 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
         (typeof value.public_slug !== "string" || !isValidSlug(value.public_slug))) {
       add("public_slug", "must be a valid high-entropy base58 slug");
     }
+    for (const path of nonCelsiusKeyPaths(value.summary, "summary")) {
+      add(path, "variant keys must use Celsius naming");
+    }
   }
 
   if (table === "roast_telemetry") {
@@ -109,6 +132,9 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
       if (field.endsWith("_" + "f")) {
         add(field, "temperature keys must use Celsius naming");
       }
+    }
+    for (const path of nonCelsiusKeyPaths(value.raw, "raw")) {
+      add(path, "variant keys must use Celsius naming");
     }
   }
 
@@ -118,17 +144,11 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
           !(ARTIFACT_KINDS as readonly string[]).includes(value.kind))) {
       add("kind", "must be an allowed artifact kind");
     }
-    if (value.stage_path !== null && value.stage_path !== undefined) {
-      if (typeof value.stage_path !== "string") {
-        add("stage_path", "must match the artifact stage path shape");
-        return violations;
-      }
-      const match = STAGE_PATH_PATTERN.exec(value.stage_path);
-      if (!match) {
-        add("stage_path", "must match the artifact stage path shape");
-      } else if (match[1] === value.roast_id) {
-        add("stage_path", "run id must differ from roast id");
-      }
+    // Exact format belongs to C3's stage_path contract (#341 / D-314-F).
+    // Slice 1 asserts only that a supplied path is a non-empty string.
+    if (value.stage_path !== null && value.stage_path !== undefined &&
+        (typeof value.stage_path !== "string" || value.stage_path.length === 0)) {
+      add("stage_path", "must be a non-empty string");
     }
   }
 
@@ -184,6 +204,32 @@ export function validateSeedOutput(output: SeedOutput): Violation[] {
           field: "roast_id",
           rule: "must reference a known cloud roast; orphan rows are forbidden",
         });
+      }
+    }
+  }
+
+  const idTables: readonly [
+    SeedTable,
+    readonly { id: string | null }[],
+  ][] = [
+    ["cloud_roasts", output.cloudRoasts],
+    ["roast_artifacts", output.roastArtifacts],
+    ["tasting_reviews", output.tastingReviews],
+    ["reference_roast_summaries", output.referenceRoastSummaries],
+  ];
+  for (const [table, rows] of idTables) {
+    const seenIds = new Set<string>();
+    for (const row of rows) {
+      if (typeof row.id === "string" && seenIds.has(row.id)) {
+        violations.push({
+          table,
+          rowIdentity: row.id,
+          field: "id",
+          rule: "explicit primary-key id must be unique within its table",
+        });
+      }
+      if (typeof row.id === "string") {
+        seenIds.add(row.id);
       }
     }
   }
