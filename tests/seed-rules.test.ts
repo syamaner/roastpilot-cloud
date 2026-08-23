@@ -125,6 +125,24 @@ describe("validateSeedOutput", () => {
     expectField(output, "idempotency_key");
   });
 
+  it("rejects telemetry that references an unknown roast", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].roast_id = "missing-roast";
+    expectField(output, "roast_id");
+  });
+
+  it("rejects an artifact that references an unknown roast", () => {
+    const output = validOutput();
+    output.roastArtifacts[0].roast_id = "missing-roast";
+    expectField(output, "roast_id");
+  });
+
+  it("rejects a review that references an unknown roast", () => {
+    const output = validOutput();
+    output.tastingReviews[0].roast_id = "missing-roast";
+    expectField(output, "roast_id");
+  });
+
   it("rejects a 16-character slug", () => {
     const output = validOutput();
     output.cloudRoasts[0].public_slug = "A".repeat(16);
@@ -177,6 +195,26 @@ describe("validateSeedOutput", () => {
     const output = validOutput();
     output.referenceRoastSummaries[0].roast_count = 2;
     expectField(output, "roast_count");
+  });
+
+  it("rejects a duplicate reference-summary logical key", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries.push({
+      ...output.referenceRoastSummaries[0],
+      id: "summary-2",
+    });
+    expectField(output, "bean_origin|roast_level");
+  });
+
+  it("accepts distinct reference-summary logical keys", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries.push({
+      ...output.referenceRoastSummaries[0],
+      id: "summary-2",
+      bean_origin: "Other Test Origin",
+      roast_count: 0,
+    });
+    expect(validateSeedOutput(output)).toEqual([]);
   });
 
   it("counts only contributing roasts in reference summaries", () => {

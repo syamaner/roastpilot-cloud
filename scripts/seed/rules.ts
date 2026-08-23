@@ -163,6 +163,31 @@ export function validateSeedOutput(output: SeedOutput): Violation[] {
       validateSeedRow("reference_roast_summaries", row)),
   ];
 
+  const roastIds = new Set(
+    output.cloudRoasts.flatMap((row) =>
+      typeof row.id === "string" ? [row.id] : []),
+  );
+  const childTables: readonly [
+    SeedTable,
+    readonly { roast_id: string }[],
+  ][] = [
+    ["roast_telemetry", output.roastTelemetry],
+    ["roast_artifacts", output.roastArtifacts],
+    ["tasting_reviews", output.tastingReviews],
+  ];
+  for (const [table, rows] of childTables) {
+    for (const row of rows) {
+      if (!roastIds.has(row.roast_id)) {
+        violations.push({
+          table,
+          rowIdentity: identity(table, recordOf(row)),
+          field: "roast_id",
+          rule: "must reference a known cloud roast; orphan rows are forbidden",
+        });
+      }
+    }
+  }
+
   const seenKeys = new Set<string>();
   for (const row of output.cloudRoasts) {
     if (seenKeys.has(row.idempotency_key)) {
@@ -174,6 +199,22 @@ export function validateSeedOutput(output: SeedOutput): Violation[] {
     seenKeys.add(row.idempotency_key);
   }
 
+  const seenSummaryKeys = new Set<string>();
+  for (const summary of output.referenceRoastSummaries) {
+    const key = JSON.stringify([summary.bean_origin, summary.roast_level]);
+    if (seenSummaryKeys.has(key)) {
+      violations.push({
+        table: "reference_roast_summaries",
+        rowIdentity: `${summary.bean_origin}|${summary.roast_level}`,
+        field: "bean_origin|roast_level",
+        rule: "must be a unique reference-summary logical key",
+      });
+    }
+    seenSummaryKeys.add(key);
+  }
+
+  // review_count and avg_rating reconciliation belongs to Slice 2's
+  // generation-time consistency checks; this slice reconciles roast_count only.
   for (const summary of output.referenceRoastSummaries) {
     const actual = output.cloudRoasts.filter(
       (roast) => roast.bean_origin === summary.bean_origin &&
