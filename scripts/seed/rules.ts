@@ -17,6 +17,7 @@ export const IP_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
 
 const CLOUD_ROAST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const IP_RETENTION_DAYS = 30;
 const RAW_IP_KEY_NAMES = new Set([
   "ip",
   "ipaddr",
@@ -135,7 +136,11 @@ function rawIpPaths(payload: unknown, parentPath: string): string[] {
   });
 }
 
-export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
+export function validateSeedRow(
+  table: SeedTable,
+  row: unknown,
+  now: number = Date.now(),
+): Violation[] {
   const value = recordOf(row);
   const rowIdentity = identity(table, value);
   const violations: Violation[] = [];
@@ -219,6 +224,17 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
         (typeof ipHash !== "string" || !IP_HASH_PATTERN.test(ipHash))) {
       add("submitted_ip_hash", "must be a 64-character hexadecimal hash");
     }
+    if (ipHash !== null && ipHash !== undefined &&
+        typeof value.created_at === "string") {
+      const createdAt = Date.parse(value.created_at);
+      const retentionMs = IP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+      if (!Number.isNaN(createdAt) && now - createdAt >= retentionMs) {
+        add(
+          "submitted_ip_hash",
+          "unpurged IP hash past the 30-day retention window must be null",
+        );
+      }
+    }
   }
 
   if (table === "reference_roast_summaries") {
@@ -232,14 +248,20 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
   return violations;
 }
 
-export function validateSeedOutput(output: SeedOutput): Violation[] {
+export function validateSeedOutput(
+  output: SeedOutput,
+  now: number = Date.now(),
+): Violation[] {
   const violations = [
-    ...output.cloudRoasts.flatMap((row) => validateSeedRow("cloud_roasts", row)),
-    ...output.roastTelemetry.flatMap((row) => validateSeedRow("roast_telemetry", row)),
-    ...output.roastArtifacts.flatMap((row) => validateSeedRow("roast_artifacts", row)),
-    ...output.tastingReviews.flatMap((row) => validateSeedRow("tasting_reviews", row)),
+    ...output.cloudRoasts.flatMap((row) => validateSeedRow("cloud_roasts", row, now)),
+    ...output.roastTelemetry.flatMap((row) =>
+      validateSeedRow("roast_telemetry", row, now)),
+    ...output.roastArtifacts.flatMap((row) =>
+      validateSeedRow("roast_artifacts", row, now)),
+    ...output.tastingReviews.flatMap((row) =>
+      validateSeedRow("tasting_reviews", row, now)),
     ...output.referenceRoastSummaries.flatMap((row) =>
-      validateSeedRow("reference_roast_summaries", row)),
+      validateSeedRow("reference_roast_summaries", row, now)),
   ];
 
   const roastIds = new Set(

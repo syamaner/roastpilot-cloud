@@ -28,7 +28,7 @@ function validOutput(): SeedOutput {
     tastingReviews: [{
       id: "review-1", roast_id: ROAST_ID_ONE, reviewer_name: null, score: 4,
       aroma: 50, acidity: 50, sweetness: 50, body: 50, aftertaste: 50,
-      brew_method: null, notes: null, submitted_ip_hash: "a".repeat(64),
+      brew_method: null, notes: null, submitted_ip_hash: null,
       created_at: "2026-01-01T00:00:00Z",
     }],
     referenceRoastSummaries: [{
@@ -43,8 +43,8 @@ function validOutput(): SeedOutput {
   };
 }
 
-function expectField(output: SeedOutput, field: string): Violation {
-  const violation = validateSeedOutput(output).find((item) => item.field === field);
+function expectField(output: SeedOutput, field: string, now?: number): Violation {
+  const violation = validateSeedOutput(output, now).find((item) => item.field === field);
   expect(violation, `expected a violation for ${field}`).toBeDefined();
   return violation!;
 }
@@ -297,7 +297,51 @@ describe("validateSeedOutput", () => {
   it("rejects a raw IP in submitted_ip_hash", () => {
     const output = validOutput();
     output.tastingReviews[0].submitted_ip_hash = "192.168.0.1";
-    expectField(output, "submitted_ip_hash");
+    expectField(output, "submitted_ip_hash", Date.parse("2026-01-02T00:00:00Z"));
+  });
+
+  it("rejects an unpurged IP hash 31 days after review creation", () => {
+    const now = Date.parse("2026-03-15T00:00:00Z");
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].created_at =
+      new Date(now - 31 * 24 * 60 * 60 * 1000).toISOString();
+    expectField(output, "submitted_ip_hash", now);
+  });
+
+  it("allows a null hash on a review older than 30 days", () => {
+    const now = Date.parse("2026-03-15T00:00:00Z");
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = null;
+    output.tastingReviews[0].created_at =
+      new Date(now - 31 * 24 * 60 * 60 * 1000).toISOString();
+    expect(validateSeedOutput(output, now)).toEqual([]);
+  });
+
+  it("allows an IP hash 29 days after review creation", () => {
+    const now = Date.parse("2026-03-15T00:00:00Z");
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].created_at =
+      new Date(now - 29 * 24 * 60 * 60 * 1000).toISOString();
+    expect(validateSeedOutput(output, now)).toEqual([]);
+  });
+
+  it("rejects an unpurged IP hash at exactly 30 days", () => {
+    const now = Date.parse("2026-03-15T00:00:00Z");
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].created_at =
+      new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+    expectField(output, "submitted_ip_hash", now);
+  });
+
+  it("does not crash or apply retention to an unparseable created_at", () => {
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].created_at = "not-a-timestamp";
+    expect(validateSeedOutput(output, Date.parse("2026-03-15T00:00:00Z")))
+      .toEqual([]);
   });
 
   it("rejects a missing NOT NULL column", () => {
