@@ -8,26 +8,24 @@
 -- would otherwise sort after this file, so this migration sorts after every
 -- object-creating repeatable on fresh targets as well as existing ones.
 --
--- Scope fence: GRANT statements only, and only for objects the deploy role
--- owns. The two roles and every referenced object already exist; this
--- repeatable migration creates no role or object. The account-level
--- prerequisites (USAGE ON DATABASE and USAGE ON WAREHOUSE for PUBLIC_WEB and
--- ROASTPILOT_AGENT) are operator-provisioned ACCOUNTADMIN DDL (D106-class,
--- like role creation), not part of this migration. PUBLIC_WEB is limited here
--- to APP schema usage, two secure views, and SUBMIT_REVIEW. ROASTPILOT_AGENT
--- receives only APP schema usage and the deferred-Option-B data plane: five
--- tables and the internal artifact stage, with no procedure grant.
+-- Scope fence: GRANT statements only, and only object-level privileges on
+-- objects the deploy role owns (views, procedure, tables, and stage). The two
+-- roles and every referenced object already exist; this repeatable migration
+-- creates no role or object. The prerequisites (USAGE ON DATABASE, USAGE ON
+-- SCHEMA APP, and USAGE ON WAREHOUSE for PUBLIC_WEB and ROASTPILOT_AGENT) are
+-- operator-provisioned ACCOUNTADMIN DDL (D106-class, like role creation), not
+-- part of this migration. PUBLIC_WEB is limited here to two secure views and
+-- SUBMIT_REVIEW. ROASTPILOT_AGENT receives only the deferred-Option-B data
+-- plane: five tables and the internal artifact stage, with no procedure grant.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before its first grant.
 use schema app;
 
-grant usage on schema app to role PUBLIC_WEB;
 grant select on view app.roast_by_slug to role PUBLIC_WEB;
 grant select on view app.reviews_by_roast to role PUBLIC_WEB;
 grant usage on procedure app.submit_review(string, string, int, smallint, smallint, smallint, smallint, smallint, string, string, string) to role PUBLIC_WEB;
 
-grant usage on schema app to role ROASTPILOT_AGENT;
 grant select, insert, update, delete on table app.cloud_roasts to role ROASTPILOT_AGENT;
 grant select, insert, update, delete on table app.roast_telemetry to role ROASTPILOT_AGENT;
 grant select, insert, update, delete on table app.roast_artifacts to role ROASTPILOT_AGENT;

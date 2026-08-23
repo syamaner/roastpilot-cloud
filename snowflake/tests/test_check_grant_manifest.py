@@ -26,14 +26,15 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
     assert check_grant_manifest.main() == 0
-    assert capsys.readouterr().out == "grant manifest matches exactly (11 grants)\n"
+    assert capsys.readouterr().out == "grant manifest matches exactly (9 grants)\n"
 
 
 def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> None:
     assert "{{" not in rendered_sql
     assert re.search(r"\bgrant\b.*\bon\s+database\b", rendered_sql, re.IGNORECASE) is None
+    assert re.search(r"\bgrant\b.*\bon\s+schema\b", rendered_sql, re.IGNORECASE) is None
     assert re.search(r"\bgrant\b.*\bon\s+warehouse\b", rendered_sql, re.IGNORECASE) is None
-    assert "grant usage on schema app to role PUBLIC_WEB;" in rendered_sql
+    assert "use schema app;" in rendered_sql
 
 
 def test_render_migration_ignores_database_environment_override(monkeypatch) -> None:
@@ -50,8 +51,9 @@ def test_render_migration_ignores_database_environment_override(monkeypatch) -> 
 def test_render_migration_is_independent_of_working_directory(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     cwd_independent_sql = check_grant_manifest.render_migration()
-    assert "grant usage on schema app to role PUBLIC_WEB;" in cwd_independent_sql
-    assert "grant usage on schema app to role ROASTPILOT_AGENT;" in cwd_independent_sql
+    assert "use schema app;" in cwd_independent_sql
+    assert "grant usage on schema app to role PUBLIC_WEB;" not in cwd_independent_sql
+    assert "grant usage on schema app to role ROASTPILOT_AGENT;" not in cwd_independent_sql
 
 
 def test_render_migration_calls_schemachange_with_exact_root_script_and_variables(monkeypatch) -> None:
@@ -104,15 +106,13 @@ def test_t3_all_migrations_render_and_grant_migration_has_only_grants_after_use(
 def test_t4_public_web_projection_is_closed(rendered_sql: str) -> None:
     parsed, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
     public_web = {grant for grant in parsed if grant.role_name == "PUBLIC_WEB"}
-    assert len(public_web) == 4
+    assert len(public_web) == 3
     assert sum(grant.object_type == "VIEW" and grant.privileges == {"SELECT"} for grant in public_web) == 2
     assert sum(grant.object_type == "PROCEDURE" and grant.privileges == {"USAGE"} for grant in public_web) == 1
-    assert sum(
-        grant.object_type == "SCHEMA"
-        and grant.privileges == {"USAGE"}
+    assert not any(
+        grant.object_type in {"DATABASE", "SCHEMA", "WAREHOUSE", "TABLE", "STAGE"}
         for grant in public_web
-    ) == 1
-    assert not any(grant.object_type in {"TABLE", "STAGE"} for grant in public_web)
+    )
 
 
 def test_t5_agent_table_and_internal_stage_privileges_are_exact(rendered_sql: str) -> None:
