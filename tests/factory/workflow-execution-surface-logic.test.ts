@@ -2110,12 +2110,16 @@ jobs:
       // Environment moves it to the deferred live-corpus class, removing its
       // 1 job, 3 run steps, 3 action steps, and 8 inputs from these totals.
       //
+      // 23 Aug 2026, #317: the new 'Check exact roles/grants manifest' run:
+      // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
+      // 48 -> 49.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 18,
-      runSteps: 48,
+      runSteps: 49,
       actionSteps: 48,
       inputs: 127,
     });
@@ -2232,7 +2236,10 @@ jobs:
       // The reviewed 184 estimate predated the required
       // `show_full_output: false` input; measured canonical evidence is 185.
       // 2026-08-20 Refs #237: +1 run step (workspace-inventory diagnostic).
-      runSteps: 79,
+      // 23 Aug 2026, #317: the new 'Check exact roles/grants manifest' run:
+      // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
+      // 79 -> 80.
+      runSteps: 80,
       actionSteps: 70,
       inputs: 185,
     });
