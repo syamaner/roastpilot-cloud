@@ -89,7 +89,7 @@ function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
   }
 
   return Object.entries(payload).flatMap(([key, nested]) => {
-    const path = parentPath ? `${parentPath}.${key}` : key;
+    const path = `${parentPath}.${key}`;
     return [
       ...(isFahrenheitKey(key) ? [path] : []),
       ...nonCelsiusKeyPaths(nested, path),

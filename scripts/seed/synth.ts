@@ -43,8 +43,8 @@ function nextSequence(rng: SeededRng): number {
 
 export function synthSlug(rng: SeededRng): string {
   const slug = randomToken(rng, MIN_SLUG_LENGTH);
+  /* v8 ignore next 3 -- unreachable unless the slug constants drift. */
   if (!isValidSlug(slug)) {
-    /* v8 ignore next -- unreachable unless the slug constants drift. */
     throw new Error("Synthetic slug generator produced an invalid slug");
   }
   return slug;
@@ -69,8 +69,8 @@ export function synthReviewerName(
 export function synthIpHash(rng: SeededRng): string {
   const token = `${SYNTHETIC_IP_TOKEN_PREFIX}${randomToken(rng)}`;
   const hash = createHash("sha256").update(token).digest("hex");
+  /* v8 ignore next 3 -- unreachable unless the SHA-256 contract drifts. */
   if (!IP_HASH_PATTERN.test(hash)) {
-    /* v8 ignore next -- unreachable unless the SHA-256 contract drifts. */
     throw new Error("Synthetic IP-token hash has an invalid shape");
   }
   return hash;

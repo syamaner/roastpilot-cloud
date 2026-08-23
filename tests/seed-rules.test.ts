@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SeedOutput, Violation } from "../scripts/seed/rules";
-import { validateSeedOutput } from "../scripts/seed/rules";
+import { validateSeedOutput, validateSeedRow } from "../scripts/seed/rules";
 
 function validOutput(): SeedOutput {
   return {
@@ -53,6 +53,21 @@ function expectNoField(output: SeedOutput, field: string): void {
 describe("validateSeedOutput", () => {
   it("accepts a fully valid output", () => {
     expect(validateSeedOutput(validOutput())).toEqual([]);
+  });
+
+  it("reports missing fields without throwing for a non-object row", () => {
+    const violations = validateSeedRow("cloud_roasts", "not-an-object");
+    expect(violations.map((violation) => violation.field)).toEqual([
+      "idempotency_key",
+      "public_slug",
+      "visibility",
+      "summary",
+      "contributed_to_learning",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(violations.every((violation) => violation.rowIdentity === "unknown"))
+      .toBe(true);
   });
 
   it.each([0, 6])("rejects score %s", (score) => {
@@ -146,6 +161,12 @@ describe("validateSeedOutput", () => {
   it("rejects a 16-character slug", () => {
     const output = validOutput();
     output.cloudRoasts[0].public_slug = "A".repeat(16);
+    expectField(output, "public_slug");
+  });
+
+  it("rejects a non-string slug without entering uniqueness tracking", () => {
+    const output = validOutput();
+    (output.cloudRoasts[0] as unknown as { public_slug: unknown }).public_slug = 42;
     expectField(output, "public_slug");
   });
 
@@ -250,13 +271,17 @@ describe("validateSeedOutput", () => {
 
   it("rejects duplicate public slugs across cloud roasts", () => {
     const output = validOutput();
+    output.cloudRoasts[0].id = null;
+    output.roastTelemetry = [];
+    output.roastArtifacts = [];
+    output.tastingReviews = [];
     output.cloudRoasts.push({
       ...output.cloudRoasts[0],
-      id: "roast-2",
+      id: null,
       idempotency_key: "idem-2",
       contributed_to_learning: false,
     });
-    expectField(output, "public_slug");
+    expect(expectField(output, "public_slug").rowIdentity).toBe("idem-2");
   });
 
   it("accepts distinct public slugs across cloud roasts", () => {
