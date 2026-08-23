@@ -26,27 +26,32 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
     assert check_grant_manifest.main() == 0
-    assert capsys.readouterr().out == "grant manifest matches exactly (15 grants)\n"
+    assert capsys.readouterr().out == "grant manifest matches exactly (11 grants)\n"
 
 
-def test_t2_rendered_prerequisites_use_concrete_default_identifiers(rendered_sql: str) -> None:
+def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> None:
     assert "{{" not in rendered_sql
-    assert "ON DATABASE ROASTPILOT_DEV" in rendered_sql.upper()
-    assert "ON WAREHOUSE DEV_CI_WH" in rendered_sql.upper()
+    assert re.search(r"\bgrant\b.*\bon\s+database\b", rendered_sql, re.IGNORECASE) is None
+    assert re.search(r"\bgrant\b.*\bon\s+warehouse\b", rendered_sql, re.IGNORECASE) is None
+    assert "grant usage on schema app to role PUBLIC_WEB;" in rendered_sql
 
 
-def test_render_migration_honours_database_environment_override(monkeypatch) -> None:
+def test_render_migration_ignores_database_environment_override(monkeypatch) -> None:
+    monkeypatch.delenv("SNOWFLAKE_DATABASE", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_WAREHOUSE", raising=False)
+    baseline_sql = check_grant_manifest.render_migration()
     monkeypatch.setenv("SNOWFLAKE_DATABASE", "ROASTPILOT_PREVIEW")
+    monkeypatch.setenv("SNOWFLAKE_WAREHOUSE", "PREVIEW_WH")
     overridden_sql = check_grant_manifest.render_migration()
-    assert "grant usage on database ROASTPILOT_PREVIEW to role PUBLIC_WEB;" in overridden_sql
-    assert "grant usage on database ROASTPILOT_DEV to role PUBLIC_WEB;" not in overridden_sql
+    assert overridden_sql == baseline_sql
+    assert "ROASTPILOT_PREVIEW" not in overridden_sql
 
 
 def test_render_migration_is_independent_of_working_directory(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     cwd_independent_sql = check_grant_manifest.render_migration()
-    assert "grant usage on database ROASTPILOT_DEV to role PUBLIC_WEB;" in cwd_independent_sql
-    assert "grant usage on warehouse DEV_CI_WH to role PUBLIC_WEB;" in cwd_independent_sql
+    assert "grant usage on schema app to role PUBLIC_WEB;" in cwd_independent_sql
+    assert "grant usage on schema app to role ROASTPILOT_AGENT;" in cwd_independent_sql
 
 
 def test_render_migration_calls_schemachange_with_exact_root_script_and_variables(monkeypatch) -> None:
@@ -99,14 +104,14 @@ def test_t3_all_migrations_render_and_grant_migration_has_only_grants_after_use(
 def test_t4_public_web_projection_is_closed(rendered_sql: str) -> None:
     parsed, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
     public_web = {grant for grant in parsed if grant.role_name == "PUBLIC_WEB"}
-    assert len(public_web) == 6
+    assert len(public_web) == 4
     assert sum(grant.object_type == "VIEW" and grant.privileges == {"SELECT"} for grant in public_web) == 2
     assert sum(grant.object_type == "PROCEDURE" and grant.privileges == {"USAGE"} for grant in public_web) == 1
     assert sum(
-        grant.object_type in {"DATABASE", "SCHEMA", "WAREHOUSE"}
+        grant.object_type == "SCHEMA"
         and grant.privileges == {"USAGE"}
         for grant in public_web
-    ) == 3
+    ) == 1
     assert not any(grant.object_type in {"TABLE", "STAGE"} for grant in public_web)
 
 
