@@ -69,21 +69,15 @@ _AGENT_TABLES = (
     "app.reference_roast_summaries",
 )
 
-# This offline CI gate runs without SNOWFLAKE_DATABASE/SNOWFLAKE_WAREHOUSE, so
-# schemachange resolves the migration's DEV env_var defaults and the manifest
-# deliberately pins them. Non-default PREVIEW/PROD boundaries are validated at
-# deploy time by the live assert_dev_ci_grants.py audit, not by this offline gate.
+# The migration renders no database or warehouse identifier, so this owned-object
+# manifest is fully environment-independent.
 EXPECTED_MANIFEST = frozenset(
     {
-        _grant("USAGE", "DATABASE", "ROASTPILOT_DEV", "PUBLIC_WEB"),
         _grant("USAGE", "SCHEMA", "app", "PUBLIC_WEB"),
-        _grant("USAGE", "WAREHOUSE", "DEV_CI_WH", "PUBLIC_WEB"),
         _grant("SELECT", "VIEW", "app.roast_by_slug", "PUBLIC_WEB"),
         _grant("SELECT", "VIEW", "app.reviews_by_roast", "PUBLIC_WEB"),
         _grant("USAGE", "PROCEDURE", _SUBMIT_REVIEW_SIGNATURE, "PUBLIC_WEB"),
-        _grant("USAGE", "DATABASE", "ROASTPILOT_DEV", "ROASTPILOT_AGENT"),
         _grant("USAGE", "SCHEMA", "app", "ROASTPILOT_AGENT"),
-        _grant("USAGE", "WAREHOUSE", "DEV_CI_WH", "ROASTPILOT_AGENT"),
         *(
             _grant("SELECT,INSERT,UPDATE,DELETE", "TABLE", table, "ROASTPILOT_AGENT")
             for table in _AGENT_TABLES
