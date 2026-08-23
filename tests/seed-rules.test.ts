@@ -46,6 +46,10 @@ function expectField(output: SeedOutput, field: string): Violation {
   return violation!;
 }
 
+function expectNoField(output: SeedOutput, field: string): void {
+  expect(validateSeedOutput(output).some((item) => item.field === field)).toBe(false);
+}
+
 describe("validateSeedOutput", () => {
   it("accepts a fully valid output", () => {
     expect(validateSeedOutput(validOutput())).toEqual([]);
@@ -57,10 +61,28 @@ describe("validateSeedOutput", () => {
     expectField(output, "score");
   });
 
+  it.each([1, 5])("accepts score boundary %s", (score) => {
+    const output = validOutput();
+    output.tastingReviews[0].score = score;
+    expectNoField(output, "score");
+  });
+
+  it("rejects a fractional score", () => {
+    const output = validOutput();
+    output.tastingReviews[0].score = 3.5;
+    expectField(output, "score");
+  });
+
   it.each([0, 6])("rejects operator_rating %s", (rating) => {
     const output = validOutput();
     output.cloudRoasts[0].operator_rating = rating;
     expectField(output, "operator_rating");
+  });
+
+  it.each([1, 5])("accepts operator_rating boundary %s", (rating) => {
+    const output = validOutput();
+    output.cloudRoasts[0].operator_rating = rating;
+    expectNoField(output, "operator_rating");
   });
 
   it.each(["aroma", "acidity", "sweetness", "body", "aftertaste"] as const)(
@@ -73,6 +95,23 @@ describe("validateSeedOutput", () => {
       }
     },
   );
+
+  it.each(["aroma", "acidity", "sweetness", "body", "aftertaste"] as const)(
+    "accepts %s at both range boundaries",
+    (field) => {
+      for (const boundary of [0, 100]) {
+        const output = validOutput();
+        output.tastingReviews[0][field] = boundary;
+        expectNoField(output, field);
+      }
+    },
+  );
+
+  it("rejects a fractional slider", () => {
+    const output = validOutput();
+    output.tastingReviews[0].aroma = 50.5;
+    expectField(output, "aroma");
+  });
 
   it.each(["deleted", ""])("rejects visibility %j", (visibility) => {
     const output = validOutput();
@@ -110,6 +149,12 @@ describe("validateSeedOutput", () => {
     expectField(output, "stage_path");
   });
 
+  it("rejects a non-string artifact stage path", () => {
+    const output = validOutput();
+    output.roastArtifacts[0].stage_path = 42 as unknown as string;
+    expectField(output, "stage_path");
+  });
+
   it("rejects an artifact stage path whose run id equals its roast id", () => {
     const output = validOutput();
     output.roastArtifacts[0].stage_path = "@roast_artifacts/roast-1/jsonl";
@@ -130,6 +175,31 @@ describe("validateSeedOutput", () => {
 
   it("rejects a summary roast count that disagrees with cloud roasts", () => {
     const output = validOutput();
+    output.referenceRoastSummaries[0].roast_count = 2;
+    expectField(output, "roast_count");
+  });
+
+  it("counts only contributing roasts in reference summaries", () => {
+    const output = validOutput();
+    output.cloudRoasts.push({
+      ...output.cloudRoasts[0],
+      id: "roast-2",
+      idempotency_key: "idem-2",
+      public_slug: "TUVWXYZabcdefghijk",
+      contributed_to_learning: false,
+    });
+    expect(validateSeedOutput(output)).toEqual([]);
+  });
+
+  it("rejects a summary count that includes a non-contributing roast", () => {
+    const output = validOutput();
+    output.cloudRoasts.push({
+      ...output.cloudRoasts[0],
+      id: "roast-2",
+      idempotency_key: "idem-2",
+      public_slug: "TUVWXYZabcdefghijk",
+      contributed_to_learning: false,
+    });
     output.referenceRoastSummaries[0].roast_count = 2;
     expectField(output, "roast_count");
   });

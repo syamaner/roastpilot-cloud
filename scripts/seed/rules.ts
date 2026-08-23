@@ -52,7 +52,9 @@ const REQUIRED_FIELDS: Record<SeedTable, readonly string[]> = {
 const SLIDER_FIELDS = [
   "aroma", "acidity", "sweetness", "body", "aftertaste",
 ] as const;
-const STAGE_PATH_PATTERN = /^@roast_artifacts\/([^/]+)\/(jsonl|csv|summary)$/;
+const STAGE_PATH_PATTERN = new RegExp(
+  `^@roast_artifacts/([^/]+)/(${ARTIFACT_KINDS.join("|")})$`,
+);
 
 function recordOf(row: unknown): Record<string, unknown> {
   return typeof row === "object" && row !== null
@@ -68,7 +70,8 @@ function identity(table: SeedTable, row: Record<string, unknown>): string {
 }
 
 function inRange(value: unknown, range: { min: number; max: number }): boolean {
-  return typeof value === "number" && value >= range.min && value <= range.max;
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= range.min && value <= range.max;
 }
 
 export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
@@ -174,7 +177,8 @@ export function validateSeedOutput(output: SeedOutput): Violation[] {
   for (const summary of output.referenceRoastSummaries) {
     const actual = output.cloudRoasts.filter(
       (roast) => roast.bean_origin === summary.bean_origin &&
-        roast.roast_level === summary.roast_level,
+        roast.roast_level === summary.roast_level &&
+        roast.contributed_to_learning === true,
     ).length;
     if (summary.roast_count !== actual) {
       violations.push({
