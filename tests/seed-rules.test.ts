@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { SeedOutput, Violation } from "../scripts/seed/rules";
 import { validateSeedOutput, validateSeedRow } from "../scripts/seed/rules";
 
+const ROAST_ID_ONE = "11111111-1111-1111-1111-111111111111";
+const ROAST_ID_TWO = "22222222-2222-2222-2222-222222222222";
+
 function validOutput(): SeedOutput {
   return {
     cloudRoasts: [{
-      id: "roast-1", idempotency_key: "idem-1", owner_id: null,
+      id: ROAST_ID_ONE, idempotency_key: "idem-1", owner_id: null,
       public_slug: "ABCDEFGHJKLMNPQRS", visibility: "unlisted",
       bean_origin: "Test Origin", bean_varietal: null, bean_weight_g: 100,
       profile_name: null, roast_level: "medium", summary: {},
@@ -14,16 +17,16 @@ function validOutput(): SeedOutput {
       updated_at: "2026-01-01T00:00:00Z",
     }],
     roastTelemetry: [{
-      roast_id: "roast-1", elapsed_s: 0, bean_temp_c: 20, env_temp_c: null,
+      roast_id: ROAST_ID_ONE, elapsed_s: 0, bean_temp_c: 20, env_temp_c: null,
       heat_percent: 50, fan_percent: 40, ror_c_per_min: null, raw: null,
     }],
     roastArtifacts: [{
-      id: "artifact-1", roast_id: "roast-1", kind: "jsonl",
+      id: "artifact-1", roast_id: ROAST_ID_ONE, kind: "jsonl",
       stage_path: "@roast_artifacts/run-1/jsonl", byte_size: 10,
       created_at: "2026-01-01T00:00:00Z",
     }],
     tastingReviews: [{
-      id: "review-1", roast_id: "roast-1", reviewer_name: null, score: 4,
+      id: "review-1", roast_id: ROAST_ID_ONE, reviewer_name: null, score: 4,
       aroma: 50, acidity: 50, sweetness: 50, body: 50, aftertaste: 50,
       brew_method: null, notes: null, submitted_ip_hash: "a".repeat(64),
       created_at: "2026-01-01T00:00:00Z",
@@ -68,6 +71,24 @@ describe("validateSeedOutput", () => {
     ]);
     expect(violations.every((violation) => violation.rowIdentity === "unknown"))
       .toBe(true);
+  });
+
+  it("rejects an explicit cloud id that is not a delete_roast UUID", () => {
+    const row = { ...validOutput().cloudRoasts[0], id: "roast-1" };
+    expect(validateSeedRow("cloud_roasts", row).some((item) => item.field === "id"))
+      .toBe(true);
+  });
+
+  it("accepts a lowercase UUID cloud id", () => {
+    const row = { ...validOutput().cloudRoasts[0], id: ROAST_ID_ONE };
+    expect(validateSeedRow("cloud_roasts", row).some((item) => item.field === "id"))
+      .toBe(false);
+  });
+
+  it("allows a null cloud id for database assignment", () => {
+    const row = { ...validOutput().cloudRoasts[0], id: null };
+    expect(validateSeedRow("cloud_roasts", row).some((item) => item.field === "id"))
+      .toBe(false);
   });
 
   it.each([0, 6])("rejects score %s", (score) => {
@@ -136,7 +157,7 @@ describe("validateSeedOutput", () => {
 
   it("rejects duplicate idempotency keys across cloud roasts", () => {
     const output = validOutput();
-    output.cloudRoasts.push({ ...output.cloudRoasts[0], id: "roast-2" });
+    output.cloudRoasts.push({ ...output.cloudRoasts[0], id: ROAST_ID_TWO });
     expectField(output, "idempotency_key");
   });
 
@@ -194,6 +215,18 @@ describe("validateSeedOutput", () => {
     expectField(output, "raw.samples[0].env_temp_f");
   });
 
+  it("rejects a camelCase Fahrenheit key in a cloud summary", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { beanTempF: 400 };
+    expectField(output, "summary.beanTempF");
+  });
+
+  it("rejects a camelCase Fahrenheit key in telemetry raw", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].raw = { temperatureF: 390 };
+    expectField(output, "raw.temperatureF");
+  });
+
   it("rejects a case-insensitive nested key containing fahrenheit", () => {
     const output = validOutput();
     output.cloudRoasts[0].summary = { notes: { FahrenheitReading: 400 } };
@@ -202,8 +235,38 @@ describe("validateSeedOutput", () => {
 
   it("accepts clean nested Celsius variant payloads", () => {
     const output = validOutput();
-    output.cloudRoasts[0].summary = { notes: { bean_temp_c: 200 } };
-    output.roastTelemetry[0].raw = { samples: [{ env_temp_c: 190 }] };
+    output.cloudRoasts[0].summary = { notes: { beanTempC: 200 } };
+    output.roastTelemetry[0].raw = { samples: [{ temperature_c: 190 }] };
+    expect(validateSeedOutput(output)).toEqual([]);
+  });
+
+  it("rejects an IP-named key carrying a non-null value", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].raw = { ip_address: "192.168.1.20" };
+    expectField(output, "raw.ip_address");
+  });
+
+  it("rejects a nested raw IPv4 string value", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { notes: { source: "10.0.0.5" } };
+    expectField(output, "summary.notes.source");
+  });
+
+  it("rejects a nested raw IPv6 string value", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].raw = { metadata: { source: "2001:db8::1" } };
+    expectField(output, "raw.metadata.source");
+  });
+
+  it("accepts a benign three-part version string", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = { notes: { version: "1.2.3" } };
+    expect(validateSeedOutput(output)).toEqual([]);
+  });
+
+  it("accepts a null value under an IP-named key", () => {
+    const output = validOutput();
+    output.roastTelemetry[0].raw = { ip: null, label: "synthetic" };
     expect(validateSeedOutput(output)).toEqual([]);
   });
 
@@ -288,7 +351,7 @@ describe("validateSeedOutput", () => {
     const output = validOutput();
     output.cloudRoasts.push({
       ...output.cloudRoasts[0],
-      id: "roast-2",
+      id: ROAST_ID_TWO,
       idempotency_key: "idem-2",
       public_slug: "TUVWXYZabcdefghijk",
       contributed_to_learning: false,
@@ -301,7 +364,7 @@ describe("validateSeedOutput", () => {
     output.cloudRoasts.push(
       {
         ...output.cloudRoasts[0],
-        id: "roast-2",
+        id: ROAST_ID_TWO,
         idempotency_key: "idem-2",
         public_slug: "TUVWXYZabcdefghijk",
         contributed_to_learning: false,
@@ -332,7 +395,7 @@ describe("validateSeedOutput", () => {
     const output = validOutput();
     output.cloudRoasts.push({
       ...output.cloudRoasts[0],
-      id: "roast-2",
+      id: ROAST_ID_TWO,
       idempotency_key: "idem-2",
       public_slug: "TUVWXYZabcdefghijk",
       contributed_to_learning: false,
@@ -344,7 +407,7 @@ describe("validateSeedOutput", () => {
     const output = validOutput();
     output.cloudRoasts.push({
       ...output.cloudRoasts[0],
-      id: "roast-2",
+      id: ROAST_ID_TWO,
       idempotency_key: "idem-2",
       public_slug: "TUVWXYZabcdefghijk",
       contributed_to_learning: false,

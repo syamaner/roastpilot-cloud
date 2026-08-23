@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { isValidSlug } from "../../lib/slug";
 import type {
   CloudRoastRow,
@@ -13,6 +14,18 @@ export const SLIDER_RANGE = { min: 0, max: 100 } as const;
 export const VISIBILITY_VALUES = ["private", "unlisted", "public"] as const;
 export const ARTIFACT_KINDS = ["jsonl", "csv", "summary"] as const;
 export const IP_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
+
+const CLOUD_ROAST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const RAW_IP_KEY_NAMES = new Set([
+  "ip",
+  "ipaddr",
+  "ipaddress",
+  "ip_address",
+  "client_ip",
+  "remote_ip",
+  "remote_addr",
+]);
 
 export interface SeedOutput {
   cloudRoasts: CloudRoastRow[];
@@ -76,7 +89,8 @@ function inRange(value: unknown, range: { min: number; max: number }): boolean {
 function isFahrenheitKey(key: string): boolean {
   const lowerKey = key.toLowerCase();
   return lowerKey.endsWith("_" + "f") ||
-    lowerKey.includes("fahren" + "heit");
+    lowerKey.includes("fahren" + "heit") ||
+    (lowerKey.endsWith("f") && lowerKey.includes("temp"));
 }
 
 function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
@@ -97,6 +111,30 @@ function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
   });
 }
 
+// Strict IP parsing avoids treating version-like strings as IPv4. This scan
+// covers the two must-block variants only; Slice 2 owns closed-shape validation.
+function rawIpPaths(payload: unknown, parentPath: string): string[] {
+  if (Array.isArray(payload)) {
+    return payload.flatMap((item, index) =>
+      rawIpPaths(item, `${parentPath}[${index}]`));
+  }
+  if (typeof payload === "string") {
+    return isIP(payload) === 0 ? [] : [parentPath];
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return [];
+  }
+
+  return Object.entries(payload).flatMap(([key, nested]) => {
+    const path = `${parentPath}.${key}`;
+    const exposedByKey = RAW_IP_KEY_NAMES.has(key.toLowerCase()) && nested !== null;
+    return [
+      ...(exposedByKey ? [path] : []),
+      ...rawIpPaths(nested, path),
+    ];
+  });
+}
+
 export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
   const value = recordOf(row);
   const rowIdentity = identity(table, value);
@@ -112,6 +150,10 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
   }
 
   if (table === "cloud_roasts") {
+    if (value.id !== null && value.id !== undefined &&
+        (typeof value.id !== "string" || !CLOUD_ROAST_ID_PATTERN.test(value.id))) {
+      add("id", "explicit cloud roast id must be a lowercase UUID for delete_roast");
+    }
     if (value.operator_rating !== null && value.operator_rating !== undefined &&
         !inRange(value.operator_rating, OPERATOR_RATING_RANGE)) {
       add("operator_rating", "must be within the operator rating range");
@@ -128,6 +170,9 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
     for (const path of nonCelsiusKeyPaths(value.summary, "summary")) {
       add(path, "variant keys must use Celsius naming");
     }
+    for (const path of new Set(rawIpPaths(value.summary, "summary"))) {
+      add(path, "raw IP address must never appear; IPs are stored hashed");
+    }
   }
 
   if (table === "roast_telemetry") {
@@ -138,6 +183,9 @@ export function validateSeedRow(table: SeedTable, row: unknown): Violation[] {
     }
     for (const path of nonCelsiusKeyPaths(value.raw, "raw")) {
       add(path, "variant keys must use Celsius naming");
+    }
+    for (const path of new Set(rawIpPaths(value.raw, "raw"))) {
+      add(path, "raw IP address must never appear; IPs are stored hashed");
     }
   }
 
