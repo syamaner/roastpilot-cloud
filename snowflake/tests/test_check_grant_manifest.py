@@ -19,11 +19,14 @@ def rendered_sql() -> str:
     return check_grant_manifest.render_migration()
 
 
-def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(rendered_sql: str) -> None:
+def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
+    rendered_sql: str, capsys
+) -> None:
     parsed, parse_violations = check_grant_manifest.parse_rendered_sql(rendered_sql)
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
     assert check_grant_manifest.main() == 0
+    assert capsys.readouterr().out == "grant manifest matches exactly (15 grants)\n"
 
 
 def test_t2_rendered_prerequisites_use_concrete_default_identifiers(rendered_sql: str) -> None:
@@ -62,7 +65,7 @@ def test_render_migration_calls_schemachange_with_exact_root_script_and_variable
     assert check_grant_manifest.render_migration() == "rendered SQL"
     assert captured == {
         "project_root": check_grant_manifest.SNOWFLAKE_DIR / "migrations",
-        "script_name": "R__roles_grants.sql",
+        "script_name": "R__z_roles_grants.sql",
         "variables": {},
     }
 
@@ -78,7 +81,7 @@ def test_render_migration_wraps_engine_failure_with_migration_name(monkeypatch) 
     monkeypatch.setattr(check_grant_manifest, "JinjaTemplateProcessor", FailingProcessor)
     with pytest.raises(
         RuntimeError,
-        match=r"schemachange render failed for R__roles_grants\.sql: broken render",
+        match=r"schemachange render failed for R__z_roles_grants\.sql: broken render",
     ):
         check_grant_manifest.render_migration()
 
@@ -192,6 +195,18 @@ def test_t12_reports_every_unparseable_statement_in_the_input() -> None:
     assert any("BAR" in violation for violation in unrecognized)
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "GRANT USAGE ON SCHEMA app TO ROLE PUBLIC_WEB WITH GRANT OPTION;",
+        "GRANT USAGE ON SCHEMA app TO ROLE PUBLIC_WEB, ROLE ROASTPILOT_AGENT;",
+    ],
+)
+def test_t12_rejects_grant_option_and_multiple_grantees(sql: str) -> None:
+    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert any("unrecognized statement" in violation for violation in violations)
+
+
 def test_t13_wrong_internal_stage_privilege_is_rejected() -> None:
     sql = "GRANT USAGE ON STAGE app.roast_artifacts TO ROLE ROASTPILOT_AGENT;"
     _, violations = check_grant_manifest.parse_rendered_sql(sql)
@@ -216,3 +231,26 @@ def test_t14_privilege_order_is_invariant() -> None:
 def test_t15_missing_sibling_module_raises_import_error() -> None:
     with pytest.raises(ImportError, match="cannot load sibling module"):
         check_grant_manifest._load_sibling_module("this_module_does_not_exist")
+
+
+def test_main_returns_1_and_reports_extra_grant(
+    rendered_sql: str, monkeypatch, capsys
+) -> None:
+    extra_sql = (
+        rendered_sql
+        + "\nGRANT SELECT ON TABLE app.tasting_reviews TO ROLE PUBLIC_WEB;"
+    )
+    monkeypatch.setattr(check_grant_manifest, "render_migration", lambda: extra_sql)
+
+    assert check_grant_manifest.main() == 1
+    assert "error: extra grant" in capsys.readouterr().err
+
+
+def test_main_returns_1_and_reports_render_failure(monkeypatch, capsys) -> None:
+    def fail_render() -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(check_grant_manifest, "render_migration", fail_render)
+
+    assert check_grant_manifest.main() == 1
+    assert "error: boom" in capsys.readouterr().err

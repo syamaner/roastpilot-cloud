@@ -1,6 +1,13 @@
 -- C2-S7 roles/grants manifest (issue #317): the complete Snowflake data-plane
 -- privilege boundary for PUBLIC_WEB and ROASTPILOT_AGENT.
 --
+-- Ordering fence: the `z` prefix is deliberate. schemachange applies
+-- repeatable scripts in alphanumeric filename order (deploy.py), and a GRANT
+-- requires its target object to exist at apply time (unlike a late-bound
+-- procedure body). The view grants below depend on R__secure_views.sql, which
+-- would otherwise sort after this file, so this migration sorts after every
+-- object-creating repeatable on fresh targets as well as existing ones.
+--
 -- Scope fence: GRANT statements only. The two roles and every referenced
 -- object already exist; this repeatable migration creates no role or object.
 -- PUBLIC_WEB is limited to its three prerequisites, two secure views, and

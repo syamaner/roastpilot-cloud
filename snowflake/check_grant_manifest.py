@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline exact-set enforcement for R__roles_grants.sql (issue #317).
+"""Offline exact-set enforcement for R__z_roles_grants.sql (issue #317).
 
 The migration is rendered by schemachange before parsing, so Jinja environment
 lookups are checked as the concrete Snowflake identifiers deployment will see.
@@ -35,7 +35,7 @@ def _load_sibling_module(module_name: str) -> ModuleType:
 
 _validate_migrations = _load_sibling_module("validate_migrations")
 SNOWFLAKE_DIR = _validate_migrations.SNOWFLAKE_DIR
-MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__roles_grants.sql"
+MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__z_roles_grants.sql"
 
 ALLOWED_ROLES = frozenset({"PUBLIC_WEB", "ROASTPILOT_AGENT"})
 ALLOWED_OBJECT_TYPES = frozenset(
@@ -69,6 +69,10 @@ _AGENT_TABLES = (
     "app.reference_roast_summaries",
 )
 
+# This offline CI gate runs without SNOWFLAKE_DATABASE/SNOWFLAKE_WAREHOUSE, so
+# schemachange resolves the migration's DEV env_var defaults and the manifest
+# deliberately pins them. Non-default PREVIEW/PROD boundaries are validated at
+# deploy time by the live assert_dev_ci_grants.py audit, not by this offline gate.
 EXPECTED_MANIFEST = frozenset(
     {
         _grant("USAGE", "DATABASE", "ROASTPILOT_DEV", "PUBLIC_WEB"),
