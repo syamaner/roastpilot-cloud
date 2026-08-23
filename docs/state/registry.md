@@ -16,7 +16,9 @@ gate and the first with **zero post-merge fold rounds**. The pattern the
 hands-off proofs establish: the **build-half runs hands-off**, and for
 Snowflake procs the **fold-half** converges *pre-merge* when the pre-open
 review carries the banked deploy-semantics learnings (#313's four folds all
-landed before merge and the live deploy confirmed them clean); before that
+landed before merge, and the live deploy confirmed the proc **compiles and
+deploys** clean — runtime behaviour is covered by the offline suite +
+reviewers, not a live behavioural run; see D-313-D on #313); before that
 discipline #310's fold-half took three post-merge connector rounds. The live
 #11 gate is **available since 22 Aug 2026** (run 32600848432) and enforces
 **main-only** validation — the `dev-snowflake-ci` credential boundary rejects
