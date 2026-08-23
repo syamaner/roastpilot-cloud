@@ -73,11 +73,9 @@ _AGENT_TABLES = (
 # manifest is fully environment-independent.
 EXPECTED_MANIFEST = frozenset(
     {
-        _grant("USAGE", "SCHEMA", "app", "PUBLIC_WEB"),
         _grant("SELECT", "VIEW", "app.roast_by_slug", "PUBLIC_WEB"),
         _grant("SELECT", "VIEW", "app.reviews_by_roast", "PUBLIC_WEB"),
         _grant("USAGE", "PROCEDURE", _SUBMIT_REVIEW_SIGNATURE, "PUBLIC_WEB"),
-        _grant("USAGE", "SCHEMA", "app", "ROASTPILOT_AGENT"),
         *(
             _grant("SELECT,INSERT,UPDATE,DELETE", "TABLE", table, "ROASTPILOT_AGENT")
             for table in _AGENT_TABLES
