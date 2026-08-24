@@ -6,6 +6,7 @@ as the other snowflake/tests/*.py files.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import assert_dev_ci_grants  # noqa: E402
+import check_grant_manifest  # noqa: E402
+
+
+class TestLoadSiblingModule:
+    def test_raises_import_error_for_a_module_that_does_not_exist(self) -> None:
+        with pytest.raises(ImportError, match="cannot load sibling module"):
+            assert_dev_ci_grants._load_sibling_module("this_module_does_not_exist")
 
 
 def _generate_test_pem(passphrase: str | None = None) -> str:
@@ -69,6 +77,57 @@ _DEV_ROLE = "ROASTPILOT_DEV_CI_ROLE"
 # three identity constants, now that TestAssertSqlIdentifierSafe above also
 # needs it.
 _CI_USER = "ROASTPILOT_DEV_CI"
+
+_LIVE_SUBMIT_REVIEW_SIGNATURE = (
+    "ROASTPILOT_DEV.APP.SUBMIT_REVIEW(VARCHAR, VARCHAR, NUMBER, NUMBER, NUMBER, "
+    "NUMBER, NUMBER, NUMBER, VARCHAR, VARCHAR, VARCHAR)"
+)
+_LIVE_AGENT_TABLES = (
+    "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+    "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
+    "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
+    "ROASTPILOT_DEV.APP.TASTING_REVIEWS",
+    "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
+)
+
+
+def _app_role_rows(role_name: str) -> list[dict[str, object]]:
+    """D-345-F compliant state for the shared account-level application roles."""
+    prerequisites = [
+        ("USAGE", "DATABASE", "ROASTPILOT_DEV"),
+        ("USAGE", "SCHEMA", "ROASTPILOT_DEV.APP"),
+        ("USAGE", "WAREHOUSE", "ROASTPILOT_WH"),
+    ]
+    if role_name == "PUBLIC_WEB":
+        grants = [
+            *prerequisites,
+            ("SELECT", "VIEW", "ROASTPILOT_DEV.APP.ROAST_BY_SLUG"),
+            ("SELECT", "VIEW", "ROASTPILOT_DEV.APP.REVIEWS_BY_ROAST"),
+            ("USAGE", "PROCEDURE", _LIVE_SUBMIT_REVIEW_SIGNATURE),
+        ]
+    elif role_name == "ROASTPILOT_AGENT":
+        grants = [
+            *prerequisites,
+            *(
+                (privilege, "TABLE", table_name)
+                for table_name in _LIVE_AGENT_TABLES
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+            ),
+            ("READ", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
+            ("WRITE", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
+        ]
+    else:
+        raise ValueError(f"unknown application role fixture: {role_name!r}")
+    return [
+        {
+            "privilege": privilege,
+            "granted_on": granted_on,
+            "name": name,
+            "grantee_name": role_name,
+            "grant_option": "false",
+        }
+        for privilege, granted_on, name in grants
+    ]
 
 
 class TestAssertBoundaryVarsNotDrifted:
@@ -675,6 +734,848 @@ class TestFindPublicFutureGrants:
         assert len(assert_dev_ci_grants.find_public_future_grants(rows)) == 2
 
 
+class TestApplicationRoleManifest:
+    def _violations(self, role_name: str, rows: list[dict[str, object]]) -> list[str]:
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[role_name]
+        return assert_dev_ci_grants.find_role_manifest_violations(
+            role_name,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+        )
+
+    def test_confirmed_live_procedure_signature_is_pinned(self) -> None:
+        assert (
+            assert_dev_ci_grants._SUBMIT_REVIEW_LIVE_SIGNATURE
+            == "ROASTPILOT_DEV.APP.SUBMIT_REVIEW(VARCHAR, VARCHAR, NUMBER, NUMBER, "
+            "NUMBER, NUMBER, NUMBER, NUMBER, VARCHAR, VARCHAR, VARCHAR)"
+        )
+
+    @pytest.mark.parametrize(
+        ("role_name", "row_count"),
+        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 25)],
+    )
+    def test_d345f_capture_with_shared_app_warehouse_is_compliant(
+        self, role_name: str, row_count: int
+    ) -> None:
+        rows = _app_role_rows(role_name)
+        assert len(rows) == row_count
+        assert all(row["grant_option"] == "false" for row in rows)
+        assert self._violations(role_name, rows) == []
+
+    def test_canonical_live_object_name_has_exact_confirmed_shape(self) -> None:
+        assert (
+            assert_dev_ci_grants._canonical_live_object_name(
+                "ROASTPILOT_DEV", "app.roast_by_slug"
+            )
+            == "ROASTPILOT_DEV.APP.ROAST_BY_SLUG"
+        )
+
+    def test_canonical_live_object_name_rejects_non_app_schema(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized offline manifest object name"):
+            assert_dev_ci_grants._canonical_live_object_name(
+                "ROASTPILOT_DEV", "other.roast_by_slug"
+            )
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("ROASTPILOT.APP.ROAST_BY_SLUG", "APP.ROAST_BY_SLUG"),
+            ("ROASTPILOT_PREVIEW.APP", "APP"),
+            ("ROASTPILOT", ""),
+        ],
+    )
+    def test_environment_invariant_name_strips_exactly_one_prefix(
+        self, name: str, expected: str
+    ) -> None:
+        assert assert_dev_ci_grants._environment_invariant_name(name) == expected
+
+    def test_public_web_cross_environment_allowed_set_is_manifest_derived(self) -> None:
+        assert assert_dev_ci_grants._PUBLIC_WEB_CROSS_ENV_ALLOWED == frozenset(
+            {
+                ("SELECT", "VIEW", "APP.ROAST_BY_SLUG"),
+                ("SELECT", "VIEW", "APP.REVIEWS_BY_ROAST"),
+                (
+                    "USAGE",
+                    "PROCEDURE",
+                    assert_dev_ci_grants._environment_invariant_name(
+                        _LIVE_SUBMIT_REVIEW_SIGNATURE
+                    ),
+                ),
+                ("USAGE", "SCHEMA", "APP"),
+            }
+        )
+
+    def test_app_role_environment_database_family_is_pinned(self) -> None:
+        assert assert_dev_ci_grants._APP_ROLE_ENVIRONMENT_DATABASES == frozenset(
+            {"ROASTPILOT_DEV", "ROASTPILOT_PREVIEW", "ROASTPILOT"}
+        )
+
+    def test_live_procedure_signature_rejects_unrecognized_signature(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized offline procedure signature"):
+            assert_dev_ci_grants._live_procedure_signature(
+                "ROASTPILOT_DEV", "other.submit_review(string)"
+            )
+
+    def test_public_web_exact_manifest_passes(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        assert all(row["grant_option"] == "false" for row in rows)
+        assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
+
+    def test_roastpilot_agent_exact_manifest_passes(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        assert all(row["grant_option"] == "false" for row in rows)
+        assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
+
+    def test_live_object_core_is_faithful_transform_of_offline_manifest(self) -> None:
+        live = assert_dev_ci_grants.expected_role_grants(_DEV_DB)
+        object_rows = [
+            row
+            for role_rows in live.values()
+            for row in role_rows
+            if row[1] in {"VIEW", "TABLE", "STAGE"}
+        ]
+        assert all(
+            re.fullmatch(r"ROASTPILOT_DEV\.APP\.[A-Z0-9_]+", row[2])
+            for row in object_rows
+        )
+        live_core = {(privilege, kind, name.rsplit(".", 1)[-1], role) for privilege, kind, name, role in object_rows}
+        offline_core = {
+            (
+                privilege,
+                grant.object_type,
+                grant.object_name.split(".", 1)[1].upper(),
+                grant.role_name,
+            )
+            for grant in check_grant_manifest.EXPECTED_MANIFEST
+            if grant.object_type in {"VIEW", "TABLE", "STAGE"}
+            for privilege in grant.privileges
+        }
+        assert live_core == offline_core
+
+    def test_agent_table_privileges_follow_narrowed_manifest_exactly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manifest_module = assert_dev_ci_grants.check_grant_manifest
+        original_manifest = manifest_module.EXPECTED_MANIFEST
+        target = next(
+            grant
+            for grant in original_manifest
+            if grant.role_name == assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+            and grant.object_type == "TABLE"
+            and grant.object_name == "app.cloud_roasts"
+        )
+        narrowed = type(target)(
+            frozenset({"SELECT", "INSERT", "UPDATE"}),
+            target.object_type,
+            target.object_name,
+            target.role_name,
+        )
+        monkeypatch.setattr(
+            manifest_module,
+            "EXPECTED_MANIFEST",
+            frozenset((original_manifest - {target}) | {narrowed}),
+        )
+
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        deleted_privilege = (
+            "DELETE",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+        )
+        assert deleted_privilege not in expected
+
+        captured_rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            captured_rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+        )
+        assert violations == [
+            "extra grant: DELETE on TABLE ROASTPILOT_DEV.APP.CLOUD_ROASTS to "
+            "ROASTPILOT_AGENT (grant_option='false')"
+        ]
+
+        narrowed_rows = [
+            row
+            for row in captured_rows
+            if not (
+                row["privilege"] == "DELETE"
+                and row["name"] == "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
+            )
+        ]
+        assert (
+            assert_dev_ci_grants.find_role_manifest_violations(
+                assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                narrowed_rows,
+                expected,
+                _DEV_DB,
+                assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            )
+            == []
+        )
+
+    def test_old_lowercase_unqualified_object_shape_is_still_missing(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(row for row in rows if row["granted_on"] == "VIEW")
+        target["name"] = "app.roast_by_slug"
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "missing manifest grant" in violation
+            and "ROASTPILOT_DEV.APP.ROAST_BY_SLUG" in violation
+            for violation in violations
+        )
+
+    def test_ac2_extra_dev_base_table_grant_fails(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("extra grant" in violation and "CLOUD_ROASTS" in violation for violation in violations)
+
+    def test_extra_procedure_grant_fails(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "PROCEDURE",
+                "name": "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR)",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("extra grant" in violation and "DELETE_ROAST" in violation for violation in violations)
+
+    def test_extra_agent_privilege_fails(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        rows.append(
+            {
+                "privilege": "OWNERSHIP",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        assert any(
+            "extra grant" in violation and "OWNERSHIP" in violation
+            for violation in self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows)
+        )
+
+    def test_missing_procedure_grant_fails(self) -> None:
+        rows = [
+            row
+            for row in _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+            if row["granted_on"] != "PROCEDURE"
+        ]
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("missing manifest grant" in violation and "SUBMIT_REVIEW" in violation for violation in violations)
+
+    def test_empty_visible_result_fails_closed_as_missing(self) -> None:
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, [])
+        assert len(violations) == len(
+            assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+                assert_dev_ci_grants.PUBLIC_WEB_ROLE
+            ]
+        )
+        assert all("missing manifest grant" in violation for violation in violations)
+
+    def test_missing_live_columns_fail_closed_with_stable_empty_defaults(self) -> None:
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, [{}])
+        assert violations[0] == "unexpected grant:  on   to  (grant_option=<absent>)"
+
+    @pytest.mark.parametrize(
+        "lookalike",
+        ["ROASTPILOT_DEV.APP.roast_by_slug", "ROASTPILOT_DEV.APP.ROAST_BY_SLUG "],
+    )
+    def test_identifier_lookalikes_fail_byte_exact_match(self, lookalike: str) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(
+            row for row in rows if row["name"] == "ROASTPILOT_DEV.APP.ROAST_BY_SLUG"
+        )
+        target["name"] = lookalike
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("extra grant" in violation and lookalike in violation for violation in violations)
+        assert any(
+            "missing manifest grant" in violation
+            and "ROASTPILOT_DEV.APP.ROAST_BY_SLUG" in violation
+            for violation in violations
+        )
+
+    @pytest.mark.parametrize(
+        ("granted_on", "name"),
+        [
+            ("PROCEDURE", "ROASTPILOT_DEV.APP.SUBMIT_REVIEW(VARCHAR)"),
+            ("FUNCTION", "ROASTPILOT_DEV.APP.ROAST_BY_SLUG"),
+        ],
+    )
+    def test_unrecognised_live_shape_fails_closed(self, granted_on: str, name: str) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": granted_on,
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        assert any(
+            "extra grant" in violation
+            for violation in self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        )
+
+    def test_ac4_roastpilot_warehouse_is_allowlisted(self) -> None:
+        row = {
+            "privilege": "USAGE",
+            "granted_on": "WAREHOUSE",
+            "name": "ROASTPILOT_WH",
+            "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+            "grant_option": "false",
+        }
+        assert (
+            assert_dev_ci_grants.find_role_manifest_violations(
+                assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                [row],
+                frozenset(),
+                _DEV_DB,
+                assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            )
+            == []
+        )
+
+    def test_allowlisted_warehouse_rejects_non_usage_privilege(self) -> None:
+        # Mutation guard: removing the USAGE privilege check would silently
+        # admit this warehouse escalation through the allowlist branch.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(row for row in rows if row["name"] == "ROASTPILOT_WH")
+        target["privilege"] = "OPERATE"
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected warehouse grant" in violation
+            and "OPERATE" in violation
+            and "ROASTPILOT_WH" in violation
+            for violation in violations
+        )
+
+    @pytest.mark.parametrize(
+        "role_name",
+        [assert_dev_ci_grants.PUBLIC_WEB_ROLE, assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE],
+    )
+    def test_dev_ci_warehouse_is_unexpected_for_application_role(
+        self, role_name: str
+    ) -> None:
+        # Mutation guard: adding DEV_CI_WH back to the allowlist makes this
+        # CI-warehouse grant disappear from the violation list.
+        rows = _app_role_rows(role_name)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "WAREHOUSE",
+                "name": "DEV_CI_WH",
+                "grantee_name": role_name,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(role_name, rows)
+        assert any(
+            "unexpected warehouse grant" in violation and "DEV_CI_WH" in violation
+            for violation in violations
+        )
+
+    def test_ac5_non_allowlisted_prod_warehouse_fails(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "WAREHOUSE",
+                "name": "PROD_WH",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected warehouse grant" in violation and "PROD_WH" in violation
+            for violation in violations
+        )
+
+    def test_allowlisted_warehouse_requires_false_grant_option(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(row for row in rows if row["name"] == "ROASTPILOT_WH")
+        target["grant_option"] = "true"
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected warehouse grant" in violation
+            and "ROASTPILOT_WH" in violation
+            and "grant_option='true'" in violation
+            for violation in violations
+        )
+
+        target.pop("grant_option")
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected warehouse grant" in violation
+            and "ROASTPILOT_WH" in violation
+            and "grant_option=<absent>" in violation
+            for violation in violations
+        )
+
+    def test_ac6_preview_and_prod_database_objects_are_ignored(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.extend(
+            {
+                "privilege": "SELECT",
+                "granted_on": "VIEW",
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+            for name in (
+                "ROASTPILOT_PREVIEW.APP.ROAST_BY_SLUG",
+                "ROASTPILOT.APP.ROAST_BY_SLUG",
+            )
+        )
+        assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
+
+    def test_other_environment_database_and_schema_prerequisites_are_ignored(
+        self,
+    ) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.extend(
+            [
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "DATABASE",
+                    "name": "ROASTPILOT_PREVIEW",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "SCHEMA",
+                    "name": "ROASTPILOT_PREVIEW.APP",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+            ]
+        )
+        assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
+
+    def test_public_web_cross_environment_secure_view_and_procedure_are_allowed(
+        self,
+    ) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.extend(
+            [
+                {
+                    "privilege": "SELECT",
+                    "granted_on": "VIEW",
+                    "name": "ROASTPILOT_PREVIEW.APP.ROAST_BY_SLUG",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "SELECT",
+                    "granted_on": "VIEW",
+                    "name": "ROASTPILOT.APP.REVIEWS_BY_ROAST",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "PROCEDURE",
+                    "name": _LIVE_SUBMIT_REVIEW_SIGNATURE.replace(
+                        "ROASTPILOT_DEV", "ROASTPILOT"
+                    ),
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "SCHEMA",
+                    "name": "ROASTPILOT_PREVIEW.APP",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "DATABASE",
+                    "name": "ROASTPILOT_PREVIEW",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "DATABASE",
+                    "name": "ROASTPILOT",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+            ]
+        )
+        assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
+
+    @pytest.mark.parametrize(
+        ("privilege", "granted_on", "name"),
+        [
+            ("SELECT", "VIEW", "ATTACKER_DB.APP.ROAST_BY_SLUG"),
+            ("USAGE", "DATABASE", "ATTACKER_DB"),
+            ("USAGE", "SCHEMA", "ATTACKER_DB.APP"),
+            (
+                "USAGE",
+                "PROCEDURE",
+                _LIVE_SUBMIT_REVIEW_SIGNATURE.replace(
+                    "ROASTPILOT_DEV", "ATTACKER_DB"
+                ),
+            ),
+            ("SELECT", "VIEW", ".APP.ROAST_BY_SLUG"),
+        ],
+    )
+    def test_public_web_rejects_non_family_cross_environment_database(
+        self, privilege: str, granted_on: str, name: str
+    ) -> None:
+        # Mutation guard: removing either family-membership check silently
+        # admits an attacker-owned database with an otherwise allowed suffix.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": privilege,
+                "granted_on": granted_on,
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation and name in violation
+            for violation in violations
+        )
+
+    @pytest.mark.parametrize(
+        ("privilege", "granted_on", "name", "grant_option"),
+        [
+            (
+                "USAGE",
+                "PROCEDURE",
+                "ROASTPILOT.APP.DELETE_ROAST(VARCHAR)",
+                "false",
+            ),
+            ("SELECT", "VIEW", "ROASTPILOT.APP.SECRET_ALL_ROWS", "false"),
+            ("USAGE", "SCHEMA", "ROASTPILOT.SECRET", "false"),
+            ("UPDATE", "VIEW", "ROASTPILOT.APP.ROAST_BY_SLUG", "false"),
+            (
+                "EXECUTE",
+                "PROCEDURE",
+                _LIVE_SUBMIT_REVIEW_SIGNATURE.replace("ROASTPILOT_DEV", "ROASTPILOT"),
+                "false",
+            ),
+            ("SELECT", "VIEW", "ROASTPILOT.APP.ROAST_BY_SLUG", "true"),
+        ],
+    )
+    def test_public_web_cross_environment_surface_fails_closed(
+        self,
+        privilege: str,
+        granted_on: str,
+        name: str,
+        grant_option: str,
+    ) -> None:
+        # Mutation guards: name, privilege, object type, and false grant-option
+        # must all participate in the cross-environment allow decision.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": privilege,
+                "granted_on": granted_on,
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": grant_option,
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation and name in violation
+            for violation in violations
+        )
+
+    def test_public_web_cross_environment_database_grant_option_fails_closed(
+        self,
+    ) -> None:
+        # Mutation guard for the bare-DATABASE branch's grant-option half.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "DATABASE",
+                "name": "ROASTPILOT",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "true",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation
+            and "USAGE on DATABASE ROASTPILOT" in violation
+            for violation in violations
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "ROASTPILOT.APP.CLOUD_ROASTS",
+            "ROASTPILOT_PREVIEW.APP.CLOUD_ROASTS",
+        ],
+    )
+    def test_public_web_cross_environment_base_table_fails(self, name: str) -> None:
+        # Mutation guard: removing the PUBLIC_WEB cross-environment shape
+        # check would silently ignore this base-table escalation.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation and name in violation
+            for violation in violations
+        )
+
+    def test_public_web_cross_environment_stage_fails(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "READ",
+                "granted_on": "STAGE",
+                "name": "ROASTPILOT.APP.ROAST_ARTIFACTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation
+            and "ROASTPILOT.APP.ROAST_ARTIFACTS" in violation
+            for violation in violations
+        )
+
+    def test_public_web_cross_environment_database_wrong_privilege_fails(
+        self,
+    ) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "DATABASE",
+                "name": "ROASTPILOT",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected PUBLIC_WEB grant" in violation
+            and "SELECT on DATABASE ROASTPILOT" in violation
+            for violation in violations
+        )
+
+    def test_agent_cross_environment_base_table_remains_out_of_scope(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ATTACKER_DB.APP.X",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
+
+    @pytest.mark.parametrize("name", ["", "CLOUD_ROASTS"])
+    def test_malformed_database_scoped_object_name_fails_closed(self, name: str) -> None:
+        # Mutation guard: removing the qualification check would silently
+        # ignore the empty-name case as an other-environment object.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "granted_on": "TABLE",
+                "name": name,
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected grant" in violation and f"TABLE {name}" in violation
+            for violation in violations
+        )
+
+    def test_dotted_database_name_fails_closed(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "DATABASE",
+                "name": "ROASTPILOT_PREVIEW.X",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "unexpected grant" in violation
+            and "DATABASE ROASTPILOT_PREVIEW.X" in violation
+            for violation in violations
+        )
+
+    def test_ac7_role_and_account_grants_fail_closed(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.extend(
+            [
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "ROLE",
+                    "name": "ACCOUNTADMIN",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+                {
+                    "privilege": "CREATE USER",
+                    "granted_on": "ACCOUNT",
+                    "name": "ACCOUNT",
+                    "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                    "grant_option": "false",
+                },
+            ]
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert len(violations) == 2
+        assert all("unexpected grant" in violation for violation in violations)
+        assert any("ROLE ACCOUNTADMIN" in violation for violation in violations)
+        assert any("ACCOUNT ACCOUNT" in violation for violation in violations)
+
+    def test_dev_container_check_precedes_warehouse_allowlist(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "WAREHOUSE",
+                "name": "ROASTPILOT_DEV.APP.SECRET",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "extra grant" in violation and "ROASTPILOT_DEV.APP.SECRET" in violation
+            for violation in violations
+        )
+        assert not any("unexpected warehouse grant" in violation for violation in violations)
+
+    def test_wrong_agent_privilege_produces_extra_and_missing(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        target = next(
+            row
+            for row in rows
+            if row["name"] == "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
+            and row["privilege"] == "DELETE"
+        )
+        target["privilege"] = "TRUNCATE"
+        violations = self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows)
+        assert any("extra grant" in violation and "TRUNCATE" in violation for violation in violations)
+        assert any("missing manifest grant" in violation and "DELETE" in violation for violation in violations)
+
+    @pytest.mark.parametrize("grant_option", ["true", True])
+    def test_grant_option_elevation_fails_closed(self, grant_option: object) -> None:
+        # Mutation guard: removing the grant_option eligibility check makes
+        # this elevated row match the expected tuple and this test fail.
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(row for row in rows if row["granted_on"] == "VIEW")
+        target["grant_option"] = grant_option
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "extra grant" in violation and f"grant_option={grant_option!r}" in violation
+            for violation in violations
+        )
+        assert any(
+            "missing manifest grant" in violation
+            and "ROASTPILOT_DEV.APP.ROAST_BY_SLUG" in violation
+            for violation in violations
+        )
+
+    def test_unrecognized_grant_option_representation_fails_closed(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows[0]["grant_option"] = "disabled"
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("grant_option='disabled'" in violation for violation in violations)
+
+    @pytest.mark.parametrize("grant_option", [False, "false", "FALSE", "", None])
+    def test_known_false_or_empty_grant_option_representations_pass(
+        self, grant_option: object
+    ) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows[0]["grant_option"] = grant_option
+        assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
+
+    def test_absent_grant_option_fails_closed(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        target = next(row for row in rows if row["granted_on"] == "VIEW")
+        target.pop("grant_option")
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any(
+            "extra grant" in violation and "grant_option=<absent>" in violation
+            for violation in violations
+        )
+        assert any(
+            "missing manifest grant" in violation
+            and "ROASTPILOT_DEV.APP.ROAST_BY_SLUG" in violation
+            for violation in violations
+        )
+
+    def test_empty_future_grant_results_pass(self) -> None:
+        assert assert_dev_ci_grants.find_role_future_grant_violations(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, []
+        ) == []
+        assert assert_dev_ci_grants.find_role_future_grant_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, []
+        ) == []
+
+    def test_any_agent_future_grant_fails(self) -> None:
+        rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"}]
+        violations = assert_dev_ci_grants.find_role_future_grant_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows
+        )
+        assert violations == [
+            f"future grant on ROASTPILOT_AGENT: SELECT on TABLE {_DEV_DB}.APP"
+        ]
+
+    def test_missing_future_columns_still_produce_a_stable_violation(self) -> None:
+        violations = assert_dev_ci_grants.find_role_future_grant_violations(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, [{}]
+        )
+        assert violations == ["future grant on PUBLIC_WEB:  on  "]
+
+
 class TestFindOutOfBoundsNames:
     """Codex P1, PR #57: SHOW GRANTS TO ROLE alone can miss a future grant
     or other visibility path -- these tests cover the SHOW DATABASES/SHOW
@@ -950,14 +1851,15 @@ class TestMain:
     correctly, which is what's actually testable without live
     infrastructure access.
 
-    main() issues NINE fixed sequential statements on the same cursor: `USE
+    main() issues THIRTEEN fixed sequential statements on the same cursor: `USE
     SECONDARY ROLES NONE` (no fetchall), then SHOW GRANTS TO ROLE, SHOW
     DATABASES, SHOW WAREHOUSES, SHOW GRANTS TO ROLE PUBLIC, SHOW GRANTS TO
     USER, SHOW FUTURE GRANTS TO ROLE, SHOW FUTURE GRANTS TO ROLE PUBLIC, and
-    SHOW USERS LIKE (each followed by a fetchall). It then issues a variable
+    SHOW USERS LIKE, and current/future SHOW GRANTS for both application roles
+    (each except USE followed by a fetchall). It then issues a variable
     sorted trailing `SHOW GRANTS TO ROLE <default_role>` query for each
     allowlisted default role granted to PUBLIC. `mock_cursor.fetchall` keeps
-    the original eight return values as a fixed prefix, followed by those
+    the twelve fixed return values as a prefix, followed by those
     per-default-role results in sorted role order.
     """
 
@@ -979,6 +1881,10 @@ class TestMain:
         future_grant_rows: list[dict[str, object]] | None = None,
         public_future_grant_rows: list[dict[str, object]] | None = None,
         show_user_rows: list[dict[str, object]] | None = None,
+        public_web_grant_rows: list[dict[str, object]] | None = None,
+        roastpilot_agent_grant_rows: list[dict[str, object]] | None = None,
+        public_web_future_grant_rows: list[dict[str, object]] | None = None,
+        roastpilot_agent_future_grant_rows: list[dict[str, object]] | None = None,
         default_role_grant_results: dict[str, list[dict[str, object]]] | None = None,
     ) -> MagicMock:
         mock_cursor = MagicMock()
@@ -993,6 +1899,14 @@ class TestMain:
             show_user_rows
             if show_user_rows is not None
             else [{"name": _CI_USER, "default_secondary_roles": "[]"}],
+            public_web_grant_rows
+            if public_web_grant_rows is not None
+            else _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE),
+            roastpilot_agent_grant_rows
+            if roastpilot_agent_grant_rows is not None
+            else _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE),
+            public_web_future_grant_rows if public_web_future_grant_rows is not None else [],
+            roastpilot_agent_future_grant_rows if roastpilot_agent_future_grant_rows is not None else [],
             *[grants for _, grants in sorted((default_role_grant_results or {}).items())],
         ]
         return mock_cursor
@@ -1017,6 +1931,121 @@ class TestMain:
         assert connect_kwargs["role"] == "ROASTPILOT_DEV_CI_ROLE"
         assert connect_kwargs["warehouse"] == "DEV_CI_WH"
         mock_conn.close.assert_called_once()
+
+    def test_returns_0_when_both_application_role_manifests_are_exact(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 0
+        stdout = capsys.readouterr().out
+        assert "PUBLIC_WEB/ROASTPILOT_AGENT exactly match their manifests" in stdout
+
+    def test_returns_1_and_prints_application_role_violation(self, monkeypatch, capsys) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        public_web_rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        public_web_rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_web_grant_rows=public_web_rows,
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "PUBLIC_WEB manifest violation" in stderr
+        assert "extra grant: SELECT on TABLE ROASTPILOT_DEV.APP.CLOUD_ROASTS" in stderr
+
+    def test_returns_1_and_prints_roastpilot_agent_manifest_violation(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        agent_rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        agent_rows.append(
+            {
+                "privilege": "OWNERSHIP",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            roastpilot_agent_grant_rows=agent_rows,
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ROASTPILOT_AGENT manifest violation" in stderr
+        assert "extra grant: OWNERSHIP on TABLE ROASTPILOT_DEV.APP.CLOUD_ROASTS" in stderr
+
+    def test_returns_1_and_prints_public_web_future_grant_violation(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        future_rows = [
+            {"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_DEV.APP"}
+        ]
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            public_web_future_grant_rows=future_rows,
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "PUBLIC_WEB future-grant violation" in stderr
+        assert "future grant on PUBLIC_WEB: SELECT on TABLE ROASTPILOT_DEV.APP" in stderr
+
+    def test_returns_1_and_prints_roastpilot_agent_future_grant_violation(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        future_rows = [
+            {"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_DEV.APP"}
+        ]
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            roastpilot_agent_future_grant_rows=future_rows,
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "ROASTPILOT_AGENT future-grant violation" in stderr
+        assert "future grant on ROASTPILOT_AGENT: SELECT on TABLE ROASTPILOT_DEV.APP" in stderr
 
     def test_returns_0_for_account_default_public_grant_corpus(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
@@ -1245,6 +2274,23 @@ class TestMain:
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert f"SHOW FUTURE GRANTS TO ROLE {_DEV_ROLE}" in executed_statements
         assert "SHOW FUTURE GRANTS TO ROLE PUBLIC" in executed_statements
+
+    def test_audits_current_and_future_grants_for_both_application_roles(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}]
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
+            assert_dev_ci_grants.main()
+
+        executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
+        assert "SHOW GRANTS TO ROLE PUBLIC_WEB" in executed_statements
+        assert "SHOW GRANTS TO ROLE ROASTPILOT_AGENT" in executed_statements
+        assert "SHOW FUTURE GRANTS TO ROLE PUBLIC_WEB" in executed_statements
+        assert "SHOW FUTURE GRANTS TO ROLE ROASTPILOT_AGENT" in executed_statements
 
     def test_audits_show_users_like_the_ci_user_codex_p1_round5(self, monkeypatch) -> None:
         # Codex P1, PR #57, round 5, :270 -- turns the operator's manual
