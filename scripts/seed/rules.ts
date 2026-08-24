@@ -15,7 +15,7 @@ export const VISIBILITY_VALUES = ["private", "unlisted", "public"] as const;
 export const ARTIFACT_KINDS = ["jsonl", "csv", "summary"] as const;
 export const IP_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
 
-const CLOUD_ROAST_ID_PATTERN =
+export const CLOUD_ROAST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const IP_RETENTION_DAYS = 30;
 const RAW_IP_KEY_NAMES = new Set([
@@ -27,6 +27,7 @@ const RAW_IP_KEY_NAMES = new Set([
   "remote_ip",
   "remote_addr",
 ]);
+const IP_TOKEN_DELIMITER_PATTERN = /[\s_,;()\[\]{}<>"'`\/\\|]+/;
 
 export interface SeedOutput {
   cloudRoasts: CloudRoastRow[];
@@ -105,22 +106,26 @@ function nonCelsiusKeyPaths(payload: unknown, parentPath: string): string[] {
 
   return Object.entries(payload).flatMap(([key, nested]) => {
     const path = `${parentPath}.${key}`;
+    const lowerKey = key.toLowerCase();
+    const isFahrenheitUnit = lowerKey.endsWith("unit") &&
+      typeof nested === "string" &&
+      (nested.toLowerCase() === "f" || nested.toLowerCase() === "fahrenheit");
     return [
-      ...(isFahrenheitKey(key) ? [path] : []),
+      ...(isFahrenheitKey(key) || isFahrenheitUnit ? [path] : []),
       ...nonCelsiusKeyPaths(nested, path),
     ];
   });
 }
 
-// Strict IP parsing avoids treating version-like strings as IPv4. This scan
-// covers the two must-block variants only; Slice 2 owns closed-shape validation.
+// Candidate extraction followed by strict IP parsing catches embedded literals
+// without treating version-like strings as IPv4.
 function rawIpPaths(payload: unknown, parentPath: string): string[] {
   if (Array.isArray(payload)) {
     return payload.flatMap((item, index) =>
       rawIpPaths(item, `${parentPath}[${index}]`));
   }
   if (typeof payload === "string") {
-    return isIP(payload) === 0 ? [] : [parentPath];
+    return containsRawIp(payload) ? [parentPath] : [];
   }
   if (typeof payload !== "object" || payload === null) {
     return [];
@@ -134,6 +139,41 @@ function rawIpPaths(payload: unknown, parentPath: string): string[] {
       ...rawIpPaths(nested, path),
     ];
   });
+}
+
+function containsRawIp(text: string): boolean {
+  return text.split(IP_TOKEN_DELIMITER_PATTERN).some((token) =>
+    isIP(token.replace(/^\.+|\.+$/g, "")) !== 0
+  );
+}
+
+function finiteOrNull(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function integerPercentOrNull(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isInteger(value) &&
+    value >= 0 && value <= 100);
+}
+
+function averageFinite(values: readonly unknown[]): number | null {
+  if (values.length === 0) return null;
+  let total = 0;
+  for (const value of values) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return Number.NaN;
+    total += value;
+  }
+  return total / values.length;
+}
+
+function approximatelyEqualNullable(
+  actual: unknown,
+  expected: number | null,
+): boolean {
+  if (actual === null && expected === null) return true;
+  return typeof actual === "number" && Number.isFinite(actual) &&
+    typeof expected === "number" && Number.isFinite(expected) &&
+    Math.abs(actual - expected) <= 1e-6;
 }
 
 export function validateSeedRow(
@@ -151,6 +191,12 @@ export function validateSeedRow(
   for (const field of REQUIRED_FIELDS[table]) {
     if (!(field in value) || value[field] === null || value[field] === undefined) {
       add(field, "must be present and non-null");
+    }
+  }
+
+  for (const [field, fieldValue] of Object.entries(value)) {
+    if (typeof fieldValue === "string" && containsRawIp(fieldValue)) {
+      add(field, "raw IP address must never appear; IPs are stored hashed");
     }
   }
 
@@ -181,6 +227,23 @@ export function validateSeedRow(
   }
 
   if (table === "roast_telemetry") {
+    if (typeof value.elapsed_s !== "number" || !Number.isFinite(value.elapsed_s) ||
+        value.elapsed_s < 0) {
+      add("elapsed_s", "must be a finite number greater than or equal to zero");
+    }
+    for (const field of ["bean_temp_c", "env_temp_c"] as const) {
+      if (!finiteOrNull(value[field])) {
+        add(field, "must be a finite number or null");
+      }
+    }
+    for (const field of ["heat_percent", "fan_percent"] as const) {
+      if (!integerPercentOrNull(value[field])) {
+        add(field, "must be an integer from 0 to 100 or null");
+      }
+    }
+    if (!finiteOrNull(value.ror_c_per_min)) {
+      add("ror_c_per_min", "must be a finite number or null");
+    }
     for (const field of Object.keys(value)) {
       if (isFahrenheitKey(field)) {
         add(field, "temperature keys must use Celsius naming");
@@ -224,11 +287,22 @@ export function validateSeedRow(
         (typeof ipHash !== "string" || !IP_HASH_PATTERN.test(ipHash))) {
       add("submitted_ip_hash", "must be a 64-character hexadecimal hash");
     }
-    if (ipHash !== null && ipHash !== undefined &&
-        typeof value.created_at === "string") {
-      const createdAt = Date.parse(value.created_at);
+    if (ipHash !== null && ipHash !== undefined) {
+      const createdAt = typeof value.created_at === "string"
+        ? Date.parse(value.created_at)
+        : Number.NaN;
       const retentionMs = IP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-      if (!Number.isNaN(createdAt) && now - createdAt >= retentionMs) {
+      if (Number.isNaN(createdAt)) {
+        add(
+          "created_at",
+          "an IP-hash row requires a valid parseable created_at within retention",
+        );
+      } else if (createdAt > now) {
+        add(
+          "created_at",
+          "an IP-hash row requires created_at to be no later than now",
+        );
+      } else if (now - createdAt >= retentionMs) {
         add(
           "submitted_ip_hash",
           "unpurged IP hash past the 30-day retention window must be null",
@@ -341,34 +415,117 @@ export function validateSeedOutput(
     }
   }
 
-  const seenSummaryKeys = new Set<string>();
+  const summaryGroups = new Map<string, string>();
   for (const summary of output.referenceRoastSummaries) {
     const key = JSON.stringify([summary.bean_origin, summary.roast_level]);
-    if (seenSummaryKeys.has(key)) {
+    const rowIdentity = `${summary.bean_origin}|${summary.roast_level}`;
+    if (summaryGroups.has(key)) {
       violations.push({
         table: "reference_roast_summaries",
-        rowIdentity: `${summary.bean_origin}|${summary.roast_level}`,
+        rowIdentity,
         field: "bean_origin|roast_level",
         rule: "must be a unique reference-summary logical key",
       });
     }
-    seenSummaryKeys.add(key);
+    summaryGroups.set(key, rowIdentity);
   }
 
-  // review_count and avg_rating reconciliation belongs to Slice 2's
-  // generation-time consistency checks; this slice reconciles roast_count only.
+  const contributingGroups = new Map<string, string>();
+  for (const roast of output.cloudRoasts) {
+    if (roast.contributed_to_learning !== true) continue;
+    const key = JSON.stringify([roast.bean_origin, roast.roast_level]);
+    contributingGroups.set(key, `${roast.bean_origin}|${roast.roast_level}`);
+  }
+  for (const [key, rowIdentity] of contributingGroups) {
+    if (!summaryGroups.has(key)) {
+      violations.push({
+        table: "reference_roast_summaries",
+        rowIdentity,
+        field: "bean_origin|roast_level",
+        rule: "every contributing roast group must have a reference summary",
+      });
+    }
+  }
+  for (const [key, rowIdentity] of summaryGroups) {
+    if (!contributingGroups.has(key)) {
+      violations.push({
+        table: "reference_roast_summaries",
+        rowIdentity,
+        field: "bean_origin|roast_level",
+        rule: "reference summary has no contributing roasts",
+      });
+    }
+  }
+
   for (const summary of output.referenceRoastSummaries) {
-    const actual = output.cloudRoasts.filter(
+    const contributingRoasts = output.cloudRoasts.filter(
       (roast) => roast.bean_origin === summary.bean_origin &&
         roast.roast_level === summary.roast_level &&
         roast.contributed_to_learning === true,
-    ).length;
-    if (summary.roast_count !== actual) {
+    );
+    const contributingRoastIds = new Set(
+      contributingRoasts.flatMap((roast) =>
+        typeof roast.id === "string" ? [roast.id] : []),
+    );
+    const reviews = output.tastingReviews.filter((review) =>
+      contributingRoastIds.has(review.roast_id));
+    const expectedAvgRating = reviews.length === 0
+      ? null
+      : reviews.reduce((total, review) => total + review.score, 0) / reviews.length;
+    const summaryVariants = contributingRoasts.map((roast) => recordOf(roast.summary));
+    const expectedDevelopmentPercent = averageFinite(
+      summaryVariants.map((variant) => variant.development_time_percent),
+    );
+    const expectedFirstCrackTime = averageFinite(summaryVariants.map((variant) => {
+      const firstCrack = typeof variant.first_crack_at_utc === "string"
+        ? Date.parse(variant.first_crack_at_utc)
+        : Number.NaN;
+      const beansAdded = typeof variant.beans_added_at_utc === "string"
+        ? Date.parse(variant.beans_added_at_utc)
+        : Number.NaN;
+      return (firstCrack - beansAdded) / 1_000;
+    }));
+    const expectedTotalTime = averageFinite(
+      summaryVariants.map((variant) => variant.total_roast_seconds),
+    );
+    const rowIdentity = `${summary.bean_origin}|${summary.roast_level}`;
+
+    if (summary.roast_count !== contributingRoasts.length) {
       violations.push({
         table: "reference_roast_summaries",
-        rowIdentity: `${summary.bean_origin}|${summary.roast_level}`,
+        rowIdentity,
         field: "roast_count", rule: "must equal the matching cloud roast count",
       });
+    }
+    if (summary.review_count !== reviews.length) {
+      violations.push({
+        table: "reference_roast_summaries",
+        rowIdentity,
+        field: "review_count",
+        rule: "must equal the matching contributing-roast review count",
+      });
+    }
+    if (summary.avg_rating !== expectedAvgRating) {
+      violations.push({
+        table: "reference_roast_summaries",
+        rowIdentity,
+        field: "avg_rating",
+        rule: "must equal the matching contributing-roast mean review score",
+      });
+    }
+    for (const [field, expected] of [
+      ["development_percent_avg", expectedDevelopmentPercent],
+      ["first_crack_time_avg_s", expectedFirstCrackTime],
+      ["total_time_avg_s", expectedTotalTime],
+    ] as const) {
+      if (!approximatelyEqualNullable(summary[field], expected)) {
+        violations.push({
+          table: "reference_roast_summaries",
+          rowIdentity,
+          field,
+          rule: "must equal the matching contributing-roast summary mean",
+        });
+      }
     }
   }
   return violations;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isValidSlug, MIN_SLUG_LENGTH } from "../../lib/slug";
-import { IP_HASH_PATTERN } from "./rules";
+import { CLOUD_ROAST_ID_PATTERN, IP_HASH_PATTERN } from "./rules";
 
 export type SeededRng = () => number;
 
@@ -48,6 +48,25 @@ export function synthSlug(rng: SeededRng): string {
     throw new Error("Synthetic slug generator produced an invalid slug");
   }
   return slug;
+}
+
+export function synthCloudRoastId(rng: SeededRng): string {
+  const bytes = Array.from({ length: 16 }, () => Math.floor(rng() * 256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0"));
+  const id = [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+  /* v8 ignore next 3 -- unreachable unless the UUID contract drifts. */
+  if (!CLOUD_ROAST_ID_PATTERN.test(id)) {
+    throw new Error("Synthetic cloud roast id has an invalid shape");
+  }
+  return id;
 }
 
 export function synthIdempotencyKey(rng: SeededRng): string {

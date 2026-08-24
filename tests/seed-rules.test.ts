@@ -11,7 +11,12 @@ function validOutput(): SeedOutput {
       id: ROAST_ID_ONE, idempotency_key: "idem-1", owner_id: null,
       public_slug: "ABCDEFGHJKLMNPQRS", visibility: "unlisted",
       bean_origin: "Test Origin", bean_varietal: null, bean_weight_g: 100,
-      profile_name: null, roast_level: "medium", summary: {},
+      profile_name: null, roast_level: "medium", summary: {
+        development_time_percent: 20,
+        total_roast_seconds: 600,
+        beans_added_at_utc: "2026-01-01T00:00:00Z",
+        first_crack_at_utc: "2026-01-01T00:08:00Z",
+      },
       operator_rating: 4, operator_notes: null, contributed_to_learning: true,
       roasted_at_utc: null, created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
@@ -149,6 +154,20 @@ describe("validateSeedOutput", () => {
     expectField(output, "aroma");
   });
 
+  it.each([
+    ["heat_percent", 101],
+    ["fan_percent", -1],
+    ["elapsed_s", -10],
+    ["heat_percent", 50.5],
+    ["bean_temp_c", Number.NaN],
+    ["env_temp_c", Number.POSITIVE_INFINITY],
+    ["ror_c_per_min", Number.NaN],
+  ] as const)("rejects invalid telemetry %s value %s", (field, invalid) => {
+    const output = validOutput();
+    output.roastTelemetry[0][field] = invalid;
+    expectField(output, field);
+  });
+
   it.each(["deleted", ""])("rejects visibility %j", (visibility) => {
     const output = validOutput();
     output.cloudRoasts[0].visibility = visibility;
@@ -233,9 +252,34 @@ describe("validateSeedOutput", () => {
     expectField(output, "summary.notes.FahrenheitReading");
   });
 
+  it.each([
+    ["temperature_unit", "F"],
+    ["temp_unit", "fahrenheit"],
+  ])("rejects a named Fahrenheit unit %s=%s", (key, unit) => {
+    const output = validOutput();
+    output.cloudRoasts[0].summary = {
+      ...(output.cloudRoasts[0].summary as Record<string, unknown>),
+      [key]: unit,
+    };
+    expectField(output, `summary.${key}`);
+  });
+
+  it("allows French Roast in arbitrary free text", () => {
+    const output = validOutput();
+    output.cloudRoasts[0].operator_notes = "French Roast";
+    output.cloudRoasts[0].summary = {
+      ...(output.cloudRoasts[0].summary as Record<string, unknown>),
+      notes: "French Roast",
+    };
+    expect(validateSeedOutput(output)).toEqual([]);
+  });
+
   it("accepts clean nested Celsius variant payloads", () => {
     const output = validOutput();
-    output.cloudRoasts[0].summary = { notes: { beanTempC: 200 } };
+    output.cloudRoasts[0].summary = {
+      ...(output.cloudRoasts[0].summary as Record<string, unknown>),
+      notes: { beanTempC: 200 },
+    };
     output.roastTelemetry[0].raw = { samples: [{ temperature_c: 190 }] };
     expect(validateSeedOutput(output)).toEqual([]);
   });
@@ -246,10 +290,10 @@ describe("validateSeedOutput", () => {
     expectField(output, "raw.ip_address");
   });
 
-  it("rejects a nested raw IPv4 string value", () => {
+  it("rejects an embedded raw IPv4 in a nested variant string", () => {
     const output = validOutput();
-    output.cloudRoasts[0].summary = { notes: { source: "10.0.0.5" } };
-    expectField(output, "summary.notes.source");
+    output.cloudRoasts[0].summary = { note: "seen 10.0.0.1" };
+    expectField(output, "summary.note");
   });
 
   it("rejects a nested raw IPv6 string value", () => {
@@ -258,9 +302,12 @@ describe("validateSeedOutput", () => {
     expectField(output, "raw.metadata.source");
   });
 
-  it("accepts a benign three-part version string", () => {
+  it("accepts a version-like five-part string", () => {
     const output = validOutput();
-    output.cloudRoasts[0].summary = { notes: { version: "1.2.3" } };
+    output.cloudRoasts[0].summary = {
+      ...(output.cloudRoasts[0].summary as Record<string, unknown>),
+      notes: { version: "1.2.3.4.5" },
+    };
     expect(validateSeedOutput(output)).toEqual([]);
   });
 
@@ -300,6 +347,51 @@ describe("validateSeedOutput", () => {
     expectField(output, "submitted_ip_hash", Date.parse("2026-01-02T00:00:00Z"));
   });
 
+  it.each([
+    ["notes", "192.168.0.1"],
+    ["notes", "2001:db8::1"],
+    ["reviewer_name", "192.168.0.2"],
+    ["reviewer_name", "2001:db8::2"],
+    ["brew_method", "192.168.0.3"],
+    ["brew_method", "2001:db8::3"],
+  ] as const)("rejects a raw IP literal in tasting_reviews.%s", (field, ip) => {
+    const output = validOutput();
+    output.tastingReviews[0][field] = ip;
+    expectField(output, field);
+  });
+
+  it("rejects an embedded IPv4 literal in tasting review free text", () => {
+    const output = validOutput();
+    output.tastingReviews[0].notes = "Synthetic server 192.168.0.1";
+    expectField(output, "notes");
+  });
+
+  it("rejects an embedded IPv6 literal in tasting review free text", () => {
+    const output = validOutput();
+    output.tastingReviews[0].notes = "Synthetic server 2001:db8::1 is active";
+    expectField(output, "notes");
+  });
+
+  it.each([
+    "10.0.0.1",
+    "logged from 10.0.0.1",
+    "server_192.168.0.1_backup",
+    "seen 10.0.0.1.",
+    "(10.0.0.1)",
+    "10.0.0.1,",
+  ])("rejects a raw IP in cloud_roasts.operator_notes: %s", (operatorNotes) => {
+    const output = validOutput();
+    output.cloudRoasts[0].operator_notes = operatorNotes;
+    const violation = expectField(output, "operator_notes");
+    expect(violation.table).toBe("cloud_roasts");
+  });
+
+  it("accepts ordinary tasting review free text without an IP", () => {
+    const output = validOutput();
+    output.tastingReviews[0].notes = "Bright and fruity";
+    expectNoField(output, "notes");
+  });
+
   it("rejects an unpurged IP hash 31 days after review creation", () => {
     const now = Date.parse("2026-03-15T00:00:00Z");
     const output = validOutput();
@@ -327,6 +419,14 @@ describe("validateSeedOutput", () => {
     expect(validateSeedOutput(output, now)).toEqual([]);
   });
 
+  it("rejects a future-dated IP-hash review", () => {
+    const now = Date.parse("2026-03-15T00:00:00Z");
+    const output = validOutput();
+    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].created_at = new Date(now + 1).toISOString();
+    expectField(output, "created_at", now);
+  });
+
   it("rejects an unpurged IP hash at exactly 30 days", () => {
     const now = Date.parse("2026-03-15T00:00:00Z");
     const output = validOutput();
@@ -336,12 +436,25 @@ describe("validateSeedOutput", () => {
     expectField(output, "submitted_ip_hash", now);
   });
 
-  it("does not crash or apply retention to an unparseable created_at", () => {
+  it.each([
+    ["unparseable", "not-a-timestamp"],
+    ["non-string", 42],
+  ] as const)(
+    "rejects a %s created_at when an IP hash is present",
+    (_description, createdAt) => {
+      const output = validOutput();
+      output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+      (output.tastingReviews[0] as unknown as { created_at: unknown }).created_at =
+        createdAt;
+      expectField(output, "created_at", Date.parse("2026-03-15T00:00:00Z"));
+    },
+  );
+
+  it("does not apply IP retention to an unparseable date when the hash is null", () => {
     const output = validOutput();
-    output.tastingReviews[0].submitted_ip_hash = "a".repeat(64);
+    output.tastingReviews[0].submitted_ip_hash = null;
     output.tastingReviews[0].created_at = "not-a-timestamp";
-    expect(validateSeedOutput(output, Date.parse("2026-03-15T00:00:00Z")))
-      .toEqual([]);
+    expectNoField(output, "created_at");
   });
 
   it("rejects a missing NOT NULL column", () => {
@@ -354,6 +467,30 @@ describe("validateSeedOutput", () => {
     const output = validOutput();
     output.referenceRoastSummaries[0].roast_count = 2;
     expectField(output, "roast_count");
+  });
+
+  it("rejects a summary review count that disagrees with contributing roasts", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].review_count = 2;
+    expectField(output, "review_count");
+  });
+
+  it("rejects an average rating that disagrees with contributing-roast reviews", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries[0].avg_rating = 3;
+    expectField(output, "avg_rating");
+  });
+
+  it.each([
+    "development_percent_avg",
+    "first_crack_time_avg_s",
+    "total_time_avg_s",
+  ] as const)("rejects a mismatched directly-written aggregate %s", (field) => {
+    const output = validOutput();
+    const current = output.referenceRoastSummaries[0][field];
+    if (current === null) throw new Error(`Expected numeric ${field}`);
+    output.referenceRoastSummaries[0][field] = current + 1;
+    expectField(output, field);
   });
 
   it("accepts the authoritative empty key_patterns array", () => {
@@ -448,15 +585,38 @@ describe("validateSeedOutput", () => {
     expectNoField(output, "id");
   });
 
-  it("accepts distinct reference-summary logical keys", () => {
+  it("rejects a reference summary for a group with no contributing roast", () => {
     const output = validOutput();
     output.referenceRoastSummaries.push({
       ...output.referenceRoastSummaries[0],
       id: "summary-2",
       bean_origin: "Other Test Origin",
       roast_count: 0,
+      review_count: 0,
+      avg_rating: null,
+      development_percent_avg: null,
+      first_crack_time_avg_s: null,
+      total_time_avg_s: null,
     });
-    expect(validateSeedOutput(output)).toEqual([]);
+    const violation = validateSeedOutput(output).find((item) =>
+      item.rule === "reference summary has no contributing roasts");
+    expect(violation).toMatchObject({
+      table: "reference_roast_summaries",
+      rowIdentity: "Other Test Origin|medium",
+      field: "bean_origin|roast_level",
+    });
+  });
+
+  it("rejects a contributing roast group with no reference summary", () => {
+    const output = validOutput();
+    output.referenceRoastSummaries = [];
+    const violation = validateSeedOutput(output).find((item) =>
+      item.rule === "every contributing roast group must have a reference summary");
+    expect(violation).toMatchObject({
+      table: "reference_roast_summaries",
+      rowIdentity: "Test Origin|medium",
+      field: "bean_origin|roast_level",
+    });
   });
 
   it("counts only contributing roasts in reference summaries", () => {
