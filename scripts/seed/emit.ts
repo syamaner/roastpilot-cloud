@@ -1,6 +1,6 @@
-import type { SeedExecute } from "./load";
-import type { SeedTarget } from "./prod-guard";
-import type { SeedTable } from "./rules";
+import type { SeedExecute } from "./load.ts";
+import type { SeedTarget } from "./prod-guard.ts";
+import type { SeedTable } from "./rules.ts";
 
 export interface SeedJsonArtifact {
   target: SeedTarget;

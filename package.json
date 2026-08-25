@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "seed:emit": "node --experimental-strip-types scripts/seed/emit-cli.ts"
   },
   "dependencies": {
     "next": "16.2.11",

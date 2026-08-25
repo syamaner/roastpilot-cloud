@@ -1,10 +1,10 @@
-import { assertNonProdTarget, type SeedTarget } from "./prod-guard";
+import { assertNonProdTarget, type SeedTarget } from "./prod-guard.ts";
 import {
   type SeedOutput,
   type SeedTable,
   type Violation,
   validateSeedOutput,
-} from "./rules";
+} from "./rules.ts";
 
 export type SeedExecute = (statement: {
   table: SeedTable;
