@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { isValidSlug, MIN_SLUG_LENGTH } from "../../lib/slug";
-import { CLOUD_ROAST_ID_PATTERN, IP_HASH_PATTERN } from "./rules";
+import { isValidSlug, MIN_SLUG_LENGTH } from "../../lib/slug.ts";
+import { CLOUD_ROAST_ID_PATTERN, IP_HASH_PATTERN } from "./rules.ts";
 
 export type SeededRng = () => number;
 

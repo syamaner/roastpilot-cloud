@@ -1,9 +1,9 @@
-import type { ParsedExport, ParsedSummary } from "./parse-export";
+import type { ParsedExport, ParsedSummary } from "./parse-export.ts";
 import {
   ARTIFACT_KINDS,
   type SeedOutput,
   VISIBILITY_VALUES,
-} from "./rules";
+} from "./rules.ts";
 import {
   createSeededRng,
   synthCloudRoastId,
@@ -12,14 +12,14 @@ import {
   synthReviewerName,
   synthSlug,
   type SeededRng,
-} from "./synth";
+} from "./synth.ts";
 import type {
   CloudRoastRow,
   ReferenceRoastSummaryRow,
   RoastArtifactRow,
   RoastTelemetryRow,
   TastingReviewRow,
-} from "./types";
+} from "./types.ts";
 
 export const BEAN_ORIGINS = [
   "Ethiopia Yirgacheffe",

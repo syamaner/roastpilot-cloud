@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
-import { runSeedCli } from "./cli";
-import { createSeedJsonSink, type SeedJsonArtifact } from "./emit";
+import { runSeedCli } from "./cli.ts";
+import { createSeedJsonSink, type SeedJsonArtifact } from "./emit.ts";
 
 export interface EmitSeedJsonOptions {
   database: string | undefined;

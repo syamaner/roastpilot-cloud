@@ -3,11 +3,11 @@
 // to the future operator-run / #11-gated live-adapter slice (D-312-H/D-312-J).
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generate } from "./generate";
-import { runSeedLoad, type SeedExecute } from "./load";
-import { parseExportDir } from "./parse-export";
-import type { SeedTarget } from "./prod-guard";
-import type { SeedTable } from "./rules";
+import { generate } from "./generate.ts";
+import { runSeedLoad, type SeedExecute } from "./load.ts";
+import { parseExportDir } from "./parse-export.ts";
+import type { SeedTarget } from "./prod-guard.ts";
+import type { SeedTable } from "./rules.ts";
 
 export interface RunSeedCliOptions {
   database: string | undefined;

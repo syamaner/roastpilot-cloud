@@ -1,12 +1,12 @@
 import { isIP } from "node:net";
-import { isValidSlug } from "../../lib/slug";
+import { isValidSlug } from "../../lib/slug.ts";
 import type {
   CloudRoastRow,
   ReferenceRoastSummaryRow,
   RoastArtifactRow,
   RoastTelemetryRow,
   TastingReviewRow,
-} from "./types";
+} from "./types.ts";
 
 export const SCORE_RANGE = { min: 1, max: 5 } as const;
 export const OPERATOR_RATING_RANGE = { min: 1, max: 5 } as const;
