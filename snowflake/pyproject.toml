@@ -77,6 +77,7 @@ only_mutate = [
     "assert_dev_ci_grants.py",
     "check_forbidden_grants.py",
     "check_grant_manifest.py",
+    "seed_load_live.py",
     "validate_migrations.py",
 ]
 
