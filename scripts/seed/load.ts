@@ -1,4 +1,4 @@
-import { assertNonProdTarget } from "./prod-guard";
+import { assertNonProdTarget, type SeedTarget } from "./prod-guard";
 import {
   type SeedOutput,
   type SeedTable,
@@ -50,7 +50,7 @@ function asRecords(rows: readonly object[]): Record<string, unknown>[] {
 
 export async function runSeedLoad(
   opts: RunSeedLoadOptions,
-): Promise<{ target: string; rowCounts: Record<SeedTable, number> }> {
+): Promise<{ target: SeedTarget; rowCounts: Record<SeedTable, number> }> {
   // D-312-J: this is an offline seam whose execute adapter is currently only
   // the CLI no-op or a test spy; this slice has no live SQL client. A future
   // operator-run / #11-gated adapter must verify CURRENT_DATABASE() equals the
