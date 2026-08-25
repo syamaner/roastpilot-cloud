@@ -680,7 +680,14 @@ describe("claude-review untrusted-comment-injection guard (issue #194)", () => {
     expect(prompt).toContain("There is NO file");
     expect(prompt).toContain("repository, network, or subprocess access");
     for (const mustBlock of [
-      "any grant to PUBLIC",
+      "`GRANT ... TO PUBLIC` in our migration text",
+      "weakens the live PUBLIC-grant",
+      "reaches an object we own",
+      "non-Snowflake-default role",
+      "non-Snowflake-default account",
+      "default role's own one-level DEV reach",
+      "malformed or blank grant row",
+      "PUBLIC future grant (D-11-B..E)",
       "secure roast-by-slug and",
       "reviews-by-roast views",
       "USAGE ON PROCEDURE",
