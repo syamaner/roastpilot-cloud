@@ -10,10 +10,12 @@ export const ALLOWED_SEED_DATABASES = [
   "ROASTPILOT_DEV",
 ] as const;
 
-export function assertNonProdTarget(database: string | undefined): string {
+export type SeedTarget = typeof ALLOWED_SEED_DATABASES[number];
+
+export function assertNonProdTarget(database: string | undefined): SeedTarget {
   const target = database?.trim().toUpperCase() ?? "UNDEFINED";
   if (!(ALLOWED_SEED_DATABASES as readonly string[]).includes(target)) {
     throw new ProdGuardError(`Rejected seed database target: ${target}`);
   }
-  return target;
+  return target as SeedTarget;
 }

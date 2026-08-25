@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { generate } from "./generate";
 import { runSeedLoad, type SeedExecute } from "./load";
 import { parseExportDir } from "./parse-export";
+import type { SeedTarget } from "./prod-guard";
 import type { SeedTable } from "./rules";
 
 export interface RunSeedCliOptions {
@@ -21,7 +22,7 @@ const DEFAULT_FIXTURES_DIR = fileURLToPath(
 
 export async function runSeedCli(
   opts: RunSeedCliOptions,
-): Promise<{ target: string; rowCounts: Record<SeedTable, number> }> {
+): Promise<{ target: SeedTarget; rowCounts: Record<SeedTable, number> }> {
   const fixturesDir = resolve(opts.fixturesDir ?? DEFAULT_FIXTURES_DIR);
   const parsedExports = ["session-1", "session-2"].map((session) =>
     parseExportDir(join(fixturesDir, session)),
