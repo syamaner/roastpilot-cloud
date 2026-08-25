@@ -25,7 +25,8 @@ rubric below) before it opens.
   non-Snowflake-default role, is any non-Snowflake-default account privilege, or
   is held by an allowlisted default role whose own **direct** DEV grants PUBLIC
   would inherit (one level — a default role reaching DEV through a further role
-  or account privilege is the documented #59 residual); it additionally rejects
+  or account privilege is the documented #59 residual), or is a malformed or
+  blank grant row it must fail closed on rather than skip; it additionally rejects
   **any** PUBLIC *future* grant it can see (`find_public_future_grants`) — both
   the current- and future-grant checks see only what a minimal DEV-scoped role
   returns from `SHOW [FUTURE] GRANTS`, the documented #59 completeness limit; and
@@ -467,7 +468,8 @@ separately, not this rule.
     our objects**, not assumed clean: `assert_dev_ci_grants.py` (D-11-B..E) flags
     a current PUBLIC grant iff it targets an object we own, is a non-default role
     / account-privilege, or is an allowlisted default role whose own **direct**
-    grants reach our objects (one level; deeper hops are the #59 residual), and
+    grants reach our objects (one level; deeper hops are the #59 residual), or is
+    a malformed or blank grant row it must fail closed on, and
     it rejects **any** PUBLIC future grant outright — the Snowflake
     account-default current grants are otherwise structurally out of scope. The
     audit's completeness limit under a minimal role is documented (#59);
@@ -493,7 +495,8 @@ inline.
 - a `GRANT … TO PUBLIC` in our migration text, or a live PUBLIC grant that
   reaches an object we own / a non-Snowflake-default role / a
   non-Snowflake-default account privilege / an allowlisted default role's own
-  one-level DEV reach, or any PUBLIC future grant (the two-layer invariant above,
+  one-level DEV reach / a malformed or blank grant row the audit must fail closed
+  on, or any PUBLIC future grant (the two-layer invariant above,
   D-11-B..E) — Snowflake account-default current grants that cannot reach our
   objects are out of scope;
 - `PUBLIC_WEB` gaining access to anything beyond the two secure views + one
