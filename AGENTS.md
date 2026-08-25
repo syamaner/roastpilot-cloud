@@ -14,9 +14,27 @@ These hold for every change, in every epic. A PR that weakens one is wrong by
 definition, and any diff touching one routes to a domain reviewer (see the
 rubric below) before it opens.
 
-- **No grants to `PUBLIC`, anywhere.** Every Snowflake privilege is scoped to
-  `ROASTPILOT_AGENT` or `PUBLIC_WEB`; a migration that grants to `PUBLIC` is a
-  blocker regardless of what it grants.
+- **No grant to `PUBLIC` on anything we own** (invariant reinterpreted by
+  D-11-B..E, #11; see #337). The literal "zero PUBLIC grants anywhere" is
+  unsatisfiable on a real Snowflake account — every account carries the
+  Snowflake account-default PUBLIC grants (sample data, `SNOWFLAKE.*` roles,
+  benign account privileges, the learning role/warehouse) that cannot reach our
+  objects and are unavoidable. The enforced invariant is two-layer: (a) the
+  **live audit** (`assert_dev_ci_grants.py`) flags a *current* PUBLIC grant iff
+  it targets an object we own (DEV database/warehouse), is any
+  non-Snowflake-default role, is any non-Snowflake-default account privilege, or
+  is held by an allowlisted default role whose own **direct** DEV grants PUBLIC
+  would inherit (one level — a default role reaching DEV through a further role
+  or account privilege is the documented #59 residual), or is a malformed or
+  blank grant row it must fail closed on rather than skip; it additionally rejects
+  **any** PUBLIC *future* grant it can see (`find_public_future_grants`) — both
+  the current- and future-grant checks see only what a minimal DEV-scoped role
+  returns from `SHOW [FUTURE] GRANTS`, the documented #59 completeness limit; and
+  (b) `check_forbidden_grants.py`
+  statically rejects any `GRANT … TO PUBLIC` in **our** migration text. Every
+  deliberate privilege we grant is still scoped to `ROASTPILOT_AGENT` or
+  `PUBLIC_WEB`; a migration that grants to `PUBLIC` is a blocker regardless of
+  what it grants.
 - **`PUBLIC_WEB`'s surface stays exactly two secure views (roast-by-slug,
   reviews-by-roast) plus the right to call `SUBMIT_REVIEW`.** That right is
   granted as `USAGE ON PROCEDURE` (Snowflake's actual call privilege —
@@ -445,8 +463,16 @@ separately, not this rule.
 - **Snowflake grant-boundary checklist** — run on any diff touching grants,
   roles, or `snowflake/migrations/**`; it folds the recurring F1-S8 class up
   front instead of rediscovering it per PR:
-  - no `GRANT ... TO PUBLIC`, and PUBLIC is **audited**, not assumed clean (its
-    audit's completeness limit under a minimal role is documented, #59);
+  - no `GRANT ... TO PUBLIC` in our migration text (enforced by
+    `check_forbidden_grants.py`), and the live PUBLIC grant set is **audited on
+    our objects**, not assumed clean: `assert_dev_ci_grants.py` (D-11-B..E) flags
+    a current PUBLIC grant iff it targets an object we own, is a non-default role
+    / account-privilege, or is an allowlisted default role whose own **direct**
+    grants reach our objects (one level; deeper hops are the #59 residual), or is
+    a malformed or blank grant row it must fail closed on, and
+    it rejects **any** PUBLIC future grant outright — the Snowflake
+    account-default current grants are otherwise structurally out of scope. The
+    audit's completeness limit under a minimal role is documented (#59);
   - `USE SECONDARY ROLES NONE` is a **statement**, not a session parameter;
   - the CI user's `DEFAULT_SECONDARY_ROLES` is **verified** empty by the assert
     script, not assumed from a one-off manual `ALTER`;
@@ -466,7 +492,13 @@ inline.
 
 **Must-block (the Architecture Invariants above):**
 
-- a grant to `PUBLIC`, anywhere;
+- a `GRANT … TO PUBLIC` in our migration text, or a live PUBLIC grant that
+  reaches an object we own / a non-Snowflake-default role / a
+  non-Snowflake-default account privilege / an allowlisted default role's own
+  one-level DEV reach / a malformed or blank grant row the audit must fail closed
+  on, or any PUBLIC future grant (the two-layer invariant above,
+  D-11-B..E) — Snowflake account-default current grants that cannot reach our
+  objects are out of scope;
 - `PUBLIC_WEB` gaining access to anything beyond the two secure views + one
   proc;
 - a secure view missing the `visibility <> 'private'` filter;

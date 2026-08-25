@@ -567,7 +567,15 @@ jobs:
             two comment sinks it surfaces.
 
             Apply this Code Review Rubric must-block list:
-            - any grant to PUBLIC;
+            - a `GRANT ... TO PUBLIC` in our migration text (our DDL must never
+              grant to PUBLIC), or a change that weakens the live PUBLIC-grant
+              audit (`assert_dev_ci_grants.py`) so it would stop flagging a
+              PUBLIC grant that reaches an object we own / a
+              non-Snowflake-default role / a non-Snowflake-default account
+              privilege / a default role's own one-level DEV reach / a
+              malformed or blank grant row it must fail closed on, or any
+              PUBLIC future grant (D-11-B..E); Snowflake account-default current
+              grants that cannot reach our objects are out of scope;
             - PUBLIC_WEB access beyond exactly the secure roast-by-slug and
               reviews-by-roast views, the right to CALL `SUBMIT_REVIEW` via
               `USAGE ON PROCEDURE` (never `EXECUTE`), and prerequisite `USAGE`
