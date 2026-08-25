@@ -3,7 +3,7 @@
 ROASTPILOT_DEV / DEV_CI_WH (F1-S8, issue #11, factory.md §8).
 
 Connects to Snowflake with the SAME identity the live contract-check job
-uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks eight
+uses (SNOWFLAKE_DEV_* env vars, key-pair/JWT auth) and checks ten
 independent things, all of which must pass:
 
 1. ``SHOW GRANTS TO ROLE <role>`` — every CURRENT object grant on the
@@ -118,6 +118,22 @@ independent things, all of which must pass:
    (uppercase-compared) and fails closed unless exactly one such row
    exists (Codex P1, PR #57, round 6, :709/:710 -- a real bug in the
    round-5 version, where `user_rows[0]` was trusted unconditionally).
+9. ``SHOW GRANTS TO ROLE PUBLIC_WEB`` and ``... ROASTPILOT_AGENT`` — the
+   grants in the DEV database container must exactly equal the per-privilege
+   #317 manifest plus pinned database/schema USAGE prerequisites. The shared
+   account-level roles may also use the explicitly allowlisted warehouse.
+   ROASTPILOT_AGENT's PREVIEW/prod objects remain owned by future per-environment
+   audits; PUBLIC_WEB is restricted within the operator-confirmed
+   DEV/PREVIEW/prod database family to byte-exact, environment-invariant #317
+   objects plus database/schema prerequisites, all without grant option. Other
+   database families, warehouses, and any role/account/unknown-shape
+   grants fail closed. DEV extra, missing, and byte-lookalike rows also fail
+   closed, as does a true, absent, or unrecognized `grant_option`. The object
+   core is derived from
+   `check_grant_manifest.py` and canonicalized to the database-qualified,
+   uppercase form returned by live `SHOW GRANTS`, not independently retyped.
+10. ``SHOW FUTURE GRANTS TO ROLE`` for both application roles — the exact
+    manifest defines no future grants, so every visible row is a violation.
 
 This is the F1-S8 acceptance bar: a compromised or misbehaving agent
 holding this role must never be able to touch PROD, PREVIEW, or any other
@@ -136,7 +152,7 @@ hasn't been applied yet). Checking only before deploy would let exactly
 that class of bad migration pass, since deploy's own job is running the
 migration's SQL, not judging whether that SQL was safe. This script itself
 has no notion of "which invocation" it is — both runs are the identical,
-stateless, full five-check audit; see the workflow file for the two call
+stateless, full ten-check audit; see the workflow file for the two call
 sites and how a post-deploy failure fails the job.
 
 Before connecting at all, `main()` also asserts the
@@ -244,12 +260,39 @@ than trusting it happened.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import sys
+from pathlib import Path
+from types import ModuleType
 
 import snowflake.connector
 from cryptography.hazmat.primitives import serialization
+
+
+def _load_sibling_module(module_name: str) -> ModuleType:  # pragma: no mutate block
+    """Load a sibling by resolved path under ``python -P``."""
+    module_path = Path(__file__).resolve().parent / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"cannot construct a loader for sibling module {module_name!r}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves postponed annotations through sys.modules while
+    # the sibling executes, so register this path-anchored module first.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except FileNotFoundError as exc:
+        sys.modules.pop(module_name, None)
+        raise ImportError(f"cannot load sibling module {module_name!r} from {module_path}") from exc
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+check_grant_manifest = _load_sibling_module("check_grant_manifest")
 
 # Snowflake object types (SHOW GRANTS' own `granted_on` column values) this
 # check knows how to evaluate against the DEV database. Anything NOT in this
@@ -295,6 +338,49 @@ _SNOWFLAKE_DEFAULT_ACCOUNT_PRIVILEGES = frozenset(
 # See assert_boundary_vars_not_drifted.
 _EXPECTED_DATABASE = "ROASTPILOT_DEV"
 _EXPECTED_WAREHOUSE = "DEV_CI_WH"
+
+# The two application roles are fixed, byte-literal audit subjects rather
+# than operator-controlled SQL inputs. Their object-level manifest is derived
+# from check_grant_manifest's #317 source of truth and canonicalized below to
+# live SHOW GRANTS' database-qualified, uppercase names. Only the live-only
+# prerequisite USAGE rows depend on the pinned DEV boundary arguments.
+PUBLIC_WEB_ROLE = "PUBLIC_WEB"
+ROASTPILOT_AGENT_ROLE = "ROASTPILOT_AGENT"
+# D106: application roles use the shared application warehouse. DEV_CI_WH
+# belongs to the CI role and is never an application-role prerequisite.
+_ALLOWED_APP_ROLE_WAREHOUSES = frozenset({"ROASTPILOT_WH"})
+# Operator-confirmed D-345-G / D106 database family: DEV rows normally enter
+# the step-1 exact match, but all three environments are listed for completeness.
+_APP_ROLE_ENVIRONMENT_DATABASES = frozenset(
+    {"ROASTPILOT_DEV", "ROASTPILOT_PREVIEW", "ROASTPILOT"}
+)
+
+
+def _live_procedure_signature(database: str, offline_signature: str) -> str:
+    """Derive the live SHOW name from #317's offline procedure signature.
+
+    The offline ``_SUBMIT_REVIEW_SIGNATURE`` remains the single source of
+    truth. This transform's output was confirmed byte-for-byte against the
+    operator's 2026-08-23 ACCOUNTADMIN ``SHOW GRANTS`` capture.
+    """
+    qualified_name, arguments_with_close = offline_signature.split("(", 1)
+    schema, procedure_name = qualified_name.split(".", 1)
+    if schema != "app" or not arguments_with_close.endswith(")"):
+        raise ValueError(f"unrecognized offline procedure signature: {offline_signature!r}")
+    type_aliases = {"string": "VARCHAR", "int": "NUMBER", "smallint": "NUMBER"}
+    argument_types = arguments_with_close[:-1].split(", ")
+    live_arguments = ", ".join(type_aliases[argument_type] for argument_type in argument_types)
+    return f"{database}.APP.{procedure_name.upper()}({live_arguments})"
+
+
+# CONFIRMED byte-for-byte against the operator's 2026-08-23 ACCOUNTADMIN
+# SHOW GRANTS TO ROLE PUBLIC_WEB capture.
+_SUBMIT_REVIEW_LIVE_SIGNATURE = _live_procedure_signature(
+    _EXPECTED_DATABASE, check_grant_manifest._SUBMIT_REVIEW_SIGNATURE
+)
+
+RoleGrant = tuple[str, str, str, str]
+_GRANT_OPTION_ABSENT = object()
 
 # Snowflake's own unquoted-identifier grammar: a letter or underscore, then
 # any number of letters, digits, underscores, or dollar signs. The only two
@@ -486,6 +572,12 @@ def _object_container(name: str) -> str:
     return name.split(".", 1)[0]
 
 
+def _environment_invariant_name(name: str) -> str:
+    """Remove one database prefix, or return empty for a bare name."""
+    _, separator, suffix = name.partition(".")
+    return suffix if separator else ""
+
+
 def is_allowed_grant(
     granted_on: str, name: str, role_name: str, allowed_database: str, allowed_warehouse: str
 ) -> bool:
@@ -573,6 +665,241 @@ def find_violations(
         if not is_allowed_grant(granted_on, name, role_name, allowed_database, allowed_warehouse):
             violations.append(f"{privilege} on {granted_on} {name}")
     return violations
+
+
+def expected_role_grants(database: str) -> dict[str, frozenset[RoleGrant]]:
+    """Build the exact live grant manifest for both application roles.
+
+    The object-level core is a per-privilege expansion of the offline #317
+    manifest, including each grant's authoritative privilege set. Object
+    names are derived and canonicalized to live SHOW GRANTS' database-qualified
+    uppercase form; procedure signatures use the confirmed live transform.
+    Database and schema USAGE rows are live-only operator-provisioned
+    prerequisites. Shared warehouses are classified separately by
+    ``find_role_manifest_violations`` because these account-level roles span
+    environments.
+    """
+    prerequisites = {
+        ("USAGE", "DATABASE", database),
+        ("USAGE", "SCHEMA", f"{database}.APP"),
+    }
+    expected: dict[str, set[RoleGrant]] = {
+        PUBLIC_WEB_ROLE: {
+            (privilege, granted_on, name, PUBLIC_WEB_ROLE)
+            for privilege, granted_on, name in prerequisites
+        },
+        ROASTPILOT_AGENT_ROLE: {
+            (privilege, granted_on, name, ROASTPILOT_AGENT_ROLE)
+            for privilege, granted_on, name in prerequisites
+        },
+    }
+    for grant in check_grant_manifest.EXPECTED_MANIFEST:
+        live_name = (
+            _live_procedure_signature(database, grant.object_name)
+            if grant.object_type == "PROCEDURE"
+            else _canonical_live_object_name(database, grant.object_name)
+        )
+        expected[grant.role_name].update(
+            (privilege, grant.object_type, live_name, grant.role_name)
+            for privilege in grant.privileges
+        )
+    return {role_name: frozenset(grants) for role_name, grants in expected.items()}
+
+
+def _canonical_live_object_name(database: str, offline_name: str) -> str:
+    """Transform one trusted ``app.<object>`` manifest name to SHOW form."""
+    schema, object_name = offline_name.split(".", 1)
+    if schema != "app" or "." in object_name:
+        raise ValueError(f"unrecognized offline manifest object name: {offline_name!r}")
+    return f"{database}.APP.{object_name.upper()}"
+
+
+# PUBLIC_WEB's cross-environment qualified surface is environment-invariant:
+# derive object rows from #317's manifest and add only the operator-provisioned
+# APP schema prerequisite. Bare database USAGE is handled separately because
+# the database identifier itself necessarily varies by environment.
+_PUBLIC_WEB_CROSS_ENV_ALLOWED = frozenset(
+    {
+        (
+            privilege,
+            grant.object_type,
+            _environment_invariant_name(
+                _live_procedure_signature(_EXPECTED_DATABASE, grant.object_name)
+                if grant.object_type == "PROCEDURE"
+                else _canonical_live_object_name(_EXPECTED_DATABASE, grant.object_name)
+            ),
+        )
+        for grant in check_grant_manifest.EXPECTED_MANIFEST
+        if grant.role_name == PUBLIC_WEB_ROLE
+        for privilege in grant.privileges
+    }
+    | {
+        (
+            "USAGE",
+            "SCHEMA",
+            _environment_invariant_name(f"{_EXPECTED_DATABASE}.APP"),
+        )
+    }
+)
+
+
+def _role_grants_match(candidate: RoleGrant, expected: RoleGrant) -> bool:
+    """Compare normalized vocabulary and byte-exact Snowflake identifiers."""
+    return (
+        candidate[0] == expected[0]
+        and candidate[1] == expected[1]
+        and identifiers_match(candidate[2], expected[2])
+        and identifiers_match(candidate[3], expected[3])
+    )
+
+
+def _grant_option_is_false(value: object) -> bool:
+    """Recognize only Snowflake's known false/empty grant-option forms."""
+    if value is _GRANT_OPTION_ABSENT:
+        return False
+    if value is False or value is None:
+        return True
+    if isinstance(value, str):
+        return value == "" or value.lower() == "false"
+    return False
+
+
+def find_role_manifest_violations(
+    role_name: str,
+    grant_rows: list[dict[str, object]],
+    expected_set: frozenset[RoleGrant],
+    database: str,
+    allowed_warehouses: frozenset[str],
+) -> list[str]:
+    """Audit DEV exactly while permitting owned cross-environment grants.
+
+    Container classification is deliberately first: every object whose first
+    dot-delimited component byte-matches ``database`` enters the exact-set
+    comparison regardless of its reported object type. Allowlisted warehouses
+    require explicit USAGE without grant option. ROASTPILOT_AGENT's well-formed
+    database-scoped objects in other environments are ignored; PUBLIC_WEB's
+    must belong to the byte-exact owned database family, exactly match its
+    environment-invariant secure surface, and have no grant option. Other
+    warehouses, role/account grants, malformed names, and unknown object types
+    fail closed.
+    """
+    in_scope: list[tuple[RoleGrant, str, bool]] = []
+    violations: list[str] = []
+    for row in grant_rows:
+        grant = (
+            str(row.get("privilege", "")).strip().upper(),
+            str(row.get("granted_on", "")).strip().upper(),
+            str(row.get("name", "")),
+            str(row.get("grantee_name", "")),
+        )
+        grant_option = row.get("grant_option", _GRANT_OPTION_ABSENT)
+        grant_option_display = (
+            "<absent>" if grant_option is _GRANT_OPTION_ABSENT else repr(grant_option)
+        )
+        grant_option_is_false = _grant_option_is_false(grant_option)
+
+        # Load-bearing order: a DEV-container name is always exact-matched,
+        # even when Snowflake reports WAREHOUSE or an unknown object type.
+        if identifiers_match(_object_container(grant[2]), database):
+            in_scope.append((grant, grant_option_display, grant_option_is_false))
+        elif (
+            grant[1] == "WAREHOUSE"
+            and grant[0] == "USAGE"
+            and grant_option_is_false
+            and any(
+                identifiers_match(grant[2], warehouse)
+                for warehouse in allowed_warehouses
+            )
+        ):
+            continue
+        elif grant[1] == "WAREHOUSE":
+            violations.append(
+                f"unexpected warehouse grant: {grant[0]} on {grant[1]} {grant[2]} "
+                f"to {grant[3]} (grant_option={grant_option_display})"
+            )
+        # A bare, non-empty DATABASE name is the well-formed other-environment
+        # prerequisite shape. Dotted DATABASE names are malformed.
+        elif grant[1] == "DATABASE" and grant[2] and "." not in grant[2]:
+            if (
+                role_name == PUBLIC_WEB_ROLE
+                and (
+                    not any(
+                        identifiers_match(grant[2], environment_database)
+                        for environment_database in _APP_ROLE_ENVIRONMENT_DATABASES
+                    )
+                    or grant[0] != "USAGE"
+                    or not grant_option_is_false
+                )
+            ):
+                violations.append(
+                    f"unexpected PUBLIC_WEB grant: {grant[0]} on {grant[1]} "
+                    f"{grant[2]} to {grant[3]}"
+                )
+            continue
+        # Every other database-scoped type must be qualified. Empty or
+        # unqualified names fall through to the fail-closed default below.
+        elif (
+            grant[1] in _DATABASE_SCOPED_OBJECT_TYPES
+            and grant[1] != "DATABASE"
+            and "." in grant[2]
+        ):
+            container = _object_container(grant[2])
+            environment_invariant_name = _environment_invariant_name(grant[2])
+            if (
+                role_name == PUBLIC_WEB_ROLE
+                and (
+                    not any(
+                        identifiers_match(container, environment_database)
+                        for environment_database in _APP_ROLE_ENVIRONMENT_DATABASES
+                    )
+                    or (
+                        grant[0],
+                        grant[1],
+                        environment_invariant_name,
+                    )
+                    not in _PUBLIC_WEB_CROSS_ENV_ALLOWED
+                    or not grant_option_is_false
+                )
+            ):
+                violations.append(
+                    f"unexpected PUBLIC_WEB grant: {grant[0]} on {grant[1]} "
+                    f"{grant[2]} to {grant[3]}"
+                )
+            continue
+        else:
+            violations.append(
+                f"unexpected grant: {grant[0]} on {grant[1]} {grant[2]} "
+                f"to {grant[3]} (grant_option={grant_option_display})"
+            )
+
+    violations.extend(
+        f"extra grant: {grant[0]} on {grant[1]} {grant[2]} to {grant[3]} "
+        f"(grant_option={grant_option_display})"
+        for grant, grant_option_display, grant_option_is_false in in_scope
+        if not grant_option_is_false
+        or not any(_role_grants_match(grant, item) for item in expected_set)
+    )
+    violations.extend(
+        f"missing manifest grant: {privilege} on {granted_on} {name} to {grantee}"
+        for privilege, granted_on, name, grantee in sorted(expected_set)
+        if not any(
+            grant_option_is_false
+            and _role_grants_match(grant, (privilege, granted_on, name, grantee))
+            for grant, _, grant_option_is_false in in_scope
+        )
+    )
+    return violations
+
+
+def find_role_future_grant_violations(
+    role_name: str, future_rows: list[dict[str, object]]
+) -> list[str]:
+    """Return a violation for every visible future grant; the manifest has none."""
+    return [
+        f"future grant on {role_name}: {str(row.get('privilege', ''))} on "
+        f"{str(row.get('grant_on', ''))} {str(row.get('name', ''))}"
+        for row in future_rows
+    ]
 
 
 def _public_grant_targets_owned_object(
@@ -983,6 +1310,18 @@ def main() -> int:
         cursor.execute(f"SHOW USERS LIKE '{user}'")
         show_user_rows = cursor.fetchall()
 
+        cursor.execute(f"SHOW GRANTS TO ROLE {PUBLIC_WEB_ROLE}")
+        public_web_grant_rows = cursor.fetchall()
+
+        cursor.execute(f"SHOW GRANTS TO ROLE {ROASTPILOT_AGENT_ROLE}")
+        roastpilot_agent_grant_rows = cursor.fetchall()
+
+        cursor.execute(f"SHOW FUTURE GRANTS TO ROLE {PUBLIC_WEB_ROLE}")
+        public_web_future_grant_rows = cursor.fetchall()
+
+        cursor.execute(f"SHOW FUTURE GRANTS TO ROLE {ROASTPILOT_AGENT_ROLE}")
+        roastpilot_agent_future_grant_rows = cursor.fetchall()
+
         public_granted_default_roles = sorted(
             {
                 str(row.get("name", ""))
@@ -1020,6 +1359,27 @@ def main() -> int:
     public_future_violations = find_public_future_grants(public_future_grant_rows)
     default_secondary_roles_violation = find_default_secondary_roles_violation(show_user_rows, user)
     default_role_reaches = find_default_role_boundary_reaches(default_role_grants, database, warehouse)
+    expected_app_role_grants = expected_role_grants(database)
+    public_web_violations = find_role_manifest_violations(
+        PUBLIC_WEB_ROLE,
+        public_web_grant_rows,
+        expected_app_role_grants[PUBLIC_WEB_ROLE],
+        database,
+        _ALLOWED_APP_ROLE_WAREHOUSES,
+    )
+    roastpilot_agent_violations = find_role_manifest_violations(
+        ROASTPILOT_AGENT_ROLE,
+        roastpilot_agent_grant_rows,
+        expected_app_role_grants[ROASTPILOT_AGENT_ROLE],
+        database,
+        _ALLOWED_APP_ROLE_WAREHOUSES,
+    )
+    public_web_future_violations = find_role_future_grant_violations(
+        PUBLIC_WEB_ROLE, public_web_future_grant_rows
+    )
+    roastpilot_agent_future_violations = find_role_future_grant_violations(
+        ROASTPILOT_AGENT_ROLE, roastpilot_agent_future_grant_rows
+    )
 
     if (
         violations
@@ -1031,6 +1391,10 @@ def main() -> int:
         or public_future_violations
         or default_secondary_roles_violation
         or default_role_reaches
+        or public_web_violations
+        or roastpilot_agent_violations
+        or public_web_future_violations
+        or roastpilot_agent_future_violations
     ):
         print(
             f"error: {role}/PUBLIC/{user} fail the DEV boundary or PUBLIC-grants audit:",
@@ -1063,6 +1427,14 @@ def main() -> int:
                 f"  - PUBLIC transitively reaches a DEV object via a default role: {violation}",
                 file=sys.stderr,
             )
+        for violation in public_web_violations:
+            print(f"  - {PUBLIC_WEB_ROLE} manifest violation: {violation}", file=sys.stderr)
+        for violation in roastpilot_agent_violations:
+            print(f"  - {ROASTPILOT_AGENT_ROLE} manifest violation: {violation}", file=sys.stderr)
+        for violation in public_web_future_violations:
+            print(f"  - {PUBLIC_WEB_ROLE} future-grant violation: {violation}", file=sys.stderr)
+        for violation in roastpilot_agent_future_violations:
+            print(f"  - {ROASTPILOT_AGENT_ROLE} future-grant violation: {violation}", file=sys.stderr)
         return 1
 
     print(
@@ -1070,7 +1442,9 @@ def main() -> int:
         f"{role} stay within {database}/{warehouse}, no PUBLIC current grant violates the "
         f"DEV/account boundary, no PUBLIC-granted default role directly reaches DEV, PUBLIC holds "
         f"zero future grants visible to this role, no other database/warehouse is visible, {user} "
-        f"has no unexpected role grants, and {user}'s DEFAULT_SECONDARY_ROLES is verified empty"
+        f"has no unexpected role grants, {user}'s DEFAULT_SECONDARY_ROLES is verified empty, and "
+        f"{PUBLIC_WEB_ROLE}/{ROASTPILOT_AGENT_ROLE} exactly match their manifests with zero future "
+        "grants visible"
     )
     return 0
 
