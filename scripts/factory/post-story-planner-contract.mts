@@ -47,7 +47,10 @@ function isSubstantive(region: string): boolean {
       index += 1;
     }
   }
-  return /[\p{L}\p{N}]/u.test(outsideComments.join(""));
+  const words = outsideComments
+    .join("")
+    .match(/\p{L}[\p{L}\p{N}'-]*/gu) ?? [];
+  return new Set(words.map((word) => word.toLowerCase())).size >= 3;
 }
 
 /** Reject malformed model output before the writable token makes any request. */
