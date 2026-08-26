@@ -27,19 +27,30 @@ export type GithubRequest = <T>(
 
 function removeCodexSeparatingBackticks(text: string): string {
   const { folded, originStart, originEnd } = buildTriggerDetectionFold(text);
-  const foldedBacktickSplitTrigger = /@`+(?=codex\b)/giu;
+  const foldedBacktickSplitTrigger = /@[\s`]*(?=codex\b)/giu;
   const spans: Array<{ start: number; end: number }> = [];
+  const seenSpans = new Set<string>();
   for (
     let match = foldedBacktickSplitTrigger.exec(folded);
     match !== null;
     match = foldedBacktickSplitTrigger.exec(folded)
   ) {
-    const foldedBacktickStart = match.index + 1;
-    const foldedBacktickEnd = match.index + match[0].length - 1;
-    spans.push({
-      start: originStart[foldedBacktickStart]!,
-      end: originEnd[foldedBacktickEnd]!,
-    });
+    for (
+      let foldedIndex = match.index + 1;
+      foldedIndex < match.index + match[0].length;
+      foldedIndex++
+    ) {
+      if (folded[foldedIndex] !== "`") {
+        continue;
+      }
+      const start = originStart[foldedIndex]!;
+      const end = originEnd[foldedIndex]!;
+      const spanKey = `${start}:${end}`;
+      if (!seenSpans.has(spanKey)) {
+        spans.push({ start, end });
+        seenSpans.add(spanKey);
+      }
+    }
   }
   let result = text;
   for (let index = spans.length - 1; index >= 0; index--) {

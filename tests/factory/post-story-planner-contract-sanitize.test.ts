@@ -29,6 +29,11 @@ describe("story-planner contract posting sanitizer", () => {
     ["single opening backtick", "@`codex review"],
     ["backtick-wrapped name", "@`codex` review"],
     ["multiple opening backticks", "@``codex review"],
+    ["space then backtick", "@ `codex review"],
+    ["backtick then space", "@` codex review"],
+    ["backtick-space-backtick", "@` `codex review"],
+    ["tab then backtick", "@\t`codex review"],
+    ["backtick then newline", "@`\ncodex review"],
     ["fullwidth and NFKC-folded trigger", "＠`ｃodex review"],
   ])("neutralizes the proven backtick-split trigger: %s", (_label, input) => {
     const output = sanitizeContractForPosting(input);
