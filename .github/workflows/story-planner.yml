@@ -96,11 +96,8 @@ jobs:
           fi
           mkdir -p issue-context planner-input planner-output
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-            --json number,author,title,body,state,comments |
-            jq -cj -f .claude/skills/triage/authorized-comments.jq \
-              > issue-context/authorized.json
-          jq -ce '{number, title, body}' issue-context/authorized.json \
-            > issue-context/story.json
+            --json number,title,body |
+            jq -ce '{number, title, body}' > issue-context/story.json
 
           NONCE="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
           if ! [[ "$NONCE" =~ ^[0-9a-f]{32}$ ]]; then
@@ -142,8 +139,8 @@ jobs:
           show_full_output: false
           claude_args: |
             --model "opus"
-            --allowedTools "Read,Grep,Glob,LS,ToolSearch,Edit(planner-output/contract.md)"
-            --disallowedTools "MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash,mcp__github_comment__*,mcp__github_inline_comment__*,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,CronCreate,CronDelete,CronList,DesignSync,EnterWorktree,ExitWorktree,Monitor,PushNotification,RemoteTrigger,ReportFindings,ScheduleWakeup,SendMessage,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate,WebFetch,WebSearch,Workflow"
+            --allowedTools "Read(./**),Grep(./**),Glob(./**),LS(./**),ToolSearch,Edit(planner-output/contract.md)"
+            --disallowedTools "MultiEdit,Write,NotebookEdit,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash,Read(.git/**),Grep(.git/**),Glob(.git/**),LS(.git/**),mcp__github_comment__*,mcp__github_inline_comment__*,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,CronCreate,CronDelete,CronList,DesignSync,EnterWorktree,ExitWorktree,Monitor,PushNotification,RemoteTrigger,ReportFindings,ScheduleWakeup,SendMessage,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate,WebFetch,WebSearch,Workflow"
             --append-system-prompt-file "planner-input/system-prompt.md"
           prompt: |
             Plan the nonce-fenced story supplied in the trusted appended system
