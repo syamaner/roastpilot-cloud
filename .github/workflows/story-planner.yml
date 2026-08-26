@@ -7,8 +7,10 @@ on:
 permissions: {}
 
 jobs:
+  # D-F2-A6/register-after-merge: the global-pause gate and halt-runbook
+  # registration are deferred to activation; the numeric workflow ID exists only post-merge.
   resolve-trusted-revision:
-    if: github.event.label.name == 'ready-to-spec' && vars.FACTORY_PAUSED != 'true' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
@@ -53,7 +55,7 @@ jobs:
 
   plan:
     needs: resolve-trusted-revision
-    if: github.event.label.name == 'ready-to-spec' && vars.FACTORY_PAUSED != 'true' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -213,7 +215,7 @@ jobs:
 
   publish:
     needs: [resolve-trusted-revision, plan]
-    if: github.event.label.name == 'ready-to-spec' && vars.FACTORY_PAUSED != 'true' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

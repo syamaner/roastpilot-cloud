@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(10);
+    expect(names).toHaveLength(11);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2114,14 +2114,18 @@ jobs:
       // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
       // 48 -> 49.
       //
+      // 26 Aug 2026, D-F2-A6: story-planner.yml is a supported ordinary-job
+      // surface. It contributes +3 jobs, +5 run steps, +6 action steps, and
+      // +21 declared action inputs.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 18,
-      runSteps: 49,
-      actionSteps: 48,
-      inputs: 127,
+      jobs: 21,
+      runSteps: 54,
+      actionSteps: 54,
+      inputs: 148,
     });
   });
 
@@ -2133,6 +2137,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
+    expect(names).toHaveLength(11);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2172,7 +2177,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 27,
+      jobs: 30,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2239,9 +2244,12 @@ jobs:
       // 23 Aug 2026, #317: the new 'Check exact roles/grants manifest' run:
       // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
       // 79 -> 80.
-      runSteps: 80,
-      actionSteps: 70,
-      inputs: 185,
+      // 26 Aug 2026, D-F2-A6: the supported ordinary story-planner.yml surface
+      // contributes +3 jobs, +5 run steps, +6 action steps, and +21 declared
+      // action inputs to this admitted-surface inventory too.
+      runSteps: 85,
+      actionSteps: 76,
+      inputs: 206,
     });
   });
 });
