@@ -31,8 +31,23 @@ function parsePositiveInteger(name: string, raw: string): number {
 }
 
 function isSubstantive(region: string): boolean {
-  const withoutComments = region.replace(/<!--[\s\S]*?-->/g, "");
-  return /[\p{L}\p{N}]/u.test(withoutComments);
+  const outsideComments: string[] = [];
+  let inComment = false;
+  for (let index = 0; index < region.length;) {
+    if (!inComment && region.startsWith("<!--", index)) {
+      inComment = true;
+      index += 4;
+    } else if (region.startsWith("-->", index)) {
+      inComment = false;
+      index += 3;
+    } else {
+      if (!inComment) {
+        outsideComments.push(region[index]!);
+      }
+      index += 1;
+    }
+  }
+  return /[\p{L}\p{N}]/u.test(outsideComments.join(""));
 }
 
 /** Reject malformed model output before the writable token makes any request. */
