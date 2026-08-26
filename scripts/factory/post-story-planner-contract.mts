@@ -110,6 +110,36 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
   validateStoryPlannerContract(contract, issueNumber);
 
   const [owner, repo] = repository.split("/", 2) as [string, string];
+  const issue = await request<unknown>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${issueNumber}`,
+  );
+  if (
+    typeof issue !== "object" ||
+    issue === null ||
+    !("labels" in issue) ||
+    !Array.isArray(issue.labels)
+  ) {
+    throw new Error("issue labels response is malformed; refusing to publish");
+  }
+  const labelNames = issue.labels.map((label) => {
+    if (
+      typeof label !== "object" ||
+      label === null ||
+      !("name" in label) ||
+      typeof label.name !== "string"
+    ) {
+      throw new Error("issue labels response is malformed; refusing to publish");
+    }
+    return label.name;
+  });
+  if (!labelNames.includes("ready-to-spec")) {
+    throw new Error(
+      "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
+    );
+  }
+
   await request(
     token,
     "POST",
