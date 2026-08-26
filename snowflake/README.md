@@ -249,6 +249,8 @@ mechanism can't cover both:
   DEFAULT_SECONDARY_ROLES = ()`, which stops secondary roles activating by
   default on any connection this user makes.
 
+Every operator-run account-level DDL step is recorded in [the Snowflake provisioning runbook](../docs/snowflake-provisioning-runbook.md).
+
 That operator action is manual and unenforceable by code — if it's ever
 missed (e.g. the user gets re-created without it), the deploy connection's
 protection would silently disappear. The grants check **verifies** it took
