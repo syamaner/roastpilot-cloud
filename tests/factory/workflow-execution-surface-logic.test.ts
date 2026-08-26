@@ -2144,9 +2144,10 @@ jobs:
           "    environment: dev_snowflake_ci",
         )
         // Refs #237: normalize the pinned hyphenated Environment name only
-        // for this exhaustive admitted-surface inventory pass.
+        // for this exhaustive admitted-surface inventory pass. D-F2-A7 adds a
+        // second job with the same Environment, so normalize every exact pin.
         .replace(
-          /^    environment: read-confinement-probe$/mu,
+          /^    environment: read-confinement-probe$/gmu,
           "    environment: read_confinement_probe",
         )
         .replace(/^[ \t]+queue: max[ \t]*$/gmu, "");
@@ -2172,7 +2173,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 27,
+      jobs: 28,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2239,9 +2240,13 @@ jobs:
       // 23 Aug 2026, #317: the new 'Check exact roles/grants manifest' run:
       // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
       // 79 -> 80.
-      runSteps: 80,
-      actionSteps: 70,
-      inputs: 185,
+      // 26 Aug 2026, D-F2-A7: the parallel scoped-reader probe adds +1 job,
+      // +4 run steps, +3 conservatively admitted action steps, and +8 inputs.
+      // The source-only inventory above is unchanged because this whole
+      // hyphenated-Environment workflow remains in its deferred class.
+      runSteps: 84,
+      actionSteps: 73,
+      inputs: 193,
     });
   });
 });
