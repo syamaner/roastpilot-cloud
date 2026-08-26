@@ -2,6 +2,11 @@
 import { readFileSync } from "node:fs";
 
 import { githubRequest, requireEnv } from "./github-api.mts";
+import {
+  escapeInvisibleCharactersVisibly,
+  neutralizeCiSkipDirectives,
+  neutralizeCodexTriggerPhrases,
+} from "./untrusted-text.mts";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/;
@@ -18,6 +23,13 @@ export type GithubRequest = <T>(
   path: string,
   body?: unknown,
 ) => Promise<T>;
+
+/** Defang control tokens in a model-authored contract without wrapping its Markdown. */
+export function sanitizeContractForPosting(contract: string): string {
+  return neutralizeCiSkipDirectives(
+    neutralizeCodexTriggerPhrases(escapeInvisibleCharactersVisibly(contract)),
+  );
+}
 
 function parsePositiveInteger(name: string, raw: string): number {
   if (!POSITIVE_DECIMAL_PATTERN.test(raw)) {
@@ -147,7 +159,7 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     token,
     "POST",
     `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-    { body: contract },
+    { body: sanitizeContractForPosting(contract) },
   );
   console.log(`Posted one story-planner contract on issue #${issueNumber}.`);
 }

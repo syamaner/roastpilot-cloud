@@ -201,6 +201,33 @@ jobs:
             echo "::error::every top-level system/init record reported an empty .tools array"
             exit 1
           fi
+          if ! jq -e '
+            ([.[] | select(.type == "result")]) as $results
+            | ([ .[]
+                | select(.type == "user")
+                | (.message.content // [])[]?
+                | select(type == "object" and .type == "tool_result")
+                | select(has("is_error") and (.is_error != false))
+              ] | length) as $tool_result_flagged
+            | ($results | length) == 1
+              and (($results[0].is_error | type) == "boolean")
+              and ($results[0].is_error == false)
+              and (($results[0].subtype | type) == "string")
+              and ($results[0].subtype == "success")
+              and (($results[0].num_turns | type) == "number")
+              and (
+                ($results[0] | has("permission_denials_count") | not)
+                or (($results[0].permission_denials_count | type) == "number" and $results[0].permission_denials_count == 0)
+              )
+              and (
+                ($results[0] | has("permission_denials") | not)
+                or (($results[0].permission_denials | type) == "array" and ($results[0].permission_denials | length) == 0)
+              )
+              and ($tool_result_flagged == 0)
+          ' "$MESSAGES" > /dev/null; then
+            echo "::error::SDK execution did not produce exactly one clean terminal result"
+            exit 1
+          fi
           echo "confirmed: SDK tool-catalog is confined to the immutable permitted residual"
       - name: Upload story-planner contract
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,0 +1,47 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+import { sanitizeContractForPosting } from "../../scripts/factory/post-story-planner-contract.mts";
+import {
+  CI_SKIP_TOKEN_REMOVED_MARKER,
+  CODEX_TRIGGER_REMOVED_MARKER,
+} from "../../scripts/factory/untrusted-text.mts";
+import { expectNoLiveTrigger } from "./support/live-trigger-oracle";
+
+const PUBLISHER_PATH = fileURLToPath(
+  new URL("../../scripts/factory/post-story-planner-contract.mts", import.meta.url),
+);
+
+describe("story-planner contract posting sanitizer", () => {
+  it("neutralizes raw, fullwidth, and invisible-separated Codex triggers", () => {
+    const output = sanitizeContractForPosting(
+      "@codex review\n＠codex review\n@\u200Bcodex review",
+    );
+
+    expectNoLiveTrigger(output);
+    expect(output.match(/\[codex trigger removed\]/g)).toHaveLength(2);
+    expect(output).toContain(CODEX_TRIGGER_REMOVED_MARKER);
+    expect(output).toContain("@[U+200B]codex review");
+  });
+
+  it("neutralizes every supported CI-skip directive in place", () => {
+    const output = sanitizeContractForPosting(
+      "Run the checks [skip ci]\nskip-checks: true",
+    );
+
+    expect(output).toBe(
+      `Run the checks ${CI_SKIP_TOKEN_REMOVED_MARKER}\n${CI_SKIP_TOKEN_REMOVED_MARKER}`,
+    );
+  });
+
+  it("returns legitimate Markdown byte-unchanged", () => {
+    const markdown = "# Plan\n\n- Keep **rendered Markdown** intact.\n\n`npm test`\n";
+    expect(sanitizeContractForPosting(markdown)).toBe(markdown);
+  });
+
+  it("routes the posted contract body through the sanitizer", () => {
+    const source = readFileSync(PUBLISHER_PATH, "utf8");
+    expect(source).toContain("{ body: sanitizeContractForPosting(contract) }");
+  });
+});
