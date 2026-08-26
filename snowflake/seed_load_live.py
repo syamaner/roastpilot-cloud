@@ -178,16 +178,16 @@ VALUES
 ROAST_TELEMETRY_INSERT = """INSERT INTO APP.roast_telemetry
   (roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, fan_percent,
    ror_c_per_min, raw)
-VALUES (%s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s))"""
+SELECT %s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s)"""
 
 ROAST_ARTIFACTS_INSERT = """INSERT INTO APP.roast_artifacts
   (id, roast_id, kind, stage_path, byte_size, created_at)
-VALUES (COALESCE(%s, UUID_STRING()), %s, %s, %s, %s, %s)"""
+SELECT COALESCE(%s, UUID_STRING()), %s, %s, %s, %s, %s"""
 
 TASTING_REVIEWS_INSERT = """INSERT INTO APP.tasting_reviews
   (id, roast_id, reviewer_name, score, aroma, acidity, sweetness, body, aftertaste,
    brew_method, notes, submitted_ip_hash, created_at)
-VALUES (COALESCE(%s, UUID_STRING()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+SELECT COALESCE(%s, UUID_STRING()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"""
 
 REFERENCE_SUMMARY_MERGE = """MERGE INTO APP.reference_roast_summaries AS target
 USING (SELECT COALESCE(%s, UUID_STRING()) AS id, %s AS bean_origin, %s AS roast_level,
