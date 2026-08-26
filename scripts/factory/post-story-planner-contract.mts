@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
+  buildTriggerDetectionFold,
   escapeInvisibleCharactersVisibly,
   neutralizeCiSkipDirectives,
   neutralizeCodexTriggerPhrases,
@@ -24,10 +25,35 @@ export type GithubRequest = <T>(
   body?: unknown,
 ) => Promise<T>;
 
+function removeCodexSeparatingBackticks(text: string): string {
+  const { folded, originStart, originEnd } = buildTriggerDetectionFold(text);
+  const foldedBacktickSplitTrigger = /@`+(?=codex\b)/giu;
+  const spans: Array<{ start: number; end: number }> = [];
+  for (
+    let match = foldedBacktickSplitTrigger.exec(folded);
+    match !== null;
+    match = foldedBacktickSplitTrigger.exec(folded)
+  ) {
+    const foldedBacktickStart = match.index + 1;
+    const foldedBacktickEnd = match.index + match[0].length - 1;
+    spans.push({
+      start: originStart[foldedBacktickStart]!,
+      end: originEnd[foldedBacktickEnd]!,
+    });
+  }
+  let result = text;
+  for (let index = spans.length - 1; index >= 0; index--) {
+    const span = spans[index]!;
+    result = result.slice(0, span.start) + result.slice(span.end);
+  }
+  return result;
+}
+
 /** Defang control tokens in a model-authored contract without wrapping its Markdown. */
 export function sanitizeContractForPosting(contract: string): string {
+  const invisiblesMarked = escapeInvisibleCharactersVisibly(contract);
   return neutralizeCiSkipDirectives(
-    neutralizeCodexTriggerPhrases(escapeInvisibleCharactersVisibly(contract)),
+    neutralizeCodexTriggerPhrases(removeCodexSeparatingBackticks(invisiblesMarked)),
   );
 }
 

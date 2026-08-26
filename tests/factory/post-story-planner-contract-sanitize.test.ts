@@ -25,6 +25,20 @@ describe("story-planner contract posting sanitizer", () => {
     expect(output).toContain("@[U+200B]codex review");
   });
 
+  it.each([
+    ["single opening backtick", "@`codex review"],
+    ["backtick-wrapped name", "@`codex` review"],
+    ["multiple opening backticks", "@``codex review"],
+    ["fullwidth and NFKC-folded trigger", "＠`ｃodex review"],
+  ])("neutralizes the proven backtick-split trigger: %s", (_label, input) => {
+    const output = sanitizeContractForPosting(input);
+
+    expect(output).toContain(CODEX_TRIGGER_REMOVED_MARKER);
+    expect(output).not.toContain("@`codex");
+    expect(output).not.toContain("@``codex");
+    expectNoLiveTrigger(output);
+  });
+
   it("neutralizes every supported CI-skip directive in place", () => {
     const output = sanitizeContractForPosting(
       "Run the checks [skip ci]\nskip-checks: true",
@@ -36,7 +50,18 @@ describe("story-planner contract posting sanitizer", () => {
   });
 
   it("returns legitimate Markdown byte-unchanged", () => {
-    const markdown = "# Plan\n\n- Keep **rendered Markdown** intact.\n\n`npm test`\n";
+    const markdown = [
+      "# Plan",
+      "",
+      "- Keep **rendered Markdown** intact.",
+      "",
+      "`npm test`",
+      "",
+      "```sh",
+      "npm test",
+      "```",
+      "",
+    ].join("\n");
     expect(sanitizeContractForPosting(markdown)).toBe(markdown);
   });
 
