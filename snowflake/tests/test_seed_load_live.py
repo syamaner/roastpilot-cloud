@@ -201,7 +201,7 @@ def test_t7_cli_returns_nonzero_when_the_load_fails(monkeypatch, tmp_path: Path)
 
 
 def _insert_columns(statement: str) -> tuple[str, ...]:
-    match = re.search(r"INSERT INTO APP\.tasting_reviews\s*\((.*?)\)\s*VALUES", statement, re.DOTALL)
+    match = re.search(r"INSERT INTO APP\.tasting_reviews\s*\((.*?)\)\s*SELECT", statement, re.DOTALL)
     assert match is not None
     return tuple(column.strip() for column in match.group(1).split(","))
 
