@@ -60,6 +60,9 @@ export function validateStoryPlannerContract(
 ): void {
   const expectedSentinel =
     `CONTRACT-COMPLETE: story-planner contract finished (issue #${issueNumber})`;
+  if (contract.split(expectedSentinel).length - 1 !== 1) {
+    throw new Error("terminal sentinel must appear exactly once");
+  }
   const nonEmptyLines = contract.split(/\r?\n/).filter((line) => line.trim() !== "");
   if (nonEmptyLines.at(-1)?.trim() !== expectedSentinel) {
     throw new Error("contract is missing the issue-bound terminal sentinel as its final non-empty line");
