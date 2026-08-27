@@ -10,6 +10,7 @@ import {
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/;
+const ISSUE_REVISION_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const COMMENT_PAGE_SIZE = 100;
 const MAX_COMMENT_PAGES = 50;
 const STORY_PLANNER_CONTRACT_MARKER_PREFIX = "<!-- story-planner-contract:";
@@ -214,6 +215,19 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
   validateStoryPlannerContract(contract, issueNumber);
 
   const [owner, repo] = repository.split("/", 2) as [string, string];
+  if (
+    await hasExistingStoryPlannerContract(
+      request,
+      token,
+      owner,
+      repo,
+      issueNumber,
+    )
+  ) {
+    console.log(`contract already posted on #${issueNumber}; skipping`);
+    return;
+  }
+
   const issue = await request<unknown>(
     token,
     "GET",
@@ -244,17 +258,38 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     );
   }
 
+  // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
+  // an edit after Prepare's read in the same wall-clock second is undetectable.
+  // No finer token exists; the residual is a marginally stale advisory comment
+  // in this dark, human-reviewed workflow—a known limitation, not a fail-open.
+  const revision = JSON.parse(
+    readFileSync(requireEnv("REVISION_PATH"), "utf8"),
+  ) as unknown;
   if (
-    await hasExistingStoryPlannerContract(
-      request,
-      token,
-      owner,
-      repo,
-      issueNumber,
-    )
+    typeof revision !== "object" ||
+    revision === null ||
+    Array.isArray(revision) ||
+    Object.keys(revision).length !== 2 ||
+    !("issueNumber" in revision) ||
+    typeof revision.issueNumber !== "number" ||
+    !("updatedAt" in revision) ||
+    typeof revision.updatedAt !== "string" ||
+    revision.issueNumber !== issueNumber ||
+    !ISSUE_REVISION_PATTERN.test(revision.updatedAt)
   ) {
-    console.log(`contract already posted on #${issueNumber}; skipping`);
-    return;
+    throw new Error("revision binding is malformed; refusing to publish");
+  }
+  if (
+    !("updated_at" in issue) ||
+    typeof issue.updated_at !== "string" ||
+    !ISSUE_REVISION_PATTERN.test(issue.updated_at)
+  ) {
+    throw new Error("issue updated_at is malformed; refusing to publish");
+  }
+  if (issue.updated_at !== revision.updatedAt) {
+    throw new Error(
+      "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+    );
   }
 
   await request(

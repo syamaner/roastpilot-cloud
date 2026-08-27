@@ -14,6 +14,7 @@ import {
 
 const ISSUE_NUMBER = 17;
 const REPOSITORY = "syamaner/roastpilot-cloud";
+const VALID_UPDATED_AT = "2026-08-27T12:34:56Z";
 const MARKERS = [
   "<!-- contract:spec -->",
   "<!-- contract:tests -->",
@@ -36,6 +37,7 @@ type RequestCall = readonly [
 
 let temporaryDirectory: string;
 let contractPath: string;
+let revisionPath: string;
 
 function sentinel(issueNumber = ISSUE_NUMBER): string {
   return `CONTRACT-COMPLETE: story-planner contract finished (issue #${issueNumber})`;
@@ -76,6 +78,12 @@ function stubPublisherEnvironment(
   vi.stubEnv("GITHUB_REPOSITORY", REPOSITORY);
   vi.stubEnv("TARGET_ISSUE_NUMBER", issueNumber);
   vi.stubEnv("CONTRACT_PATH", contractPath);
+  writeFileSync(
+    revisionPath,
+    JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: VALID_UPDATED_AT }),
+    "utf8",
+  );
+  vi.stubEnv("REVISION_PATH", revisionPath);
 }
 
 function mockRequest(
@@ -92,7 +100,9 @@ function mockRequest(
       return commentPages[page - 1] ?? [];
     }
     if (method === "GET") {
-      return issueResponse;
+      return typeof issueResponse === "object" && issueResponse !== null
+        ? { updated_at: VALID_UPDATED_AT, ...issueResponse }
+        : issueResponse;
     }
     if (method === "POST") {
       return { id: 123 };
@@ -115,6 +125,7 @@ function expectNoPost(mock: ReturnType<typeof vi.fn>): void {
 beforeEach(() => {
   temporaryDirectory = mkdtempSync(join(tmpdir(), "story-planner-publisher-"));
   contractPath = join(temporaryDirectory, "contract.md");
+  revisionPath = join(temporaryDirectory, "revision.json");
   vi.spyOn(console, "log").mockImplementation(() => undefined);
 });
 
@@ -261,6 +272,92 @@ describe("validateStoryPlannerContract", () => {
 });
 
 describe("main", () => {
+  it("T-A1: matching captured and current revisions permit one issue GET and one POST", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    await main(request);
+
+    expect(
+      mock.mock.calls.filter(
+        (call) => call[1] === "GET" && !String(call[2]).includes("/comments?"),
+      ),
+    ).toHaveLength(1);
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+  });
+
+  it("T-A2: rejects a stale captured revision without making a POST", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest({
+      labels: [{ name: "ready-to-spec" }],
+      updated_at: "2026-08-27T12:34:57Z",
+    });
+
+    await expect(main(request)).rejects.toThrow(
+      "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+    );
+    expectNoPost(mock);
+  });
+
+  it.each([
+    ["a missing file", null, VALID_UPDATED_AT],
+    ["non-JSON content", "{not-json", VALID_UPDATED_AT],
+    [
+      "an open shape with an extra property",
+      JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: VALID_UPDATED_AT, extra: true }),
+      VALID_UPDATED_AT,
+    ],
+    [
+      "an updatedAt outside the closed timestamp grammar",
+      JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: "2026-08-27T12:34:56.000Z" }),
+      "2026-08-27T12:34:56.000Z",
+    ],
+  ])(
+    "T-A3: rejects revision.json with %s without making a POST",
+    async (_label, revisionContents, issueUpdatedAt) => {
+      stubPublisherEnvironment();
+      if (revisionContents === null) {
+        rmSync(revisionPath);
+      } else {
+        writeFileSync(revisionPath, revisionContents, "utf8");
+      }
+      const { request, mock } = mockRequest({
+        labels: [{ name: "ready-to-spec" }],
+        updated_at: issueUpdatedAt,
+      });
+
+      await expect(main(request)).rejects.toThrow();
+      expectNoPost(mock);
+    },
+  );
+
+  it("rejects a missing REVISION_PATH environment variable without making a POST", async () => {
+    stubPublisherEnvironment();
+    vi.stubEnv("REVISION_PATH", "");
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    await expect(main(request)).rejects.toThrow(
+      "missing required environment variable: REVISION_PATH",
+    );
+    expectNoPost(mock);
+  });
+
+  it.each([
+    ["an absent updated_at", undefined],
+    ["an updated_at outside the closed timestamp grammar", "2026-08-27T12:34:56.000Z"],
+  ])("T-A4: rejects issue GET with %s without making a POST", async (_label, updatedAt) => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest({
+      labels: [{ name: "ready-to-spec" }],
+      updated_at: updatedAt,
+    });
+
+    await expect(main(request)).rejects.toThrow(
+      "issue updated_at is malformed; refusing to publish",
+    );
+    expectNoPost(mock);
+  });
+
   it.each(["01", "1.0", "abc"])(
     "rejects non-canonical TARGET_ISSUE_NUMBER %j before making a request",
     async (issueNumber) => {
@@ -319,14 +416,14 @@ describe("main", () => {
       1,
       "test-token",
       "GET",
-      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
       undefined,
     );
     expect(mock).toHaveBeenNthCalledWith(
       2,
       "test-token",
       "GET",
-      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
       undefined,
     );
     expect(mock).toHaveBeenNthCalledWith(
@@ -363,6 +460,13 @@ describe("main", () => {
     await main(request);
 
     expectNoPost(mock);
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenCalledWith(
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      undefined,
+    );
     expect(console.log).toHaveBeenCalledWith(
       `contract already posted on #${ISSUE_NUMBER}; skipping`,
     );
@@ -481,7 +585,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
     );
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenCalledTimes(2);
     expectNoPost(mock);
   });
 
@@ -497,7 +601,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "issue labels response is malformed; refusing to publish",
     );
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenCalledTimes(2);
     expectNoPost(mock);
   });
 
@@ -513,7 +617,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "issue labels response is malformed; refusing to publish",
     );
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenCalledTimes(2);
     expectNoPost(mock);
   });
 });
