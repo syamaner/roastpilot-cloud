@@ -56,12 +56,19 @@ credential, a `publish` job validates + posts) + the deterministic publisher.
 Ships with control-token neutralization, a fail-closed SDK-result completion
 gate, and full publisher guard tests; `factory-security-reviewer` CONFIRMED-SOUND,
 Codex connector clean, qa PASS. The `Read(./**)` confinement was settled by the
-#372 probe (D-F2-A7). **Open F2-A tails:** PR-2 (workflow-contract tests, publisher
-idempotency marker, tests-region comment-exclusion depth) still to file (closes
-#370); **activation obligations** (MUST precede `STORY_PLANNER_ENABLED=true`):
-#373 (revision-binding + per-issue concurrency), #374 (prompt/agent-def reconcile +
-comment-length bound), plus FACTORY_PAUSED gate + halt-runbook entry + ESCALATE
-handling. **Next F2:** B (two-mode triage), C (owner `/approve`+`/respec`), then
+#372 probe (D-F2-A7). **F2-A COMPLETE — PR-2 (#377, squash `45fd38a`) MERGED, #370 CLOSED:**
+the publisher idempotency dedup (terminal-anchored, bot-author-verified issue-keyed
+marker; skip-not-update; reserved-prefix guard), tests-region HTML-comment exclusion,
+and broadened workflow-contract tests (`factory-security-reviewer` CONFIRMED-SOUND ×2
+— folded a marker-laundering suppression vector; `qa` PASS; Codex connector clean first
+pass; `pr-triage` MERGEABLE). Registry sync #375 merged. **Activation obligations**
+(MUST precede `STORY_PLANNER_ENABLED=true`): #373 (revision-binding + per-issue
+concurrency — also owns PR-2's overlapping-run TOCTOU), #374 (prompt/agent-def reconcile
++ comment-length bound), plus FACTORY_PAUSED gate + halt-runbook entry + ESCALATE
+handling. **Open for operator:** #376 (verify whether the 18 Aug C2-unpause re-evaluated
+#120's `FACTORY_PAUSED=true` accepted-residual condition; not re-paused). **Next F2:**
+B (two-mode triage — label via PAT/App, not the built-in `GITHUB_TOKEN`, or the
+downstream `issues:labeled` run is suppressed), C (owner `/approve`+`/respec`), then
 the C3 to-issues dogfood. **`FACTORY_PAUSED` is currently `false`** — verified live (repo variable, set `false` 18 Aug 2026 21:22Z when the factory was unpaused for C2 work; #371 added only a dark, gated workflow and did not change it. The `remains exactly \`true\`` statements in the historical F1-S6 / F1-S11 rows below describe the pre-unpause S11 era and are **not** the current value; read the live variable, not those rows, before any activation act.
 
 ## C1 story status — complete
