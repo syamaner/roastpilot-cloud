@@ -183,7 +183,7 @@ async function hasExistingStoryPlannerContract(
         (comment) =>
           comment.user?.type === "Bot" &&
           comment.user.login === STORY_PLANNER_CONTRACT_AUTHOR_LOGIN &&
-          comment.body.includes(marker),
+          (comment.body === marker || comment.body.endsWith(`\n${marker}`)),
       )
     ) {
       return true;

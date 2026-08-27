@@ -368,6 +368,22 @@ describe("main", () => {
     );
   });
 
+  it("GUARD-I4: a bot-authored mid-body marker cannot suppress publication", async () => {
+    stubPublisherEnvironment();
+    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[{
+        body: `Triage reasoning:\n\`\`\`text\n${marker}\n\`\`\`\nVerdict follows.`,
+        user: { type: "Bot", login: "github-actions[bot]" },
+      }]],
+    );
+
+    await main(request);
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+  });
+
   it("B-I3: appends the trusted marker byte-unchanged after sanitized model text", async () => {
     const contract = withRegion(0, "Alpha beta gamma @codex review.");
     stubPublisherEnvironment(contract);
