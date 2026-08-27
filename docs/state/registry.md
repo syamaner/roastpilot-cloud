@@ -62,7 +62,7 @@ idempotency marker, tests-region comment-exclusion depth) still to file (closes
 #373 (revision-binding + per-issue concurrency), #374 (prompt/agent-def reconcile +
 comment-length bound), plus FACTORY_PAUSED gate + halt-runbook entry + ESCALATE
 handling. **Next F2:** B (two-mode triage), C (owner `/approve`+`/respec`), then
-the C3 to-issues dogfood. FACTORY_PAUSED stays `false`.
+the C3 to-issues dogfood. **`FACTORY_PAUSED` is currently `false`** — verified live (repo variable, set `false` 18 Aug 2026 21:22Z when the factory was unpaused for C2 work; #371 added only a dark, gated workflow and did not change it. The `remains exactly \`true\`` statements in the historical F1-S6 / F1-S11 rows below describe the pre-unpause S11 era and are **not** the current value; read the live variable, not those rows, before any activation act.
 
 ## C1 story status — complete
 
