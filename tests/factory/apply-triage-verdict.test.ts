@@ -94,6 +94,7 @@ beforeEach(async () => {
   process.env.TRUSTED_TRIAGE_COMMENT_ID = "99";
   process.env.TRIAGE_JOB_RESULT = "success";
   process.env.TRIAGE_EXECUTION = "123.1";
+  process.env.TRIAGE_MODE = "readiness";
   process.exitCode = undefined;
 });
 
@@ -106,11 +107,99 @@ afterEach(async () => {
   delete process.env.TRUSTED_TRIAGE_COMMENT_ID;
   delete process.env.TRIAGE_JOB_RESULT;
   delete process.env.TRIAGE_EXECUTION;
+  delete process.env.TRIAGE_MODE;
   delete process.env.VERDICT_PATH;
   process.exitCode = undefined;
 });
 
 describe("main — valid verdict path", () => {
+  it.each([
+    ["pre-filter", "ready-to-spec", true],
+    ["readiness", "ready-to-implement", false],
+  ] as const)(
+    "composes %s mode into the effective label and comment readiness",
+    async (mode, expectedReadiness, expectsClamp) => {
+      const verdictPath = join(workdir, "verdict.json");
+      await writeFile(
+        verdictPath,
+        JSON.stringify({
+          issue_number: 42,
+          readiness: "ready-to-implement",
+          reasoning: "The story has complete inline acceptance criteria.",
+          missing_info_questions: [],
+        }),
+      );
+      process.env.VERDICT_PATH = verdictPath;
+      process.env.TRIAGE_MODE = mode;
+
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+          () => jsonResponse([{ name: "needs-triage" }]),
+        "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+          jsonResponse({}),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+        labels: [expectedReadiness],
+      });
+      const commentBody = (
+        calls.find((call) => call.method === "PATCH")?.body as {
+          readonly body: string;
+        }
+      ).body;
+      expect(commentBody).toContain(
+        `Automated triage verdict: \`${expectedReadiness}\``,
+      );
+      expect(commentBody.includes("Pre-filter triage downgrade")).toBe(
+        expectsClamp,
+      );
+    },
+  );
+
+  it("surfaces both deterministic downgrade reasons when both guards apply", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "The submitted story meets the intake bar.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    process.env.TRIAGE_MODE = "pre-filter";
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({
+          state: "open",
+          body: "### Acceptance criteria\n- [ ] Schema matches section 4",
+        }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const commentBody = (
+      calls.find((call) => call.method === "PATCH")?.body as {
+        readonly body: string;
+      }
+    ).body;
+    expect(commentBody).toContain("Pre-filter triage downgrade");
+    expect(commentBody).toContain("Automated intake downgrade");
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["ready-to-spec"],
+    });
+  });
+
   it("B8/G9: deterministically downgrades a delegating AC without echoing it", async () => {
     const rawCriterion =
       "UNTRUSTED-SENTINEL: the cloud schema matches §4 exactly";

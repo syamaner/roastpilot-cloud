@@ -560,6 +560,18 @@ describe("bounded triage context contract", () => {
     expect(extractTriageGeneration(heldPriorVerdict)).toBe("hold:123.1");
 
     expect(triage?.needs).toBe("seed");
+    expect(asMapping(triage?.permissions)).toEqual({
+      contents: "read",
+      issues: "read",
+    });
+    const triageAction = asMapping(
+      namedStep(triage, "Run the triage skill").with,
+    );
+    expect(triageAction).toMatchObject({
+      github_token: "${{ secrets.GITHUB_TOKEN }}",
+      allowed_bots: "",
+    });
+    expect(JSON.stringify(triage)).not.toContain("create-github-app-token");
     const context = namedStep(
       triage,
       "Write issue context for the triage skill",
@@ -583,6 +595,8 @@ describe("bounded triage context contract", () => {
       TRUSTED_TRIAGE_COMMENT_ID:
         "${{ needs.seed.outputs.triage_comment_id }}",
       TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
+      TRIAGE_MODE:
+        "${{ github.event_name == 'workflow_dispatch' && 'readiness' || 'pre-filter' }}",
     });
     expect(
       asMapping(

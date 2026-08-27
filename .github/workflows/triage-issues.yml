@@ -480,6 +480,11 @@ jobs:
           # issue_number disagrees.
           TRUSTED_ISSUE_NUMBER: ${{ needs.seed.outputs.target_issue_number }}
           TRUSTED_TRIAGE_COMMENT_ID: ${{ needs.seed.outputs.triage_comment_id }}
+          # issues:[opened] uses pre-filter because a raw issue must be specced;
+          # workflow_dispatch uses readiness after the contract gate. This is
+          # trusted event context, never an artifact, and the script re-validates
+          # unknown values fail-closed to pre-filter.
+          TRIAGE_MODE: ${{ github.event_name == 'workflow_dispatch' && 'readiness' || 'pre-filter' }}
           # The `triage` step uploads its artifact with `if: always()`, so a
           # schema-valid verdict can exist even from a run that did NOT
           # succeed (timeout, internal error, a forbidden-tool attempt).

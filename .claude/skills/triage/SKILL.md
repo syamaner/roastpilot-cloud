@@ -102,6 +102,12 @@ blocking it (that's the reviewer's job at PR time), but say so.
 
 ## Readiness decision
 
+Triage has two workflow-selected modes. Issue-open runs are a `pre-filter` for
+raw issues, so implementation or wait readiness is deterministically reduced
+to `ready-to-spec`. Operator re-dispatch runs are the `readiness` gate after
+the story contract. Agent output is untrusted; the deterministic apply guard
+is authoritative.
+
 Pick exactly one value, from this exact taxonomy (factory.md §4) — copy the
 string verbatim, these are the only 7 legal values:
 

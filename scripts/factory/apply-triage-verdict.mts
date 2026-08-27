@@ -39,6 +39,8 @@
  * - `TRIAGE_EXECUTION` — trusted `<run_id>.<run_attempt>` identity. Seed
  *   installed `hold:<TRIAGE_EXECUTION>` before the agent started; an
  *   apply-only retry may find the same final generation.
+ * - `TRIAGE_MODE` - trusted workflow-event mode. Unknown or absent values
+ *   fail closed to `pre-filter`.
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
@@ -53,6 +55,10 @@ import {
   validateTriageVerdict,
   type TriageVerdictValidationResult,
 } from "./triage-verdict-schema.mts";
+import {
+  clampTriageReadiness,
+  validateTriageMode,
+} from "./triage-mode.mts";
 import {
   buildFallbackCommentBody,
   buildTriageHoldGeneration,
@@ -397,6 +403,7 @@ export async function main(): Promise<void> {
   const triageJobResult = requireEnv("TRIAGE_JOB_RESULT");
   const generation = requireEnv("TRIAGE_EXECUTION");
   const holdGeneration = buildTriageHoldGeneration(generation);
+  const triageMode = validateTriageMode(process.env.TRIAGE_MODE);
 
   // Re-check immediately at the privileged boundary. The issue can close
   // after seed validates it, and neither a verdict nor the fail-closed
@@ -468,17 +475,41 @@ export async function main(): Promise<void> {
     return;
   }
 
+  // Evaluate both monotone guards against the original validated readiness,
+  // then join their results at ready-to-spec. Each guard only passes through
+  // or downgrades to ready-to-spec, so the join is idempotent and independent
+  // of evaluation order. Independent evaluation also retains both trusted
+  // notices when both downgrade reasons apply.
+  const modeClamp = clampTriageReadiness(
+    triageMode,
+    result.verdict.readiness,
+  );
   const diffVerifiableAc = enforceDiffVerifiableAc(
     result.verdict.readiness,
     issue.body ?? "",
   );
+  const downgradeNotices = [
+    modeClamp.clampNotice,
+    diffVerifiableAc.downgradeNotice,
+  ].filter((notice): notice is string => notice !== null);
+  const deterministicReadiness: DiffVerifiableAcResult = {
+    effectiveReadiness:
+      modeClamp.effectiveReadiness === "ready-to-spec" ||
+      diffVerifiableAc.effectiveReadiness === "ready-to-spec"
+        ? "ready-to-spec"
+        : result.verdict.readiness,
+    downgraded: modeClamp.clamped || diffVerifiableAc.downgraded,
+    patternId: diffVerifiableAc.patternId,
+    downgradeNotice:
+      downgradeNotices.length > 0 ? downgradeNotices.join("\n\n") : null,
+  };
 
   await applyValidVerdict(
     token,
     owner,
     repo,
     result,
-    diffVerifiableAc,
+    deterministicReadiness,
     trustedCommentId,
     generation,
   );
