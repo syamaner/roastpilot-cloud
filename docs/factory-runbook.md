@@ -353,7 +353,7 @@ against `gh run list --help`).
 **Before running any disable command, capture the pre-halt workflow state.**
 First run the state-check command shown immediately below the disable block
 (`gh api --paginate 'repos/syamaner/roastpilot-cloud/actions/workflows?per_page=100'
---jq '.workflows[] | {name, id, state}'`) and record which of these four
+--jq '.workflows[] | {name, id, state}'`) and record which of these five
 workflow IDs are `active`. On resume, re-enable only workflows this halt
 provably transitions from `active` to `disabled_manually`. Bind each transition
 to this halt with audit evidence for this halt's own disable action and
@@ -370,6 +370,7 @@ gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315461463/disabl
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/disable   # implement-ready-issues.yml
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330152328/disable   # codex-verdict-status.yml — currently dark — listed for completeness before 9h activation
 gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/disable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
+gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/343585420/disable   # story-planner.yml — dark (STORY_PLANNER_ENABLED unset) but FACTORY_PAUSED-gated; listed for completeness
 ```
 
 **After disabling, re-run the state check to confirm the intended transitions
@@ -450,6 +451,7 @@ backfills. Skipping an applicable step leaves the factory in a wrong state:**
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/315533067/enable   # implement-ready-issues.yml
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330152328/enable   # codex-verdict-status.yml — currently dark — listed for completeness before 9h activation
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/enable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
+   gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/343585420/enable   # story-planner.yml — dark (STORY_PLANNER_ENABLED unset) but FACTORY_PAUSED-gated; listed for completeness
    ```
 2. **Set `FACTORY_PAUSED` back to `false`.** This is the step that
    actually restarts the factory — re-enabling the workflows alone does
@@ -519,6 +521,28 @@ since then would be bypassed. The issue title and body are re-fetched fresh via
 `gh issue view` at execution time and are current either way; use a fresh
 `workflow_dispatch`, which runs the current `main` workflow—the fresh-trigger
 mechanism from #51.
+
+`story-planner.yml` is `FACTORY_PAUSED`-gated but currently DARK
+(`STORY_PLANNER_ENABLED` is unset). While dark, a `ready-to-spec` label still
+fires the `issues: [labeled]` event and GitHub creates a run, but every job
+skips on the enable/pause gate, and GitHub does not replay that event when the
+variable is later set. So at **activation** (setting `STORY_PLANNER_ENABLED` to
+`true`), any issue already carrying `ready-to-spec` from the dark period is not
+planned automatically: the activation procedure must sweep open issues still
+labeled `ready-to-spec` that have no posted story-planner contract and remove
+then re-add the `ready-to-spec` label on each
+(`gh issue edit <n> --remove-label ready-to-spec` then
+`--add-label ready-to-spec`), firing a fresh `labeled` event from current
+`main`. Because a relabel fires the event but does not guarantee completion — a
+skipped or failed run leaves the issue labeled with no contract and no further
+event — confirm each swept issue received a posted story-planner contract (the
+issue-bound `github-actions[bot]` marker) and repeat the remove-then-add on any
+that did not. The same recovery applies after a `FACTORY_PAUSED` window once
+the workflow is live.
+Because the trigger is a re-appliable label (not a one-shot `issues: [opened]`),
+this recovery is a relabel and needs no `workflow_dispatch` backfill mechanism —
+building an automatic sweep is deferred to the activation change that sets
+`STORY_PLANNER_ENABLED`, not this dark-gating slice.
 
 **Step 1 — find every issue opened during the pause/disabled window.** Use the
 conservative pre-write `PAUSE_START` recorded in §1, never the later pause

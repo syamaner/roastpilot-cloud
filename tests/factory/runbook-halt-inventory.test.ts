@@ -18,12 +18,6 @@ const UNAFFECTED_WORKFLOWS = new Set([
   // intentionally run while the factory is paused before activation. A pause
   // gate would defeat that purpose; no event/automated trigger can reach it.
   "task-agent-read-confinement-probe.yml",
-  // D-F2-A6/register-after-merge: story-planner is dark, gated only by
-  // STORY_PLANNER_ENABLED, and intentionally not FACTORY_PAUSED-gated until
-  // activation because its numeric workflow ID exists only post-merge. At
-  // activation it moves out of UNAFFECTED_WORKFLOWS into the gated set with
-  // its runbook disable/enable entry.
-  "story-planner.yml",
 ]);
 const PAUSE_BLOCK_CONJUNCT = "vars.FACTORY_PAUSED != 'true'";
 const PAUSE_NOTICE_CONJUNCT = "vars.FACTORY_PAUSED == 'true'";
@@ -591,6 +585,7 @@ describe("factory halt and resume inventory", () => {
       "codex-verdict-status.yml",
       "implement-ready-issues.yml",
       "owner-command-intake.yml",
+      "story-planner.yml",
       "triage-issues.yml",
     ]);
   });

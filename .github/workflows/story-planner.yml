@@ -7,10 +7,11 @@ on:
 permissions: {}
 
 jobs:
-  # D-F2-A6/register-after-merge: the global-pause gate and halt-runbook
-  # registration are deferred to activation; the numeric workflow ID exists only post-merge.
+  # D-F2-A6: this workflow is FACTORY_PAUSED-gated and registered in the
+  # halt-runbook inventory (workflow ID 343585420). It stays DARK until an
+  # operator sets STORY_PLANNER_ENABLED — the pause gate does not activate it.
   resolve-trusted-revision:
-    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
@@ -55,7 +56,7 @@ jobs:
 
   plan:
     needs: resolve-trusted-revision
-    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -239,7 +240,7 @@ jobs:
 
   publish:
     needs: [resolve-trusted-revision, plan]
-    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
