@@ -71,6 +71,8 @@ describe("story-planner contract posting sanitizer", () => {
 
   it("routes the posted contract body through the sanitizer", () => {
     const source = readFileSync(PUBLISHER_PATH, "utf8");
-    expect(source).toContain("{ body: sanitizeContractForPosting(contract) }");
+    expect(source).toContain("sanitizeContractForPosting(contract) +");
+    expect(source).toContain('"\\n" +');
+    expect(source).toContain("STORY_PLANNER_CONTRACT_MARKER(issueNumber)");
   });
 });
