@@ -65,8 +65,7 @@ pass; `pr-triage` MERGEABLE). Registry sync #375 merged. **Activation obligation
 (MUST precede `STORY_PLANNER_ENABLED=true`): #373 (revision-binding + per-issue
 concurrency — also owns PR-2's overlapping-run TOCTOU), #374 (prompt/agent-def reconcile
 + comment-length bound), plus FACTORY_PAUSED gate + halt-runbook entry + ESCALATE
-handling. **Open for operator:** #376 (verify whether the 18 Aug C2-unpause re-evaluated
-#120's `FACTORY_PAUSED=true` accepted-residual condition; not re-paused). **Next F2:**
+handling. **#376 RESOLVED** ([D154](https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md), 27 Aug): the 18 Aug C2-unpause ran outside D140's exact-`FACTORY_PAUSED=true` condition (operator oversight); a fresh `factory-security-reviewer` re-evaluation of all nine PR-triggered jobs under `FACTORY_PAUSED=false` returned **CONFIRMED-SOUND, no blocker**, and the residual acceptance was **re-based from the literal `FACTORY_PAUSED=true` value to supervised operation** (re-accepted, not re-paused) — see the F1-S7 row below. **Next F2:**
 B (two-mode triage — label via PAT/App, not the built-in `GITHUB_TOKEN`, or the
 downstream `issues:labeled` run is suppressed), C (owner `/approve`+`/respec`), then
 the C3 to-issues dogfood. **`FACTORY_PAUSED` is currently `false`** — verified live (repo variable, set `false` 18 Aug 2026 21:22Z when the factory was unpaused for C2 work; #371 added only a dark, gated workflow and did not change it. The `remains exactly \`true\`` statements in the historical F1-S6 / F1-S11 rows below describe the pre-unpause S11 era and are **not** the current value; read the live variable, not those rows, before any activation act.
