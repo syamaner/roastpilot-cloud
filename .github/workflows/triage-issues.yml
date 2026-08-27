@@ -15,6 +15,14 @@ on:
         description: "The issue number to triage or re-triage"
         required: true
         type: string
+      triage_mode:
+        description: "readiness = post-contract readiness gate (operator/F2-C re-triage of a specced issue). Leave at the default pre-filter for raw-issue outage backfills (docs/factory-runbook.md) and any issue without a story contract."
+        required: false
+        type: choice
+        default: pre-filter
+        options:
+          - pre-filter
+          - readiness
 
 env:
   TARGET_ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
@@ -480,11 +488,12 @@ jobs:
           # issue_number disagrees.
           TRUSTED_ISSUE_NUMBER: ${{ needs.seed.outputs.target_issue_number }}
           TRUSTED_TRIAGE_COMMENT_ID: ${{ needs.seed.outputs.triage_comment_id }}
-          # issues:[opened] uses pre-filter because a raw issue must be specced;
-          # workflow_dispatch uses readiness after the contract gate. This is
-          # trusted event context, never an artifact, and the script re-validates
+          # Readiness requires an explicit trusted triage_mode: readiness input,
+          # settable only by a principal with dispatch/write permission.
+          # issues:[opened] and dispatches that omit the input, including runbook
+          # raw-issue backfills, fail closed to pre-filter. The script re-validates
           # unknown values fail-closed to pre-filter.
-          TRIAGE_MODE: ${{ github.event_name == 'workflow_dispatch' && 'readiness' || 'pre-filter' }}
+          TRIAGE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.triage_mode || 'pre-filter' }}
           # The `triage` step uploads its artifact with `if: always()`, so a
           # schema-valid verdict can exist even from a run that did NOT
           # succeed (timeout, internal error, a forbidden-tool attempt).

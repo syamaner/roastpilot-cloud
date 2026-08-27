@@ -399,12 +399,13 @@ function runJqProgram(
 }
 
 describe("bounded triage context contract", () => {
-  it("keeps opened issues and adds only a required issue-number dispatch", () => {
+  it("keeps opened issues and adds a fail-closed mode dispatch input", () => {
     const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const on = asMapping(workflow.on);
     const dispatch = asMapping(on?.workflow_dispatch);
     const inputs = asMapping(dispatch?.inputs);
     const issueNumber = asMapping(inputs?.issue_number);
+    const triageMode = asMapping(inputs?.triage_mode);
 
     expect(asMapping(on?.issues)?.types).toEqual(["opened"]);
     expect(workflow["run-name"]).toBe(
@@ -414,11 +415,21 @@ describe("bounded triage context contract", () => {
       "issues",
       "workflow_dispatch",
     ]);
-    expect(Object.keys(inputs ?? {})).toEqual(["issue_number"]);
+    expect(Object.keys(inputs ?? {})).toEqual(["issue_number", "triage_mode"]);
     expect(issueNumber).toEqual({
       description: "The issue number to triage or re-triage",
       required: true,
       type: "string",
+    });
+    // A raw-issue outage backfill supplies only issue_number. Exact default and
+    // option assertions prevent that path from mutating back to readiness.
+    expect(triageMode).toEqual({
+      description:
+        "readiness = post-contract readiness gate (operator/F2-C re-triage of a specced issue). Leave at the default pre-filter for raw-issue outage backfills (docs/factory-runbook.md) and any issue without a story contract.",
+      required: false,
+      type: "choice",
+      default: "pre-filter",
+      options: ["pre-filter", "readiness"],
     });
   });
 
@@ -596,7 +607,7 @@ describe("bounded triage context contract", () => {
         "${{ needs.seed.outputs.triage_comment_id }}",
       TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
       TRIAGE_MODE:
-        "${{ github.event_name == 'workflow_dispatch' && 'readiness' || 'pre-filter' }}",
+        "${{ github.event_name == 'workflow_dispatch' && inputs.triage_mode || 'pre-filter' }}",
     });
     expect(
       asMapping(
