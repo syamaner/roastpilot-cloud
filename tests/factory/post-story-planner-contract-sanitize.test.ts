@@ -3,10 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { sanitizeContractForPosting } from "../../scripts/factory/post-story-planner-contract.mts";
-import {
-  CI_SKIP_TOKEN_REMOVED_MARKER,
-  CODEX_TRIGGER_REMOVED_MARKER,
-} from "../../scripts/factory/untrusted-text.mts";
+import { CODEX_TRIGGER_REMOVED_MARKER } from "../../scripts/factory/untrusted-text.mts";
 import { expectNoLiveTrigger } from "./support/live-trigger-oracle";
 
 const PUBLISHER_PATH = fileURLToPath(
@@ -44,13 +41,15 @@ describe("story-planner contract posting sanitizer", () => {
     expectNoLiveTrigger(output);
   });
 
-  it("neutralizes every supported CI-skip directive in place", () => {
-    const output = sanitizeContractForPosting(
-      "Run the checks [skip ci]\nskip-checks: true",
-    );
+  it("preserves issue-comment CI-skip literals while neutralizing a Codex trigger", () => {
+    const input = [
+      "Document [skip ci], [ci skip], and skip-checks: true exactly.",
+      "@codex review",
+    ].join("\n");
+    const output = sanitizeContractForPosting(input);
 
     expect(output).toBe(
-      `Run the checks ${CI_SKIP_TOKEN_REMOVED_MARKER}\n${CI_SKIP_TOKEN_REMOVED_MARKER}`,
+      `Document [skip ci], [ci skip], and skip-checks: true exactly.\n${CODEX_TRIGGER_REMOVED_MARKER} review`,
     );
   });
 

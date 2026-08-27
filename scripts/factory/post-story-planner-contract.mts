@@ -5,7 +5,6 @@ import { githubRequest, requireEnv } from "./github-api.mts";
 import {
   buildTriggerDetectionFold,
   escapeInvisibleCharactersVisibly,
-  neutralizeCiSkipDirectives,
   neutralizeCodexTriggerPhrases,
 } from "./untrusted-text.mts";
 
@@ -63,9 +62,7 @@ function removeCodexSeparatingBackticks(text: string): string {
 /** Defang control tokens in a model-authored contract without wrapping its Markdown. */
 export function sanitizeContractForPosting(contract: string): string {
   const invisiblesMarked = escapeInvisibleCharactersVisibly(contract);
-  return neutralizeCiSkipDirectives(
-    neutralizeCodexTriggerPhrases(removeCodexSeparatingBackticks(invisiblesMarked)),
-  );
+  return neutralizeCodexTriggerPhrases(removeCodexSeparatingBackticks(invisiblesMarked));
 }
 
 function parsePositiveInteger(name: string, raw: string): number {
