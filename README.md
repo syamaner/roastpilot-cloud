@@ -4,8 +4,16 @@ Cloud data plane for [RoastPilot](https://github.com/syamaner/roastpilot-agent):
 roast sharing via unlisted links, no-account tasting reviews from friends,
 and reference-roast summaries fed back to the roasting advisor.
 
-**Status**: planned (Milestone 2, built after the agent harness M1). Prep
-complete: plan revised, factory specced, C1/F1 stories filed (16 Jul 2026).
+**Status**: in build (updated 27 Aug 2026). C1 (scaffold) and F1 (the software
+factory) are complete, and the factory operates on GitHub Actions with triage,
+implementation, and review stages under human-gated merge. The C2 data-plane
+schema epic (base DDL, secure views, stored procedures, and the roles/grants
+boundary) is largely delivered and validated against a live Snowflake gate;
+C3 onward are pending. F2, the issue-driven spec chain that decomposes and
+specs stories automatically (to-issues, story-planner, triage), is landing
+incrementally, with the story-planner stage shipped dark behind an enable flag.
+Live epic and story pointers are in `docs/state/registry.md`; the plan repo
+remains the source of truth.
 
 **Stack** (D97): **Snowflake** (tables, stages, telemetry-in-SQL, stored-proc
 aggregation, operator analytics) + Next.js (App Router) on **Vercel** for the
