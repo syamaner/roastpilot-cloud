@@ -41,6 +41,29 @@ harness-validated in recorded mode). C1 Scaffold complete.
 Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table) and §4
 (C2 data model); factory pipeline/security model/label taxonomy: `factory.md`.
 
+## F2 Spec chain status (factory improvement, parallel to C2)
+
+Milestone **F2 Spec chain** (#10); design in the plan repo
+(`factory-F2-spec-chain.md`, decisions D-F2-1..4 / A1..A7). Wires
+`to-issues → story-planner → triage` so the spec chain runs without an
+interactive session. Every F2 unit touches the factory pipeline → **conventional /
+protected-path**, `factory-security-reviewer` mandatory, per-PR operator merge grant.
+
+**D135 sync, 27 Aug 2026:** **F2-A PR-1 (#371) MERGED** (squash `1cf88e8`,
+Refs #370) — the **dark** `story-planner.yml` workflow (gated by
+`STORY_PLANNER_ENABLED`, inert; Option B / D-F2-A5: model holds no write
+credential, a `publish` job validates + posts) + the deterministic publisher.
+Ships with control-token neutralization, a fail-closed SDK-result completion
+gate, and full publisher guard tests; `factory-security-reviewer` CONFIRMED-SOUND,
+Codex connector clean, qa PASS. The `Read(./**)` confinement was settled by the
+#372 probe (D-F2-A7). **Open F2-A tails:** PR-2 (workflow-contract tests, publisher
+idempotency marker, tests-region comment-exclusion depth) still to file (closes
+#370); **activation obligations** (MUST precede `STORY_PLANNER_ENABLED=true`):
+#373 (revision-binding + per-issue concurrency), #374 (prompt/agent-def reconcile +
+comment-length bound), plus FACTORY_PAUSED gate + halt-runbook entry + ESCALATE
+handling. **Next F2:** B (two-mode triage), C (owner `/approve`+`/respec`), then
+the C3 to-issues dogfood. FACTORY_PAUSED stays `false`.
+
 ## C1 story status — complete
 
 | Story | Issue | Status |
