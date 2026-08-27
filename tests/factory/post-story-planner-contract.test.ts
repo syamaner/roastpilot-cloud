@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  STORY_PLANNER_CONTRACT_MARKER,
   type GithubRequest,
   main,
   sanitizeContractForPosting,
@@ -77,12 +78,19 @@ function stubPublisherEnvironment(
   vi.stubEnv("CONTRACT_PATH", contractPath);
 }
 
-function mockRequest(issueResponse: unknown): {
+function mockRequest(
+  issueResponse: unknown,
+  commentPages: readonly (readonly unknown[])[] = [[]],
+): {
   readonly request: GithubRequest;
   readonly mock: ReturnType<typeof vi.fn>;
 } {
   const mock = vi.fn(async (...call: RequestCall): Promise<unknown> => {
-    const [, method] = call;
+    const [, method, path] = call;
+    if (method === "GET" && path.includes("/comments?")) {
+      const page = Number(new URL(path, "https://api.github.test").searchParams.get("page"));
+      return commentPages[page - 1] ?? [];
+    }
     if (method === "GET") {
       return issueResponse;
     }
@@ -199,6 +207,57 @@ describe("validateStoryPlannerContract", () => {
       "contract tests region must contain a negative-case indicator",
     );
   });
+
+  it("B-C1: accepts a visible Markdown bullet with a negative case", () => {
+    expect(() =>
+      validateStoryPlannerContract(
+        withRegion(1, "Context covers expected behavior.\n- Must fail malformed payloads."),
+        ISSUE_NUMBER,
+      ),
+    ).not.toThrow();
+  });
+
+  it("GUARD-C1: rejects a test bullet that exists only inside an HTML comment", () => {
+    expect(() =>
+      validateStoryPlannerContract(
+        withRegion(
+          1,
+          "Visible negative cases documented.\n<!--\n- Reject malformed payload\n-->",
+        ),
+        ISSUE_NUMBER,
+      ),
+    ).toThrow("contract tests region must contain at least one Markdown test bullet");
+  });
+
+  it("GUARD-C2: rejects a negative token that exists only inside an HTML comment", () => {
+    expect(() =>
+      validateStoryPlannerContract(
+        withRegion(1, "- Valid payload behavior documented.\n<!-- reject -->"),
+        ISSUE_NUMBER,
+      ),
+    ).toThrow("contract tests region must contain a negative-case indicator");
+  });
+
+  it.each([
+    ["fewer than three distinct words", "one two"],
+    ["comment-only content", "<!-- alpha beta gamma -->"],
+    ["one repeated word", "x x x"],
+    ["comments plus two visible words", "<!-- alpha beta gamma --> one two"],
+  ])("B-C2: keeps the isSubstantive vacuity rejection for %s", (_label, region) => {
+    expect(() => validateStoryPlannerContract(withRegion(0, region), ISSUE_NUMBER)).toThrow(
+      `contract region after ${MARKERS[0]} is empty or vacuous`,
+    );
+  });
+
+  it("N-I8/GUARD-I3: rejects a model-authored reserved marker prefix", () => {
+    const contract = withRegion(
+      0,
+      "Alpha beta gamma <!-- story-planner-contract:issue-17 -->",
+    );
+    expect(() => validateStoryPlannerContract(contract, ISSUE_NUMBER)).toThrow(
+      "contract contains the reserved story-planner contract marker prefix",
+    );
+  });
 });
 
 describe("main", () => {
@@ -246,7 +305,7 @@ describe("main", () => {
     expect(mock).not.toHaveBeenCalled();
   });
 
-  it("rechecks ready-to-spec and posts exactly one sanitized contract", async () => {
+  it("B-I1/GUARD-I1: first publication performs one comment GET and one POST", async () => {
     const contract = withRegion(0, "Alpha beta gamma @codex review.");
     stubPublisherEnvironment(contract);
     const { request, mock } = mockRequest({
@@ -255,7 +314,7 @@ describe("main", () => {
 
     await main(request);
 
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(3);
     expect(mock).toHaveBeenNthCalledWith(
       1,
       "test-token",
@@ -266,13 +325,137 @@ describe("main", () => {
     expect(mock).toHaveBeenNthCalledWith(
       2,
       "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      undefined,
+    );
+    expect(mock).toHaveBeenNthCalledWith(
+      3,
+      "test-token",
       "POST",
       `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments`,
-      { body: sanitizeContractForPosting(contract) },
+      {
+        body:
+          sanitizeContractForPosting(contract) +
+          "\n" +
+          STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER),
+      },
     );
-    const postedBody = mock.mock.calls[1]?.[3] as { readonly body: string };
+    const commentGets = mock.mock.calls.filter(
+      (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
+    );
+    expect(commentGets).toHaveLength(1);
+    const postedBody = mock.mock.calls[2]?.[3] as { readonly body: string };
     expect(postedBody.body).toContain("[codex trigger removed]");
     expect(postedBody.body).not.toContain("@codex review");
+  });
+
+  it("B-I2/GUARD-I1: skips when the exact bot-authored issue marker is present", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[{
+        body: `prior contract\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`,
+        user: { type: "Bot", login: "github-actions[bot]" },
+      }]],
+    );
+
+    await main(request);
+
+    expectNoPost(mock);
+    expect(console.log).toHaveBeenCalledWith(
+      `contract already posted on #${ISSUE_NUMBER}; skipping`,
+    );
+  });
+
+  it("B-I3: appends the trusted marker byte-unchanged after sanitized model text", async () => {
+    const contract = withRegion(0, "Alpha beta gamma @codex review.");
+    stubPublisherEnvironment(contract);
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+    expect(body).toBe(`${sanitizeContractForPosting(contract)}\n${marker}`);
+    expect(body.endsWith(marker)).toBe(true);
+    expect(body.match(/<!-- story-planner-contract:issue-17 -->/g)).toHaveLength(1);
+  });
+
+  it("B-I4: a marker for another issue does not suppress this issue", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[{
+        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER + 1),
+        user: { type: "Bot", login: "github-actions[bot]" },
+      }]],
+    );
+
+    await main(request);
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+  });
+
+  it("B-I5: finds a bot-authored marker on comment page two and skips", async () => {
+    stubPublisherEnvironment();
+    const fullFirstPage = Array.from({ length: 100 }, () => ({
+      body: "ordinary comment",
+      user: { type: "User", login: "someone" },
+    }));
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [fullFirstPage, [{
+        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER),
+        user: { type: "Bot", login: "github-actions[bot]" },
+      }]],
+    );
+
+    await main(request);
+
+    expectNoPost(mock);
+    expect(
+      mock.mock.calls.filter(
+        (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("N-I6: posts with a warning after the bounded comment scan is exhausted", async () => {
+    stubPublisherEnvironment();
+    const fullPage = Array.from({ length: 100 }, () => ({
+      body: "ordinary comment",
+      user: { type: "User", login: "someone" },
+    }));
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      Array.from({ length: 50 }, () => fullPage),
+    );
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await main(request);
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("Scanned 50 pages of comments"),
+    );
+  });
+
+  it.each([
+    ["human author", { type: "User", login: "github-actions[bot]" }],
+    ["different bot", { type: "Bot", login: "other-bot[bot]" }],
+    ["missing author", null],
+  ])("N-I7/GUARD-I2: %s with the marker does not suppress publication", async (_label, user) => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[{ body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER), user }]],
+    );
+
+    await main(request);
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
   });
 
   it("rejects when ready-to-spec was withdrawn and makes no POST", async () => {
