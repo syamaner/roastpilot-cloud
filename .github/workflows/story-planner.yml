@@ -6,6 +6,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: story-planner-${{ github.event.issue.number }}-${{ github.event.label.name }}
+  cancel-in-progress: false
+
 jobs:
   # D-F2-A6: this workflow is FACTORY_PAUSED-gated and registered in the
   # halt-runbook inventory (workflow ID 343585420). It stays DARK until an
@@ -97,8 +101,10 @@ jobs:
           fi
           mkdir -p issue-context planner-input planner-output
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-            --json number,title,body |
-            jq -ce '{number, title, body}' > issue-context/story.json
+            --json number,title,body,updatedAt > issue-context/issue.json
+          jq -ce '{number, title, body}' issue-context/issue.json > issue-context/story.json
+          jq -ce '{issueNumber: .number, updatedAt}' issue-context/issue.json \
+            > planner-output/revision.json
 
           NONCE="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
           if ! [[ "$NONCE" =~ ^[0-9a-f]{32}$ ]]; then
@@ -234,7 +240,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: story-planner-contract
-          path: planner-output/contract.md
+          path: |
+            planner-output/contract.md
+            planner-output/revision.json
           if-no-files-found: error
           retention-days: 1
 
@@ -266,4 +274,5 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TARGET_ISSUE_NUMBER: ${{ github.event.issue.number }}
           CONTRACT_PATH: planner-output/contract.md
+          REVISION_PATH: planner-output/revision.json
         run: node --experimental-strip-types scripts/factory/post-story-planner-contract.mts

@@ -11,6 +11,7 @@ const WORKFLOW_PATH = fileURLToPath(
 );
 const CLOSURE_STEP = "Enforce the SDK tool-catalog closure";
 const UPLOAD_STEP = "Upload story-planner contract";
+const PREPARE_STEP = "Prepare nonce-fenced story data and trusted system prompt";
 
 type Mapping = Record<string, unknown>;
 
@@ -79,6 +80,14 @@ const CLEAN_RESULT = {
 };
 
 describe("story-planner workflow protected shape", () => {
+  it("T-A5: serializes runs per issue without cancelling an in-progress plan", () => {
+    const concurrency = asMapping(workflowDocument().concurrency);
+    expect(concurrency?.group).toBe(
+      "story-planner-${{ github.event.issue.number }}-${{ github.event.label.name }}",
+    );
+    expect(concurrency?.["cancel-in-progress"]).toBe(false);
+  });
+
   it("pins the labeled trigger and both enablement conjuncts on every job", () => {
     const workflow = workflowDocument();
     expect(asMapping(asMapping(workflow.on)?.issues)?.types).toEqual(["labeled"]);
@@ -137,7 +146,7 @@ describe("story-planner workflow protected shape", () => {
 
   it("pins the nonce-fenced story DATA block and its never-instructions directive", () => {
     const prepare = planSteps().find(
-      (step) => step.name === "Prepare nonce-fenced story data and trusted system prompt",
+      (step) => step.name === PREPARE_STEP,
     );
     const run = String(prepare?.run);
 
@@ -146,6 +155,28 @@ describe("story-planner workflow protected shape", () => {
     expect(run).toContain('("<UNTRUSTED_STORY_DATA_" + $nonce + ">")');
     expect(run).toContain('("</UNTRUSTED_STORY_DATA_" + $nonce + ">")');
     expect(run).toContain("($story[0] | tojson)");
+  });
+
+  it("T-A6: uploads the contract and its captured issue revision together", () => {
+    const upload = planSteps().find((step) => step.name === UPLOAD_STEP);
+    const path = String(asMapping(upload?.with)?.path).split(/\r?\n/);
+    expect(path).toEqual(expect.arrayContaining([
+      "planner-output/contract.md",
+      "planner-output/revision.json",
+    ]));
+  });
+
+  it("T-A7: captures a trusted revision without changing the model story shape", () => {
+    const prepare = planSteps().find((step) => step.name === PREPARE_STEP);
+    const run = String(prepare?.run);
+    const revisionWrite = run.indexOf("> planner-output/revision.json");
+    const contextRemoval = run.indexOf("rm -rf -- issue-context");
+
+    expect(run).toContain("--json number,title,body,updatedAt");
+    expect(run).toContain("jq -ce '{number, title, body}'");
+    expect(run).toContain("($story[0] | tojson)");
+    expect(revisionWrite).toBeGreaterThanOrEqual(0);
+    expect(contextRemoval).toBeGreaterThan(revisionWrite);
   });
 
   it("pins both checkouts to the resolved trusted SHA without persisted credentials", () => {
