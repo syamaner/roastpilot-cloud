@@ -478,9 +478,26 @@ jobs:
           name: triage-verdict
           path: triage-output
 
+      - name: Mint factory App token
+        id: factory_token
+        if: ${{ vars.FACTORY_PUBLISHER_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.FACTORY_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.FACTORY_PUBLISHER_PRIVATE_KEY }}
+          permission-issues: write
+
+      - name: Warn if triage labels use GITHUB_TOKEN
+        if: ${{ steps.factory_token.outcome != 'success' }}
+        env:
+          MINT_OUTCOME: ${{ steps.factory_token.outcome }}
+        run: echo "::warning::No factory App token was minted (outcome=$MINT_OUTCOME). ready-to-spec will be applied by GITHUB_TOKEN, so story-planner will not auto-fire."
+
       - name: Validate and apply the triage verdict
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FACTORY_APP_TOKEN: ${{ steps.factory_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Trusted issue number, from normalized workflow event/input
           # context — never from the verdict artifact itself.

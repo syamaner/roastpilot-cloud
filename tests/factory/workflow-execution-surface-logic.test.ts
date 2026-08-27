@@ -2254,9 +2254,12 @@ jobs:
       // 26 Aug 2026, D-F2-A6: the supported ordinary story-planner.yml surface
       // stacks on that probe with +3 jobs, +5 run steps, +6 action steps, and
       // +21 declared action inputs.
-      runSteps: 89,
-      actionSteps: 79,
-      inputs: 214,
+      // 28 Aug 2026, #384 Slice 2: the triage apply job adds +1 warning run
+      // step, +1 create-github-app-token action step, and +3 declared action
+      // inputs for the issues-only factory App mint. Jobs are unchanged.
+      runSteps: 90,
+      actionSteps: 80,
+      inputs: 217,
     });
   });
 });

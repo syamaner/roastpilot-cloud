@@ -23,6 +23,10 @@
  *
  * Required environment variables:
  * - `GH_TOKEN` — the job's `permissions: issues: write` token.
+ * - `FACTORY_APP_TOKEN`: optional issues-only App token. When present, it is
+ *   used only for a successful-path `ready-to-spec` label write and its
+ *   verification read. Comment writes and fallback writes always use
+ *   `GH_TOKEN`.
  * - `GITHUB_REPOSITORY` — `owner/repo` (set automatically by Actions).
  * - `TRUSTED_ISSUE_NUMBER` — the canonical workflow target, never from the
  *   verdict artifact.
@@ -65,6 +69,7 @@ import {
   buildVerdictCommentBody,
   computeNewLabelSet,
   extractTriageGeneration,
+  selectLabelWriteToken,
   TRIAGE_COMMENT_AUTHOR_LOGIN,
   TRIAGE_COMMENT_MARKER,
 } from "./apply-triage-verdict-logic.mts";
@@ -227,7 +232,8 @@ async function verifyLabelSet(
  * why.
  */
 async function applyValidVerdict(
-  token: string,
+  ghToken: string,
+  appToken: string,
   owner: string,
   repo: string,
   result: Extract<TriageVerdictValidationResult, { ok: true }>,
@@ -255,7 +261,7 @@ async function applyValidVerdict(
   );
 
   await updateComment(
-    token,
+    ghToken,
     owner,
     repo,
     commentId,
@@ -268,7 +274,7 @@ async function applyValidVerdict(
   );
 
   const currentLabels = await githubRequest<GitHubIssueLabel[]>(
-    token,
+    ghToken,
     "GET",
     `/repos/${owner}/${repo}/issues/${verdict.issue_number}/labels?per_page=100`,
   );
@@ -276,15 +282,20 @@ async function applyValidVerdict(
     currentLabels.map((l) => l.name),
     diffVerifiableAc.effectiveReadiness,
   );
+  const labelWriteToken = selectLabelWriteToken(
+    diffVerifiableAc.effectiveReadiness,
+    ghToken,
+    appToken,
+  );
   try {
     await githubRequest(
-      token,
+      labelWriteToken,
       "PUT",
       `/repos/${owner}/${repo}/issues/${verdict.issue_number}/labels`,
       { labels: newLabelSet },
     );
     await verifyLabelSet(
-      token,
+      labelWriteToken,
       owner,
       repo,
       verdict.issue_number,
@@ -293,7 +304,7 @@ async function applyValidVerdict(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await applyFallback(
-      token,
+      ghToken,
       owner,
       repo,
       verdict.issue_number,
@@ -376,7 +387,8 @@ async function applyFallback(
 }
 
 export async function main(): Promise<void> {
-  const token = requireEnv("GH_TOKEN");
+  const ghToken = requireEnv("GH_TOKEN");
+  const appToken = process.env.FACTORY_APP_TOKEN ?? "";
   const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
   if (!owner || !repo) {
     throw new Error(
@@ -409,7 +421,7 @@ export async function main(): Promise<void> {
   // after seed validates it, and neither a verdict nor the fail-closed
   // fallback may relabel or comment on closed work.
   const issue = await githubRequest<GitHubIssue>(
-    token,
+    ghToken,
     "GET",
     `/repos/${owner}/${repo}/issues/${trustedIssueNumber}`,
   );
@@ -420,7 +432,7 @@ export async function main(): Promise<void> {
     );
   }
   await requireRetryableTriageGeneration(
-    token,
+    ghToken,
     owner,
     repo,
     trustedIssueNumber,
@@ -430,7 +442,7 @@ export async function main(): Promise<void> {
   );
   const fallback = (errors: readonly string[]): Promise<void> =>
     applyFallback(
-      token,
+      ghToken,
       owner,
       repo,
       trustedIssueNumber,
@@ -505,7 +517,8 @@ export async function main(): Promise<void> {
   };
 
   await applyValidVerdict(
-    token,
+    ghToken,
+    appToken,
     owner,
     repo,
     result,

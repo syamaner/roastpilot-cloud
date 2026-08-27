@@ -11,6 +11,7 @@ import {
   hasAdjacentTriageGenerationMarker,
   hasBlockingTriageGeneration,
   isAuthorizingTriageGeneration,
+  selectLabelWriteToken,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 import {
@@ -30,6 +31,24 @@ const verdict: TriageVerdict = {
   reasoning: "Plan link, acceptance criteria, scope, and size are all present.",
   missing_info_questions: [],
 };
+
+describe("selectLabelWriteToken", () => {
+  it("uses the App token only for ready-to-spec when it is present", () => {
+    expect(selectLabelWriteToken("ready-to-spec", "gh", "app")).toBe("app");
+    expect(selectLabelWriteToken("ready-to-spec", "gh", "")).toBe("gh");
+  });
+
+  it.each([
+    "needs-triage",
+    "ready-to-implement",
+    "ready-for-conventional-implementation",
+    "needs-info",
+    "wait-to-implement",
+    "wontfix",
+  ] as const)("keeps %s on GITHUB_TOKEN", (readiness) => {
+    expect(selectLabelWriteToken(readiness, "gh", "app")).toBe("gh");
+  });
+});
 
 describe("computeNewLabelSet", () => {
   it("adds the readiness label when none was present", () => {
