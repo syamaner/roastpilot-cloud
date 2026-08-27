@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(10);
+    expect(names).toHaveLength(11);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2114,14 +2114,20 @@ jobs:
       // step in ci.yml adds +1 run step (no action, no inputs) -- runSteps
       // 48 -> 49.
       //
+      // 26 Aug 2026, D-F2-A6: story-planner.yml stacks on D-F2-A7 as a
+      // supported ordinary-job surface. It contributes +3 jobs, +5 run steps,
+      // +6 action steps, and +21 declared action inputs; D-F2-A7's whole probe
+      // workflow remains in the unsupported-shape skip list above, so it does
+      // not change this source-only inventory.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 18,
-      runSteps: 49,
-      actionSteps: 48,
-      inputs: 127,
+      jobs: 21,
+      runSteps: 54,
+      actionSteps: 54,
+      inputs: 148,
     });
   });
 
@@ -2133,6 +2139,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
+    expect(names).toHaveLength(11);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2173,7 +2180,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 28,
+      jobs: 31,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2244,9 +2251,12 @@ jobs:
       // +4 run steps, +3 conservatively admitted action steps, and +8 inputs.
       // The source-only inventory above is unchanged because this whole
       // hyphenated-Environment workflow remains in its deferred class.
-      runSteps: 84,
-      actionSteps: 73,
-      inputs: 193,
+      // 26 Aug 2026, D-F2-A6: the supported ordinary story-planner.yml surface
+      // stacks on that probe with +3 jobs, +5 run steps, +6 action steps, and
+      // +21 declared action inputs.
+      runSteps: 89,
+      actionSteps: 79,
+      inputs: 214,
     });
   });
 });

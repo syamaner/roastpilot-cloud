@@ -20,9 +20,10 @@ import { expect } from "vitest";
  * quirk ever altered a folded form.
  */
 
-/** ASCII `@` or fullwidth `＠`, any whitespace run, then `codex` — no `\b`, so
- * the oracle stays deliberately conservative (it flags any `@…codex` run). */
-const LIVE_TRIGGER = /[@＠]\s*codex/iu;
+/** ASCII `@` or fullwidth `＠`, any whitespace/backtick run, then `codex` — no
+ * `\b`, so the oracle stays deliberately conservative (it flags any
+ * `@…codex` run), including the proven Markdown backtick-split exploit. */
+const LIVE_TRIGGER = /[@＠][\s`]*codex/iu;
 
 /** Contiguous `@codex` (no whitespace) — used after invisibles are stripped, so
  * a truncation that RESYNTHESISES a trigger at a cut boundary is caught. */

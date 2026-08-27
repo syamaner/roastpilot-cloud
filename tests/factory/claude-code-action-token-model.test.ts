@@ -46,11 +46,11 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 // must NOT move when the completion-comment author literal changes -- T-4.
 const EXPECTED_ALLOWED_BOTS =
   "claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]";
-// The live corpus has exactly eight invocations (claude-review, spec-grounded,
+// The live corpus has exactly nine invocations (claude-review, spec-grounded,
 // triage, implement, owner-command answer-agent, owner-command task-agent, and
-// the two dark task-agent read-confinement probes). A ninth must fail this
-// tripwire so it cannot be added without owning the `github_token` contract
-// too (class sweep, #157 §4).
+// the two dark task-agent read-confinement probes, plus story-planner). A tenth
+// must fail this tripwire so it cannot be added without owning the
+// `github_token` contract too (class sweep, #157 §4).
 // 9 Aug 2026, 9e Unit 2 PR2b: the fifth invocation is the DARK
 // owner-command-intake.yml answer-agent. It explicitly passes the built-in
 // `github_token: ${{ secrets.GITHUB_TOKEN }}`, so the #157 token-model contract
@@ -61,7 +61,9 @@ const EXPECTED_ALLOWED_BOTS =
 // seventh, with the same binding and no OIDC permission.
 // 26 Aug 2026, D-F2-A7: the parallel scoped-reader probe is the eighth and
 // carries the same explicit built-in token binding and no OIDC permission.
-const EXPECTED_INVOCATION_COUNT = 8;
+// 26 Aug 2026, D-F2-A6: story-planner.yml stacks as the ninth invocation and
+// passes the built-in `github_token: ${{ secrets.GITHUB_TOKEN }}`.
+const EXPECTED_INVOCATION_COUNT = 9;
 
 type Mapping = Record<string, unknown>;
 
