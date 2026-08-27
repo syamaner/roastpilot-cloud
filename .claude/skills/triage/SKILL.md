@@ -102,6 +102,12 @@ blocking it (that's the reviewer's job at PR time), but say so.
 
 ## Readiness decision
 
+Triage has two workflow-selected modes. `readiness` mode requires an explicit
+`triage_mode: readiness` re-dispatch of an already-specced issue. Issue-open
+runs and unqualified or backfill dispatches are `pre-filter`, so implementation
+or wait readiness is deterministically reduced to `ready-to-spec`. Agent output
+is untrusted; the deterministic apply guard is authoritative.
+
 Pick exactly one value, from this exact taxonomy (factory.md §4) — copy the
 string verbatim, these are the only 7 legal values:
 
