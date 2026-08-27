@@ -84,7 +84,7 @@ describe("story-planner workflow protected shape", () => {
     expect(asMapping(asMapping(workflow.on)?.issues)?.types).toEqual(["labeled"]);
     for (const job of Object.values(workflowJobs())) {
       expect(job.if).toBe(
-        "github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true'",
+        "github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'",
       );
     }
   });
@@ -165,9 +165,9 @@ describe("story-planner workflow protected shape", () => {
     }
   });
 
-  it("keeps FACTORY_PAUSED absent from every job condition until registration", () => {
+  it("requires FACTORY_PAUSED in every job condition", () => {
     for (const job of Object.values(workflowJobs())) {
-      expect(String(job.if)).not.toContain("FACTORY_PAUSED");
+      expect(String(job.if)).toContain("vars.FACTORY_PAUSED != 'true'");
     }
   });
 });
