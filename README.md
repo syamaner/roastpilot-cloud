@@ -21,11 +21,14 @@ public taster surface only. Snowflake cannot serve anonymous users, so the
 share pages and review form live outside it by design.
 
 **Build process** (D98): epics C2–C8 are built **factory-first**: a
-GitHub-issue-driven agent pipeline (triage → implement → review) where the
-human specs, clarifies, and merges. C1 (scaffold) and F1 (the factory
-itself) are conventional. Labels, issue templates, and milestones in this
-repo are that pipeline's substrate; see the factory spec for the label
-taxonomy and what each readiness state means.
+GitHub-issue-driven agent pipeline (decompose → spec → triage → implement →
+review) where agents draft the spec and a human clarifies, approves, and
+merges. Merge is always human. The F2 spec chain (to-issues, story-planner,
+triage) grooms a raw issue into a reviewed contract before any code is
+written; see the Status above for what is live versus shipped dark. C1
+(scaffold) and F1 (the factory itself) are conventional. Labels, issue
+templates, and milestones in this repo are that pipeline's substrate; see the
+factory spec for the label taxonomy and what each readiness state means.
 
 **Plans** (source of truth, in
 [`roastpilot-plan`](https://github.com/syamaner/roastpilot-plan)):
