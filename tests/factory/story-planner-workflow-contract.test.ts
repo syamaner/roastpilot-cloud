@@ -157,6 +157,44 @@ describe("story-planner workflow protected shape", () => {
     expect(run).toContain("($story[0] | tojson)");
   });
 
+  it("T-B1: supersedes chat return with the confined file-only output channel", () => {
+    const prepare = planSteps().find((step) => step.name === PREPARE_STEP);
+    const run = String(prepare?.run);
+    const outputHeading = run.indexOf('"## Workflow-owned output contract"');
+    const soleFileChannel = run.indexOf(
+      "the file planner-output/contract.md using the single permitted Edit tool, which is the sole output channel.",
+    );
+    const noWriteToolsOverride = run.indexOf(
+      "both its no-write-tools statement and its instruction to return the contract as chat or return text",
+    );
+    const retainedGroundRules = run.indexOf(
+      "Every other agent-definition ground rule (file and line verification, fail-closed direction analysis, scope-trip escalation, reviewer routing, and all quality and safety requirements) remains fully in force.",
+    );
+    const discardedChat = run.indexOf(
+      "A run that writes no file fails, and any contract returned as chat or return text is discarded.",
+    );
+    const writeInstruction = run.indexOf(
+      '"Write the completed contract only to planner-output/contract.md."',
+    );
+
+    expect(soleFileChannel).toBeGreaterThan(outputHeading);
+    expect(noWriteToolsOverride).toBeGreaterThan(soleFileChannel);
+    expect(retainedGroundRules).toBeGreaterThan(noWriteToolsOverride);
+    expect(discardedChat).toBeGreaterThan(retainedGroundRules);
+    expect(writeInstruction).toBeGreaterThan(discardedChat);
+  });
+
+  it("rejects shell-breaking quoting in the Prepare run block", () => {
+    const prepare = planSteps().find((step) => step.name === PREPARE_STEP);
+    const run = String(prepare?.run);
+    const syntaxCheck = spawnSync("bash", ["-n"], {
+      input: run,
+      encoding: "utf8",
+    });
+
+    expect(syntaxCheck.status, syntaxCheck.stderr).toBe(0);
+  });
+
   it("T-A6: uploads the contract and its captured issue revision together", () => {
     const upload = planSteps().find((step) => step.name === UPLOAD_STEP);
     const path = String(asMapping(upload?.with)?.path).split(/\r?\n/);

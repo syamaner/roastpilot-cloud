@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "../../scripts/factory/github-comment-limit.mts";
 import {
   STORY_PLANNER_CONTRACT_MARKER,
   type GithubRequest,
@@ -67,6 +68,19 @@ function withRegion(index: number, region: string): string {
   const regions: string[] = [...VALID_REGIONS];
   regions[index] = region;
   return buildContract({ regions });
+}
+
+function contractWithFinalBodyLength(targetLength: number): string {
+  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+  const seed = withRegion(0, "Alpha beta gamma requirements.");
+  const seedFinalLength = `${sanitizeContractForPosting(seed)}\n${marker}`.length;
+  if (targetLength < seedFinalLength) {
+    throw new Error("target final body length is shorter than the valid contract seed");
+  }
+  return withRegion(
+    0,
+    `Alpha beta gamma requirements.${"x".repeat(targetLength - seedFinalLength)}`,
+  );
 }
 
 function stubPublisherEnvironment(
@@ -272,6 +286,40 @@ describe("validateStoryPlannerContract", () => {
 });
 
 describe("main", () => {
+  it("T-C1: posts a final sanitized contract body at the GitHub comment limit", async () => {
+    const contract = contractWithFinalBodyLength(
+      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH,
+    );
+    const finalBody =
+      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`;
+    stubPublisherEnvironment(contract);
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    expect(finalBody).toHaveLength(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
+    await main(request);
+
+    const posts = mock.mock.calls.filter((call) => call[1] === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.[3]).toEqual({ body: finalBody });
+  });
+
+  it("T-C2: rejects an oversized final body before any GitHub request", async () => {
+    const actualLength = MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH + 1;
+    const contract = contractWithFinalBodyLength(actualLength);
+    stubPublisherEnvironment(contract);
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    const rejection = main(request).catch((error: unknown) => error);
+    const error = await rejection;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      `story-planner contract comment length ${actualLength} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+    );
+    expect((error as Error).message).not.toContain(contract);
+    expect(mock).not.toHaveBeenCalled();
+    expectNoPost(mock);
+  });
+
   it("T-A1: matching captured and current revisions permit one issue GET and one POST", async () => {
     stubPublisherEnvironment();
     const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });

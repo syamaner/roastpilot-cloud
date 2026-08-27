@@ -121,6 +121,8 @@ jobs:
             [
               "",
               "## Workflow-owned output contract",
+              "In this confined run the planner MUST write its completed contract to the file planner-output/contract.md using the single permitted Edit tool, which is the sole output channel. For this run only, this supersedes the agent-definition output-mechanism rules (both its no-write-tools statement and its instruction to return the contract as chat or return text), and it grants no capability beyond writing that one file.",
+              "Every other agent-definition ground rule (file and line verification, fail-closed direction analysis, scope-trip escalation, reviewer routing, and all quality and safety requirements) remains fully in force. A run that writes no file fails, and any contract returned as chat or return text is discarded.",
               "The retrieval tool named in the agent definition is deliberately unavailable in this confined run; use only the permitted repository readers.",
               "Write the completed contract only to planner-output/contract.md.",
               "It must contain these four markers exactly once and in this order:",
