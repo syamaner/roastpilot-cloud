@@ -42,6 +42,7 @@
  */
 
 import type { InlinePostingDegradeReason } from "./publish-spec-grounding-blocker-logic.mts";
+import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 import { parseLinkedIssueReferences, type IssueLinkKind } from "./spec-grounding-logic.mts";
 import type {
   CriteriaSpineEntry,
@@ -562,7 +563,7 @@ const MAX_FINDINGS_LIST_LENGTH = 55_000;
 const MAX_PROVENANCE_LIST_LENGTH = 8_000;
 
 /** GitHub's maximum accepted issue-comment body length, in characters. */
-export const MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH = 65_536;
+export { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 
 function buildCriteriaProvenanceSection(
   linkedIssueProvenance: readonly LinkedIssueProvenance[] | undefined,

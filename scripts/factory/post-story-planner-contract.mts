@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 
 import { githubRequest, requireEnv } from "./github-api.mts";
+import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 import {
   buildTriggerDetectionFold,
   escapeInvisibleCharactersVisibly,
@@ -213,6 +214,15 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
   );
   const contract = readFileSync(requireEnv("CONTRACT_PATH"), "utf8");
   validateStoryPlannerContract(contract, issueNumber);
+  const finalBody =
+    sanitizeContractForPosting(contract) +
+    "\n" +
+    STORY_PLANNER_CONTRACT_MARKER(issueNumber);
+  if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+    throw new Error(
+      `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+    );
+  }
 
   const [owner, repo] = repository.split("/", 2) as [string, string];
   if (
@@ -297,10 +307,7 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     "POST",
     `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
     {
-      body:
-        sanitizeContractForPosting(contract) +
-        "\n" +
-        STORY_PLANNER_CONTRACT_MARKER(issueNumber),
+      body: finalBody,
     },
   );
   console.log(`Posted one story-planner contract on issue #${issueNumber}.`);
