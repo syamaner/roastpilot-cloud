@@ -230,6 +230,11 @@ jobs:
           fi
           issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
             --json number,author,title,body,state,labels,comments)
+          rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")
+          issue_json=$(jq -cn \
+            --argjson context "$issue_json" \
+            --argjson rest "$rest_issue" \
+            '$context | .body = (if ($rest.body | type) == "string" then $rest.body elif $rest.body == null then "" else error("REST issue body is malformed") end)')
           state=$(echo "$issue_json" | jq -r '.state')
           labels=$(echo "$issue_json" | jq -r '[.labels[].name] | join(",")')
           if [ "$state" != "OPEN" ]; then
@@ -272,6 +277,8 @@ jobs:
             echo "Issue #$ISSUE_NUMBER has no current authorizing triage generation (found: $triage_generation) — refusing to implement."
             exit 1
           fi
+          ISSUE_CONTEXT_PATH=issue-context/issue.json \
+            node --experimental-strip-types scripts/factory/verify-approved-revision.mts
           echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"
 
       - name: Assert no Snowflake/Vercel secrets are present in this job's environment

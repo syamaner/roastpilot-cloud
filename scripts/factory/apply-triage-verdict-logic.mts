@@ -16,6 +16,9 @@ import {
   renderBoundedUntrustedMultilineBlock,
   renderBoundedUntrustedReason,
 } from "./untrusted-text.mts";
+import {
+  isApprovedRevision,
+} from "./approve-revision.mts";
 
 // Per-field render budgets for the three attacker-influenced sinks in the two
 // posted-body builders below. Every one defangs `@codex` triggers, surfaces
@@ -68,6 +71,21 @@ const TRIAGE_GENERATION_PATTERN =
 const TRIAGE_GENERATION_VALUE_PATTERN =
   /^(?:hold:[1-9][0-9]*\.[1-9][0-9]*|[1-9][0-9]*(?:\.[1-9][0-9]*)?)$/;
 const TRIAGE_EXECUTION_PATTERN = /^[1-9][0-9]*\.[1-9][0-9]*$/;
+export const APPROVED_REVISION_MARKER_PREFIX =
+  "<!-- roastpilot-factory:approved-revision:";
+export const APPROVED_REVISION_MARKER_PATTERN =
+  /(?:^|\n)<!-- roastpilot-factory:approved-revision:([0-9a-f]{64}):do-not-edit -->\r?\n<!-- roastpilot-factory:triage-generation:(?:hold:[1-9][0-9]*\.[1-9][0-9]*|[1-9][0-9]*(?:\.[1-9][0-9]*)?):do-not-edit -->\r?\n<!-- roastpilot-factory:triage-verdict:do-not-edit -->$/;
+
+export function buildApprovedRevisionMarker(revision: string): string {
+  if (!isApprovedRevision(revision)) {
+    throw new Error("approved revision has an invalid format");
+  }
+  return `${APPROVED_REVISION_MARKER_PREFIX}${revision}:do-not-edit -->`;
+}
+
+export function extractApprovedRevision(body: string): string | null {
+  return APPROVED_REVISION_MARKER_PATTERN.exec(body)?.[1] ?? null;
+}
 
 /**
  * Reports whether trusted triage-comment syntax carries a generation line.
@@ -261,6 +279,7 @@ export function buildVerdictCommentBody(
   generation: string,
   effectiveReadiness: ReadinessLabel = verdict.readiness,
   downgradeNotice: string | null = null,
+  approvedRevision: string | null = null,
 ): string {
   const effectiveGeneration =
     !isFactoryAuthorizingReadiness(effectiveReadiness) &&
@@ -316,6 +335,15 @@ export function buildVerdictCommentBody(
       "This label reflects the automated verdict above — a human may " +
       "override it._",
     "",
+  );
+  if (
+    isFactoryAuthorizingReadiness(effectiveReadiness) &&
+    approvedRevision !== null &&
+    isApprovedRevision(approvedRevision)
+  ) {
+    lines.push(buildApprovedRevisionMarker(approvedRevision));
+  }
+  lines.push(
     buildTriageGenerationMarker(effectiveGeneration),
     TRIAGE_COMMENT_MARKER,
   );

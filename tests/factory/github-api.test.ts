@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   decideRateLimitResponse,
   GithubApiError,
+  githubGraphql,
   githubRequest,
   MAX_RATE_LIMIT_RETRIES,
   MAX_RETRY_AFTER_SECONDS,
@@ -11,6 +12,103 @@ import {
   parseRetryAfterMs,
   requireEnv,
 } from "../../scripts/factory/github-api.mts";
+
+describe("githubGraphql", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns object data and POSTs the query and variables", async () => {
+    const fetchMock = vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      async (input: string | URL, init?: RequestInit) =>
+        new Response(JSON.stringify({ data: { repository: { id: "R_1" } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const variables = { owner: "syamaner" };
+
+    await expect(
+      githubGraphql<{ repository: { id: string } }>(
+        "tok",
+        "query($owner:String!){repository(owner:$owner,name:\"repo\"){id}}",
+        variables,
+      ),
+    ).resolves.toEqual({ repository: { id: "R_1" } });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe("https://api.github.com/graphql");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      query: "query($owner:String!){repository(owner:$owner,name:\"repo\"){id}}",
+      variables,
+    });
+  });
+
+  it("fails closed when GraphQL reports errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(
+        JSON.stringify({ data: { repository: {} }, errors: [{ message: "no" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ));
+
+    await expect(githubGraphql("tok", "query { viewer { login } }", {}))
+      .rejects.toThrow(/errors/);
+  });
+
+  it("fails closed when the GraphQL errors envelope is not an array", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: { repository: { id: "partial" } },
+          errors: { message: "intermediary failure" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ));
+
+    await expect(githubGraphql("tok", "query { viewer { login } }", {}))
+      .rejects.toThrow("GitHub GraphQL response contained errors");
+  });
+
+  it("accepts an empty GraphQL errors array with valid object data", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: { repository: { id: "R_empty_errors" } },
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ));
+
+    await expect(
+      githubGraphql<{ repository: { id: string } }>(
+        "tok",
+        "query { viewer { login } }",
+        {},
+      ),
+    ).resolves.toEqual({ repository: { id: "R_empty_errors" } });
+  });
+
+  it.each([{ extensions: {} }, { data: null }, { data: [] }])(
+    "fails closed when object data is missing: %j",
+    async (response) => {
+      vi.stubGlobal("fetch", vi.fn(async () =>
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ));
+
+      await expect(githubGraphql("tok", "query { viewer { login } }", {}))
+        .rejects.toThrow(/data/);
+    },
+  );
+});
 
 describe("requireEnv", () => {
   afterEach(() => {

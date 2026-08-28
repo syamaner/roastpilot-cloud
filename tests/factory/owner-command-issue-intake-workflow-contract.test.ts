@@ -11,6 +11,8 @@ const WORKFLOW_PATH = fileURLToPath(
   ),
 );
 const ENABLE_GATE = "vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'";
+const DISPATCH_GATE =
+  "${{ vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'approve' }}";
 const EXPECTED_INTAKE_ENV = {
   GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
   GITHUB_REPOSITORY: "${{ github.repository }}",
@@ -20,17 +22,13 @@ const EXPECTED_INTAKE_ENV = {
 const FORBIDDEN_SOURCE = [
   "task-agent",
   "task-apply",
-  "OWNER_TASK_APPLY_ENABLED",
-  "contents: write",
   "git push",
   "claude-code-action",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "workflow_dispatch",
-  "actions: write",
   "id-token",
   "issues: write",
   "/actions/workflows/",
-  "workflow run",
 ] as const;
 
 type Mapping = Record<string, unknown>;
@@ -61,18 +59,23 @@ function contractFailures(source: string): string[] {
   if (JSON.stringify(parsed.permissions) !== JSON.stringify({})) {
     failures.push("root-permissions");
   }
-  if (JSON.stringify(Object.keys(jobs)) !== JSON.stringify(["intake"])) {
+  if (JSON.stringify(Object.keys(jobs)) !== JSON.stringify([
+    "intake",
+    "dispatch-approve",
+  ])) {
     failures.push("job-set");
   }
-  for (const [jobName, rawJob] of Object.entries(jobs)) {
-    const job = mapping(rawJob);
-    if (job.if !== ENABLE_GATE) failures.push(`gate:${jobName}`);
-  }
   const intake = mapping(jobs.intake);
+  if (intake.if !== ENABLE_GATE) failures.push("gate:intake");
   if (JSON.stringify(intake.permissions) !== JSON.stringify({
     contents: "read",
     issues: "read",
   })) failures.push("intake-permissions");
+  if (JSON.stringify(mapping(intake.outputs)) !== JSON.stringify({
+    proceed: "${{ steps.intake.outputs.proceed }}",
+    verb: "${{ steps.intake.outputs.verb }}",
+    approved_revision: "${{ steps.intake.outputs.approved_revision }}",
+  })) failures.push("intake-outputs");
   const rawSteps = intake.steps;
   if (!Array.isArray(rawSteps)) {
     failures.push("steps");
@@ -103,13 +106,33 @@ function contractFailures(source: string): string[] {
     JSON.stringify(mapping(entrypoint.env)) !==
       JSON.stringify(EXPECTED_INTAKE_ENV)
   ) failures.push("entrypoint");
+  const dispatch = mapping(jobs["dispatch-approve"]);
+  if (dispatch.needs !== "intake") failures.push("dispatch-needs");
+  if (dispatch.if !== DISPATCH_GATE) failures.push("gate:dispatch-approve");
+  if (JSON.stringify(mapping(dispatch.permissions)) !== JSON.stringify({
+    actions: "write",
+  })) failures.push("dispatch-permissions");
+  const dispatchSteps = dispatch.steps;
+  if (!Array.isArray(dispatchSteps) || dispatchSteps.length !== 1) {
+    failures.push("dispatch-steps");
+  } else {
+    const step = mapping(dispatchSteps[0]);
+    if (
+      step.name !== "Dispatch triage readiness promotion" ||
+      JSON.stringify(mapping(step.env)) !== JSON.stringify({
+        GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+      }) ||
+      step.run !==
+        "gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness -f approved_revision=${{ needs.intake.outputs.approved_revision }}"
+    ) failures.push("dispatch-step");
+  }
   return failures;
 }
 
 const SOURCE = readFileSync(WORKFLOW_PATH, "utf8");
 
 describe("owner command issue intake workflow contract", () => {
-  it("M-KEYSTONE-A has no task, write, model, credential, or dispatch path", () => {
+  it("has no task, contents-write, model, or broad credential path", () => {
     expect(contractFailures(SOURCE)).toEqual([]);
   });
 
@@ -121,12 +144,13 @@ describe("owner command issue intake workflow contract", () => {
     },
   );
 
-  it("M-DARK gates every job on only the issue-intake enable variable", () => {
+  it("M-DARK gates intake and approve dispatch on the shared enable variable", () => {
     const jobs = mapping(parseWorkflow(SOURCE).jobs);
-    for (const rawJob of Object.values(jobs)) {
-      expect(mapping(rawJob).if).toBe(ENABLE_GATE);
-    }
-    expect(SOURCE).not.toContain("FACTORY_PAUSED");
+    expect(mapping(jobs.intake).if).toBe(ENABLE_GATE);
+    expect(mapping(jobs["dispatch-approve"]).if).toBe(DISPATCH_GATE);
+    expect(String(mapping(jobs["dispatch-approve"]).if)).not.toContain(
+      "FACTORY_PAUSED",
+    );
   });
 
   it("M-DARK catches a removed or widened job gate", () => {
@@ -139,13 +163,31 @@ describe("owner command issue intake workflow contract", () => {
     expect(contractFailures(widened)).toContain("gate:intake");
   });
 
+  it("dispatch-approve is approve-only, actions-write-only, and passes readiness plus the captured revision", () => {
+    const jobs = mapping(parseWorkflow(SOURCE).jobs);
+    const intake = mapping(jobs.intake);
+    const dispatch = mapping(jobs["dispatch-approve"]);
+    expect(mapping(intake.outputs)).toEqual({
+      proceed: "${{ steps.intake.outputs.proceed }}",
+      verb: "${{ steps.intake.outputs.verb }}",
+      approved_revision: "${{ steps.intake.outputs.approved_revision }}",
+    });
+    expect(dispatch.needs).toBe("intake");
+    expect(dispatch.if).toBe(DISPATCH_GATE);
+    expect(mapping(dispatch.permissions)).toEqual({ actions: "write" });
+    const steps = (dispatch.steps as unknown[]).map(mapping);
+    expect(String(steps[0]?.run)).toContain("triage_mode=readiness");
+    expect(String(steps[0]?.run)).toContain(
+      "approved_revision=${{ needs.intake.outputs.approved_revision }}",
+    );
+    expect(String(steps[0]?.run)).not.toContain("implement-ready-issues.yml");
+    expect(SOURCE).not.toContain("OWNER_TASK_APPLY_ENABLED:");
+  });
+
   it("pins read-only permissions and catches either write mutation", () => {
     const jobWrite = SOURCE.replace("      contents: read", "      contents: write");
     const issueWrite = SOURCE.replace("      issues: read", "      issues: write");
-    expect(contractFailures(jobWrite)).toEqual(expect.arrayContaining([
-      "forbidden:contents: write",
-      "intake-permissions",
-    ]));
+    expect(contractFailures(jobWrite)).toContain("intake-permissions");
     expect(contractFailures(issueWrite)).toContain("intake-permissions");
   });
 

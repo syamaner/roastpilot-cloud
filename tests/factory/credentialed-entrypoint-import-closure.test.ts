@@ -30,6 +30,7 @@ const ENTRYPOINTS = [
   "scripts/factory/intake-owner-command.mts",
   "scripts/factory/intake-owner-command-issue.mts",
   "scripts/factory/post-owner-command-response.mts",
+  "scripts/factory/verify-approved-revision.mts",
 ] as const;
 const NODE_BUILTINS: readonly NodeExternalModuleRule[] = [
   {
@@ -67,6 +68,8 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
       "scripts/factory/apply-owner-task.mts",
+      "scripts/factory/apply-triage-verdict-logic.mts",
+      "scripts/factory/approve-revision.mts",
       "scripts/factory/derive-issue-command-authorization.mts",
       "scripts/factory/factory-owner-allowlist.mts",
       "scripts/factory/github-api.mts",
@@ -78,8 +81,23 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
       "scripts/factory/patch-analysis-format.mts",
       "scripts/factory/post-owner-command-response-logic.mts",
       "scripts/factory/post-owner-command-response.mts",
+      "scripts/factory/triage-verdict-schema.mts",
       "scripts/factory/untrusted-diff-fence.mts",
       "scripts/factory/untrusted-text.mts",
+      "scripts/factory/verify-approved-revision.mts",
+    ]);
+  });
+
+  it("keeps approved-revision verification inside the protected dependency-free closure", () => {
+    const result = verify(["scripts/factory/verify-approved-revision.mts"]);
+
+    expect(result.violations).toEqual([]);
+    expect(result.files).toEqual([
+      "scripts/factory/apply-triage-verdict-logic.mts",
+      "scripts/factory/approve-revision.mts",
+      "scripts/factory/triage-verdict-schema.mts",
+      "scripts/factory/untrusted-text.mts",
+      "scripts/factory/verify-approved-revision.mts",
     ]);
   });
 
@@ -88,6 +106,7 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
 
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
+      "scripts/factory/approve-revision.mts",
       "scripts/factory/derive-issue-command-authorization.mts",
       "scripts/factory/factory-owner-allowlist.mts",
       "scripts/factory/github-api.mts",

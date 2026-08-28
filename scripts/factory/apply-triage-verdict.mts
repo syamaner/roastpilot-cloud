@@ -45,6 +45,8 @@
  *   apply-only retry may find the same final generation.
  * - `TRIAGE_MODE` - trusted workflow-event mode. Unknown or absent values
  *   fail closed to `pre-filter`.
+ * - `APPROVED_REVISION` - optional lowercase SHA-256 of the REST issue body
+ *   reviewed by the owner. A malformed value or body mismatch fails closed.
  * - `VERDICT_PATH` — path to the downloaded artifact file (may not exist).
  */
 
@@ -54,6 +56,10 @@ import {
   type DiffVerifiableAcResult,
 } from "./diff-verifiable-ac.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
+import {
+  computeApprovedRevision,
+  isApprovedRevision,
+} from "./approve-revision.mts";
 import {
   MAX_PAYLOAD_BYTES,
   validateTriageVerdict,
@@ -240,6 +246,7 @@ async function applyValidVerdict(
   diffVerifiableAc: DiffVerifiableAcResult,
   commentId: number,
   generation: string,
+  approvedRevision: string,
 ): Promise<void> {
   const { verdict } = result;
 
@@ -270,6 +277,7 @@ async function applyValidVerdict(
       generation,
       diffVerifiableAc.effectiveReadiness,
       diffVerifiableAc.downgradeNotice,
+      approvedRevision,
     ),
   );
 
@@ -416,6 +424,7 @@ export async function main(): Promise<void> {
   const generation = requireEnv("TRIAGE_EXECUTION");
   const holdGeneration = buildTriageHoldGeneration(generation);
   const triageMode = validateTriageMode(process.env.TRIAGE_MODE);
+  const approvedRevision = process.env.APPROVED_REVISION ?? "";
 
   // Re-check immediately at the privileged boundary. The issue can close
   // after seed validates it, and neither a verdict nor the fail-closed
@@ -450,6 +459,23 @@ export async function main(): Promise<void> {
       trustedCommentId,
       holdGeneration,
     );
+
+  if (approvedRevision !== "" && !isApprovedRevision(approvedRevision)) {
+    await fallback(["APPROVED_REVISION must be empty or canonical lowercase SHA-256"]);
+    process.exitCode = 1;
+    return;
+  }
+  if (
+    approvedRevision !== "" &&
+    (typeof issue.body !== "string" ||
+      computeApprovedRevision(issue.body) !== approvedRevision)
+  ) {
+    await fallback([
+      "approved issue revision no longer matches the current REST issue body",
+    ]);
+    process.exitCode = 1;
+    return;
+  }
 
   // Gate on triage job success BEFORE ever reading the artifact. A verdict
   // is applied only when (triage succeeded AND the artifact is valid) —
@@ -525,6 +551,7 @@ export async function main(): Promise<void> {
     deterministicReadiness,
     trustedCommentId,
     generation,
+    approvedRevision,
   );
 }
 

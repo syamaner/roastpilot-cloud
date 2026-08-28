@@ -594,12 +594,20 @@ describe("factory halt and resume inventory", () => {
     ]);
   });
 
-  it("keeps unaffected workflows free of FACTORY_PAUSED mentions", () => {
+  it("keeps unaffected workflows free of executable FACTORY_PAUSED references", () => {
     for (const filename of UNAFFECTED_WORKFLOWS) {
-      expect(
-        workflowTexts.get(filename),
-        `Missing unaffected workflow ${filename}`,
-      ).not.toContain("FACTORY_PAUSED");
+      const source = workflowTexts.get(filename);
+      expect(source, `Missing unaffected workflow ${filename}`).toBeDefined();
+      if (filename === "owner-command-issue-intake.yml") {
+        const document = parseDocument(source ?? "");
+        expect(document.errors).toEqual([]);
+        expect(JSON.stringify(document.toJS())).not.toContain("FACTORY_PAUSED");
+        expect(source).toContain(
+          "Activation checklist: this job has no FACTORY_PAUSED conjunct.",
+        );
+      } else {
+        expect(source).not.toContain("FACTORY_PAUSED");
+      }
     }
   });
 

@@ -16,6 +16,7 @@ jobs:
     outputs:
       proceed: ${{ steps.intake.outputs.proceed }}
       verb: ${{ steps.intake.outputs.verb }}
+      approved_revision: ${{ steps.intake.outputs.approved_revision }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -32,3 +33,25 @@ jobs:
           TARGET_ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: node --experimental-strip-types scripts/factory/intake-owner-command-issue.mts
+
+  # This dispatches ONLY the already-reviewed triage readiness promotion
+  # (ready-to-spec -> ready-to-implement). It never dispatches
+  # implement-ready-issues.yml or any contents: write workflow, and it never
+  # reaches OWNER_TASK_APPLY_ENABLED.
+  # Activation checklist: OWNER_COMMAND_INTAKE_ENABLED is shared with the
+  # frozen owner-command-intake.yml, so C3 activation must account for both
+  # workflows becoming active when the variable is set.
+  # Activation checklist: this job has no FACTORY_PAUSED conjunct. The target
+  # triage workflow applies its own pause gate, so C3 must account for this
+  # availability-only dispatch behavior when activation removes the dark gate.
+  dispatch-approve:
+    needs: intake
+    if: ${{ vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'approve' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch triage readiness promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness -f approved_revision=${{ needs.intake.outputs.approved_revision }}
