@@ -183,6 +183,38 @@ describe("main — valid verdict path", () => {
     );
   });
 
+  it("falls back to GITHUB_TOKEN when FACTORY_APP_TOKEN is absent", async () => {
+    delete process.env.FACTORY_APP_TOKEN;
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-spec",
+        reasoning: "The story needs a planning contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(calls.find((call) => call.method === "PUT")?.authorization).toBe(
+      "Bearer test-token",
+    );
+    const commentWrites = calls.filter((call) => call.method === "PATCH");
+    expect(commentWrites).toHaveLength(1);
+    expect(commentWrites[0]?.authorization).toBe("Bearer test-token");
+  });
+
   it("keeps ready-to-implement label and comment writes on GITHUB_TOKEN", async () => {
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
