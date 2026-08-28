@@ -11,6 +11,12 @@ const WORKFLOW_PATH = fileURLToPath(
   ),
 );
 const ENABLE_GATE = "vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'";
+const EXPECTED_INTAKE_ENV = {
+  GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+  GITHUB_REPOSITORY: "${{ github.repository }}",
+  TARGET_ISSUE_NUMBER: "${{ github.event.issue.number }}",
+  COMMENT_ID: "${{ github.event.comment.id }}",
+};
 const FORBIDDEN_SOURCE = [
   "task-agent",
   "task-apply",
@@ -94,7 +100,8 @@ function contractFailures(source: string): string[] {
     entrypoint?.id !== "intake" ||
     entrypoint.run !==
       "node --experimental-strip-types scripts/factory/intake-owner-command-issue.mts" ||
-    mapping(entrypoint.env).GH_TOKEN !== "${{ secrets.GITHUB_TOKEN }}"
+    JSON.stringify(mapping(entrypoint.env)) !==
+      JSON.stringify(EXPECTED_INTAKE_ENV)
   ) failures.push("entrypoint");
   return failures;
 }
@@ -157,10 +164,10 @@ describe("owner command issue intake workflow contract", () => {
     expect(steps[2]).toEqual(expect.objectContaining({
       id: "intake",
       run: "node --experimental-strip-types scripts/factory/intake-owner-command-issue.mts",
-      env: expect.objectContaining({
-        GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
-      }),
     }));
+    // MUTATION-CHECK: exact equality kills widening the intake env to carry
+    // raw webhook content such as COMMENT_BODY from github.event.comment.body.
+    expect(mapping(steps[2]!.env)).toEqual(EXPECTED_INTAKE_ENV);
   });
 
   it("catches a dispatch trigger mutation", () => {
@@ -188,9 +195,15 @@ describe("owner command issue intake workflow contract", () => {
       "intake-owner-command-issue.mts",
       "other-entrypoint.mts",
     );
+    const contentEnv = SOURCE.replace(
+      "          COMMENT_ID: ${{ github.event.comment.id }}",
+      "          COMMENT_ID: ${{ github.event.comment.id }}\n" +
+        "          COMMENT_BODY: ${{ github.event.comment.body }}",
+    );
     expect(contractFailures(persisted)).toContain("checkout");
     expect(contractFailures(broadCheckout)).toContain("checkout");
     expect(contractFailures(changedNode)).toContain("setup-node");
     expect(contractFailures(changedEntrypoint)).toContain("entrypoint");
+    expect(contractFailures(contentEnv)).toContain("entrypoint");
   });
 });
