@@ -11,7 +11,17 @@ const GITHUB_EXPRESSION = /\$\{\{[\s\S]*?\}\}/g;
 const ALLOWED_SINK_EXPRESSIONS = [
   /^steps\.[A-Za-z_][A-Za-z0-9_-]*\.outcome$/i,
   /^github\.repository$/i,
+  // 28 Aug 2026, D-F2-C2 C2a: the issue_comment payload issue number is an
+  // integer trusted by the approve-dispatch contract and is safe in every
+  // audited execution sink.
+  /^github\.event\.issue\.number$/i,
 ];
+const ALLOWED_LOCATION_SINK_EXPRESSIONS: Readonly<Record<string, RegExp>> = {
+  // D-F2-C2 C2a: this output is produced only by computeApprovedRevision as
+  // lowercase hex. Keep this exception bound to the exact reviewed command.
+  ".github/workflows/owner-command-issue-intake.yml.jobs.dispatch-approve.steps[0].run":
+    /^needs\.intake\.outputs\.approved_revision$/,
+};
 const SINK_KEYS = new Set(["run", "shell", "script"]);
 
 type Mapping = Record<string, unknown>;
@@ -76,7 +86,8 @@ function findUnrecognisedSinkExpressions(
         const expression = match[0];
         const normalized = normalizedExpressionInnerText(expression);
         if (
-          !ALLOWED_SINK_EXPRESSIONS.some((pattern) => pattern.test(normalized))
+          !ALLOWED_SINK_EXPRESSIONS.some((pattern) => pattern.test(normalized)) &&
+          !ALLOWED_LOCATION_SINK_EXPRESSIONS[childLocation]?.test(normalized)
         ) {
           failures.push(`${childLocation}: ${expression}`);
         }
@@ -192,12 +203,30 @@ describe("workflow run/shell/script expression injection guard (issues #151, #15
     "${{ steps.grants-post.outcome }}",
     "${{ github.repository }}",
     "${{   github.repository   }}",
+    "${{ github.event.issue.number }}",
   ])("allows reviewed run expression %s", (expression) => {
     const allowedWorkflow = {
       path: ".github/workflows/allowed.yml",
       content: `jobs:\n  test:\n    steps:\n      - run: |\n          echo "${expression}"\n`,
     };
     expect(validateWorkflowSinkExpressions(allowedWorkflow)).toEqual([]);
+  });
+
+  it("allows the approved revision output only at its reviewed dispatch sink", () => {
+    const expression = "${{ needs.intake.outputs.approved_revision }}";
+    const reviewedWorkflow = {
+      path: ".github/workflows/owner-command-issue-intake.yml",
+      content: `jobs:\n  dispatch-approve:\n    steps:\n      - run: gh workflow run triage-issues.yml -f approved_revision=${expression}\n`,
+    };
+    const otherWorkflow = {
+      path: ".github/workflows/other.yml",
+      content: reviewedWorkflow.content,
+    };
+
+    expect(validateWorkflowSinkExpressions(reviewedWorkflow)).toEqual([]);
+    expect(validateWorkflowSinkExpressions(otherWorkflow)).toEqual([
+      `${otherWorkflow.path}.jobs.dispatch-approve.steps[0].run: ${expression}`,
+    ]);
   });
 
   it("catches a composite action run expression", () => {

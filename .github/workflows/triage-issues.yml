@@ -23,6 +23,11 @@ on:
         options:
           - pre-filter
           - readiness
+      approved_revision:
+        description: "SHA-256 digest of the issue body reviewed for approval"
+        required: false
+        type: string
+        default: ""
 
 env:
   TARGET_ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
@@ -511,6 +516,7 @@ jobs:
           # raw-issue backfills, fail closed to pre-filter. The script re-validates
           # unknown values fail-closed to pre-filter.
           TRIAGE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.triage_mode || 'pre-filter' }}
+          APPROVED_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.approved_revision || '' }}
           # The `triage` step uploads its artifact with `if: always()`, so a
           # schema-valid verdict can exist even from a run that did NOT
           # succeed (timeout, internal error, a forbidden-tool attempt).

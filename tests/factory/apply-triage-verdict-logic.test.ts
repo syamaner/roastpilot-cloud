@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  APPROVED_REVISION_MARKER_PATTERN,
   TRIAGE_COMMENT_MARKER,
+  buildApprovedRevisionMarker,
   buildFallbackCommentBody,
   buildTriageGenerationMarker,
   buildTriageHoldGeneration,
@@ -8,12 +10,14 @@ import {
   computeNewLabelSet,
   extractTriageGeneration,
   extractOwnedTriageGenerations,
+  extractApprovedRevision,
   hasAdjacentTriageGenerationMarker,
   hasBlockingTriageGeneration,
   isAuthorizingTriageGeneration,
   selectLabelWriteToken,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
+import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   MAX_QUESTION_LENGTH,
   MAX_QUESTIONS,
@@ -31,6 +35,7 @@ const verdict: TriageVerdict = {
   reasoning: "Plan link, acceptance criteria, scope, and size are all present.",
   missing_info_questions: [],
 };
+const approvedRevision = computeApprovedRevision("reviewed REST body");
 
 describe("selectLabelWriteToken", () => {
   it("uses the App token only for ready-to-spec when it is present", () => {
@@ -169,6 +174,37 @@ describe("transitional triage-generation fence", () => {
 });
 
 describe("buildVerdictCommentBody", () => {
+  it("M-B2b emits an approved revision immediately above the authorizing generation", () => {
+    const body = buildVerdictCommentBody(
+      verdict,
+      "123.1",
+      "ready-to-implement",
+      null,
+      approvedRevision,
+    );
+    expect(body).toContain(
+      `${buildApprovedRevisionMarker(approvedRevision)}\n` +
+        `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`,
+    );
+    expect(extractApprovedRevision(body)).toBe(approvedRevision);
+    expect(extractTriageGeneration(body)).toBe("123.1");
+  });
+
+  it.each(["ready-to-spec", "needs-triage"] as const)(
+    "M-B2b omits the approved revision after a downgrade to %s",
+    (effectiveReadiness) => {
+      const body = buildVerdictCommentBody(
+        verdict,
+        "123.1",
+        effectiveReadiness,
+        null,
+        approvedRevision,
+      );
+      expect(extractApprovedRevision(body)).toBeNull();
+      expect(body).not.toContain("approved-revision:");
+    },
+  );
+
   it("keeps an authorizing generation for ready-to-implement", () => {
     const body = buildVerdictCommentBody(
       verdict,
@@ -392,6 +428,26 @@ describe("buildFallbackCommentBody", () => {
 });
 
 describe("triage generation marker", () => {
+  it("round-trips the terminal approved revision without perturbing generation detection", () => {
+    const body =
+      `${buildApprovedRevisionMarker(approvedRevision)}\r\n` +
+      `${buildTriageGenerationMarker("123.1")}\r\n${TRIAGE_COMMENT_MARKER}`;
+    expect(APPROVED_REVISION_MARKER_PATTERN.test(body)).toBe(true);
+    expect(extractApprovedRevision(body)).toBe(approvedRevision);
+    expect(extractTriageGeneration(body)).toBe("123.1");
+    expect(hasAdjacentTriageGenerationMarker(body)).toBe(true);
+  });
+
+  it("rejects malformed approved revision markers", () => {
+    expect(() => buildApprovedRevisionMarker("junk")).toThrow(/invalid format/);
+    expect(
+      extractApprovedRevision(
+        `<!-- roastpilot-factory:approved-revision:${"A".repeat(64)}:do-not-edit -->\n` +
+          `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`,
+      ),
+    ).toBeNull();
+  });
+
   it("round-trips only the marker anchored beside the final factory marker", () => {
     const body =
       `untrusted ${buildTriageGenerationMarker("999")}\n` +

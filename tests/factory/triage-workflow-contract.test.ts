@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,9 +15,11 @@ import { describe, expect, it } from "vitest";
 import { parseDocument } from "yaml";
 import {
   TRIAGE_COMMENT_MARKER,
+  buildApprovedRevisionMarker,
   buildTriageGenerationMarker,
   extractTriageGeneration,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
+import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
 
 const TRIAGE_WORKFLOW_PATH = fileURLToPath(
   new URL("../../.github/workflows/triage-issues.yml", import.meta.url),
@@ -46,6 +49,10 @@ const CONTRACT_EXCERPT_PREFIX_MAX_BYTES =
 function storyPlannerContractMarker(issueNumber: number): string {
   return `<!-- story-planner-contract:issue-${issueNumber} -->`;
 }
+
+const FACTORY_SCRIPTS_DIRECTORY = fileURLToPath(
+  new URL("../../scripts/factory/", import.meta.url),
+);
 
 type Mapping = Record<string, unknown>;
 
@@ -290,6 +297,7 @@ function runTargetValidation(
 function runImplementEligibility(
   run: string,
   issue: unknown,
+  restBody: unknown = (issue as { readonly body?: unknown }).body,
 ): {
   readonly status: number | null;
   readonly output: string;
@@ -299,19 +307,38 @@ function runImplementEligibility(
   const workdir = mkdtempSync(join(tmpdir(), "implement-eligibility-"));
   const bin = join(workdir, "bin");
   const filterDir = join(workdir, ".claude", "skills", "triage");
+  const factoryScriptsDir = join(workdir, "scripts", "factory");
   const issuePath = join(workdir, "issue.json");
+  const restIssuePath = join(workdir, "rest-issue.json");
   const outputPath = join(workdir, "output");
   const ghPath = join(bin, "gh");
   try {
     mkdirSync(bin);
     mkdirSync(filterDir, { recursive: true });
+    mkdirSync(factoryScriptsDir, { recursive: true });
     writeFileSync(issuePath, JSON.stringify(issue));
+    writeFileSync(restIssuePath, JSON.stringify({ body: restBody }));
     writeFileSync(outputPath, "");
     writeFileSync(
       join(filterDir, "authorized-comments.jq"),
       readFileSync(AUTHORIZED_COMMENTS_FILTER_PATH, "utf8"),
     );
-    writeFileSync(ghPath, '#!/usr/bin/env bash\ncat "$ISSUE_JSON_PATH"\n');
+    for (const filename of [
+      "verify-approved-revision.mts",
+      "approve-revision.mts",
+      "apply-triage-verdict-logic.mts",
+      "triage-verdict-schema.mts",
+      "untrusted-text.mts",
+    ]) {
+      copyFileSync(
+        join(FACTORY_SCRIPTS_DIRECTORY, filename),
+        join(factoryScriptsDir, filename),
+      );
+    }
+    writeFileSync(
+      ghPath,
+      '#!/usr/bin/env bash\nif [ "${1:-}" = "api" ]; then cat "$REST_ISSUE_JSON_PATH"; else cat "$ISSUE_JSON_PATH"; fi\n',
+    );
     chmodSync(ghPath, 0o755);
 
     const result = spawnSync("bash", ["-c", run], {
@@ -323,6 +350,7 @@ function runImplementEligibility(
         GH_TOKEN: "test-token",
         GITHUB_OUTPUT: outputPath,
         ISSUE_JSON_PATH: issuePath,
+        REST_ISSUE_JSON_PATH: restIssuePath,
         ISSUE_NUMBER: "51",
         REPO: "syamaner/roastpilot-cloud",
       },
@@ -416,6 +444,7 @@ describe("bounded triage context contract", () => {
     const inputs = asMapping(dispatch?.inputs);
     const issueNumber = asMapping(inputs?.issue_number);
     const triageMode = asMapping(inputs?.triage_mode);
+    const approvedRevision = asMapping(inputs?.approved_revision);
 
     expect(asMapping(on?.issues)?.types).toEqual(["opened"]);
     expect(workflow["run-name"]).toBe(
@@ -425,7 +454,11 @@ describe("bounded triage context contract", () => {
       "issues",
       "workflow_dispatch",
     ]);
-    expect(Object.keys(inputs ?? {})).toEqual(["issue_number", "triage_mode"]);
+    expect(Object.keys(inputs ?? {})).toEqual([
+      "issue_number",
+      "triage_mode",
+      "approved_revision",
+    ]);
     expect(issueNumber).toEqual({
       description: "The issue number to triage or re-triage",
       required: true,
@@ -440,6 +473,12 @@ describe("bounded triage context contract", () => {
       type: "choice",
       default: "pre-filter",
       options: ["pre-filter", "readiness"],
+    });
+    expect(approvedRevision).toEqual({
+      description: "SHA-256 digest of the issue body reviewed for approval",
+      required: false,
+      type: "string",
+      default: "",
     });
   });
 
@@ -618,6 +657,8 @@ describe("bounded triage context contract", () => {
       TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
       TRIAGE_MODE:
         "${{ github.event_name == 'workflow_dispatch' && inputs.triage_mode || 'pre-filter' }}",
+      APPROVED_REVISION:
+        "${{ github.event_name == 'workflow_dispatch' && inputs.approved_revision || '' }}",
     });
     expect(
       asMapping(
@@ -1637,6 +1678,8 @@ describe("bounded triage context contract", () => {
       'if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then',
       "exit 1",
       "--json number,author,title,body,state,labels,comments",
+      'rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")',
+      ".body = (if ($rest.body | type) == \"string\" then $rest.body",
       `state=$(echo "$issue_json" | jq -r '.state')`,
       `labels=$(echo "$issue_json" | jq -r`,
       `if [ "$state" != "OPEN" ]; then`,
@@ -1650,6 +1693,7 @@ describe("bounded triage context contract", () => {
       `$history[0].triage_generation`,
       `if ! [[ "$triage_generation" =~ ^[1-9][0-9]*\\.[1-9][0-9]*$ ]]; then`,
       "exit 1",
+      "node --experimental-strip-types scripts/factory/verify-approved-revision.mts",
       'echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"',
     ]);
     expect(step.id).toBe("issue-context");
@@ -1764,6 +1808,32 @@ describe("bounded triage context contract", () => {
       status: 0,
       output: "triage_generation=123.1\n",
     });
+    const matchingIssue = issue(["123.1"]) as {
+      body: string;
+      comments: Array<{ body: string }>;
+    };
+    const matchingRestBody = "REST body\nwith trailing newline\n";
+    matchingIssue.body = "different GraphQL body representation";
+    matchingIssue.comments[0]!.body =
+      `Verdict\n${buildApprovedRevisionMarker(computeApprovedRevision(matchingRestBody))}\n` +
+      `<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n` +
+      TRIAGE_COMMENT_MARKER;
+    expect(
+      runImplementEligibility(eligibilityRun, matchingIssue, matchingRestBody),
+    ).toMatchObject({
+      status: 0,
+      output: "triage_generation=123.1\n",
+    });
+
+    const mismatchedIssue = structuredClone(matchingIssue);
+    const mismatch = runImplementEligibility(
+      eligibilityRun,
+      mismatchedIssue,
+      "REST body edited after approval",
+    );
+    expect(mismatch.status).not.toBe(0);
+    expect(mismatch.output).toBe("");
+    expect(mismatch.stderr).toContain("does not match");
     for (const generations of [
       [],
       ["123"],

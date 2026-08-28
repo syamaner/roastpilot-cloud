@@ -450,3 +450,36 @@ export async function githubRequest<T>(
     return (await response.json()) as T;
   }
 }
+
+interface GithubGraphqlResponse<T> {
+  readonly data?: T;
+  readonly errors?: unknown;
+}
+
+/** Makes a fail-closed request to GitHub's GraphQL endpoint. */
+export async function githubGraphql<T>(
+  token: string,
+  query: string,
+  variables: Readonly<Record<string, unknown>>,
+): Promise<T> {
+  const response = await githubRequest<GithubGraphqlResponse<T>>(
+    token,
+    "POST",
+    "/graphql",
+    { query, variables },
+  );
+  if (
+    response.errors !== undefined &&
+    (!Array.isArray(response.errors) || response.errors.length > 0)
+  ) {
+    throw new Error("GitHub GraphQL response contained errors");
+  }
+  if (
+    typeof response.data !== "object" ||
+    response.data === null ||
+    Array.isArray(response.data)
+  ) {
+    throw new Error("GitHub GraphQL response is missing object data");
+  }
+  return response.data;
+}
