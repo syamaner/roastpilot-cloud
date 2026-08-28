@@ -28,6 +28,7 @@ const REPOSITORY_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRYPOINTS = [
   "scripts/factory/apply-owner-task.mts",
   "scripts/factory/intake-owner-command.mts",
+  "scripts/factory/intake-owner-command-issue.mts",
   "scripts/factory/post-owner-command-response.mts",
 ] as const;
 const NODE_BUILTINS: readonly NodeExternalModuleRule[] = [
@@ -66,9 +67,11 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
       "scripts/factory/apply-owner-task.mts",
+      "scripts/factory/derive-issue-command-authorization.mts",
       "scripts/factory/factory-owner-allowlist.mts",
       "scripts/factory/github-api.mts",
       "scripts/factory/implement-patch-logic.mts",
+      "scripts/factory/intake-owner-command-issue.mts",
       "scripts/factory/intake-owner-command.mts",
       "scripts/factory/owner-command-logic.mts",
       "scripts/factory/owner-task-patch-logic.mts",
@@ -77,6 +80,19 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
       "scripts/factory/post-owner-command-response.mts",
       "scripts/factory/untrusted-diff-fence.mts",
       "scripts/factory/untrusted-text.mts",
+    ]);
+  });
+
+  it("keeps issue intake inside the protected dependency-free closure", () => {
+    const result = verify(["scripts/factory/intake-owner-command-issue.mts"]);
+
+    expect(result.violations).toEqual([]);
+    expect(result.files).toEqual([
+      "scripts/factory/derive-issue-command-authorization.mts",
+      "scripts/factory/factory-owner-allowlist.mts",
+      "scripts/factory/github-api.mts",
+      "scripts/factory/intake-owner-command-issue.mts",
+      "scripts/factory/owner-command-logic.mts",
     ]);
   });
 

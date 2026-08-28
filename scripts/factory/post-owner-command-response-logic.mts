@@ -26,9 +26,14 @@ const TASK_ACKNOWLEDGEMENT =
 const RESPONSE_MARKER_SPOOF_REMOVED =
   "[owner-command response marker removed]";
 
+type ResponseOwnerCommand = Extract<
+  OwnerCommand,
+  { verb: "question" | "task" }
+>;
+
 export type DerivedAuthorization =
   | { proceed: false }
-  | { proceed: true; command: OwnerCommand };
+  | { proceed: true; command: ResponseOwnerCommand };
 
 export interface ResponseAuthorizationInput {
   issue: unknown;
@@ -153,6 +158,12 @@ export function deriveResponseAuthorization(
 
   const command = parseOwnerCommand(input.commentBody);
   if (command === null) {
+    return { proceed: false };
+  }
+  // Issue-only verbs must never cross into the PR-scoped response intake.
+  // MUTATION-CHECK M-KEYSTONE-B: widening or removing this closed subset
+  // fails the approve and respec authorization regressions.
+  if (command.verb !== "question" && command.verb !== "task") {
     return { proceed: false };
   }
 

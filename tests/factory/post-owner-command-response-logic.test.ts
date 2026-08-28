@@ -149,6 +149,15 @@ describe("defense-in-depth authorization re-derivation", () => {
     });
   });
 
+  it.each(["approve", "respec"])(
+    "M-KEYSTONE-B rejects the issue-only %s verb on PR intake",
+    (verb) => {
+      expect(deriveResponseAuthorization(authorizationInput({
+        commentBody: `@claude ${verb}`,
+      }))).toEqual({ proceed: false });
+    },
+  );
+
   it("Q4 / M6 rejects a non-PR issue", () => {
     expect(deriveResponseAuthorization(authorizationInput({ issue: {} })))
       .toEqual({ proceed: false });

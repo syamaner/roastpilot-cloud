@@ -14,6 +14,10 @@ const UNAFFECTED_WORKFLOWS = new Set([
   "dependency-review.yml",
   "claude-code-review.yml",
   "dev-snowflake-contract.yml",
+  // 28 Aug 2026, D-F2-C2: C1 ships this issue-only classifier dark on its
+  // enable variable alone. D-F2-A6 adds FACTORY_PAUSED and the numeric workflow
+  // ID inventory together at activation, after GitHub assigns the live ID.
+  "owner-command-issue-intake.yml",
   // Refs #237: this workflow_dispatch-only, operator-initiated diagnostic is
   // intentionally run while the factory is paused before activation. A pause
   // gate would defeat that purpose; no event/automated trigger can reach it.

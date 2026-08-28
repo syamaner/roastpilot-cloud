@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(12);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2120,14 +2120,18 @@ jobs:
       // workflow remains in the unsupported-shape skip list above, so it does
       // not change this source-only inventory.
       //
+      // 28 Aug 2026, D-F2-C2 C1: the dark issue-command intake adds +1 job,
+      // +1 run step, +2 pinned action steps, and +3 declared action inputs.
+      // It has no model action and no write-capable step.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 21,
-      runSteps: 54,
-      actionSteps: 54,
-      inputs: 148,
+      jobs: 22,
+      runSteps: 55,
+      actionSteps: 56,
+      inputs: 151,
     });
   });
 
@@ -2139,7 +2143,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(12);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2180,7 +2184,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 31,
+      jobs: 32,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2257,9 +2261,11 @@ jobs:
       // 28 Aug 2026, #384 Slice 2: the triage apply job adds +1 warning run
       // step, +1 create-github-app-token action step, and +3 declared action
       // inputs for the issues-only factory App mint. Jobs are unchanged.
-      runSteps: 90,
-      actionSteps: 80,
-      inputs: 217,
+      // 28 Aug 2026, D-F2-C2 C1: same measured +1 job / +1 run step / +2
+      // action steps / +3 action inputs as the source-only corpus above.
+      runSteps: 91,
+      actionSteps: 82,
+      inputs: 220,
     });
   });
 });
