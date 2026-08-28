@@ -2124,12 +2124,16 @@ jobs:
       // +1 run step, +2 pinned action steps, and +3 declared action inputs.
       // It has no model action and no write-capable step.
       //
+      // 28 Aug 2026, D-F2-C2 C2a: the approve-only readiness dispatch adds
+      // +1 job and +1 run step. It adds no action steps or declared action
+      // inputs.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 22,
-      runSteps: 55,
+      jobs: 23,
+      runSteps: 56,
       actionSteps: 56,
       inputs: 151,
     });
@@ -2184,7 +2188,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 32,
+      jobs: 33,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2263,7 +2267,9 @@ jobs:
       // inputs for the issues-only factory App mint. Jobs are unchanged.
       // 28 Aug 2026, D-F2-C2 C1: same measured +1 job / +1 run step / +2
       // action steps / +3 action inputs as the source-only corpus above.
-      runSteps: 91,
+      // 28 Aug 2026, D-F2-C2 C2a: same measured +1 job / +1 run step / +0
+      // action steps / +0 action inputs as the source-only corpus above.
+      runSteps: 92,
       actionSteps: 82,
       inputs: 220,
     });

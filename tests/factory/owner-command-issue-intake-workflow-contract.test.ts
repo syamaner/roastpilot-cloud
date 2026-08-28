@@ -11,13 +11,17 @@ const WORKFLOW_PATH = fileURLToPath(
   ),
 );
 const ENABLE_GATE = "vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'";
+const APPROVE_GATE =
+  "${{ vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'approve' }}";
+const DISPATCH_COMMAND =
+  "gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness";
 const EXPECTED_INTAKE_ENV = {
   GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
   GITHUB_REPOSITORY: "${{ github.repository }}",
   TARGET_ISSUE_NUMBER: "${{ github.event.issue.number }}",
   COMMENT_ID: "${{ github.event.comment.id }}",
 };
-const FORBIDDEN_SOURCE = [
+const FORBIDDEN_EXECUTABLE_SOURCE = [
   "task-agent",
   "task-apply",
   "OWNER_TASK_APPLY_ENABLED",
@@ -26,11 +30,10 @@ const FORBIDDEN_SOURCE = [
   "claude-code-action",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "workflow_dispatch",
-  "actions: write",
   "id-token",
   "issues: write",
   "/actions/workflows/",
-  "workflow run",
+  "implement-ready-issues.yml",
 ] as const;
 
 type Mapping = Record<string, unknown>;
@@ -50,10 +53,13 @@ function parseWorkflow(source: string): Mapping {
 
 function contractFailures(source: string): string[] {
   const failures: string[] = [];
-  for (const forbidden of FORBIDDEN_SOURCE) {
-    if (source.includes(forbidden)) failures.push(`forbidden:${forbidden}`);
-  }
   const parsed = parseWorkflow(source);
+  const executableSource = JSON.stringify(parsed);
+  for (const forbidden of FORBIDDEN_EXECUTABLE_SOURCE) {
+    if (executableSource.includes(forbidden)) {
+      failures.push(`forbidden:${forbidden}`);
+    }
+  }
   const jobs = mapping(parsed.jobs);
   if (JSON.stringify(parsed.on) !== JSON.stringify({
     issue_comment: { types: ["created"] },
@@ -61,14 +67,14 @@ function contractFailures(source: string): string[] {
   if (JSON.stringify(parsed.permissions) !== JSON.stringify({})) {
     failures.push("root-permissions");
   }
-  if (JSON.stringify(Object.keys(jobs)) !== JSON.stringify(["intake"])) {
+  if (
+    JSON.stringify(Object.keys(jobs)) !==
+    JSON.stringify(["intake", "dispatch-approve"])
+  ) {
     failures.push("job-set");
   }
-  for (const [jobName, rawJob] of Object.entries(jobs)) {
-    const job = mapping(rawJob);
-    if (job.if !== ENABLE_GATE) failures.push(`gate:${jobName}`);
-  }
   const intake = mapping(jobs.intake);
+  if (intake.if !== ENABLE_GATE) failures.push("gate:intake");
   if (JSON.stringify(intake.permissions) !== JSON.stringify({
     contents: "read",
     issues: "read",
@@ -103,50 +109,150 @@ function contractFailures(source: string): string[] {
     JSON.stringify(mapping(entrypoint.env)) !==
       JSON.stringify(EXPECTED_INTAKE_ENV)
   ) failures.push("entrypoint");
+
+  const dispatch = mapping(jobs["dispatch-approve"]);
+  if (dispatch.needs !== "intake") failures.push("dispatch-needs");
+  if (dispatch.if !== APPROVE_GATE) failures.push("gate:dispatch-approve");
+  if (JSON.stringify(dispatch.permissions) !== JSON.stringify({
+    actions: "write",
+  })) failures.push("dispatch-permissions");
+  const rawDispatchSteps = dispatch.steps;
+  if (!Array.isArray(rawDispatchSteps)) {
+    failures.push("dispatch-steps");
+    return failures;
+  }
+  const dispatchSteps = rawDispatchSteps.map(mapping);
+  const dispatchStep = dispatchSteps[0];
+  if (
+    dispatchSteps.length !== 1 ||
+    dispatchStep?.run !== DISPATCH_COMMAND ||
+    JSON.stringify(mapping(dispatchStep?.env)) !== JSON.stringify({
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+    })
+  ) failures.push("dispatch-step");
+
+  const actionWriteJobs = Object.entries(jobs)
+    .filter(([, rawJob]) => mapping(mapping(rawJob).permissions).actions === "write")
+    .map(([jobName]) => jobName);
+  if (JSON.stringify(actionWriteJobs) !== JSON.stringify(["dispatch-approve"])) {
+    failures.push("actions-write-scope");
+  }
   return failures;
 }
 
 const SOURCE = readFileSync(WORKFLOW_PATH, "utf8");
 
 describe("owner command issue intake workflow contract", () => {
-  it("M-KEYSTONE-A has no task, write, model, credential, or dispatch path", () => {
+  it("M-KEYSTONE-A has only the bounded approve dispatch write path", () => {
     expect(contractFailures(SOURCE)).toEqual([]);
   });
 
-  it.each(FORBIDDEN_SOURCE)(
+  it.each(FORBIDDEN_EXECUTABLE_SOURCE)(
     "M-KEYSTONE-A catches injected forbidden source %s",
     (forbidden) => {
-      expect(contractFailures(`${SOURCE}\n# ${forbidden}\n`))
+      expect(contractFailures(
+        `${SOURCE}\nforbidden-test: ${JSON.stringify(forbidden)}\n`,
+      ))
         .toContain(`forbidden:${forbidden}`);
     },
   );
 
-  it("M-DARK gates every job on only the issue-intake enable variable", () => {
+  it("M-DARK gates intake and the approve dispatch exactly", () => {
     const jobs = mapping(parseWorkflow(SOURCE).jobs);
-    for (const rawJob of Object.values(jobs)) {
-      expect(mapping(rawJob).if).toBe(ENABLE_GATE);
-    }
+    expect(mapping(jobs.intake).if).toBe(ENABLE_GATE);
+    expect(mapping(jobs["dispatch-approve"]).if).toBe(APPROVE_GATE);
     expect(SOURCE).not.toContain("FACTORY_PAUSED");
   });
 
   it("M-DARK catches a removed or widened job gate", () => {
-    const removed = SOURCE.replace(`    if: ${ENABLE_GATE}\n`, "");
+    const removed = SOURCE.replace(`    if: ${APPROVE_GATE}\n`, "");
     const widened = SOURCE.replace(
-      ENABLE_GATE,
-      `${ENABLE_GATE} || github.actor == 'attacker'`,
+      APPROVE_GATE,
+      `${APPROVE_GATE} || github.actor == 'attacker'`,
     );
-    expect(contractFailures(removed)).toContain("gate:intake");
-    expect(contractFailures(widened)).toContain("gate:intake");
+    expect(contractFailures(removed)).toContain("gate:dispatch-approve");
+    expect(contractFailures(widened)).toContain("gate:dispatch-approve");
   });
 
   it("pins read-only permissions and catches either write mutation", () => {
     const jobWrite = SOURCE.replace("      contents: read", "      contents: write");
     const issueWrite = SOURCE.replace("      issues: read", "      issues: write");
-    expect(contractFailures(jobWrite)).toEqual(expect.arrayContaining([
-      "forbidden:contents: write",
-      "intake-permissions",
-    ]));
+    expect(contractFailures(jobWrite)).toContain("intake-permissions");
     expect(contractFailures(issueWrite)).toContain("intake-permissions");
+  });
+
+  it("pins dispatch dependencies and exact actions-only permissions", () => {
+    const parsed = parseWorkflow(SOURCE);
+    const dispatch = mapping(mapping(parsed.jobs)["dispatch-approve"]);
+    expect(dispatch.needs).toBe("intake");
+    expect(dispatch.permissions).toEqual({ actions: "write" });
+
+    const contentsWrite = SOURCE.replace(
+      "      actions: write",
+      "      actions: write\n      contents: write",
+    );
+    const issuesWrite = SOURCE.replace(
+      "      actions: write",
+      "      actions: write\n      issues: write",
+    );
+    expect(contractFailures(contentsWrite)).toContain("dispatch-permissions");
+    expect(contractFailures(issuesWrite)).toContain("dispatch-permissions");
+  });
+
+  it("M-DISPATCH pins triage readiness and trusted issue provenance", () => {
+    const dispatch = mapping(
+      mapping(parseWorkflow(SOURCE).jobs)["dispatch-approve"],
+    );
+    const steps = (dispatch.steps as unknown[]).map(mapping);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toEqual(expect.objectContaining({
+      run: DISPATCH_COMMAND,
+      env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" },
+    }));
+
+    const wrongWorkflow = SOURCE.replace(
+      "workflow run triage-issues.yml",
+      "workflow run implement-ready-issues.yml",
+    );
+    const wrongMode = SOURCE.replace("triage_mode=readiness", "triage_mode=full");
+    const untrustedIssue = SOURCE.replace(
+      "issue_number=${{ github.event.issue.number }}",
+      "issue_number=${{ github.event.comment.body }}",
+    );
+    expect(contractFailures(wrongWorkflow)).toContain("dispatch-step");
+    expect(contractFailures(wrongMode)).toContain("dispatch-step");
+    expect(contractFailures(untrustedIssue)).toContain("dispatch-step");
+  });
+
+  it("keeps respec inert by requiring the approve verb", () => {
+    expect(APPROVE_GATE).toContain("needs.intake.outputs.verb == 'approve'");
+    expect(APPROVE_GATE).not.toContain("respec");
+    const respecGate = SOURCE.replace(
+      "needs.intake.outputs.verb == 'approve'",
+      "needs.intake.outputs.verb == 'respec'",
+    );
+    expect(contractFailures(respecGate)).toContain("gate:dispatch-approve");
+  });
+
+  it("keeps intake read-only and scopes actions write to dispatch only", () => {
+    const jobs = mapping(parseWorkflow(SOURCE).jobs);
+    expect(mapping(jobs.intake).permissions).toEqual({
+      contents: "read",
+      issues: "read",
+    });
+    expect(SOURCE.match(/actions: write/gu)).toHaveLength(1);
+    expect(mapping(jobs["dispatch-approve"]).permissions).toEqual({
+      actions: "write",
+    });
+
+    const intakeActionWrite = SOURCE.replace(
+      "      issues: read",
+      "      issues: read\n      actions: write",
+    );
+    expect(contractFailures(intakeActionWrite)).toEqual(expect.arrayContaining([
+      "intake-permissions",
+      "actions-write-scope",
+    ]));
   });
 
   it("pins the created-comment trigger, checkout confinement, and entrypoint", () => {

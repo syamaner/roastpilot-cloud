@@ -11,6 +11,10 @@ const GITHUB_EXPRESSION = /\$\{\{[\s\S]*?\}\}/g;
 const ALLOWED_SINK_EXPRESSIONS = [
   /^steps\.[A-Za-z_][A-Za-z0-9_-]*\.outcome$/i,
   /^github\.repository$/i,
+  // 28 Aug 2026, D-F2-C2 C2a: the issue_comment payload issue number is an
+  // integer trusted by the approve-dispatch contract and is safe in every
+  // audited execution sink.
+  /^github\.event\.issue\.number$/i,
 ];
 const SINK_KEYS = new Set(["run", "shell", "script"]);
 
@@ -192,6 +196,7 @@ describe("workflow run/shell/script expression injection guard (issues #151, #15
     "${{ steps.grants-post.outcome }}",
     "${{ github.repository }}",
     "${{   github.repository   }}",
+    "${{ github.event.issue.number }}",
   ])("allows reviewed run expression %s", (expression) => {
     const allowedWorkflow = {
       path: ".github/workflows/allowed.yml",

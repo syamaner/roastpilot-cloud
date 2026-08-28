@@ -32,3 +32,22 @@ jobs:
           TARGET_ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: node --experimental-strip-types scripts/factory/intake-owner-command-issue.mts
+
+  # This dispatches ONLY the already-reviewed triage readiness promotion
+  # (ready-to-spec -> ready-to-implement). It never dispatches
+  # implement-ready-issues.yml or any contents: write workflow, and it never
+  # reaches OWNER_TASK_APPLY_ENABLED.
+  # Activation checklist: OWNER_COMMAND_INTAKE_ENABLED is shared with the
+  # frozen owner-command-intake.yml, so C3 activation must account for both
+  # workflows becoming active when the variable is set.
+  dispatch-approve:
+    needs: intake
+    if: ${{ vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'approve' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch triage readiness promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness
