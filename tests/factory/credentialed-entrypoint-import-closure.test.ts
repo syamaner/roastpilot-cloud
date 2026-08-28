@@ -67,6 +67,7 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
       "scripts/factory/apply-owner-task.mts",
+      "scripts/factory/approve-revision.mts",
       "scripts/factory/derive-issue-command-authorization.mts",
       "scripts/factory/factory-owner-allowlist.mts",
       "scripts/factory/github-api.mts",
@@ -88,6 +89,7 @@ describe("credentialed sparse-checkout entrypoint import closure", () => {
 
     expect(result.violations).toEqual([]);
     expect(result.files).toEqual([
+      "scripts/factory/approve-revision.mts",
       "scripts/factory/derive-issue-command-authorization.mts",
       "scripts/factory/factory-owner-allowlist.mts",
       "scripts/factory/github-api.mts",

@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import {
   deriveIssueCommandAuthorization,
 } from "./derive-issue-command-authorization.mts";
+import { computeApprovedRevision } from "./approve-revision.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -78,8 +79,14 @@ export async function main(request: GithubRequest): Promise<void> {
     appendOutput(outputPath, "proceed", "false");
     return;
   }
+  const approvedRevision = authorization.command.verb === "approve"
+    ? computeApprovedRevision(issue.body as string)
+    : null;
   appendOutput(outputPath, "proceed", "true");
   appendOutput(outputPath, "verb", authorization.command.verb);
+  if (approvedRevision !== null) {
+    appendOutput(outputPath, "approved_revision", approvedRevision);
+  }
 }
 
 /* v8 ignore next 3 -- the CLI-only branch is unreachable through module-import tests. */

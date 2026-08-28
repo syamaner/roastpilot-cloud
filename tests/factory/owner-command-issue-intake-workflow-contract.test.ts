@@ -14,7 +14,12 @@ const ENABLE_GATE = "vars.OWNER_COMMAND_INTAKE_ENABLED == 'true'";
 const APPROVE_GATE =
   "${{ vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'approve' }}";
 const DISPATCH_COMMAND =
-  "gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness";
+  "gh workflow run triage-issues.yml --repo ${{ github.repository }} --ref main -f issue_number=${{ github.event.issue.number }} -f triage_mode=readiness -f approved_revision=${{ needs.intake.outputs.approved_revision }}";
+const EXPECTED_INTAKE_OUTPUTS = {
+  proceed: "${{ steps.intake.outputs.proceed }}",
+  verb: "${{ steps.intake.outputs.verb }}",
+  approved_revision: "${{ steps.intake.outputs.approved_revision }}",
+};
 const EXPECTED_INTAKE_ENV = {
   GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
   GITHUB_REPOSITORY: "${{ github.repository }}",
@@ -56,7 +61,11 @@ function contractFailures(source: string): string[] {
   const parsed = parseWorkflow(source);
   const executableSource = JSON.stringify(parsed);
   for (const forbidden of FORBIDDEN_EXECUTABLE_SOURCE) {
-    if (executableSource.includes(forbidden)) {
+    const structuralForm = forbidden.replace(": ", '\":\"');
+    if (
+      executableSource.includes(forbidden) ||
+      executableSource.includes(structuralForm)
+    ) {
       failures.push(`forbidden:${forbidden}`);
     }
   }
@@ -75,6 +84,9 @@ function contractFailures(source: string): string[] {
   }
   const intake = mapping(jobs.intake);
   if (intake.if !== ENABLE_GATE) failures.push("gate:intake");
+  if (
+    JSON.stringify(intake.outputs) !== JSON.stringify(EXPECTED_INTAKE_OUTPUTS)
+  ) failures.push("intake-outputs");
   if (JSON.stringify(intake.permissions) !== JSON.stringify({
     contents: "read",
     issues: "read",
@@ -161,7 +173,11 @@ describe("owner command issue intake workflow contract", () => {
     const jobs = mapping(parseWorkflow(SOURCE).jobs);
     expect(mapping(jobs.intake).if).toBe(ENABLE_GATE);
     expect(mapping(jobs["dispatch-approve"]).if).toBe(APPROVE_GATE);
-    expect(SOURCE).not.toContain("FACTORY_PAUSED");
+    expect(String(mapping(jobs["dispatch-approve"]).if)).not.toContain(
+      "FACTORY_PAUSED",
+    );
+    expect(SOURCE).toContain("Activation checklist");
+    expect(SOURCE).toContain("availability-only dispatch behavior");
   });
 
   it("M-DARK catches a removed or widened job gate", () => {
@@ -197,6 +213,10 @@ describe("owner command issue intake workflow contract", () => {
     );
     expect(contractFailures(contentsWrite)).toContain("dispatch-permissions");
     expect(contractFailures(issuesWrite)).toContain("dispatch-permissions");
+    expect(contractFailures(contentsWrite)).toContain(
+      "forbidden:contents: write",
+    );
+    expect(contractFailures(issuesWrite)).toContain("forbidden:issues: write");
   });
 
   it("M-DISPATCH pins triage readiness and trusted issue provenance", () => {
@@ -219,9 +239,33 @@ describe("owner command issue intake workflow contract", () => {
       "issue_number=${{ github.event.issue.number }}",
       "issue_number=${{ github.event.comment.body }}",
     );
+    const missingRevision = SOURCE.replace(
+      " -f approved_revision=${{ needs.intake.outputs.approved_revision }}",
+      "",
+    );
+    const untrustedRevision = SOURCE.replace(
+      "approved_revision=${{ needs.intake.outputs.approved_revision }}",
+      "approved_revision=${{ github.event.issue.body }}",
+    );
     expect(contractFailures(wrongWorkflow)).toContain("dispatch-step");
     expect(contractFailures(wrongMode)).toContain("dispatch-step");
     expect(contractFailures(untrustedIssue)).toContain("dispatch-step");
+    expect(contractFailures(missingRevision)).toContain("dispatch-step");
+    expect(contractFailures(untrustedRevision)).toContain("dispatch-step");
+  });
+
+  it("M-WF exports and dispatches the approve-only revision binding", () => {
+    const jobs = mapping(parseWorkflow(SOURCE).jobs);
+    expect(mapping(jobs.intake).outputs).toEqual(EXPECTED_INTAKE_OUTPUTS);
+    expect(
+      String(
+        ((mapping(jobs["dispatch-approve"]).steps as unknown[]).map(mapping)[0]
+          ?.run),
+      ),
+    ).toContain(
+      "approved_revision=${{ needs.intake.outputs.approved_revision }}",
+    );
+    expect(mapping(jobs["dispatch-approve"]).if).toBe(APPROVE_GATE);
   });
 
   it("keeps respec inert by requiring the approve verb", () => {

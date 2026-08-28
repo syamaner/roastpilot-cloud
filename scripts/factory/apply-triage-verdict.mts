@@ -50,6 +50,10 @@
 
 import { readFile, stat } from "node:fs/promises";
 import {
+  computeApprovedRevision,
+  isApprovedRevision,
+} from "./approve-revision.mts";
+import {
   enforceDiffVerifiableAc,
   type DiffVerifiableAcResult,
 } from "./diff-verifiable-ac.mts";
@@ -65,6 +69,7 @@ import {
 } from "./triage-mode.mts";
 import {
   buildFallbackCommentBody,
+  buildRevisionMismatchNotice,
   buildTriageHoldGeneration,
   buildVerdictCommentBody,
   computeNewLabelSet,
@@ -416,6 +421,7 @@ export async function main(): Promise<void> {
   const generation = requireEnv("TRIAGE_EXECUTION");
   const holdGeneration = buildTriageHoldGeneration(generation);
   const triageMode = validateTriageMode(process.env.TRIAGE_MODE);
+  const approvedRevision = process.env.APPROVED_REVISION ?? "";
 
   // Re-check immediately at the privileged boundary. The issue can close
   // after seed validates it, and neither a verdict nor the fail-closed
@@ -450,6 +456,23 @@ export async function main(): Promise<void> {
       trustedCommentId,
       holdGeneration,
     );
+
+  if (approvedRevision !== "") {
+    const validRevision = isApprovedRevision(approvedRevision);
+    const validBody = typeof issue.body === "string";
+    const actualRevision = validRevision && validBody
+      ? computeApprovedRevision(issue.body)
+      : null;
+    if (!validRevision || !validBody || actualRevision !== approvedRevision) {
+      console.error(JSON.stringify({
+        approved_revision_expected: approvedRevision,
+        approved_revision_actual: actualRevision,
+      }));
+      await fallback([buildRevisionMismatchNotice()]);
+      process.exitCode = 1;
+      return;
+    }
+  }
 
   // Gate on triage job success BEFORE ever reading the artifact. A verdict
   // is applied only when (triage succeeded AND the artifact is valid) —

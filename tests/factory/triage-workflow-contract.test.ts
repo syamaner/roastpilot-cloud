@@ -51,6 +51,37 @@ function parseWorkflow(path: string): Mapping {
   return document.toJS() as Mapping;
 }
 
+function approvedRevisionWiringFailures(source: string): string[] {
+  const document = parseDocument(source);
+  if (document.errors.length > 0) return ["yaml"];
+  const workflow = document.toJS() as Mapping;
+  const jobs = asMapping(workflow.jobs);
+  const seed = asMapping(jobs?.seed);
+  const triage = asMapping(jobs?.triage);
+  const apply = asMapping(jobs?.apply);
+  const dispatch = asMapping(asMapping(workflow.on)?.workflow_dispatch);
+  const approvedRevision = asMapping(
+    asMapping(dispatch?.inputs)?.approved_revision,
+  );
+  const applyEnv = asMapping(
+    namedStep(apply, "Validate and apply the triage verdict").env,
+  );
+  const failures: string[] = [];
+  if (JSON.stringify(approvedRevision) !== JSON.stringify({
+    description: "SHA-256 digest of the issue body reviewed for approval",
+    required: false,
+    type: "string",
+    default: "",
+  })) failures.push("input");
+  if (
+    applyEnv?.APPROVED_REVISION !==
+    "${{ github.event_name == 'workflow_dispatch' && inputs.approved_revision || '' }}"
+  ) failures.push("apply-env");
+  if (JSON.stringify(seed).includes("approved_revision")) failures.push("seed");
+  if (JSON.stringify(triage).includes("approved_revision")) failures.push("triage");
+  return failures;
+}
+
 function namedStep(job: unknown, name: string): Mapping {
   const steps = asMapping(job)?.steps;
   if (!Array.isArray(steps)) {
@@ -406,6 +437,7 @@ describe("bounded triage context contract", () => {
     const inputs = asMapping(dispatch?.inputs);
     const issueNumber = asMapping(inputs?.issue_number);
     const triageMode = asMapping(inputs?.triage_mode);
+    const approvedRevision = asMapping(inputs?.approved_revision);
 
     expect(asMapping(on?.issues)?.types).toEqual(["opened"]);
     expect(workflow["run-name"]).toBe(
@@ -415,7 +447,11 @@ describe("bounded triage context contract", () => {
       "issues",
       "workflow_dispatch",
     ]);
-    expect(Object.keys(inputs ?? {})).toEqual(["issue_number", "triage_mode"]);
+    expect(Object.keys(inputs ?? {})).toEqual([
+      "issue_number",
+      "triage_mode",
+      "approved_revision",
+    ]);
     expect(issueNumber).toEqual({
       description: "The issue number to triage or re-triage",
       required: true,
@@ -431,6 +467,33 @@ describe("bounded triage context contract", () => {
       default: "pre-filter",
       options: ["pre-filter", "readiness"],
     });
+    expect(approvedRevision).toEqual({
+      description: "SHA-256 digest of the issue body reviewed for approval",
+      required: false,
+      type: "string",
+      default: "",
+    });
+  });
+
+  it("M-WF confines the optional approved revision to dispatch and apply", () => {
+    const source = readFileSync(TRIAGE_WORKFLOW_PATH, "utf8");
+    expect(approvedRevisionWiringFailures(source)).toEqual([]);
+
+    const required = source.replace(
+      "      approved_revision:\n        description: \"SHA-256 digest of the issue body reviewed for approval\"\n        required: false",
+      "      approved_revision:\n        description: \"SHA-256 digest of the issue body reviewed for approval\"\n        required: true",
+    );
+    const unguarded = source.replace(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.approved_revision || '' }}",
+      "${{ inputs.approved_revision }}",
+    );
+    const leakedToSeed = source.replace(
+      "  seed:\n",
+      "  seed:\n    env:\n      approved_revision: leak\n",
+    );
+    expect(approvedRevisionWiringFailures(required)).toContain("input");
+    expect(approvedRevisionWiringFailures(unguarded)).toContain("apply-env");
+    expect(approvedRevisionWiringFailures(leakedToSeed)).toContain("seed");
   });
 
   it("normalizes one trusted target and establishes the two-phase hold", () => {
@@ -608,7 +671,11 @@ describe("bounded triage context contract", () => {
       TRIAGE_EXECUTION: "${{ needs.seed.outputs.triage_execution }}",
       TRIAGE_MODE:
         "${{ github.event_name == 'workflow_dispatch' && inputs.triage_mode || 'pre-filter' }}",
+      APPROVED_REVISION:
+        "${{ github.event_name == 'workflow_dispatch' && inputs.approved_revision || '' }}",
     });
+    expect(JSON.stringify(seed)).not.toContain("approved_revision");
+    expect(JSON.stringify(triage)).not.toContain("approved_revision");
     expect(
       asMapping(
         namedStep(apply, "Validate and apply the triage verdict").env,

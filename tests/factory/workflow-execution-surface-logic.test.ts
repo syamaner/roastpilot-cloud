@@ -2128,6 +2128,12 @@ jobs:
       // +1 job and +1 run step. It adds no action steps or declared action
       // inputs.
       //
+      // 28 Aug 2026, #390 revision-binding fold: triage-issues.yml adds one
+      // workflow_dispatch input. This inventory's `inputs` counter measures
+      // action-step `with:` inputs only, so its measured total stays 151.
+      // The workflow input still changes canonical evidence and is pinned by
+      // triage-workflow-contract.test.ts.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
@@ -2269,6 +2275,9 @@ jobs:
       // action steps / +3 action inputs as the source-only corpus above.
       // 28 Aug 2026, D-F2-C2 C2a: same measured +1 job / +1 run step / +0
       // action steps / +0 action inputs as the source-only corpus above.
+      // 28 Aug 2026, #390 revision-binding fold: same +1 workflow_dispatch
+      // input as above, outside this action-step `with:` input counter. The
+      // measured total therefore stays 220.
       runSteps: 92,
       actionSteps: 82,
       inputs: 220,

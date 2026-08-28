@@ -356,3 +356,12 @@ export function buildFallbackCommentBody(
   ];
   return lines.join("\n");
 }
+
+const REVISION_MISMATCH_NOTICE =
+  "The issue body changed after `@claude approve`, so readiness promotion " +
+  "was refused. Re-review the current issue body and run `@claude approve` " +
+  "again.";
+
+export function buildRevisionMismatchNotice(): string {
+  return REVISION_MISMATCH_NOTICE;
+}

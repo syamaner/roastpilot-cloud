@@ -2,8 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
 import { main } from "../../scripts/factory/apply-triage-verdict.mts";
-import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdict-logic.mts";
+import {
+  TRIAGE_COMMENT_MARKER,
+  buildRevisionMismatchNotice,
+} from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 /**
  * Integration-style tests for the privileged CLI entrypoint: stub `fetch`
@@ -93,6 +97,21 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 let workdir: string;
 
+async function writeReadyVerdict(): Promise<string> {
+  const verdictPath = join(workdir, "revision-verdict.json");
+  await writeFile(
+    verdictPath,
+    JSON.stringify({
+      issue_number: 42,
+      readiness: "ready-to-implement",
+      reasoning: "The reviewed story is ready for factory implementation.",
+      missing_info_questions: [],
+    }),
+  );
+  process.env.VERDICT_PATH = verdictPath;
+  return verdictPath;
+}
+
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "triage-verdict-"));
   process.env.GH_TOKEN = "test-token";
@@ -117,8 +136,172 @@ afterEach(async () => {
   delete process.env.TRIAGE_JOB_RESULT;
   delete process.env.TRIAGE_EXECUTION;
   delete process.env.TRIAGE_MODE;
+  delete process.env.APPROVED_REVISION;
   delete process.env.VERDICT_PATH;
+  vi.restoreAllMocks();
   process.exitCode = undefined;
+});
+
+describe("approved revision gate", () => {
+  it("promotes when the live body matches the approved revision", async () => {
+    const body = "Reviewed body with exact acceptance criteria.";
+    process.env.APPROVED_REVISION = computeApprovedRevision(body);
+    await writeReadyVerdict();
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", body }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["ready-to-implement"],
+    });
+  });
+
+  it("M-REV-COMPARE resets to needs-triage when the live body changed", async () => {
+    const reviewedBody = "Reviewed body";
+    const liveBody = "Changed body";
+    const expectedRevision = computeApprovedRevision(reviewedBody);
+    const actualRevision = computeApprovedRevision(liveBody);
+    process.env.APPROVED_REVISION = expectedRevision;
+    await writeReadyVerdict();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", body: liveBody }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([
+      expect.objectContaining({ body: { labels: ["needs-triage"] } }),
+    ]);
+    const commentBody = (
+      calls.find((call) => call.method === "PATCH")?.body as { body: string }
+    ).body;
+    expect(commentBody).toContain("issue body changed");
+    expect(commentBody).not.toContain(expectedRevision);
+    expect(commentBody).not.toContain(actualRevision);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(expectedRevision));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(actualRevision));
+  });
+
+  it("rejects a well-formed but wrong 64-hex revision", async () => {
+    process.env.APPROVED_REVISION = "0".repeat(64);
+    await writeReadyVerdict();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", body: "live body" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([
+      expect.objectContaining({ body: { labels: ["needs-triage"] } }),
+    ]);
+  });
+
+  it("M-REV-FORMAT rejects a malformed revision before comparison", async () => {
+    process.env.APPROVED_REVISION = "not-a-revision";
+    await writeReadyVerdict();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", body: "live body" }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"approved_revision_actual":null'),
+    );
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([
+      expect.objectContaining({ body: { labels: ["needs-triage"] } }),
+    ]);
+  });
+
+  it("M-REV-BODY rejects a non-string live issue body", async () => {
+    process.env.APPROVED_REVISION = computeApprovedRevision("reviewed body");
+    await writeReadyVerdict();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", body: null }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([
+      expect.objectContaining({ body: { labels: ["needs-triage"] } }),
+    ]);
+  });
+
+  it("M-REV-ABSENT keeps empty and absent pre-filter behavior byte-identical", async () => {
+    await writeReadyVerdict();
+    process.env.TRIAGE_MODE = "pre-filter";
+    const run = async (token: string | undefined): Promise<FetchCall[]> => {
+      if (token === undefined) delete process.env.APPROVED_REVISION;
+      else process.env.APPROVED_REVISION = token;
+      process.exitCode = undefined;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+          jsonResponse({ state: "open", body: "opened issue body" }),
+        "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+          () => jsonResponse([{ name: "needs-triage" }]),
+        "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+          jsonResponse({}),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await main();
+      expect(process.exitCode).toBeUndefined();
+      return calls;
+    };
+
+    const absentCalls = await run(undefined);
+    const emptyCalls = await run("");
+
+    expect(emptyCalls).toEqual(absentCalls);
+    expect(emptyCalls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["ready-to-spec"],
+    });
+    expect(
+      (emptyCalls.find((call) => call.method === "PATCH")?.body as {
+        body: string;
+      }).body,
+    ).not.toContain(buildRevisionMismatchNotice());
+  });
 });
 
 describe("main — valid verdict path", () => {

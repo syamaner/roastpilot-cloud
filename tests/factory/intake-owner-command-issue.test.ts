@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   main,
   type GithubRequest,
@@ -51,7 +52,9 @@ function requestFor(
     const response = path.endsWith(`/issues/comments/${COMMENT_ID}`)
       ? comment
       : path.endsWith(`/issues/${ISSUE_NUMBER}`)
-        ? "issue" in overrides ? overrides.issue : { state: "open" }
+        ? "issue" in overrides
+          ? overrides.issue
+          : { state: "open", body: "reviewed issue body" }
         : "repository" in overrides
           ? overrides.repository
           : { full_name: REPOSITORY, fork: false };
@@ -62,6 +65,7 @@ function requestFor(
 
 describe("issue owner-command intake entrypoint", () => {
   it("re-fetches all authorization records and emits approve outputs", async () => {
+    vi.stubEnv("GITHUB_EVENT_ISSUE_BODY", "stale webhook issue body");
     const { request, calls } = requestFor({
       body: "@claude approve",
       user: { login: "syamaner" },
@@ -75,7 +79,21 @@ describe("issue owner-command intake entrypoint", () => {
       `GET /repos/${REPOSITORY}/issues/comments/${COMMENT_ID}`,
     ].sort());
     expect(readFileSync(outputPath, "utf8")).toBe(
-      "proceed=true\nverb=approve\n",
+      "proceed=true\nverb=approve\napproved_revision=" +
+        `${computeApprovedRevision("reviewed issue body")}\n`,
+    );
+  });
+
+  it("does not emit an approved revision for respec", async () => {
+    const { request } = requestFor({
+      body: "@claude respec",
+      user: { login: "syamaner" },
+    });
+
+    await main(request);
+
+    expect(readFileSync(outputPath, "utf8")).toBe(
+      "proceed=true\nverb=respec\n",
     );
   });
 
@@ -88,6 +106,16 @@ describe("issue owner-command intake entrypoint", () => {
     await main(request);
 
     expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
+  });
+
+  it("fails closed on a non-string fetched issue body for approve", async () => {
+    const { request } = requestFor(
+      { body: "@claude approve", user: { login: "syamaner" } },
+      { issue: { state: "open", body: null } },
+    );
+
+    await expect(main(request)).rejects.toThrow(TypeError);
+    expect(() => readFileSync(outputPath, "utf8")).toThrow();
   });
 
   it("throws loudly for a malformed fetched comment", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   TRIAGE_COMMENT_MARKER,
   buildFallbackCommentBody,
+  buildRevisionMismatchNotice,
   buildTriageGenerationMarker,
   buildTriageHoldGeneration,
   buildVerdictCommentBody,
@@ -345,6 +346,28 @@ describe("buildFallbackCommentBody", () => {
     expect(bulletLines).toHaveLength(41);
     expect(body).toContain("- _(460 further error(s) omitted — full detail in the run log.)_");
     expect(body.length).toBeLessThan(65_536);
+  });
+});
+
+describe("buildRevisionMismatchNotice", () => {
+  it("M-NOTE stays static, digest-free, and bounded by the fallback renderer", () => {
+    const untrustedBody = "UNTRUSTED-ISSUE-BODY";
+    const digest = "a".repeat(64);
+    const notice = buildRevisionMismatchNotice();
+
+    expect(buildRevisionMismatchNotice()).toBe(notice);
+    expect(notice).not.toContain(untrustedBody);
+    expect(notice).not.toMatch(/[0-9a-f]{64}/u);
+    expect(notice).toContain("Re-review");
+
+    const fallbackBody = buildFallbackCommentBody(
+      [notice],
+      "hold:123.1",
+    );
+    expect(fallbackBody).toContain("issue body changed");
+    expect(fallbackBody).not.toContain(untrustedBody);
+    expect(fallbackBody).not.toContain(digest);
+    expect(fallbackBody.length).toBeLessThan(65_536);
   });
 });
 
