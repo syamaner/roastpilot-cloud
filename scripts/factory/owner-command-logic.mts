@@ -1,10 +1,13 @@
 import { isFactoryOwnerLogin } from "./factory-owner-allowlist.mts";
 
+export type OwnerCommandVerb = "question" | "task" | "approve" | "respec";
 export type OwnerCommand = {
-  verb: "question" | "task";
-  payload: string;
-  truncated: boolean;
-};
+  [Verb in OwnerCommandVerb]: {
+    verb: Verb;
+    payload: string;
+    truncated: boolean;
+  };
+}[OwnerCommandVerb];
 
 /** Mirrors spec-grounding-logic.mts's 256 KiB structural-input bound. */
 const MAX_STRUCTURAL_INPUT_BYTES = 256 * 1024;
@@ -76,7 +79,12 @@ export function parseOwnerCommand(body: string): OwnerCommand | null {
   if (match === null) return null;
 
   const foldedVerb = asciiFold(match[1]!);
-  if (foldedVerb !== "question" && foldedVerb !== "task") return null;
+  if (
+    foldedVerb !== "question" &&
+    foldedVerb !== "task" &&
+    foldedVerb !== "approve" &&
+    foldedVerb !== "respec"
+  ) return null;
 
   const verbEnd = normalized.length - lead.length + match[0].length;
   const boundedPayload = truncateCodePoints(

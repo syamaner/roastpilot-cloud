@@ -29,8 +29,31 @@ describe("owner-command grammar", () => {
     });
   });
 
+  it.each([
+    ["@claude approve", "approve"],
+    ["@claude respec", "respec"],
+  ] as const)("M-PARSE parses the issue verb in %s", (body, verb) => {
+    expect(parseOwnerCommand(body)).toEqual({
+      verb,
+      payload: "",
+      truncated: false,
+    });
+  });
+
   it("G-V3 rejects a verb outside the closed set", () => {
     expect(parseOwnerCommand("@claude review x")).toBeNull();
+  });
+
+  it("M-PARSE keeps an unknown deploy verb inert", () => {
+    expect(parseOwnerCommand("@claude deploy x")).toBeNull();
+  });
+
+  it.each([
+    "prose @claude approve",
+    "context\n@claude respec",
+    "> @claude approve",
+  ])("M-LEAD rejects non-leading issue command placement in %j", (body) => {
+    expect(parseOwnerCommand(body)).toBeNull();
   });
 
   it.each(["@claude questions", "@claude question2"])(
@@ -50,6 +73,20 @@ describe("owner-command grammar", () => {
     expect(parseOwnerCommand(body)).toEqual({
       verb,
       payload: "",
+      truncated: false,
+    });
+  });
+
+  it.each([
+    ["@CLAUDE APPROVE", "approve"],
+    ["@Claude\tReSpEc\tpayload", "respec"],
+    ["\n\n@claude   approve body", "approve"],
+  ] as const)("M-PARSE ASCII-folds and accepts hardened whitespace in %j", (body, verb) => {
+    expect(parseOwnerCommand(body)).toEqual({
+      verb,
+      payload: body.endsWith("payload")
+        ? "\tpayload"
+        : body.endsWith("body") ? " body" : "",
       truncated: false,
     });
   });
