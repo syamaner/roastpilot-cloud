@@ -157,6 +157,23 @@ export function computeNewLabelSet(
 }
 
 /**
+ * Selects the identity for a successful-path readiness label write.
+ *
+ * Only ready-to-spec needs a non-GITHUB_TOKEN identity so its labeled event
+ * can trigger story-planner. Every other readiness value stays on the built-in
+ * token, as does ready-to-spec when the optional App mint is unavailable.
+ */
+export function selectLabelWriteToken(
+  effectiveReadiness: ReadinessLabel,
+  ghToken: string,
+  appToken: string,
+): string {
+  return effectiveReadiness === "ready-to-spec" && appToken !== ""
+    ? appToken
+    : ghToken;
+}
+
+/**
  * The exact GitHub identity that posts on behalf of this workflow's
  * `secrets.GITHUB_TOKEN` — required by owned terminal-history and current-hold
  * checks.

@@ -18,6 +18,7 @@ interface FetchCall {
   readonly url: string;
   readonly method: string;
   readonly body: unknown;
+  readonly authorization: string | null;
 }
 
 function mockFetch(
@@ -32,7 +33,13 @@ function mockFetch(
     const url = String(input);
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    const call: FetchCall = { url, method, body };
+    const headers = new Headers(init?.headers);
+    const call: FetchCall = {
+      url,
+      method,
+      body,
+      authorization: headers.get("authorization"),
+    };
     calls.push(call);
     const key = `${method} ${url.replace("https://api.github.com", "")}`;
     if (
@@ -89,6 +96,7 @@ let workdir: string;
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "triage-verdict-"));
   process.env.GH_TOKEN = "test-token";
+  process.env.FACTORY_APP_TOKEN = "app-token";
   process.env.GITHUB_REPOSITORY = "syamaner/roastpilot-cloud";
   process.env.TRUSTED_ISSUE_NUMBER = "42";
   process.env.TRUSTED_TRIAGE_COMMENT_ID = "99";
@@ -102,6 +110,7 @@ afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
   vi.unstubAllGlobals();
   delete process.env.GH_TOKEN;
+  delete process.env.FACTORY_APP_TOKEN;
   delete process.env.GITHUB_REPOSITORY;
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.TRUSTED_TRIAGE_COMMENT_ID;
@@ -113,6 +122,168 @@ afterEach(async () => {
 });
 
 describe("main — valid verdict path", () => {
+  it("uses the App token only for a ready-to-spec label PUT and verification", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-spec",
+        reasoning: "The story needs a planning contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    const put = calls.find((call) => call.method === "PUT");
+    const labelReads = calls.filter((call) => call.url.includes("/labels"));
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(put?.authorization).toBe("Bearer app-token");
+    expect(labelReads[0]?.authorization).toBe("Bearer test-token");
+    expect(labelReads.at(-1)?.authorization).toBe("Bearer app-token");
+    expect(patch?.authorization).toBe("Bearer test-token");
+  });
+
+  it("falls back to GITHUB_TOKEN when the optional App token is empty", async () => {
+    process.env.FACTORY_APP_TOKEN = "";
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-spec",
+        reasoning: "The story needs a planning contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(calls.find((call) => call.method === "PUT")?.authorization).toBe(
+      "Bearer test-token",
+    );
+  });
+
+  it("falls back to GITHUB_TOKEN when FACTORY_APP_TOKEN is absent", async () => {
+    delete process.env.FACTORY_APP_TOKEN;
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-spec",
+        reasoning: "The story needs a planning contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(calls.find((call) => call.method === "PUT")?.authorization).toBe(
+      "Bearer test-token",
+    );
+    const commentWrites = calls.filter((call) => call.method === "PATCH");
+    expect(commentWrites).toHaveLength(1);
+    expect(commentWrites[0]?.authorization).toBe("Bearer test-token");
+  });
+
+  it("keeps ready-to-implement label and comment writes on GITHUB_TOKEN", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "The story is ready for factory implementation.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    for (const call of calls.filter(
+      (candidate) => candidate.method === "PUT" || candidate.method === "PATCH",
+    )) {
+      expect(call.authorization).toBe("Bearer test-token");
+    }
+  });
+
+  it("uses GITHUB_TOKEN for the fallback after an App label PUT failure", async () => {
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-spec",
+        reasoning: "The story needs a planning contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    let putAttempts = 0;
+
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100":
+        () => jsonResponse([{ name: "needs-triage" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () => {
+        putAttempts += 1;
+        return putAttempts === 1
+          ? new Response("App write unavailable", { status: 503 })
+          : jsonResponse({});
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(main()).rejects.toThrow(/503/);
+
+    const puts = calls.filter((call) => call.method === "PUT");
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(puts).toHaveLength(2);
+    expect(puts[0]?.authorization).toBe("Bearer app-token");
+    expect(puts[1]?.authorization).toBe("Bearer test-token");
+    expect(puts[1]?.body).toEqual({ labels: ["needs-triage"] });
+    expect(patches).toHaveLength(2);
+    expect(patches.every((call) => call.authorization === "Bearer test-token"))
+      .toBe(true);
+  });
+
   it.each([
     ["pre-filter", "ready-to-spec", true],
     ["readiness", "ready-to-implement", false],
