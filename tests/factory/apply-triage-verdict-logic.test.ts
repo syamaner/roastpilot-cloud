@@ -169,6 +169,49 @@ describe("transitional triage-generation fence", () => {
 });
 
 describe("buildVerdictCommentBody", () => {
+  it("keeps an authorizing generation for ready-to-implement", () => {
+    const body = buildVerdictCommentBody(
+      verdict,
+      "123.1",
+      "ready-to-implement",
+    );
+    expect(
+      isAuthorizingTriageGeneration(extractTriageGeneration(body)),
+    ).toBe(true);
+  });
+
+  it("downgrades an authorizing generation to hold for ready-for-conventional-implementation", () => {
+    const body = buildVerdictCommentBody(
+      verdict,
+      "123.1",
+      "ready-for-conventional-implementation",
+    );
+    const generation = extractTriageGeneration(body);
+    expect(isAuthorizingTriageGeneration(generation)).toBe(false);
+    expect(generation).toMatch(/^hold:/);
+  });
+
+  it("M-B5: downgrades an authorizing generation to hold for ready-to-spec", () => {
+    const body = buildVerdictCommentBody(verdict, "123.1", "ready-to-spec");
+    const generation = extractTriageGeneration(body);
+    expect(isAuthorizingTriageGeneration(generation)).toBe(false);
+    expect(generation).toMatch(/^hold:/);
+  });
+
+  it.each(["wontfix", "needs-info"] as const)(
+    "downgrades an authorizing generation to hold for %s",
+    (effectiveReadiness) => {
+      const body = buildVerdictCommentBody(
+        verdict,
+        "123.1",
+        effectiveReadiness,
+      );
+      const generation = extractTriageGeneration(body);
+      expect(isAuthorizingTriageGeneration(generation)).toBe(false);
+      expect(generation).toMatch(/^hold:/);
+    },
+  );
+
   it("includes the readiness and renders reasoning as an inert fenced block (not a raw blockquote)", () => {
     const body = buildVerdictCommentBody(verdict, "123.1");
     expect(body).toContain("ready-to-implement");
