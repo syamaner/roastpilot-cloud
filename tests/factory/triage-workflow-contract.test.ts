@@ -36,6 +36,16 @@ const AUTHORIZED_COMMENTS_FILTER_PATH = fileURLToPath(
     import.meta.url,
   ),
 );
+const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
+const CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE =
+  "\n\n_[contract excerpt truncated for the triage context; full contract is on the issue.]_";
+const CONTRACT_EXCERPT_PREFIX_MAX_BYTES =
+  CONTRACT_EXCERPT_MAX_BYTES -
+  Buffer.byteLength(CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE);
+
+function storyPlannerContractMarker(issueNumber: number): string {
+  return `<!-- story-planner-contract:issue-${issueNumber} -->`;
+}
 
 type Mapping = Record<string, unknown>;
 
@@ -1070,6 +1080,13 @@ describe("bounded triage context contract", () => {
     expect(skill).toContain("more than 50 comments");
     expect(skill).toContain("exceeds 64 KiB");
     expect(skill).not.toContain("freshly-opened issue structurally has");
+    const readinessSection = skill.slice(
+      skill.indexOf("## Readiness decision"),
+      skill.indexOf("## Output"),
+    );
+    expect(readinessSection).toContain("`story_planner_contract`");
+    expect(readinessSection).toContain("D104 PR plan");
+    expect(readinessSection).toContain("acceptance criteria");
   });
 
   it("retains only authorized clarifications and authenticated history", () => {
@@ -1196,6 +1213,187 @@ describe("bounded triage context contract", () => {
           TRIAGE_COMMENT_MARKER,
       },
     ]);
+  });
+
+  it("admits this issue's github-actions story-planner contract with a bounded excerpt", () => {
+    const marker = storyPlannerContractMarker(51);
+    const contractBody = `${"contract evidence ".repeat(2_200)}\n${marker}`;
+    const serialized = runFilter({
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Contract ingestion",
+      body: "Body",
+      state: "OPEN",
+      comments: [
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:00:00Z",
+          body: contractBody,
+        },
+      ],
+    });
+    const output = JSON.parse(serialized) as {
+      readonly comments: readonly [{ readonly kind: string; readonly body: string }];
+    };
+
+    expect(output.comments).toHaveLength(1);
+    expect(output.comments[0].kind).toBe("story_planner_contract");
+    expect(output.comments[0].body).toBe(
+      contractBody.slice(0, CONTRACT_EXCERPT_PREFIX_MAX_BYTES) +
+        CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+    expect(output.comments[0].body).not.toBe(contractBody);
+    expect(Buffer.byteLength(output.comments[0].body)).toBe(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
+  });
+
+  it("preserves every region of a realistic full contract under the byte budget", () => {
+    const regions = [
+      `<!-- contract:spec -->\n${"specification detail ".repeat(320)}`,
+      `<!-- contract:tests -->\n${"negative contract test ".repeat(320)}`,
+      `<!-- contract:pr-plan -->\n${"ordered reviewable slice ".repeat(320)}`,
+      `<!-- contract:routing -->\n${"factory security reviewer ".repeat(320)}`,
+    ];
+    const contractBody =
+      `${regions.join("\n")}\n` +
+      "CONTRACT-COMPLETE: story-planner contract finished (issue #51)\n" +
+      storyPlannerContractMarker(51);
+    expect(Buffer.byteLength(contractBody)).toBeGreaterThan(24_000);
+    expect(Buffer.byteLength(contractBody)).toBeLessThanOrEqual(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: "Realistic complete contract",
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-28T10:00:00Z",
+            body: contractBody,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly [{ readonly body: string }] };
+
+    expect(output.comments[0].body).toBe(contractBody);
+    expect(output.comments[0].body).toContain("<!-- contract:pr-plan -->");
+    expect(output.comments[0].body).toContain("<!-- contract:routing -->");
+    expect(output.comments[0].body).not.toContain(
+      CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+  });
+
+  it("byte-bounds a multibyte contract below the old codepoint threshold", () => {
+    const contractBody =
+      `${"🙂".repeat(10_000)}\n` + storyPlannerContractMarker(51);
+    expect(Array.from(contractBody).length).toBeLessThan(16_000);
+    expect(Buffer.byteLength(contractBody)).toBeGreaterThan(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+
+    const serialized = runFilter({
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Multibyte contract",
+      body: "Body",
+      state: "OPEN",
+      comments: [
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:00:00Z",
+          body: contractBody,
+        },
+      ],
+    });
+    const output = JSON.parse(serialized) as {
+      readonly comments: readonly [{ readonly body: string }];
+    };
+
+    expect(Buffer.byteLength(output.comments[0].body)).toBeLessThanOrEqual(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+    expect(output.comments[0].body).toContain(
+      CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+    expect(output.comments[0].body).not.toBe(contractBody);
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
+  });
+
+  it("M-B4a: drops a story-planner marker bound to a different issue", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: "Wrong issue marker",
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-28T10:00:00Z",
+            body: `Contract for another issue\n${storyPlannerContractMarker(52)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly unknown[] };
+
+    expect(output.comments).toEqual([]);
+  });
+
+  it("M-B4b: drops a non-github-actions story-planner contract spoof", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: "Spoofed contract",
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "public-repo-stranger" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-28T10:00:00Z",
+            body: `Spoofed contract\n${storyPlannerContractMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly unknown[] };
+
+    expect(output.comments).toEqual([]);
+  });
+
+  it("M-B4c: fails closed when two contracts match this issue", () => {
+    const contractComment = (createdAt: string) => ({
+      author: { login: "github-actions" },
+      authorAssociation: "NONE",
+      createdAt,
+      body: `Contract\n${storyPlannerContractMarker(51)}`,
+    });
+
+    expect(() =>
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: "Duplicate contracts",
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          contractComment("2026-08-28T10:00:00Z"),
+          contractComment("2026-08-28T10:01:00Z"),
+        ],
+      }),
+    ).toThrow(/more than one story-planner contract/);
   });
 
   it("does not null-match a deleted issue author", () => {
@@ -1332,6 +1530,98 @@ describe("bounded triage context contract", () => {
     expect(() =>
       runFilter({ ...base, comments: [comment(0, `${exactBody}x`)] }),
     ).toThrow(/65536-byte limit/);
+
+    const contract = {
+      author: { login: "github-actions" },
+      authorAssociation: "NONE",
+      createdAt: "2026-08-28T10:01:00Z",
+      body: storyPlannerContractMarker(51),
+    };
+    expect(() =>
+      runFilter({
+        ...base,
+        comments: [
+          ...Array.from({ length: 49 }, (_, index) => comment(index)),
+          contract,
+        ],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      runFilter({
+        ...base,
+        comments: [
+          ...Array.from({ length: 50 }, (_, index) => comment(index)),
+          contract,
+        ],
+      }),
+    ).toThrow(/50-comment limit/);
+  });
+
+  it("M-B4e: keeps a max-size contract context below 65536 bytes while raw would exceed it", () => {
+    const marker = storyPlannerContractMarker(51);
+    const rawContractBody = `${"x".repeat(65_536 - marker.length - 1)}\n${marker}`;
+    expect(rawContractBody).toHaveLength(65_536);
+    const historyBody =
+      `Authorized\n${buildTriageGenerationMarker("123.1")}\n` +
+      TRIAGE_COMMENT_MARKER;
+    const comments = [
+      {
+        author: { login: "issue-author" },
+        authorAssociation: "NONE",
+        createdAt: "2026-08-28T09:55:00Z",
+        body: "Acceptance criteria confirmed in the contract.",
+      },
+      {
+        author: { login: "repo-owner" },
+        authorAssociation: "OWNER",
+        createdAt: "2026-08-28T09:56:00Z",
+        body: "Execution path remains factory-dispatchable.",
+      },
+      {
+        author: { login: "github-actions" },
+        authorAssociation: "NONE",
+        createdAt: "2026-08-28T09:57:00Z",
+        body: historyBody,
+      },
+      {
+        author: { login: "github-actions" },
+        authorAssociation: "NONE",
+        createdAt: "2026-08-28T09:58:00Z",
+        body: rawContractBody,
+      },
+    ];
+
+    const serialized = runFilter({
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Max-size contract",
+      body: "Evaluate the planned acceptance criteria and PR slices.",
+      state: "OPEN",
+      comments,
+    });
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
+
+    const bounded = JSON.parse(serialized) as {
+      comments: Array<{ kind: string; body: string }>;
+    };
+    const contract = bounded.comments.find(
+      (comment) => comment.kind === "story_planner_contract",
+    );
+    expect(contract?.body).toBe(
+      rawContractBody.slice(0, CONTRACT_EXCERPT_PREFIX_MAX_BYTES) +
+        CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+    expect(Buffer.byteLength(contract?.body ?? "")).toBe(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+
+    const rawControl = structuredClone(bounded);
+    const rawControlContract = rawControl.comments.find(
+      (comment) => comment.kind === "story_planner_contract",
+    );
+    expect(rawControlContract).toBeDefined();
+    rawControlContract!.body = rawContractBody;
+    expect(Buffer.byteLength(JSON.stringify(rawControl))).toBeGreaterThan(65_536);
   });
 
   it("uses the same bounded context for implementation", () => {
@@ -1400,6 +1690,46 @@ describe("bounded triage context contract", () => {
         namedStep(publish, "Validate and publish the implement patch").env,
       )?.EXPECTED_TRIAGE_GENERATION,
     ).toBe("${{ needs.implement.outputs.triage_generation }}");
+  });
+
+  it("M-B4d: one authorizing history plus one contract remains exactly one implement history", () => {
+    const workflow = parseWorkflow(IMPLEMENT_WORKFLOW_PATH);
+    const implement = asMapping(asMapping(workflow.jobs)?.implement);
+    const eligibilityRun = String(
+      namedStep(
+        implement,
+        "Fetch target issue, verify it is ready-to-implement, write context for the agent",
+      ).run,
+    );
+    const result = runImplementEligibility(eligibilityRun, {
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Distinct contract kind",
+      body: "Body",
+      state: "OPEN",
+      labels: [{ name: "ready-to-implement" }],
+      comments: [
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:00:00Z",
+          body:
+            `Authorized\n${buildTriageGenerationMarker("123.1")}\n` +
+            TRIAGE_COMMENT_MARKER,
+        },
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:01:00Z",
+          body: `Contract\n${storyPlannerContractMarker(51)}`,
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: 0,
+      output: "triage_generation=123.1\n",
+    });
   });
 
   it("captures only one exact final generation before the implement agent", () => {

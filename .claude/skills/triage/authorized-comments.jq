@@ -3,6 +3,12 @@ def factory_marker:
 
 def max_retained_comments: 50;
 def max_context_bytes: 65536;
+def contract_excerpt_max_bytes: 32000;
+def contract_excerpt_truncation_disclosure:
+  "\n\n_[contract excerpt truncated for the triage context; full contract is on the issue.]_";
+
+def story_planner_contract_marker($issue_number):
+  "<!-- story-planner-contract:issue-" + ($issue_number | tostring) + " -->";
 
 def triage_generation:
   try (
@@ -25,6 +31,49 @@ def is_factory_history:
     or ((.body // "") | endswith("\n" + factory_marker))
   );
 
+def is_story_planner_contract($issue_number):
+  story_planner_contract_marker($issue_number) as $marker
+  | (.author.login // null) == "github-actions"
+    and (
+      (.body // "") == $marker
+      or ((.body // "") | endswith("\n" + $marker))
+    );
+
+def byte_bounded_prefix($maxbytes):
+  if utf8bytelength <= $maxbytes then
+    .
+  else
+    (reduce (explode[]) as $cp
+      ({acc: "", bytes: 0, done: false};
+        if .done then
+          .
+        else
+          ([$cp] | implode) as $ch
+          | ($ch | utf8bytelength) as $char_bytes
+          | if (.bytes + $char_bytes) <= $maxbytes then
+              {
+                acc: (.acc + $ch),
+                bytes: (.bytes + $char_bytes),
+                done: false
+              }
+            else
+              {acc: .acc, bytes: .bytes, done: true}
+            end
+        end
+      )
+    ).acc
+  end;
+
+def contract_excerpt:
+  if utf8bytelength > contract_excerpt_max_bytes then
+    byte_bounded_prefix(
+      contract_excerpt_max_bytes
+      - (contract_excerpt_truncation_disclosure | utf8bytelength)
+    ) + contract_excerpt_truncation_disclosure
+  else
+    .
+  end;
+
 def is_authorized_clarification($issue_author):
   (.author.login // null) as $comment_author
   | $comment_author != null
@@ -35,6 +84,12 @@ def is_authorized_clarification($issue_author):
     );
 
 . as $issue
+| ([.comments[] | select(is_story_planner_contract($issue.number))] | length) as $contract_count
+| if $contract_count > 1 then
+    error("authorized issue context contains more than one story-planner contract")
+  else
+    .
+  end
 | {
     number,
     title,
@@ -50,6 +105,14 @@ def is_authorized_clarification($issue_author):
             created_at: .createdAt,
             triage_generation: (.body | triage_generation),
             body
+          }
+        elif is_story_planner_contract($issue.number) then
+          {
+            kind: "story_planner_contract",
+            author: .author.login,
+            author_association: .authorAssociation,
+            created_at: .createdAt,
+            body: ((.body // "") | contract_excerpt)
           }
         elif is_authorized_clarification($issue.author.login // null) then
           {
