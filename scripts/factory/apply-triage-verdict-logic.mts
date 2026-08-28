@@ -133,6 +133,12 @@ export function isAuthorizingTriageGeneration(generation: string): boolean {
   return TRIAGE_EXECUTION_PATTERN.test(generation);
 }
 
+export function isFactoryAuthorizingReadiness(
+  readiness: ReadinessLabel,
+): boolean {
+  return readiness === "ready-to-implement";
+}
+
 const READINESS_LABEL_SET = new Set<string>(READINESS_LABELS);
 
 /**
@@ -256,6 +262,12 @@ export function buildVerdictCommentBody(
   effectiveReadiness: ReadinessLabel = verdict.readiness,
   downgradeNotice: string | null = null,
 ): string {
+  const effectiveGeneration =
+    !isFactoryAuthorizingReadiness(effectiveReadiness) &&
+    TRIAGE_EXECUTION_PATTERN.test(generation)
+      ? buildTriageHoldGeneration(generation)
+      : generation;
+
   // `verdict.readiness` is a closed enum validated by the schema (trusted).
   // `verdict.reasoning` is untrusted multi-line agent prose: render it as an
   // inert fenced block so its `@codex` triggers, invisibles, and any fence/
@@ -304,7 +316,7 @@ export function buildVerdictCommentBody(
       "This label reflects the automated verdict above — a human may " +
       "override it._",
     "",
-    buildTriageGenerationMarker(generation),
+    buildTriageGenerationMarker(effectiveGeneration),
     TRIAGE_COMMENT_MARKER,
   );
 
