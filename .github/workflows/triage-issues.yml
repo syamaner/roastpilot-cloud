@@ -319,7 +319,7 @@ jobs:
             | .title = (if ($rest.title | type) == "string" then $rest.title else error("REST issue title is malformed") end)
             | .body = (if ($rest.body | type) == "string" then $rest.body elif $rest.body == null then "" else error("REST issue body is malformed") end)')
           echo "$issue_json" |
-            jq -cj --arg current_revision "$current_revision" -f .claude/skills/triage/authorized-comments.jq \
+            jq -cj --arg current_revision "$current_revision" --argjson include_authorized_clarifications true -f .claude/skills/triage/authorized-comments.jq \
               > issue-context/issue.json
           # Pre-create the verdict output directory: Bash is disallowed for
           # the skill (below), so it cannot mkdir this itself. The verdict
