@@ -283,6 +283,19 @@ describe("validateStoryPlannerContract", () => {
       "contract contains the reserved story-planner contract marker prefix",
     );
   });
+
+  it.each(["<!-- escalate:question -->", "<!-- story-planner-escalate:issue-17 -->"])(
+    "G3: rejects the escalation marker prefix %s in a contract",
+    (marker) => {
+      // Mutation witness: removing either symmetric disjointness guard accepts this contract.
+      expect(() =>
+        validateStoryPlannerContract(
+          withRegion(0, `Alpha beta gamma ${marker}`),
+          ISSUE_NUMBER,
+        ),
+      ).toThrow("contract contains a reserved story-planner escalation marker prefix");
+    },
+  );
 });
 
 describe("main", () => {
