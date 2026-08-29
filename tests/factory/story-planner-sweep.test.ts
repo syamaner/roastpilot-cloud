@@ -259,6 +259,78 @@ describe("story-planner sweep I/O", () => {
     expect(mock.mock.calls.filter((call) => call[1] !== "GET")).toEqual([]);
   });
 
+  // remove guard F4-pre-readd-state => a close after DELETE still reaches POST.
+  it("does not re-add when the issue closes between DELETE and POST", async () => {
+    let stateReads = 0;
+    const logs: string[] = [];
+    const { request, mock } = requestFrom(async (_token, method, path) => {
+      if (method === "GET" && path.includes("/issues?")) {
+        return enumerationResponse(path, [issue(38)]);
+      }
+      if (method === "GET" && path.includes("/comments?")) return [];
+      if (method === "GET" && path.endsWith("/issues/38")) {
+        stateReads += 1;
+        return stateReads === 1 ? issue(38) : issue(38, "closed");
+      }
+      if (method === "DELETE") return undefined;
+      throw new Error(`unexpected request: ${method} ${path}`);
+    });
+
+    await expect(runSweep({
+      request,
+      ghToken: READ_TOKEN,
+      appToken: APP_TOKEN,
+      owner: OWNER,
+      repo: REPO,
+      log: (line) => logs.push(line),
+    })).resolves.toBeUndefined();
+    expect(mock.mock.calls.filter((call) => call[1] === "DELETE")).toHaveLength(1);
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toEqual([]);
+    expect(logs.map((line) => JSON.parse(line))).toEqual([
+      { issue_number: 38, result: "closed-after-delete-no-readd" },
+    ]);
+  });
+
+  // remove guard F4-pre-readd-order => POST can occur without the fresh GET.
+  it("rechecks still-open state after DELETE and before POST", async () => {
+    let commentReads = 0;
+    let stateReads = 0;
+    const { request, mock } = requestFrom(async (_token, method, path) => {
+      if (method === "GET" && path.includes("/issues?")) {
+        return enumerationResponse(path, [issue(39)]);
+      }
+      if (method === "GET" && path.includes("/comments?")) {
+        commentReads += 1;
+        return commentReads === 1
+          ? []
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(39), user: BOT }];
+      }
+      if (method === "GET" && path.endsWith("/issues/39")) {
+        stateReads += 1;
+        return stateReads === 1 ? issue(39) : { ...issue(39), labels: [] };
+      }
+      if (method === "DELETE" || method === "POST") return undefined;
+      throw new Error(`unexpected request: ${method} ${path}`);
+    });
+
+    await runSweep({
+      request,
+      ghToken: READ_TOKEN,
+      appToken: APP_TOKEN,
+      owner: OWNER,
+      repo: REPO,
+    });
+    const stateAndWrites = mock.mock.calls.filter(
+      (call) => String(call[2]).endsWith("/issues/39") || call[1] !== "GET",
+    );
+    expect(stateAndWrites).toEqual([
+      [READ_TOKEN, "GET", `/repos/${OWNER}/${REPO}/issues/39`, undefined],
+      [APP_TOKEN, "DELETE", `/repos/${OWNER}/${REPO}/issues/39/labels/ready-to-spec`, undefined],
+      [READ_TOKEN, "GET", `/repos/${OWNER}/${REPO}/issues/39`, undefined],
+      [APP_TOKEN, "POST", `/repos/${OWNER}/${REPO}/issues/39/labels`, { labels: ["ready-to-spec"] }],
+    ]);
+  });
+
   // remove guard F2-readd-bound => a successful DELETE can strand the issue silently.
   it("retries a failed re-add to the bound, emits ::error::, and throws", async () => {
     const errors: string[] = [];

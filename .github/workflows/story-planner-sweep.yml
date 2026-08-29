@@ -5,10 +5,16 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: story-planner-sweep
+  cancel-in-progress: false
+
 jobs:
   sweep:
     # Activation adds the pause gate plus the runbook's numeric workflow ID.
-    if: vars.STORY_PLANNER_ENABLED == 'true'
+    # workflow_dispatch's github.ref is the selected ref. Admit only main so
+    # an unreviewed branch workflow cannot run with the publisher credential.
+    if: vars.STORY_PLANNER_ENABLED == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read

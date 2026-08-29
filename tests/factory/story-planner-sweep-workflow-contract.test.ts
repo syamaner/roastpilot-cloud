@@ -49,13 +49,19 @@ function issue(number: number, state: "open" | "closed") {
 }
 
 describe("story-planner sweep workflow contract", () => {
-  // remove guard G14 => adding a trigger or pause conjunct fails this pin.
-  it("G14 is workflow_dispatch-only and dark on the enable variable alone", () => {
+  // remove guard G14 => dropping main-ref admission or adding a pause conjunct fails.
+  it("G14 is dispatch-only and dark on the enable variable plus main ref", () => {
     const root = workflow();
     expect(root.on).toEqual({ workflow_dispatch: null });
     expect(mapping(root.permissions)).toEqual({});
+    expect(mapping(root.concurrency)).toEqual({
+      group: "story-planner-sweep",
+      "cancel-in-progress": false,
+    });
     const sweep = mapping(mapping(root.jobs).sweep);
-    expect(sweep.if).toBe("vars.STORY_PLANNER_ENABLED == 'true'");
+    expect(sweep.if).toBe(
+      "vars.STORY_PLANNER_ENABLED == 'true' && github.ref == 'refs/heads/main'",
+    );
     expect(WORKFLOW_SOURCE).not.toContain("FACTORY_PAUSED");
     expect(mapping(sweep.permissions)).toEqual({
       contents: "read",

@@ -33,7 +33,11 @@ interface SweepDependencies {
   readonly error?: (message: string) => void;
 }
 
-function validateIssue(raw: unknown, expectedState: SweepIssue["state"]): SweepIssue {
+function validateIssue(
+  raw: unknown,
+  expectedState: SweepIssue["state"],
+  requireReadyToSpec = true,
+): SweepIssue {
   if (
     typeof raw !== "object" ||
     raw === null ||
@@ -59,7 +63,7 @@ function validateIssue(raw: unknown, expectedState: SweepIssue["state"]): SweepI
     ) return label.name;
     throw new Error(`malformed ${expectedState} ready-to-spec issue response`);
   });
-  if (!labels.includes(READY_TO_SPEC_LABEL)) {
+  if (requireReadyToSpec && !labels.includes(READY_TO_SPEC_LABEL)) {
     throw new Error(`malformed ${expectedState} ready-to-spec issue response`);
   }
   return { number: raw.number, state: expectedState };
@@ -114,6 +118,7 @@ async function isStillOpenReadyToSpec(
   owner: string,
   repo: string,
   issueNumber: number,
+  requireReadyToSpec = true,
 ): Promise<boolean> {
   const raw = await request<unknown>(
     token,
@@ -121,7 +126,7 @@ async function isStillOpenReadyToSpec(
     `/repos/${owner}/${repo}/issues/${issueNumber}`,
   );
   try {
-    validateIssue(raw, "open");
+    validateIssue(raw, "open", requireReadyToSpec);
     return true;
   } catch (error) {
     if (
@@ -243,7 +248,23 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
       log(JSON.stringify({ issue_number: issue.number, result: "closed-before-write-no-write" }));
       continue;
     }
+    let skippedReadd = false;
     for (const operation of decision.operations) {
+      if (
+        operation.method === "POST" &&
+        !await isStillOpenReadyToSpec(
+          dependencies.request,
+          dependencies.ghToken,
+          dependencies.owner,
+          dependencies.repo,
+          issue.number,
+          false,
+        )
+      ) {
+        log(JSON.stringify({ issue_number: issue.number, result: "closed-after-delete-no-readd" }));
+        skippedReadd = true;
+        break;
+      }
       await writeLabelOperation(
         dependencies.request,
         dependencies.appToken,
@@ -254,6 +275,7 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
         dependencies.error ?? console.error,
       );
     }
+    if (skippedReadd) continue;
     const planned = await confirmHandled(dependencies, issue.number);
     log(JSON.stringify({
       issue_number: issue.number,
