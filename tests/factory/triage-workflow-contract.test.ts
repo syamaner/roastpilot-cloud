@@ -42,9 +42,15 @@ const AUTHORIZED_COMMENTS_FILTER_PATH = fileURLToPath(
 const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
 const CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE =
   "\n\n_[contract excerpt truncated for the triage context; full contract is on the issue.]_";
+
+function jsonStringContribution(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
+}
+
 const CONTRACT_EXCERPT_PREFIX_MAX_BYTES =
   CONTRACT_EXCERPT_MAX_BYTES -
-  Buffer.byteLength(CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE);
+  2 -
+  jsonStringContribution(CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE);
 
 function storyPlannerContractMarker(issueNumber: number): string {
   return `<!-- story-planner-contract:issue-${issueNumber} -->`;
@@ -1285,8 +1291,46 @@ describe("bounded triage context contract", () => {
         CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
     );
     expect(output.comments[0].body).not.toBe(contractBody);
-    expect(Buffer.byteLength(output.comments[0].body)).toBe(
+    expect(Buffer.byteLength(JSON.stringify(output.comments[0].body))).toBe(
       CONTRACT_EXCERPT_MAX_BYTES,
+    );
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
+  });
+
+  it("admits an escape-heavy contract without breaching the serialized context cap", () => {
+    const marker = storyPlannerContractMarker(51);
+    const contractBody = `${"\u0001\"\\\n".repeat(9_000)}${marker}`;
+    expect(Buffer.byteLength(contractBody)).toBeGreaterThan(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+
+    const serialized = runFilter({
+      number: 51,
+      author: { login: "issue-author" },
+      title: "Escape-heavy contract",
+      body: "Body",
+      state: "OPEN",
+      comments: [
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:00:00Z",
+          body: contractBody,
+        },
+      ],
+    });
+    const output = JSON.parse(serialized) as {
+      readonly comments: readonly [
+        { readonly kind: string; readonly body: string },
+      ];
+    };
+
+    expect(output.comments[0].kind).toBe("story_planner_contract");
+    expect(
+      Buffer.byteLength(JSON.stringify(output.comments[0].body)),
+    ).toBeLessThanOrEqual(CONTRACT_EXCERPT_MAX_BYTES);
+    expect(output.comments[0].body).toContain(
+      CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
     );
     expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
   });
@@ -1360,11 +1404,18 @@ describe("bounded triage context contract", () => {
       readonly comments: readonly [{ readonly body: string }];
     };
 
-    expect(Buffer.byteLength(output.comments[0].body)).toBeLessThanOrEqual(
-      CONTRACT_EXCERPT_MAX_BYTES,
-    );
+    expect(
+      Buffer.byteLength(JSON.stringify(output.comments[0].body)),
+    ).toBeLessThanOrEqual(CONTRACT_EXCERPT_MAX_BYTES);
     expect(output.comments[0].body).toContain(
       CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+    const prefix = output.comments[0].body.slice(
+      0,
+      -CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE.length,
+    );
+    expect(Array.from(prefix).every((character) => character === "🙂")).toBe(
+      true,
     );
     expect(output.comments[0].body).not.toBe(contractBody);
     expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
@@ -1652,7 +1703,7 @@ describe("bounded triage context contract", () => {
       rawContractBody.slice(0, CONTRACT_EXCERPT_PREFIX_MAX_BYTES) +
         CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
     );
-    expect(Buffer.byteLength(contract?.body ?? "")).toBe(
+    expect(Buffer.byteLength(JSON.stringify(contract?.body ?? ""))).toBe(
       CONTRACT_EXCERPT_MAX_BYTES,
     );
 

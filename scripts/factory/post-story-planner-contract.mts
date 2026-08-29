@@ -18,6 +18,7 @@ const POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/;
 const ISSUE_REVISION_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const COMMENT_PAGE_SIZE = 100;
 const MAX_COMMENT_PAGES = 50;
+const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
 const STORY_PLANNER_CONTRACT_MARKER_PREFIX = "<!-- story-planner-contract:";
 export const STORY_PLANNER_ESCALATE_MARKER_PREFIX = "<!-- story-planner-escalate:";
 const MARKERS = [
@@ -326,6 +327,12 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
       throw new Error(
         `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+      );
+    }
+    const serializedBodyBytes = Buffer.byteLength(JSON.stringify(finalBody));
+    if (serializedBodyBytes > CONTRACT_EXCERPT_MAX_BYTES) {
+      throw new Error(
+        `story-planner contract serialized comment length ${serializedBodyBytes} exceeds triage excerpt limit ${CONTRACT_EXCERPT_MAX_BYTES}`,
       );
     }
 

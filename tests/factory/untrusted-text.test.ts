@@ -334,6 +334,14 @@ describe("escapeInvisibleCharactersVisibly (in the untrusted-text leaf)", () => 
     expect(escapeInvisibleCharactersVisibly("a\u0000b")).toBe("a[U+0000]b");
   });
 
+  it("renders U+007F visibly before story-planner JSON budget measurement", () => {
+    // jq `tojson` expands DEL while JavaScript `JSON.stringify` leaves it raw;
+    // R1's equal excerpt budgets therefore depend on this sanitizer removing it.
+    const output = escapeInvisibleCharactersVisibly("a\u007fb");
+    expect(output).toBe("a[U+007F]b");
+    expect(output).not.toContain("\u007f");
+  });
+
   it("renders a Trojan-Source bidi override visibly instead of hiding it", () => {
     expect(escapeInvisibleCharactersVisibly("x\u202Ey")).toBe("x[U+202E]y");
   });
