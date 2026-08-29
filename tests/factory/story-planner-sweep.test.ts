@@ -331,9 +331,48 @@ describe("story-planner sweep I/O", () => {
     ]);
   });
 
+  // remove guard F5-per-retry-recheck => retry POSTs after the issue closes.
+  it("stops re-add retries when the issue closes after the first POST failure", async () => {
+    let stateReads = 0;
+    const logs: string[] = [];
+    const { request, mock } = requestFrom(async (_token, method, path) => {
+      if (method === "GET" && path.includes("/issues?")) {
+        return enumerationResponse(path, [issue(40)]);
+      }
+      if (method === "GET" && path.includes("/comments?")) return [];
+      if (method === "GET" && path.endsWith("/issues/40")) {
+        stateReads += 1;
+        return stateReads < 3 ? issue(40) : issue(40, "closed");
+      }
+      if (method === "DELETE") return undefined;
+      if (method === "POST") throw new Error("first re-add failed");
+      throw new Error(`unexpected request: ${method} ${path}`);
+    });
+
+    await expect(runSweep({
+      request,
+      ghToken: READ_TOKEN,
+      appToken: APP_TOKEN,
+      owner: OWNER,
+      repo: REPO,
+      log: (line) => logs.push(line),
+    })).resolves.toBeUndefined();
+    expect(mock.mock.calls.filter((call) => call[1] !== "GET")).toEqual([
+      [APP_TOKEN, "DELETE", `/repos/${OWNER}/${REPO}/issues/40/labels/ready-to-spec`, undefined],
+      [APP_TOKEN, "POST", `/repos/${OWNER}/${REPO}/issues/40/labels`, { labels: ["ready-to-spec"] }],
+    ]);
+    expect(stateReads).toBe(3);
+    expect(logs.map((line) => JSON.parse(line))).toEqual([
+      { issue_number: 40, result: "closed-after-delete-no-readd" },
+    ]);
+  });
+
   // remove guard F2-readd-bound => a successful DELETE can strand the issue silently.
-  it("retries a failed re-add to the bound, emits ::error::, and throws", async () => {
+  it.each(["injected", "default"] as const)(
+    "retries a failed re-add to the bound, emits ::error:: via %s reporter, and throws",
+    async (reporter) => {
     const errors: string[] = [];
+    const defaultError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { request, mock } = requestFrom(async (_token, method, path) => {
       if (method === "GET" && path.includes("/issues?")) {
         return enumerationResponse(path, [issue(36)]);
@@ -351,15 +390,25 @@ describe("story-planner sweep I/O", () => {
       appToken: APP_TOKEN,
       owner: OWNER,
       repo: REPO,
-      error: (line) => errors.push(line),
+      ...(reporter === "injected" ? { error: (line: string) => errors.push(line) } : {}),
     })).rejects.toThrow("re-add unavailable");
     expect(mock.mock.calls.filter((call) => call[1] === "DELETE")).toHaveLength(1);
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(
       MAX_LABEL_READD_ATTEMPTS,
     );
-    expect(errors).toEqual([
-      expect.stringMatching(/::error::.*issue #36.*Manually re-add ready-to-spec.*#36/),
-    ]);
+    expect(
+      mock.mock.calls.filter((call) => String(call[2]).endsWith("/issues/36")),
+    ).toHaveLength(1 + MAX_LABEL_READD_ATTEMPTS);
+    const loudError = expect.stringMatching(
+      /::error::.*issue #36.*Manually re-add ready-to-spec.*#36/,
+    );
+    if (reporter === "injected") {
+      expect(errors).toEqual([loudError]);
+      expect(defaultError).not.toHaveBeenCalled();
+    } else {
+      expect(errors).toEqual([]);
+      expect(defaultError).toHaveBeenCalledWith(loudError);
+    }
   });
 
   // remove guard F2-readd-recovery => one transient POST failure aborts after DELETE.
@@ -397,6 +446,9 @@ describe("story-planner sweep I/O", () => {
     })).resolves.toBeUndefined();
     expect(mock.mock.calls.filter((call) => call[1] === "DELETE")).toHaveLength(1);
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(2);
+    expect(
+      mock.mock.calls.filter((call) => String(call[2]).endsWith("/issues/37")),
+    ).toHaveLength(3);
     expect(errors).toEqual([]);
   });
 });

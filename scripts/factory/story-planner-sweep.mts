@@ -146,7 +146,6 @@ async function writeLabelOperation(
   repo: string,
   issueNumber: number,
   operation: SweepLabelOperation,
-  reportError: (message: string) => void,
 ): Promise<void> {
   const issuePath = `/repos/${owner}/${repo}/issues/${issueNumber}`;
   if (operation.method === "DELETE") {
@@ -157,23 +156,46 @@ async function writeLabelOperation(
     );
     return;
   }
+  await request(appToken, "POST", `${issuePath}/labels`, {
+    labels: [operation.label],
+  });
+}
+
+async function readdReadyToSpecWithRetries(
+  dependencies: SweepDependencies,
+  issueNumber: number,
+  operation: Extract<SweepLabelOperation, { readonly method: "POST" }>,
+): Promise<"readded" | "closed"> {
+  let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_LABEL_READD_ATTEMPTS; attempt += 1) {
+    if (!await isStillOpenReadyToSpec(
+      dependencies.request,
+      dependencies.ghToken,
+      dependencies.owner,
+      dependencies.repo,
+      issueNumber,
+      false,
+    )) return "closed";
     try {
-      await request(appToken, "POST", `${issuePath}/labels`, {
-        labels: [operation.label],
-      });
-      return;
+      await writeLabelOperation(
+        dependencies.request,
+        dependencies.appToken,
+        dependencies.owner,
+        dependencies.repo,
+        issueNumber,
+        operation,
+      );
+      return "readded";
     } catch (error) {
-      if (attempt === MAX_LABEL_READD_ATTEMPTS) {
-        reportError(
-          `::error::Failed to re-add ${READY_TO_SPEC_LABEL} to issue #${issueNumber} ` +
-            `after ${MAX_LABEL_READD_ATTEMPTS} attempts. Manually re-add ` +
-            `${READY_TO_SPEC_LABEL} to issue #${issueNumber}; its prior DELETE succeeded.`,
-        );
-        throw error;
-      }
+      lastError = error;
     }
   }
+  (dependencies.error ?? console.error)(
+    `::error::Failed to re-add ${READY_TO_SPEC_LABEL} to issue #${issueNumber} ` +
+      `after ${MAX_LABEL_READD_ATTEMPTS} attempts. Manually re-add ` +
+      `${READY_TO_SPEC_LABEL} to issue #${issueNumber}; its prior DELETE succeeded.`,
+  );
+  throw lastError;
 }
 
 async function confirmHandled(
@@ -250,30 +272,26 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
     }
     let skippedReadd = false;
     for (const operation of decision.operations) {
-      if (
-        operation.method === "POST" &&
-        !await isStillOpenReadyToSpec(
+      if (operation.method === "DELETE") {
+        await writeLabelOperation(
           dependencies.request,
-          dependencies.ghToken,
+          dependencies.appToken,
           dependencies.owner,
           dependencies.repo,
           issue.number,
-          false,
-        )
-      ) {
+          operation,
+        );
+        continue;
+      }
+      if (await readdReadyToSpecWithRetries(
+        dependencies,
+        issue.number,
+        operation,
+      ) === "closed") {
         log(JSON.stringify({ issue_number: issue.number, result: "closed-after-delete-no-readd" }));
         skippedReadd = true;
         break;
       }
-      await writeLabelOperation(
-        dependencies.request,
-        dependencies.appToken,
-        dependencies.owner,
-        dependencies.repo,
-        issue.number,
-        operation,
-        dependencies.error ?? console.error,
-      );
     }
     if (skippedReadd) continue;
     const planned = await confirmHandled(dependencies, issue.number);
