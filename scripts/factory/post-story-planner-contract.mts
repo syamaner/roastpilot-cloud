@@ -1,5 +1,5 @@
 /** Deterministic, shape-gated publisher for the dark story-planner workflow. */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import { githubRequest, requireEnv } from "./github-api.mts";
 import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
@@ -15,7 +15,8 @@ const ISSUE_REVISION_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const COMMENT_PAGE_SIZE = 100;
 const MAX_COMMENT_PAGES = 50;
 const STORY_PLANNER_CONTRACT_MARKER_PREFIX = "<!-- story-planner-contract:";
-const STORY_PLANNER_CONTRACT_AUTHOR_LOGIN = "github-actions[bot]";
+export const STORY_PLANNER_ESCALATE_MARKER_PREFIX = "<!-- story-planner-escalate:";
+const STORY_PLANNER_BOT_AUTHOR_LOGIN = "github-actions[bot]";
 const MARKERS = [
   "<!-- contract:spec -->",
   "<!-- contract:tests -->",
@@ -26,6 +27,10 @@ const MARKERS = [
 /** Workflow-owned issue-scoped marker appended only after model text is sanitized. */
 export const STORY_PLANNER_CONTRACT_MARKER = (issueNumber: number): string =>
   `${STORY_PLANNER_CONTRACT_MARKER_PREFIX}issue-${issueNumber} -->`;
+
+/** Workflow-owned issue-scoped marker appended only after escalation text is sanitized. */
+export const STORY_PLANNER_ESCALATE_MARKER = (issueNumber: number): string =>
+  `${STORY_PLANNER_ESCALATE_MARKER_PREFIX}issue-${issueNumber} -->`;
 
 export type GithubRequest = <T>(
   token: string,
@@ -119,6 +124,12 @@ export function validateStoryPlannerContract(
   if (contract.includes(STORY_PLANNER_CONTRACT_MARKER_PREFIX)) {
     throw new Error("contract contains the reserved story-planner contract marker prefix");
   }
+  if (
+    contract.includes("<!-- escalate:") ||
+    contract.includes(STORY_PLANNER_ESCALATE_MARKER_PREFIX)
+  ) {
+    throw new Error("contract contains a reserved story-planner escalation marker prefix");
+  }
   const expectedSentinel =
     `CONTRACT-COMPLETE: story-planner contract finished (issue #${issueNumber})`;
   if (contract.split(expectedSentinel).length - 1 !== 1) {
@@ -161,19 +172,60 @@ export function validateStoryPlannerContract(
   }
 }
 
+/** Reject malformed model-authored escalation output before any request. */
+export function validateStoryPlannerEscalation(
+  escalate: string,
+  issueNumber: number,
+): void {
+  if (
+    escalate.includes("<!-- contract:") ||
+    escalate.includes(STORY_PLANNER_CONTRACT_MARKER_PREFIX) ||
+    escalate.includes(STORY_PLANNER_ESCALATE_MARKER_PREFIX)
+  ) {
+    throw new Error("escalation contains a reserved story-planner marker prefix");
+  }
+
+  const marker = "<!-- escalate:question -->";
+  const markerPosition = escalate.indexOf(marker);
+  if (
+    markerPosition < 0 ||
+    escalate.indexOf(marker, markerPosition + marker.length) >= 0
+  ) {
+    throw new Error(`escalation must contain ${marker} exactly once`);
+  }
+
+  const expectedSentinel =
+    `ESCALATE-COMPLETE: story-planner escalation finished (issue #${issueNumber})`;
+  if (escalate.split(expectedSentinel).length - 1 !== 1) {
+    throw new Error("escalation terminal sentinel must appear exactly once");
+  }
+  const nonEmptyLines = escalate.split(/\r?\n/).filter((line) => line.trim() !== "");
+  if (nonEmptyLines.at(-1)?.trim() !== expectedSentinel) {
+    throw new Error(
+      "escalation is missing the issue-bound terminal sentinel as its final non-empty line",
+    );
+  }
+
+  const sentinelPosition = escalate.lastIndexOf(expectedSentinel);
+  const questionRegion = escalate.slice(markerPosition + marker.length, sentinelPosition);
+  if (!isSubstantive(questionRegion)) {
+    throw new Error(`escalation region after ${marker} is empty or vacuous`);
+  }
+}
+
 interface GitHubComment {
   readonly body: string;
   readonly user: { readonly type: string; readonly login: string } | null;
 }
 
-async function hasExistingStoryPlannerContract(
+async function hasExistingBotMarkerComment(
   request: GithubRequest,
   token: string,
   owner: string,
   repo: string,
   issueNumber: number,
+  marker: string,
 ): Promise<boolean> {
-  const marker = STORY_PLANNER_CONTRACT_MARKER(issueNumber);
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const comments = await request<GitHubComment[]>(
       token,
@@ -184,7 +236,7 @@ async function hasExistingStoryPlannerContract(
       comments.some(
         (comment) =>
           comment.user?.type === "Bot" &&
-          comment.user.login === STORY_PLANNER_CONTRACT_AUTHOR_LOGIN &&
+          comment.user.login === STORY_PLANNER_BOT_AUTHOR_LOGIN &&
           (comment.body === marker || comment.body.endsWith(`\n${marker}`)),
       )
     ) {
@@ -212,105 +264,150 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     "TARGET_ISSUE_NUMBER",
     requireEnv("TARGET_ISSUE_NUMBER"),
   );
-  const contract = readFileSync(requireEnv("CONTRACT_PATH"), "utf8");
-  validateStoryPlannerContract(contract, issueNumber);
-  const finalBody =
-    sanitizeContractForPosting(contract) +
-    "\n" +
-    STORY_PLANNER_CONTRACT_MARKER(issueNumber);
-  if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
-    throw new Error(
-      `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
-    );
-  }
-
+  const contractPath = requireEnv("CONTRACT_PATH");
+  const escalatePath = process.env.ESCALATE_PATH;
   const [owner, repo] = repository.split("/", 2) as [string, string];
-  if (
-    await hasExistingStoryPlannerContract(
-      request,
-      token,
-      owner,
-      repo,
-      issueNumber,
-    )
-  ) {
-    console.log(`contract already posted on #${issueNumber}; skipping`);
-    return;
-  }
+  if (existsSync(contractPath)) {
+    const contract = readFileSync(contractPath, "utf8");
+    validateStoryPlannerContract(contract, issueNumber);
+    const finalBody =
+      sanitizeContractForPosting(contract) +
+      "\n" +
+      STORY_PLANNER_CONTRACT_MARKER(issueNumber);
+    if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+      throw new Error(
+        `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+      );
+    }
 
-  const issue = await request<unknown>(
-    token,
-    "GET",
-    `/repos/${owner}/${repo}/issues/${issueNumber}`,
-  );
-  if (
-    typeof issue !== "object" ||
-    issue === null ||
-    !("labels" in issue) ||
-    !Array.isArray(issue.labels)
-  ) {
-    throw new Error("issue labels response is malformed; refusing to publish");
-  }
-  const labelNames = issue.labels.map((label) => {
     if (
-      typeof label !== "object" ||
-      label === null ||
-      !("name" in label) ||
-      typeof label.name !== "string"
+      await hasExistingBotMarkerComment(
+        request,
+        token,
+        owner,
+        repo,
+        issueNumber,
+        STORY_PLANNER_CONTRACT_MARKER(issueNumber),
+      )
+    ) {
+      console.log(`contract already posted on #${issueNumber}; skipping`);
+      return;
+    }
+
+    const issue = await request<unknown>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}`,
+    );
+    if (
+      typeof issue !== "object" ||
+      issue === null ||
+      !("labels" in issue) ||
+      !Array.isArray(issue.labels)
     ) {
       throw new Error("issue labels response is malformed; refusing to publish");
     }
-    return label.name;
-  });
-  if (!labelNames.includes("ready-to-spec")) {
-    throw new Error(
-      "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
+    const labelNames = issue.labels.map((label) => {
+      if (
+        typeof label !== "object" ||
+        label === null ||
+        !("name" in label) ||
+        typeof label.name !== "string"
+      ) {
+        throw new Error("issue labels response is malformed; refusing to publish");
+      }
+      return label.name;
+    });
+    if (!labelNames.includes("ready-to-spec")) {
+      throw new Error(
+        "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
+      );
+    }
+
+    // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
+    // an edit after Prepare's read in the same wall-clock second is undetectable.
+    // No finer token exists; the residual is a marginally stale advisory comment
+    // in this dark, human-reviewed workflow—a known limitation, not a fail-open.
+    const revision = JSON.parse(
+      readFileSync(requireEnv("REVISION_PATH"), "utf8"),
+    ) as unknown;
+    if (
+      typeof revision !== "object" ||
+      revision === null ||
+      Array.isArray(revision) ||
+      Object.keys(revision).length !== 2 ||
+      !("issueNumber" in revision) ||
+      typeof revision.issueNumber !== "number" ||
+      !("updatedAt" in revision) ||
+      typeof revision.updatedAt !== "string" ||
+      revision.issueNumber !== issueNumber ||
+      !ISSUE_REVISION_PATTERN.test(revision.updatedAt)
+    ) {
+      throw new Error("revision binding is malformed; refusing to publish");
+    }
+    if (
+      !("updated_at" in issue) ||
+      typeof issue.updated_at !== "string" ||
+      !ISSUE_REVISION_PATTERN.test(issue.updated_at)
+    ) {
+      throw new Error("issue updated_at is malformed; refusing to publish");
+    }
+    if (issue.updated_at !== revision.updatedAt) {
+      throw new Error(
+        "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+      );
+    }
+
+    await request(
+      token,
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
+      {
+        body: finalBody,
+      },
     );
+    console.log(`Posted one story-planner contract on issue #${issueNumber}.`);
+    return;
   }
 
-  // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
-  // an edit after Prepare's read in the same wall-clock second is undetectable.
-  // No finer token exists; the residual is a marginally stale advisory comment
-  // in this dark, human-reviewed workflow—a known limitation, not a fail-open.
-  const revision = JSON.parse(
-    readFileSync(requireEnv("REVISION_PATH"), "utf8"),
-  ) as unknown;
-  if (
-    typeof revision !== "object" ||
-    revision === null ||
-    Array.isArray(revision) ||
-    Object.keys(revision).length !== 2 ||
-    !("issueNumber" in revision) ||
-    typeof revision.issueNumber !== "number" ||
-    !("updatedAt" in revision) ||
-    typeof revision.updatedAt !== "string" ||
-    revision.issueNumber !== issueNumber ||
-    !ISSUE_REVISION_PATTERN.test(revision.updatedAt)
-  ) {
-    throw new Error("revision binding is malformed; refusing to publish");
-  }
-  if (
-    !("updated_at" in issue) ||
-    typeof issue.updated_at !== "string" ||
-    !ISSUE_REVISION_PATTERN.test(issue.updated_at)
-  ) {
-    throw new Error("issue updated_at is malformed; refusing to publish");
-  }
-  if (issue.updated_at !== revision.updatedAt) {
-    throw new Error(
-      "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+  if (escalatePath !== undefined && existsSync(escalatePath)) {
+    const escalate = readFileSync(escalatePath, "utf8");
+    validateStoryPlannerEscalation(escalate, issueNumber);
+    const finalBody =
+      sanitizeContractForPosting(escalate) +
+      "\n" +
+      "This is a re-scoping question, not an authorization: no label has been changed and no work is authorized by this comment." +
+      "\n" +
+      STORY_PLANNER_ESCALATE_MARKER(issueNumber);
+    if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+      throw new Error(
+        `story-planner escalation comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+      );
+    }
+    if (
+      await hasExistingBotMarkerComment(
+        request,
+        token,
+        owner,
+        repo,
+        issueNumber,
+        STORY_PLANNER_ESCALATE_MARKER(issueNumber),
+      )
+    ) {
+      console.log(`escalation already posted on #${issueNumber}; skipping`);
+      return;
+    }
+    await request(
+      token,
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
+      { body: finalBody },
     );
+    console.log(`Posted one story-planner escalation on issue #${issueNumber}.`);
+    return;
   }
 
-  await request(
-    token,
-    "POST",
-    `/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-    {
-      body: finalBody,
-    },
-  );
-  console.log(`Posted one story-planner contract on issue #${issueNumber}.`);
+  throw new Error("story-planner produced neither a contract nor an escalation file");
 }
 
 /* v8 ignore start -- exercised by the workflow process, not import-based tests. */

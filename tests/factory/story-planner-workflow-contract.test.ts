@@ -104,6 +104,7 @@ describe("story-planner workflow protected shape", () => {
     const allowed = claudeArgs.match(/--allowedTools "([^"]+)"/)?.[1]?.split(",");
     const disallowed = claudeArgs.match(/--disallowedTools "([^"]+)"/)?.[1]?.split(",") ?? [];
 
+    // G8 mutation witness: removing the escalation Edit grant breaks this exact array pin.
     expect(allowed).toEqual([
       "Read(./**)",
       "Grep(./**)",
@@ -111,6 +112,7 @@ describe("story-planner workflow protected shape", () => {
       "LS(./**)",
       "ToolSearch",
       "Edit(planner-output/contract.md)",
+      "Edit(planner-output/escalate.md)",
     ]);
     expect(allowed).not.toContain("Bash");
     expect(allowed).not.toContain("Write");
@@ -131,6 +133,10 @@ describe("story-planner workflow protected shape", () => {
       "mcp__github_file_ops__commit_files",
       "mcp__github_file_ops__delete_files",
     ]));
+    // G8 mutation witness: widening or changing the six-name SDK closure breaks this pin.
+    expect(asMapping(closureStep().env)?.PERMITTED_RESIDUAL).toBe(
+      '["Read","Grep","Glob","LS","ToolSearch","Edit"]',
+    );
   });
 
   it("keeps plan read-only and makes publish the sole issues-write job", () => {
@@ -162,19 +168,19 @@ describe("story-planner workflow protected shape", () => {
     const run = String(prepare?.run);
     const outputHeading = run.indexOf('"## Workflow-owned output contract"');
     const soleFileChannel = run.indexOf(
-      "the file planner-output/contract.md using the single permitted Edit tool, which is the sole output channel.",
+      "use the single permitted Edit tool to write exactly one workflow-owned output file, which is the sole output channel.",
     );
     const noWriteToolsOverride = run.indexOf(
-      "both its no-write-tools statement and its instruction to return the contract as chat or return text",
+      "both its no-write-tools statement and its instruction to return the contract or escalation as chat or return text",
     );
     const retainedGroundRules = run.indexOf(
       "Every other agent-definition ground rule (file and line verification, fail-closed direction analysis, scope-trip escalation, reviewer routing, and all quality and safety requirements) remains fully in force.",
     );
     const discardedChat = run.indexOf(
-      "A run that writes no file fails, and any contract returned as chat or return text is discarded.",
+      "A run that writes no file fails, and any output returned as chat or return text is discarded.",
     );
     const writeInstruction = run.indexOf(
-      '"Write the completed contract only to planner-output/contract.md."',
+      '"When the story can be contracted, write the completed contract to planner-output/contract.md."',
     );
 
     expect(soleFileChannel).toBeGreaterThan(outputHeading);
@@ -182,6 +188,19 @@ describe("story-planner workflow protected shape", () => {
     expect(retainedGroundRules).toBeGreaterThan(noWriteToolsOverride);
     expect(discardedChat).toBeGreaterThan(retainedGroundRules);
     expect(writeInstruction).toBeGreaterThan(discardedChat);
+    // G8 mutation witness: removing the alternative file protocol loses these lockstep pins.
+    expect(run).toContain(
+      '"When the story cannot be contracted because of a scope trip or undecidable re-scoping question, write planner-output/escalate.md instead of planner-output/contract.md."',
+    );
+    expect(run).toContain(
+      '"The escalation file must contain exactly one <!-- escalate:question --> region followed by the specific substantive re-scoping question."',
+    );
+    expect(run).toContain(
+      '("Its final non-empty line must be exactly: ESCALATE-COMPLETE: story-planner escalation finished (issue #" + $issue + ")")',
+    );
+    expect(run).toContain(
+      '"Write exactly one of planner-output/contract.md and planner-output/escalate.md, never both."',
+    );
   });
 
   it("rejects shell-breaking quoting in the Prepare run block", () => {
@@ -195,13 +214,27 @@ describe("story-planner workflow protected shape", () => {
     expect(syntaxCheck.status, syntaxCheck.stderr).toBe(0);
   });
 
-  it("T-A6: uploads the contract and its captured issue revision together", () => {
+  it("T-A6/G9: uploads both possible outputs and the captured issue revision together", () => {
     const upload = planSteps().find((step) => step.name === UPLOAD_STEP);
     const path = String(asMapping(upload?.with)?.path).split(/\r?\n/);
     expect(path).toEqual(expect.arrayContaining([
       "planner-output/contract.md",
+      "planner-output/escalate.md",
       "planner-output/revision.json",
     ]));
+    // G9 mutation witness: removing escalation from the artifact path fails this assertion.
+    expect(asMapping(upload?.with)?.["if-no-files-found"]).toBe("error");
+  });
+
+  it("passes the optional escalation path to the deterministic publisher", () => {
+    const publish = workflowJobs().publish;
+    const step = Array.isArray(publish?.steps)
+      ? publish.steps
+          .map((candidate) => asMapping(candidate) ?? {})
+          .find((candidate) => candidate.name === "Validate and post exactly one contract comment")
+      : undefined;
+    // Mutation witness: omitting ESCALATE_PATH makes an escalation artifact appear absent.
+    expect(asMapping(step?.env)?.ESCALATE_PATH).toBe("planner-output/escalate.md");
   });
 
   it("T-A7: captures a trusted revision without changing the model story shape", () => {
