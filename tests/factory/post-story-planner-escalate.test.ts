@@ -245,17 +245,58 @@ describe("main escalation precedence and publication", () => {
     );
     expect(posts[0]?.[3]).toEqual({
       body:
+        `${TRUSTED_ESCALATION_LINE}\n\n` +
         `${sanitizeContractForPosting(escalation)}\n` +
-        `${TRUSTED_ESCALATION_LINE}\n` +
         STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER),
     });
+    const body = (posts[0]?.[3] as { readonly body: string }).body;
+    // Mutation witness: moving the notice after model text fails these ordering pins.
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
+      body.indexOf("Which bounded scope handles"),
+    );
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
+      body.indexOf("<!-- escalate:question -->"),
+    );
+    expect(mock).toHaveBeenNthCalledWith(
+      1,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      undefined,
+    );
+    expect(mock).toHaveBeenNthCalledWith(
+      2,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
+      undefined,
+    );
     expect(mock.mock.calls.some((call) => call[1] === "PUT")).toBe(false);
     expect(mock.mock.calls.some((call) => String(call[2]).includes("/labels"))).toBe(false);
     expect(mock).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps the trusted notice visible before an unterminated model HTML comment", async () => {
+    // Mutation witness: moving the notice after model text places it inside this open comment.
+    const escalation = buildEscalation({
+      question: "Which bounded scope remains visible? <!--",
+    });
+    writeFileSync(escalatePath, escalation, "utf8");
+    const { request, mock } = mockRequest();
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    const openComment = body.indexOf("<!--", body.indexOf("remains visible"));
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(openComment);
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
+      body.indexOf("<!-- escalate:question -->"),
+    );
+  });
+
   it("G-escalate-label-withdrawn: refuses to post after ready-to-spec is withdrawn", async () => {
-    // Mutation witness: removing the shared readiness check lets this escalation post.
+    // Mutation witness: readiness-before-scan changes this order and reopens the TOCTOU window.
     writeFileSync(escalatePath, buildEscalation(), "utf8");
     const { request, mock } = mockRequest({ labels: [{ name: "triaged" }] });
 
@@ -264,7 +305,21 @@ describe("main escalation precedence and publication", () => {
     );
 
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(0);
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenNthCalledWith(
+      1,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      undefined,
+    );
+    expect(mock).toHaveBeenNthCalledWith(
+      2,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
+      undefined,
+    );
+    expect(mock).toHaveBeenCalledTimes(2);
   });
 
   it("G-escalate-not-revision-bound: posts despite a captured-revision mismatch", async () => {
@@ -285,7 +340,7 @@ describe("main escalation precedence and publication", () => {
     const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
     const seed = buildEscalation();
     const seedLength =
-      `${sanitizeContractForPosting(seed)}\n${TRUSTED_ESCALATION_LINE}\n${marker}`.length;
+      `${TRUSTED_ESCALATION_LINE}\n\n${sanitizeContractForPosting(seed)}\n${marker}`.length;
     const escalation = buildEscalation({
       question:
         "Which bounded implementation scope should the planner contract?" +
@@ -316,6 +371,6 @@ describe("main escalation precedence and publication", () => {
     await main(request);
 
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(0);
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(1);
   });
 });

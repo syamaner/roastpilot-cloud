@@ -396,9 +396,9 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     const escalate = readFileSync(escalatePath, "utf8");
     validateStoryPlannerEscalation(escalate, issueNumber);
     const finalBody =
-      sanitizeContractForPosting(escalate) +
-      "\n" +
       "This is a re-scoping question, not an authorization: no label has been changed and no work is authorized by this comment." +
+      "\n\n" +
+      sanitizeContractForPosting(escalate) +
       "\n" +
       STORY_PLANNER_ESCALATE_MARKER(issueNumber);
     if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
@@ -406,17 +406,6 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
         `story-planner escalation comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
       );
     }
-    // An escalation is a non-authorizing re-scoping question, not a body-bound
-    // spec. Deliberately omit revision binding so a benign same-run body edit
-    // cannot recreate the red-job/no-question failure, while still refusing
-    // publication when ready-to-spec was withdrawn.
-    await fetchIssueAndAssertReadyToSpec(
-      request,
-      token,
-      owner,
-      repo,
-      issueNumber,
-    );
     if (
       await hasExistingBotMarkerComment(
         request,
@@ -430,6 +419,17 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
       console.log(`escalation already posted on #${issueNumber}; skipping`);
       return;
     }
+    // An escalation is a non-authorizing re-scoping question, not a body-bound
+    // spec. Deliberately omit revision binding so a benign same-run body edit
+    // cannot recreate the red-job/no-question failure, while still refusing
+    // publication when ready-to-spec was withdrawn.
+    await fetchIssueAndAssertReadyToSpec(
+      request,
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
     await request(
       token,
       "POST",
