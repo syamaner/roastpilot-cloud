@@ -143,7 +143,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           use_commit_signing: true
-          allowed_bots: ""
+          allowed_bots: 'roastpilot-factory,roastpilot-factory[bot]'
           allowed_non_write_users: ""
           show_full_output: false
           claude_args: |

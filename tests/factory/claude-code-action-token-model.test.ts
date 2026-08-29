@@ -28,6 +28,10 @@ const REVIEW_WORKFLOW_PATH = join(
   "claude-code-review.yml",
 );
 const REVIEW_WORKFLOW_CONTENT = readFileSync(REVIEW_WORKFLOW_PATH, "utf8");
+const STORY_PLANNER_WORKFLOW_CONTENT = readFileSync(
+  join(WORKFLOWS_DIR, "story-planner.yml"),
+  "utf8",
+);
 
 const CLAUDE_ACTION_PREFIX = "anthropics/claude-code-action@";
 // The exact expression the action must be handed. A PAT-style secret, or the
@@ -46,6 +50,8 @@ const EXPECTED_REVIEW_PERMISSIONS = {
 // must NOT move when the completion-comment author literal changes -- T-4.
 const EXPECTED_ALLOWED_BOTS =
   "claude,claude[bot],roastpilot-factory,roastpilot-factory[bot]";
+const EXPECTED_STORY_PLANNER_ALLOWED_BOTS =
+  "roastpilot-factory,roastpilot-factory[bot]";
 // The live corpus has exactly nine invocations (claude-review, spec-grounded,
 // triage, implement, owner-command answer-agent, owner-command task-agent, and
 // the two dark task-agent read-confinement probes, plus story-planner). A tenth
@@ -418,6 +424,19 @@ describe("claude-code-action token model (issue #157)", () => {
         expect(value).not.toMatch(/github-actions|\*|\$\{\{/);
       }
     }
+  });
+
+  it("T-4c: the story-planner invocation admits exactly the factory App bot forms", () => {
+    expect(allowedBotsInSource(STORY_PLANNER_WORKFLOW_CONTENT)).toEqual([
+      EXPECTED_STORY_PLANNER_ALLOWED_BOTS,
+    ]);
+  });
+
+  it("T-4d: the story-planner allowlist is non-empty and excludes broad actor forms", () => {
+    const [value] = allowedBotsInSource(STORY_PLANNER_WORKFLOW_CONTENT);
+    expect(value).not.toBe("");
+    expect(value).not.toMatch(/github-actions|\*|\$\{\{/);
+    // Guard witness: "" or "*" fails T-4c; github-actions, *, or ${{ fails T-4b.
   });
 
   it("T-5: every live claude-code-action invocation passes the built-in token, and there are exactly eight", () => {
