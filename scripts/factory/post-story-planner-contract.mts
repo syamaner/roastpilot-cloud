@@ -80,8 +80,14 @@ export function sanitizeContractForPosting(contract: string): string {
   return neutralizeCodexTriggerPhrases(removeCodexSeparatingBackticks(invisiblesMarked));
 }
 
-function neutralizeHtmlComments(text: string): string {
-  return text.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+function fenceVerbatim(text: string): string {
+  const backtickRuns = text.match(/`+/g) ?? [];
+  const longestRun = backtickRuns.reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0,
+  );
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}\n${text}\n${fence}`;
 }
 
 function parsePositiveInteger(name: string, raw: string): number {
@@ -402,7 +408,7 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     const finalBody =
       "This is a re-scoping question, not an authorization: no label has been changed and no work is authorized by this comment." +
       "\n\n" +
-      neutralizeHtmlComments(sanitizeContractForPosting(escalate)) +
+      fenceVerbatim(sanitizeContractForPosting(escalate)) +
       "\n" +
       STORY_PLANNER_ESCALATE_MARKER(issueNumber);
     if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {

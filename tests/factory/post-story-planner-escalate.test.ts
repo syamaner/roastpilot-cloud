@@ -50,8 +50,10 @@ function buildEscalation(options: {
   ].join("\n");
 }
 
-function neutralizeHtmlCommentsForExpectedPosting(text: string): string {
-  return text.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+function fenceVerbatimForExpectedPosting(text: string): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}\n${text}\n${fence}`;
 }
 
 function contractSentinel(): string {
@@ -250,7 +252,7 @@ describe("main escalation precedence and publication", () => {
     expect(posts[0]?.[3]).toEqual({
       body:
         `${TRUSTED_ESCALATION_LINE}\n\n` +
-        `${neutralizeHtmlCommentsForExpectedPosting(sanitizeContractForPosting(escalation))}\n` +
+        `${fenceVerbatimForExpectedPosting(sanitizeContractForPosting(escalation))}\n` +
         STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER),
     });
     const body = (posts[0]?.[3] as { readonly body: string }).body;
@@ -259,7 +261,7 @@ describe("main escalation precedence and publication", () => {
       body.indexOf("Which bounded scope handles"),
     );
     expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
-      body.indexOf("&lt;!-- escalate:question --&gt;"),
+      body.indexOf("<!-- escalate:question -->"),
     );
     expect(mock).toHaveBeenNthCalledWith(
       1,
@@ -280,10 +282,13 @@ describe("main escalation precedence and publication", () => {
     expect(mock).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps the full question visible by neutralizing model-authored HTML comments", async () => {
-    // Mutation witness: removing neutralizeHtmlComments leaves a raw opener that hides the tail.
+  it("renders a Markdown reference definition verbatim inside the adaptive fence", async () => {
+    // Mutation witness: removing the fence lets GitHub hide this reference-definition line.
     const escalation = buildEscalation({
-      question: "Which option is <!-- A or B?",
+      question:
+        "Which scope should we choose?\n\n" +
+        "[Which scope should we choose?]: https://example.invalid\n\n" +
+        "Follow-up context remains visible.",
     });
     writeFileSync(escalatePath, escalation, "utf8");
     const { request, mock } = mockRequest();
@@ -293,18 +298,66 @@ describe("main escalation precedence and publication", () => {
     const post = mock.mock.calls.find((call) => call[1] === "POST");
     const body = (post?.[3] as { readonly body: string }).body;
     const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
-    const modelStart = body.indexOf("\n\n") + 2;
-    const modelEnd = body.lastIndexOf(`\n${marker}`);
-    const modelBody = body.slice(modelStart, modelEnd);
+    const openingFenceStart = body.indexOf("\n\n") + 2;
+    const openingFenceEnd = body.indexOf("\n", openingFenceStart);
+    const openingFence = body.slice(openingFenceStart, openingFenceEnd);
+    const closingFenceStart = body.lastIndexOf("\n", body.lastIndexOf(`\n${marker}`) - 1) + 1;
+    const closingFence = body.slice(closingFenceStart, body.lastIndexOf(`\n${marker}`));
+    const referenceDefinition =
+      "[Which scope should we choose?]: https://example.invalid";
 
+    expect(openingFence).toMatch(/^`{3,}$/);
+    expect(closingFence).toBe(openingFence);
+    expect(body.indexOf(referenceDefinition)).toBeGreaterThan(openingFenceEnd);
+    expect(body.indexOf(referenceDefinition)).toBeLessThan(closingFenceStart);
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(openingFenceStart);
+    expect(body.endsWith(`\n${marker}`)).toBe(true);
+  });
+
+  it("renders an HTML-comment truncation attempt verbatim inside the fence", async () => {
+    // Mutation witness: removing the fence lets the raw opener hide the question tail.
+    const escalation = buildEscalation({ question: "Which option is <!-- A or B?" });
+    writeFileSync(escalatePath, escalation, "utf8");
+    const { request, mock } = mockRequest();
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    const openingFenceStart = body.indexOf("\n\n") + 2;
+    const openingFenceEnd = body.indexOf("\n", openingFenceStart);
+    const closingFenceStart = body.lastIndexOf("\n", body.lastIndexOf("\n<!-- story-planner-escalate:") - 1) + 1;
+    const questionIndex = body.indexOf("Which option is <!-- A or B?");
+
+    expect(questionIndex).toBeGreaterThan(openingFenceEnd);
+    expect(questionIndex).toBeLessThan(closingFenceStart);
     expect(body).toContain("A or B?");
-    expect(modelBody).toContain("Which option is &lt;!-- A or B?");
-    expect(modelBody).toContain("&lt;!-- escalate:question --&gt;");
-    expect(modelBody).not.toContain("<!--");
-    expect(modelBody).not.toContain("-->");
-    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
-      body.indexOf("Which option is"),
-    );
+  });
+
+  it("uses a fence strictly longer than the model's longest backtick run", async () => {
+    // Mutation witness: a fixed three-backtick fence lets this model text break out.
+    const backtickRun = "````";
+    const escalation = buildEscalation({
+      question: `Which scope contains ${backtickRun} without breaking out?`,
+    });
+    writeFileSync(escalatePath, escalation, "utf8");
+    const { request, mock } = mockRequest();
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    const openingFenceStart = body.indexOf("\n\n") + 2;
+    const openingFenceEnd = body.indexOf("\n", openingFenceStart);
+    const openingFence = body.slice(openingFenceStart, openingFenceEnd);
+    const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
+    const closingFenceStart = body.lastIndexOf("\n", body.lastIndexOf(`\n${marker}`) - 1) + 1;
+    const closingFence = body.slice(closingFenceStart, body.lastIndexOf(`\n${marker}`));
+
+    expect(openingFence.length).toBeGreaterThan(backtickRun.length);
+    expect(closingFence).toBe(openingFence);
+    expect(body.indexOf(backtickRun, openingFenceEnd)).toBeLessThan(closingFenceStart);
+    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(openingFenceStart);
     expect(body.endsWith(`\n${marker}`)).toBe(true);
   });
 
@@ -353,7 +406,7 @@ describe("main escalation precedence and publication", () => {
     const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
     const seed = buildEscalation();
     const seedLength =
-      `${TRUSTED_ESCALATION_LINE}\n\n${neutralizeHtmlCommentsForExpectedPosting(sanitizeContractForPosting(seed))}\n${marker}`.length;
+      `${TRUSTED_ESCALATION_LINE}\n\n${fenceVerbatimForExpectedPosting(sanitizeContractForPosting(seed))}\n${marker}`.length;
     const escalation = buildEscalation({
       question:
         "Which bounded implementation scope should the planner contract?" +
