@@ -257,7 +257,33 @@ describe("main escalation precedence and publication", () => {
     });
     expect(mock.mock.calls.some((call) => call[1] === "PUT")).toBe(false);
     expect(mock.mock.calls.some((call) => String(call[2]).includes("/labels"))).toBe(false);
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(3);
+  });
+
+  it("G-escalate-label-withdrawn: refuses to post after ready-to-spec is withdrawn", async () => {
+    // Mutation witness: removing the shared readiness check lets this escalation post.
+    writeFileSync(escalatePath, buildEscalation(), "utf8");
+    const { request, mock } = mockRequest({ labels: [{ name: "triaged" }] });
+
+    await expect(main(request)).rejects.toThrow(
+      "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
+    );
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(0);
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
+
+  it("G-escalate-not-revision-bound: posts despite a captured-revision mismatch", async () => {
+    // Mutation witness: adding contract-style revision binding to escalation fails this test.
+    writeFileSync(escalatePath, buildEscalation(), "utf8");
+    const { request, mock } = mockRequest({
+      labels: [{ name: "ready-to-spec" }],
+      updated_at: "2026-08-27T12:34:57Z",
+    });
+
+    await main(request);
+
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
   });
 
   it("rejects an oversized escalation before any GitHub request", async () => {
@@ -296,6 +322,6 @@ describe("main escalation precedence and publication", () => {
     await main(request);
 
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(0);
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock).toHaveBeenCalledTimes(2);
   });
 });

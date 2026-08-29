@@ -254,6 +254,45 @@ async function hasExistingBotMarkerComment(
   return false;
 }
 
+async function fetchIssueAndAssertReadyToSpec(
+  request: GithubRequest,
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<Record<string, unknown>> {
+  const issue = await request<unknown>(
+    token,
+    "GET",
+    `/repos/${owner}/${repo}/issues/${issueNumber}`,
+  );
+  if (
+    typeof issue !== "object" ||
+    issue === null ||
+    !("labels" in issue) ||
+    !Array.isArray(issue.labels)
+  ) {
+    throw new Error("issue labels response is malformed; refusing to publish");
+  }
+  const labelNames = issue.labels.map((label) => {
+    if (
+      typeof label !== "object" ||
+      label === null ||
+      !("name" in label) ||
+      typeof label.name !== "string"
+    ) {
+      throw new Error("issue labels response is malformed; refusing to publish");
+    }
+    return label.name;
+  });
+  if (!labelNames.includes("ready-to-spec")) {
+    throw new Error(
+      "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
+    );
+  }
+  return issue as Record<string, unknown>;
+}
+
 export async function main(request: GithubRequest = githubRequest): Promise<void> {
   const token = requireEnv("GH_TOKEN");
   const repository = requireEnv("GITHUB_REPOSITORY");
@@ -294,35 +333,13 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
       return;
     }
 
-    const issue = await request<unknown>(
+    const issue = await fetchIssueAndAssertReadyToSpec(
+      request,
       token,
-      "GET",
-      `/repos/${owner}/${repo}/issues/${issueNumber}`,
+      owner,
+      repo,
+      issueNumber,
     );
-    if (
-      typeof issue !== "object" ||
-      issue === null ||
-      !("labels" in issue) ||
-      !Array.isArray(issue.labels)
-    ) {
-      throw new Error("issue labels response is malformed; refusing to publish");
-    }
-    const labelNames = issue.labels.map((label) => {
-      if (
-        typeof label !== "object" ||
-        label === null ||
-        !("name" in label) ||
-        typeof label.name !== "string"
-      ) {
-        throw new Error("issue labels response is malformed; refusing to publish");
-      }
-      return label.name;
-    });
-    if (!labelNames.includes("ready-to-spec")) {
-      throw new Error(
-        "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
-      );
-    }
 
     // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
     // an edit after Prepare's read in the same wall-clock second is undetectable.
@@ -384,6 +401,17 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
         `story-planner escalation comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
       );
     }
+    // An escalation is a non-authorizing re-scoping question, not a body-bound
+    // spec. Deliberately omit revision binding so a benign same-run body edit
+    // cannot recreate the red-job/no-question failure, while still refusing
+    // publication when ready-to-spec was withdrawn.
+    await fetchIssueAndAssertReadyToSpec(
+      request,
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
     if (
       await hasExistingBotMarkerComment(
         request,
