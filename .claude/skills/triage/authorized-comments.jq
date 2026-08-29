@@ -138,7 +138,8 @@ def is_authorized_clarification($issue_author):
                 created_at: .createdAt
               }
             end
-        elif is_authorized_clarification($issue.author.login // null) then
+        elif is_authorized_clarification($issue.author.login // null)
+          and ($include_authorized_clarifications == true) then
           {
             kind: "authorized_clarification",
             author: .author.login,
