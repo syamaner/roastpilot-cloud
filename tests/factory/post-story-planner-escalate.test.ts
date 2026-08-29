@@ -425,7 +425,10 @@ describe("main escalation precedence and publication", () => {
     // Mutation witness: using the contract marker for escalation idempotency posts a duplicate.
     writeFileSync(escalatePath, buildEscalation(), "utf8");
     const escalationMarker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
-    const contractMarker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+    const contractMarker = STORY_PLANNER_CONTRACT_MARKER(
+      ISSUE_NUMBER,
+      "e".repeat(64),
+    );
     const { request, mock } = mockRequest(undefined, [[{
       body: `prior question\n${escalationMarker}`,
       user: { type: "Bot", login: "github-actions[bot]" },
@@ -434,6 +437,7 @@ describe("main escalation precedence and publication", () => {
     expect(escalationMarker).not.toBe(contractMarker);
     expect(escalationMarker).toContain("story-planner-escalate:");
     expect(contractMarker).toContain("story-planner-contract:");
+    expect(contractMarker).toContain(":rev-");
     await main(request);
 
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(0);

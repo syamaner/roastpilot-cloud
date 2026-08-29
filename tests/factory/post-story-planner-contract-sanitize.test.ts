@@ -73,6 +73,8 @@ describe("story-planner contract posting sanitizer", () => {
     const source = readFileSync(PUBLISHER_PATH, "utf8");
     expect(source).toContain("sanitizeContractForPosting(contract) +");
     expect(source).toContain('"\\n" +');
-    expect(source).toContain("STORY_PLANNER_CONTRACT_MARKER(issueNumber)");
+    expect(source).toContain(
+      "STORY_PLANNER_CONTRACT_MARKER(issueNumber, approvedRevision)",
+    );
   });
 });

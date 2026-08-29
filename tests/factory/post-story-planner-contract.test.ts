@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "../../scripts/factory/github-comment-limit.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   STORY_PLANNER_CONTRACT_MARKER,
   type GithubRequest,
@@ -16,6 +17,9 @@ import {
 const ISSUE_NUMBER = 17;
 const REPOSITORY = "syamaner/roastpilot-cloud";
 const VALID_UPDATED_AT = "2026-08-27T12:34:56Z";
+const ISSUE_TITLE = "Current REST issue title";
+const ISSUE_BODY = "Current REST issue body";
+const ISSUE_REVISION = canonicalIssueRevision(ISSUE_TITLE, ISSUE_BODY);
 const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
 const MARKERS = [
   "<!-- contract:spec -->",
@@ -72,7 +76,7 @@ function withRegion(index: number, region: string): string {
 }
 
 function contractWithFinalBodyLength(targetLength: number): string {
-  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION);
   const seed = withRegion(0, "Alpha beta gamma requirements.");
   const seedFinalLength = `${sanitizeContractForPosting(seed)}\n${marker}`.length;
   if (targetLength < seedFinalLength) {
@@ -85,7 +89,7 @@ function contractWithFinalBodyLength(targetLength: number): string {
 }
 
 function contractWithFinalSerializedBodyLength(targetLength: number): string {
-  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION);
   const seed = withRegion(0, "Alpha beta gamma requirements.");
   const seedFinalBody = `${sanitizeContractForPosting(seed)}\n${marker}`;
   const seedSerializedLength = Buffer.byteLength(JSON.stringify(seedFinalBody));
@@ -130,7 +134,12 @@ function mockRequest(
     }
     if (method === "GET") {
       return typeof issueResponse === "object" && issueResponse !== null
-        ? { updated_at: VALID_UPDATED_AT, ...issueResponse }
+        ? {
+            title: ISSUE_TITLE,
+            body: ISSUE_BODY,
+            updated_at: VALID_UPDATED_AT,
+            ...issueResponse,
+          }
         : issueResponse;
     }
     if (method === "POST") {
@@ -165,6 +174,12 @@ afterEach(() => {
 });
 
 describe("validateStoryPlannerContract", () => {
+  it("rejects a malformed revision when constructing the trusted marker", () => {
+    expect(() => STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, "not-a-digest")).toThrow(
+      "story-planner contract revision must be a SHA-256 hex digest",
+    );
+  });
+
   it("accepts a well-formed issue-bound contract", () => {
     expect(() => validateStoryPlannerContract(buildContract(), ISSUE_NUMBER)).not.toThrow();
   });
@@ -319,7 +334,7 @@ describe("main", () => {
       CONTRACT_EXCERPT_MAX_BYTES,
     );
     const finalBody =
-      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`;
+      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION)}`;
     stubPublisherEnvironment(contract);
     const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
 
@@ -333,7 +348,7 @@ describe("main", () => {
     expect(posts[0]?.[3]).toEqual({ body: finalBody });
   });
 
-  it("rejects an escape-heavy contract over the excerpt budget before any request", async () => {
+  it("rejects an escape-heavy contract over the excerpt budget before POST", async () => {
     const contract = withRegion(
       0,
       `Alpha beta gamma requirements.${'"'.repeat(16_000)}`,
@@ -344,11 +359,11 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       /serialized comment length .* exceeds triage excerpt limit 32000/u,
     );
-    expect(mock).not.toHaveBeenCalled();
+    expect(mock).toHaveBeenCalledTimes(2);
     expectNoPost(mock);
   });
 
-  it("T-C2: rejects an oversized final body before any GitHub request", async () => {
+  it("T-C2: rejects an oversized final body before POST", async () => {
     const actualLength = MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH + 1;
     const contract = contractWithFinalBodyLength(actualLength);
     stubPublisherEnvironment(contract);
@@ -361,7 +376,7 @@ describe("main", () => {
       `story-planner contract comment length ${actualLength} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
     );
     expect((error as Error).message).not.toContain(contract);
-    expect(mock).not.toHaveBeenCalled();
+    expect(mock).toHaveBeenCalledTimes(2);
     expectNoPost(mock);
   });
 
@@ -451,6 +466,55 @@ describe("main", () => {
     expectNoPost(mock);
   });
 
+  it.each([undefined, 42, { unexpected: "shape" }])(
+    "rejects a non-string REST issue body %j without making a POST",
+    async (body) => {
+      stubPublisherEnvironment();
+      const { request, mock } = mockRequest({
+        labels: [{ name: "ready-to-spec" }],
+        body,
+      });
+
+      await expect(main(request)).rejects.toThrow(
+        "issue body is malformed; refusing to publish",
+      );
+      expectNoPost(mock);
+    },
+  );
+
+  it.each([undefined, null, 42])(
+    "rejects a malformed REST issue title %j without making a POST",
+    async (title) => {
+      stubPublisherEnvironment();
+      const { request, mock } = mockRequest({
+        labels: [{ name: "ready-to-spec" }],
+        title,
+      });
+
+      await expect(main(request)).rejects.toThrow(
+        "issue title is malformed; refusing to publish",
+      );
+      expectNoPost(mock);
+    },
+  );
+
+  it("posts a null-body issue contract with the empty-body revision", async () => {
+    const contract = buildContract();
+    stubPublisherEnvironment(contract);
+    const { request, mock } = mockRequest({
+      labels: [{ name: "ready-to-spec" }],
+      body: null,
+    });
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    expect(body).toBe(
+      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, canonicalIssueRevision(ISSUE_TITLE, null))}`,
+    );
+  });
+
   it.each(["01", "1.0", "abc"])(
     "rejects non-canonical TARGET_ISSUE_NUMBER %j before making a request",
     async (issueNumber) => {
@@ -528,7 +592,7 @@ describe("main", () => {
         body:
           sanitizeContractForPosting(contract) +
           "\n" +
-          STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER),
+          STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION),
       },
     );
     const commentGets = mock.mock.calls.filter(
@@ -540,12 +604,16 @@ describe("main", () => {
     expect(postedBody.body).not.toContain("@codex review");
   });
 
-  it("B-I2/GUARD-I1: skips when the exact bot-authored issue marker is present", async () => {
+  it("B-I2/GUARD-I1: skips a bot-authored issue-prefix marker with a different revision", async () => {
     stubPublisherEnvironment();
+    const priorRevision = canonicalIssueRevision(
+      "prior title revision",
+      "prior body revision",
+    );
     const { request, mock } = mockRequest(
       { labels: [{ name: "ready-to-spec" }] },
       [[{
-        body: `prior contract\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`,
+        body: `prior contract\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, priorRevision)}`,
         user: { type: "Bot", login: "github-actions[bot]" },
       }]],
     );
@@ -567,7 +635,7 @@ describe("main", () => {
 
   it("GUARD-I4: a bot-authored mid-body marker cannot suppress publication", async () => {
     stubPublisherEnvironment();
-    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION);
     const { request, mock } = mockRequest(
       { labels: [{ name: "ready-to-spec" }] },
       [[{
@@ -590,10 +658,31 @@ describe("main", () => {
 
     const post = mock.mock.calls.find((call) => call[1] === "POST");
     const body = (post?.[3] as { readonly body: string }).body;
-    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION);
     expect(body).toBe(`${sanitizeContractForPosting(contract)}\n${marker}`);
     expect(body.endsWith(marker)).toBe(true);
-    expect(body.match(/<!-- story-planner-contract:issue-17 -->/g)).toHaveLength(1);
+    expect(body).toContain(
+      `:rev-${canonicalIssueRevision(ISSUE_TITLE, ISSUE_BODY)} -->`,
+    );
+  });
+
+  it.each([
+    ["title", "Edited REST title", ISSUE_BODY],
+    ["body", ISSUE_TITLE, "Edited REST body"],
+  ])("binds the posted marker to a %s edit", async (_field, title, issueBody) => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest({
+      labels: [{ name: "ready-to-spec" }],
+      title,
+      body: issueBody,
+    });
+
+    await main(request);
+
+    const post = mock.mock.calls.find((call) => call[1] === "POST");
+    const body = (post?.[3] as { readonly body: string }).body;
+    expect(body).toContain(`:rev-${canonicalIssueRevision(title, issueBody)} -->`);
+    expect(body).not.toContain(`:rev-${ISSUE_REVISION} -->`);
   });
 
   it("B-I4: a marker for another issue does not suppress this issue", async () => {
@@ -601,7 +690,7 @@ describe("main", () => {
     const { request, mock } = mockRequest(
       { labels: [{ name: "ready-to-spec" }] },
       [[{
-        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER + 1),
+        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER + 1, ISSUE_REVISION),
         user: { type: "Bot", login: "github-actions[bot]" },
       }]],
     );
@@ -620,7 +709,7 @@ describe("main", () => {
     const { request, mock } = mockRequest(
       { labels: [{ name: "ready-to-spec" }] },
       [fullFirstPage, [{
-        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER),
+        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION),
         user: { type: "Bot", login: "github-actions[bot]" },
       }]],
     );
@@ -663,7 +752,7 @@ describe("main", () => {
     stubPublisherEnvironment();
     const { request, mock } = mockRequest(
       { labels: [{ name: "ready-to-spec" }] },
-      [[{ body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER), user }]],
+      [[{ body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION), user }]],
     );
 
     await main(request);

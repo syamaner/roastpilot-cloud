@@ -9,6 +9,15 @@ export function computeApprovedRevision(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
 }
 
+export function canonicalIssueRevision(
+  title: string | null,
+  body: string | null,
+): string {
+  return computeApprovedRevision(
+    JSON.stringify({ title: title ?? "", body: body ?? "" }),
+  );
+}
+
 export function isApprovedRevision(raw: unknown): boolean {
   return typeof raw === "string" && APPROVED_REVISION_PATTERN.test(raw);
 }

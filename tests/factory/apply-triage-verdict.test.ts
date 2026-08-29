@@ -7,7 +7,9 @@ import {
   TRIAGE_COMMENT_MARKER,
   extractApprovedRevision,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
-import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
+
+const ISSUE_TITLE = "Current REST issue title";
 
 /**
  * Integration-style tests for the privileged CLI entrypoint: stub `fetch`
@@ -57,7 +59,7 @@ function mockFetch(
     const handler =
       handlers[key] ??
       (key === "GET /repos/syamaner/roastpilot-cloud/issues/42"
-        ? () => jsonResponse({ state: "open", body: null })
+        ? () => jsonResponse({ state: "open", title: ISSUE_TITLE, body: null })
         : key ===
             "GET /repos/syamaner/roastpilot-cloud/issues/comments/99"
           ? () =>
@@ -130,7 +132,10 @@ afterEach(async () => {
 describe("main — valid verdict path", () => {
   it("M-B2a fails closed when the freshly fetched REST body no longer matches approval", async () => {
     const currentBody = "Current REST body";
-    process.env.APPROVED_REVISION = computeApprovedRevision("Reviewed body");
+    process.env.APPROVED_REVISION = canonicalIssueRevision(
+      ISSUE_TITLE,
+      "Reviewed body",
+    );
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -144,7 +149,7 @@ describe("main — valid verdict path", () => {
     process.env.VERDICT_PATH = verdictPath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
-        jsonResponse({ state: "open", body: currentBody }),
+        jsonResponse({ state: "open", title: ISSUE_TITLE, body: currentBody }),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
         jsonResponse([{ name: "ready-to-implement" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
@@ -168,9 +173,16 @@ describe("main — valid verdict path", () => {
     expect(commentBody).toContain("triage-generation:hold:123.1");
   });
 
-  it("embeds the matching REST-body revision only in an authorizing verdict", async () => {
-    const currentBody = "Current REST body\nwith trailing bytes.\n";
-    process.env.APPROVED_REVISION = computeApprovedRevision(currentBody);
+  it.each([
+    ["a title-only edit", "Edited REST issue title"],
+    ["a missing REST title", undefined],
+    ["a non-string REST title", 42],
+  ])("falls back with exit 1 for %s", async (_name, currentTitle) => {
+    const currentBody = "Approved body remains unchanged";
+    process.env.APPROVED_REVISION = canonicalIssueRevision(
+      ISSUE_TITLE,
+      currentBody,
+    );
     const verdictPath = join(workdir, "verdict.json");
     await writeFile(
       verdictPath,
@@ -184,7 +196,78 @@ describe("main — valid verdict path", () => {
     process.env.VERDICT_PATH = verdictPath;
     const { fetchMock, calls } = mockFetch({
       "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
-        jsonResponse({ state: "open", body: currentBody }),
+        jsonResponse({ state: "open", title: currentTitle, body: currentBody }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["needs-triage"],
+    });
+  });
+
+  it("isolates the approved-revision title type guard from digest mismatch", async () => {
+    const currentTitle = 42;
+    const currentBody = "Approved body remains unchanged";
+    process.env.APPROVED_REVISION = canonicalIssueRevision(
+      currentTitle as unknown as string,
+      currentBody,
+    );
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "The story has a complete implementation contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", title: currentTitle, body: currentBody }),
+      "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
+        jsonResponse([{ name: "ready-to-implement" }]),
+      "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>
+        jsonResponse({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      labels: ["needs-triage"],
+    });
+  });
+
+  it("embeds the matching REST-body revision only in an authorizing verdict", async () => {
+    const currentBody = "Current REST body\nwith trailing bytes.\n";
+    process.env.APPROVED_REVISION = canonicalIssueRevision(
+      ISSUE_TITLE,
+      currentBody,
+    );
+    const verdictPath = join(workdir, "verdict.json");
+    await writeFile(
+      verdictPath,
+      JSON.stringify({
+        issue_number: 42,
+        readiness: "ready-to-implement",
+        reasoning: "The story has a complete implementation contract.",
+        missing_info_questions: [],
+      }),
+    );
+    process.env.VERDICT_PATH = verdictPath;
+    const { fetchMock, calls } = mockFetch({
+      "GET /repos/syamaner/roastpilot-cloud/issues/42": () =>
+        jsonResponse({ state: "open", title: ISSUE_TITLE, body: currentBody }),
       "GET /repos/syamaner/roastpilot-cloud/issues/42/labels?per_page=100": () =>
         jsonResponse([{ name: "needs-triage" }]),
       "PUT /repos/syamaner/roastpilot-cloud/issues/42/labels": () =>

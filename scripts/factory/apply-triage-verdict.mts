@@ -57,7 +57,7 @@ import {
 } from "./diff-verifiable-ac.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import {
-  computeApprovedRevision,
+  canonicalIssueRevision,
   isApprovedRevision,
 } from "./approve-revision.mts";
 import {
@@ -86,6 +86,7 @@ interface GitHubIssueLabel {
 
 interface GitHubIssue {
   readonly state: string;
+  readonly title: string;
   readonly body: string | null;
 }
 
@@ -467,8 +468,9 @@ export async function main(): Promise<void> {
   }
   if (
     approvedRevision !== "" &&
-    (typeof issue.body !== "string" ||
-      computeApprovedRevision(issue.body) !== approvedRevision)
+    (typeof issue.title !== "string" ||
+      typeof issue.body !== "string" ||
+      canonicalIssueRevision(issue.title, issue.body) !== approvedRevision)
   ) {
     await fallback([
       "approved issue revision no longer matches the current REST issue body",

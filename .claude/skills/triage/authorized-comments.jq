@@ -8,7 +8,21 @@ def contract_excerpt_truncation_disclosure:
   "\n\n_[contract excerpt truncated for the triage context; full contract is on the issue.]_";
 
 def story_planner_contract_marker($issue_number):
-  "<!-- story-planner-contract:issue-" + ($issue_number | tostring) + " -->";
+  "<!-- story-planner-contract:issue-" + ($issue_number | tostring);
+
+def story_planner_contract_binding($issue_number):
+  try (
+    capture(
+      "(^|\\n)"
+      + story_planner_contract_marker($issue_number)
+      + "(?<binding>(:[^\\r\\n]*)?) -->$"
+    )
+  )
+  catch null;
+
+def story_planner_contract_revision($issue_number):
+  story_planner_contract_binding($issue_number) as $marker
+  | (($marker.binding | capture("^:rev-(?<revision>[0-9a-f]{64})$").revision) // null);
 
 def triage_generation:
   try (
@@ -32,12 +46,8 @@ def is_factory_history:
   );
 
 def is_story_planner_contract($issue_number):
-  story_planner_contract_marker($issue_number) as $marker
-  | (.author.login // null) == "github-actions"
-    and (
-      (.body // "") == $marker
-      or ((.body // "") | endswith("\n" + $marker))
-    );
+  (.author.login // null) == "github-actions"
+  and (((.body // "") | story_planner_contract_binding($issue_number)) != null);
 
 def json_string_contribution:
   (tojson | utf8bytelength) - 2;
@@ -111,13 +121,23 @@ def is_authorized_clarification($issue_author):
             body
           }
         elif is_story_planner_contract($issue.number) then
-          {
-            kind: "story_planner_contract",
-            author: .author.login,
-            author_association: .authorAssociation,
-            created_at: .createdAt,
-            body: ((.body // "") | contract_excerpt)
-          }
+          ((.body // "") | story_planner_contract_revision($issue.number)) as $revision
+          | if $revision == $current_revision then
+              {
+                kind: "story_planner_contract",
+                author: .author.login,
+                author_association: .authorAssociation,
+                created_at: .createdAt,
+                body: ((.body // "") | contract_excerpt)
+              }
+            else
+              {
+                kind: "story_planner_contract_stale",
+                author: .author.login,
+                author_association: .authorAssociation,
+                created_at: .createdAt
+              }
+            end
         elif is_authorized_clarification($issue.author.login // null) then
           {
             kind: "authorized_clarification",

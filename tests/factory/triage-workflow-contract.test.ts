@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,7 +20,7 @@ import {
   buildTriageGenerationMarker,
   extractTriageGeneration,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
-import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 
 const TRIAGE_WORKFLOW_PATH = fileURLToPath(
   new URL("../../.github/workflows/triage-issues.yml", import.meta.url),
@@ -42,6 +43,11 @@ const AUTHORIZED_COMMENTS_FILTER_PATH = fileURLToPath(
 const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
 const CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE =
   "\n\n_[contract excerpt truncated for the triage context; full contract is on the issue.]_";
+const DEFAULT_ISSUE_TITLE = "Current issue";
+const DEFAULT_CURRENT_REVISION = canonicalIssueRevision(
+  DEFAULT_ISSUE_TITLE,
+  "Body",
+);
 
 function jsonStringContribution(value: string): number {
   return Buffer.byteLength(JSON.stringify(value)) - 2;
@@ -52,8 +58,11 @@ const CONTRACT_EXCERPT_PREFIX_MAX_BYTES =
   2 -
   jsonStringContribution(CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE);
 
-function storyPlannerContractMarker(issueNumber: number): string {
-  return `<!-- story-planner-contract:issue-${issueNumber} -->`;
+function storyPlannerContractMarker(
+  issueNumber: number,
+  revision = DEFAULT_CURRENT_REVISION,
+): string {
+  return `<!-- story-planner-contract:issue-${issueNumber}:rev-${revision} -->`;
 }
 
 const FACTORY_SCRIPTS_DIRECTORY = fileURLToPath(
@@ -111,14 +120,35 @@ function expectOrdered(text: string, fragments: readonly string[]): void {
   }
 }
 
-function runFilter(input: unknown): string {
+function runFilter(
+  input: unknown,
+  currentRevision = DEFAULT_CURRENT_REVISION,
+): string {
   return execFileSync(
     "jq",
-    ["-cj", "-f", AUTHORIZED_COMMENTS_FILTER_PATH],
+    [
+      "-cj",
+      "--arg",
+      "current_revision",
+      currentRevision,
+      "-f",
+      AUTHORIZED_COMMENTS_FILTER_PATH,
+    ],
     {
       encoding: "utf8",
       input: JSON.stringify(input),
     },
+  );
+}
+
+function runCurrentRevision(issue: unknown): ReturnType<typeof spawnSync> {
+  return spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      join(FACTORY_SCRIPTS_DIRECTORY, "compute-current-revision.mts"),
+    ],
+    { encoding: "utf8", input: JSON.stringify(issue) },
   );
 }
 
@@ -304,11 +334,13 @@ function runImplementEligibility(
   run: string,
   issue: unknown,
   restBody: unknown = (issue as { readonly body?: unknown }).body,
+  restTitle: unknown = (issue as { readonly title?: unknown }).title,
 ): {
   readonly status: number | null;
   readonly output: string;
   readonly stdout: string;
   readonly stderr: string;
+  readonly context: string | undefined;
 } {
   const workdir = mkdtempSync(join(tmpdir(), "implement-eligibility-"));
   const bin = join(workdir, "bin");
@@ -323,13 +355,17 @@ function runImplementEligibility(
     mkdirSync(filterDir, { recursive: true });
     mkdirSync(factoryScriptsDir, { recursive: true });
     writeFileSync(issuePath, JSON.stringify(issue));
-    writeFileSync(restIssuePath, JSON.stringify({ body: restBody }));
+    writeFileSync(
+      restIssuePath,
+      JSON.stringify({ title: restTitle, body: restBody }),
+    );
     writeFileSync(outputPath, "");
     writeFileSync(
       join(filterDir, "authorized-comments.jq"),
       readFileSync(AUTHORIZED_COMMENTS_FILTER_PATH, "utf8"),
     );
     for (const filename of [
+      "compute-current-revision.mts",
       "verify-approved-revision.mts",
       "approve-revision.mts",
       "apply-triage-verdict-logic.mts",
@@ -366,6 +402,9 @@ function runImplementEligibility(
       output: readFileSync(outputPath, "utf8"),
       stdout: result.stdout,
       stderr: result.stderr,
+      context: existsSync(join(workdir, "issue-context", "issue.json"))
+        ? readFileSync(join(workdir, "issue-context", "issue.json"), "utf8")
+        : undefined,
     };
   } finally {
     rmSync(workdir, { recursive: true, force: true });
@@ -443,6 +482,27 @@ function runJqProgram(
 }
 
 describe("bounded triage context contract", () => {
+  it("normalizes a null REST body to the empty-body revision", () => {
+    const result = runCurrentRevision({ title: DEFAULT_ISSUE_TITLE, body: null });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      canonicalIssueRevision(DEFAULT_ISSUE_TITLE, null),
+    );
+  });
+
+  it.each([
+    {},
+    { title: DEFAULT_ISSUE_TITLE, body: 42 },
+    { title: 42, body: "Body" },
+  ])(
+    "rejects a missing or malformed REST revision input: %j",
+    (issue) => {
+      const result = runCurrentRevision(issue);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/REST issue (title|body) is malformed/u);
+    },
+  );
+
   it("keeps opened issues and adds a fail-closed mode dispatch input", () => {
     const workflow = parseWorkflow(TRIAGE_WORKFLOW_PATH);
     const on = asMapping(workflow.on);
@@ -1099,13 +1159,59 @@ describe("bounded triage context contract", () => {
       ISSUE_NUMBER: "${{ needs.seed.outputs.target_issue_number }}",
     });
     expectOrdered(run, [
+      'rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")',
+      "node --experimental-strip-types scripts/factory/compute-current-revision.mts",
       'gh issue view "$ISSUE_NUMBER" --repo "$REPO"',
       "--json number,author,title,body,state,comments",
-      "jq -cj -f .claude/skills/triage/authorized-comments.jq",
+      `issue_json=$(printf '%s' "$issue_json" | jq -c`,
+      '--argjson rest "$rest_issue"',
+      ". as $context",
+      "| $context",
+      '.title = (if ($rest.title | type) == "string" then $rest.title',
+      '.body = (if ($rest.body | type) == "string" then $rest.body',
+      'echo "$issue_json"',
+      'jq -cj --arg current_revision "$current_revision" -f .claude/skills/triage/authorized-comments.jq',
       "> issue-context/issue.json",
     ]);
     expect(run).not.toContain("github.event.issue.title");
     expect(run).not.toContain("github.event.issue.body");
+    expect(run).not.toContain('--argjson context "$issue_json"');
+    const restTitle = "REST snapshot title";
+    const graphqlTitle = "Title edited between fetches";
+    const restBody = "REST snapshot planned against";
+    const graphqlBody = "Body edited between fetches";
+    const result = runImplementEligibility(
+      run,
+      {
+        number: 51,
+        author: { login: "issue-author" },
+        title: graphqlTitle,
+        body: graphqlBody,
+        state: "OPEN",
+        comments: [{
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-29T10:00:00Z",
+          body:
+            `Contract\n` +
+            storyPlannerContractMarker(
+              51,
+              canonicalIssueRevision(restTitle, restBody),
+            ),
+        }],
+      },
+      restBody,
+      restTitle,
+    );
+    expect(result.status).toBe(0);
+    const context = JSON.parse(result.context ?? "null") as Mapping;
+    expect(context.title).toBe(restTitle);
+    expect(context.title).not.toBe(graphqlTitle);
+    expect(context.body).toBe(restBody);
+    expect(context.body).not.toBe(graphqlBody);
+    expect(context.comments).toEqual([
+      expect.objectContaining({ kind: "story_planner_contract" }),
+    ]);
     expect(
       stepIndex(triage, "Checkout roastpilot-cloud (read-only)"),
     ).toBeLessThan(stepIndex(triage, "Write issue context for the triage skill"));
@@ -1297,6 +1403,48 @@ describe("bounded triage context contract", () => {
     expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
   });
 
+  it.each([
+    [
+      "mismatched",
+      storyPlannerContractMarker(
+        51,
+        canonicalIssueRevision(DEFAULT_ISSUE_TITLE, "old body"),
+      ),
+    ],
+    [
+      "title-only edited",
+      storyPlannerContractMarker(
+        51,
+        canonicalIssueRevision("Old issue title", "Body"),
+      ),
+    ],
+    ["absent", "<!-- story-planner-contract:issue-51 -->"],
+    ["malformed", "<!-- story-planner-contract:issue-51:rev-not-a-digest -->"],
+  ])("discloses a %s revision as a bodyless stale contract", (_case, marker) => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: "Stale contract",
+        body: "Body",
+        state: "OPEN",
+        comments: [{
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-28T10:00:00Z",
+          body: `Untrusted stale excerpt\n${marker}`,
+        }],
+      }),
+    ) as { readonly comments: readonly [Record<string, unknown>] };
+
+    expect(output.comments).toHaveLength(1);
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_contract_stale",
+      author: "github-actions",
+    });
+    expect(output.comments[0]).not.toHaveProperty("body");
+  });
+
   it("admits an escape-heavy contract without breaching the serialized context cap", () => {
     const marker = storyPlannerContractMarker(51);
     const contractBody = `${"\u0001\"\\\n".repeat(9_000)}${marker}`;
@@ -1465,12 +1613,12 @@ describe("bounded triage context contract", () => {
     expect(output.comments).toEqual([]);
   });
 
-  it("M-B4c: fails closed when two contracts match this issue", () => {
-    const contractComment = (createdAt: string) => ({
+  it("M-B4c: fails closed when two contracts with differing revisions match this issue", () => {
+    const contractComment = (createdAt: string, revision: string) => ({
       author: { login: "github-actions" },
       authorAssociation: "NONE",
       createdAt,
-      body: `Contract\n${storyPlannerContractMarker(51)}`,
+      body: `Contract\n${storyPlannerContractMarker(51, revision)}`,
     });
 
     expect(() =>
@@ -1481,8 +1629,11 @@ describe("bounded triage context contract", () => {
         body: "Body",
         state: "OPEN",
         comments: [
-          contractComment("2026-08-28T10:00:00Z"),
-          contractComment("2026-08-28T10:01:00Z"),
+          contractComment("2026-08-28T10:00:00Z", DEFAULT_CURRENT_REVISION),
+          contractComment(
+            "2026-08-28T10:01:00Z",
+            canonicalIssueRevision("other title", "other body"),
+          ),
         ],
       }),
     ).toThrow(/more than one story-planner contract/);
@@ -1730,6 +1881,8 @@ describe("bounded triage context contract", () => {
       "exit 1",
       "--json number,author,title,body,state,labels,comments",
       'rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")',
+      "node --experimental-strip-types scripts/factory/compute-current-revision.mts",
+      ".title = (if ($rest.title | type) == \"string\" then $rest.title",
       ".body = (if ($rest.body | type) == \"string\" then $rest.body",
       `state=$(echo "$issue_json" | jq -r '.state')`,
       `labels=$(echo "$issue_json" | jq -r`,
@@ -1737,7 +1890,7 @@ describe("bounded triage context contract", () => {
       "exit 1",
       `if ! echo ",$labels," | grep -q ",ready-to-implement,"; then`,
       "exit 1",
-      "jq -cj -f .claude/skills/triage/authorized-comments.jq",
+      'jq -cj --arg current_revision "$current_revision" -f .claude/skills/triage/authorized-comments.jq',
       "> issue-context/issue.json",
       `] as $history`,
       `if ($history | length) == 1 then`,
@@ -1866,27 +2019,40 @@ describe("bounded triage context contract", () => {
       output: "triage_generation=123.1\n",
     });
     const matchingIssue = issue(["123.1"]) as {
+      title: string;
       body: string;
       comments: Array<{ body: string }>;
     };
+    const matchingRestTitle = "REST title with exact bytes";
     const matchingRestBody = "REST body\nwith trailing newline\n";
+    matchingIssue.title = "different GraphQL title representation";
     matchingIssue.body = "different GraphQL body representation";
     matchingIssue.comments[0]!.body =
-      `Verdict\n${buildApprovedRevisionMarker(computeApprovedRevision(matchingRestBody))}\n` +
+      `Verdict\n${buildApprovedRevisionMarker(canonicalIssueRevision(matchingRestTitle, matchingRestBody))}\n` +
       `<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n` +
       TRIAGE_COMMENT_MARKER;
-    expect(
-      runImplementEligibility(eligibilityRun, matchingIssue, matchingRestBody),
-    ).toMatchObject({
+    const matching = runImplementEligibility(
+      eligibilityRun,
+      matchingIssue,
+      matchingRestBody,
+      matchingRestTitle,
+    );
+    expect(matching).toMatchObject({
       status: 0,
       output: "triage_generation=123.1\n",
     });
+    const matchingContext = JSON.parse(matching.context ?? "null") as Mapping;
+    expect(matchingContext.title).toBe(matchingRestTitle);
+    expect(matchingContext.title).not.toBe(matchingIssue.title);
+    expect(matchingContext.body).toBe(matchingRestBody);
+    expect(matchingContext.body).not.toBe(matchingIssue.body);
 
     const mismatchedIssue = structuredClone(matchingIssue);
     const mismatch = runImplementEligibility(
       eligibilityRun,
       mismatchedIssue,
       "REST body edited after approval",
+      matchingRestTitle,
     );
     expect(mismatch.status).not.toBe(0);
     expect(mismatch.output).toBe("");

@@ -21,6 +21,7 @@ const ENTRYPOINT_PATH = fileURLToPath(
   new URL("../../scripts/factory/story-planner-sweep.mts", import.meta.url),
 );
 const BOT = { type: "Bot", login: "github-actions[bot]" } as const;
+const CONTRACT_REVISION = "b".repeat(64);
 
 type Mapping = Record<string, unknown>;
 type RequestCall = readonly [string, string, string, unknown?];
@@ -189,7 +190,7 @@ describe("story-planner sweep workflow contract", () => {
         openCommentReads += 1;
         return openCommentReads === 1
           ? []
-          : [{ body: STORY_PLANNER_CONTRACT_MARKER(1), user: BOT }];
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(1, CONTRACT_REVISION), user: BOT }];
       }
       if (method === "GET" && path.endsWith("/issues/1")) return issue(1, "open");
       return undefined;
