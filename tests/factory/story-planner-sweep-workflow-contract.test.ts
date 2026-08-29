@@ -57,7 +57,10 @@ describe("story-planner sweep workflow contract", () => {
     const sweep = mapping(mapping(root.jobs).sweep);
     expect(sweep.if).toBe("vars.STORY_PLANNER_ENABLED == 'true'");
     expect(WORKFLOW_SOURCE).not.toContain("FACTORY_PAUSED");
-    expect(mapping(sweep.permissions)).toEqual({ contents: "read" });
+    expect(mapping(sweep.permissions)).toEqual({
+      contents: "read",
+      issues: "read",
+    });
     expect(mapping(namedStep(sweep, "Checkout sweep scripts only").with)).toEqual({
       "persist-credentials": false,
       ref: "main",

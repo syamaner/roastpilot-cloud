@@ -10,8 +10,9 @@ import type { StoryPlannerMarkerComment } from "./story-planner-marker.mts";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const PAGE_SIZE = 100;
-const MAX_PAGES = 50;
+export const MAX_PAGES = 50;
 export const MAX_CONFIRMATION_ATTEMPTS = 3;
+export const MAX_LABEL_READD_ATTEMPTS = 3;
 const CONFIRMATION_RETRY_DELAY_MS = 10_000;
 
 export type GithubRequest = <T>(
@@ -29,6 +30,7 @@ interface SweepDependencies {
   readonly repo: string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly log?: (message: string) => void;
+  readonly error?: (message: string) => void;
 }
 
 function validateIssue(raw: unknown, expectedState: SweepIssue["state"]): SweepIssue {
@@ -139,6 +141,7 @@ async function writeLabelOperation(
   repo: string,
   issueNumber: number,
   operation: SweepLabelOperation,
+  reportError: (message: string) => void,
 ): Promise<void> {
   const issuePath = `/repos/${owner}/${repo}/issues/${issueNumber}`;
   if (operation.method === "DELETE") {
@@ -149,9 +152,23 @@ async function writeLabelOperation(
     );
     return;
   }
-  await request(appToken, "POST", `${issuePath}/labels`, {
-    labels: [operation.label],
-  });
+  for (let attempt = 1; attempt <= MAX_LABEL_READD_ATTEMPTS; attempt += 1) {
+    try {
+      await request(appToken, "POST", `${issuePath}/labels`, {
+        labels: [operation.label],
+      });
+      return;
+    } catch (error) {
+      if (attempt === MAX_LABEL_READD_ATTEMPTS) {
+        reportError(
+          `::error::Failed to re-add ${READY_TO_SPEC_LABEL} to issue #${issueNumber} ` +
+            `after ${MAX_LABEL_READD_ATTEMPTS} attempts. Manually re-add ` +
+            `${READY_TO_SPEC_LABEL} to issue #${issueNumber}; its prior DELETE succeeded.`,
+        );
+        throw error;
+      }
+    }
+  }
 }
 
 async function confirmHandled(
@@ -231,6 +248,7 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
         dependencies.repo,
         issue.number,
         operation,
+        dependencies.error ?? console.error,
       );
     }
     const planned = await confirmHandled(dependencies, issue.number);
