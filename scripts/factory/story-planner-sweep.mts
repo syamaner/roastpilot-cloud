@@ -175,8 +175,11 @@ async function confirmHandled(
   dependencies: SweepDependencies,
   issueNumber: number,
 ): Promise<boolean> {
+  // Production timing fallback; tests inject sleep to avoid real wall-clock waits.
+  /* v8 ignore start */
   const sleep = dependencies.sleep ??
     ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  /* v8 ignore stop */
   for (let attempt = 1; attempt <= MAX_CONFIRMATION_ATTEMPTS; attempt += 1) {
     const comments = await fetchComments(
       dependencies.request,

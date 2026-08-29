@@ -157,6 +157,20 @@ describe("story-planner sweep I/O", () => {
     expect(mock.mock.calls.filter((call) => call[1] !== "GET")).toEqual([]);
   });
 
+  // remove guard F3-list-shape => a non-array GitHub response is treated as issues.
+  it("rejects a non-array issue enumeration response with zero writes", async () => {
+    const { request, mock } = requestFrom(async () => ({ message: "unexpected shape" }));
+
+    await expect(enumerateReadyToSpecIssues(
+      request,
+      READ_TOKEN,
+      OWNER,
+      REPO,
+      "open",
+    )).rejects.toThrow("malformed open ready-to-spec issue response");
+    expect(mock.mock.calls.filter((call) => call[1] !== "GET")).toEqual([]);
+  });
+
   // remove guard F2-comment-pagination => a page-two marker is missed and relabeled.
   it("fully scans multiple comment pages before deciding handled", async () => {
     const fullPage = Array.from({ length: 100 }, () => ({
