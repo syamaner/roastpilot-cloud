@@ -16,6 +16,7 @@ import {
 const ISSUE_NUMBER = 17;
 const REPOSITORY = "syamaner/roastpilot-cloud";
 const VALID_UPDATED_AT = "2026-08-27T12:34:56Z";
+const CONTRACT_EXCERPT_MAX_BYTES = 32_000;
 const MARKERS = [
   "<!-- contract:spec -->",
   "<!-- contract:tests -->",
@@ -80,6 +81,20 @@ function contractWithFinalBodyLength(targetLength: number): string {
   return withRegion(
     0,
     `Alpha beta gamma requirements.${"x".repeat(targetLength - seedFinalLength)}`,
+  );
+}
+
+function contractWithFinalSerializedBodyLength(targetLength: number): string {
+  const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER);
+  const seed = withRegion(0, "Alpha beta gamma requirements.");
+  const seedFinalBody = `${sanitizeContractForPosting(seed)}\n${marker}`;
+  const seedSerializedLength = Buffer.byteLength(JSON.stringify(seedFinalBody));
+  if (targetLength < seedSerializedLength) {
+    throw new Error("target serialized body length is shorter than the valid contract seed");
+  }
+  return withRegion(
+    0,
+    `Alpha beta gamma requirements.${"x".repeat(targetLength - seedSerializedLength)}`,
   );
 }
 
@@ -299,21 +314,38 @@ describe("validateStoryPlannerContract", () => {
 });
 
 describe("main", () => {
-  it("T-C1: posts a final sanitized contract body at the GitHub comment limit", async () => {
-    const contract = contractWithFinalBodyLength(
-      MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH,
+  it("T-C1: posts a final sanitized contract body at the triage excerpt limit", async () => {
+    const contract = contractWithFinalSerializedBodyLength(
+      CONTRACT_EXCERPT_MAX_BYTES,
     );
     const finalBody =
       `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`;
     stubPublisherEnvironment(contract);
     const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
 
-    expect(finalBody).toHaveLength(MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH);
+    expect(Buffer.byteLength(JSON.stringify(finalBody))).toBe(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
     await main(request);
 
     const posts = mock.mock.calls.filter((call) => call[1] === "POST");
     expect(posts).toHaveLength(1);
     expect(posts[0]?.[3]).toEqual({ body: finalBody });
+  });
+
+  it("rejects an escape-heavy contract over the excerpt budget before any request", async () => {
+    const contract = withRegion(
+      0,
+      `Alpha beta gamma requirements.${'"'.repeat(16_000)}`,
+    );
+    stubPublisherEnvironment(contract);
+    const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
+
+    await expect(main(request)).rejects.toThrow(
+      /serialized comment length .* exceeds triage excerpt limit 32000/u,
+    );
+    expect(mock).not.toHaveBeenCalled();
+    expectNoPost(mock);
   });
 
   it("T-C2: rejects an oversized final body before any GitHub request", async () => {

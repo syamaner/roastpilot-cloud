@@ -39,8 +39,11 @@ def is_story_planner_contract($issue_number):
       or ((.body // "") | endswith("\n" + $marker))
     );
 
+def json_string_contribution:
+  (tojson | utf8bytelength) - 2;
+
 def byte_bounded_prefix($maxbytes):
-  if utf8bytelength <= $maxbytes then
+  if json_string_contribution <= $maxbytes then
     .
   else
     (reduce (explode[]) as $cp
@@ -49,7 +52,7 @@ def byte_bounded_prefix($maxbytes):
           .
         else
           ([$cp] | implode) as $ch
-          | ($ch | utf8bytelength) as $char_bytes
+          | ($ch | json_string_contribution) as $char_bytes
           | if (.bytes + $char_bytes) <= $maxbytes then
               {
                 acc: (.acc + $ch),
@@ -65,10 +68,11 @@ def byte_bounded_prefix($maxbytes):
   end;
 
 def contract_excerpt:
-  if utf8bytelength > contract_excerpt_max_bytes then
+  if (tojson | utf8bytelength) > contract_excerpt_max_bytes then
     byte_bounded_prefix(
       contract_excerpt_max_bytes
-      - (contract_excerpt_truncation_disclosure | utf8bytelength)
+      - 2
+      - (contract_excerpt_truncation_disclosure | json_string_contribution)
     ) + contract_excerpt_truncation_disclosure
   else
     .
