@@ -80,6 +80,10 @@ export function sanitizeContractForPosting(contract: string): string {
   return neutralizeCodexTriggerPhrases(removeCodexSeparatingBackticks(invisiblesMarked));
 }
 
+function neutralizeHtmlComments(text: string): string {
+  return text.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+}
+
 function parsePositiveInteger(name: string, raw: string): number {
   if (!POSITIVE_DECIMAL_PATTERN.test(raw)) {
     throw new Error(`${name} must be a canonical positive decimal integer`);
@@ -398,7 +402,7 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     const finalBody =
       "This is a re-scoping question, not an authorization: no label has been changed and no work is authorized by this comment." +
       "\n\n" +
-      sanitizeContractForPosting(escalate) +
+      neutralizeHtmlComments(sanitizeContractForPosting(escalate)) +
       "\n" +
       STORY_PLANNER_ESCALATE_MARKER(issueNumber);
     if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {

@@ -50,6 +50,10 @@ function buildEscalation(options: {
   ].join("\n");
 }
 
+function neutralizeHtmlCommentsForExpectedPosting(text: string): string {
+  return text.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+}
+
 function contractSentinel(): string {
   return `CONTRACT-COMPLETE: story-planner contract finished (issue #${ISSUE_NUMBER})`;
 }
@@ -246,7 +250,7 @@ describe("main escalation precedence and publication", () => {
     expect(posts[0]?.[3]).toEqual({
       body:
         `${TRUSTED_ESCALATION_LINE}\n\n` +
-        `${sanitizeContractForPosting(escalation)}\n` +
+        `${neutralizeHtmlCommentsForExpectedPosting(sanitizeContractForPosting(escalation))}\n` +
         STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER),
     });
     const body = (posts[0]?.[3] as { readonly body: string }).body;
@@ -255,7 +259,7 @@ describe("main escalation precedence and publication", () => {
       body.indexOf("Which bounded scope handles"),
     );
     expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
-      body.indexOf("<!-- escalate:question -->"),
+      body.indexOf("&lt;!-- escalate:question --&gt;"),
     );
     expect(mock).toHaveBeenNthCalledWith(
       1,
@@ -276,10 +280,10 @@ describe("main escalation precedence and publication", () => {
     expect(mock).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps the trusted notice visible before an unterminated model HTML comment", async () => {
-    // Mutation witness: moving the notice after model text places it inside this open comment.
+  it("keeps the full question visible by neutralizing model-authored HTML comments", async () => {
+    // Mutation witness: removing neutralizeHtmlComments leaves a raw opener that hides the tail.
     const escalation = buildEscalation({
-      question: "Which bounded scope remains visible? <!--",
+      question: "Which option is <!-- A or B?",
     });
     writeFileSync(escalatePath, escalation, "utf8");
     const { request, mock } = mockRequest();
@@ -288,11 +292,20 @@ describe("main escalation precedence and publication", () => {
 
     const post = mock.mock.calls.find((call) => call[1] === "POST");
     const body = (post?.[3] as { readonly body: string }).body;
-    const openComment = body.indexOf("<!--", body.indexOf("remains visible"));
-    expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(openComment);
+    const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
+    const modelStart = body.indexOf("\n\n") + 2;
+    const modelEnd = body.lastIndexOf(`\n${marker}`);
+    const modelBody = body.slice(modelStart, modelEnd);
+
+    expect(body).toContain("A or B?");
+    expect(modelBody).toContain("Which option is &lt;!-- A or B?");
+    expect(modelBody).toContain("&lt;!-- escalate:question --&gt;");
+    expect(modelBody).not.toContain("<!--");
+    expect(modelBody).not.toContain("-->");
     expect(body.indexOf(TRUSTED_ESCALATION_LINE)).toBeLessThan(
-      body.indexOf("<!-- escalate:question -->"),
+      body.indexOf("Which option is"),
     );
+    expect(body.endsWith(`\n${marker}`)).toBe(true);
   });
 
   it("G-escalate-label-withdrawn: refuses to post after ready-to-spec is withdrawn", async () => {
@@ -340,7 +353,7 @@ describe("main escalation precedence and publication", () => {
     const marker = STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER);
     const seed = buildEscalation();
     const seedLength =
-      `${TRUSTED_ESCALATION_LINE}\n\n${sanitizeContractForPosting(seed)}\n${marker}`.length;
+      `${TRUSTED_ESCALATION_LINE}\n\n${neutralizeHtmlCommentsForExpectedPosting(sanitizeContractForPosting(seed))}\n${marker}`.length;
     const escalation = buildEscalation({
       question:
         "Which bounded implementation scope should the planner contract?" +
