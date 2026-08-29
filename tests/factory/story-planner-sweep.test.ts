@@ -18,6 +18,7 @@ const REPO = "roastpilot-cloud";
 const READ_TOKEN = "read-token";
 const APP_TOKEN = "app-token";
 const BOT = { type: "Bot", login: "github-actions[bot]" } as const;
+const CONTRACT_REVISION = "a".repeat(64);
 
 type RequestCall = readonly [string, string, string, unknown?];
 
@@ -48,7 +49,7 @@ afterEach(() => {
 describe("story-planner sweep I/O", () => {
   // remove guard AC12 => writing despite skip-handled makes this test fail.
   it.each([
-    ["contract", STORY_PLANNER_CONTRACT_MARKER(31)],
+    ["contract", STORY_PLANNER_CONTRACT_MARKER(31, CONTRACT_REVISION)],
     ["escalate", STORY_PLANNER_ESCALATE_MARKER(31)],
   ])("AC12 skips an open issue with an existing %s marker end-to-end", async (_kind, marker) => {
     const { request, mock } = requestFrom(async (_token, method, path) => {
@@ -117,7 +118,7 @@ describe("story-planner sweep I/O", () => {
         commentReads += 1;
         return commentReads === 1
           ? []
-          : [{ body: STORY_PLANNER_CONTRACT_MARKER(32), user: BOT }];
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(32, CONTRACT_REVISION), user: BOT }];
       }
       if (method === "GET" && path.endsWith("/issues/32")) return issue(32);
       if (method === "DELETE" || method === "POST") return undefined;
@@ -185,7 +186,7 @@ describe("story-planner sweep I/O", () => {
         return fullPage;
       }
       if (method === "GET" && path.includes("/comments?")) {
-        return [{ body: STORY_PLANNER_CONTRACT_MARKER(33), user: BOT }];
+        return [{ body: STORY_PLANNER_CONTRACT_MARKER(33, CONTRACT_REVISION), user: BOT }];
       }
       throw new Error(`unexpected request: ${method} ${path}`);
     });
@@ -303,7 +304,7 @@ describe("story-planner sweep I/O", () => {
         commentReads += 1;
         return commentReads === 1
           ? []
-          : [{ body: STORY_PLANNER_CONTRACT_MARKER(39), user: BOT }];
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(39, CONTRACT_REVISION), user: BOT }];
       }
       if (method === "GET" && path.endsWith("/issues/39")) {
         stateReads += 1;
@@ -424,7 +425,7 @@ describe("story-planner sweep I/O", () => {
         commentReads += 1;
         return commentReads === 1
           ? []
-          : [{ body: STORY_PLANNER_CONTRACT_MARKER(37), user: BOT }];
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(37, CONTRACT_REVISION), user: BOT }];
       }
       if (method === "GET" && path.endsWith("/issues/37")) return issue(37);
       if (method === "DELETE") return undefined;

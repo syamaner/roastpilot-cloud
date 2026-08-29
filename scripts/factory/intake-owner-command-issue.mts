@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import {
   deriveIssueCommandAuthorization,
 } from "./derive-issue-command-authorization.mts";
-import { computeApprovedRevision } from "./approve-revision.mts";
+import { canonicalIssueRevision } from "./approve-revision.mts";
 import { githubGraphql, githubRequest, requireEnv } from "./github-api.mts";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -23,6 +23,8 @@ export type GithubGraphql = <T>(
 
 const ISSUE_BODY_EDIT_HISTORY_QUERY =
   "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){userContentEdits(first:100){nodes{editedAt}pageInfo{hasNextPage}}}}}";
+const ISSUE_TITLE_RENAME_HISTORY_QUERY =
+  "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){nodes{... on RenamedTitleEvent{createdAt}}pageInfo{hasNextPage}}}}}";
 const ISO_8601_TIMESTAMP_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
@@ -129,6 +131,30 @@ function bodyEditTimestamps(raw: unknown): readonly number[] | null {
   return timestamps;
 }
 
+function titleRenameTimestamps(raw: unknown): readonly number[] | null {
+  if (!isRecord(raw)) return null;
+  const repository = raw.repository;
+  if (!isRecord(repository) || !isRecord(repository.issue)) return null;
+  const renames = repository.issue.timelineItems;
+  if (
+    !isRecord(renames) ||
+    !Array.isArray(renames.nodes) ||
+    !isRecord(renames.pageInfo) ||
+    typeof renames.pageInfo.hasNextPage !== "boolean" ||
+    renames.pageInfo.hasNextPage
+  ) {
+    return null;
+  }
+  const timestamps: number[] = [];
+  for (const node of renames.nodes) {
+    if (!isRecord(node)) return null;
+    const timestamp = parseTimestamp(node.createdAt);
+    if (timestamp === null) return null;
+    timestamps.push(timestamp);
+  }
+  return timestamps;
+}
+
 export async function main(
   request: GithubRequest,
   graphql: GithubGraphql = githubGraphql,
@@ -172,25 +198,40 @@ export async function main(
   }
   if (authorization.command.verb === "approve") {
     const commentCreatedAt = parseTimestamp(comment.created_at);
-    if (commentCreatedAt === null || typeof issue.body !== "string") {
+    if (
+      commentCreatedAt === null ||
+      typeof issue.title !== "string" ||
+      typeof issue.body !== "string"
+    ) {
       appendOutput(outputPath, "proceed", "false");
       return;
     }
     let rawEditHistory: unknown;
+    let rawRenameHistory: unknown;
     try {
-      rawEditHistory = await graphql<unknown>(
-        token,
-        ISSUE_BODY_EDIT_HISTORY_QUERY,
-        { owner, repo, number: issueNumber },
-      );
+      [rawEditHistory, rawRenameHistory] = await Promise.all([
+        graphql<unknown>(token, ISSUE_BODY_EDIT_HISTORY_QUERY, {
+          owner,
+          repo,
+          number: issueNumber,
+        }),
+        graphql<unknown>(token, ISSUE_TITLE_RENAME_HISTORY_QUERY, {
+          owner,
+          repo,
+          number: issueNumber,
+        }),
+      ]);
     } catch {
       appendOutput(outputPath, "proceed", "false");
       return;
     }
     const editTimestamps = bodyEditTimestamps(rawEditHistory);
+    const renameTimestamps = titleRenameTimestamps(rawRenameHistory);
     if (
       editTimestamps === null ||
-      editTimestamps.some((editedAt) => editedAt >= commentCreatedAt)
+      renameTimestamps === null ||
+      editTimestamps.some((editedAt) => editedAt >= commentCreatedAt) ||
+      renameTimestamps.some((renamedAt) => renamedAt >= commentCreatedAt)
     ) {
       appendOutput(outputPath, "proceed", "false");
       return;
@@ -200,7 +241,7 @@ export async function main(
     appendOutput(
       outputPath,
       "approved_revision",
-      computeApprovedRevision(issue.body),
+      canonicalIssueRevision(issue.title, issue.body),
     );
     return;
   }

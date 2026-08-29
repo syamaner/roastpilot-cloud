@@ -1,26 +1,41 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  computeApprovedRevision,
+  canonicalIssueRevision,
   isApprovedRevision,
 } from "../../scripts/factory/approve-revision.mts";
 
-describe("approved issue-body revision digest", () => {
+describe("canonical approved issue revision digest", () => {
   it("is deterministic and emits lowercase SHA-256 hex", () => {
-    const first = computeApprovedRevision("reviewed body");
-    expect(computeApprovedRevision("reviewed body")).toBe(first);
+    const first = canonicalIssueRevision("Reviewed title", "reviewed body");
+    expect(canonicalIssueRevision("Reviewed title", "reviewed body")).toBe(first);
     expect(first).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("distinguishes different issue bodies", () => {
-    expect(computeApprovedRevision("body one")).not.toBe(
-      computeApprovedRevision("body two"),
+  it("distinguishes title-only and body-only changes", () => {
+    expect(canonicalIssueRevision("title one", "body")).not.toBe(
+      canonicalIssueRevision("title two", "body"),
+    );
+    expect(canonicalIssueRevision("title", "body one")).not.toBe(
+      canonicalIssueRevision("title", "body two"),
     );
   });
 
-  it("rejects non-string input", () => {
-    expect(() => computeApprovedRevision(42 as unknown as string)).toThrow(
-      TypeError,
+  it("is injective across field order and newline-concatenation traps", () => {
+    expect(canonicalIssueRevision("A", "B")).not.toBe(
+      canonicalIssueRevision("B", "A"),
+    );
+    expect(canonicalIssueRevision("a", "b\nc")).not.toBe(
+      canonicalIssueRevision("a\nb", "c"),
+    );
+  });
+
+  it("normalizes null fields exactly like empty strings", () => {
+    expect(canonicalIssueRevision(null, "body")).toBe(
+      canonicalIssueRevision("", "body"),
+    );
+    expect(canonicalIssueRevision("title", null)).toBe(
+      canonicalIssueRevision("title", ""),
     );
   });
 

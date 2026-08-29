@@ -9,7 +9,7 @@ import {
   buildTriageGenerationMarker,
   TRIAGE_COMMENT_MARKER,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
-import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   main,
   verifyApprovedRevision,
@@ -17,6 +17,7 @@ import {
 
 let workdir: string;
 let contextPath: string;
+const ISSUE_TITLE = "Current issue title";
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "verify-approved-revision-"));
@@ -38,22 +39,34 @@ function authorizingComment(revision: string): string {
 
 describe("implementation approved-revision consumer", () => {
   it("M-B3 fails closed when the current body differs from the marker", () => {
-    const comment = authorizingComment(computeApprovedRevision("reviewed"));
-    expect(() => verifyApprovedRevision("mutated", comment)).toThrow(
+    const comment = authorizingComment(
+      canonicalIssueRevision(ISSUE_TITLE, "reviewed"),
+    );
+    expect(() => verifyApprovedRevision(ISSUE_TITLE, "mutated", comment)).toThrow(
       /does not match/,
     );
   });
 
   it("M-B3 accepts a current body matching the marker byte-for-byte", () => {
     const body = "reviewed body\nincluding trailing newline\n";
-    const comment = authorizingComment(computeApprovedRevision(body));
-    expect(() => verifyApprovedRevision(body, comment)).not.toThrow();
+    const comment = authorizingComment(canonicalIssueRevision(ISSUE_TITLE, body));
+    expect(() => verifyApprovedRevision(ISSUE_TITLE, body, comment)).not.toThrow();
+  });
+
+  it("M-B3 fails closed after a title-only edit", () => {
+    const body = "approved body";
+    const comment = authorizingComment(
+      canonicalIssueRevision("Approved title", body),
+    );
+    expect(() => verifyApprovedRevision("Edited title", body, comment)).toThrow(
+      /does not match/,
+    );
   });
 
   it("M-B3 preserves the manual-dispatch path when no marker exists", () => {
     const legacyComment =
       `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`;
-    expect(() => verifyApprovedRevision("current body", legacyComment))
+    expect(() => verifyApprovedRevision(ISSUE_TITLE, "current body", legacyComment))
       .not.toThrow();
   });
 
@@ -64,18 +77,18 @@ describe("implementation approved-revision consumer", () => {
     const malformedComment =
       `<!-- roastpilot-factory:approved-revision:${revision}:do-not-edit -->\n` +
       `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`;
-    expect(() => verifyApprovedRevision("current body", malformedComment)).toThrow(
+    expect(() => verifyApprovedRevision(ISSUE_TITLE, "current body", malformedComment)).toThrow(
       "malformed approved-revision marker",
     );
   });
 
   it("fails closed for a present approved-revision marker in non-terminal placement", () => {
-    const revision = computeApprovedRevision("current body");
+    const revision = canonicalIssueRevision(ISSUE_TITLE, "current body");
     const misplacedComment =
       `${buildApprovedRevisionMarker(revision)}\n` +
       "untrusted trailing text\n" +
       `${buildTriageGenerationMarker("123.1")}\n${TRIAGE_COMMENT_MARKER}`;
-    expect(() => verifyApprovedRevision("current body", misplacedComment)).toThrow(
+    expect(() => verifyApprovedRevision(ISSUE_TITLE, "current body", misplacedComment)).toThrow(
       "malformed approved-revision marker",
     );
   });
@@ -99,15 +112,19 @@ describe("approved-revision consumer entrypoint", () => {
 
   it.each([
     ["non-record context", null],
-    ["non-string issue body", { body: 42, comments: [] }],
-    ["non-array comments", { body: "current", comments: {} }],
+    ["missing issue title", { body: "current", comments: [] }],
+    ["non-string issue title", { title: 42, body: "current", comments: [] }],
+    ["non-string issue body", { title: ISSUE_TITLE, body: 42, comments: [] }],
+    ["non-array comments", { title: ISSUE_TITLE, body: "current", comments: {} }],
   ])("fails closed for a malformed %s", async (_name, context) => {
     await writeContext(context);
-    await expect(main()).rejects.toThrow("malformed body or comments");
+    await expect(main()).rejects.toThrow(
+      "malformed title, body, or comments",
+    );
   });
 
   it("fails closed when no factory triage history exists", async () => {
-    await writeContext({ body: "current", comments: [] });
+    await writeContext({ title: ISSUE_TITLE, body: "current", comments: [] });
     await expect(main()).rejects.toThrow(
       "expected exactly one authorizing triage comment body",
     );
@@ -116,6 +133,7 @@ describe("approved-revision consumer entrypoint", () => {
   it("fails closed when more than one factory triage history exists", async () => {
     await writeContext({
       body: "current",
+      title: ISSUE_TITLE,
       comments: [history("first"), history("second")],
     });
     await expect(main()).rejects.toThrow(
@@ -124,7 +142,11 @@ describe("approved-revision consumer entrypoint", () => {
   });
 
   it("fails closed when the authorizing history body is not a string", async () => {
-    await writeContext({ body: "current", comments: [history(42)] });
+    await writeContext({
+      title: ISSUE_TITLE,
+      body: "current",
+      comments: [history(42)],
+    });
     await expect(main()).rejects.toThrow(
       "expected exactly one authorizing triage comment body",
     );
@@ -133,8 +155,11 @@ describe("approved-revision consumer entrypoint", () => {
   it("accepts one authorizing history whose marker matches the current body", async () => {
     const body = "current body\nwith exact bytes\n";
     await writeContext({
+      title: ISSUE_TITLE,
       body,
-      comments: [history(authorizingComment(computeApprovedRevision(body)))],
+      comments: [
+        history(authorizingComment(canonicalIssueRevision(ISSUE_TITLE, body))),
+      ],
     });
     await expect(main()).resolves.toBeUndefined();
   });

@@ -305,9 +305,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p issue-context
-          gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-            --json number,author,title,body,state,comments |
-            jq -cj -f .claude/skills/triage/authorized-comments.jq \
+          rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")
+          current_revision=$(printf '%s' "$rest_issue" |
+            node --experimental-strip-types scripts/factory/compute-current-revision.mts)
+          issue_json=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+            --json number,author,title,body,state,comments)
+          # Parity-only: the triage context title itself feeds no digest compare,
+          # but keeping title and body on one REST snapshot prevents source drift.
+          issue_json=$(printf '%s' "$issue_json" | jq -c \
+            --argjson rest "$rest_issue" \
+            '. as $context
+            | $context
+            | .title = (if ($rest.title | type) == "string" then $rest.title else error("REST issue title is malformed") end)
+            | .body = (if ($rest.body | type) == "string" then $rest.body elif $rest.body == null then "" else error("REST issue body is malformed") end)')
+          echo "$issue_json" |
+            jq -cj --arg current_revision "$current_revision" -f .claude/skills/triage/authorized-comments.jq \
               > issue-context/issue.json
           # Pre-create the verdict output directory: Bash is disallowed for
           # the skill (below), so it cannot mkdir this itself. The verdict

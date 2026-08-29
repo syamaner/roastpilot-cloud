@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 
-import { computeApprovedRevision } from "./approve-revision.mts";
+import { canonicalIssueRevision } from "./approve-revision.mts";
 import {
   APPROVED_REVISION_MARKER_PREFIX,
   extractApprovedRevision,
@@ -11,6 +11,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function verifyApprovedRevision(
+  currentTitle: string,
   currentBody: string,
   authorizingCommentBody: string,
 ): void {
@@ -21,7 +22,7 @@ export function verifyApprovedRevision(
     }
     return;
   }
-  if (computeApprovedRevision(currentBody) !== approvedRevision) {
+  if (canonicalIssueRevision(currentTitle, currentBody) !== approvedRevision) {
     throw new Error(
       "current issue body does not match the owner-approved revision",
     );
@@ -34,8 +35,13 @@ export async function main(): Promise<void> {
     throw new Error("missing required environment variable: ISSUE_CONTEXT_PATH");
   }
   const raw = JSON.parse(await fs.readFile(contextPath, "utf8")) as unknown;
-  if (!isRecord(raw) || typeof raw.body !== "string" || !Array.isArray(raw.comments)) {
-    throw new TypeError("issue context has malformed body or comments");
+  if (
+    !isRecord(raw) ||
+    typeof raw.title !== "string" ||
+    typeof raw.body !== "string" ||
+    !Array.isArray(raw.comments)
+  ) {
+    throw new TypeError("issue context has malformed title, body, or comments");
   }
   const histories = raw.comments.filter(
     (comment): comment is Record<string, unknown> =>
@@ -44,7 +50,7 @@ export async function main(): Promise<void> {
   if (histories.length !== 1 || typeof histories[0]?.body !== "string") {
     throw new Error("expected exactly one authorizing triage comment body");
   }
-  verifyApprovedRevision(raw.body, histories[0].body);
+  verifyApprovedRevision(raw.title, raw.body, histories[0].body);
 }
 
 /* v8 ignore next 6 -- exercised by the workflow-contract subprocess test. */

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  computeApprovedRevision,
+  canonicalIssueRevision,
 } from "../../scripts/factory/approve-revision.mts";
 import {
   main,
@@ -21,6 +21,7 @@ const REPOSITORY = "syamaner/roastpilot-cloud";
 const ISSUE_NUMBER = 390;
 const COMMENT_ID = 1234;
 const COMMENT_CREATED_AT = "2026-08-28T10:00:00Z";
+const REST_TITLE = "Exact REST issue title";
 const REST_BODY = "Exact REST issue body\nwith bytes preserved.";
 let temporaryDirectory: string;
 let outputPath: string;
@@ -47,6 +48,8 @@ function requestFor(
     repository?: unknown;
     graphql?: unknown;
     graphqlError?: Error;
+    titleRenameGraphql?: unknown;
+    titleRenameGraphqlError?: Error;
   } = {},
 ): {
   request: GithubRequest;
@@ -65,7 +68,7 @@ function requestFor(
       : path.endsWith(`/issues/${ISSUE_NUMBER}`)
         ? "issue" in overrides
           ? overrides.issue
-          : { state: "open", body: REST_BODY }
+          : { state: "open", title: REST_TITLE, body: REST_BODY }
         : "repository" in overrides
           ? overrides.repository
           : { full_name: REPOSITORY, fork: false };
@@ -77,6 +80,23 @@ function requestFor(
     variables: Readonly<Record<string, unknown>>,
   ): Promise<T> => {
     calls.push(`GRAPHQL ${query} ${JSON.stringify(variables)}`);
+    if (query.includes("timelineItems")) {
+      if (overrides.titleRenameGraphqlError) {
+        throw overrides.titleRenameGraphqlError;
+      }
+      return ("titleRenameGraphql" in overrides
+        ? overrides.titleRenameGraphql
+        : {
+            repository: {
+              issue: {
+                timelineItems: {
+                  nodes: [],
+                  pageInfo: { hasNextPage: false },
+                },
+              },
+            },
+          }) as T;
+    }
     if (overrides.graphqlError) throw overrides.graphqlError;
     return ("graphql" in overrides
       ? overrides.graphql
@@ -124,8 +144,16 @@ describe("issue owner-command intake entrypoint", () => {
           number: ISSUE_NUMBER,
         }),
     );
+    expect(calls[4]).toBe(
+      "GRAPHQL query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){nodes{... on RenamedTitleEvent{createdAt}}pageInfo{hasNextPage}}}}} " +
+        JSON.stringify({
+          owner: "syamaner",
+          repo: "roastpilot-cloud",
+          number: ISSUE_NUMBER,
+        }),
+    );
     expect(readFileSync(outputPath, "utf8")).toBe(
-      `proceed=true\nverb=approve\napproved_revision=${computeApprovedRevision(REST_BODY)}\n`,
+      `proceed=true\nverb=approve\napproved_revision=${canonicalIssueRevision(REST_TITLE, REST_BODY)}\n`,
     );
   });
 
@@ -219,7 +247,7 @@ describe("issue owner-command intake entrypoint", () => {
 
     expect(readFileSync(outputPath, "utf8")).toBe(
       shouldProceed
-        ? `proceed=true\nverb=approve\napproved_revision=${computeApprovedRevision(REST_BODY)}\n`
+        ? `proceed=true\nverb=approve\napproved_revision=${canonicalIssueRevision(REST_TITLE, REST_BODY)}\n`
         : "proceed=false\n",
     );
   });
@@ -253,14 +281,23 @@ describe("issue owner-command intake entrypoint", () => {
     expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
   });
 
-  it("allows title-only edits and body edits strictly before review", async () => {
+  it("allows title renames and body edits strictly before approval", async () => {
     const { request, graphql } = requestFor(ownerComment(), {
       graphql: {
         repository: {
           issue: {
-            renamedTitleEvents: [{ createdAt: "2026-08-28T10:01:00Z" }],
             userContentEdits: {
               nodes: [{ editedAt: "2026-08-28T09:59:59Z" }],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+      titleRenameGraphql: {
+        repository: {
+          issue: {
+            timelineItems: {
+              nodes: [{ createdAt: "2026-08-28T09:59:59Z" }],
               pageInfo: { hasNextPage: false },
             },
           },
@@ -271,8 +308,112 @@ describe("issue owner-command intake entrypoint", () => {
     await main(request, graphql);
 
     expect(readFileSync(outputPath, "utf8")).toContain(
-      `approved_revision=${computeApprovedRevision(REST_BODY)}\n`,
+      `approved_revision=${canonicalIssueRevision(REST_TITLE, REST_BODY)}\n`,
     );
+  });
+
+  it("fails closed for a title rename after the approve comment", async () => {
+    const { request, graphql } = requestFor(ownerComment(), {
+      titleRenameGraphql: {
+        repository: {
+          issue: {
+            timelineItems: {
+              nodes: [{ createdAt: "2026-08-28T10:00:00.001Z" }],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    });
+
+    await main(request, graphql);
+
+    expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
+  });
+
+  it.each([
+    ["non-record data", null],
+    ["a non-record repository", { repository: null }],
+    ["a non-record issue", { repository: { issue: null } }],
+    ["a missing timeline", { repository: { issue: {} } }],
+    ["non-array nodes", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: {},
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      },
+    }],
+    ["non-record page info", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: [],
+            pageInfo: null,
+          },
+        },
+      },
+    }],
+    ["a non-boolean pagination flag", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: [],
+            pageInfo: { hasNextPage: "false" },
+          },
+        },
+      },
+    }],
+    ["a malformed node", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: [null],
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      },
+    }],
+    ["a malformed timestamp", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: [{ createdAt: "not-a-time" }],
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      },
+    }],
+    ["paginated history", {
+      repository: {
+        issue: {
+          timelineItems: {
+            nodes: [],
+            pageInfo: { hasNextPage: true },
+          },
+        },
+      },
+    }],
+  ])("fails closed for %s in title-rename history", async (_name, history) => {
+    const { request, graphql } = requestFor(ownerComment(), {
+      titleRenameGraphql: history,
+    });
+
+    await main(request, graphql);
+
+    expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
+  });
+
+  it("fails closed when the title-rename history query errors", async () => {
+    const { request, graphql } = requestFor(ownerComment(), {
+      titleRenameGraphqlError: new Error("GraphQL errors"),
+    });
+
+    await main(request, graphql);
+
+    expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
   });
 
   it("hashes the REST body, never a GraphQL body", async () => {
@@ -294,8 +435,36 @@ describe("issue owner-command intake entrypoint", () => {
     await main(request, graphql);
 
     const output = readFileSync(outputPath, "utf8");
-    expect(output).toContain(computeApprovedRevision(REST_BODY));
-    expect(output).not.toContain(computeApprovedRevision(graphqlBody));
+    expect(output).toContain(canonicalIssueRevision(REST_TITLE, REST_BODY));
+    expect(output).not.toContain(
+      canonicalIssueRevision(REST_TITLE, graphqlBody),
+    );
+  });
+
+  it("changes the captured revision after a REST title-only edit", async () => {
+    const editedTitle = "Edited REST issue title";
+    const { request, graphql } = requestFor(ownerComment(), {
+      issue: { state: "open", title: editedTitle, body: REST_BODY },
+    });
+
+    await main(request, graphql);
+
+    const output = readFileSync(outputPath, "utf8");
+    expect(output).toContain(canonicalIssueRevision(editedTitle, REST_BODY));
+    expect(output).not.toContain(canonicalIssueRevision(REST_TITLE, REST_BODY));
+  });
+
+  it.each([
+    ["missing", { state: "open", body: REST_BODY }],
+    ["null", { state: "open", title: null, body: REST_BODY }],
+    ["non-string", { state: "open", title: 42, body: REST_BODY }],
+  ])("fails closed with proceed=false for a %s REST title", async (_name, issue) => {
+    const { request, graphql, calls } = requestFor(ownerComment(), { issue });
+
+    await main(request, graphql);
+
+    expect(readFileSync(outputPath, "utf8")).toBe("proceed=false\n");
+    expect(calls.some((call) => call.startsWith("GRAPHQL"))).toBe(false);
   });
 
   it.each([

@@ -17,7 +17,7 @@ import {
   selectLabelWriteToken,
   type ExistingComment,
 } from "../../scripts/factory/apply-triage-verdict-logic.mts";
-import { computeApprovedRevision } from "../../scripts/factory/approve-revision.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   MAX_QUESTION_LENGTH,
   MAX_QUESTIONS,
@@ -35,7 +35,10 @@ const verdict: TriageVerdict = {
   reasoning: "Plan link, acceptance criteria, scope, and size are all present.",
   missing_info_questions: [],
 };
-const approvedRevision = computeApprovedRevision("reviewed REST body");
+const approvedRevision = canonicalIssueRevision(
+  "reviewed REST title",
+  "reviewed REST body",
+);
 
 describe("selectLabelWriteToken", () => {
   it("uses the App token only for ready-to-spec when it is present", () => {

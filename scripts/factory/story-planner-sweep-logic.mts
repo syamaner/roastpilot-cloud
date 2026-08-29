@@ -1,9 +1,10 @@
 import {
-  STORY_PLANNER_CONTRACT_MARKER,
+  STORY_PLANNER_CONTRACT_ISSUE_PREFIX,
   STORY_PLANNER_ESCALATE_MARKER,
 } from "./post-story-planner-contract.mts";
 import {
   isStoryPlannerBotMarkerComment,
+  isStoryPlannerBotMarkerPrefixComment,
   type StoryPlannerMarkerComment,
 } from "./story-planner-marker.mts";
 
@@ -28,12 +29,12 @@ export function isIssueHandled(
   comments: readonly StoryPlannerMarkerComment[],
   issueNumber: number,
 ): boolean {
-  const markers = [
-    STORY_PLANNER_CONTRACT_MARKER(issueNumber),
-    STORY_PLANNER_ESCALATE_MARKER(issueNumber),
-  ];
-  return markers.some((marker) =>
-    comments.some((comment) => isStoryPlannerBotMarkerComment(comment, marker)),
+  const contractPrefix = STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber);
+  const escalationMarker = STORY_PLANNER_ESCALATE_MARKER(issueNumber);
+  return comments.some(
+    (comment) =>
+      isStoryPlannerBotMarkerPrefixComment(comment, contractPrefix) ||
+      isStoryPlannerBotMarkerComment(comment, escalationMarker),
   );
 }
 

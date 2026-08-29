@@ -5,8 +5,13 @@ import { githubRequest, requireEnv } from "./github-api.mts";
 import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 import {
   isStoryPlannerBotMarkerComment,
+  isStoryPlannerBotMarkerPrefixComment,
   type StoryPlannerMarkerComment,
 } from "./story-planner-marker.mts";
+import {
+  APPROVED_REVISION_PATTERN,
+  canonicalIssueRevision,
+} from "./approve-revision.mts";
 import {
   buildTriggerDetectionFold,
   escapeInvisibleCharactersVisibly,
@@ -29,8 +34,19 @@ const MARKERS = [
 ] as const;
 
 /** Workflow-owned issue-scoped marker appended only after model text is sanitized. */
-export const STORY_PLANNER_CONTRACT_MARKER = (issueNumber: number): string =>
-  `${STORY_PLANNER_CONTRACT_MARKER_PREFIX}issue-${issueNumber} -->`;
+export const STORY_PLANNER_CONTRACT_ISSUE_PREFIX = (issueNumber: number): string =>
+  `${STORY_PLANNER_CONTRACT_MARKER_PREFIX}issue-${issueNumber}:`;
+
+/** Workflow-owned revision-bound marker appended only after model text is sanitized. */
+export const STORY_PLANNER_CONTRACT_MARKER = (
+  issueNumber: number,
+  revision: string,
+): string => {
+  if (!APPROVED_REVISION_PATTERN.test(revision)) {
+    throw new Error("story-planner contract revision must be a SHA-256 hex digest");
+  }
+  return `${STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber)}rev-${revision} -->`;
+};
 
 /** Workflow-owned issue-scoped marker appended only after escalation text is sanitized. */
 export const STORY_PLANNER_ESCALATE_MARKER = (issueNumber: number): string =>
@@ -234,6 +250,8 @@ async function hasExistingBotMarkerComment(
   repo: string,
   issueNumber: number,
   marker: string,
+  matchesMarker: typeof isStoryPlannerBotMarkerComment =
+    isStoryPlannerBotMarkerComment,
 ): Promise<boolean> {
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const comments = await request<StoryPlannerMarkerComment[]>(
@@ -242,7 +260,7 @@ async function hasExistingBotMarkerComment(
       `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
     );
     if (
-      comments.some((comment) => isStoryPlannerBotMarkerComment(comment, marker))
+      comments.some((comment) => matchesMarker(comment, marker))
     ) {
       return true;
     }
@@ -320,21 +338,6 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
   if (contractExists) {
     const contract = readFileSync(contractPath, "utf8");
     validateStoryPlannerContract(contract, issueNumber);
-    const finalBody =
-      sanitizeContractForPosting(contract) +
-      "\n" +
-      STORY_PLANNER_CONTRACT_MARKER(issueNumber);
-    if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
-      throw new Error(
-        `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
-      );
-    }
-    const serializedBodyBytes = Buffer.byteLength(JSON.stringify(finalBody));
-    if (serializedBodyBytes > CONTRACT_EXCERPT_MAX_BYTES) {
-      throw new Error(
-        `story-planner contract serialized comment length ${serializedBodyBytes} exceeds triage excerpt limit ${CONTRACT_EXCERPT_MAX_BYTES}`,
-      );
-    }
 
     if (
       await hasExistingBotMarkerComment(
@@ -343,7 +346,8 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
         owner,
         repo,
         issueNumber,
-        STORY_PLANNER_CONTRACT_MARKER(issueNumber),
+        STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber),
+        isStoryPlannerBotMarkerPrefixComment,
       )
     ) {
       console.log(`contract already posted on #${issueNumber}; skipping`);
@@ -357,6 +361,31 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
       repo,
       issueNumber,
     );
+    if (!("title" in issue) || typeof issue.title !== "string") {
+      throw new Error("issue title is malformed; refusing to publish");
+    }
+    if (
+      !("body" in issue) ||
+      (typeof issue.body !== "string" && issue.body !== null)
+    ) {
+      throw new Error("issue body is malformed; refusing to publish");
+    }
+    const approvedRevision = canonicalIssueRevision(issue.title, issue.body);
+    const finalBody =
+      sanitizeContractForPosting(contract) +
+      "\n" +
+      STORY_PLANNER_CONTRACT_MARKER(issueNumber, approvedRevision);
+    if (finalBody.length > MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH) {
+      throw new Error(
+        `story-planner contract comment length ${finalBody.length} exceeds GitHub comment limit ${MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH}`,
+      );
+    }
+    const serializedBodyBytes = Buffer.byteLength(JSON.stringify(finalBody));
+    if (serializedBodyBytes > CONTRACT_EXCERPT_MAX_BYTES) {
+      throw new Error(
+        `story-planner contract serialized comment length ${serializedBodyBytes} exceeds triage excerpt limit ${CONTRACT_EXCERPT_MAX_BYTES}`,
+      );
+    }
 
     // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
     // an edit after Prepare's read in the same wall-clock second is undetectable.
