@@ -198,27 +198,21 @@ describe("validateStoryPlannerEscalation", () => {
 });
 
 describe("main escalation precedence and publication", () => {
-  it("G4a: valid contract wins when both files exist", async () => {
-    // Mutation witness: checking escalation first posts the wrong model output.
+  it("G4a: both outputs present fails closed", async () => {
+    // Mutation witness: removing the both-present guard lets the contract post.
     writeFileSync(contractPath, buildContract(), "utf8");
     writeFileSync(escalatePath, buildEscalation(), "utf8");
     const { request, mock } = mockRequest();
 
-    await main(request);
-
-    const posts = mock.mock.calls.filter((call) => call[1] === "POST");
-    expect(posts).toHaveLength(1);
-    const body = (posts[0]?.[3] as { readonly body: string }).body;
-    expect(body).toBe(
-      `${sanitizeContractForPosting(buildContract())}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER)}`,
+    await expect(main(request)).rejects.toThrow(
+      "story-planner produced both a contract and an escalation; ambiguous output, refusing to publish",
     );
-    expect(body).not.toContain("<!-- escalate:question -->");
+    expect(mock).not.toHaveBeenCalled();
   });
 
-  it("G4b: invalid present contract fails closed without consulting a valid escalation", async () => {
-    // Mutation witness: falling through after contract validation failure posts the escalation.
+  it("G4b: invalid contract-only output fails closed before any request", async () => {
+    // Mutation witness: skipping contract validation would reach the publisher requests.
     writeFileSync(contractPath, "invalid contract", "utf8");
-    writeFileSync(escalatePath, buildEscalation(), "utf8");
     const { request, mock } = mockRequest();
 
     await expect(main(request)).rejects.toThrow("terminal sentinel must appear exactly once");

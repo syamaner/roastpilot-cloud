@@ -305,8 +305,15 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
   );
   const contractPath = requireEnv("CONTRACT_PATH");
   const escalatePath = process.env.ESCALATE_PATH;
+  const contractExists = existsSync(contractPath);
+  const escalateExists = escalatePath !== undefined && existsSync(escalatePath);
+  if (contractExists && escalateExists) {
+    throw new Error(
+      "story-planner produced both a contract and an escalation; ambiguous output, refusing to publish",
+    );
+  }
   const [owner, repo] = repository.split("/", 2) as [string, string];
-  if (existsSync(contractPath)) {
+  if (contractExists) {
     const contract = readFileSync(contractPath, "utf8");
     validateStoryPlannerContract(contract, issueNumber);
     const finalBody =
@@ -385,9 +392,7 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     );
     console.log(`Posted one story-planner contract on issue #${issueNumber}.`);
     return;
-  }
-
-  if (escalatePath !== undefined && existsSync(escalatePath)) {
+  } else if (escalateExists) {
     const escalate = readFileSync(escalatePath, "utf8");
     validateStoryPlannerEscalation(escalate, issueNumber);
     const finalBody =
