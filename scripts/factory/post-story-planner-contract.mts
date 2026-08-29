@@ -4,6 +4,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 import {
+  isStoryPlannerBotMarkerComment,
+  type StoryPlannerMarkerComment,
+} from "./story-planner-marker.mts";
+import {
   buildTriggerDetectionFold,
   escapeInvisibleCharactersVisibly,
   neutralizeCodexTriggerPhrases,
@@ -16,7 +20,6 @@ const COMMENT_PAGE_SIZE = 100;
 const MAX_COMMENT_PAGES = 50;
 const STORY_PLANNER_CONTRACT_MARKER_PREFIX = "<!-- story-planner-contract:";
 export const STORY_PLANNER_ESCALATE_MARKER_PREFIX = "<!-- story-planner-escalate:";
-const STORY_PLANNER_BOT_AUTHOR_LOGIN = "github-actions[bot]";
 const MARKERS = [
   "<!-- contract:spec -->",
   "<!-- contract:tests -->",
@@ -223,11 +226,6 @@ export function validateStoryPlannerEscalation(
   }
 }
 
-interface GitHubComment {
-  readonly body: string;
-  readonly user: { readonly type: string; readonly login: string } | null;
-}
-
 async function hasExistingBotMarkerComment(
   request: GithubRequest,
   token: string,
@@ -237,18 +235,13 @@ async function hasExistingBotMarkerComment(
   marker: string,
 ): Promise<boolean> {
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
-    const comments = await request<GitHubComment[]>(
+    const comments = await request<StoryPlannerMarkerComment[]>(
       token,
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
     );
     if (
-      comments.some(
-        (comment) =>
-          comment.user?.type === "Bot" &&
-          comment.user.login === STORY_PLANNER_BOT_AUTHOR_LOGIN &&
-          (comment.body === marker || comment.body.endsWith(`\n${marker}`)),
-      )
+      comments.some((comment) => isStoryPlannerBotMarkerComment(comment, marker))
     ) {
       return true;
     }

@@ -18,6 +18,10 @@ const UNAFFECTED_WORKFLOWS = new Set([
   // enable variable alone. D-F2-A6 adds FACTORY_PAUSED and the numeric workflow
   // ID inventory together at activation, after GitHub assigns the live ID.
   "owner-command-issue-intake.yml",
+  // 29 Aug 2026, #383 Slice 3: ships dispatch-only and dark on the planner
+  // enable variable alone. Activation adds FACTORY_PAUSED and the numeric
+  // workflow ID inventory together after GitHub assigns the live ID.
+  "story-planner-sweep.yml",
   // Refs #237: this workflow_dispatch-only, operator-initiated diagnostic is
   // intentionally run while the factory is paused before activation. A pause
   // gate would defeat that purpose; no event/automated trigger can reach it.

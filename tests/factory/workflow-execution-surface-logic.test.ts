@@ -1989,7 +1989,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(12);
+    expect(names).toHaveLength(13);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2134,14 +2134,18 @@ jobs:
       // The workflow input still changes canonical evidence and is pinned by
       // triage-workflow-contract.test.ts.
       //
+      // 29 Aug 2026, #383 Slice 3: the dark sweep adds +1 job, +1 run step,
+      // +3 pinned action steps (checkout, setup-node, App mint), and +6
+      // declared action inputs (3 + 1 + 3).
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 23,
-      runSteps: 56,
-      actionSteps: 56,
-      inputs: 151,
+      jobs: 24,
+      runSteps: 57,
+      actionSteps: 59,
+      inputs: 158,
     });
   });
 
@@ -2153,7 +2157,7 @@ jobs:
     let runSteps = 0;
     let actionSteps = 0;
     let inputs = 0;
-    expect(names).toHaveLength(12);
+    expect(names).toHaveLength(13);
     for (const name of names) {
       const source = readFileSync(
         resolve(WORKFLOW_DIRECTORY, name),
@@ -2194,7 +2198,7 @@ jobs:
       }
     }
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 33,
+      jobs: 34,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2278,9 +2282,11 @@ jobs:
       // 28 Aug 2026, #390 revision-binding fold: same +1 workflow_dispatch
       // input as above, outside this action-step `with:` input counter. The
       // measured total therefore stays 220.
-      runSteps: 92,
-      actionSteps: 82,
-      inputs: 220,
+      // 29 Aug 2026, #383 Slice 3: same measured +1 job / +1 run step / +3
+      // action steps / +7 action inputs as the source-only corpus above.
+      runSteps: 93,
+      actionSteps: 85,
+      inputs: 227,
     });
   });
 });
