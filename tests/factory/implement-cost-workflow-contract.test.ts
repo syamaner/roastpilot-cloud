@@ -46,6 +46,35 @@ function step(name: string, stepName: string): Mapping {
 }
 
 describe("implement cost workflow contract", () => {
+  it("T-H1-wf: threads the REST-captured canonical issue revision to publish", () => {
+    expect(mapping(job("implement").outputs)).toMatchObject({
+      issue_revision: "${{ steps.issue-context.outputs.issue_revision }}",
+    });
+    const issueContext = step(
+      "implement",
+      "Fetch target issue, verify it is ready-to-implement, write context for the agent",
+    );
+    const issueContextRun = String(issueContext.run);
+    expect(issueContextRun).toContain(
+      'rest_issue=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER")',
+    );
+    expect(issueContextRun).toContain(
+      "node --experimental-strip-types scripts/factory/compute-current-revision.mts",
+    );
+    expect(issueContextRun).toContain(
+      'echo "issue_revision=$current_revision" >> "$GITHUB_OUTPUT"',
+    );
+    expect(
+      mapping(step("publish", "Validate and publish the implement patch").env)
+        .EXPECTED_ISSUE_REVISION,
+    ).toBe("${{ needs.implement.outputs.issue_revision }}");
+
+    const publisherSource = readFileSync(PUBLISHER_PATH, "utf8");
+    expect(publisherSource).toContain(
+      '"GET",\n      `/repos/${owner}/${repo}/issues/${issueNumber}`',
+    );
+  });
+
   it("W1: declares both bounded extractor job outputs", () => {
     expect(mapping(job("implement").outputs)).toMatchObject({
       cost_usd: "${{ steps.extract-implement-cost.outputs.cost_usd }}",

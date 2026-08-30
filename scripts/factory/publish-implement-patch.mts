@@ -121,6 +121,8 @@
  *   from a run that did not succeed.
  * - `EXPECTED_TRIAGE_GENERATION` — the authorizing
  *   `<run_id>.<run_attempt>` captured before the implement agent started.
+ * - `EXPECTED_ISSUE_REVISION` — canonical lowercase SHA-256 of the REST
+ *   issue title/body captured before the implement agent started.
  * - `PATCH_PATH` — path to the downloaded patch artifact (may not exist).
  * - `RUN_URL` — link to the implement run, for the PR body / failure
  *   comment.
@@ -187,6 +189,10 @@ import {
   type FactoryPatchLineStat,
 } from "./patch-analysis-format.mts";
 import { githubRequest, requireEnv } from "./github-api.mts";
+import {
+  APPROVED_REVISION_PATTERN,
+  canonicalIssueRevision,
+} from "./approve-revision.mts";
 import {
   extractOwnedTriageGenerations,
   isAuthorizingTriageGeneration,
@@ -302,8 +308,36 @@ const READY_TO_IMPLEMENT_LABEL = "ready-to-implement";
 
 interface GitHubIssue {
   readonly title: string;
+  readonly body: string | null;
   readonly state: string;
   readonly labels: unknown;
+}
+
+function assertIssueRevisionMatches(
+  issue: GitHubIssue,
+  expectedIssueRevision: string,
+  issueNumber: number,
+): { readonly title: string; readonly body: string | null } {
+  if (
+    typeof issue.title !== "string" ||
+    (issue.body !== null && typeof issue.body !== "string")
+  ) {
+    throw new PublishRejection(
+      `target #${issueNumber} REST issue title/body is malformed; ` +
+        `refusing branch/PR publish`,
+    );
+  }
+
+  const currentIssueRevision = canonicalIssueRevision(issue.title, issue.body);
+  if (currentIssueRevision !== expectedIssueRevision) {
+    throw new PublishRejection(
+      `target #${issueNumber} issue revision changed from ` +
+        `${expectedIssueRevision} to ${currentIssueRevision}; ` +
+        `refusing stale-scope branch/PR publish`,
+    );
+  }
+
+  return { title: issue.title, body: issue.body };
 }
 
 interface GitHubComment {
@@ -723,14 +757,15 @@ function runGit(args: string[]): void {
  * including a re-dispatch's force-pushed refresh, unlike the PR body's
  * own Provenance section (creation-time only).
  */
-function applyPatchAndPush(
+async function applyPatchAndPush(
   branchName: string,
   patchPath: string,
   issueNumber: number,
   issueTitle: string,
   agentActionRef: string,
   provenance: ProvenanceContext,
-): void {
+  revalidateBeforePush: () => Promise<void>,
+): Promise<void> {
   runGit(["config", "user.name", "github-actions[bot]"]);
   runGit([
     "config",
@@ -809,6 +844,7 @@ function applyPatchAndPush(
     );
   }
   runGit(["commit", "-m", messageParts[0], "-m", messageParts[1], "-m", messageParts[2]]);
+  await revalidateBeforePush();
   runGit(["push", "--force", "origin", branchName]);
 }
 
@@ -1651,6 +1687,7 @@ export async function main(): Promise<void> {
   const implementJobResult = requireEnv("IMPLEMENT_JOB_RESULT");
   const expectedTriageGeneration =
     process.env.EXPECTED_TRIAGE_GENERATION ?? "";
+  const expectedIssueRevision = process.env.EXPECTED_ISSUE_REVISION ?? "";
   const patchPath = process.env.PATCH_PATH ?? "patch-output/patch.diff";
   const runUrl = requireEnv("RUN_URL");
   // Provenance metadata only (Codex round-3 finding) — soft-defaulted,
@@ -1751,6 +1788,13 @@ export async function main(): Promise<void> {
       throw new PublishRejection(
         `implement job did not report an authorizing ` +
           `<run_id>.<run_attempt> triage generation`,
+      );
+    }
+
+    if (!APPROVED_REVISION_PATTERN.test(expectedIssueRevision)) {
+      throw new PublishRejection(
+        `implement job did not report a canonical lowercase SHA-256 ` +
+          `issue revision`,
       );
     }
 
@@ -1877,6 +1921,8 @@ export async function main(): Promise<void> {
       );
     }
 
+    assertIssueRevisionMatches(issue, expectedIssueRevision, issueNumber);
+
     // Idempotency keys off the issue number (stable), never a freshly
     // re-derived title slug — see findPrForIssueNumber's docstring.
     const existingPr = await findExistingPrForIssue(
@@ -1885,17 +1931,45 @@ export async function main(): Promise<void> {
       repo,
       issueNumber,
     );
+
+    // Re-fetch after the potentially paginated PR lookup so the digest check
+    // is the final authoritative operation before the branch write. A scope
+    // edit that lands while findExistingPrForIssue is scanning must not leave
+    // the publisher using the stale title/body from the fast pre-filter above.
+    const publishIssue = await githubRequest<GitHubIssue>(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/issues/${issueNumber}`,
+    );
+    const validatedPublishIssue = assertIssueRevisionMatches(
+      publishIssue,
+      expectedIssueRevision,
+      issueNumber,
+    );
+
     branchName = existingPr
       ? existingPr.headRef
-      : deriveBranchName(issueNumber, issue.title);
+      : deriveBranchName(issueNumber, validatedPublishIssue.title);
 
-    applyPatchAndPush(
+    await applyPatchAndPush(
       branchName,
       patchPath,
       issueNumber,
-      issue.title,
+      validatedPublishIssue.title,
       agentActionRef,
       provenance,
+      async () => {
+        const pushIssue = await githubRequest<GitHubIssue>(
+          token,
+          "GET",
+          `/repos/${owner}/${repo}/issues/${issueNumber}`,
+        );
+        assertIssueRevisionMatches(
+          pushIssue,
+          expectedIssueRevision,
+          issueNumber,
+        );
+      },
     );
     branchPushed = true;
 

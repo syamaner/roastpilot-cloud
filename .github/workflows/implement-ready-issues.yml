@@ -104,6 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
+      issue_revision: ${{ steps.issue-context.outputs.issue_revision }}
       model_id: ${{ steps.extract-model-id.outputs.model_id }}
       cost_usd: ${{ steps.extract-implement-cost.outputs.cost_usd }}
       num_turns: ${{ steps.extract-implement-cost.outputs.num_turns }}
@@ -284,6 +285,7 @@ jobs:
           ISSUE_CONTEXT_PATH=issue-context/issue.json \
             node --experimental-strip-types scripts/factory/verify-approved-revision.mts
           echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"
+          echo "issue_revision=$current_revision" >> "$GITHUB_OUTPUT"
 
       - name: Assert no Snowflake/Vercel secrets are present in this job's environment
         # Issue #6's verification note calls for this asserted, not just
@@ -1066,6 +1068,10 @@ jobs:
           # ready, before the agent ran. Publish re-checks the same canonical
           # bot-owned terminal history under the shared issue lock.
           EXPECTED_TRIAGE_GENERATION: ${{ needs.implement.outputs.triage_generation }}
+          # Exact canonical REST title/body revision captured before the
+          # implement agent ran. Publish recomputes it from its own fresh REST
+          # issue fetch before any branch write.
+          EXPECTED_ISSUE_REVISION: ${{ needs.implement.outputs.issue_revision }}
           PATCH_PATH: patch-output/patch.diff
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Minimal PR-body provenance (Codex round 3, partial factory.md

@@ -3,6 +3,7 @@ import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import { TRIAGE_COMMENT_MARKER } from "../../scripts/factory/apply-triage-verdict-logic.mts";
 
 vi.mock("node:child_process", () => ({
@@ -88,6 +89,82 @@ index 0000000..abc1234
 +export const x = 1;
 `;
 
+const ISSUE_TITLE = "[F1-S3] Implement workflow";
+const ISSUE_BODY = "Build the approved implementation.";
+
+function mockSuccessfulGit(): void {
+  vi.mocked(execFileSync).mockImplementation((_file, args) => {
+    const gitArgs = args as readonly string[];
+    if (gitArgs[0] === "apply" && gitArgs[1] === "--numstat") {
+      return "1\t0\tlib/new-file.ts\0";
+    }
+    if (gitArgs[0] === "rev-parse") {
+      return `${"a".repeat(40)}\n`;
+    }
+    if (gitArgs[0] === "write-tree") {
+      return `${"b".repeat(40)}\n`;
+    }
+    if (gitArgs[0] === "diff-index") {
+      return "A\0lib/new-file.ts\0";
+    }
+    if (gitArgs[0] === "diff" && gitArgs.includes("--text")) {
+      return VALID_DIFF;
+    }
+    if (gitArgs[0] === "diff" && gitArgs.includes("--numstat")) {
+      return "1\t0\tlib/new-file.ts\0";
+    }
+    return "";
+  });
+}
+
+function issueRevisionFetchHandlers(
+  body: string | null,
+): Record<string, (call: FetchCall) => Response> {
+  return {
+    "POST /graphql": () =>
+      jsonResponse({
+        data: {
+          repository: {
+            issue: {
+              comments: {
+                nodes: [
+                  {
+                    body:
+                      "<!-- roastpilot-factory:triage-generation:123.1:do-not-edit -->\n" +
+                      TRIAGE_COMMENT_MARKER,
+                    author: { __typename: "Bot", login: "github-actions" },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      }),
+    "GET /repos/syamaner/roastpilot-cloud/issues/6": () =>
+      jsonResponse({
+        title: ISSUE_TITLE,
+        body,
+        state: "open",
+        labels: [{ name: "ready-to-implement" }],
+      }),
+    "GET /repos/syamaner/roastpilot-cloud/pulls?state=open&per_page=100&page=1": () =>
+      jsonResponse([]),
+    "POST /repos/syamaner/roastpilot-cloud/pulls": () =>
+      jsonResponse(
+        {
+          number: 99,
+          html_url: "https://github.com/o/r/pull/99",
+        },
+        201,
+      ),
+    "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+      jsonResponse([]),
+    "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+      jsonResponse({}, 201),
+  };
+}
+
 describe("implement cost provenance", () => {
   it("P1: renders one valid inert line in the PR provenance and publisher summary", () => {
     const note = buildImplementCostNote("2.9373", "62");
@@ -149,6 +226,10 @@ beforeEach(async () => {
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
   process.env.EXPECTED_TRIAGE_GENERATION = "123.1";
+  process.env.EXPECTED_ISSUE_REVISION = canonicalIssueRevision(
+    ISSUE_TITLE,
+    ISSUE_BODY,
+  );
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.exitCode = undefined;
   vi.mocked(execFileSync).mockReset();
@@ -162,6 +243,7 @@ afterEach(async () => {
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
   delete process.env.EXPECTED_TRIAGE_GENERATION;
+  delete process.env.EXPECTED_ISSUE_REVISION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   process.exitCode = undefined;
@@ -189,6 +271,37 @@ describe("main — input validation", () => {
 });
 
 describe("main — fail-closed paths that never reach git (no branch, no PR, one comment)", () => {
+  it.each([undefined, "not-a-revision", "A".repeat(64)])(
+    "T-H1-malformed-env: rejects missing or malformed issue revision %s",
+    async (revision) => {
+      if (revision === undefined) {
+        delete process.env.EXPECTED_ISSUE_REVISION;
+      } else {
+        process.env.EXPECTED_ISSUE_REVISION = revision;
+      }
+      const patchPath = join(workdir, "patch.diff");
+      await writeFile(patchPath, VALID_DIFF);
+      process.env.PATCH_PATH = patchPath;
+      const { fetchMock, calls } = mockFetch({
+        "GET /repos/syamaner/roastpilot-cloud/issues/6/comments?per_page=100&page=1": () =>
+          jsonResponse([]),
+        "POST /repos/syamaner/roastpilot-cloud/issues/6/comments": () =>
+          jsonResponse({}, 201),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await main();
+
+      expect(process.exitCode).toBe(1);
+      expect(vi.mocked(execFileSync)).not.toHaveBeenCalled();
+      expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+      expect(
+        (calls.find((call) => call.method === "POST")?.body as { body: string })
+          .body,
+      ).toContain("did not report a canonical lowercase SHA-256 issue revision");
+    },
+  );
+
   it("rejects a stale captured generation before invoking any local git command", async () => {
     const patchPath = join(workdir, "patch.diff");
     await writeFile(patchPath, VALID_DIFF);
@@ -421,6 +534,240 @@ describe("main — fail-closed paths that never reach git (no branch, no PR, one
     expect((comment?.body as { body: string }).body).toContain(
       "exceeds the 2097152-byte limit",
     );
+  });
+});
+
+describe("main — H1 issue revision guard", () => {
+  it("T-H1-match: pushes when the fresh canonical digest matches", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    mockSuccessfulGit();
+    const { fetchMock, calls } = mockFetch(
+      issueRevisionFetchHandlers(ISSUE_BODY),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
+      "git",
+      ["push", "--force", "origin", expect.stringMatching(/^feature\/6-/)],
+      expect.any(Object),
+    );
+    expect(
+      calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/pulls"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("T-H1-mismatch: rejects an edited body before push and posts exactly one failure comment", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    mockSuccessfulGit();
+    const { fetchMock, calls } = mockFetch(
+      issueRevisionFetchHandlers("Body edited after the implement snapshot."),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "push",
+      ),
+    ).toBe(false);
+    expect(calls.some((call) => call.url.endsWith("/pulls"))).toBe(false);
+    const failureComments = calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect(failureComments).toHaveLength(1);
+    expect((failureComments[0]?.body as { body: string }).body).toContain(
+      "issue revision changed",
+    );
+  });
+
+  it("T-H1-malformed-issue-fields: rejects an omitted fresh REST body before push and posts exactly one failure comment", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    process.env.EXPECTED_ISSUE_REVISION = canonicalIssueRevision(
+      ISSUE_TITLE,
+      null,
+    );
+    mockSuccessfulGit();
+    const handlers = issueRevisionFetchHandlers(null);
+    handlers["GET /repos/syamaner/roastpilot-cloud/issues/6"] = () =>
+      jsonResponse({
+        title: ISSUE_TITLE,
+        state: "open",
+        labels: [{ name: "ready-to-implement" }],
+      });
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBe(1);
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "push",
+      ),
+    ).toBe(false);
+    expect(calls.some((call) => call.url.endsWith("/pulls"))).toBe(false);
+    const failureComments = calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect(failureComments).toHaveLength(1);
+    expect((failureComments[0]?.body as { body: string }).body).toContain(
+      "REST issue title/body is malformed",
+    );
+  });
+
+  it("T-H1-edit-during-pr-lookup: re-fetches after PR lookup and rejects an intervening scope edit", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    mockSuccessfulGit();
+    let prLookupCompleted = false;
+    const handlers = issueRevisionFetchHandlers(ISSUE_BODY);
+    handlers[
+      "GET /repos/syamaner/roastpilot-cloud/pulls?state=open&per_page=100&page=1"
+    ] = () => {
+      prLookupCompleted = true;
+      return jsonResponse([]);
+    };
+    handlers["GET /repos/syamaner/roastpilot-cloud/issues/6"] = () =>
+      jsonResponse({
+        title: ISSUE_TITLE,
+        body: prLookupCompleted
+          ? "Body edited while the PR lookup was running."
+          : ISSUE_BODY,
+        state: "open",
+        labels: [{ name: "ready-to-implement" }],
+      });
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prLookupCompleted).toBe(true);
+    expect(process.exitCode).toBe(1);
+    expect(
+      calls.filter(
+        (call) =>
+          call.method === "GET" && call.url.endsWith("/issues/6"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "push",
+      ),
+    ).toBe(false);
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "commit",
+      ),
+    ).toBe(false);
+    expect(
+      calls.some(
+        (call) => call.method === "POST" && call.url.endsWith("/pulls"),
+      ),
+    ).toBe(false);
+    const failureComments = calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect(failureComments).toHaveLength(1);
+    expect((failureComments[0]?.body as { body: string }).body).toContain(
+      "issue revision changed",
+    );
+  });
+
+  it("T-H1-edit-during-patch-prep: revalidates after commit and rejects an edit before push", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    mockSuccessfulGit();
+    let issueFetchCount = 0;
+    let prepCompletedBeforeFinalFetch = false;
+    const handlers = issueRevisionFetchHandlers(ISSUE_BODY);
+    handlers["GET /repos/syamaner/roastpilot-cloud/issues/6"] = () => {
+      issueFetchCount += 1;
+      if (issueFetchCount === 3) {
+        prepCompletedBeforeFinalFetch = vi.mocked(execFileSync).mock.calls.some(
+          ([, args]) => (args as readonly string[])[0] === "commit",
+        );
+      }
+      return jsonResponse({
+        title: ISSUE_TITLE,
+        body:
+          issueFetchCount === 3
+            ? "Body edited while the local patch was being prepared."
+            : ISSUE_BODY,
+        state: "open",
+        labels: [{ name: "ready-to-implement" }],
+      });
+    };
+    const { fetchMock, calls } = mockFetch(handlers);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(prepCompletedBeforeFinalFetch).toBe(true);
+    expect(process.exitCode).toBe(1);
+    expect(
+      calls.filter(
+        (call) =>
+          call.method === "GET" && call.url.endsWith("/issues/6"),
+      ),
+    ).toHaveLength(3);
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "push",
+      ),
+    ).toBe(false);
+    expect(
+      calls.some(
+        (call) => call.method === "POST" && call.url.endsWith("/pulls"),
+      ),
+    ).toBe(false);
+    const failureComments = calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/issues/6/comments"),
+    );
+    expect(failureComments).toHaveLength(1);
+    expect((failureComments[0]?.body as { body: string }).body).toContain(
+      "issue revision changed",
+    );
+  });
+
+  it("T-H1-null-body: maps a REST null body to the canonical empty string and pushes", async () => {
+    const patchPath = join(workdir, "patch.diff");
+    await writeFile(patchPath, VALID_DIFF);
+    process.env.PATCH_PATH = patchPath;
+    process.env.EXPECTED_ISSUE_REVISION = canonicalIssueRevision(
+      ISSUE_TITLE,
+      null,
+    );
+    mockSuccessfulGit();
+    const { fetchMock } = mockFetch(issueRevisionFetchHandlers(null));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(
+      vi.mocked(execFileSync).mock.calls.some(
+        ([, args]) => (args as readonly string[])[0] === "push",
+      ),
+    ).toBe(true);
   });
 });
 

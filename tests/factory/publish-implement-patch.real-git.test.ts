@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   getAuthoritativePatchAnalysis,
   main,
@@ -47,6 +48,8 @@ index 0000000..abc1234
 @@ -0,0 +1,1 @@
 +export const x = 1;
 `;
+const DEFAULT_ISSUE_TITLE = "[F1-S3] Implement workflow";
+const DEFAULT_ISSUE_BODY = "Implement the authorized issue scope.";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -89,6 +92,10 @@ beforeEach(async () => {
   process.env.TRUSTED_ISSUE_NUMBER = "6";
   process.env.IMPLEMENT_JOB_RESULT = "success";
   process.env.EXPECTED_TRIAGE_GENERATION = "123.1";
+  process.env.EXPECTED_ISSUE_REVISION = canonicalIssueRevision(
+    DEFAULT_ISSUE_TITLE,
+    DEFAULT_ISSUE_BODY,
+  );
   process.env.RUN_URL = "https://github.com/o/r/actions/runs/1";
   process.env.PATCH_PATH = patchPath;
   process.exitCode = undefined;
@@ -103,6 +110,7 @@ afterEach(async () => {
   delete process.env.TRUSTED_ISSUE_NUMBER;
   delete process.env.IMPLEMENT_JOB_RESULT;
   delete process.env.EXPECTED_TRIAGE_GENERATION;
+  delete process.env.EXPECTED_ISSUE_REVISION;
   delete process.env.RUN_URL;
   delete process.env.PATCH_PATH;
   delete process.env.IMPLEMENT_PROMPT_VERSION;
@@ -193,6 +201,7 @@ function stubFetch(
     ) {
       const body = (await response.clone().json()) as Record<string, unknown>;
       return jsonResponse({
+        body: DEFAULT_ISSUE_BODY,
         state: "open",
         labels: [{ name: "ready-to-implement" }],
         ...body,
@@ -361,6 +370,7 @@ function stubHappyPathFetch(options?: {
   rawIssueLabels?: unknown;
   issueState?: string;
   issueTitle?: string;
+  issueBody?: string | null;
   triageGraphqlPage?: (cursor: string | null) => unknown | Response;
   /**
    * Simulates a prior implement-failure comment already on the issue
@@ -371,6 +381,12 @@ function stubHappyPathFetch(options?: {
    */
   existingFailureComment?: { id: number; body: string };
 }) {
+  const issueTitle = options?.issueTitle ?? DEFAULT_ISSUE_TITLE;
+  const issueBody = options?.issueBody ?? DEFAULT_ISSUE_BODY;
+  process.env.EXPECTED_ISSUE_REVISION = canonicalIssueRevision(
+    issueTitle,
+    issueBody,
+  );
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -388,7 +404,8 @@ function stubHappyPathFetch(options?: {
     if (method === "GET" && url.match(/\/issues\/\d+$/)) {
       return new Response(
         JSON.stringify({
-          title: options?.issueTitle ?? "[F1-S3] Implement workflow",
+          title: issueTitle,
+          body: issueBody,
           state: options?.issueState ?? "open",
           labels: Object.prototype.hasOwnProperty.call(
             options ?? {},
