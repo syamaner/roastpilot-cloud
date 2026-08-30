@@ -105,6 +105,7 @@ function contractWithFinalSerializedBodyLength(targetLength: number): string {
 function stubPublisherEnvironment(
   contract = buildContract(),
   issueNumber = String(ISSUE_NUMBER),
+  preparedRevision = ISSUE_REVISION,
 ): void {
   writeFileSync(contractPath, contract, "utf8");
   vi.stubEnv("GH_TOKEN", "test-token");
@@ -113,7 +114,11 @@ function stubPublisherEnvironment(
   vi.stubEnv("CONTRACT_PATH", contractPath);
   writeFileSync(
     revisionPath,
-    JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: VALID_UPDATED_AT }),
+    JSON.stringify({
+      issueNumber: ISSUE_NUMBER,
+      updatedAt: VALID_UPDATED_AT,
+      preparedRevision,
+    }),
     "utf8",
   );
   vi.stubEnv("REVISION_PATH", revisionPath);
@@ -122,10 +127,13 @@ function stubPublisherEnvironment(
 function mockRequest(
   issueResponse: unknown,
   commentPages: readonly (readonly unknown[])[] = [[]],
+  subsequentIssueResponses: readonly unknown[] = [],
 ): {
   readonly request: GithubRequest;
   readonly mock: ReturnType<typeof vi.fn>;
 } {
+  let issueGetIndex = 0;
+  const issueResponses = [issueResponse, ...subsequentIssueResponses];
   const mock = vi.fn(async (...call: RequestCall): Promise<unknown> => {
     const [, method, path] = call;
     if (method === "GET" && path.includes("/comments?")) {
@@ -133,14 +141,16 @@ function mockRequest(
       return commentPages[page - 1] ?? [];
     }
     if (method === "GET") {
-      return typeof issueResponse === "object" && issueResponse !== null
+      const selectedIssueResponse =
+        issueResponses[Math.min(issueGetIndex++, issueResponses.length - 1)];
+      return typeof selectedIssueResponse === "object" && selectedIssueResponse !== null
         ? {
             title: ISSUE_TITLE,
             body: ISSUE_BODY,
             updated_at: VALID_UPDATED_AT,
-            ...issueResponse,
+            ...selectedIssueResponse,
           }
-        : issueResponse;
+        : selectedIssueResponse;
     }
     if (method === "POST") {
       return { id: 123 };
@@ -380,8 +390,9 @@ describe("main", () => {
     expectNoPost(mock);
   });
 
-  it("T-A1: matching captured and current revisions permit one issue GET and one POST", async () => {
-    stubPublisherEnvironment();
+  it("T-H2-match: matching prepared and current revisions bind the posted marker", async () => {
+    const contract = buildContract();
+    stubPublisherEnvironment(contract);
     const { request, mock } = mockRequest({ labels: [{ name: "ready-to-spec" }] });
 
     await main(request);
@@ -390,8 +401,102 @@ describe("main", () => {
       mock.mock.calls.filter(
         (call) => call[1] === "GET" && !String(call[2]).includes("/comments?"),
       ),
-    ).toHaveLength(1);
-    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+    ).toHaveLength(2);
+    const posts = mock.mock.calls.filter((call) => call[1] === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.[3]).toEqual({
+      body:
+        `${sanitizeContractForPosting(contract)}\n` +
+        STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION),
+    });
+  });
+
+  it("rejects an edit after dedup at the final pre-POST revision check", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[]],
+      [{
+        labels: [{ name: "ready-to-spec" }],
+        title: "Edited after the dedup scan",
+      }],
+    );
+
+    await expect(main(request)).rejects.toThrow(
+      "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+    );
+    expect(
+      mock.mock.calls.filter(
+        (call) => call[1] === "GET" && !String(call[2]).includes("/comments?"),
+      ),
+    ).toHaveLength(2);
+    expectNoPost(mock);
+  });
+
+  it("rejects a non-string title from the final pre-POST re-fetch", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[]],
+      [{ labels: [{ name: "ready-to-spec" }], title: 42 }],
+    );
+
+    await expect(main(request)).rejects.toThrow(
+      "issue title is malformed; refusing to publish",
+    );
+    expectNoPost(mock);
+  });
+
+  it("rejects a non-string, non-null body from the final pre-POST re-fetch", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[]],
+      [{ labels: [{ name: "ready-to-spec" }], body: { malformed: true } }],
+    );
+
+    await expect(main(request)).rejects.toThrow(
+      "issue body is malformed; refusing to publish",
+    );
+    expectNoPost(mock);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["non-string", 42],
+    ["outside the closed grammar", "2026-08-27T12:34:56.000Z"],
+  ])(
+    "rejects a %s updated_at from the final pre-POST re-fetch",
+    async (_label, updatedAt) => {
+      stubPublisherEnvironment();
+      const { request, mock } = mockRequest(
+        { labels: [{ name: "ready-to-spec" }] },
+        [[]],
+        [{ labels: [{ name: "ready-to-spec" }], updated_at: updatedAt }],
+      );
+
+      await expect(main(request)).rejects.toThrow(
+        "issue updated_at is malformed; refusing to publish",
+      );
+      expectNoPost(mock);
+    },
+  );
+
+  it("rejects an updated_at mismatch at the final pre-POST revision check", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[]],
+      [{
+        labels: [{ name: "ready-to-spec" }],
+        updated_at: "2026-08-27T12:34:57Z",
+      }],
+    );
+
+    await expect(main(request)).rejects.toThrow(
+      "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+    );
+    expectNoPost(mock);
   });
 
   it("T-A2: rejects a stale captured revision without making a POST", async () => {
@@ -412,13 +517,36 @@ describe("main", () => {
     ["non-JSON content", "{not-json", VALID_UPDATED_AT],
     [
       "an open shape with an extra property",
-      JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: VALID_UPDATED_AT, extra: true }),
+      JSON.stringify({
+        issueNumber: ISSUE_NUMBER,
+        updatedAt: VALID_UPDATED_AT,
+        preparedRevision: ISSUE_REVISION,
+        extra: true,
+      }),
       VALID_UPDATED_AT,
     ],
     [
       "an updatedAt outside the closed timestamp grammar",
-      JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: "2026-08-27T12:34:56.000Z" }),
+      JSON.stringify({
+        issueNumber: ISSUE_NUMBER,
+        updatedAt: "2026-08-27T12:34:56.000Z",
+        preparedRevision: ISSUE_REVISION,
+      }),
       "2026-08-27T12:34:56.000Z",
+    ],
+    [
+      "a missing preparedRevision",
+      JSON.stringify({ issueNumber: ISSUE_NUMBER, updatedAt: VALID_UPDATED_AT }),
+      VALID_UPDATED_AT,
+    ],
+    [
+      "a non-hex preparedRevision",
+      JSON.stringify({
+        issueNumber: ISSUE_NUMBER,
+        updatedAt: VALID_UPDATED_AT,
+        preparedRevision: "not-a-digest",
+      }),
+      VALID_UPDATED_AT,
     ],
   ])(
     "T-A3: rejects revision.json with %s without making a POST",
@@ -500,7 +628,8 @@ describe("main", () => {
 
   it("posts a null-body issue contract with the empty-body revision", async () => {
     const contract = buildContract();
-    stubPublisherEnvironment(contract);
+    const nullBodyRevision = canonicalIssueRevision(ISSUE_TITLE, null);
+    stubPublisherEnvironment(contract, String(ISSUE_NUMBER), nullBodyRevision);
     const { request, mock } = mockRequest({
       labels: [{ name: "ready-to-spec" }],
       body: null,
@@ -511,7 +640,7 @@ describe("main", () => {
     const post = mock.mock.calls.find((call) => call[1] === "POST");
     const body = (post?.[3] as { readonly body: string }).body;
     expect(body).toBe(
-      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, canonicalIssueRevision(ISSUE_TITLE, null))}`,
+      `${sanitizeContractForPosting(contract)}\n${STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, nullBodyRevision)}`,
     );
   });
 
@@ -559,7 +688,7 @@ describe("main", () => {
     expect(mock).not.toHaveBeenCalled();
   });
 
-  it("B-I1/GUARD-I1: first publication performs one comment GET and one POST", async () => {
+  it("T-H3-no-marker/GUARD-I1: first publication performs one comment GET and one POST", async () => {
     const contract = withRegion(0, "Alpha beta gamma @codex review.");
     stubPublisherEnvironment(contract);
     const { request, mock } = mockRequest({
@@ -568,23 +697,30 @@ describe("main", () => {
 
     await main(request);
 
-    expect(mock).toHaveBeenCalledTimes(3);
+    expect(mock).toHaveBeenCalledTimes(4);
     expect(mock).toHaveBeenNthCalledWith(
       1,
-      "test-token",
-      "GET",
-      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
-      undefined,
-    );
-    expect(mock).toHaveBeenNthCalledWith(
-      2,
       "test-token",
       "GET",
       `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
       undefined,
     );
     expect(mock).toHaveBeenNthCalledWith(
+      2,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
+      undefined,
+    );
+    expect(mock).toHaveBeenNthCalledWith(
       3,
+      "test-token",
+      "GET",
+      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}`,
+      undefined,
+    );
+    expect(mock).toHaveBeenNthCalledWith(
+      4,
       "test-token",
       "POST",
       `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments`,
@@ -599,12 +735,12 @@ describe("main", () => {
       (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
     );
     expect(commentGets).toHaveLength(1);
-    const postedBody = mock.mock.calls[2]?.[3] as { readonly body: string };
+    const postedBody = mock.mock.calls[3]?.[3] as { readonly body: string };
     expect(postedBody.body).toContain("[codex trigger removed]");
     expect(postedBody.body).not.toContain("@codex review");
   });
 
-  it("B-I2/GUARD-I1: skips a bot-authored issue-prefix marker with a different revision", async () => {
+  it("T-H3-recovery: posts when a bot-authored marker has a stale revision", async () => {
     stubPublisherEnvironment();
     const priorRevision = canonicalIssueRevision(
       "prior title revision",
@@ -620,17 +756,27 @@ describe("main", () => {
 
     await main(request);
 
+    const posts = mock.mock.calls.filter((call) => call[1] === "POST");
+    expect(posts).toHaveLength(1);
+    expect((posts[0]?.[3] as { readonly body: string }).body).toContain(
+      STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION),
+    );
+  });
+
+  it("T-H3-malformed-marker rejects a malformed bot marker without POST", async () => {
+    stubPublisherEnvironment();
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [[{
+        body: `contract\n<!-- story-planner-contract:issue-${ISSUE_NUMBER}:rev-bad -->`,
+        user: { type: "Bot", login: "github-actions[bot]" },
+      }]],
+    );
+
+    await expect(main(request)).rejects.toThrow(
+      "malformed story-planner contract marker",
+    );
     expectNoPost(mock);
-    expect(mock).toHaveBeenCalledTimes(1);
-    expect(mock).toHaveBeenCalledWith(
-      "test-token",
-      "GET",
-      `/repos/syamaner/roastpilot-cloud/issues/${ISSUE_NUMBER}/comments?per_page=100&page=1`,
-      undefined,
-    );
-    expect(console.log).toHaveBeenCalledWith(
-      `contract already posted on #${ISSUE_NUMBER}; skipping`,
-    );
   });
 
   it("GUARD-I4: a bot-authored mid-body marker cannot suppress publication", async () => {
@@ -669,7 +815,7 @@ describe("main", () => {
   it.each([
     ["title", "Edited REST title", ISSUE_BODY],
     ["body", ISSUE_TITLE, "Edited REST body"],
-  ])("binds the posted marker to a %s edit", async (_field, title, issueBody) => {
+  ])("T-H2-samesecond rejects a same-timestamp %s edit", async (_field, title, issueBody) => {
     stubPublisherEnvironment();
     const { request, mock } = mockRequest({
       labels: [{ name: "ready-to-spec" }],
@@ -677,12 +823,11 @@ describe("main", () => {
       body: issueBody,
     });
 
-    await main(request);
-
-    const post = mock.mock.calls.find((call) => call[1] === "POST");
-    const body = (post?.[3] as { readonly body: string }).body;
-    expect(body).toContain(`:rev-${canonicalIssueRevision(title, issueBody)} -->`);
-    expect(body).not.toContain(`:rev-${ISSUE_REVISION} -->`);
+    await expect(main(request)).rejects.toThrow(
+      "issue was modified after planning (revision binding mismatch)",
+    );
+    expect(canonicalIssueRevision(title, issueBody)).not.toBe(ISSUE_REVISION);
+    expectNoPost(mock);
   });
 
   it("B-I4: a marker for another issue does not suppress this issue", async () => {
@@ -700,7 +845,7 @@ describe("main", () => {
     expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
   });
 
-  it("B-I5: finds a bot-authored marker on comment page two and skips", async () => {
+  it("T-H3-dedup: finds a current-revision bot marker on page two and skips", async () => {
     stubPublisherEnvironment();
     const fullFirstPage = Array.from({ length: 100 }, () => ({
       body: "ordinary comment",
@@ -722,6 +867,58 @@ describe("main", () => {
         (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
       ),
     ).toHaveLength(2);
+  });
+
+  it("continues after a full comment page and stops on a shorter page", async () => {
+    stubPublisherEnvironment();
+    const fullFirstPage = Array.from({ length: 100 }, () => ({
+      body: "ordinary comment",
+      user: { type: "User", login: "someone" },
+    }));
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [fullFirstPage, [{
+        body: "short final page",
+        user: { type: "User", login: "someone" },
+      }]],
+    );
+
+    await main(request);
+
+    expect(
+      mock.mock.calls.filter(
+        (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
+      ),
+    ).toHaveLength(2);
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+  });
+
+  it("deduplicates a marker found during a fully saturated bounded scan", async () => {
+    stubPublisherEnvironment();
+    const ordinaryFullPage = Array.from({ length: 100 }, () => ({
+      body: "ordinary comment",
+      user: { type: "User", login: "someone" },
+    }));
+    const markerFullPage = [
+      {
+        body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, ISSUE_REVISION),
+        user: { type: "Bot", login: "github-actions[bot]" },
+      },
+      ...ordinaryFullPage.slice(1),
+    ];
+    const { request, mock } = mockRequest(
+      { labels: [{ name: "ready-to-spec" }] },
+      [markerFullPage, ...Array.from({ length: 49 }, () => ordinaryFullPage)],
+    );
+
+    await main(request);
+
+    expect(
+      mock.mock.calls.filter(
+        (call) => call[1] === "GET" && String(call[2]).includes("/comments?"),
+      ),
+    ).toHaveLength(50);
+    expectNoPost(mock);
   });
 
   it("N-I6: posts with a warning after the bounded comment scan is exhausted", async () => {
@@ -767,7 +964,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "ready-to-spec was withdrawn before publish; refusing to post a stale contract",
     );
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(1);
     expectNoPost(mock);
   });
 
@@ -783,7 +980,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "issue labels response is malformed; refusing to publish",
     );
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(1);
     expectNoPost(mock);
   });
 
@@ -799,7 +996,7 @@ describe("main", () => {
     await expect(main(request)).rejects.toThrow(
       "issue labels response is malformed; refusing to publish",
     );
-    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock).toHaveBeenCalledTimes(1);
     expectNoPost(mock);
   });
 });

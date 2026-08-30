@@ -1,10 +1,7 @@
+import { STORY_PLANNER_ESCALATE_MARKER } from "./post-story-planner-contract.mts";
 import {
-  STORY_PLANNER_CONTRACT_ISSUE_PREFIX,
-  STORY_PLANNER_ESCALATE_MARKER,
-} from "./post-story-planner-contract.mts";
-import {
+  extractStoryPlannerContractRevision,
   isStoryPlannerBotMarkerComment,
-  isStoryPlannerBotMarkerPrefixComment,
   type StoryPlannerMarkerComment,
 } from "./story-planner-marker.mts";
 
@@ -12,6 +9,7 @@ export const READY_TO_SPEC_LABEL = "ready-to-spec";
 export interface SweepIssue {
   readonly number: number;
   readonly state: "open" | "closed";
+  readonly currentRevision: string;
 }
 
 export type SweepLabelOperation =
@@ -28,14 +26,17 @@ export function computeSweepLabelOperations(): readonly SweepLabelOperation[] {
 export function isIssueHandled(
   comments: readonly StoryPlannerMarkerComment[],
   issueNumber: number,
+  currentRevision: string,
 ): boolean {
-  const contractPrefix = STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber);
   const escalationMarker = STORY_PLANNER_ESCALATE_MARKER(issueNumber);
-  return comments.some(
-    (comment) =>
-      isStoryPlannerBotMarkerPrefixComment(comment, contractPrefix) ||
-      isStoryPlannerBotMarkerComment(comment, escalationMarker),
-  );
+  let handled = false;
+  for (const comment of comments) {
+    if (extractStoryPlannerContractRevision(comment, issueNumber) === currentRevision) {
+      handled = true;
+    }
+    if (isStoryPlannerBotMarkerComment(comment, escalationMarker)) handled = true;
+  }
+  return handled;
 }
 
 export type SweepDecision =
@@ -50,7 +51,7 @@ export function decideSweepIssue(
   issue: SweepIssue,
   comments: readonly StoryPlannerMarkerComment[],
 ): SweepDecision {
-  if (isIssueHandled(comments, issue.number)) {
+  if (isIssueHandled(comments, issue.number, issue.currentRevision)) {
     return { kind: "skip-handled" };
   }
   if (issue.state === "closed") {

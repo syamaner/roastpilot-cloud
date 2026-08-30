@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 
 import { STORY_PLANNER_CONTRACT_MARKER } from "../../scripts/factory/post-story-planner-contract.mts";
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   MAX_CONFIRMATION_ATTEMPTS,
   enumerateReadyToSpecIssues,
@@ -21,7 +22,9 @@ const ENTRYPOINT_PATH = fileURLToPath(
   new URL("../../scripts/factory/story-planner-sweep.mts", import.meta.url),
 );
 const BOT = { type: "Bot", login: "github-actions[bot]" } as const;
-const CONTRACT_REVISION = "b".repeat(64);
+const ISSUE_TITLE = "Sweep workflow issue";
+const ISSUE_BODY = "Sweep workflow body";
+const CONTRACT_REVISION = canonicalIssueRevision(ISSUE_TITLE, ISSUE_BODY);
 
 type Mapping = Record<string, unknown>;
 type RequestCall = readonly [string, string, string, unknown?];
@@ -46,7 +49,13 @@ function namedStep(job: Mapping, name: string): Mapping {
 }
 
 function issue(number: number, state: "open" | "closed") {
-  return { number, state, labels: [{ name: "ready-to-spec" }] };
+  return {
+    number,
+    state,
+    title: ISSUE_TITLE,
+    body: ISSUE_BODY,
+    labels: [{ name: "ready-to-spec" }],
+  };
 }
 
 describe("story-planner sweep workflow contract", () => {

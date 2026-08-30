@@ -6,6 +6,7 @@ import {
   STORY_PLANNER_ESCALATE_MARKER,
 } from "../../scripts/factory/post-story-planner-contract.mts";
 import {
+  extractStoryPlannerContractRevision,
   isStoryPlannerBotMarkerComment,
   isStoryPlannerBotMarkerPrefixComment,
 } from "../../scripts/factory/story-planner-marker.mts";
@@ -48,9 +49,13 @@ describe("story-planner sweep pure logic", () => {
     ["escalate", STORY_PLANNER_ESCALATE_MARKER(ISSUE_NUMBER)],
   ])("G12 skips a bot-owned terminal %s marker", (_kind, marker) => {
     const comments = [{ body: `trusted prefix\n${marker}`, user: BOT }];
-    expect(isIssueHandled(comments, ISSUE_NUMBER)).toBe(true);
+    expect(isIssueHandled(comments, ISSUE_NUMBER, CONTRACT_REVISION)).toBe(true);
     expect(
-      decideSweepIssue({ number: ISSUE_NUMBER, state: "open" }, comments),
+      decideSweepIssue({
+        number: ISSUE_NUMBER,
+        state: "open",
+        currentRevision: CONTRACT_REVISION,
+      }, comments),
     ).toEqual({ kind: "skip-handled" });
   });
 
@@ -78,8 +83,14 @@ describe("story-planner sweep pure logic", () => {
       expect(isStoryPlannerBotMarkerComment(escalation, escalationMarker)).toBe(
         expected,
       );
-      expect(isIssueHandled([contract], ISSUE_NUMBER)).toBe(expected);
-      expect(isIssueHandled([escalation], ISSUE_NUMBER)).toBe(expected);
+      if (suffix === "\r\n" || suffix === "\r") {
+        expect(() => isIssueHandled([contract], ISSUE_NUMBER, CONTRACT_REVISION)).toThrow(
+          "malformed story-planner contract marker",
+        );
+      } else {
+        expect(isIssueHandled([contract], ISSUE_NUMBER, CONTRACT_REVISION)).toBe(expected);
+      }
+      expect(isIssueHandled([escalation], ISSUE_NUMBER, CONTRACT_REVISION)).toBe(expected);
     }
   });
 
@@ -97,18 +108,30 @@ describe("story-planner sweep pure logic", () => {
         user: BOT,
       },
     ];
-    expect(isIssueHandled(neither, ISSUE_NUMBER)).toBe(false);
+    expect(isIssueHandled(neither, ISSUE_NUMBER, CONTRACT_REVISION)).toBe(false);
     expect(
-      decideSweepIssue({ number: ISSUE_NUMBER, state: "open" }, neither),
+      decideSweepIssue({
+        number: ISSUE_NUMBER,
+        state: "open",
+        currentRevision: CONTRACT_REVISION,
+      }, neither),
     ).toEqual({ kind: "relabel", operations: computeSweepLabelOperations() });
   });
 
-  it("G12 treats any revision for this issue prefix as already handled", () => {
+  it("G-H3-sweep treats a stale marker as unhandled so planning can recover", () => {
     const comments = [{
       body: STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, DIFFERENT_REVISION),
       user: BOT,
     }];
-    expect(isIssueHandled(comments, ISSUE_NUMBER)).toBe(true);
+    expect(isIssueHandled(comments, ISSUE_NUMBER, CONTRACT_REVISION)).toBe(false);
+    expect(decideSweepIssue({
+      number: ISSUE_NUMBER,
+      state: "open",
+      currentRevision: CONTRACT_REVISION,
+    }, comments)).toEqual({
+      kind: "relabel",
+      operations: computeSweepLabelOperations(),
+    });
   });
 
   it("G12 rejects an issue-prefix marker without the required terminator", () => {
@@ -128,7 +151,38 @@ describe("story-planner sweep pure logic", () => {
   // remove guard G13 => permitting a closed relabel makes this test fail.
   it("G13 logs an unhandled closed issue without label operations", () => {
     expect(
-      decideSweepIssue({ number: ISSUE_NUMBER, state: "closed" }, []),
+      decideSweepIssue({
+        number: ISSUE_NUMBER,
+        state: "closed",
+        currentRevision: CONTRACT_REVISION,
+      }, []),
     ).toEqual({ kind: "log-closed" });
+  });
+
+  it("T-H3-extract returns only this issue's exact bot-authored terminal revision", () => {
+    const marker = STORY_PLANNER_CONTRACT_MARKER(ISSUE_NUMBER, CONTRACT_REVISION);
+    expect(extractStoryPlannerContractRevision({ body: `contract\n${marker}`, user: BOT }, ISSUE_NUMBER))
+      .toBe(CONTRACT_REVISION);
+    expect(extractStoryPlannerContractRevision({ body: marker, user: BOT }, ISSUE_NUMBER + 1))
+      .toBeNull();
+    expect(extractStoryPlannerContractRevision({
+      body: marker,
+      user: { type: "User", login: "github-actions[bot]" },
+    }, ISSUE_NUMBER)).toBeNull();
+    expect(extractStoryPlannerContractRevision({ body: "ordinary", user: BOT }, ISSUE_NUMBER))
+      .toBeNull();
+  });
+
+  it("T-H3-malformed-marker rejects a malformed bot-owned contract prefix", () => {
+    const malformed = {
+      body: `${STORY_PLANNER_CONTRACT_ISSUE_PREFIX(ISSUE_NUMBER)}rev-not-hex -->`,
+      user: BOT,
+    };
+    expect(() => extractStoryPlannerContractRevision(malformed, ISSUE_NUMBER)).toThrow(
+      "malformed story-planner contract marker",
+    );
+    expect(() => isIssueHandled([malformed], ISSUE_NUMBER, CONTRACT_REVISION)).toThrow(
+      "malformed story-planner contract marker",
+    );
   });
 });

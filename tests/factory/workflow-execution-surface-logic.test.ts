@@ -2144,8 +2144,8 @@ jobs:
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 24,
       runSteps: 57,
-      actionSteps: 59,
-      inputs: 158,
+      actionSteps: 60,
+      inputs: 159,
     });
   });
 
@@ -2285,8 +2285,8 @@ jobs:
       // 29 Aug 2026, #383 Slice 3: same measured +1 job / +1 run step / +3
       // action steps / +7 action inputs as the source-only corpus above.
       runSteps: 93,
-      actionSteps: 85,
-      inputs: 227,
+      actionSteps: 86,
+      inputs: 228,
     });
   });
 });
