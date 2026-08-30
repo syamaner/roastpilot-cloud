@@ -1963,6 +1963,7 @@ describe("bounded triage context contract", () => {
       "exit 1",
       "node --experimental-strip-types scripts/factory/verify-approved-revision.mts",
       'echo "triage_generation=$triage_generation" >> "$GITHUB_OUTPUT"',
+      'echo "issue_revision=$current_revision" >> "$GITHUB_OUTPUT"',
     ]);
     expect(run).not.toMatch(
       /(?:^|\s)--arg\s+include_authorized_clarifications(?:\s|$)/u,
@@ -1971,6 +1972,7 @@ describe("bounded triage context contract", () => {
     expect(asMapping(implement?.outputs)).toEqual({
       triage_generation:
         "${{ steps.issue-context.outputs.triage_generation }}",
+      issue_revision: "${{ steps.issue-context.outputs.issue_revision }}",
       model_id: "${{ steps.extract-model-id.outputs.model_id }}",
       cost_usd: "${{ steps.extract-implement-cost.outputs.cost_usd }}",
       num_turns: "${{ steps.extract-implement-cost.outputs.num_turns }}",
@@ -2018,11 +2020,13 @@ describe("bounded triage context contract", () => {
         "Fetch target issue, verify it is ready-to-implement, write context for the agent",
       ).run,
     );
+    const issueTitle = "Distinct contract kind";
+    const issueBody = "Body";
     const result = runImplementEligibility(eligibilityRun, {
       number: 51,
       author: { login: "issue-author" },
-      title: "Distinct contract kind",
-      body: "Body",
+      title: issueTitle,
+      body: issueBody,
       state: "OPEN",
       labels: [{ name: "ready-to-implement" }],
       comments: [
@@ -2045,7 +2049,9 @@ describe("bounded triage context contract", () => {
 
     expect(result).toMatchObject({
       status: 0,
-      output: "triage_generation=123.1\n",
+      output:
+        "triage_generation=123.1\n" +
+        `issue_revision=${canonicalIssueRevision(issueTitle, issueBody)}\n`,
     });
   });
 
@@ -2079,7 +2085,9 @@ describe("bounded triage context contract", () => {
       runImplementEligibility(eligibilityRun, issue(["123.1"])),
     ).toMatchObject({
       status: 0,
-      output: "triage_generation=123.1\n",
+      output:
+        "triage_generation=123.1\n" +
+        `issue_revision=${canonicalIssueRevision("Implement exact generation", "Body")}\n`,
     });
     const matchingIssue = issue(["123.1"]) as {
       title: string;
@@ -2102,7 +2110,9 @@ describe("bounded triage context contract", () => {
     );
     expect(matching).toMatchObject({
       status: 0,
-      output: "triage_generation=123.1\n",
+      output:
+        "triage_generation=123.1\n" +
+        `issue_revision=${canonicalIssueRevision(matchingRestTitle, matchingRestBody)}\n`,
     });
     const matchingContext = JSON.parse(matching.context ?? "null") as Mapping;
     expect(matchingContext.title).toBe(matchingRestTitle);
