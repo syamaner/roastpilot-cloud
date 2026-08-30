@@ -10,6 +10,9 @@ def contract_excerpt_truncation_disclosure:
 def story_planner_contract_marker($issue_number):
   "<!-- story-planner-contract:issue-" + ($issue_number | tostring);
 
+def story_planner_escalate_marker($issue_number):
+  "<!-- story-planner-escalate:issue-" + ($issue_number | tostring) + " -->";
+
 def story_planner_contract_binding($issue_number):
   try (
     capture(
@@ -47,7 +50,27 @@ def is_factory_history:
 
 def is_story_planner_contract($issue_number):
   (.author.login // null) == "github-actions"
-  and (((.body // "") | story_planner_contract_binding($issue_number)) != null);
+  # A no-match capture emits empty; coerce it to null/false so later elif branches remain reachable.
+  and (((((.body // "") | story_planner_contract_binding($issue_number)) // null) != null));
+
+def is_story_planner_escalation($issue_number):
+  (.author.login // null) == "github-actions"
+  and (
+    try (
+      (.body // "")
+      | test(
+          "(^|\\n)"
+          + story_planner_escalate_marker($issue_number)
+          + "$"
+        )
+    )
+    catch false
+  );
+
+def valid_created_at:
+  type == "string"
+  # \A...\z anchors the whole string, not an individual line.
+  and (try test("\\A\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z\\z") catch false);
 
 def json_string_contribution:
   (tojson | utf8bytelength) - 2;
@@ -98,7 +121,16 @@ def is_authorized_clarification($issue_author):
     );
 
 . as $issue
-| ([.comments[] | select(is_story_planner_contract($issue.number))] | length) as $contract_count
+| [.comments[] | select(is_story_planner_contract($issue.number))] as $contracts
+| ($contracts | length) as $contract_count
+| ($contracts[0].createdAt // null) as $c_created
+| [.comments[] | select(is_story_planner_escalation($issue.number))] as $escalations
+| ($escalations | map(select(.createdAt | valid_created_at))) as $valid_escalations
+| (
+    $valid_escalations
+    | if length == 0 then null else map(.createdAt) | max end
+  ) as $e_max
+| any($escalations[]; ((.createdAt | valid_created_at) | not)) as $has_invalid_escalation_timestamp
 | if $contract_count > 1 then
     error("authorized issue context contains more than one story-planner contract")
   else
@@ -122,7 +154,17 @@ def is_authorized_clarification($issue_author):
           }
         elif is_story_planner_contract($issue.number) then
           ((.body // "") | story_planner_contract_revision($issue.number)) as $revision
-          | if $revision == $current_revision then
+          | (
+              ($escalations | length) == 0
+              or (
+                (.createdAt | valid_created_at)
+                and ($e_max != null)
+                and ($e_max | valid_created_at)
+                and ($has_invalid_escalation_timestamp | not)
+                and (.createdAt > $e_max)
+              )
+            ) as $contract_is_eligible
+          | if $contract_is_eligible and $revision == $current_revision then
               {
                 kind: "story_planner_contract",
                 author: .author.login,
@@ -138,6 +180,29 @@ def is_authorized_clarification($issue_author):
                 created_at: .createdAt
               }
             end
+        elif is_story_planner_escalation($issue.number) then
+          if ($c_created == null)
+            or (($c_created | valid_created_at) | not)
+            or (
+              (.createdAt | valid_created_at)
+              and (.createdAt > $c_created)
+            ) then
+            {
+              kind: "story_planner_escalation",
+              author: .author.login,
+              author_association: .authorAssociation,
+              created_at: .createdAt,
+              body: ((.body // "") | contract_excerpt)
+            }
+          else
+            {
+              kind: "story_planner_escalation_stale",
+              author: .author.login,
+              author_association: .authorAssociation,
+              created_at: .createdAt,
+              body: ((.body // "") | contract_excerpt)
+            }
+          end
         elif is_authorized_clarification($issue.author.login // null)
           and ($include_authorized_clarifications == true) then
           {

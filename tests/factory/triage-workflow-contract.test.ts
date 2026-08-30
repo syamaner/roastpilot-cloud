@@ -65,6 +65,10 @@ function storyPlannerContractMarker(
   return `<!-- story-planner-contract:issue-${issueNumber}:rev-${revision} -->`;
 }
 
+function storyPlannerEscalateMarker(issueNumber: number): string {
+  return `<!-- story-planner-escalate:issue-${issueNumber} -->`;
+}
+
 const FACTORY_SCRIPTS_DIRECTORY = fileURLToPath(
   new URL("../../scripts/factory/", import.meta.url),
 );
@@ -1235,8 +1239,15 @@ describe("bounded triage context contract", () => {
     expect(skill).toContain(
       "title, body, state, and provenance-tagged comments from",
     );
-    expect(skill).toContain("`authorized_clarification`");
-    expect(skill).toContain("`factory_triage_history`");
+    const inputsSection = skill.slice(
+      skill.indexOf("## Inputs"),
+      skill.indexOf("## What to judge (factory.md §5, the story issue template)"),
+    );
+    expect(inputsSection).toContain("`authorized_clarification`");
+    expect(inputsSection).toContain("`factory_triage_history`");
+    expect(inputsSection).toContain("`story_planner_escalation`");
+    expect(inputsSection).toContain("`story_planner_escalation_stale`");
+    expect(inputsSection).toContain("historical advisory evidence");
     expect(skill).toContain("more than 50 comments");
     expect(skill).toContain("exceeds 64 KiB");
     expect(skill).not.toContain("freshly-opened issue structurally has");
@@ -1245,6 +1256,11 @@ describe("bounded triage context contract", () => {
       skill.indexOf("## Output"),
     );
     expect(readinessSection).toContain("`story_planner_contract`");
+    expect(readinessSection).toContain("`story_planner_escalation`");
+    expect(readinessSection).toContain("`story_planner_escalation_stale`");
+    expect(readinessSection).toContain("untrusted advisory evidence");
+    expect(readinessSection).toContain("historical advisory evidence");
+    expect(readinessSection).toContain("no new capability");
     expect(readinessSection).toContain("D104 PR plan");
     expect(readinessSection).toContain("acceptance criteria");
   });
@@ -1430,6 +1446,442 @@ describe("bounded triage context contract", () => {
       expect.objectContaining({ kind: "factory_triage_history" }),
       expect.objectContaining({ kind: "story_planner_contract" }),
     ]);
+  });
+
+  it("surfaces a story-planner escalation as body-bearing advisory context", () => {
+    const body = `Planner requires a re-scope.\n${storyPlannerEscalateMarker(51)}`;
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [{
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-29T10:05:00Z",
+          body,
+        }],
+      }),
+    ) as { readonly comments: readonly [Record<string, unknown>] };
+
+    expect(output.comments).toEqual([{
+      kind: "story_planner_escalation",
+      author: "github-actions",
+      author_association: "NONE",
+      created_at: "2026-08-29T10:05:00Z",
+      body,
+    }]);
+  });
+
+  it("lets a newer escalation supersede a fresh revision-matching contract", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:05:00Z",
+            body: `Re-scope required\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_contract_stale",
+    });
+    expect(output.comments[0]).not.toHaveProperty("body");
+    expect(output.comments[1]).toMatchObject({
+      kind: "story_planner_escalation",
+      body: expect.stringContaining("Re-scope required"),
+    });
+  });
+
+  it("lets a newer escalation supersede an already revision-stale contract", () => {
+    const staleRevision = canonicalIssueRevision("Old title", "Old body");
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Stale contract\n${storyPlannerContractMarker(51, staleRevision)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:05:00Z",
+            body: `Re-scope required\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_contract_stale",
+    });
+    expect(output.comments[0]).not.toHaveProperty("body");
+    expect(output.comments[1]).toMatchObject({
+      kind: "story_planner_escalation",
+      body: expect.stringContaining("Re-scope required"),
+    });
+  });
+
+  it("keeps a strictly newer fresh contract and makes the older escalation stale", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Earlier re-scope\n${storyPlannerEscalateMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:05:00Z",
+            body: `Replacement contract\n${storyPlannerContractMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_escalation_stale",
+      body: expect.stringContaining("Earlier re-scope"),
+    });
+    expect(output.comments[1]).toMatchObject({
+      kind: "story_planner_contract",
+      body: expect.stringContaining("Replacement contract"),
+    });
+  });
+
+  it("fails closed when a fresh contract ties the latest escalation timestamp", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Concurrent re-scope\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_contract_stale",
+    });
+    expect(output.comments[0]).not.toHaveProperty("body");
+    expect(output.comments[1]).toMatchObject({
+      kind: "story_planner_escalation_stale",
+      body: expect.stringContaining("Concurrent re-scope"),
+    });
+  });
+
+  it("classifies escalation supersession identically when clarifications are excluded", () => {
+    const input = {
+      number: 51,
+      author: { login: "issue-author" },
+      title: DEFAULT_ISSUE_TITLE,
+      body: "Body",
+      state: "OPEN",
+      comments: [
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-29T10:00:00Z",
+          body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+        },
+        {
+          author: { login: "github-actions" },
+          authorAssociation: "NONE",
+          createdAt: "2026-08-29T10:05:00Z",
+          body: `Re-scope required\n${storyPlannerEscalateMarker(51)}`,
+        },
+      ],
+    };
+
+    expect(JSON.parse(runFilter(input, DEFAULT_CURRENT_REVISION, false))).toEqual(
+      JSON.parse(runFilter(input, DEFAULT_CURRENT_REVISION, true)),
+    );
+  });
+
+  it("byte-bounds a large escalation without breaching the context cap", () => {
+    const marker = storyPlannerEscalateMarker(51);
+    const escalationBody = `${"escalation evidence ".repeat(2_200)}\n${marker}`;
+    const serialized = runFilter({
+      number: 51,
+      author: { login: "issue-author" },
+      title: DEFAULT_ISSUE_TITLE,
+      body: "Body",
+      state: "OPEN",
+      comments: [{
+        author: { login: "github-actions" },
+        authorAssociation: "NONE",
+        createdAt: "2026-08-29T10:05:00Z",
+        body: escalationBody,
+      }],
+    });
+    const output = JSON.parse(serialized) as {
+      readonly comments: readonly [{ readonly kind: string; readonly body: string }];
+    };
+
+    expect(output.comments[0].kind).toBe("story_planner_escalation");
+    expect(output.comments[0].body).toContain(
+      CONTRACT_EXCERPT_TRUNCATION_DISCLOSURE,
+    );
+    expect(Buffer.byteLength(JSON.stringify(output.comments[0].body))).toBe(
+      CONTRACT_EXCERPT_MAX_BYTES,
+    );
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65_536);
+  });
+
+  it.each([
+    [
+      "non-bot author",
+      "outsider",
+      `Spoofed escalation\n${storyPlannerEscalateMarker(51)}`,
+    ],
+    [
+      "wrong issue number",
+      "github-actions",
+      `Other issue\n${storyPlannerEscalateMarker(52)}`,
+    ],
+    [
+      "non-terminal marker",
+      "github-actions",
+      `Embedded\n${storyPlannerEscalateMarker(51)}\ntrailing text`,
+    ],
+    [
+      "marker missing its terminal delimiter",
+      "github-actions",
+      "<!-- story-planner-escalate:issue-51",
+    ],
+  ])(
+    "drops a %s without superseding a fresh contract",
+    (_case, author, escalationBody) => {
+      const output = JSON.parse(
+        runFilter({
+          number: 51,
+          author: { login: "issue-author" },
+          title: DEFAULT_ISSUE_TITLE,
+          body: "Body",
+          state: "OPEN",
+          comments: [
+            {
+              author: { login: "github-actions" },
+              authorAssociation: "NONE",
+              createdAt: "2026-08-29T10:00:00Z",
+              body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+            },
+            {
+              author: { login: author },
+              authorAssociation: "NONE",
+              createdAt: "2026-08-29T10:05:00Z",
+              body: escalationBody,
+            },
+          ],
+        }),
+      ) as { readonly comments: readonly Record<string, unknown>[] };
+
+      expect(output.comments).toHaveLength(1);
+      expect(output.comments[0]).toMatchObject({
+        kind: "story_planner_contract",
+        body: expect.stringContaining("Fresh contract"),
+      });
+    },
+  );
+
+  it.each([
+    ["malformed", "not-a-timestamp"],
+    ["missing", undefined],
+  ])(
+    "fails closed for a recognised escalation with a %s createdAt",
+    (_case, createdAt) => {
+      const output = JSON.parse(
+        runFilter({
+          number: 51,
+          author: { login: "issue-author" },
+          title: DEFAULT_ISSUE_TITLE,
+          body: "Body",
+          state: "OPEN",
+          comments: [
+            {
+              author: { login: "github-actions" },
+              authorAssociation: "NONE",
+              createdAt: "2026-08-29T10:00:00Z",
+              body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+            },
+            {
+              author: { login: "github-actions" },
+              authorAssociation: "NONE",
+              createdAt,
+              body: `Unordered re-scope\n${storyPlannerEscalateMarker(51)}`,
+            },
+          ],
+        }),
+      ) as { readonly comments: readonly Record<string, unknown>[] };
+
+      expect(output.comments[0]).toMatchObject({
+        kind: "story_planner_contract_stale",
+      });
+      expect(output.comments[0]).not.toHaveProperty("body");
+      expect(output.comments[1]).toMatchObject({
+        kind: "story_planner_escalation_stale",
+        body: expect.stringContaining("Unordered re-scope"),
+      });
+    },
+  );
+
+  it("fails closed for a malformed contract timestamp while keeping a valid escalation active", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "not-a-timestamp",
+            body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T09:00:00Z",
+            body: `Valid re-scope\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    // Pins both contract timestamp validity and invalid-$c_created escalation admission.
+    expect(output.comments[0]).toMatchObject({
+      kind: "story_planner_contract_stale",
+    });
+    expect(output.comments[0]).not.toHaveProperty("body");
+    expect(output.comments[1]).toMatchObject({
+      kind: "story_planner_escalation",
+      body: expect.stringContaining("Valid re-scope"),
+    });
+  });
+
+  it("fails closed when any recognised escalation has an invalid timestamp", () => {
+    const output = JSON.parse(
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T09:00:00Z",
+            body: `Earlier re-scope\n${storyPlannerEscalateMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:00:00Z",
+            body: `Fresh contract\n${storyPlannerContractMarker(51)}`,
+          },
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "not-a-timestamp",
+            body: `Unordered re-scope\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ) as { readonly comments: readonly Record<string, unknown>[] };
+
+    const contract = output.comments.find(({ kind }) =>
+      kind === "story_planner_contract_stale"
+    );
+    expect(contract).toBeDefined();
+    expect(contract).not.toHaveProperty("body");
+    const escalations = output.comments.filter(({ kind }) =>
+      kind === "story_planner_escalation_stale"
+    );
+    expect(escalations).toEqual([
+      expect.objectContaining({
+        body: expect.stringContaining("Earlier re-scope"),
+      }),
+      expect.objectContaining({
+        body: expect.stringContaining("Unordered re-scope"),
+      }),
+    ]);
+  });
+
+  it("counts an escalation toward the retained 50-comment limit", () => {
+    const clarifications = Array.from({ length: 50 }, (_, index) => ({
+      author: { login: "issue-author" },
+      authorAssociation: "NONE",
+      createdAt: `2026-08-29T09:00:${String(index).padStart(2, "0")}Z`,
+      body: `Clarification ${index}`,
+    }));
+
+    expect(() =>
+      runFilter({
+        number: 51,
+        author: { login: "issue-author" },
+        title: DEFAULT_ISSUE_TITLE,
+        body: "Body",
+        state: "OPEN",
+        comments: [
+          ...clarifications,
+          {
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt: "2026-08-29T10:05:00Z",
+            body: `Re-scope required\n${storyPlannerEscalateMarker(51)}`,
+          },
+        ],
+      }),
+    ).toThrow(/50-comment limit/);
   });
 
   it("admits this issue's github-actions story-planner contract with a bounded excerpt", () => {
