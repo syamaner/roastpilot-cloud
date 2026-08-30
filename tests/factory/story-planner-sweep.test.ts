@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { canonicalIssueRevision } from "../../scripts/factory/approve-revision.mts";
 import {
   STORY_PLANNER_CONTRACT_MARKER,
   STORY_PLANNER_ESCALATE_MARKER,
@@ -18,12 +19,24 @@ const REPO = "roastpilot-cloud";
 const READ_TOKEN = "read-token";
 const APP_TOKEN = "app-token";
 const BOT = { type: "Bot", login: "github-actions[bot]" } as const;
-const CONTRACT_REVISION = "a".repeat(64);
+const ISSUE_TITLE = "Sweep issue";
+const ISSUE_BODY = "Sweep body";
+const CONTRACT_REVISION = canonicalIssueRevision(ISSUE_TITLE, ISSUE_BODY);
 
 type RequestCall = readonly [string, string, string, unknown?];
 
-function issue(number: number, state: "open" | "closed" = "open") {
-  return { number, state, labels: [{ name: "ready-to-spec" }] };
+function issue(
+  number: number,
+  state: "open" | "closed" = "open",
+  body: string | null = ISSUE_BODY,
+) {
+  return {
+    number,
+    state,
+    title: ISSUE_TITLE,
+    body,
+    labels: [{ name: "ready-to-spec" }],
+  };
 }
 
 function requestFrom(
@@ -76,6 +89,78 @@ describe("story-planner sweep I/O", () => {
     expect(logs.map((line) => JSON.parse(line))).toEqual([
       { issue_number: 31, result: "already-handled" },
     ]);
+  });
+
+  it("G-H3-sweep relabels when the existing contract revision is stale", async () => {
+    let commentReads = 0;
+    const staleRevision = canonicalIssueRevision("Old title", "Old body");
+    const { request, mock } = requestFrom(async (_token, method, path) => {
+      if (method === "GET" && path.includes("/issues?")) {
+        return enumerationResponse(path, [issue(41)]);
+      }
+      if (method === "GET" && path.includes("/comments?")) {
+        commentReads += 1;
+        return commentReads === 1
+          ? [{ body: STORY_PLANNER_CONTRACT_MARKER(41, staleRevision), user: BOT }]
+          : [{ body: STORY_PLANNER_CONTRACT_MARKER(41, CONTRACT_REVISION), user: BOT }];
+      }
+      if (method === "GET" && path.endsWith("/issues/41")) return issue(41);
+      if (method === "DELETE" || method === "POST") return undefined;
+      throw new Error(`unexpected request: ${method} ${path}`);
+    });
+
+    await runSweep({
+      request,
+      ghToken: READ_TOKEN,
+      appToken: APP_TOKEN,
+      owner: OWNER,
+      repo: REPO,
+      sleep: async () => undefined,
+    });
+
+    expect(mock.mock.calls.filter((call) => call[1] === "DELETE")).toHaveLength(1);
+    expect(mock.mock.calls.filter((call) => call[1] === "POST")).toHaveLength(1);
+  });
+
+  it("fails closed on a malformed bot contract marker", async () => {
+    const { request, mock } = requestFrom(async (_token, method, path) => {
+      if (method === "GET" && path.includes("/issues?")) {
+        return enumerationResponse(path, [issue(42)]);
+      }
+      if (method === "GET" && path.includes("/comments?")) {
+        return [{
+          body: "<!-- story-planner-contract:issue-42:rev-bad -->",
+          user: BOT,
+        }];
+      }
+      throw new Error(`unexpected request: ${method} ${path}`);
+    });
+
+    await expect(runSweep({
+      request,
+      ghToken: READ_TOKEN,
+      appToken: APP_TOKEN,
+      owner: OWNER,
+      repo: REPO,
+    })).rejects.toThrow("malformed story-planner contract marker");
+    expect(mock.mock.calls.filter((call) => call[1] !== "GET")).toEqual([]);
+  });
+
+  it("computes a canonical revision for a null-body REST issue", async () => {
+    const { request } = requestFrom(async () => [issue(43, "open", null)]);
+    const issues = await enumerateReadyToSpecIssues(
+      request,
+      READ_TOKEN,
+      OWNER,
+      REPO,
+      "open",
+    );
+
+    expect(issues).toEqual([{
+      number: 43,
+      state: "open",
+      currentRevision: canonicalIssueRevision(ISSUE_TITLE, null),
+    }]);
   });
 
   // remove guard F2-main-repo => malformed repository wiring reaches GitHub.
@@ -145,6 +230,16 @@ describe("story-planner sweep I/O", () => {
     ["missing labels", { number: 1, state: "open" }],
     ["invalid label entry", { number: 1, state: "open", labels: [null] }],
     ["missing ready-to-spec", { number: 1, state: "open", labels: ["bug"] }],
+    [
+      "missing title",
+      { number: 1, state: "open", body: ISSUE_BODY, labels: [{ name: "ready-to-spec" }] },
+    ],
+    ["non-string title", { ...issue(1), title: 42 }],
+    [
+      "missing body",
+      { number: 1, state: "open", title: ISSUE_TITLE, labels: [{ name: "ready-to-spec" }] },
+    ],
+    ["non-string, non-null body", { ...issue(1), body: 42 }],
   ])("rejects a %s with zero writes", async (_name, row) => {
     const { request, mock } = requestFrom(async () => [row]);
 

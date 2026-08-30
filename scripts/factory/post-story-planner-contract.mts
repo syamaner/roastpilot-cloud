@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { githubRequest, requireEnv } from "./github-api.mts";
 import { MAX_SPEC_GROUNDING_SUMMARY_COMMENT_LENGTH } from "./github-comment-limit.mts";
 import {
+  extractStoryPlannerContractRevision,
   isStoryPlannerBotMarkerComment,
-  isStoryPlannerBotMarkerPrefixComment,
   type StoryPlannerMarkerComment,
 } from "./story-planner-marker.mts";
 import {
@@ -253,21 +253,21 @@ async function hasExistingBotMarkerComment(
   matchesMarker: typeof isStoryPlannerBotMarkerComment =
     isStoryPlannerBotMarkerComment,
 ): Promise<boolean> {
+  let foundMarker = false;
   for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
     const comments = await request<StoryPlannerMarkerComment[]>(
       token,
       "GET",
       `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
     );
-    if (
-      comments.some((comment) => matchesMarker(comment, marker))
-    ) {
-      return true;
+    for (const comment of comments) {
+      if (matchesMarker(comment, marker)) foundMarker = true;
     }
     if (comments.length < COMMENT_PAGE_SIZE) {
-      return false;
+      return foundMarker;
     }
   }
+  if (foundMarker) return true;
   console.warn(
     `Scanned ${MAX_COMMENT_PAGES} pages of comments on #${issueNumber} ` +
       `without finding a prior story-planner contract; posting a new one ` +
@@ -339,21 +339,6 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     const contract = readFileSync(contractPath, "utf8");
     validateStoryPlannerContract(contract, issueNumber);
 
-    if (
-      await hasExistingBotMarkerComment(
-        request,
-        token,
-        owner,
-        repo,
-        issueNumber,
-        STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber),
-        isStoryPlannerBotMarkerPrefixComment,
-      )
-    ) {
-      console.log(`contract already posted on #${issueNumber}; skipping`);
-      return;
-    }
-
     const issue = await fetchIssueAndAssertReadyToSpec(
       request,
       token,
@@ -370,7 +355,62 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
     ) {
       throw new Error("issue body is malformed; refusing to publish");
     }
-    const approvedRevision = canonicalIssueRevision(issue.title, issue.body);
+    const currentRevision = canonicalIssueRevision(issue.title, issue.body);
+    const revision = JSON.parse(
+      readFileSync(requireEnv("REVISION_PATH"), "utf8"),
+    ) as unknown;
+    if (
+      typeof revision !== "object" ||
+      revision === null ||
+      Array.isArray(revision) ||
+      Object.keys(revision).length !== 3 ||
+      !("issueNumber" in revision) ||
+      typeof revision.issueNumber !== "number" ||
+      !("updatedAt" in revision) ||
+      typeof revision.updatedAt !== "string" ||
+      !("preparedRevision" in revision) ||
+      typeof revision.preparedRevision !== "string" ||
+      revision.issueNumber !== issueNumber ||
+      !ISSUE_REVISION_PATTERN.test(revision.updatedAt) ||
+      !APPROVED_REVISION_PATTERN.test(revision.preparedRevision)
+    ) {
+      throw new Error("revision binding is malformed; refusing to publish");
+    }
+    if (
+      !("updated_at" in issue) ||
+      typeof issue.updated_at !== "string" ||
+      !ISSUE_REVISION_PATTERN.test(issue.updated_at)
+    ) {
+      throw new Error("issue updated_at is malformed; refusing to publish");
+    }
+    if (issue.updated_at !== revision.updatedAt) {
+      throw new Error(
+        "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+      );
+    }
+    if (currentRevision !== revision.preparedRevision) {
+      throw new Error(
+        "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
+      );
+    }
+
+    if (
+      await hasExistingBotMarkerComment(
+        request,
+        token,
+        owner,
+        repo,
+        issueNumber,
+        STORY_PLANNER_CONTRACT_ISSUE_PREFIX(issueNumber),
+        (comment) =>
+          extractStoryPlannerContractRevision(comment, issueNumber) === currentRevision,
+      )
+    ) {
+      console.log(`contract already posted on #${issueNumber}; skipping`);
+      return;
+    }
+
+    const approvedRevision = revision.preparedRevision;
     const finalBody =
       sanitizeContractForPosting(contract) +
       "\n" +
@@ -387,39 +427,43 @@ export async function main(request: GithubRequest = githubRequest): Promise<void
       );
     }
 
-    // GitHub updated_at (and GraphQL updatedAt) has only second granularity, so
-    // an edit after Prepare's read in the same wall-clock second is undetectable.
-    // No finer token exists; the residual is a marginally stale advisory comment
-    // in this dark, human-reviewed workflow—a known limitation, not a fail-open.
-    const revision = JSON.parse(
-      readFileSync(requireEnv("REVISION_PATH"), "utf8"),
-    ) as unknown;
-    if (
-      typeof revision !== "object" ||
-      revision === null ||
-      Array.isArray(revision) ||
-      Object.keys(revision).length !== 2 ||
-      !("issueNumber" in revision) ||
-      typeof revision.issueNumber !== "number" ||
-      !("updatedAt" in revision) ||
-      typeof revision.updatedAt !== "string" ||
-      revision.issueNumber !== issueNumber ||
-      !ISSUE_REVISION_PATTERN.test(revision.updatedAt)
-    ) {
-      throw new Error("revision binding is malformed; refusing to publish");
+    const freshIssue = await fetchIssueAndAssertReadyToSpec(
+      request,
+      token,
+      owner,
+      repo,
+      issueNumber,
+    );
+    if (!("title" in freshIssue) || typeof freshIssue.title !== "string") {
+      throw new Error("issue title is malformed; refusing to publish");
     }
     if (
-      !("updated_at" in issue) ||
-      typeof issue.updated_at !== "string" ||
-      !ISSUE_REVISION_PATTERN.test(issue.updated_at)
+      !("body" in freshIssue) ||
+      (typeof freshIssue.body !== "string" && freshIssue.body !== null)
+    ) {
+      throw new Error("issue body is malformed; refusing to publish");
+    }
+    if (
+      !("updated_at" in freshIssue) ||
+      typeof freshIssue.updated_at !== "string" ||
+      !ISSUE_REVISION_PATTERN.test(freshIssue.updated_at)
     ) {
       throw new Error("issue updated_at is malformed; refusing to publish");
     }
-    if (issue.updated_at !== revision.updatedAt) {
+    if (
+      freshIssue.updated_at !== revision.updatedAt ||
+      canonicalIssueRevision(freshIssue.title, freshIssue.body) !==
+        revision.preparedRevision
+    ) {
       throw new Error(
         "issue was modified after planning (revision binding mismatch); refusing to post a contract planned against stale content",
       );
     }
+
+    // The only remaining window is an edit between this final pre-POST REST
+    // re-fetch and the POST itself. It is irreducible because GitHub offers no
+    // content-conditional issue-comment write; this path is advisory-only,
+    // dark, and human-reviewed.
 
     await request(
       token,

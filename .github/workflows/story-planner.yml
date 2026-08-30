@@ -88,6 +88,9 @@ jobs:
               rm -rf -- "$added_path"
             done
           git checkout "$TRUSTED_SHA" -- .
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
       - name: Prepare nonce-fenced story data and trusted system prompt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,10 +103,19 @@ jobs:
             exit 1
           fi
           mkdir -p issue-context planner-input planner-output
-          gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-            --json number,title,body,updatedAt > issue-context/issue.json
+          gh api "repos/$REPO/issues/$ISSUE_NUMBER" > issue-context/issue.json
+          PREPARED_REVISION="$(
+            node --experimental-strip-types scripts/factory/compute-current-revision.mts \
+              < issue-context/issue.json
+          )"
+          if ! [[ "$PREPARED_REVISION" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::prepared issue revision is not a lowercase SHA-256 digest"
+            exit 1
+          fi
           jq -ce '{number, title, body}' issue-context/issue.json > issue-context/story.json
-          jq -ce '{issueNumber: .number, updatedAt}' issue-context/issue.json \
+          jq -ce --arg preparedRevision "$PREPARED_REVISION" \
+            '{issueNumber: .number, updatedAt: .updated_at, preparedRevision: $preparedRevision}' \
+            issue-context/issue.json \
             > planner-output/revision.json
 
           NONCE="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"

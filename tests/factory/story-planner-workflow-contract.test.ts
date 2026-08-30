@@ -243,11 +243,51 @@ describe("story-planner workflow protected shape", () => {
     const revisionWrite = run.indexOf("> planner-output/revision.json");
     const contextRemoval = run.indexOf("rm -rf -- issue-context");
 
-    expect(run).toContain("--json number,title,body,updatedAt");
+    expect(run).toContain(
+      'gh api "repos/$REPO/issues/$ISSUE_NUMBER" > issue-context/issue.json',
+    );
     expect(run).toContain("jq -ce '{number, title, body}'");
     expect(run).toContain("($story[0] | tojson)");
     expect(revisionWrite).toBeGreaterThanOrEqual(0);
     expect(contextRemoval).toBeGreaterThan(revisionWrite);
+  });
+
+  it("T-H2-wf computes preparedRevision from the REST issue representation", () => {
+    const prepare = planSteps().find((step) => step.name === PREPARE_STEP);
+    const run = String(prepare?.run);
+    const issueFetch = run.indexOf(
+      'gh api "repos/$REPO/issues/$ISSUE_NUMBER" > issue-context/issue.json',
+    );
+    const revisionCompute = run.indexOf(
+      "node --experimental-strip-types scripts/factory/compute-current-revision.mts",
+    );
+    const revisionWrite = run.indexOf(
+      "'{issueNumber: .number, updatedAt: .updated_at, preparedRevision: $preparedRevision}'",
+    );
+
+    expect(issueFetch).toBeGreaterThanOrEqual(0);
+    expect(revisionCompute).toBeGreaterThan(issueFetch);
+    expect(revisionWrite).toBeGreaterThan(revisionCompute);
+    expect(run).toContain("< issue-context/issue.json");
+    expect(run).not.toContain("gh issue view");
+  });
+
+  it("pins Node 22 after trusted-state restore and before Prepare", () => {
+    const steps = planSteps();
+    const restoreIndex = steps.findIndex(
+      (step) => step.name === "Restore base-owned configuration",
+    );
+    const setupIndex = steps.findIndex(
+      (step) => step.uses ===
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    );
+    const prepareIndex = steps.findIndex((step) => step.name === PREPARE_STEP);
+    const setup = steps[setupIndex];
+
+    expect(restoreIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeGreaterThan(restoreIndex);
+    expect(prepareIndex).toBeGreaterThan(setupIndex);
+    expect(asMapping(setup?.with)?.["node-version"]).toBe("22");
   });
 
   it("pins both checkouts to the resolved trusted SHA without persisted credentials", () => {

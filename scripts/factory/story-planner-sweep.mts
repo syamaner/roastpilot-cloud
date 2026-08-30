@@ -1,4 +1,5 @@
 import { githubRequest, requireEnv } from "./github-api.mts";
+import { canonicalIssueRevision } from "./approve-revision.mts";
 import {
   READY_TO_SPEC_LABEL,
   decideSweepIssue,
@@ -66,7 +67,19 @@ function validateIssue(
   if (requireReadyToSpec && !labels.includes(READY_TO_SPEC_LABEL)) {
     throw new Error(`malformed ${expectedState} ready-to-spec issue response`);
   }
-  return { number: raw.number, state: expectedState };
+  if (
+    !("title" in raw) ||
+    typeof raw.title !== "string" ||
+    !("body" in raw) ||
+    (typeof raw.body !== "string" && raw.body !== null)
+  ) {
+    throw new Error(`malformed ${expectedState} ready-to-spec issue response`);
+  }
+  return {
+    number: raw.number,
+    state: expectedState,
+    currentRevision: canonicalIssueRevision(raw.title, raw.body),
+  };
 }
 
 export async function enumerateReadyToSpecIssues(
@@ -201,6 +214,7 @@ async function readdReadyToSpecWithRetries(
 async function confirmHandled(
   dependencies: SweepDependencies,
   issueNumber: number,
+  currentRevision: string,
 ): Promise<boolean> {
   // Production timing fallback; tests inject sleep to avoid real wall-clock waits.
   /* v8 ignore start */
@@ -215,7 +229,7 @@ async function confirmHandled(
       dependencies.repo,
       issueNumber,
     );
-    if (isIssueHandled(comments, issueNumber)) return true;
+    if (isIssueHandled(comments, issueNumber, currentRevision)) return true;
     if (attempt < MAX_CONFIRMATION_ATTEMPTS) {
       await sleep(CONFIRMATION_RETRY_DELAY_MS);
     }
@@ -243,6 +257,11 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
     "closed",
   );
 
+  // Accepted residual: currentRevision comes from enumeration, so an edit
+  // before this issue's decision can cause a one-cycle skip-handled. This is
+  // availability-only and self-heals on the next sweep, whose enumeration
+  // recomputes the revision and makes the old marker stale; deliberately do
+  // not add a per-issue re-fetch.
   for (const issue of [...closedIssues, ...openIssues]) {
     const comments = await fetchComments(
       dependencies.request,
@@ -294,7 +313,11 @@ export async function runSweep(dependencies: SweepDependencies): Promise<void> {
       }
     }
     if (skippedReadd) continue;
-    const planned = await confirmHandled(dependencies, issue.number);
+    const planned = await confirmHandled(
+      dependencies,
+      issue.number,
+      issue.currentRevision,
+    );
     log(JSON.stringify({
       issue_number: issue.number,
       result: planned ? "planned" : "still-unplanned-after-bounded-confirmation",
