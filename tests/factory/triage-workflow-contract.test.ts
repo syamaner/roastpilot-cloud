@@ -1475,6 +1475,42 @@ describe("bounded triage context contract", () => {
     }]);
   });
 
+  it.each([
+    ["malformed", "not-a-timestamp"],
+    ["missing", undefined],
+  ])(
+    "keeps a no-contract escalation with a %s own timestamp active",
+    (_case, createdAt) => {
+      const body = `Planner requires a re-scope.\n${storyPlannerEscalateMarker(51)}`;
+      const output = JSON.parse(
+        runFilter({
+          number: 51,
+          author: { login: "issue-author" },
+          title: DEFAULT_ISSUE_TITLE,
+          body: "Body",
+          state: "OPEN",
+          comments: [{
+            author: { login: "github-actions" },
+            authorAssociation: "NONE",
+            createdAt,
+            body,
+          }],
+        }),
+      ) as {
+        readonly comments: readonly [{ readonly kind: string; readonly body: string }];
+      };
+
+      // Pins the previously unpinned no-contract + bad-own-timestamp matrix cell:
+      // it stays ACTIVE and body-bearing. Its live mutation witness is fail-closed
+      // over-tightening: prepending an "escalation own createdAt must be valid"
+      // precondition to the active branch drops this cell and fails this test. This
+      // does not witness removal of `$c_created == null`; that mutant is equivalent
+      // here because `valid_created_at | not` is also true when `$c_created` is null.
+      expect(output.comments[0].kind).toBe("story_planner_escalation");
+      expect(output.comments[0].body).toBe(body);
+    },
+  );
+
   it("lets a newer escalation supersede a fresh revision-matching contract", () => {
     const output = JSON.parse(
       runFilter({
