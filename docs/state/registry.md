@@ -69,6 +69,28 @@ F1-S6 9h operator-driven activation ([#9](https://github.com/syamaner/roastpilot
 and F1-S11 live-provider eval ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14),
 harness-validated in recorded mode). C1 Scaffold complete.
 
+**F1 CI infra — path-aware CI gate landed (31 Aug 2026, merged 23:19Z).**
+[#413](https://github.com/syamaner/roastpilot-cloud/issues/413) Phase 1 +
+D-413-4 merged via [#414](https://github.com/syamaner/roastpilot-cloud/pull/414)
+(main `f9a9caa`): a fail-closed change-classifier (`snowflake/ci_change_classifier.py`,
+ported from agent #863) emits `mode` (`docs-only`|`full`), and an always-emitting
+`Checks` aggregate (`snowflake/ci_gate_result.py`, #871) lets a `docs/**.md`-only PR
+(including `docs/state/registry.md`-only) skip the heavy jobs — Playwright,
+Snowflake-offline, Mutation — while `gates`/CodeQL/dependency-review stay
+always-on and a logic change never skips a scanner. Both gate scripts run from a
+base-controlled **trusted revision** (the #205/#209 `resolve-trusted-revision`
+pattern) and are in `PROTECTED_EXACT_PATHS` + CODEOWNERS, so a PR cannot edit them
+to disable the gate; the heavy-job guards are `!cancelled() && … != 'docs-only'`
+so a failed/skipped `classify` runs them fail-closed. Cross-family review (the
+Codex connector) caught two fail-opens the pre-open board missed (the
+un-pinned/unprotected scripts → D-413-4; the implicit-`needs`-success guard
+semantics). **Pending operator step: the D-413-3 branch-protection cutover** —
+add the `Checks` context to the required-status list and remove the individual
+heavy contexts (add before remove, so no required context is orphaned
+mid-migration); until then the gate is fail-closed but not yet the enforced
+single gate. Phase 2 (coarse per-area `snowflake-only`/`web-only` test selection)
+is a deferred future issue. #413 stays open for the cutover.
+
 Plan: `roastpilot-plan/roastpilot-cloud/plan.md` §11 (epic table) and §4
 (C2 data model); factory pipeline/security model/label taxonomy: `factory.md`.
 
