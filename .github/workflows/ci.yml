@@ -24,6 +24,33 @@ env:
 permissions: {}
 
 jobs:
+  classify:
+    name: Classify CI change
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Classify pull-request change
+        id: classify
+        run: >-
+          python3 snowflake/ci_change_classifier.py
+          --event-name "${{ github.event_name }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --head-sha "${{ github.event.pull_request.head.sha }}"
+
   gates:
     name: Lint, typecheck, unit tests
     runs-on: ubuntu-latest
@@ -86,6 +113,8 @@ jobs:
 
   playwright:
     name: Playwright smoke
+    needs: classify
+    if: ${{ needs.classify.outputs.mode == 'full' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,6 +151,8 @@ jobs:
 
   snowflake-migrations:
     name: Snowflake migrations (offline)
+    needs: classify
+    if: ${{ needs.classify.outputs.mode == 'full' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -178,7 +209,7 @@ jobs:
         # in this repo. Set a few points below the current 98% so routine
         # additions (a new branch, an edge case) don't need a threshold
         # bump every time -- only a real coverage regression trips it.
-        run: python3 -P -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_grant_manifest --cov=check_mutation_score --cov-report=term-missing --cov-fail-under=90
+        run: python3 -P -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_grant_manifest --cov=check_mutation_score --cov=ci_change_classifier --cov=ci_gate_result --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
         run: python3 -P snowflake/validate_migrations.py
@@ -201,6 +232,8 @@ jobs:
 
   mutation-testing:
     name: Mutation testing (security-critical Python)
+    needs: classify
+    if: ${{ needs.classify.outputs.mode == 'full' }}
     runs-on: ubuntu-latest
     # F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing
     # over the security-critical grant-boundary Python. No Snowflake
@@ -307,3 +340,33 @@ jobs:
             snowflake/mutants/mutmut-cicd-stats.json
             snowflake/mutmut-survivors.txt
           retention-days: 14
+
+  checks:
+    name: Checks
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [gates, classify, playwright, snowflake-migrations, mutation-testing]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Require every CI job to match its change class
+        env:
+          MODE: ${{ needs.classify.outputs.mode }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: >-
+          python3 snowflake/ci_gate_result.py
+          --always gates
+          --always classify
+          --full-only playwright
+          --full-only snowflake-migrations
+          --full-only mutation-testing
