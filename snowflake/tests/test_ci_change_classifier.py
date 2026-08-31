@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import runpy
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -123,7 +124,12 @@ def test_classifies_multiple_nested_allowed_markdown_paths_as_docs_only(
 def test_classifies_allowed_rename_and_copy_as_docs_only(
     monkeypatch: pytest.MonkeyPatch, status: bytes
 ) -> None:
-    """Rename and copy need both sides inside the closed Markdown grammar."""
+    """Pin defensive pair-status parsing, including currently unwired copies.
+
+    The wired ``git diff --find-renames`` command does not emit ``C100``
+    without ``--find-copies``/``-C``. Its case here deliberately verifies the
+    parser's fail-closed defensive handling, not reachable production input.
+    """
 
     _install_git_fixture(monkeypatch, _name_status(status, b"docs/old.md", b"docs/new.md"))
     assert (
@@ -135,6 +141,7 @@ def test_classifies_allowed_rename_and_copy_as_docs_only(
     "fields",
     [
         (b"R100", b"docs/old.md", b"src/new.py"),
+        # Defensive parser coverage only: the wired diff omits -C/--find-copies.
         (b"C100", b"src/old.py", b"docs/new.md"),
         (b"A", b"README.md"),
         (b"A", b"package-lock.json"),
@@ -444,6 +451,76 @@ def test_uses_merge_base_and_exact_nul_name_status_command(monkeypatch: pytest.M
     assert ("ls-tree", "-z", _MERGE_BASE, "--", "docs/safe.md") in calls
 
 
+def test_real_git_diff_and_tree_output_matches_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real NUL-delimited Git output admits docs only and rejects unsafe entries."""
+
+    if shutil.which("git") is None:
+        pytest.skip("git is unavailable")
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", *arguments],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    git("config", "user.email", "classifier-test@example.invalid")
+    git("config", "user.name", "CI classifier test")
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "existing.md").write_text("before\n", encoding="utf-8")
+    (docs / "old.md").write_text("delete me\n", encoding="utf-8")
+    (docs / "rename-old.md").write_text("rename me\n", encoding="utf-8")
+    git("add", "docs")
+    git("commit", "--quiet", "-m", "initial docs")
+    first_sha = git("rev-parse", "HEAD")
+
+    (docs / "new.md").write_text("new\n", encoding="utf-8")
+    (docs / "existing.md").write_text("after\n", encoding="utf-8")
+    (docs / "old.md").unlink()
+    git("mv", "docs/rename-old.md", "docs/rename-new.md")
+    git("add", "--all")
+    git("commit", "--quiet", "-m", "mixed docs operations")
+    second_sha = git("rev-parse", "HEAD")
+
+    assert (
+        classifier.classify_change("pull_request", first_sha, second_sha)
+        is classifier.ChangeMode.DOCS_ONLY
+    )
+
+    source = repo / "src"
+    source.mkdir()
+    (source / "app.py").write_text("print('unsafe')\n", encoding="utf-8")
+    git("add", "--all")
+    git("commit", "--quiet", "-m", "add non-doc")
+    third_sha = git("rev-parse", "HEAD")
+
+    assert (
+        classifier.classify_change("pull_request", second_sha, third_sha)
+        is classifier.ChangeMode.FULL
+    )
+
+    git("checkout", "--quiet", "--detach", second_sha)
+    (docs / "link.md").symlink_to("new.md")
+    git("add", "--all")
+    git("commit", "--quiet", "-m", "add docs symlink")
+    symlink_sha = git("rev-parse", "HEAD")
+
+    assert (
+        classifier.classify_change("pull_request", second_sha, symlink_sha)
+        is classifier.ChangeMode.FULL
+    )
+
+
 def test_classify_passes_exact_merge_base_and_head_to_entry_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -621,17 +698,21 @@ def test_ci_classifier_job_is_consumed_and_uses_closed_checkout_settings() -> No
     assert steps[1]["uses"] == "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
     assert steps[1]["with"] == {"python-version": "3.11"}
     classifier_step = steps[2]
+    assert classifier_step["env"] == {
+        "EVENT_NAME": "${{ github.event_name }}",
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
     assert classifier_step["run"] == (
-        'python3 snowflake/ci_change_classifier.py --event-name "${{ github.event_name }}" '
-        '--base-sha "${{ github.event.pull_request.base.sha }}" '
-        '--head-sha "${{ github.event.pull_request.head.sha }}"'
+        'python3 snowflake/ci_change_classifier.py --event-name "$EVENT_NAME" '
+        '--base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"'
     )
     for name in ("playwright", "snowflake-migrations", "mutation-testing"):
         job = jobs[name]
         needs = job["needs"]
         needs_values = {needs} if isinstance(needs, str) else set(cast(list[str], needs))
         assert "classify" in needs_values
-        assert job["if"] == "${{ needs.classify.outputs.mode == 'full' }}"
+        assert job["if"] == "${{ needs.classify.outputs.mode != 'docs-only' }}"
 
     gates = jobs["gates"]
     gates_needs = gates.get("needs", [])
