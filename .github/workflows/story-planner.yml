@@ -58,9 +58,10 @@ jobs:
           fi
           echo "trusted-sha=$TRUSTED_SHA" >> "$GITHUB_OUTPUT"
 
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   plan:
     needs: resolve-trusted-revision
-    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'
+    if: github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

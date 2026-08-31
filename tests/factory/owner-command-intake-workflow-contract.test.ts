@@ -24,9 +24,13 @@ const APPLY_ENTRYPOINT_PATH = fileURLToPath(
   new URL("../../scripts/factory/apply-owner-task.mts", import.meta.url),
 );
 const OWNER_INTAKE_VARIABLE = ["OWNER", "COMMAND", "INTAKE", "ENABLED"].join("_");
-const TASK_GATE =
+const ANSWER_GATE =
+  `vars.${OWNER_INTAKE_VARIABLE} == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'question' && vars.CLAUDE_HEADLESS_ENABLED == 'true'`;
+const TASK_BASE_GATE =
   `vars.${OWNER_INTAKE_VARIABLE} == 'true' && vars.OWNER_TASK_APPLY_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'task'`;
-const TASK_APPLY_GATE = `${TASK_GATE} && needs.task-agent.result == 'success'`;
+const TASK_GATE =
+  `${TASK_BASE_GATE} && vars.CLAUDE_HEADLESS_ENABLED == 'true'`;
+const TASK_APPLY_GATE = `${TASK_BASE_GATE} && needs.task-agent.result == 'success'`;
 const PUBLISH_GATE =
   `always() && vars.${OWNER_INTAKE_VARIABLE} == 'true' && vars.FACTORY_PAUSED != 'true' && needs.resolve-trusted-revision.result == 'success' && needs.intake.result == 'success' && needs.intake.outputs.proceed == 'true' && ((needs.intake.outputs.verb == 'question' && needs.answer-agent.result == 'success') || (needs.intake.outputs.verb == 'task' && vars.OWNER_TASK_APPLY_ENABLED != 'true'))`;
 const CHECKOUT =
@@ -318,6 +322,7 @@ describe("owner-command intake workflow contract", () => {
   });
 
   it("W-T1 byte-pins both complete dark task gates", () => {
+    expect(job("answer-agent").if).toBe(ANSWER_GATE);
     expect(job("task-agent").if).toBe(TASK_GATE);
     expect(job("task-apply").if).toBe(TASK_APPLY_GATE);
   });

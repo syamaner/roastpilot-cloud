@@ -115,9 +115,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   answer-agent:
     needs: [resolve-trusted-revision, intake]
-    if: vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'question'
+    if: vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'question' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -181,9 +182,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   task-agent:
     needs: [resolve-trusted-revision, intake]
-    if: vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && vars.OWNER_TASK_APPLY_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'task'
+    if: vars.OWNER_COMMAND_INTAKE_ENABLED == 'true' && vars.OWNER_TASK_APPLY_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true' && needs.intake.outputs.proceed == 'true' && needs.intake.outputs.verb == 'task' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

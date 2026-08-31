@@ -137,6 +137,18 @@ point at which row of that table proves it.
 
 ## Factory Context
 
+**Current status (31 Aug 2026, operator decision D-ToS-1):** The autonomous CI
+factory is **disabled**. Headless Claude in CI is retired on ToS grounds because
+Anthropic consumer OAuth tokens are not permitted for CI automation, so triage,
+story planner, implement, owner command intake, and the CI review lenses are
+gated off and do not run. Until a metered `anthropic_api_key` revival is funded,
+C2, C3, and all subsequent work ships through the compliant model: the
+interactive orchestrator (Claude Code) and its review sub-agents, Codex as
+implementer and the official GitHub code-review connector, and a human merge.
+See [`docs/state/registry.md`](docs/state/registry.md), "Factory status", for
+the full picture; the factory narrative below remains reference for a possible
+metered-key revival.
+
 C1 (this repo's scaffold) and F1 (the factory itself) are built
 conventionally — an interactive agent, this file, a human at the keyboard.
 **C2 onward is factory-first** (`factory.md`): issues are triaged and

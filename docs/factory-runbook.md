@@ -453,11 +453,20 @@ backfills. Skipping an applicable step leaves the factory in a wrong state:**
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/330592310/enable   # owner-command-intake.yml — currently dark — listed for completeness before 9h activation
    gh api -X PUT repos/syamaner/roastpilot-cloud/actions/workflows/343585420/enable   # story-planner.yml — dark (STORY_PLANNER_ENABLED unset) but FACTORY_PAUSED-gated; listed for completeness
    ```
-2. **Set `FACTORY_PAUSED` back to `false`.** This is the step that
-   actually restarts the factory — re-enabling the workflows alone does
+2. **Set `FACTORY_PAUSED` back to `false`.** Before D-ToS-1, this was the step
+   that actually restarted the factory — re-enabling the workflows alone does
    **not** resume anything, because every job's `if:` condition still
    gates on the flag regardless of whether the workflow itself is
    enabled or disabled:
+
+   **D-ToS-1 resume note (31 Aug 2026):** Clearing `FACTORY_PAUSED` alone no
+   longer resumes the headless Claude jobs. They are also gated by the unset
+   `CLAUDE_HEADLESS_ENABLED` variable, and the `CLAUDE_CODE_OAUTH_TOKEN` secret
+   has been removed. A real revival requires setting
+   `CLAUDE_HEADLESS_ENABLED='true'` **and** migrating to a metered
+   `anthropic_api_key`; do not restore the consumer OAuth token. See
+   [`docs/state/registry.md`](state/registry.md), "Factory status", for the
+   authoritative current state.
 
    ```bash
    gh variable set FACTORY_PAUSED --body false --repo syamaner/roastpilot-cloud
@@ -1072,9 +1081,11 @@ that ordered path for any enablement, question or task, rather than a standalone
 question-only procedure. That sequence is the operator-ratification hard stop
 at 9h and is **not** authorized by this dark wiring.
 
-Unpausing `FACTORY_PAUSED`, if and when the broader factory is unpaused, remains
+Unpausing `FACTORY_PAUSED`, if and when the broader factory is revived, remains
 a separate operator decision; setting either enable variable to `true` does not
-authorize that transition.
+authorize that transition. Under D-ToS-1, unpausing alone does not resume the
+headless Claude jobs; the full revival requirements are in
+[`docs/state/registry.md`](state/registry.md), "Factory status".
 
 Unlike the 9d advisory workflow, this workflow declares no
 `workflow_dispatch`; it is triggered only by a newly created `issue_comment`.
@@ -1456,9 +1467,10 @@ authorized by this dark wiring:
    already mandatory. The task jobs require both
    `OWNER_COMMAND_INTAKE_ENABLED` and `OWNER_TASK_APPLY_ENABLED`.
 
-Task-mutation unpause boundary: before any `FACTORY_PAUSED` change to `false`
-that would activate task mutation, re-run the same hardened trusted-comparator
-block immediately before the unpause:
+Task-mutation unpause boundary: before any future complete D-ToS-1 revival in
+which `FACTORY_PAUSED` changes to `false` and task mutation would be activated,
+re-run the same hardened trusted-comparator block immediately before the
+unpause:
 
 ```bash
 set -euo pipefail
@@ -1480,7 +1492,10 @@ defense in depth; it is not a mechanical guarantee against a truly concurrent
 admin actor.
 
 Unpausing `FACTORY_PAUSED` remains a separate operator decision; setting an
-enable variable to `true` does not authorize unpausing.
+enable variable to `true` does not authorize unpausing. Under D-ToS-1,
+unpausing alone does not resume the headless Claude jobs; the full revival
+requirements are in [`docs/state/registry.md`](state/registry.md), "Factory
+status".
 
 Known availability limitation [#239](https://github.com/syamaner/roastpilot-cloud/issues/239):
 a `task` comment edited to `question` after intake produces no stale or

@@ -91,11 +91,13 @@ describe("story-planner workflow protected shape", () => {
   it("pins the labeled trigger and both enablement conjuncts on every job", () => {
     const workflow = workflowDocument();
     expect(asMapping(asMapping(workflow.on)?.issues)?.types).toEqual(["labeled"]);
-    for (const job of Object.values(workflowJobs())) {
-      expect(job.if).toBe(
-        "github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'",
-      );
-    }
+    const baseGate =
+      "github.event.label.name == 'ready-to-spec' && vars.STORY_PLANNER_ENABLED == 'true' && vars.FACTORY_PAUSED != 'true'";
+    expect(workflowJobs()["resolve-trusted-revision"]?.if).toBe(baseGate);
+    expect(workflowJobs().plan?.if).toBe(
+      `${baseGate} && vars.CLAUDE_HEADLESS_ENABLED == 'true'`,
+    );
+    expect(workflowJobs().publish?.if).toBe(baseGate);
   });
 
   it("confines allowed tools and explicitly denies writers, git readers, egress, and execution", () => {

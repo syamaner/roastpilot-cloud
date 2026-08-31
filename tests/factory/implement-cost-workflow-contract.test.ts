@@ -46,6 +46,15 @@ function step(name: string, stepName: string): Mapping {
 }
 
 describe("implement cost workflow contract", () => {
+  it("byte-pins the retired headless-Claude gates on implement and publish", () => {
+    expect(job("implement").if).toBe(
+      "vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true'",
+    );
+    expect(job("publish").if).toBe(
+      "always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true'",
+    );
+  });
+
   it("T-H1-wf: threads the REST-captured canonical issue revision to publish", () => {
     expect(mapping(job("implement").outputs)).toMatchObject({
       issue_revision: "${{ steps.issue-context.outputs.issue_revision }}",
