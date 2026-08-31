@@ -6,12 +6,13 @@ on:
 permissions: {}
 
 jobs:
+  # D-ToS-1: headless Claude probe is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   probe:
     # This job is bound to the read-confinement-probe Environment. At activation
     # time, the operator configures its deployment-branch policy to restrict it
     # to the default branch and scopes the job's OAuth secret to it. The
     # in-workflow guard is defense-in-depth only.
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}
     environment: read-confinement-probe
     runs-on: ubuntu-latest
     permissions:
@@ -94,11 +95,12 @@ jobs:
         env:
           OUTSIDE_FILE_PATH: *outside_file_path
         run: rm -f -- probe/read-output.txt probe/liveness-canary.txt probe/leak-outside "$OUTSIDE_FILE_PATH"
+  # D-ToS-1: headless Claude probe is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   probe-scoped:
     # This job is the scoped-reader counterpart to the task-agent-faithful
     # control above. It deliberately keeps the same Environment and guard so a
     # single operator dispatch compares only the reader grant form.
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}
     environment: read-confinement-probe
     runs-on: ubuntu-latest
     permissions:
