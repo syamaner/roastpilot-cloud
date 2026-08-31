@@ -17,12 +17,12 @@ token inputs are **preserved** (gated, not deleted) so a future revival is a
 deliberate two-step: set `CLAUDE_HEADLESS_ENABLED` **and** swap to a metered
 `anthropic_api_key`. Do not re-arm on the OAuth token.
 
-One exception: the dark `task-agent-read-confinement-probe.yml` is
-`workflow_dispatch`/main-only and Environment-gated; it uses a separate
-`PROBE_READ_CONFINEMENT_OAUTH_TOKEN` and is not covered by the
-`CLAUDE_HEADLESS_ENABLED` gate. Whether to gate it too or accept it as an
-operator-dispatched exception remains pending; under the same ToS/429
-constraint, its OAuth path is currently inoperable regardless.
+The dark `task-agent-read-confinement-probe.yml` is `workflow_dispatch`/main-only
+and Environment-gated; it uses a separate `PROBE_READ_CONFINEMENT_OAUTH_TOKEN`.
+It now also carries the `CLAUDE_HEADLESS_ENABLED` gate on both its jobs (`probe`
+and `probe-scoped`), gated for D-ToS-1 completeness alongside the other five
+workflows; under the same ToS/429 constraint its OAuth path is inoperable
+regardless.
 
 **Compliant build model (unchanged, this is how work ships now):** the
 interactive orchestrator (Claude Code = an official interface) + the review

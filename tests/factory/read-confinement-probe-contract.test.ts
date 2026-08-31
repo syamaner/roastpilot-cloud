@@ -125,7 +125,7 @@ describe("task-agent read-confinement probe workflow contract", () => {
   it("TC-3a binds the probe job to its Environment and keeps the default-branch guard", () => {
     const job = mapping(mapping(probe.jobs).probe);
     expect(job.environment).toBe("read-confinement-probe");
-    expect(job.if).toBe("${{ github.ref == 'refs/heads/main' }}");
+    expect(job.if).toBe("${{ github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}");
   });
 
   it("TC-4 keeps the static liveness canary confined to plant and verdict wiring", () => {
@@ -221,7 +221,7 @@ describe("task-agent read-confinement probe workflow contract", () => {
     const scopedJob = mapping(mapping(probe.jobs)[SCOPED_JOB]);
     expect(scopedJob.permissions).toEqual({ contents: "read" });
     expect(scopedJob.environment).toBe("read-confinement-probe");
-    expect(scopedJob.if).toBe("${{ github.ref == 'refs/heads/main' }}");
+    expect(scopedJob.if).toBe("${{ github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}");
   });
 
   it("TC-7 fails closed on malformed workflow YAML", () => {
