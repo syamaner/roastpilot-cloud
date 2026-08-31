@@ -1,8 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  lstatSync,
+  closeSync,
+  constants,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -170,9 +173,16 @@ function assertTrustedRegularFile(
   expected: Buffer,
 ): void {
   const restored = join(fixture.repository, path);
-  expect(lstatSync(restored).isFile()).toBe(true);
-  expect(lstatSync(restored).isSymbolicLink()).toBe(false);
-  expect(readFileSync(restored)).toEqual(expected);
+  // O_NOFOLLOW: throws (ELOOP) if `restored` is a symlink — defeats an
+  // attacker symlink swap — and the single fd means the is-file check and
+  // read are on the same object (no by-name TOCTOU).
+  const fd = openSync(restored, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    expect(fstatSync(fd).isFile()).toBe(true);
+    expect(readFileSync(fd)).toEqual(expected);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function runClassify(fixture: Fixture) {
