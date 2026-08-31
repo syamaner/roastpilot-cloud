@@ -672,6 +672,20 @@ describe("findForbiddenPatchPaths", () => {
     expect(forbidden).toEqual(["scripts/factory/publish-implement-patch.mts"]);
   });
 
+  it("flags both base-controlled CI gate scripts as exact protected paths", () => {
+    expect(
+      findForbiddenPatchPaths([
+        "a/snowflake/ci_change_classifier.py",
+        "b/snowflake/ci_change_classifier.py",
+        "a/snowflake/ci_gate_result.py",
+        "b/snowflake/ci_gate_result.py",
+      ]),
+    ).toEqual([
+      "snowflake/ci_change_classifier.py",
+      "snowflake/ci_gate_result.py",
+    ]);
+  });
+
   it("flags normalized runtime instruction/configuration and state paths", () => {
     const forbidden = findForbiddenPatchPaths([
       "a/AGENTS.md",

@@ -5,6 +5,7 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-cov==7.1.0
+pyyaml==6.0.3
 
 # F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing over the
 # security-critical grant-boundary Python (assert_dev_ci_grants.py,

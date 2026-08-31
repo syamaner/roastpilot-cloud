@@ -75,6 +75,8 @@ source_paths = ["."]
 # for what this slice asks for (see PR body for the fuller reasoning).
 only_mutate = [
     "assert_dev_ci_grants.py",
+    "ci_change_classifier.py",
+    "ci_gate_result.py",
     "check_forbidden_grants.py",
     "check_grant_manifest.py",
     "seed_load_live.py",
