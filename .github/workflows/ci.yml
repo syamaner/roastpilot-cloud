@@ -24,8 +24,65 @@ env:
 permissions: {}
 
 jobs:
+  resolve-trusted-revision:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      trusted-sha: ${{ steps.resolve.outputs.trusted-sha }}
+      trusted-source: ${{ steps.resolve.outputs.trusted-source }}
+    steps:
+      - name: Resolve the trusted revision
+        id: resolve
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::error::default_branch unavailable; cannot establish a trusted revision"; exit 1; }
+          case "$DEFAULT_BRANCH" in
+            -*|*[[:space:]]*|*'*'*)
+              echo "::error::default_branch has an unsafe shape; cannot establish a trusted revision"
+              exit 1
+              ;;
+          esac
+
+          if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            TRUSTED_SHA="$BASE_SHA"
+            TRUSTED_SOURCE="base-sha"
+          else
+            EXPECTED_REF="refs/heads/$DEFAULT_BRANCH"
+            LS="$(git ls-remote "$REMOTE_URL" "refs/heads/$DEFAULT_BRANCH")"
+            MATCH_COUNT=0
+            TRUSTED_SHA=""
+            while IFS= read -r remote_line; do
+              remote_sha="${remote_line%%$'\t'*}"
+              remote_ref="${remote_line#*$'\t'}"
+              [ "$remote_line" != "$remote_ref" ] || continue
+              [ "$remote_ref" = "$EXPECTED_REF" ] || continue
+              MATCH_COUNT=$((MATCH_COUNT + 1))
+              TRUSTED_SHA="$remote_sha"
+            done <<< "$LS"
+            if [ "$MATCH_COUNT" -ne 1 ]; then
+              echo "::error::default branch lookup returned $MATCH_COUNT exact matches; cannot establish a trusted revision"
+              exit 1
+            fi
+            TRUSTED_SOURCE="default-branch-tip"
+          fi
+
+          if [ -z "$TRUSTED_SHA" ] || ! [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::trusted revision is not a lowercase 40-hex SHA"
+            exit 1
+          fi
+          {
+            echo "trusted-sha=$TRUSTED_SHA"
+            echo "trusted-source=$TRUSTED_SOURCE"
+          } >> "$GITHUB_OUTPUT"
+
   classify:
     name: Classify CI change
+    needs: resolve-trusted-revision
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,11 +110,19 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 snowflake/ci_change_classifier.py
-          --event-name "$EVENT_NAME"
-          --base-sha "$BASE_SHA"
-          --head-sha "$HEAD_SHA"
+          TRUSTED_SHA: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
+        run: |
+          set -euo pipefail
+          emit_full() { echo "mode=full" >> "$GITHUB_OUTPUT"; exit 0; }
+          [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]] || emit_full
+          git fetch --depth 1 origin "$TRUSTED_SHA" || emit_full
+          if git cat-file -e "$TRUSTED_SHA:snowflake/ci_change_classifier.py" 2>/dev/null; then
+            rm -rf -- snowflake/ci_change_classifier.py
+            git checkout "$TRUSTED_SHA" -- snowflake/ci_change_classifier.py
+            python3 -P snowflake/ci_change_classifier.py --event-name "$EVENT_NAME" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"
+          else
+            emit_full
+          fi
 
   gates:
     name: Lint, typecheck, unit tests
@@ -355,13 +420,14 @@ jobs:
     name: Checks
     if: always()
     runs-on: ubuntu-latest
-    needs: [gates, classify, playwright, snowflake-migrations, mutation-testing]
+    needs: [gates, classify, playwright, snowflake-migrations, mutation-testing, resolve-trusted-revision]
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -373,10 +439,27 @@ jobs:
         env:
           MODE: ${{ needs.classify.outputs.mode }}
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: >-
-          python3 snowflake/ci_gate_result.py
-          --always gates
-          --always classify
-          --full-only playwright
-          --full-only snowflake-migrations
-          --full-only mutation-testing
+          TRUSTED_SHA: ${{ needs.resolve-trusted-revision.outputs.trusted-sha }}
+          R_GATES: ${{ needs.gates.result }}
+          R_CLASSIFY: ${{ needs.classify.result }}
+          R_PLAYWRIGHT: ${{ needs.playwright.result }}
+          R_SNOWFLAKE: ${{ needs.snowflake-migrations.result }}
+          R_MUTATION: ${{ needs.mutation-testing.result }}
+        run: |
+          set -euo pipefail
+          bootstrap_fallback() {
+            [ "$MODE" = "full" ] || { echo "::error::bootstrap: require mode=full"; exit 1; }
+            for r in "$R_GATES" "$R_CLASSIFY" "$R_PLAYWRIGHT" "$R_SNOWFLAKE" "$R_MUTATION"; do
+              [ "$r" = "success" ] || { echo "::error::bootstrap: every heavy job must succeed"; exit 1; }
+            done
+            exit 0
+          }
+          [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]] || bootstrap_fallback
+          git fetch --depth 1 origin "$TRUSTED_SHA" || bootstrap_fallback
+          if git cat-file -e "$TRUSTED_SHA:snowflake/ci_gate_result.py" 2>/dev/null; then
+            rm -rf -- snowflake/ci_gate_result.py
+            git checkout "$TRUSTED_SHA" -- snowflake/ci_gate_result.py
+            python3 -P snowflake/ci_gate_result.py --always gates --always classify --always resolve-trusted-revision --full-only playwright --full-only snowflake-migrations --full-only mutation-testing
+          else
+            bootstrap_fallback
+          fi

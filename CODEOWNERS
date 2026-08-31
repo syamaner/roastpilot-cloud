@@ -95,3 +95,8 @@
 # output cannot rewrite the source of truth, while trusted deterministic
 # transition logic or a conventional same-PR amendment still may.
 /docs/state/registry.md @syamaner
+
+# The base-controlled CI classifier and aggregate gate scripts. These execute
+# at the CI trust boundary and are restored from the resolved trusted revision.
+/snowflake/ci_change_classifier.py @syamaner
+/snowflake/ci_gate_result.py @syamaner

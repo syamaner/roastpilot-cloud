@@ -25,7 +25,7 @@ if _REPO.name == "snowflake":
     _REPO = _REPO.parent
 _SCRIPT = _REPO / "snowflake" / "ci_gate_result.py"
 _FULL_ONLY = ("playwright", "snowflake-migrations", "mutation-testing")
-_ALWAYS = ("gates", "classify")
+_ALWAYS = ("gates", "classify", "resolve-trusted-revision")
 
 
 def _needs_values(raw_job: dict[str, object]) -> set[str]:
@@ -76,14 +76,28 @@ def test_checks_job_has_exact_aggregate_contract() -> None:
     assert cast(dict[str, str], gate_step["env"]) == {
         "MODE": "${{ needs.classify.outputs.mode }}",
         "NEEDS_JSON": "${{ toJSON(needs) }}",
+        "TRUSTED_SHA": "${{ needs.resolve-trusted-revision.outputs.trusted-sha }}",
+        "R_GATES": "${{ needs.gates.result }}",
+        "R_CLASSIFY": "${{ needs.classify.result }}",
+        "R_PLAYWRIGHT": "${{ needs.playwright.result }}",
+        "R_SNOWFLAKE": "${{ needs.snowflake-migrations.result }}",
+        "R_MUTATION": "${{ needs.mutation-testing.result }}",
     }
-    assert str(gate_step["run"]).split() == [
+    invocation = next(
+        line.strip()
+        for line in str(gate_step["run"]).splitlines()
+        if line.strip().startswith("python3 -P snowflake/ci_gate_result.py")
+    )
+    assert invocation.split() == [
         "python3",
+        "-P",
         "snowflake/ci_gate_result.py",
         "--always",
         "gates",
         "--always",
         "classify",
+        "--always",
+        "resolve-trusted-revision",
         "--full-only",
         "playwright",
         "--full-only",
@@ -203,6 +217,7 @@ def _cloud_needs(*, full_only_result: str) -> dict[str, object]:
     return _needs(
         gates="success",
         classify="success",
+        **{"resolve-trusted-revision": "success"},
         playwright=full_only_result,
         **{
             "snowflake-migrations": full_only_result,

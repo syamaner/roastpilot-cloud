@@ -698,6 +698,7 @@ def test_ci_classifier_job_is_consumed_and_uses_closed_checkout_settings() -> No
     assert isinstance(loaded, dict)
     jobs = cast(dict[str, dict[str, object]], loaded["jobs"])
     classify = jobs["classify"]
+    assert classify["needs"] == "resolve-trusted-revision"
     assert cast(dict[str, str], classify["outputs"]) == {
         "mode": "${{ steps.classify.outputs.mode }}"
     }
@@ -714,11 +715,16 @@ def test_ci_classifier_job_is_consumed_and_uses_closed_checkout_settings() -> No
         "EVENT_NAME": "${{ github.event_name }}",
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "TRUSTED_SHA": "${{ needs.resolve-trusted-revision.outputs.trusted-sha }}",
     }
-    assert classifier_step["run"] == (
-        'python3 snowflake/ci_change_classifier.py --event-name "$EVENT_NAME" '
+    classifier_run = str(classifier_step["run"])
+    assert 'git checkout "$TRUSTED_SHA" -- snowflake/ci_change_classifier.py' in classifier_run
+    assert (
+        'python3 -P snowflake/ci_change_classifier.py --event-name "$EVENT_NAME" '
         '--base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"'
+        in classifier_run
     )
+    assert classifier_run.endswith("else\n  emit_full\nfi\n")
     for name in ("playwright", "snowflake-migrations", "mutation-testing"):
         job = jobs[name]
         needs = job["needs"]

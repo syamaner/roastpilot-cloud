@@ -90,6 +90,8 @@ export const PROTECTED_EXACT_PATHS = [
   "docs/CODEOWNERS",
   "AGENTS.md",
   "docs/state/registry.md",
+  "snowflake/ci_change_classifier.py",
+  "snowflake/ci_gate_result.py",
 ] as const;
 export const PROTECTED_BASENAMES = [
   ".claude",

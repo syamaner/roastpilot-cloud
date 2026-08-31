@@ -2146,14 +2146,20 @@ jobs:
       // Checks setup-python adds 1 (python-version). Neither job runs a model
       // action or a write-capable step.
       //
+      // 31 Aug 2026, #413 D-413-4: adds the resolve-trusted-revision job
+      // (+1 job, +1 run step, permissions:{}) and reshapes the existing
+      // classify/checks run steps to restore trusted scripts, for an exact net
+      // delta of +1 job / +1 run step / +0 action steps / +1 action input. The
+      // sole input is fetch-depth on the existing Checks checkout.
+      //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 26,
-      runSteps: 59,
+      jobs: 27,
+      runSteps: 60,
       actionSteps: 64,
-      inputs: 164,
+      inputs: 165,
     });
   });
 
@@ -2212,8 +2218,13 @@ jobs:
     // 1 (python-version), Checks checkout adds 1 (persist-credentials), and
     // Checks setup-python adds 1 (python-version). Neither job runs a model
     // action or a write-capable step.
+    // 31 Aug 2026, #413 D-413-4: adds the resolve-trusted-revision job
+    // (+1 job, +1 run step, permissions:{}) and reshapes the existing
+    // classify/checks run steps to restore trusted scripts, for an exact net
+    // delta of +1 job / +1 run step / +0 action steps / +1 action input. The
+    // sole input is fetch-depth on the existing Checks checkout.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
-      jobs: 36,
+      jobs: 37,
       // Same #146 delta as the corpus test above: +2 run steps (the
       // denial-evidence and completion-assertion steps A+B). The
       // transcript-upload machinery was dropped (codex round 4 / D139).
@@ -2299,9 +2310,9 @@ jobs:
       // measured total therefore stays 220.
       // 29 Aug 2026, #383 Slice 3: same measured +1 job / +1 run step / +3
       // action steps / +7 action inputs as the source-only corpus above.
-      runSteps: 95,
+      runSteps: 96,
       actionSteps: 90,
-      inputs: 233,
+      inputs: 234,
     });
   });
 });

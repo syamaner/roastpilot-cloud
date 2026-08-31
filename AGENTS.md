@@ -534,7 +534,9 @@ inline.
   publisher script wherever it lives, CODEOWNERS, branch-protection config, the
   factory-integrity enforcement tests (`tests/factory/**`, #160 — a
   human-editable diff that weakens an alarm must still draw the adversarial
-  lens, not just the guard), `.claude/**`, `.codex/**`, any recognized agent
+  lens, not just the guard), the base-controlled CI gate scripts
+  `snowflake/ci_change_classifier.py` and `snowflake/ci_gate_result.py`,
+  `.claude/**`, `.codex/**`, any recognized agent
   instruction/configuration basename at any depth (the complete
   `PROTECTED_BASENAMES` set: `.claude`, `.codex`, `AGENTS.md`,
   `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.claudeignore`,
@@ -580,7 +582,9 @@ basename at any depth (the complete `PROTECTED_BASENAMES` set: `.claude`,
 `.codex/**`, the factory-integrity enforcement tests (`tests/factory/**` —
 the ALARM that mechanically enforces the pins/guards whose ASSETS this list
 already protects; leaving it writable let a patch gut an enforcement test as a
-"refactor" and disable the check, #160), or `docs/state/registry.md`. That diff
+"refactor" and disable the check, #160), the base-controlled CI gate scripts
+`snowflake/ci_change_classifier.py` and `snowflake/ci_gate_result.py`, or
+`docs/state/registry.md`. That diff
 is a review blocker on any such PR, full stop. The applied-tree guard, not a prompt instruction, enforces
 the repository paths. The registry may enter a factory PR only through trusted
 deterministic transition logic or a conventional human-directed amendment in
