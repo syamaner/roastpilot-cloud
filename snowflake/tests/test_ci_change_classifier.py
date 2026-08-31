@@ -251,6 +251,18 @@ def test_regular_file_confirmation_rejects_extra_metadata_fields(
     assert not classifier._is_regular_file(_HEAD, path)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_regular_file_confirmation_strips_the_trailing_suffix_not_a_leading_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the ``[:-len]`` suffix strip against mutation to ``[:+len]``."""
+
+    def short_path_tree(_arguments: Sequence[str]) -> bytes:
+        return b"100644 blob " + (b"0" * 40) + b"\tdocs/d.md\0"
+
+    monkeypatch.setattr(classifier, "_run_git", short_path_tree)
+    assert classifier._is_regular_file(_HEAD, b"docs/d.md") is True  # pyright: ignore[reportPrivateUsage]
+
+
 def test_regular_file_confirmation_accepts_only_the_exact_commit_and_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
