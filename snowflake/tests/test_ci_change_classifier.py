@@ -730,7 +730,9 @@ def test_ci_classifier_job_is_consumed_and_uses_closed_checkout_settings() -> No
         needs = job["needs"]
         needs_values = {needs} if isinstance(needs, str) else set(cast(list[str], needs))
         assert "classify" in needs_values
-        assert job["if"] == "${{ needs.classify.outputs.mode != 'docs-only' }}"
+        assert job["if"] == (
+            "${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}"
+        )
 
     gates = jobs["gates"]
     gates_needs = gates.get("needs", [])

@@ -52,7 +52,9 @@ def test_workflow_consumes_classifier_for_exact_full_only_job_set() -> None:
     for job_id in _FULL_ONLY:
         job = jobs[job_id]
         assert "classify" in _needs_values(job)
-        assert job["if"] == "${{ needs.classify.outputs.mode != 'docs-only' }}"
+        assert job["if"] == (
+            "${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}"
+        )
 
     gates = jobs["gates"]
     assert "classify" not in _needs_values(gates)

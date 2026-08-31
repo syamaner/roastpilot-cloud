@@ -188,8 +188,10 @@ jobs:
     name: Playwright smoke
     needs: classify
     # Skip only a deliberate docs-only result; an absent classifier output
-    # runs heavy jobs so classifier infrastructure failures fail closed.
-    if: ${{ needs.classify.outputs.mode != 'docs-only' }}
+    # runs heavy jobs so classifier infrastructure failures fail closed. A
+    # plain `if` implicitly requires needs success; `!cancelled()` lifts that
+    # gate so failed/skipped classification still runs heavy jobs.
+    if: ${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -227,7 +229,7 @@ jobs:
   snowflake-migrations:
     name: Snowflake migrations (offline)
     needs: classify
-    if: ${{ needs.classify.outputs.mode != 'docs-only' }}
+    if: ${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -308,7 +310,7 @@ jobs:
   mutation-testing:
     name: Mutation testing (security-critical Python)
     needs: classify
-    if: ${{ needs.classify.outputs.mode != 'docs-only' }}
+    if: ${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}
     runs-on: ubuntu-latest
     # F1-S9 slice 2 (issue #12, acceptance criterion 1): mutation testing
     # over the security-critical grant-boundary Python. No Snowflake

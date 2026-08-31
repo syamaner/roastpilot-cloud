@@ -140,6 +140,18 @@ describe("CI trusted gate scripts", () => {
     expect(run.indexOf("git checkout")).toBeLessThan(run.indexOf("python3 -P"));
   });
 
+  it("runs every heavy job on failed classification unless the run is cancelled", () => {
+    for (const jobName of [
+      "playwright",
+      "snowflake-migrations",
+      "mutation-testing",
+    ]) {
+      expect(job(ci.workflow, jobName).if).toBe(
+        "${{ !cancelled() && needs.classify.outputs.mode != 'docs-only' }}",
+      );
+    }
+  });
+
   it("keeps every composed shell body syntactically valid Bash", () => {
     expectBashSyntax(runBody(ci.workflow, RESOLVER_JOB, RESOLVER_STEP));
     expectBashSyntax(runBody(ci.workflow, "classify", CLASSIFY_STEP));
