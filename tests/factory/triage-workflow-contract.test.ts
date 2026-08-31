@@ -2672,13 +2672,13 @@ describe("bounded triage context contract", () => {
       `${mainOnly} && vars.FACTORY_PAUSED == 'true'`,
     );
     expect(asMapping(jobs?.seed)?.if).toBe(
-      `${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
+      `${mainOnly} && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'`,
     );
     expect(asMapping(jobs?.triage)?.if).toBe(
-      `${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
+      `${mainOnly} && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'`,
     );
     expect(asMapping(jobs?.apply)?.if).toBe(
-      `always() && needs.seed.result == 'success' && ${mainOnly} && vars.FACTORY_PAUSED != 'true'`,
+      `always() && needs.seed.result == 'success' && ${mainOnly} && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'`,
     );
   });
 

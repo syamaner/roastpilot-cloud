@@ -87,6 +87,7 @@ jobs:
   # push, or open a PR — it can only leave a modified working tree, which a
   # deterministic step here (not the agent) turns into a patch artifact.
   # ---
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   implement:
     name: Implement (read-only)
     # Codex round-7 finding: workflow_dispatch can be manually run from any
@@ -100,7 +101,7 @@ jobs:
     # all) unless dispatched from main. `github.ref` for a
     # workflow_dispatch-triggered run is exactly the ref the dispatch
     # selected.
-    if: vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
+    if: vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
       triage_generation: ${{ steps.issue-context.outputs.triage_generation }}
@@ -896,6 +897,7 @@ jobs:
   # On any rejection or unexpected failure, posts exactly one explanatory
   # comment on the issue, accurately describing whether a branch was
   # already pushed. ---
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   publish:
     name: Publish patch (privileged)
     needs: implement
@@ -904,7 +906,7 @@ jobs:
     # never run for a non-main dispatch either — `always()` here is about
     # not being skipped by the implement job's own status, not about
     # overriding this branch check.
-    if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main'
+    if: always() && vars.FACTORY_PAUSED != 'true' && github.ref == 'refs/heads/main' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: factory-issue-privileged-${{ inputs.issue_number }}

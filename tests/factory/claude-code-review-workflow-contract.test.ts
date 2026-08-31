@@ -196,16 +196,18 @@ describe("claude-code-review workflow edited-event contract", () => {
       "${{ (github.event.action != 'edited' || github.event.changes.body != null || " +
         "github.event.changes.base != null || github.event.changes.title != null) && " +
         "github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == " +
-        "github.repository && github.event.pull_request.draft == false }}",
+        "github.repository && github.event.pull_request.draft == false && " +
+        "vars.CLAUDE_HEADLESS_ENABLED == 'true' }}",
     );
   });
 
   it("T19 admits only base edits to claude-review, excluding title/body-only edits", () => {
     const expression = jobIf(parseWorkflow(), "claude-review");
     expect(expression).toBe(
-      "${{ (github.event.action != 'edited' || github.event.changes.base != null) && " +
+        "${{ (github.event.action != 'edited' || github.event.changes.base != null) && " +
         "github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == " +
-        "github.repository && github.event.pull_request.draft == false }}",
+        "github.repository && github.event.pull_request.draft == false && " +
+        "vars.CLAUDE_HEADLESS_ENABLED == 'true' }}",
     );
     expect(expression).not.toContain("changes.body");
     expect(expression).not.toContain("changes.title");

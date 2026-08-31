@@ -101,6 +101,7 @@ jobs:
             echo "trusted-source=$TRUSTED_SOURCE"
           } >> "$GITHUB_OUTPUT"
 
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   claude-review:
     needs: resolve-trusted-revision
     # Skip Dependabot PRs: GitHub withholds repository secrets from
@@ -145,7 +146,7 @@ jobs:
     # Title/body-only edits stay excluded because they do not change this
     # job's diff. A base retarget is admitted because it changes the
     # merge-base diff the review judges.
-    if: ${{ (github.event.action != 'edited' || github.event.changes.base != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}
 
     # Adjudicated fold (round-2 Finding 3, #35 rework), now JOB-scoped (Codex
     # finding, PR #76 review, round 3 — see the top-level comment above
@@ -1318,6 +1319,7 @@ jobs:
   # verdict against the trusted spine and posts results is slice 3b-iii —
   # out of scope here; this job's only output is the uploaded artifact
   # below.
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   spec-grounded-review:
     name: Spec-grounded review (read-only)
     needs: resolve-trusted-revision
@@ -1335,7 +1337,7 @@ jobs:
     # base changes the diff and reviewedBaseSha those criteria are judged
     # against. GitHub's edited payload grammar is closed over those three
     # `changes` keys; non-edited actions short-circuit the guard.
-    if: ${{ (github.event.action != 'edited' || github.event.changes.body != null || github.event.changes.base != null || github.event.changes.title != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.body != null || github.event.changes.base != null || github.event.changes.title != null) && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false && vars.CLAUDE_HEADLESS_ENABLED == 'true' }}
 
     # OWN group, separate from `claude-review`'s (Codex finding, PR #76
     # review, round 3 — see the top-level comment above `jobs:`): an

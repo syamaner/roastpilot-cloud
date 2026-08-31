@@ -61,6 +61,7 @@ jobs:
 
   # --- seed: dumb, deterministic, no agent involved. Applies the
   # non-authorizing readiness and generation hold before triage starts. ---
+  # D-ToS-1: gated with triage/apply so the seed→triage→apply cycle is atomic under the headless switch; seed must not mutate an issue that triage can no longer resolve.
   seed:
     name: Seed inbox label
     # §13 point 9's manual kill-switch (F1-S10): a repo variable the whole
@@ -69,7 +70,7 @@ jobs:
     # this `if:` is the actual enforcement (a GitHub Actions job-level
     # condition, evaluated before any step runs, so the agent never even
     # starts — see `pause-notice` above for the paired observability half).
-    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: >-
@@ -231,10 +232,11 @@ jobs:
   # --- triage: read-only agent job. Runs the .claude/skills/triage skill,
   # which judges the issue and writes ONLY a JSON verdict file — it never
   # calls a GitHub write API itself. ---
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   triage:
     name: Triage (read-only)
     needs: seed
-    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -457,13 +459,14 @@ jobs:
   # readiness is explicitly RESET to `needs-triage` (fail closed — a rerun
   # must not leave a stale ready-to-implement in place just because this
   # run's triage failed). ---
+  # D-ToS-1: headless Claude review is retired (ToS: consumer OAuth tokens are not for CI automation). Job GATED OFF (skips while CLAUDE_HEADLESS_ENABLED unset); machinery retained but inert; revive only via a metered anthropic_api_key.
   apply:
     name: Apply triage verdict (privileged)
     needs: [seed, triage]
     # always() so a triage failure still reaches the fallback path (needs
     # -triage reset + explanatory comment); still gated on the pause flag,
     # since always() alone would otherwise ignore it.
-    if: always() && needs.seed.result == 'success' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true'
+    if: always() && needs.seed.result == 'success' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && vars.FACTORY_PAUSED != 'true' && vars.CLAUDE_HEADLESS_ENABLED == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: factory-issue-privileged-${{ needs.seed.outputs.target_issue_number }}
