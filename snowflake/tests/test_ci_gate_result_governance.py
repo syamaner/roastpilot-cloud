@@ -394,6 +394,18 @@ def test_rejects_a_skipped_always_job(capsys: pytest.CaptureFixture[str]) -> Non
     assert "gates\tsuccess\tskipped" in output
 
 
+@pytest.mark.parametrize("result", ["skipped", "failure"])
+def test_rejects_an_unsuccessful_trusted_revision_resolver(
+    capsys: pytest.CaptureFixture[str], result: str
+) -> None:
+    """TG5: the unconditional trusted-revision resolver must succeed."""
+
+    needs = _cloud_needs(full_only_result="success")
+    needs["resolve-trusted-revision"] = {"result": result}
+    output = _assert_failure(capsys, _arguments(), _environment("full", needs))
+    assert f"resolve-trusted-revision\tsuccess\t{result}" in output
+
+
 @pytest.mark.parametrize("mode", ["", None])
 def test_missing_mode_fails_closed(
     capsys: pytest.CaptureFixture[str], mode: str | None
