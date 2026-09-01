@@ -39,7 +39,16 @@ MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__z_roles_grants.sql"
 
 ALLOWED_ROLES = frozenset({"PUBLIC_WEB", "ROASTPILOT_AGENT"})
 ALLOWED_OBJECT_TYPES = frozenset(
-    {"DATABASE", "SCHEMA", "WAREHOUSE", "VIEW", "TABLE", "STAGE", "PROCEDURE"}
+    {
+        "DATABASE",
+        "SCHEMA",
+        "WAREHOUSE",
+        "VIEW",
+        "TABLE",
+        "STAGE",
+        "FILE FORMAT",
+        "PROCEDURE",
+    }
 )
 
 
@@ -81,6 +90,13 @@ EXPECTED_MANIFEST = frozenset(
             for table in _AGENT_TABLES
         ),
         _grant("READ,WRITE", "STAGE", "app.roast_artifacts", "ROASTPILOT_AGENT"),
+        _grant("USAGE", "FILE FORMAT", "app.roast_jsonl_format", "ROASTPILOT_AGENT"),
+        _grant(
+            "USAGE",
+            "PROCEDURE",
+            "app.load_roast_telemetry(string, string)",
+            "ROASTPILOT_AGENT",
+        ),
     }
 )
 
@@ -89,7 +105,7 @@ _USE_SCHEMA_PATTERN = re.compile(r"USE\s+SCHEMA\s+app\Z", re.IGNORECASE)
 _GRANT_PATTERN = re.compile(
     r"GRANT\s+"
     r"(?P<privileges>[A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+"
-    r"ON\s+(?P<object_type>[A-Za-z]+)\s+"
+    r"ON\s+(?P<object_type>FILE\s+FORMAT|[A-Za-z]+)\s+"
     r"(?P<object_name>.+?)\s+"
     r"TO\s+ROLE\s+(?P<role_name>\S+)\Z",
     re.IGNORECASE | re.DOTALL,
@@ -122,7 +138,7 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
         privileges = frozenset(
             token.strip().upper() for token in match.group("privileges").split(",")
         )
-        object_type = match.group("object_type").upper()
+        object_type = re.sub(r"\s+", " ", match.group("object_type")).upper()
         object_name = match.group("object_name")
         role_name = match.group("role_name")
         grant = Grant(privileges, object_type, object_name, role_name)
@@ -134,6 +150,8 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
             violations.append(f"unauthorized grantee in: {statement}")
         if object_type == "PROCEDURE" and privileges != frozenset({"USAGE"}):
             violations.append(f"procedure privilege must be exactly USAGE in: {statement}")
+        if object_type == "FILE FORMAT" and privileges != frozenset({"USAGE"}):
+            violations.append(f"file format privilege must be exactly USAGE in: {statement}")
         if object_type == "STAGE" and privileges != frozenset({"READ", "WRITE"}):
             violations.append(f"stage privileges must be exactly READ, WRITE in: {statement}")
 

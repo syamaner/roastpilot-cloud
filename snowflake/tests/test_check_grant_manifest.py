@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import check_grant_manifest  # noqa: E402
+import assert_dev_ci_grants  # noqa: E402
 import validate_migrations  # noqa: E402
 
 
@@ -26,7 +27,7 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
     assert check_grant_manifest.main() == 0
-    assert capsys.readouterr().out == "grant manifest matches exactly (9 grants)\n"
+    assert capsys.readouterr().out == "grant manifest matches exactly (11 grants)\n"
 
 
 def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> None:
@@ -236,6 +237,123 @@ def test_t14_privilege_order_is_invariant() -> None:
 def test_t15_missing_sibling_module_raises_import_error() -> None:
     with pytest.raises(ImportError, match="cannot load sibling module"):
         check_grant_manifest._load_sibling_module("this_module_does_not_exist")
+
+
+def test_t16_two_word_file_format_type_parses_as_one_closed_type() -> None:
+    parsed, violations = check_grant_manifest.parse_rendered_sql(
+        "GRANT USAGE ON FILE   FORMAT app.roast_jsonl_format TO ROLE ROASTPILOT_AGENT;"
+    )
+    assert violations == []
+    assert len(parsed) == 1
+    grant = next(iter(parsed))
+    assert grant.object_type == "FILE FORMAT"
+    assert grant.object_name == "app.roast_jsonl_format"
+
+
+@pytest.mark.parametrize(
+    "privileges",
+    ["SELECT", "USAGE, READ"],
+)
+def test_t17_file_format_privilege_is_exactly_usage(privileges: str) -> None:
+    sql = (
+        f"GRANT {privileges} ON FILE FORMAT app.roast_jsonl_format "
+        "TO ROLE ROASTPILOT_AGENT;"
+    )
+    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert any("file format privilege must be exactly USAGE" in item for item in violations)
+
+
+@pytest.mark.parametrize("role", ["PUBLIC", "ACCOUNTADMIN", "PUBLIC_WEB"])
+def test_t18_file_format_rejects_every_unapproved_grantee(role: str) -> None:
+    sql = f"GRANT USAGE ON FILE FORMAT app.roast_jsonl_format TO ROLE {role};"
+    parsed, violations = check_grant_manifest.parse_rendered_sql(sql)
+    if role == "PUBLIC_WEB":
+        assert violations == []
+        manifest_violations = check_grant_manifest.manifest_violations(sql)
+        assert any("extra grant" in item and "PUBLIC_WEB" in item for item in manifest_violations)
+    else:
+        assert any("unauthorized grantee" in item and role in item for item in violations)
+    assert parsed
+
+
+@pytest.mark.parametrize("object_type", ["MATERIALIZED VIEW", "EXTERNAL TABLE"])
+def test_t19_general_two_word_object_types_remain_closed(object_type: str) -> None:
+    sql = f"GRANT SELECT ON {object_type} app.x TO ROLE ROASTPILOT_AGENT;"
+    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert any("unrecognized object type" in item for item in violations)
+
+
+def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None:
+    additions = {
+        check_grant_manifest._grant(
+            "USAGE", "FILE FORMAT", "app.roast_jsonl_format", "ROASTPILOT_AGENT"
+        ),
+        check_grant_manifest._grant(
+            "USAGE",
+            "PROCEDURE",
+            "app.load_roast_telemetry(string, string)",
+            "ROASTPILOT_AGENT",
+        ),
+    }
+    previous_manifest = check_grant_manifest.EXPECTED_MANIFEST - additions
+    assert len(check_grant_manifest.EXPECTED_MANIFEST) == 11
+    assert len(previous_manifest) == 9
+    assert check_grant_manifest.EXPECTED_MANIFEST - previous_manifest == additions
+
+
+@pytest.mark.parametrize(
+    "required, object_name",
+    [
+        (
+            "grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT;",
+            "app.roast_jsonl_format",
+        ),
+        (
+            "grant usage on procedure app.load_roast_telemetry(string, string) "
+            "to role ROASTPILOT_AGENT;",
+            "app.load_roast_telemetry(string, string)",
+        ),
+    ],
+)
+def test_t21_removing_either_new_grant_is_named_missing(
+    rendered_sql: str, required: str, object_name: str
+) -> None:
+    violations = check_grant_manifest.manifest_violations(rendered_sql.replace(required, ""))
+    assert any("missing grant" in item and object_name in item for item in violations)
+
+
+def test_t22_procedure_signature_separator_is_load_bearing(rendered_sql: str) -> None:
+    committed = "app.load_roast_telemetry(string, string)"
+    malformed = "app.load_roast_telemetry(string,string)"
+    violations = check_grant_manifest.manifest_violations(rendered_sql.replace(committed, malformed))
+    assert any("missing grant" in item and committed in item for item in violations)
+    assert any("extra grant" in item and malformed in item for item in violations)
+    assert (
+        assert_dev_ci_grants._live_procedure_signature("ROASTPILOT_DEV", committed)
+        == "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)"
+    )
+
+
+def test_t23_grant_header_names_new_caller_rights_boundary(rendered_sql: str) -> None:
+    header = rendered_sql.split("use schema app;", 1)[0]
+    assert "no procedure grant" not in header.lower()
+    assert "load_roast_telemetry" in header.lower()
+
+
+def test_t24_live_agent_manifest_derives_both_new_rows() -> None:
+    agent = assert_dev_ci_grants.expected_role_grants("ROASTPILOT_DEV")["ROASTPILOT_AGENT"]
+    assert (
+        "USAGE",
+        "FILE FORMAT",
+        "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+        "ROASTPILOT_AGENT",
+    ) in agent
+    assert (
+        "USAGE",
+        "PROCEDURE",
+        "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)",
+        "ROASTPILOT_AGENT",
+    ) in agent
 
 
 def test_main_returns_1_and_reports_extra_grant(
