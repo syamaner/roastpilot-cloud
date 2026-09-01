@@ -305,12 +305,12 @@ def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None
     "required, object_name",
     [
         (
-            "grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT;",
+            "grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT",
             "app.roast_jsonl_format",
         ),
         (
             "grant usage on procedure app.load_roast_telemetry(string, string) "
-            "to role ROASTPILOT_AGENT;",
+            "to role ROASTPILOT_AGENT",
             "app.load_roast_telemetry(string, string)",
         ),
     ],
