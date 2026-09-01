@@ -15,8 +15,11 @@
 -- SCHEMA APP, and USAGE ON WAREHOUSE for PUBLIC_WEB and ROASTPILOT_AGENT) are
 -- operator-provisioned ACCOUNTADMIN DDL (D106-class, like role creation), not
 -- part of this migration. PUBLIC_WEB is limited here to two secure views and
--- SUBMIT_REVIEW. ROASTPILOT_AGENT receives only the deferred-Option-B data
--- plane: five tables and the internal artifact stage, with no procedure grant.
+-- SUBMIT_REVIEW. ROASTPILOT_AGENT receives the deferred-Option-B data plane:
+-- five tables, the internal artifact stage and file format, plus its first
+-- procedure grant, LOAD_ROAST_TELEMETRY. That caller-rights procedure confers
+-- nothing beyond the role's existing telemetry-table and artifact-stage grants
+-- (D-416-C).
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before its first grant.
@@ -32,3 +35,5 @@ grant select, insert, update, delete on table app.roast_artifacts to role ROASTP
 grant select, insert, update, delete on table app.tasting_reviews to role ROASTPILOT_AGENT;
 grant select, insert, update, delete on table app.reference_roast_summaries to role ROASTPILOT_AGENT;
 grant read, write on stage app.roast_artifacts to role ROASTPILOT_AGENT;
+grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT;
+grant usage on procedure app.load_roast_telemetry(string, string) to role ROASTPILOT_AGENT;
