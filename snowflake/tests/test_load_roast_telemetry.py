@@ -166,6 +166,18 @@ def test_t_type_filter_is_byte_exact_and_type_appears_only_there() -> None:
     assert len(re.findall(r"\btype\b", dynamic_sql, re.IGNORECASE)) == 1
 
 
+def test_t_stage_scan_is_bounded_to_guarded_run_prefix() -> None:
+    dynamic_sql = _render_dynamic_sql()
+    assert f"from @app.roast_artifacts/{RUN_ID}/ " in dynamic_sql
+
+
+def test_t_stage_filename_predicate_is_byte_exact() -> None:
+    dynamic_sql = _render_dynamic_sql()
+    expected_filename = f"{RUN_ID}/roast.jsonl"
+    assert f"metadata$filename = '{expected_filename}'" in dynamic_sql
+    assert re.search(r"\bpattern\s*=>", dynamic_sql, re.IGNORECASE) is None
+
+
 def test_t_insert_projection_matches_independent_literal_exactly() -> None:
     columns, expressions = _insert_projection()
     assert columns == [destination for destination, _ in SOURCE_TO_DEST]
@@ -297,10 +309,10 @@ def test_t_transaction_rolls_back_and_reraises() -> None:
     ) is not None
 
 
-def test_t_dynamic_sql_interpolates_exactly_two_validated_parameters() -> None:
+def test_t_dynamic_sql_interpolates_only_validated_parameters() -> None:
     without_literals = re.sub(r"'(?:''|[^'])*'", "", _execute_expression())
     variables = re.findall(r"\b[pv]_[a-z0-9_]+\b", without_literals, re.IGNORECASE)
-    assert variables == ["p_roast_id", "p_run_id"]
+    assert variables == ["p_roast_id", "p_run_id", "p_run_id"]
     operators_only = re.sub(r"\bp_(?:roast|run)_id\b", "", without_literals)
     assert operators_only.replace("||", "").strip() == ";"
     executes = re.findall(r"execute\s+immediate\s+:v_insert_sql\s*;", STRIPPED, re.I)

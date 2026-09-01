@@ -12,6 +12,10 @@
 -- D-416-B uses INSERT SELECT because COPY transformations cannot carry the
 -- mandatory record-kind filter. D-416-A leaves both optional output columns
 -- NULL so no identifying source fields are persisted.
+-- Snowflake treats a path in a stage reference as a prefix. The guarded run-id
+-- prefix bounds the scan to one run directory, but alone would also match
+-- compressed or similarly named siblings. The byte-exact METADATA$FILENAME
+-- predicate pins one object; alone it would scan and parse unrelated artifacts.
 --
 -- Residual: offline guard tests use Python ``re`` while Snowflake evaluates
 -- REGEXP_LIKE with RE2. RE2's ``$`` is stricter (it has no trailing-newline
@@ -67,10 +71,11 @@ begin
         '  $1:fan_level_percent::int, ' ||
         '  null, ' ||
         '  null ' ||
-        -- PINNED AT #417: this is the one admitted export basename.
-        'from @app.roast_artifacts/' || p_run_id || '/roast.jsonl ' ||
+        'from @app.roast_artifacts/' || p_run_id || '/ ' ||
         '  (file_format => ''app.roast_jsonl_format'') ' ||
-        'where $1:type::string = ''telemetry''';
+        -- PINNED AT #417: this is the one admitted export basename.
+        'where metadata$filename = ''' || p_run_id || '/roast.jsonl'' ' ||
+        '  and $1:type::string = ''telemetry''';
       execute immediate :v_insert_sql;
       v_loaded_rows := sqlrowcount;
       if (v_loaded_rows = 0) then

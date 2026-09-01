@@ -15,6 +15,7 @@ SNOWFLAKE_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = (SNOWFLAKE_DIR / "fixtures").resolve()
 FIXTURE_PATH = SNOWFLAKE_DIR / "fixtures" / "m1-export" / "session-1" / "roast.jsonl"
 ALLOWED_TARGETS = frozenset({"ROASTPILOT_DEV"})
+EXPECTED_ROLE = "ROASTPILOT_AGENT"
 TEST_RUN_ID = "c3_s1_live_verify"
 TEST_ROAST_ID = "c3c3c3c3-4160-4160-4160-c3c3c3c3c3c3"
 SELECT_COLUMNS = (
@@ -88,6 +89,9 @@ def verify_live_load(
     cursor.execute("SELECT CURRENT_DATABASE()")
     if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
         raise TelemetryVerifyError("connected database does not match target")
+    cursor.execute("SELECT CURRENT_ROLE()")
+    if _first_value(cursor.fetchone(), "CURRENT_ROLE()") != EXPECTED_ROLE:
+        raise TelemetryVerifyError("connected role is not ROASTPILOT_AGENT")
 
     body_error: BaseException | None = None
     try:

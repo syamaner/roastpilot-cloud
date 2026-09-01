@@ -32,11 +32,13 @@ class FakeCursor:
         self,
         *,
         database: str = "ROASTPILOT_DEV",
+        role: str = "ROASTPILOT_AGENT",
         loaded: object = "1",
         actual: list[tuple[object, ...]] | None = None,
         fail_on: str | None = None,
     ) -> None:
         self.database = database
+        self.role = role
         self.loaded = loaded
         self.actual = [EXPECTED_TUPLE] if actual is None else actual
         self.fail_on = fail_on
@@ -53,6 +55,8 @@ class FakeCursor:
         command = self.executed[-1][0]
         if command == "SELECT CURRENT_DATABASE()":
             return (self.database,)
+        if command == "SELECT CURRENT_ROLE()":
+            return (self.role,)
         if command.startswith("CALL app.load_roast_telemetry"):
             return (self.loaded,)
         raise AssertionError(f"unexpected fetchone after: {command}")
@@ -124,20 +128,27 @@ def test_happy_path_pins_put_call_select_and_cleanup(
     ) == 1
 
     commands = _commands(connection)
-    assert commands[0:2] == ["USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()"]
-    assert commands[2] == (
+    assert commands[0:3] == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+    ]
+    assert commands.index("SELECT CURRENT_ROLE()") < next(
+        index for index, command in enumerate(commands) if command.startswith("PUT ")
+    )
+    assert commands[3] == (
         f"PUT '{load_telemetry_verify_live.FIXTURE_PATH.resolve().as_uri()}' "
         f"@app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID} "
         "AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
     )
-    assert connection.fake_cursor.executed[3] == (
+    assert connection.fake_cursor.executed[4] == (
         "CALL app.load_roast_telemetry(%s, %s)",
         (
             load_telemetry_verify_live.TEST_RUN_ID,
             load_telemetry_verify_live.TEST_ROAST_ID,
         ),
     )
-    assert connection.fake_cursor.executed[4] == (
+    assert connection.fake_cursor.executed[5] == (
         f"SELECT {', '.join(load_telemetry_verify_live.SELECT_COLUMNS)} "
         "FROM app.roast_telemetry WHERE roast_id = %s ORDER BY elapsed_s",
         (load_telemetry_verify_live.TEST_ROAST_ID,),
@@ -197,6 +208,27 @@ def test_database_mismatch_rejects_before_put_or_cleanup(
             "ROASTPILOT_DEV",
         )
     assert _commands(connection) == ["USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()"]
+
+
+def test_role_mismatch_rejects_before_put_or_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(role="ACCOUNTADMIN")
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="connected role is not ROASTPILOT_AGENT",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    assert _commands(connection) == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+    ]
 
 
 def test_row_count_mismatch_is_detected(monkeypatch: pytest.MonkeyPatch) -> None:
