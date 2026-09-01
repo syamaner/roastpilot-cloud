@@ -89,6 +89,7 @@ def verify_live_load(
     if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
         raise TelemetryVerifyError("connected database does not match target")
 
+    body_error: BaseException | None = None
     try:
         cursor.execute(
             f"PUT '{fixture_uri}' "
@@ -110,14 +111,34 @@ def verify_live_load(
         if str(loaded) != str(len(expected)):
             raise TelemetryVerifyError("procedure row count does not match fixture expectation")
         return len(actual)
+    except BaseException as exc:
+        body_error = exc
+        raise
     finally:
+        cleanup_errors: list[BaseException] = []
         try:
             cursor.execute(
                 "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
                 (TEST_ROAST_ID,),
             )
-        finally:
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        try:
             cursor.execute(f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/")
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        if cleanup_errors:
+            if body_error is not None:
+                for cleanup_error in cleanup_errors:
+                    body_error.add_note(f"cleanup failed: {cleanup_error!r}")
+            else:
+                primary_cleanup_error = cleanup_errors[0]
+                for cleanup_error in cleanup_errors[1:]:
+                    primary_cleanup_error.add_note(
+                        f"additional cleanup failure: {cleanup_error!r}"
+                    )
+                raise primary_cleanup_error
 
 
 def _required_env(name: str) -> str:
