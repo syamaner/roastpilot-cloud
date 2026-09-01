@@ -16,6 +16,9 @@
 -- prefix bounds the scan to one run directory; PATTERN prevents same-directory
 -- roast.csv and summary.json artifacts from being opened and parsed as JSONL;
 -- byte-exact METADATA$FILENAME equality pins the exact row source.
+-- Snowflake full-matches PATTERN against the stage-relative path, but its
+-- optional directory group deliberately also supports post-prefix matching
+-- because that anchoring is unverifiable offline.
 --
 -- Residual: offline guard tests use Python ``re`` while Snowflake evaluates
 -- REGEXP_LIKE with RE2. RE2's ``$`` is stricter (it has no trailing-newline
@@ -75,7 +78,7 @@ begin
         '  null, ' ||
         '  null ' ||
         'from @app.roast_artifacts/' || p_run_id || '/ ' ||
-        '  (file_format => ''app.roast_jsonl_format'', pattern => ''.*/roast[.]jsonl'') ' ||
+        '  (file_format => ''app.roast_jsonl_format'', pattern => ''(.*/)?roast[.]jsonl'') ' ||
         -- PINNED AT #417: this is the one admitted export basename.
         'where metadata$filename = ''' || p_run_id || '/roast.jsonl'' ' ||
         '  and $1:type::string = ''telemetry''';

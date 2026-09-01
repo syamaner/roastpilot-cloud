@@ -173,7 +173,7 @@ def test_t_stage_scan_is_bounded_to_guarded_run_prefix() -> None:
 
 def test_t_stage_pattern_opens_only_the_pinned_basename() -> None:
     dynamic_sql = _render_dynamic_sql()
-    assert "pattern => '.*/roast[.]jsonl'" in dynamic_sql
+    assert "pattern => '(.*/)?roast[.]jsonl'" in dynamic_sql
 
 
 def test_t_stage_filename_predicate_is_byte_exact() -> None:
@@ -198,7 +198,10 @@ def test_t_private_source_and_unmapped_fields_never_persist() -> None:
 
 def test_t_stage_reference_uses_named_format_without_inline_json_type() -> None:
     dynamic_sql = _render_dynamic_sql()
-    assert "file_format => 'app.roast_jsonl_format'" in dynamic_sql
+    assert (
+        "(file_format => 'app.roast_jsonl_format', "
+        "pattern => '(.*/)?roast[.]jsonl')"
+    ) in dynamic_sql
     stage_clause = dynamic_sql.split("from @app.roast_artifacts/", 1)[1]
     assert re.search(r"\btype\s*=\s*json\b", stage_clause, re.IGNORECASE) is None
 
