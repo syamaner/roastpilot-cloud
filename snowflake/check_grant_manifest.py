@@ -102,14 +102,31 @@ EXPECTED_MANIFEST = frozenset(
 
 _COMMENT_PATTERN = re.compile(r"--[^\n]*(?:\n|$)|/\*.*?\*/", re.DOTALL)
 _USE_SCHEMA_PATTERN = re.compile(r"USE\s+SCHEMA\s+app\Z", re.IGNORECASE)
+_OBJECT_TYPE_PATTERN = "|".join(
+    re.escape(object_type).replace(r"\ ", r"\s+")
+    for object_type in sorted(
+        ALLOWED_OBJECT_TYPES,
+        key=lambda object_type: (-object_type.count(" "), object_type),
+    )
+)
 _GRANT_PATTERN = re.compile(
     r"GRANT\s+"
     r"(?P<privileges>[A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+"
-    r"ON\s+(?P<object_type>FILE\s+FORMAT|[A-Za-z]+)\s+"
+    rf"ON\s+(?P<object_type>{_OBJECT_TYPE_PATTERN})\b\s+"
     r"(?P<object_name>.+?)\s+"
     r"TO\s+ROLE\s+(?P<role_name>\S+)\Z",
     re.IGNORECASE | re.DOTALL,
 )
+_GRANT_SHAPE_PATTERN = re.compile(
+    r"GRANT\s+"
+    r"[A-Za-z]+(?:\s*,\s*[A-Za-z]+)*\s+"
+    r"ON\s+(?P<object_type>[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+"
+    r".+?\s+TO\s+ROLE\s+\S+\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_BARE_OBJECT_NAME_PREFIX = re.compile(r"[A-Za-z]+\s+\S", re.DOTALL)
+
+
 def format_grant(grant: Grant) -> str:
     """Return a stable human-readable representation for diagnostics."""
     privileges = ", ".join(sorted(grant.privileges))
@@ -132,7 +149,11 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
 
         match = _GRANT_PATTERN.fullmatch(statement)
         if match is None:
-            violations.append(f"unrecognized statement: {statement}")
+            shape_match = _GRANT_SHAPE_PATTERN.fullmatch(statement)
+            if shape_match is None:
+                violations.append(f"unrecognized statement: {statement}")
+            else:
+                violations.append(f"unrecognized object type in: {statement}")
             continue
 
         privileges = frozenset(
@@ -140,12 +161,13 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
         )
         object_type = re.sub(r"\s+", " ", match.group("object_type")).upper()
         object_name = match.group("object_name")
+        if _BARE_OBJECT_NAME_PREFIX.match(object_name):
+            violations.append(f"unrecognized object type in: {statement}")
+            continue
         role_name = match.group("role_name")
         grant = Grant(privileges, object_type, object_name, role_name)
         grants.add(grant)
 
-        if object_type not in ALLOWED_OBJECT_TYPES:
-            violations.append(f"unrecognized object type in: {statement}")
         if role_name not in ALLOWED_ROLES:
             violations.append(f"unauthorized grantee in: {statement}")
         if object_type == "PROCEDURE" and privileges != frozenset({"USAGE"}):

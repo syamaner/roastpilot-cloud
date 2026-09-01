@@ -276,11 +276,37 @@ def test_t18_file_format_rejects_every_unapproved_grantee(role: str) -> None:
     assert parsed
 
 
-@pytest.mark.parametrize("object_type", ["MATERIALIZED VIEW", "EXTERNAL TABLE"])
+@pytest.mark.parametrize(
+    "object_type",
+    ["DATABASE ROLE", "MATERIALIZED VIEW", "EXTERNAL TABLE"],
+)
 def test_t19_general_two_word_object_types_remain_closed(object_type: str) -> None:
     sql = f"GRANT SELECT ON {object_type} app.x TO ROLE ROASTPILOT_AGENT;"
     _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unrecognized object type" in item for item in violations)
+
+
+def test_t19_reports_every_unrecognized_multi_word_object_type() -> None:
+    sql = ";".join(
+        f"GRANT SELECT ON {object_type} app.x TO ROLE ROASTPILOT_AGENT"
+        for object_type in ("DATABASE ROLE", "MATERIALIZED VIEW", "EXTERNAL TABLE")
+    )
+    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert len(violations) == 3
+    assert all("unrecognized object type" in violation for violation in violations)
+
+
+def test_t19_every_rendered_grant_parses_with_the_closed_object_type_grammar(
+    rendered_sql: str,
+) -> None:
+    uncommented = check_grant_manifest._COMMENT_PATTERN.sub("", rendered_sql)
+    statements = [
+        statement.strip()
+        for statement in uncommented.split(";")
+        if statement.strip().lower().startswith("grant ")
+    ]
+    assert len(statements) == len(check_grant_manifest.EXPECTED_MANIFEST)
+    assert all(check_grant_manifest._GRANT_PATTERN.fullmatch(statement) for statement in statements)
 
 
 def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None:

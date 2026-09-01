@@ -12,6 +12,13 @@ SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
 MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__proc_load_roast_telemetry.sql"
 MIGRATION = MIGRATION_PATH.read_text(encoding="utf-8")
 STRIPPED = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", MIGRATION, flags=re.DOTALL)
+DELETE_MIGRATION = (
+    SNOWFLAKE_DIR / "migrations" / "R__proc_delete_roast.sql"
+).read_text(encoding="utf-8")
+CELSIUS_FORBIDDEN = re.compile(
+    r"fahrenheit|_f\b|\*\s*9\s*/\s*5|\*\s*1\.8|\+\s*32",
+    re.IGNORECASE,
+)
 
 # Prompt-transcribed source-to-destination contract, deliberately not parsed
 # from the migration. Tests below compare this independent literal to the SQL.
@@ -112,6 +119,20 @@ def fixture_expected_rows(path: Path, roast_id: str) -> list[dict[str, object]]:
     return [row for row in mapped if row is not None]
 
 
+def _roast_id_guard_grammar(migration: str) -> str:
+    guard = re.search(
+        r"regexp_like\s*\(\s*p_roast_id\s*,\s*'(?P<grammar>\^[^']+\$)'",
+        migration,
+        re.IGNORECASE,
+    )
+    assert guard is not None
+    return guard.group("grammar")
+
+
+def _assert_celsius_only(value: object) -> None:
+    assert CELSIUS_FORBIDDEN.search(json.dumps(value, sort_keys=True)) is None
+
+
 def test_t_exact_signature_and_attribute_run() -> None:
     expected = """create or replace procedure load_roast_telemetry(p_run_id string, p_roast_id string)
 copy grants
@@ -122,6 +143,21 @@ as"""
     assert expected in STRIPPED
     assert len(re.findall(r"\bcreate\s+or\s+replace\s+procedure\b", STRIPPED, re.I)) == 1
     assert re.search(r"\bexecute\s+as\s+owner\b", STRIPPED, re.I) is None
+
+
+def test_t_use_schema_precedes_the_only_procedure_create() -> None:
+    use_schema = re.search(r"\buse\s+schema\s+app\s*;", STRIPPED, re.IGNORECASE)
+    create = re.search(r"\bcreate\s+or\s+replace\s+procedure\b", STRIPPED, re.IGNORECASE)
+    assert use_schema is not None and create is not None
+    assert use_schema.start() < create.start()
+
+
+def test_t_scope_fence_contains_no_grant_statement() -> None:
+    assert re.search(r"\bgrant\b", STRIPPED, re.IGNORECASE) is None
+
+
+def test_t_proc_sql_is_celsius_only() -> None:
+    assert CELSIUS_FORBIDDEN.search(STRIPPED) is None
 
 
 def test_t_type_filter_is_byte_exact_and_type_appears_only_there() -> None:
@@ -187,6 +223,28 @@ def test_t_run_id_guard_literal_executes_against_hostile_table() -> None:
     assert re.fullmatch(grammar, "plainAlphanumeric42") is not None
 
 
+def test_t_roast_id_guard_is_byte_equal_to_delete_roast() -> None:
+    assert _roast_id_guard_grammar(MIGRATION) == _roast_id_guard_grammar(DELETE_MIGRATION)
+
+
+def test_t_roast_id_guard_literal_executes_against_hostile_table() -> None:
+    grammar = _roast_id_guard_grammar(MIGRATION)
+    hostile = (
+        "0123456-89ab-cdef-0123-456789abcdef",
+        "01234567-89a-cdef-0123-456789abcdef",
+        "01234567-89ab-cde-0123-456789abcdef",
+        "01234567-89ab-cdef-012-456789abcdef",
+        "01234567-89ab-cdef-0123-456789abcde",
+        "01234567-89ab-cdef-0123-456789abcdef'",
+        "01234567-89ab-cdef-0123-456789abcdef\n",
+        "01234567-89AB-CDEF-0123-456789ABCDEF",
+        "",
+        "01234567-89ab-cdef-0123-456789abcdef trailing",
+    )
+    assert all(re.fullmatch(grammar, candidate) is None for candidate in hostile)
+    assert re.fullmatch(grammar, ROAST_ID) is not None
+
+
 def test_t_guards_precede_dynamic_sql_transaction_and_dml() -> None:
     roast_guard = re.search(r"regexp_like\s*\(\s*p_roast_id", STRIPPED, re.I)
     run_guard = re.search(r"regexp_like\s*\(\s*p_run_id", STRIPPED, re.I)
@@ -220,7 +278,8 @@ def test_t_replay_delete_is_bound_scoped_and_inside_transaction() -> None:
 def test_t_zero_row_guard_is_after_insert_before_commit() -> None:
     insert = re.search(r"execute\s+immediate", STRIPPED, re.IGNORECASE)
     guard = re.search(
-        r"if\s*\(\s*sqlrowcount\s*=\s*0\s*\)\s*then\s*"
+        r"v_loaded_rows\s*:=\s*sqlrowcount\s*;\s*"
+        r"if\s*\(\s*v_loaded_rows\s*=\s*0\s*\)\s*then\s*"
         r"raise\s+no_telemetry_loaded\s*;\s*end\s+if\s*;",
         STRIPPED,
         re.IGNORECASE,
@@ -273,6 +332,10 @@ def test_t_real_fixtures_have_independent_closed_shapes_and_counts() -> None:
         "session-1": (8.32387712498894, 24.0, 24.0, 0, 0, None, None),
         "session-2": (2.998852041986538, 38.0, 43.0, 0, 0, None, None),
     }
+    expected_last = {
+        "session-1": (1635.9380316250026, 147.0, 167.0, 0, 0, None, None),
+        "session-2": (1391.4337629579823, 179.0, 201.0, 0, 100, None, None),
+    }
     for session in ("session-1", "session-2"):
         fixture = SNOWFLAKE_DIR / "fixtures" / "m1-export" / session / "roast.jsonl"
         source_rows = [json.loads(line) for line in fixture.read_text().splitlines()]
@@ -299,6 +362,8 @@ def test_t_real_fixtures_have_independent_closed_shapes_and_counts() -> None:
             for row in telemetry
         )
         mapped = fixture_expected_rows(fixture, ROAST_ID)
+        _assert_celsius_only(source_rows)
+        _assert_celsius_only(mapped)
         first = mapped[0]
         assert (
             first["elapsed_s"],
@@ -309,6 +374,16 @@ def test_t_real_fixtures_have_independent_closed_shapes_and_counts() -> None:
             first["ror_c_per_min"],
             first["raw"],
         ) == expected_first[session]
+        last = mapped[-1]
+        assert (
+            last["elapsed_s"],
+            last["bean_temp_c"],
+            last["env_temp_c"],
+            last["heat_percent"],
+            last["fan_percent"],
+            last["ror_c_per_min"],
+            last["raw"],
+        ) == expected_last[session]
         assert first["elapsed_s"] != 0
 
 
@@ -350,6 +425,9 @@ def test_t_synthetic_rows_pin_mapping_intent_not_snowflake_behavior() -> None:
         "monotonic_seconds": 5.0,
         "payload": {},
     }
+    _assert_celsius_only(
+        (missing_bean, null_bean, missing_elapsed, out_of_range_heat, event)
+    )
     assert map_source_row(missing_bean, ROAST_ID)["bean_temp_c"] is None
     assert map_source_row(null_bean, ROAST_ID)["bean_temp_c"] is None
     assert map_source_row(missing_elapsed, ROAST_ID)["elapsed_s"] is None

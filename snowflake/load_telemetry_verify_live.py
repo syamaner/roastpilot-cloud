@@ -12,8 +12,9 @@ from typing import Any, Protocol
 
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent
+FIXTURES_DIR = (SNOWFLAKE_DIR / "fixtures").resolve()
 FIXTURE_PATH = SNOWFLAKE_DIR / "fixtures" / "m1-export" / "session-1" / "roast.jsonl"
-ALLOWED_TARGETS = frozenset({"ROASTPILOT_PREVIEW", "ROASTPILOT_DEV"})
+ALLOWED_TARGETS = frozenset({"ROASTPILOT_DEV"})
 TEST_RUN_ID = "c3_s1_live_verify"
 TEST_ROAST_ID = "c3c3c3c3-4160-4160-4160-c3c3c3c3c3c3"
 SELECT_COLUMNS = (
@@ -41,6 +42,14 @@ class Connection(Protocol):
 
 class TelemetryVerifyError(RuntimeError):
     """Raised when live telemetry differs from the fixture-derived contract."""
+
+
+def _validated_fixture_uri(fixture_path: Path) -> str:
+    """Return a closed, quote-safe URI for the repository fixture tree."""
+    resolved = fixture_path.resolve()
+    if not resolved.is_relative_to(FIXTURES_DIR) or "'" in str(resolved):
+        raise TelemetryVerifyError(f"rejected telemetry fixture path: {fixture_path}")
+    return resolved.as_uri()
 
 
 def _load_test_helper() -> Callable[[Path, str], list[dict[str, object]]]:
@@ -71,6 +80,7 @@ def verify_live_load(
     """PUT one real fixture, call the proc, and compare every loaded value."""
     if expected_target not in ALLOWED_TARGETS:
         raise TelemetryVerifyError(f"rejected telemetry target: {expected_target!r}")
+    fixture_uri = _validated_fixture_uri(fixture_path)
     expected_dicts = _load_test_helper()(fixture_path, TEST_ROAST_ID)
     expected = [tuple(row[column] for column in SELECT_COLUMNS) for row in expected_dicts]
     cursor = connection.cursor()
@@ -79,26 +89,35 @@ def verify_live_load(
     if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
         raise TelemetryVerifyError("connected database does not match target")
 
-    cursor.execute(
-        f"PUT '{fixture_path.resolve().as_uri()}' "
-        f"@app.roast_artifacts/{TEST_RUN_ID} AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-    )
-    cursor.execute(
-        "CALL app.load_roast_telemetry(%s, %s)",
-        (TEST_RUN_ID, TEST_ROAST_ID),
-    )
-    loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")
-    cursor.execute(
-        f"SELECT {', '.join(SELECT_COLUMNS)} FROM app.roast_telemetry "
-        "WHERE roast_id = %s ORDER BY elapsed_s",
-        (TEST_ROAST_ID,),
-    )
-    actual = [tuple(row) for row in cursor.fetchall()]
-    if actual != expected:
-        raise TelemetryVerifyError("loaded telemetry does not match fixture expectation")
-    if str(loaded) != str(len(expected)):
-        raise TelemetryVerifyError("procedure row count does not match fixture expectation")
-    return len(actual)
+    try:
+        cursor.execute(
+            f"PUT '{fixture_uri}' "
+            f"@app.roast_artifacts/{TEST_RUN_ID} AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+        )
+        cursor.execute(
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (TEST_RUN_ID, TEST_ROAST_ID),
+        )
+        loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")
+        cursor.execute(
+            f"SELECT {', '.join(SELECT_COLUMNS)} FROM app.roast_telemetry "
+            "WHERE roast_id = %s ORDER BY elapsed_s",
+            (TEST_ROAST_ID,),
+        )
+        actual = [tuple(row) for row in cursor.fetchall()]
+        if actual != expected:
+            raise TelemetryVerifyError("loaded telemetry does not match fixture expectation")
+        if str(loaded) != str(len(expected)):
+            raise TelemetryVerifyError("procedure row count does not match fixture expectation")
+        return len(actual)
+    finally:
+        try:
+            cursor.execute(
+                "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+                (TEST_ROAST_ID,),
+            )
+        finally:
+            cursor.execute(f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/")
 
 
 def _required_env(name: str) -> str:

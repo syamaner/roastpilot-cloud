@@ -13,6 +13,13 @@
 -- mandatory record-kind filter. D-416-A leaves both optional output columns
 -- NULL so no identifying source fields are persisted.
 --
+-- Residual: offline guard tests use Python ``re`` while Snowflake evaluates
+-- REGEXP_LIKE with RE2. RE2's ``$`` is stricter (it has no trailing-newline
+-- exception), so the guards are believed safe; exact equivalence is not
+-- verified offline and is confirmed by the live gate.
+-- Residual: -20007 cannot distinguish a legitimately telemetry-free export
+-- from a missing or corrupt stage file. Empty telemetry is a caller error.
+--
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
 use schema app;
@@ -66,7 +73,7 @@ begin
         'where $1:type::string = ''telemetry''';
       execute immediate :v_insert_sql;
       v_loaded_rows := sqlrowcount;
-      if (sqlrowcount = 0) then
+      if (v_loaded_rows = 0) then
         raise no_telemetry_loaded;
       end if;
     commit;
