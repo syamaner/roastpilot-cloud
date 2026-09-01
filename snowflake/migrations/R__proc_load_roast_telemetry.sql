@@ -13,16 +13,19 @@
 -- mandatory record-kind filter. D-416-A leaves both optional output columns
 -- NULL so no identifying source fields are persisted.
 -- Snowflake treats a path in a stage reference as a prefix. The guarded run-id
--- prefix bounds the scan to one run directory, but alone would also match
--- compressed or similarly named siblings. The byte-exact METADATA$FILENAME
--- predicate pins one object; alone it would scan and parse unrelated artifacts.
+-- prefix bounds the scan to one run directory; PATTERN prevents same-directory
+-- roast.csv and summary.json artifacts from being opened and parsed as JSONL;
+-- byte-exact METADATA$FILENAME equality pins the exact row source.
 --
 -- Residual: offline guard tests use Python ``re`` while Snowflake evaluates
 -- REGEXP_LIKE with RE2. RE2's ``$`` is stricter (it has no trailing-newline
 -- exception), so the guards are believed safe; exact equivalence is not
 -- verified offline and is confirmed by the live gate.
 -- Residual: -20007 cannot distinguish a legitimately telemetry-free export
--- from a missing or corrupt stage file. Empty telemetry is a caller error.
+-- from a missing or corrupt stage file. It also masks uploader compression or
+-- naming mistakes: #417 must pin the agent connector PUT to AUTO_COMPRESS=FALSE
+-- and the exact basename and case. The default TRUE stores that basename with
+-- a .gz suffix, which matches neither PATTERN nor METADATA$FILENAME equality.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
@@ -72,7 +75,7 @@ begin
         '  null, ' ||
         '  null ' ||
         'from @app.roast_artifacts/' || p_run_id || '/ ' ||
-        '  (file_format => ''app.roast_jsonl_format'') ' ||
+        '  (file_format => ''app.roast_jsonl_format'', pattern => ''.*/roast[.]jsonl'') ' ||
         -- PINNED AT #417: this is the one admitted export basename.
         'where metadata$filename = ''' || p_run_id || '/roast.jsonl'' ' ||
         '  and $1:type::string = ''telemetry''';
