@@ -85,6 +85,7 @@ _LIVE_SUBMIT_REVIEW_SIGNATURE = (
 _LIVE_LOAD_TELEMETRY_SIGNATURE = (
     "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)"
 )
+_LIVE_UPSERT_ROAST_SIGNATURE = "ROASTPILOT_DEV.APP.UPSERT_ROAST(VARCHAR, VARCHAR)"
 _LIVE_AGENT_TABLES = (
     "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
     "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
@@ -120,6 +121,7 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
             ("WRITE", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
             ("USAGE", "FILE_FORMAT", "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"),
             ("USAGE", "PROCEDURE", _LIVE_LOAD_TELEMETRY_SIGNATURE),
+            ("USAGE", "PROCEDURE", _LIVE_UPSERT_ROAST_SIGNATURE),
         ]
     else:
         raise ValueError(f"unknown application role fixture: {role_name!r}")
@@ -991,7 +993,7 @@ class TestApplicationRoleManifest:
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
-        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 27)],
+        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 28)],
     )
     def test_d345f_capture_with_shared_app_warehouse_is_compliant(
         self, role_name: str, row_count: int

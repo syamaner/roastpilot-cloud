@@ -27,9 +27,13 @@ export const MIN_SLUG_LENGTH = Math.ceil(
   MIN_SLUG_ENTROPY_BITS / BITS_PER_BASE58_CHAR,
 );
 
+/** Maximum length accepted by the Snowflake upsert payload grammar. */
+export const MAX_SLUG_LENGTH = 64;
+
 /**
  * Checks whether `candidate` is a well-formed public roast slug: base58
- * characters only, and long enough to meet the D11 entropy floor.
+ * characters only, long enough to meet the D11 entropy floor, and no longer
+ * than the Snowflake payload grammar permits.
  *
  * This is a shape check, not a lookup — it never touches Snowflake. It
  * exists so a malformed `/r/[slug]` route param can be rejected before any
@@ -42,7 +46,10 @@ export function isValidSlug(candidate: string): boolean {
   if (typeof candidate !== "string") {
     return false;
   }
-  if (candidate.length < MIN_SLUG_LENGTH) {
+  if (
+    candidate.length < MIN_SLUG_LENGTH ||
+    candidate.length > MAX_SLUG_LENGTH
+  ) {
     return false;
   }
   return BASE58_PATTERN.test(candidate);

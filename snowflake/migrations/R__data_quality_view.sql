@@ -1,6 +1,6 @@
 -- C2-S8 data-quality audit view (issue #316): the live counterpart to the
--- four declarative constraint checks in scripts/seed/rules.ts, expanded to
--- exactly nine branches so each nullable slider is independently auditable.
+-- five declarative constraint checks in scripts/seed/rules.ts, expanded to
+-- exactly ten branches so each nullable slider is independently auditable.
 -- Repeatable (R__) migration -- schemachange re-applies it whenever its
 -- checksum changes, ordered after the versioned set, so it runs after
 -- V1.1.0__base_tables.sql. Grants are deliberately not copied: this view is
@@ -105,4 +105,15 @@ select
   'duplicate idempotency_key' as rule
 from cloud_roasts
 group by idempotency_key
+having count(*) > 1
+
+union all
+
+select
+  'cloud_roasts' as table_name,
+  any_value(id) as row_identity,
+  'public_slug' as field,
+  'duplicate public_slug' as rule
+from cloud_roasts
+group by public_slug
 having count(*) > 1;
