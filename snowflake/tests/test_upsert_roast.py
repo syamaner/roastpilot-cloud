@@ -513,7 +513,13 @@ def test_t31b_roasted_at_requires_explicit_offset_before_timestamp_conversion() 
     assert re.fullmatch(grammar, "2026-08-24T11:00:00Z")
     assert re.fullmatch(grammar, "2026-08-24T11:00:00+01:30")
     assert re.fullmatch(grammar, "2026-08-24T11:00:00-04:00")
-    assert re.fullmatch(grammar, "2026-08-24T11:00:00") is None
+    rejected = (
+        "2026-08-24T11:00:00",
+        "2026-08-24T11:00:00+0530",
+        "2026-08-24T11:00:00z",
+        "2026-08-24T11:00:00 UTC",
+    )
+    assert all(re.fullmatch(grammar, value) is None for value in rejected)
     assert re.search(
         r"typeof\(v_payload:roasted_at_utc\)\s+not\s+in\s*\(\s*'VARCHAR'\s*,\s*'NULL_VALUE'\s*\)",
         STRIPPED,
@@ -536,6 +542,10 @@ def test_t32_artifact_kind_set_matches_seed_rules_and_rejects_hostiles() -> None
 
 def test_t32a_empty_artifact_manifest_is_allowed_for_both_learning_states() -> None:
     assert re.search(r"v_artifact_count\s*=\s*0", STRIPPED, re.I) is None
+    expected_null_safe_counts = """coalesce(count_if(typeof(value) <> 'VARCHAR'), 0),
+         coalesce(count_if(typeof(value) = 'VARCHAR'
+                           and value::string not in ('jsonl', 'csv', 'summary')), 0)"""
+    assert STRIPPED.count(expected_null_safe_counts) == 1
     expected_guard = """if (v_distinct_artifact_count <> v_artifact_count
       or v_invalid_artifact_type_count <> 0
       or v_unknown_artifact_count <> 0) then
@@ -551,6 +561,26 @@ def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
         r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
     )
     assert len(re.findall(pattern, STRIPPED, re.I | re.DOTALL)) == 1
+
+
+def test_t32c_artifact_guard_and_telemetry_purge_share_exact_opt_out_rule() -> None:
+    artifact_predicate = _match(
+        r"if\s*\(\s*(?P<predicate>v_payload:contributed_to_learning::boolean\s*=\s*false)\s+"
+        r"and\s+v_artifact_count\s*<>\s*0\s*\)\s*then"
+    ).group("predicate")
+    assignment = _match(
+        r"(?P<assignment>v_contributed_to_learning\s*:=\s*"
+        r"v_payload:contributed_to_learning::boolean)\s*;"
+    ).group("assignment")
+    purge_predicate = _match(
+        r"if\s*\(\s*(?P<predicate>v_contributed_to_learning\s*=\s*false)\s*\)\s*then\s*"
+        r"delete\s+from\s+app\.roast_telemetry"
+    ).group("predicate")
+    assert artifact_predicate == "v_payload:contributed_to_learning::boolean = false"
+    assert assignment == (
+        "v_contributed_to_learning := v_payload:contributed_to_learning::boolean"
+    )
+    assert purge_predicate == "v_contributed_to_learning = false"
 
 
 def test_t33_uuid_guard_literal_is_byte_equal_across_three_procedures() -> None:

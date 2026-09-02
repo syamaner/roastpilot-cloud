@@ -16,9 +16,18 @@
 -- The payload is a closed 13-key grammar. Failures raise a static message so
 -- roast metadata is never echoed into logs. Offline guard tests use Python re,
 -- while Snowflake REGEXP_LIKE uses RE2; exact equivalence remains live-gate-only.
--- Per #419, an opted-out roast (contributed_to_learning = false) must have an
--- empty artifact manifest, enforcing the artifact-row half of requirement (b),
--- while the transactional opt-out telemetry purge enforces requirement (a).
+-- The cloud roasted_at_utc grammar is deliberately narrower than
+-- seed_validate_live.py: numeric offsets must be colon-separated, and the
+-- connector must emit either that form or uppercase Z.
+-- Per #419, the empty-manifest guard rejects an opted-out roast
+-- (contributed_to_learning = false) before any write, enforcing the artifact-row
+-- half of requirement (b). The telemetry purge is only a transactional
+-- best-effort revocation on this upsert path, not an enforcement boundary: it
+-- closes the revocation-replay case by removing the public curve when a
+-- previously-contributing roast is re-synced as opted out, but it does not cover
+-- a first-sync opt-out because telemetry loading runs after this procedure
+-- returns. Procedure-level enforcement is impossible while the agent role holds
+-- direct telemetry-table DML; #419 owns that enforcement contract.
 -- The stage-file half of (b) remains open: staged files survive an opt-out because
 -- the agent holds stage WRITE independently (#317), and #341's directory-scoped
 -- REMOVE runs at deletion time rather than opt-out. The true case is deliberately
