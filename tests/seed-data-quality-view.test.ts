@@ -117,6 +117,24 @@ function dataQualityViolations(
     }
   }
 
+  const publicSlugCounts = new Map<string, number>();
+  for (const roast of cloudRoasts) {
+    publicSlugCounts.set(
+      roast.public_slug,
+      (publicSlugCounts.get(roast.public_slug) ?? 0) + 1,
+    );
+  }
+  for (const [publicSlug, count] of publicSlugCounts) {
+    if (count > 1) {
+      add(
+        "cloud_roasts",
+        publicSlug,
+        "public_slug",
+        "duplicate public_slug",
+      );
+    }
+  }
+
   return violations;
 }
 
@@ -218,8 +236,16 @@ describe("data_quality_violations oracle", () => {
   });
 
   it("T-dupkey-neg: emits one flag per duplicated key and none when unique", () => {
-    const first = cloneCloudRoast({ id: "roast-1", idempotency_key: "duplicate" });
-    const second = cloneCloudRoast({ id: "roast-2", idempotency_key: "duplicate" });
+    const first = cloneCloudRoast({
+      id: "roast-1",
+      idempotency_key: "duplicate",
+      public_slug: "slug-1",
+    });
+    const second = cloneCloudRoast({
+      id: "roast-2",
+      idempotency_key: "duplicate",
+      public_slug: "slug-2",
+    });
 
     expect(cloudFlags(first, second)).toEqual([{
       table_name: "cloud_roasts",
@@ -236,12 +262,17 @@ describe("data_quality_violations oracle", () => {
   it("T-dupkey-multiplicity: emits one flag for each duplicate group", () => {
     const base = cloneCloudRoast({});
     const rows = [
-      { ...base, id: "roast-a1", idempotency_key: "dupA" },
-      { ...base, id: "roast-a2", idempotency_key: "dupA" },
-      { ...base, id: "roast-b1", idempotency_key: "dupB" },
-      { ...base, id: "roast-b2", idempotency_key: "dupB" },
-      { ...base, id: "roast-b3", idempotency_key: "dupB" },
-      { ...base, id: "roast-unique", idempotency_key: "unique" },
+      { ...base, id: "roast-a1", idempotency_key: "dupA", public_slug: "slug-a1" },
+      { ...base, id: "roast-a2", idempotency_key: "dupA", public_slug: "slug-a2" },
+      { ...base, id: "roast-b1", idempotency_key: "dupB", public_slug: "slug-b1" },
+      { ...base, id: "roast-b2", idempotency_key: "dupB", public_slug: "slug-b2" },
+      { ...base, id: "roast-b3", idempotency_key: "dupB", public_slug: "slug-b3" },
+      {
+        ...base,
+        id: "roast-unique",
+        idempotency_key: "unique",
+        public_slug: "slug-unique",
+      },
     ];
 
     expect(cloudFlags(...rows)).toEqual([
@@ -256,6 +287,62 @@ describe("data_quality_violations oracle", () => {
         row_identity: "dupB",
         field: "idempotency_key",
         rule: "duplicate idempotency_key",
+      },
+    ]);
+  });
+
+  it("T-dupslug-neg: emits one flag per duplicated slug and none when unique", () => {
+    const first = cloneCloudRoast({
+      id: "roast-1",
+      idempotency_key: "key-1",
+      public_slug: "duplicate",
+    });
+    const second = cloneCloudRoast({
+      id: "roast-2",
+      idempotency_key: "key-2",
+      public_slug: "duplicate",
+    });
+
+    expect(cloudFlags(first, second)).toEqual([{
+      table_name: "cloud_roasts",
+      row_identity: "duplicate",
+      field: "public_slug",
+      rule: "duplicate public_slug",
+    }]);
+    expect(cloudFlags(
+      first,
+      { ...second, public_slug: "unique" },
+    )).toEqual([]);
+  });
+
+  it("T-dupslug-multiplicity: emits one flag for each duplicate group", () => {
+    const base = cloneCloudRoast({});
+    const rows = [
+      { ...base, id: "roast-a1", idempotency_key: "key-a1", public_slug: "dupA" },
+      { ...base, id: "roast-a2", idempotency_key: "key-a2", public_slug: "dupA" },
+      { ...base, id: "roast-b1", idempotency_key: "key-b1", public_slug: "dupB" },
+      { ...base, id: "roast-b2", idempotency_key: "key-b2", public_slug: "dupB" },
+      { ...base, id: "roast-b3", idempotency_key: "key-b3", public_slug: "dupB" },
+      {
+        ...base,
+        id: "roast-unique",
+        idempotency_key: "key-unique",
+        public_slug: "unique",
+      },
+    ];
+
+    expect(cloudFlags(...rows)).toEqual([
+      {
+        table_name: "cloud_roasts",
+        row_identity: "dupA",
+        field: "public_slug",
+        rule: "duplicate public_slug",
+      },
+      {
+        table_name: "cloud_roasts",
+        row_identity: "dupB",
+        field: "public_slug",
+        rule: "duplicate public_slug",
       },
     ]);
   });
@@ -284,8 +371,8 @@ describe("data_quality_violations oracle", () => {
 });
 
 describe("data_quality_violations SQL/oracle parity", () => {
-  it("contains exactly nine UNION ALL branches", () => {
-    expect(SQL.match(/\bunion\s+all\b/gi)).toHaveLength(8);
+  it("contains exactly ten branches joined by nine UNION ALL operators", () => {
+    expect(SQL.match(/\bunion\s+all\b/gi)).toHaveLength(9);
   });
 
   it("binds the score branch labels, source, and predicate", () => {
@@ -325,6 +412,12 @@ describe("data_quality_violations SQL/oracle parity", () => {
   it("binds the duplicate-key branch labels, source, and aggregation", () => {
     expect(SQL).toMatch(
       /select\s+'cloud_roasts'\s+as\s+table_name,\s*idempotency_key\s+as\s+row_identity,\s*'idempotency_key'\s+as\s+field,\s*'duplicate idempotency_key'\s+as\s+rule[\s\S]*?from\s+cloud_roasts\s+group\s+by\s+idempotency_key\s+having\s+count\s*\(\s*\*\s*\)\s*>\s*1/i,
+    );
+  });
+
+  it("binds the duplicate-slug branch labels, source, and aggregation", () => {
+    expect(SQL).toMatch(
+      /select\s+'cloud_roasts'\s+as\s+table_name,\s*public_slug\s+as\s+row_identity,\s*'public_slug'\s+as\s+field,\s*'duplicate public_slug'\s+as\s+rule[\s\S]*?from\s+cloud_roasts\s+group\s+by\s+public_slug\s+having\s+count\s*\(\s*\*\s*\)\s*>\s*1/i,
     );
   });
 
