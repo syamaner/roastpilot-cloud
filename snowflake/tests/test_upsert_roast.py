@@ -261,6 +261,12 @@ def test_t10_artifact_replace_delete_is_bound_and_precedes_insert() -> None:
         transaction,
     )
     insert = _match(r"insert\s+into\s+app\.roast_artifacts", transaction)
+    prefix = transaction[: delete.start()]
+    conditional_opens = len(re.findall(r"\bif\s*\(", prefix, re.I))
+    conditional_thens = len(re.findall(r"\)\s*then\b", prefix, re.I))
+    conditional_closes = len(re.findall(r"\bend\s+if\s*;", prefix, re.I))
+    # Equal opens, THENs, and closes prove depth zero; gap/name checks miss a wrapper around both DML statements.
+    assert conditional_opens == conditional_thens == conditional_closes
     assert delete.start() < insert.start()
     assert len(re.findall(r"delete\s+from\s+app\.roast_artifacts", STRIPPED, re.I)) == 1
     assert ":p_run_id" not in delete.group(0)
@@ -471,20 +477,16 @@ def test_t32_artifact_kind_set_matches_seed_rules_and_rejects_hostiles() -> None
     assert re.search(r"v_distinct_artifact_count\s*<>\s*v_artifact_count", STRIPPED, re.I)
     hostile = ("JSONL", "json", "")
     assert all(value not in kinds for value in hostile)
-    assert len(set(("jsonl", "jsonl"))) != len(("jsonl", "jsonl"))
 
 
 def test_t32a_empty_artifact_manifest_is_allowed_for_both_learning_states() -> None:
-    def allowed_by_learning_coupling(
-        contributed_to_learning: bool, artifact_kinds: tuple[str, ...]
-    ) -> bool:
-        return contributed_to_learning or len(artifact_kinds) == 0
-
     assert re.search(r"v_artifact_count\s*=\s*0", STRIPPED, re.I) is None
-    assert len(re.findall(r"coalesce\s*\(\s*count_if\s*\(", STRIPPED, re.I)) == 2
-    assert allowed_by_learning_coupling(False, ())
-    assert not allowed_by_learning_coupling(False, ("jsonl",))
-    assert allowed_by_learning_coupling(True, ())
+    expected_guard = """if (v_distinct_artifact_count <> v_artifact_count
+      or v_invalid_artifact_type_count <> 0
+      or v_unknown_artifact_count <> 0) then
+    raise invalid_payload;
+  end if;"""
+    assert STRIPPED.count(expected_guard) == 1
 
 
 def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
@@ -494,17 +496,6 @@ def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
         r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
     )
     assert len(re.findall(pattern, STRIPPED, re.I | re.DOTALL)) == 1
-
-
-def test_t32c_artifact_kind_distinctness_and_membership_apply_to_nonempty_arrays() -> None:
-    allowed = set(ARTIFACT_BASENAMES)
-
-    def accepted(values: tuple[str, ...]) -> bool:
-        return len(set(values)) == len(values) and all(value in allowed for value in values)
-
-    assert accepted(("jsonl", "csv", "summary"))
-    assert not accepted(("jsonl", "jsonl"))
-    assert all(not accepted(("jsonl", hostile)) for hostile in ("JSONL", "json", ""))
 
 
 def test_t33_uuid_guard_literal_is_byte_equal_across_three_procedures() -> None:

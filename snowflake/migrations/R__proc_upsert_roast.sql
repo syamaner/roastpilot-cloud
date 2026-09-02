@@ -17,9 +17,11 @@
 -- roast metadata is never echoed into logs. Offline guard tests use Python re,
 -- while Snowflake REGEXP_LIKE uses RE2; exact equivalence remains live-gate-only.
 -- Per #419, an opted-out roast (contributed_to_learning = false) must have an
--- empty artifact manifest so a misbehaving connector cannot mint misleading
--- artifact rows. The true case is deliberately unconstrained and may also be
--- empty.
+-- empty artifact manifest, preventing this procedure from minting artifact rows.
+-- This guard binds the manifest only: telemetry rows and staged files written
+-- before an opt-out survive it, so #419's telemetry requirement (a) and the
+-- stage-file half of requirement (b) are not closed by this migration. The true
+-- case is deliberately unconstrained and may also have an empty manifest.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
