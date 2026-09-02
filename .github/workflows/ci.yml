@@ -316,17 +316,21 @@ jobs:
     # over the security-critical grant-boundary Python. No Snowflake
     # connection here (same offline reasoning as snowflake-migrations above)
     # -- mutmut only re-runs this repo's own already-mocked unit tests
-    # against mutated copies of the source. Verified wall time against
-    # this repo's actual three files: ~40-60s for all 593 mutants, so a FULL
-    # run on every PR (not diff-scoped) is the right choice -- mutmut
-    # 3.6.0 has no native "mutate only the changed lines" option anyway
-    # (confirmed via its own `mutmut run --help`), and this surface is
-    # small enough that a full run costs less CI time than the Playwright
-    # job below already does. timeout-minutes is a defensive cap on top
-    # of mutmut's own per-mutant timeout_multiplier/timeout_constant
-    # defaults (a malicious or accidental infinite-loop mutant is bounded
-    # per-mutant already; this is the whole-job backstop).
-    timeout-minutes: 15
+    # against mutated copies of the source. The three completed runner runs
+    # took 12m 44s, 14m 10s, and 14m 45s. On d3ab130 the 15-minute cap was
+    # hit twice, so its completion time is unmeasured. A FULL run
+    # on every PR (not diff-scoped) is the right choice -- mutmut 3.6.0 has
+    # no native "mutate only the changed lines" option anyway (confirmed via
+    # its own `mutmut run --help`). timeout-minutes: 30 gives roughly 2.0 to
+    # 2.4x headroom over the completed runs. Mutant counts belong in the
+    # review-gated `total` field of snowflake/mutation-baseline.json and the
+    # `mutation-testing-stats` CI artifact rather than this comment. It is a
+    # runaway guard, not a gate; mutmut's own per-mutant
+    # timeout_multiplier/timeout_constant do the real bounding. The runtime
+    # is a function of the `only_mutate` surface in snowflake/pyproject.toml,
+    # so adding a module there should include checking that this job still
+    # fits rather than first discovering the overrun as a cancelled check.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
