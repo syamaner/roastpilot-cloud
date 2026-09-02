@@ -264,6 +264,8 @@ def test_t10_artifact_replace_delete_is_bound_and_precedes_insert() -> None:
     assert delete.start() < insert.start()
     assert len(re.findall(r"delete\s+from\s+app\.roast_artifacts", STRIPPED, re.I)) == 1
     assert ":p_run_id" not in delete.group(0)
+    assert re.search(r"\bif\b", transaction[delete.end() : insert.start()], re.I) is None
+    assert "v_artifact_count" not in transaction.lower()
 
 
 @pytest.mark.parametrize("kind, expected_path", EXPECTED_STAGE_PATHS.items())
@@ -466,9 +468,43 @@ def test_t32_artifact_kind_set_matches_seed_rules_and_rejects_hostiles() -> None
         r"ARTIFACT_KINDS\s*=\s*\[(?P<values>[^]]+)\]", rules
     ).group("values")))
     assert kinds == seed_kinds == tuple(ARTIFACT_BASENAMES)
-    assert re.search(r"v_artifact_count\s*=\s*0", STRIPPED, re.I)
     assert re.search(r"v_distinct_artifact_count\s*<>\s*v_artifact_count", STRIPPED, re.I)
-    assert all(value not in kinds for value in ("JSONL", "json", ""))
+    hostile = ("JSONL", "json", "")
+    assert all(value not in kinds for value in hostile)
+    assert len(set(("jsonl", "jsonl"))) != len(("jsonl", "jsonl"))
+
+
+def test_t32a_empty_artifact_manifest_is_allowed_for_both_learning_states() -> None:
+    def allowed_by_learning_coupling(
+        contributed_to_learning: bool, artifact_kinds: tuple[str, ...]
+    ) -> bool:
+        return contributed_to_learning or len(artifact_kinds) == 0
+
+    assert re.search(r"v_artifact_count\s*=\s*0", STRIPPED, re.I) is None
+    assert len(re.findall(r"coalesce\s*\(\s*count_if\s*\(", STRIPPED, re.I)) == 2
+    assert allowed_by_learning_coupling(False, ())
+    assert not allowed_by_learning_coupling(False, ("jsonl",))
+    assert allowed_by_learning_coupling(True, ())
+
+
+def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
+    pattern = (
+        r"if\s*\(\s*v_payload:contributed_to_learning::boolean\s*=\s*false\s+"
+        r"and\s+v_artifact_count\s*<>\s*0\s*\)\s*then\s*"
+        r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
+    )
+    assert len(re.findall(pattern, STRIPPED, re.I | re.DOTALL)) == 1
+
+
+def test_t32c_artifact_kind_distinctness_and_membership_apply_to_nonempty_arrays() -> None:
+    allowed = set(ARTIFACT_BASENAMES)
+
+    def accepted(values: tuple[str, ...]) -> bool:
+        return len(set(values)) == len(values) and all(value in allowed for value in values)
+
+    assert accepted(("jsonl", "csv", "summary"))
+    assert not accepted(("jsonl", "jsonl"))
+    assert all(not accepted(("jsonl", hostile)) for hostile in ("JSONL", "json", ""))
 
 
 def test_t33_uuid_guard_literal_is_byte_equal_across_three_procedures() -> None:

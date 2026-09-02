@@ -16,6 +16,10 @@
 -- The payload is a closed 13-key grammar. Failures raise a static message so
 -- roast metadata is never echoed into logs. Offline guard tests use Python re,
 -- while Snowflake REGEXP_LIKE uses RE2; exact equivalence remains live-gate-only.
+-- Per #419, an opted-out roast (contributed_to_learning = false) must have an
+-- empty artifact manifest so a misbehaving connector cannot mint misleading
+-- artifact rows. The true case is deliberately unconstrained and may also be
+-- empty.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
@@ -162,16 +166,19 @@ begin
   end if;
   v_artifact_kinds := v_payload:artifact_kinds;
   select count(*), count(distinct value::string),
-         count_if(typeof(value) <> 'VARCHAR'),
-         count_if(typeof(value) = 'VARCHAR'
-                  and value::string not in ('jsonl', 'csv', 'summary'))
+         coalesce(count_if(typeof(value) <> 'VARCHAR'), 0),
+         coalesce(count_if(typeof(value) = 'VARCHAR'
+                           and value::string not in ('jsonl', 'csv', 'summary')), 0)
     into :v_artifact_count, :v_distinct_artifact_count,
          :v_invalid_artifact_type_count, :v_unknown_artifact_count
     from table(flatten(input => :v_artifact_kinds));
-  if (v_artifact_count = 0
-      or v_distinct_artifact_count <> v_artifact_count
+  if (v_distinct_artifact_count <> v_artifact_count
       or v_invalid_artifact_type_count <> 0
       or v_unknown_artifact_count <> 0) then
+    raise invalid_payload;
+  end if;
+  if (v_payload:contributed_to_learning::boolean = false
+      and v_artifact_count <> 0) then
     raise invalid_payload;
   end if;
 
