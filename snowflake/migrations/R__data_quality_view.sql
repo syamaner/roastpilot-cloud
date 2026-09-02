@@ -105,4 +105,15 @@ select
   'duplicate idempotency_key' as rule
 from cloud_roasts
 group by idempotency_key
+having count(*) > 1
+
+union all
+
+select
+  'cloud_roasts' as table_name,
+  public_slug as row_identity,
+  'public_slug' as field,
+  'duplicate public_slug' as rule
+from cloud_roasts
+group by public_slug
 having count(*) > 1;

@@ -17,13 +17,20 @@
 -- roast metadata is never echoed into logs. Offline guard tests use Python re,
 -- while Snowflake REGEXP_LIKE uses RE2; exact equivalence remains live-gate-only.
 --
--- Replays preserve id, idempotency_key, public_slug, visibility, and created_at.
+-- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
+-- created_at.
 -- Artifact replacement is idempotent over (roast_id, kind, stage_path) triples,
 -- not artifact row ids, which are regenerated on replay. Paths are constructed
 -- as @app.roast_artifacts/<run_id>/<basename> from a closed kind map. The agent
 -- connector must PUT the exact lowercase basenames with AUTO_COMPRESS=FALSE.
--- The post-MERGE count guard catches pre-existing duplicate keys and fails closed;
--- concurrent MERGE snapshot visibility remains unverified until the live gate.
+-- A shrinking artifact_kinds replay can leave dropped files without manifest
+-- rows, so #341's deletion contract is directory-scoped: derive the run id from
+-- cloud_roasts.idempotency_key and REMOVE @app.roast_artifacts/<run_id>/ rather
+-- than iterating the surviving per-row stage_path values.
+-- The post-MERGE count guards catch pre-existing duplicate idempotency keys and
+-- public slugs and fail closed. They close sequential/replay cases, but concurrent
+-- MERGE snapshot visibility remains unverified in both directions until a live
+-- gate proves it; neither guard is claimed to close that concurrency residual.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
@@ -40,6 +47,7 @@ declare
   invalid_run_id exception (-20008, 'Run id must be a lowercase UUID');
   invalid_payload exception (-20009, 'Payload does not match the closed roast grammar');
   ambiguous_idempotency_key exception (-20010, 'Idempotency key did not resolve uniquely');
+  duplicate_public_slug exception (-20011, 'Public slug did not resolve uniquely');
   v_payload variant;
   v_artifact_kinds array;
   v_artifact_count int;
@@ -48,6 +56,7 @@ declare
   v_unknown_artifact_count int;
   v_existing_count int;
   v_count int;
+  v_slug_count int;
   v_id string;
   v_slug string;
   v_old_bean_origin string;
@@ -173,13 +182,13 @@ begin
   v_contributed_to_learning := v_payload:contributed_to_learning::boolean;
   v_roasted_at_utc := v_payload:roasted_at_utc::timestamp_tz;
 
-  -- Capture the old group before the MERGE so a move can recompute both groups.
-  select count(*), any_value(bean_origin), any_value(roast_level)
-    into :v_existing_count, :v_old_bean_origin, :v_old_roast_level
-    from app.cloud_roasts where idempotency_key = :p_run_id;
-
   begin
     begin transaction;
+      -- Capture the old group in the same transaction snapshot as the MERGE.
+      select count(*), any_value(bean_origin), any_value(roast_level)
+        into :v_existing_count, :v_old_bean_origin, :v_old_roast_level
+        from app.cloud_roasts where idempotency_key = :p_run_id;
+
       merge into app.cloud_roasts as target
       using (
         select uuid_string() as id, :p_run_id as idempotency_key,
@@ -195,7 +204,6 @@ begin
       ) as source
       on target.idempotency_key = source.idempotency_key
       when matched then update set
-        owner_id = source.owner_id,
         bean_origin = source.bean_origin,
         bean_varietal = source.bean_varietal,
         bean_weight_g = source.bean_weight_g,
@@ -231,6 +239,14 @@ begin
       -- Read the stable return pair and post-merge group from the stored row.
       select id, public_slug into :v_id, :v_slug
         from app.cloud_roasts where idempotency_key = :p_run_id;
+      -- Count the stored immutable slug, not a differing replay input slug.
+      v_public_slug := v_slug;
+      select count(*) into :v_slug_count
+        from app.cloud_roasts where public_slug = :v_public_slug;
+      if (v_slug_count <> 1) then
+        raise duplicate_public_slug;
+      end if;
+
       select bean_origin, roast_level into :v_new_bean_origin, :v_new_roast_level
         from app.cloud_roasts where idempotency_key = :p_run_id;
 

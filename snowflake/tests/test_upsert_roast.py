@@ -55,6 +55,11 @@ ARTIFACT_BASENAMES = {
     "csv": "roast.csv",
     "summary": "summary.json",
 }
+EXPECTED_STAGE_PATHS = {
+    "jsonl": "@app.roast_artifacts/01234567-89ab-cdef-0123-456789abcdef/roast.jsonl",
+    "csv": "@app.roast_artifacts/01234567-89ab-cdef-0123-456789abcdef/roast.csv",
+    "summary": "@app.roast_artifacts/01234567-89ab-cdef-0123-456789abcdef/summary.json",
+}
 CLOUD_ROAST_COLUMNS = (
     "id",
     "idempotency_key",
@@ -148,6 +153,14 @@ def _assert_celsius_only(value: object) -> None:
     assert CELSIUS_FORBIDDEN.search(json.dumps(value, sort_keys=True)) is None
 
 
+def _find_repo_root() -> Path:
+    marker = Path("scripts") / "seed" / "rules.ts"
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / marker).is_file():
+            return candidate
+    raise AssertionError(f"repository root containing {marker} not found from {__file__}")
+
+
 def test_t01_exact_signature_attributes_and_single_create() -> None:
     expected = """create or replace procedure upsert_roast(p_run_id string, p_payload string)
 copy grants
@@ -177,7 +190,8 @@ def test_t03_single_merge_has_exact_idempotency_on_clause() -> None:
 
 
 @pytest.mark.parametrize(
-    "immutable", ["id", "idempotency_key", "public_slug", "visibility", "created_at"]
+    "immutable",
+    ["id", "idempotency_key", "owner_id", "public_slug", "visibility", "created_at"],
 )
 def test_t04_matched_update_excludes_each_immutable_column(immutable: str) -> None:
     assignments = re.findall(r"\b([a-z_]+)\s*=", _matched_set(), re.I)
@@ -186,6 +200,25 @@ def test_t04_matched_update_excludes_each_immutable_column(immutable: str) -> No
 
 def test_t05_matched_update_refreshes_updated_at() -> None:
     assert re.search(r"updated_at\s*=\s*current_timestamp\(\)", _matched_set(), re.I)
+
+
+def test_t05b_matched_update_contains_only_payload_columns_or_updated_at() -> None:
+    assignments = set(re.findall(r"\b([a-z_]+)\s*=", _matched_set(), re.I))
+    expected = {
+        "bean_origin",
+        "bean_varietal",
+        "bean_weight_g",
+        "profile_name",
+        "roast_level",
+        "summary",
+        "operator_rating",
+        "operator_notes",
+        "contributed_to_learning",
+        "roasted_at_utc",
+        "updated_at",
+    }
+    assert assignments == expected
+    assert assignments <= set(PAYLOAD_KEYS) | {"updated_at"}
 
 
 def test_t06_insert_has_all_17_columns_and_explicit_generators() -> None:
@@ -233,8 +266,8 @@ def test_t10_artifact_replace_delete_is_bound_and_precedes_insert() -> None:
     assert ":p_run_id" not in delete.group(0)
 
 
-@pytest.mark.parametrize("kind, basename", ARTIFACT_BASENAMES.items())
-def test_t11_stage_path_renders_exact_closed_mapping(kind: str, basename: str) -> None:
+@pytest.mark.parametrize("kind, expected_path", EXPECTED_STAGE_PATHS.items())
+def test_t11_stage_path_renders_exact_closed_mapping(kind: str, expected_path: str) -> None:
     insert = _artifact_insert()
     assert re.search(
         r"'@app\.roast_artifacts/'\s*\|\|\s*:p_run_id\s*\|\|\s*'/'\s*\|\|\s*case",
@@ -243,9 +276,8 @@ def test_t11_stage_path_renders_exact_closed_mapping(kind: str, basename: str) -
     )
     pairs = dict(re.findall(r"when\s+'([^']+)'\s+then\s+'([^']+)'", insert, re.I))
     assert pairs == ARTIFACT_BASENAMES
-    assert f"@app.roast_artifacts/{RUN_ID}/{pairs[kind]}" == (
-        f"@app.roast_artifacts/{RUN_ID}/{basename}"
-    )
+    rendered_path = f"@app.roast_artifacts/{RUN_ID}/{pairs[kind]}"
+    assert rendered_path == expected_path
 
 
 def test_t12_stage_path_never_uses_kind_as_terminal_basename() -> None:
@@ -309,12 +341,15 @@ def test_t19_exactly_two_recomputes_are_after_merge_inside_transaction() -> None
 
 
 def test_t20_premerge_group_capture_precedes_merge() -> None:
+    transaction = _transaction()
     capture = _match(
         r"select\s+count\(\*\)\s*,\s*any_value\(bean_origin\)\s*,\s*"
-        r"any_value\(roast_level\).*?where\s+idempotency_key\s*=\s*:p_run_id\s*;"
+        r"any_value\(roast_level\).*?where\s+idempotency_key\s*=\s*:p_run_id\s*;",
+        transaction,
     )
-    merge = _match(r"merge\s+into\s+app\.cloud_roasts")
+    merge = _match(r"merge\s+into\s+app\.cloud_roasts", transaction)
     assert capture.start() < merge.start()
+    assert transaction[capture.end() : merge.start()].strip() == ""
 
 
 def test_t21_old_group_call_requires_a_real_group_change() -> None:
@@ -325,7 +360,7 @@ def test_t21_old_group_call_requires_a_real_group_change() -> None:
         r"call\s+app\.recompute_reference_summary\s*"
         r"\(\s*:v_old_bean_origin\s*,\s*:v_old_roast_level\s*\)\s*;.*?end\s+if\s*;"
     )
-    assert "or" in guard.group(0).lower()
+    assert re.search(r"\bor\b", guard.group(0), re.I)
 
 
 def test_t22_new_group_call_is_unconditional_and_callee_owns_null_noop() -> None:
@@ -372,7 +407,7 @@ def test_t27_exception_codes_are_the_unique_contiguous_allocation() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 11)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 12)})
 
 
 def test_t28_closed_payload_key_set_is_exactly_13() -> None:
@@ -398,6 +433,7 @@ def test_t29_slug_guard_rejects_hostile_table_and_accepts_boundaries() -> None:
     assert all(re.fullmatch(grammar, value) is None for value in hostile)
     assert re.fullmatch(grammar, "123456789ABCDEFGHJKLMNP")
     assert re.fullmatch(grammar, "123456789ABCDEFGH")
+    assert re.fullmatch(grammar, "1" * 64)
 
 
 def test_t30_visibility_enum_matches_quality_view_and_rejects_hostile_table() -> None:
@@ -425,7 +461,7 @@ def test_t31_operator_rating_bounds_are_one_through_five() -> None:
 def test_t32_artifact_kind_set_matches_seed_rules_and_rejects_hostiles() -> None:
     guard = _match(r"value::string\s+not\s+in\s*\((?P<values>[^)]+)\)")
     kinds = tuple(re.findall(r"'([^']+)'", guard.group("values")))
-    rules = (SNOWFLAKE_DIR.parent / "scripts" / "seed" / "rules.ts").read_text()
+    rules = (_find_repo_root() / "scripts" / "seed" / "rules.ts").read_text()
     seed_kinds = tuple(re.findall(r'"([^"]+)"', _match(
         r"ARTIFACT_KINDS\s*=\s*\[(?P<values>[^]]+)\]", rules
     ).group("values")))
@@ -473,6 +509,36 @@ def test_t36_ambiguity_guard_is_after_merge_before_commit() -> None:
     assert merge.start() < guard.start()
 
 
+def test_t36b_duplicate_slug_guard_is_postmerge_and_counts_stored_slug() -> None:
+    transaction = _transaction()
+    merge = _match(r"merge\s+into\s+app\.cloud_roasts", transaction)
+    stored = _match(
+        r"select\s+id\s*,\s*public_slug\s+into\s+:v_id\s*,\s*:v_slug.*?;",
+        transaction,
+    )
+    guard = _match(
+        r"v_public_slug\s*:=\s*v_slug\s*;\s*"
+        r"select\s+count\(\*\)\s+into\s+:v_slug_count\s+"
+        r"from\s+app\.cloud_roasts\s+where\s+public_slug\s*=\s*:v_public_slug\s*;\s*"
+        r"if\s*\(\s*v_slug_count\s*<>\s*1\s*\)\s*then\s*"
+        r"raise\s+duplicate_public_slug\s*;\s*end\s+if\s*;",
+        transaction,
+    )
+    assert merge.start() < stored.start() < guard.start()
+
+
+def test_t36c_data_quality_view_flags_duplicate_public_slug_exactly() -> None:
+    view = (SNOWFLAKE_DIR / "migrations" / "R__data_quality_view.sql").read_text()
+    branch = _match(
+        r"select\s+'cloud_roasts'\s+as\s+table_name\s*,\s*"
+        r"public_slug\s+as\s+row_identity\s*,\s*'public_slug'\s+as\s+field\s*,\s*"
+        r"'duplicate public_slug'\s+as\s+rule\s+from\s+cloud_roasts\s+"
+        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*;",
+        view,
+    )
+    assert branch is not None
+
+
 def test_t37_write_projections_have_no_null_masking_or_try_casts() -> None:
     projections = _merge() + _artifact_insert()
     assert re.search(
@@ -485,7 +551,7 @@ def test_t37_write_projections_have_no_null_masking_or_try_casts() -> None:
 
 
 def test_t38_exception_messages_are_static_and_never_echo_payload() -> None:
-    declarations = re.findall(r"exception\s*\(\s*-200(?:08|09|10)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I)
-    assert len(declarations) == 3
+    declarations = re.findall(r"exception\s*\(\s*-200(?:08|09|10|11)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I)
+    assert len(declarations) == 4
     assert all("p_payload" not in declaration.lower() for declaration in declarations)
     assert re.search(r"raise\s+invalid_payload\s*\|\|", STRIPPED, re.I) is None
