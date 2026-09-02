@@ -299,15 +299,26 @@ check_grant_manifest = _load_sibling_module("check_grant_manifest")
 # set (ACCOUNT, INTEGRATION, USER, or any future object type Snowflake
 # introduces) is rejected outright by is_allowed_grant's fail-closed
 # default -- never silently permitted just because it wasn't anticipated.
+#
+# CONFIRMED byte-for-byte against the operator's 2026-09-01 live capture
+# against ROASTPILOT_DEV under ROASTPILOT_ADMIN: a throwaway file format
+# returned `USAGE | FILE_FORMAT | ROASTPILOT_DEV.APP.TMP_GRANTED_ON_PROBE`.
+# Its grant was revoked and the probe object was dropped after the capture;
+# cleanup was confirmed.
+# INFERRED, not probed: MATERIALIZED_VIEW follows Snowflake's consistently
+# underscore-delimited multi-word SHOW GRANTS vocabulary. Creating the probe
+# object would require Enterprise edition, so do not treat it as observed.
+# The other eleven entries are single-word, where this space/underscore
+# ambiguity cannot arise.
 _DATABASE_SCOPED_OBJECT_TYPES = frozenset(
     {
         "DATABASE",
         "SCHEMA",
         "TABLE",
         "VIEW",
-        "MATERIALIZED VIEW",
+        "MATERIALIZED_VIEW",
         "STAGE",
-        "FILE FORMAT",
+        "FILE_FORMAT",
         "SEQUENCE",
         "PROCEDURE",
         "FUNCTION",
@@ -694,16 +705,35 @@ def expected_role_grants(database: str) -> dict[str, frozenset[RoleGrant]]:
         },
     }
     for grant in check_grant_manifest.EXPECTED_MANIFEST:
-        live_name = (
-            _live_procedure_signature(database, grant.object_name)
-            if grant.object_type == "PROCEDURE"
-            else _canonical_live_object_name(database, grant.object_name)
-        )
+        live_object_type, live_name = _live_manifest_object(database, grant)
         expected[grant.role_name].update(
-            (privilege, grant.object_type, live_name, grant.role_name)
+            (privilege, live_object_type, live_name, grant.role_name)
             for privilege in grant.privileges
         )
     return {role_name: frozenset(grants) for role_name, grants in expected.items()}
+
+
+def _live_object_type(offline_object_type: str) -> str:
+    """Map one offline manifest object type to SHOW GRANTS' vocabulary.
+
+    SQL DDL spells a multi-word object type with a space (``GRANT USAGE ON
+    FILE FORMAT ...``), which is what check_grant_manifest.py parses from
+    migration text and stores in its manifest. Live SHOW GRANTS reports the
+    same type with an underscore. Fail closed on an unknown multi-word
+    offline type: emitting it unchanged would create an expected row that no
+    live row could ever match.
+    """
+    offline_to_live = {
+        "FILE FORMAT": "FILE_FORMAT",
+        "MATERIALIZED VIEW": "MATERIALIZED_VIEW",
+    }
+    if offline_object_type in offline_to_live:
+        return offline_to_live[offline_object_type]
+    if " " in offline_object_type:
+        raise ValueError(
+            f"unmapped multi-word offline object type: {offline_object_type!r}"
+        )
+    return offline_object_type
 
 
 def _canonical_live_object_name(database: str, offline_name: str) -> str:
@@ -714,6 +744,24 @@ def _canonical_live_object_name(database: str, offline_name: str) -> str:
     return f"{database}.APP.{object_name.upper()}"
 
 
+def _live_manifest_object(
+    database: str, grant: check_grant_manifest.Grant
+) -> tuple[str, str]:
+    """Transform one offline #317 manifest row into its live type and name.
+
+    This is the single crossing point from the manifest's SQL-DDL vocabulary
+    to live SHOW GRANTS' vocabulary, keeping ``expected_role_grants`` and
+    ``_PUBLIC_WEB_CROSS_ENV_ALLOWED`` aligned. ``object_type`` is compared
+    against its offline spelling before it is mapped.
+    """
+    live_name = (
+        _live_procedure_signature(database, grant.object_name)
+        if grant.object_type == "PROCEDURE"
+        else _canonical_live_object_name(database, grant.object_name)
+    )
+    return _live_object_type(grant.object_type), live_name
+
+
 # PUBLIC_WEB's cross-environment qualified surface is environment-invariant:
 # derive object rows from #317's manifest and add only the operator-provisioned
 # APP schema prerequisite. Bare database USAGE is handled separately because
@@ -722,15 +770,14 @@ _PUBLIC_WEB_CROSS_ENV_ALLOWED = frozenset(
     {
         (
             privilege,
-            grant.object_type,
-            _environment_invariant_name(
-                _live_procedure_signature(_EXPECTED_DATABASE, grant.object_name)
-                if grant.object_type == "PROCEDURE"
-                else _canonical_live_object_name(_EXPECTED_DATABASE, grant.object_name)
-            ),
+            live_object_type,
+            _environment_invariant_name(live_name),
         )
         for grant in check_grant_manifest.EXPECTED_MANIFEST
         if grant.role_name == PUBLIC_WEB_ROLE
+        for live_object_type, live_name in (
+            _live_manifest_object(_EXPECTED_DATABASE, grant),
+        )
         for privilege in grant.privileges
     }
     | {

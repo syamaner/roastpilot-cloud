@@ -370,7 +370,7 @@ def test_t24_live_agent_manifest_derives_both_new_rows() -> None:
     agent = assert_dev_ci_grants.expected_role_grants("ROASTPILOT_DEV")["ROASTPILOT_AGENT"]
     assert (
         "USAGE",
-        "FILE FORMAT",
+        "FILE_FORMAT",
         "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
         "ROASTPILOT_AGENT",
     ) in agent

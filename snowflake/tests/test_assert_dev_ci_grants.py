@@ -118,7 +118,7 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
             ),
             ("READ", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
             ("WRITE", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
-            ("USAGE", "FILE FORMAT", "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"),
+            ("USAGE", "FILE_FORMAT", "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"),
             ("USAGE", "PROCEDURE", _LIVE_LOAD_TELEMETRY_SIGNATURE),
         ]
     else:
@@ -295,6 +295,89 @@ class TestIsAllowedGrant:
         )
         assert assert_dev_ci_grants.is_allowed_grant(
             "SCHEMA", "ROASTPILOT_DEV.APP", _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+
+    def test_allows_live_file_format_vocabulary_inside_dev(self) -> None:
+        assert assert_dev_ci_grants.is_allowed_grant(
+            "FILE_FORMAT",
+            "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+        assert (
+            assert_dev_ci_grants.find_violations(
+                [
+                    {
+                        "privilege": "OWNERSHIP",
+                        "granted_on": "FILE_FORMAT",
+                        "name": "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+                    }
+                ],
+                _DEV_ROLE,
+                _DEV_DB,
+                _DEV_WH,
+            )
+            == []
+        )
+
+    def test_rejects_live_file_format_outside_dev(self) -> None:
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "FILE_FORMAT",
+            "ROASTPILOT_PREVIEW.APP.X",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+
+    def test_rejects_offline_file_format_spelling_on_live_side(self) -> None:
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "FILE FORMAT",
+            "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+
+    def test_materialized_view_uses_live_underscore_vocabulary_only(self) -> None:
+        assert assert_dev_ci_grants.is_allowed_grant(
+            "MATERIALIZED_VIEW",
+            "ROASTPILOT_DEV.APP.MV",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+        assert not assert_dev_ci_grants.is_allowed_grant(
+            "MATERIALIZED VIEW",
+            "ROASTPILOT_DEV.APP.MV",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+
+    def test_database_scoped_object_types_pin_live_vocabulary(self) -> None:
+        assert assert_dev_ci_grants._DATABASE_SCOPED_OBJECT_TYPES == frozenset(
+            {
+                "DATABASE",
+                "SCHEMA",
+                "TABLE",
+                "VIEW",
+                "MATERIALIZED_VIEW",
+                "STAGE",
+                "FILE_FORMAT",
+                "SEQUENCE",
+                "PROCEDURE",
+                "FUNCTION",
+                "STREAM",
+                "TASK",
+                "PIPE",
+            }
+        )
+
+    def test_database_scoped_object_types_have_no_spaces(self) -> None:
+        assert all(
+            " " not in object_type
+            for object_type in assert_dev_ci_grants._DATABASE_SCOPED_OBJECT_TYPES
         )
 
     def test_allows_the_dev_ci_warehouse(self) -> None:
@@ -499,6 +582,16 @@ class TestFindPublicGrants:
         ]
         assert _find_public_grants(rows) == [f"SELECT on SOME_FUTURE_OBJECT_TYPE {_DEV_DB}.APP.T"]
 
+    def test_file_format_still_flags_at_public_owned_object_predicate(self) -> None:
+        assert assert_dev_ci_grants._public_grant_targets_owned_object(
+            "USAGE",
+            "FILE_FORMAT",
+            "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+            _DEV_ROLE,
+            _DEV_DB,
+            _DEV_WH,
+        )
+
     def test_flags_the_dev_warehouse(self) -> None:
         rows = [{"privilege": "USAGE", "granted_on": "WAREHOUSE", "name": _DEV_WH}]
         assert _find_public_grants(rows) == [f"USAGE on WAREHOUSE {_DEV_WH}"]
@@ -692,6 +785,33 @@ class TestFindFutureGrantViolations:
         rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": f"{_DEV_DB}.APP"}]
         assert assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH) == []
 
+    def test_file_format_future_grant_uses_live_vocabulary_and_boundary(self) -> None:
+        dev_rows = [
+            {
+                "privilege": "USAGE",
+                "grant_on": "FILE_FORMAT",
+                "name": "ROASTPILOT_DEV.APP",
+            }
+        ]
+        assert (
+            assert_dev_ci_grants.find_future_grant_violations(
+                dev_rows, _DEV_ROLE, _DEV_DB, _DEV_WH
+            )
+            == []
+        )
+
+        preview_rows = [
+            {
+                "privilege": "USAGE",
+                "grant_on": "FILE_FORMAT",
+                "name": "ROASTPILOT_PREVIEW.APP",
+            }
+        ]
+        violations = assert_dev_ci_grants.find_future_grant_violations(
+            preview_rows, _DEV_ROLE, _DEV_DB, _DEV_WH
+        )
+        assert len(violations) == 1
+
     def test_flags_a_future_grant_outside_dev(self) -> None:
         rows = [{"privilege": "SELECT", "grant_on": "TABLE", "name": "ROASTPILOT_PREVIEW.APP"}]
         violations = assert_dev_ci_grants.find_future_grant_violations(rows, _DEV_ROLE, _DEV_DB, _DEV_WH)
@@ -756,6 +876,87 @@ class TestApplicationRoleManifest:
             == "ROASTPILOT_DEV.APP.SUBMIT_REVIEW(VARCHAR, VARCHAR, NUMBER, NUMBER, "
             "NUMBER, NUMBER, NUMBER, NUMBER, VARCHAR, VARCHAR, VARCHAR)"
         )
+
+    def test_agent_expected_manifest_contains_only_live_file_format_spelling(
+        self,
+    ) -> None:
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        live_row = (
+            "USAGE",
+            "FILE_FORMAT",
+            "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT",
+            "ROASTPILOT_AGENT",
+        )
+        assert live_row in expected
+        assert (live_row[0], "FILE FORMAT", live_row[2], live_row[3]) not in expected
+
+    def test_offline_file_format_live_row_reports_extra_and_missing(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        target = next(
+            row
+            for row in rows
+            if row["name"] == "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"
+        )
+        target["granted_on"] = "FILE FORMAT"
+
+        violations = self._violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows
+        )
+        assert any(
+            "extra grant" in violation and "FILE FORMAT" in violation
+            for violation in violations
+        )
+        assert any(
+            "missing manifest grant" in violation and "FILE_FORMAT" in violation
+            for violation in violations
+        )
+
+    def test_every_offline_multi_word_type_maps_to_known_live_vocabulary(
+        self,
+    ) -> None:
+        for object_type in check_grant_manifest.ALLOWED_OBJECT_TYPES:
+            if " " in object_type:
+                live_object_type = assert_dev_ci_grants._live_object_type(
+                    object_type
+                )
+                assert " " not in live_object_type
+                assert (
+                    live_object_type
+                    in assert_dev_ci_grants._DATABASE_SCOPED_OBJECT_TYPES
+                )
+
+    def test_live_object_type_maps_known_types_and_rejects_unknown_multi_word_types(
+        self,
+    ) -> None:
+        assert (
+            assert_dev_ci_grants._live_object_type("FILE FORMAT")
+            == "FILE_FORMAT"
+        )
+        assert (
+            assert_dev_ci_grants._live_object_type("MATERIALIZED VIEW")
+            == "MATERIALIZED_VIEW"
+        )
+        assert assert_dev_ci_grants._live_object_type("TABLE") == "TABLE"
+        for object_type in ("EXTERNAL TABLE", "DATABASE ROLE"):
+            with pytest.raises(
+                ValueError, match="unmapped multi-word offline object type"
+            ):
+                assert_dev_ci_grants._live_object_type(object_type)
+
+    def test_manifest_types_cross_to_known_live_vocabulary(self) -> None:
+        for grant in check_grant_manifest.EXPECTED_MANIFEST:
+            live_object_type, _ = assert_dev_ci_grants._live_manifest_object(
+                _DEV_DB, grant
+            )
+            if " " not in grant.object_type:
+                assert live_object_type == grant.object_type
+            if grant.object_type != "WAREHOUSE":
+                assert (
+                    live_object_type
+                    in assert_dev_ci_grants._DATABASE_SCOPED_OBJECT_TYPES
+                )
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
@@ -828,10 +1029,75 @@ class TestApplicationRoleManifest:
         assert all(row["grant_option"] == "false" for row in rows)
         assert self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows) == []
 
+    def test_public_web_rejects_cross_environment_file_format(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "FILE_FORMAT",
+                "name": "ROASTPILOT_PREVIEW.APP.ROAST_JSONL_FORMAT",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("unexpected PUBLIC_WEB grant" in item for item in violations)
+
+    def test_public_web_rejects_out_of_family_file_format(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "FILE_FORMAT",
+                "name": "NOT_OURS.APP.X",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        violations = self._violations(assert_dev_ci_grants.PUBLIC_WEB_ROLE, rows)
+        assert any("unexpected PUBLIC_WEB grant" in item for item in violations)
+
     def test_roastpilot_agent_exact_manifest_passes(self) -> None:
         rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
         assert all(row["grant_option"] == "false" for row in rows)
         assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
+
+    def test_agent_allows_cross_environment_file_format(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "FILE_FORMAT",
+                "name": "ROASTPILOT_PREVIEW.APP.ROAST_JSONL_FORMAT",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        # find_role_manifest_violations's docstring records the ratified
+        # D-345-G/D106 agent cross-environment database-scoped leniency.
+        violations = self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows)
+        assert violations == []
+
+    def test_agent_allows_out_of_family_file_format(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "FILE_FORMAT",
+                "name": "NOT_OURS.APP.X",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        # This is the pre-existing D-345-G/D106 agent leniency recorded by
+        # find_role_manifest_violations's docstring. It applies uniformly to
+        # every database-scoped type: verified TABLE, VIEW, and STAGE rows in
+        # the same foreign database behave identically. The family check
+        # applies only to PUBLIC_WEB; correcting the vocabulary makes
+        # FILE_FORMAT consistent with the other eleven types rather than
+        # opening a new path.
+        violations = self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows)
+        assert violations == []
 
     def test_live_object_core_is_faithful_transform_of_offline_manifest(self) -> None:
         live = assert_dev_ci_grants.expected_role_grants(_DEV_DB)
