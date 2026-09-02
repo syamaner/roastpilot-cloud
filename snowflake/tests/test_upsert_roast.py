@@ -407,7 +407,7 @@ def test_t27_exception_codes_are_the_unique_contiguous_allocation() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 12)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 13)})
 
 
 def test_t28_closed_payload_key_set_is_exactly_13() -> None:
@@ -517,9 +517,8 @@ def test_t36b_duplicate_slug_guard_is_postmerge_and_counts_stored_slug() -> None
         transaction,
     )
     guard = _match(
-        r"v_public_slug\s*:=\s*v_slug\s*;\s*"
         r"select\s+count\(\*\)\s+into\s+:v_slug_count\s+"
-        r"from\s+app\.cloud_roasts\s+where\s+public_slug\s*=\s*:v_public_slug\s*;\s*"
+        r"from\s+app\.cloud_roasts\s+where\s+public_slug\s*=\s*:v_slug\s*;\s*"
         r"if\s*\(\s*v_slug_count\s*<>\s*1\s*\)\s*then\s*"
         r"raise\s+duplicate_public_slug\s*;\s*end\s+if\s*;",
         transaction,
@@ -529,14 +528,40 @@ def test_t36b_duplicate_slug_guard_is_postmerge_and_counts_stored_slug() -> None
 
 def test_t36c_data_quality_view_flags_duplicate_public_slug_exactly() -> None:
     view = (SNOWFLAKE_DIR / "migrations" / "R__data_quality_view.sql").read_text()
-    branch = _match(
+    pattern = (
         r"select\s+'cloud_roasts'\s+as\s+table_name\s*,\s*"
-        r"public_slug\s+as\s+row_identity\s*,\s*'public_slug'\s+as\s+field\s*,\s*"
+        r"any_value\s*\(\s*id\s*\)\s+as\s+row_identity\s*,\s*"
+        r"'public_slug'\s+as\s+field\s*,\s*"
         r"'duplicate public_slug'\s+as\s+rule\s+from\s+cloud_roasts\s+"
-        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*;",
-        view,
+        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*;"
     )
-    assert branch is not None
+    assert len(re.findall(pattern, view, re.I | re.DOTALL)) == 1
+
+
+def test_t36d_visibility_change_guard_is_post_readback_and_exact() -> None:
+    transaction = _transaction()
+    declaration = _match(
+        r"visibility_change_not_supported\s+exception\s*\(\s*-20012\s*,\s*"
+        r"'Visibility changes are not supported by upsert_roast'\s*\)\s*;"
+    )
+    stored = _match(
+        r"select\s+id\s*,\s*public_slug\s+into\s+:v_id\s*,\s*:v_slug.*?;",
+        transaction,
+    )
+    stored_visibility = _match(
+        r"select\s+visibility\s+into\s+:v_stored_visibility\s+from\s+"
+        r"app\.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id\s*;",
+        transaction,
+    )
+    guard = _match(
+        r"if\s*\(\s*v_visibility\s+is\s+distinct\s+from\s+"
+        r"v_stored_visibility\s*\)\s*then\s*"
+        r"raise\s+visibility_change_not_supported\s*;\s*end\s+if\s*;",
+        transaction,
+    )
+    transaction_start = _match(r"begin\s+transaction\s*;")
+    assert declaration.start() < transaction_start.start()
+    assert stored.start() < stored_visibility.start() < guard.start()
 
 
 def test_t37_write_projections_have_no_null_masking_or_try_casts() -> None:
@@ -551,7 +576,7 @@ def test_t37_write_projections_have_no_null_masking_or_try_casts() -> None:
 
 
 def test_t38_exception_messages_are_static_and_never_echo_payload() -> None:
-    declarations = re.findall(r"exception\s*\(\s*-200(?:08|09|10|11)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I)
-    assert len(declarations) == 4
+    declarations = re.findall(r"exception\s*\(\s*-200(?:08|09|10|11|12)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I)
+    assert len(declarations) == 5
     assert all("p_payload" not in declaration.lower() for declaration in declarations)
     assert re.search(r"raise\s+invalid_payload\s*\|\|", STRIPPED, re.I) is None

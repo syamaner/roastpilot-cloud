@@ -330,7 +330,7 @@ def test_t_exception_codes_are_unique_across_procedures() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 12)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 13)})
 
 
 def test_t_stage_basename_is_single_and_pinned_adjacent() -> None:

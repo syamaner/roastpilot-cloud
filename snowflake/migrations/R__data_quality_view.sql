@@ -1,6 +1,6 @@
 -- C2-S8 data-quality audit view (issue #316): the live counterpart to the
--- four declarative constraint checks in scripts/seed/rules.ts, expanded to
--- exactly nine branches so each nullable slider is independently auditable.
+-- five declarative constraint checks in scripts/seed/rules.ts, expanded to
+-- exactly ten branches so each nullable slider is independently auditable.
 -- Repeatable (R__) migration -- schemachange re-applies it whenever its
 -- checksum changes, ordered after the versioned set, so it runs after
 -- V1.1.0__base_tables.sql. Grants are deliberately not copied: this view is
@@ -111,7 +111,7 @@ union all
 
 select
   'cloud_roasts' as table_name,
-  public_slug as row_identity,
+  any_value(id) as row_identity,
   'public_slug' as field,
   'duplicate public_slug' as rule
 from cloud_roasts

@@ -14,10 +14,13 @@
 -- requires exactly one parent delete inside the transaction. A well-formed absent
 -- id is an idempotent no-op.
 --
--- D-314-I: stage-file REMOVE is deferred to #341, gated on the C3 connector's
--- stage_path contract. This procedure deletes artifact rows but not yet staged
--- files; no real staged artifacts exist in C2. All temperatures are Celsius;
--- this procedure contains no Fahrenheit value or conversion.
+-- D-314-I: stage-file REMOVE is deferred to #341. This row cascade deletes
+-- artifact rows but not staged files; once the C3 connector begins PUTting files,
+-- deleting a roast leaves those files with no row pointing at them. #341 must
+-- derive the run id from cloud_roasts.idempotency_key and REMOVE the directory
+-- @app.roast_artifacts/<run_id>/ rather than iterate per-row stage_path values.
+-- All temperatures are Celsius; this procedure contains no Fahrenheit value or
+-- conversion.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.

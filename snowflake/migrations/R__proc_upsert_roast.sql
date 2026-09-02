@@ -19,6 +19,11 @@
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
+-- A divergent public_slug is deliberately tolerated because server-side slug
+-- rotation (C4 regenerate_slug, including duplicate repair) is legitimate and
+-- preserving the stored slug is correct. A divergent visibility is rejected:
+-- silently preserving it could make a caller believe a revocation to private
+-- succeeded. The actual visibility-update path remains deferred to C4.
 -- Artifact replacement is idempotent over (roast_id, kind, stage_path) triples,
 -- not artifact row ids, which are regenerated on replay. Paths are constructed
 -- as @app.roast_artifacts/<run_id>/<basename> from a closed kind map. The agent
@@ -47,7 +52,8 @@ declare
   invalid_run_id exception (-20008, 'Run id must be a lowercase UUID');
   invalid_payload exception (-20009, 'Payload does not match the closed roast grammar');
   ambiguous_idempotency_key exception (-20010, 'Idempotency key did not resolve uniquely');
-  duplicate_public_slug exception (-20011, 'Public slug did not resolve uniquely');
+  duplicate_public_slug exception (-20011, 'Public slug is not unique across roasts');
+  visibility_change_not_supported exception (-20012, 'Visibility changes are not supported by upsert_roast');
   v_payload variant;
   v_artifact_kinds array;
   v_artifact_count int;
@@ -59,6 +65,7 @@ declare
   v_slug_count int;
   v_id string;
   v_slug string;
+  v_stored_visibility string;
   v_old_bean_origin string;
   v_old_roast_level string;
   v_new_bean_origin string;
@@ -239,10 +246,16 @@ begin
       -- Read the stable return pair and post-merge group from the stored row.
       select id, public_slug into :v_id, :v_slug
         from app.cloud_roasts where idempotency_key = :p_run_id;
-      -- Count the stored immutable slug, not a differing replay input slug.
-      v_public_slug := v_slug;
+
+      select visibility into :v_stored_visibility
+        from app.cloud_roasts where idempotency_key = :p_run_id;
+      if (v_visibility is distinct from v_stored_visibility) then
+        raise visibility_change_not_supported;
+      end if;
+
+      -- Count the stored slug, not a differing replay input slug.
       select count(*) into :v_slug_count
-        from app.cloud_roasts where public_slug = :v_public_slug;
+        from app.cloud_roasts where public_slug = :v_slug;
       if (v_slug_count <> 1) then
         raise duplicate_public_slug;
       end if;

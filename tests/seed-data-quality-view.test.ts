@@ -118,17 +118,24 @@ function dataQualityViolations(
   }
 
   const publicSlugCounts = new Map<string, number>();
+  const publicSlugRowIdentities = new Map<string, string>();
   for (const roast of cloudRoasts) {
     publicSlugCounts.set(
       roast.public_slug,
       (publicSlugCounts.get(roast.public_slug) ?? 0) + 1,
     );
+    if (!publicSlugRowIdentities.has(roast.public_slug)) {
+      publicSlugRowIdentities.set(
+        roast.public_slug,
+        roast.id ?? roast.idempotency_key,
+      );
+    }
   }
   for (const [publicSlug, count] of publicSlugCounts) {
     if (count > 1) {
       add(
         "cloud_roasts",
-        publicSlug,
+        publicSlugRowIdentities.get(publicSlug) ?? null,
         "public_slug",
         "duplicate public_slug",
       );
@@ -305,7 +312,7 @@ describe("data_quality_violations oracle", () => {
 
     expect(cloudFlags(first, second)).toEqual([{
       table_name: "cloud_roasts",
-      row_identity: "duplicate",
+      row_identity: "roast-1",
       field: "public_slug",
       rule: "duplicate public_slug",
     }]);
@@ -334,13 +341,13 @@ describe("data_quality_violations oracle", () => {
     expect(cloudFlags(...rows)).toEqual([
       {
         table_name: "cloud_roasts",
-        row_identity: "dupA",
+        row_identity: "roast-a1",
         field: "public_slug",
         rule: "duplicate public_slug",
       },
       {
         table_name: "cloud_roasts",
-        row_identity: "dupB",
+        row_identity: "roast-b1",
         field: "public_slug",
         rule: "duplicate public_slug",
       },
@@ -417,7 +424,7 @@ describe("data_quality_violations SQL/oracle parity", () => {
 
   it("binds the duplicate-slug branch labels, source, and aggregation", () => {
     expect(SQL).toMatch(
-      /select\s+'cloud_roasts'\s+as\s+table_name,\s*public_slug\s+as\s+row_identity,\s*'public_slug'\s+as\s+field,\s*'duplicate public_slug'\s+as\s+rule[\s\S]*?from\s+cloud_roasts\s+group\s+by\s+public_slug\s+having\s+count\s*\(\s*\*\s*\)\s*>\s*1/i,
+      /select\s+'cloud_roasts'\s+as\s+table_name,\s*any_value\s*\(\s*id\s*\)\s+as\s+row_identity,\s*'public_slug'\s+as\s+field,\s*'duplicate public_slug'\s+as\s+rule[\s\S]*?from\s+cloud_roasts\s+group\s+by\s+public_slug\s+having\s+count\s*\(\s*\*\s*\)\s*>\s*1/i,
     );
   });
 
