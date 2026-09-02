@@ -135,6 +135,20 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
     ]
 
 
+def _app_role_rows_missing(
+    role: str, *object_name_suffixes: str
+) -> list[dict[str, object]]:
+    """Return a compliant application-role corpus minus named objects."""
+    return [
+        row
+        for row in _app_role_rows(role)
+        if not any(
+            str(row["name"]).endswith(suffix)
+            for suffix in object_name_suffixes
+        )
+    ]
+
+
 class TestAssertBoundaryVarsNotDrifted:
     """Codex P2, PR #57, round 2: every check in this script trusts
     SNOWFLAKE_DEV_DATABASE/SNOWFLAKE_DEV_WAREHOUSE AS the allowed boundary
@@ -957,6 +971,23 @@ class TestApplicationRoleManifest:
                     live_object_type
                     in assert_dev_ci_grants._DATABASE_SCOPED_OBJECT_TYPES
                 )
+
+    def test_object_manifest_grants_are_dev_qualified_without_prerequisites(
+        self,
+    ) -> None:
+        grants = assert_dev_ci_grants.object_manifest_role_grants(_DEV_DB)
+
+        assert (
+            "SELECT",
+            "VIEW",
+            "ROASTPILOT_DEV.APP.ROAST_BY_SLUG",
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+        ) in grants[assert_dev_ci_grants.PUBLIC_WEB_ROLE]
+        assert all(
+            grant[1] not in {"DATABASE", "SCHEMA"}
+            for role_grants in grants.values()
+            for grant in role_grants
+        )
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
@@ -2182,6 +2213,568 @@ class TestMain:
         ]
         return mock_cursor
 
+    def _run_main(
+        self,
+        monkeypatch,
+        argv: list[str],
+        *,
+        grant_rows: list[dict[str, object]] | None = None,
+        **cursor_options,
+    ) -> int:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        mock_cursor = self._mock_cursor(
+            grant_rows
+            if grant_rows is not None
+            else [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            **cursor_options,
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        with patch.object(
+            assert_dev_ci_grants.snowflake.connector,
+            "connect",
+            return_value=mock_conn,
+        ):
+            return assert_dev_ci_grants.main(argv)
+
+    @staticmethod
+    def _bootstrap_agent_rows() -> list[dict[str, object]]:
+        return _app_role_rows_missing(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            ".ROAST_JSONL_FORMAT",
+            ".LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)",
+        )
+
+    def test_b1_relaxed_mode_allows_agent_bootstrap_missing_grants(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 0
+        assert "missing manifest grant" not in capsys.readouterr().err
+
+    def test_b1b_relaxed_mode_allows_public_web_bootstrap_missing_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows_missing(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, ".REVIEWS_BY_ROAST"
+        )
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_web_grant_rows=public_web_rows,
+        )
+
+        assert exit_code == 0
+        assert "missing manifest grant" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("role_name", "cursor_option"),
+        [
+            (assert_dev_ci_grants.PUBLIC_WEB_ROLE, "public_web_grant_rows"),
+            (
+                assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "roastpilot_agent_grant_rows",
+            ),
+        ],
+        ids=["public-web", "roastpilot-agent"],
+    )
+    def test_b1c_relaxed_mode_reports_missing_operator_prerequisite(
+        self, monkeypatch, capsys, role_name: str, cursor_option: str
+    ) -> None:
+        rows = _app_role_rows_missing(role_name, _DEV_DB)
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            **{cursor_option: rows},
+        )
+
+        assert exit_code == 1
+        assert (
+            f"missing manifest grant: USAGE on DATABASE {_DEV_DB} to {role_name}"
+        ) in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("role_name", "cursor_option"),
+        [
+            (assert_dev_ci_grants.PUBLIC_WEB_ROLE, "public_web_grant_rows"),
+            (
+                assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "roastpilot_agent_grant_rows",
+            ),
+        ],
+        ids=["public-web", "roastpilot-agent"],
+    )
+    def test_b1d_relaxed_mode_fails_closed_for_empty_role_grants(
+        self, monkeypatch, capsys, role_name: str, cursor_option: str
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            **{cursor_option: []},
+        )
+
+        assert exit_code == 1
+        assert (
+            f"missing manifest grant: USAGE on DATABASE {_DEV_DB} to {role_name}"
+        ) in capsys.readouterr().err
+
+    def test_b2b_strict_mode_reports_public_web_bootstrap_missing_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows_missing(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, ".REVIEWS_BY_ROAST"
+        )
+        exit_code = self._run_main(
+            monkeypatch,
+            [],
+            public_web_grant_rows=public_web_rows,
+        )
+
+        assert exit_code == 1
+        assert (
+            "missing manifest grant: SELECT on VIEW "
+            "ROASTPILOT_DEV.APP.REVIEWS_BY_ROAST to PUBLIC_WEB"
+        ) in capsys.readouterr().err
+
+    def test_b2_strict_mode_reports_both_agent_bootstrap_missing_grants(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            [],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert (
+            "missing manifest grant: USAGE on FILE_FORMAT "
+            "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT to ROASTPILOT_AGENT"
+        ) in stderr
+        assert (
+            "missing manifest grant: USAGE on PROCEDURE "
+            "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR) "
+            "to ROASTPILOT_AGENT"
+        ) in stderr
+
+    def test_b3_relaxed_mode_confirms_a_fully_compliant_corpus(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch, ["--allow-missing-manifest-grants"]
+        )
+
+        assert exit_code == 0
+        stdout = capsys.readouterr().out
+        assert (
+            "PUBLIC_WEB/ROASTPILOT_AGENT have no disallowed visible grants under the DEV-scoped "
+            "manifest ceiling and zero future grants visible; manifest completeness was deferred "
+            "to the post-deploy audit and was not verified by this run"
+        ) in stdout
+        assert "exactly match their manifests" not in stdout
+
+    def test_b3b_strict_mode_confirms_exact_manifest_match(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(monkeypatch, [])
+
+        assert exit_code == 0
+        assert (
+            "PUBLIC_WEB/ROASTPILOT_AGENT exactly match their manifests with zero future grants "
+            "visible"
+        ) in capsys.readouterr().out
+
+    def test_b4_no_argv_argument_remains_strict(
+        self, monkeypatch, capsys
+    ) -> None:
+        self._set_required_env(monkeypatch, _generate_test_pem())
+        monkeypatch.setattr(sys, "argv", ["assert_dev_ci_grants.py"])
+        mock_cursor = self._mock_cursor(
+            [{"privilege": "USAGE", "granted_on": "DATABASE", "name": _DEV_DB}],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(
+            assert_dev_ci_grants.snowflake.connector,
+            "connect",
+            return_value=mock_conn,
+        ):
+            exit_code = assert_dev_ci_grants.main()
+
+        assert exit_code == 1
+        assert "missing manifest grant" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--skip-manifest"],
+            ["positional"],
+            ["--allow-missing-manifest-grants=1"],
+            ["--allow"],
+            ["--allow-missing"],
+        ],
+        ids=[
+            "a1-old-broad-name",
+            "a2-positional",
+            "a3-flag-value",
+            "a4-short-prefix",
+            "a5-long-prefix",
+        ],
+    )
+    def test_argument_grammar_rejects_every_non_flag_form_before_connecting(
+        self, argv: list[str]
+    ) -> None:
+        with patch.object(
+            assert_dev_ci_grants.snowflake.connector, "connect"
+        ) as mock_connect:
+            with pytest.raises(SystemExit) as exc_info:
+                assert_dev_ci_grants.main(argv)
+
+        assert exc_info.value.code == 2
+        mock_connect.assert_not_called()
+
+    def test_help_uses_the_module_contract_description_before_connecting(
+        self, capsys
+    ) -> None:
+        with patch.object(
+            assert_dev_ci_grants.snowflake.connector, "connect"
+        ) as mock_connect:
+            with pytest.raises(SystemExit) as exc_info:
+                assert_dev_ci_grants.main(["--help"])
+
+        assert exc_info.value.code == 0
+        assert (
+            "Asserts the DEV-scoped CI service role's grants never extend beyond"
+            in capsys.readouterr().out
+        )
+        mock_connect.assert_not_called()
+
+    def test_d1_incomplete_direct_audit_keeps_extra_and_suppresses_missing(
+        self,
+    ) -> None:
+        rows = _app_role_rows_missing(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, ".REVIEWS_BY_ROAST"
+        )
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE
+        ]
+        deferred = assert_dev_ci_grants.object_manifest_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE
+        ]
+
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            deferred_missing_grants=deferred,
+        )
+
+        assert len(violations) == 1
+        assert violations[0].startswith("extra grant:")
+
+    def test_d2_direct_audit_defaults_to_extra_and_missing(self) -> None:
+        rows = _app_role_rows_missing(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE, ".REVIEWS_BY_ROAST"
+        )
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE
+        ]
+
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+        )
+
+        assert len(violations) == 2
+        assert sum(item.startswith("extra grant:") for item in violations) == 1
+        assert sum(item.startswith("missing manifest grant:") for item in violations) == 1
+
+    def test_n1_relaxed_mode_still_rejects_ci_role_boundary_violation(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            grant_rows=[
+                {
+                    "privilege": "USAGE",
+                    "granted_on": "DATABASE",
+                    "name": "ROASTPILOT_PREVIEW",
+                }
+            ],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "grant on ROASTPILOT_DEV_CI_ROLE outside" in capsys.readouterr().err
+
+    def test_n2_relaxed_mode_still_rejects_public_current_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_grant_rows=[
+                {
+                    "privilege": "SELECT",
+                    "granted_on": "TABLE",
+                    "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                }
+            ],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert (
+            "PUBLIC grant violating the DEV/account boundary"
+            in capsys.readouterr().err
+        )
+
+    def test_n3_relaxed_mode_still_rejects_public_future_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_future_grant_rows=[
+                {
+                    "privilege": "SELECT",
+                    "grant_on": "TABLE",
+                    "name": "ROASTPILOT_DEV.APP",
+                }
+            ],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "PUBLIC future grant visible to" in capsys.readouterr().err
+
+    def test_n4_relaxed_mode_still_rejects_secondary_roles(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            show_user_rows=[
+                {"name": _CI_USER, "default_secondary_roles": '["ALL"]'}
+            ],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "DEFAULT_SECONDARY_ROLES is" in capsys.readouterr().err
+
+    def test_n5_relaxed_mode_still_rejects_visible_database(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            visible_databases=[{"name": _DEV_DB}, {"name": "ROASTPILOT_PREVIEW"}],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "visible database beyond the DEV boundary" in capsys.readouterr().err
+
+    def test_n5b_relaxed_mode_still_rejects_visible_warehouse(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            visible_warehouses=[{"name": _DEV_WH}, {"name": "SOME_OTHER_WH"}],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "visible warehouse beyond the DEV boundary" in capsys.readouterr().err
+
+    def test_n6_relaxed_mode_still_rejects_malformed_public_row(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_grant_rows=[
+                {"privilege": "USAGE", "granted_on": "", "name": "ROASTPILOT_DEV"}
+            ],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert (
+            "PUBLIC grant violating the DEV/account boundary"
+            in capsys.readouterr().err
+        )
+
+    def test_n7_relaxed_mode_still_rejects_extra_public_web_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        public_web_rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_web_grant_rows=public_web_rows,
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "extra grant:" in capsys.readouterr().err
+
+    def test_n8_relaxed_mode_rejects_byte_lookalike_without_reporting_missing(
+        self, monkeypatch, capsys
+    ) -> None:
+        agent_rows = self._bootstrap_agent_rows()
+        lookalike = next(
+            row
+            for row in _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+            if str(row["name"]).endswith(".ROAST_JSONL_FORMAT")
+        )
+        lookalike["name"] = "ROASTPILOT_DEV.APP.roast_jsonl_format"
+        agent_rows.append(lookalike)
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            roastpilot_agent_grant_rows=agent_rows,
+        )
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "extra grant:" in stderr
+        assert "missing manifest grant" not in stderr
+
+    def test_n9_relaxed_mode_rejects_manifest_grant_with_grant_option(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        public_web_rows[0]["grant_option"] = "true"
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_web_grant_rows=public_web_rows,
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "extra grant:" in capsys.readouterr().err
+
+    def test_n10_relaxed_mode_still_rejects_app_role_future_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+            roastpilot_agent_future_grant_rows=[
+                {
+                    "privilege": "SELECT",
+                    "grant_on": "TABLE",
+                    "name": "ROASTPILOT_DEV.APP",
+                }
+            ],
+        )
+
+        assert exit_code == 1
+        assert "ROASTPILOT_AGENT future-grant violation" in capsys.readouterr().err
+
+    def test_n11_relaxed_mode_still_rejects_unexpected_warehouse_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        agent_rows = self._bootstrap_agent_rows()
+        agent_rows.append(
+            {
+                "privilege": "USAGE",
+                "granted_on": "WAREHOUSE",
+                "name": "SOME_OTHER_WH",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            roastpilot_agent_grant_rows=agent_rows,
+        )
+
+        assert exit_code == 1
+        assert "unexpected warehouse grant" in capsys.readouterr().err
+
+    def test_n12_relaxed_mode_still_rejects_extra_role_on_ci_user(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            user_role_rows=[{"role": _DEV_ROLE}, {"role": "ACCOUNTADMIN"}],
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "unexpected role granted to" in capsys.readouterr().err
+
+    def test_s2_strict_mode_rejects_extra_public_web_grant(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        public_web_rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "grantee_name": assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+                "grant_option": "false",
+            }
+        )
+        exit_code = self._run_main(
+            monkeypatch,
+            [],
+            public_web_grant_rows=public_web_rows,
+            roastpilot_agent_grant_rows=self._bootstrap_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert "extra grant:" in capsys.readouterr().err
+
     def test_returns_0_and_prints_confirmation_when_all_grants_are_compliant(self, monkeypatch, capsys) -> None:
         self._set_required_env(monkeypatch, _generate_test_pem())
         mock_cursor = self._mock_cursor(
@@ -2191,7 +2784,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn) as mock_connect:
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         assert "confirmed" in capsys.readouterr().out
@@ -2212,7 +2805,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         stdout = capsys.readouterr().out
@@ -2238,7 +2831,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2267,7 +2860,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2289,7 +2882,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2311,7 +2904,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2340,7 +2933,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         stdout = capsys.readouterr().out
@@ -2364,7 +2957,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2384,7 +2977,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2407,7 +3000,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         assert "FOO_DB" in capsys.readouterr().err
@@ -2438,7 +3031,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2454,7 +3047,7 @@ class TestMain:
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
             try:
-                assert_dev_ci_grants.main()
+                assert_dev_ci_grants.main([])
                 raise AssertionError("expected SystemExit")
             except SystemExit as exc:
                 # `startswith`, not `in`: a substring assertion still passes
@@ -2475,7 +3068,7 @@ class TestMain:
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
             try:
-                assert_dev_ci_grants.main()
+                assert_dev_ci_grants.main([])
                 raise AssertionError("expected SystemExit")
             except SystemExit as exc:
                 # Exact prefix, same reasoning as the role test above.
@@ -2498,7 +3091,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn) as mock_connect:
-            assert_dev_ci_grants.main()
+            assert_dev_ci_grants.main([])
 
         # No such kwarg exists anymore -- it never worked.
         _, connect_kwargs = mock_connect.call_args
@@ -2520,7 +3113,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            assert_dev_ci_grants.main()
+            assert_dev_ci_grants.main([])
 
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert "SHOW GRANTS TO ROLE PUBLIC" in executed_statements
@@ -2540,7 +3133,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            assert_dev_ci_grants.main()
+            assert_dev_ci_grants.main([])
 
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert f"SHOW FUTURE GRANTS TO ROLE {_DEV_ROLE}" in executed_statements
@@ -2555,7 +3148,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            assert_dev_ci_grants.main()
+            assert_dev_ci_grants.main([])
 
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
         assert "SHOW GRANTS TO ROLE PUBLIC_WEB" in executed_statements
@@ -2575,7 +3168,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         executed_statements = [call_args.args[0] for call_args in mock_cursor.execute.call_args_list]
@@ -2596,7 +3189,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2619,7 +3212,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2637,7 +3230,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2659,7 +3252,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2674,7 +3267,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         assert "ROASTPILOT_PREVIEW" in capsys.readouterr().err
@@ -2693,7 +3286,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2710,7 +3303,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         assert "PREVIEW_WH" in capsys.readouterr().err
@@ -2725,7 +3318,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         assert "no PUBLIC current grant violates the DEV/account boundary" in capsys.readouterr().out
@@ -2742,7 +3335,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2762,7 +3355,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 1
         stderr = capsys.readouterr().err
@@ -2782,7 +3375,7 @@ class TestMain:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
-            exit_code = assert_dev_ci_grants.main()
+            exit_code = assert_dev_ci_grants.main([])
 
         assert exit_code == 0
         assert "confirmed" in capsys.readouterr().out
@@ -2799,7 +3392,7 @@ class TestMain:
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
             try:
-                assert_dev_ci_grants.main()
+                assert_dev_ci_grants.main([])
                 raise AssertionError("expected SystemExit")
             except SystemExit as exc:
                 assert "SNOWFLAKE_DEV_DATABASE" in str(exc)
@@ -2814,7 +3407,7 @@ class TestMain:
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect") as mock_connect:
             try:
-                assert_dev_ci_grants.main()
+                assert_dev_ci_grants.main([])
                 raise AssertionError("expected SystemExit")
             except SystemExit as exc:
                 assert "SNOWFLAKE_DEV_WAREHOUSE" in str(exc)
@@ -2830,7 +3423,7 @@ class TestMain:
 
         with patch.object(assert_dev_ci_grants.snowflake.connector, "connect", return_value=mock_conn):
             try:
-                assert_dev_ci_grants.main()
+                assert_dev_ci_grants.main([])
                 raise AssertionError("expected the query error to propagate")
             except RuntimeError:
                 pass
@@ -2840,7 +3433,7 @@ class TestMain:
     def test_raises_systemexit_for_a_missing_required_env_var(self, monkeypatch) -> None:
         monkeypatch.delenv("SNOWFLAKE_ACCOUNT", raising=False)
         try:
-            assert_dev_ci_grants.main()
+            assert_dev_ci_grants.main([])
             raise AssertionError("expected SystemExit")
         except SystemExit as exc:
             assert "SNOWFLAKE_ACCOUNT" in str(exc)

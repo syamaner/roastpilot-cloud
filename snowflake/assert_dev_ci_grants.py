@@ -120,7 +120,10 @@ independent things, all of which must pass:
    round-5 version, where `user_rows[0]` was trusted unconditionally).
 9. ``SHOW GRANTS TO ROLE PUBLIC_WEB`` and ``... ROASTPILOT_AGENT`` — the
    grants in the DEV database container must exactly equal the per-privilege
-   #317 manifest plus pinned database/schema USAGE prerequisites. The shared
+   #317 manifest plus pinned database/schema USAGE prerequisites. The relaxed
+   pre-deploy invocation may defer missing object-level #317 rows that a
+   pending migration can create, but these operator-provisioned prerequisites
+   remain mandatory. The shared
    account-level roles may also use the explicitly allowlisted warehouse.
    ROASTPILOT_AGENT's PREVIEW/prod objects remain owned by future per-environment
    audits; PUBLIC_WEB is restricted within the operator-confirmed
@@ -150,10 +153,19 @@ migration that ITSELF introduces a forbidden grant, e.g. a bad `GRANT ...
 TO PUBLIC` migration, which the pre-deploy run can never see since it
 hasn't been applied yet). Checking only before deploy would let exactly
 that class of bad migration pass, since deploy's own job is running the
-migration's SQL, not judging whether that SQL was safe. This script itself
-has no notion of "which invocation" it is — both runs are the identical,
-stateless, full ten-check audit; see the workflow file for the two call
-sites and how a post-deploy failure fails the job.
+migration's SQL, not judging whether that SQL was safe. The pre-deploy
+invocation runs every containment check but defers only missing object-level
+manifest grants that a pending migration may add. Missing operator-provisioned
+database/schema prerequisites still fail closed; the post-deploy invocation
+and the script's default are the full audit.
+
+That deferral resolves the additive/bootstrap case only. Any non-additive
+change to the expected manifest can still make the live, superseded grant an
+``extra grant:`` before deploy and therefore block the migration: a revoke,
+an object rename, a procedure-signature change, or a correction to the
+offline-to-live type/name transform. The operator escape hatch is an
+ACCOUNTADMIN revoke of the superseded grant or drop of its superseded object
+before running the deploy.
 
 Before connecting at all, `main()` also asserts the
 `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` env vars still equal
@@ -260,10 +272,12 @@ than trusting it happened.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -678,6 +692,21 @@ def find_violations(
     return violations
 
 
+def object_manifest_role_grants(database: str) -> dict[str, frozenset[RoleGrant]]:
+    """Build the migration-supplied object grants for both application roles."""
+    expected: dict[str, set[RoleGrant]] = {
+        PUBLIC_WEB_ROLE: set(),
+        ROASTPILOT_AGENT_ROLE: set(),
+    }
+    for grant in check_grant_manifest.EXPECTED_MANIFEST:
+        live_object_type, live_name = _live_manifest_object(database, grant)
+        expected[grant.role_name].update(
+            (privilege, live_object_type, live_name, grant.role_name)
+            for privilege in grant.privileges
+        )
+    return {role_name: frozenset(grants) for role_name, grants in expected.items()}
+
+
 def expected_role_grants(database: str) -> dict[str, frozenset[RoleGrant]]:
     """Build the exact live grant manifest for both application roles.
 
@@ -694,23 +723,21 @@ def expected_role_grants(database: str) -> dict[str, frozenset[RoleGrant]]:
         ("USAGE", "DATABASE", database),
         ("USAGE", "SCHEMA", f"{database}.APP"),
     }
-    expected: dict[str, set[RoleGrant]] = {
-        PUBLIC_WEB_ROLE: {
+    object_grants = object_manifest_role_grants(database)
+    prerequisites_by_role: dict[str, frozenset[RoleGrant]] = {
+        PUBLIC_WEB_ROLE: frozenset(
             (privilege, granted_on, name, PUBLIC_WEB_ROLE)
             for privilege, granted_on, name in prerequisites
-        },
-        ROASTPILOT_AGENT_ROLE: {
+        ),
+        ROASTPILOT_AGENT_ROLE: frozenset(
             (privilege, granted_on, name, ROASTPILOT_AGENT_ROLE)
             for privilege, granted_on, name in prerequisites
-        },
+        ),
     }
-    for grant in check_grant_manifest.EXPECTED_MANIFEST:
-        live_object_type, live_name = _live_manifest_object(database, grant)
-        expected[grant.role_name].update(
-            (privilege, live_object_type, live_name, grant.role_name)
-            for privilege in grant.privileges
-        )
-    return {role_name: frozenset(grants) for role_name, grants in expected.items()}
+    return {
+        role_name: grants | prerequisites_by_role[role_name]
+        for role_name, grants in object_grants.items()
+    }
 
 
 def _live_object_type(offline_object_type: str) -> str:
@@ -817,6 +844,8 @@ def find_role_manifest_violations(
     expected_set: frozenset[RoleGrant],
     database: str,
     allowed_warehouses: frozenset[str],
+    *,
+    deferred_missing_grants: frozenset[RoleGrant] = frozenset(),
 ) -> list[str]:
     """Audit DEV exactly while permitting owned cross-environment grants.
 
@@ -828,7 +857,10 @@ def find_role_manifest_violations(
     must belong to the byte-exact owned database family, exactly match its
     environment-invariant secure surface, and have no grant option. Other
     warehouses, role/account grants, malformed names, and unknown object types
-    fail closed.
+    fail closed. ``deferred_missing_grants`` is the explicit subset of expected
+    rows whose absence may be deferred; its empty default is the strict full
+    audit. Every expected row outside that caller-provided set remains required,
+    so this function never infers that an absent row is migration-supplied.
     """
     in_scope: list[tuple[RoleGrant, str, bool]] = []
     violations: list[str] = []
@@ -928,7 +960,9 @@ def find_role_manifest_violations(
     )
     violations.extend(
         f"missing manifest grant: {privilege} on {granted_on} {name} to {grantee}"
-        for privilege, granted_on, name, grantee in sorted(expected_set)
+        for privilege, granted_on, name, grantee in sorted(
+            expected_set - deferred_missing_grants
+        )
         if not any(
             grant_option_is_false
             and _role_grants_match(grant, (privilege, granted_on, name, grantee))
@@ -1289,7 +1323,12 @@ def find_default_secondary_roles_violation(user_rows: list[dict[str, object]], u
     )
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--allow-missing-manifest-grants", action="store_true")
+    arguments = parser.parse_args(argv)
+    require_complete = not arguments.allow_missing_manifest_grants
+
     account = require_env("SNOWFLAKE_ACCOUNT")
     user = require_env("SNOWFLAKE_DEV_USER")
     role = require_env("SNOWFLAKE_DEV_ROLE")
@@ -1407,12 +1446,18 @@ def main() -> int:
     default_secondary_roles_violation = find_default_secondary_roles_violation(show_user_rows, user)
     default_role_reaches = find_default_role_boundary_reaches(default_role_grants, database, warehouse)
     expected_app_role_grants = expected_role_grants(database)
+    object_app_role_grants = object_manifest_role_grants(database)
     public_web_violations = find_role_manifest_violations(
         PUBLIC_WEB_ROLE,
         public_web_grant_rows,
         expected_app_role_grants[PUBLIC_WEB_ROLE],
         database,
         _ALLOWED_APP_ROLE_WAREHOUSES,
+        deferred_missing_grants=(
+            object_app_role_grants[PUBLIC_WEB_ROLE]
+            if not require_complete
+            else frozenset()
+        ),
     )
     roastpilot_agent_violations = find_role_manifest_violations(
         ROASTPILOT_AGENT_ROLE,
@@ -1420,6 +1465,11 @@ def main() -> int:
         expected_app_role_grants[ROASTPILOT_AGENT_ROLE],
         database,
         _ALLOWED_APP_ROLE_WAREHOUSES,
+        deferred_missing_grants=(
+            object_app_role_grants[ROASTPILOT_AGENT_ROLE]
+            if not require_complete
+            else frozenset()
+        ),
     )
     public_web_future_violations = find_role_future_grant_violations(
         PUBLIC_WEB_ROLE, public_web_future_grant_rows
@@ -1484,14 +1534,21 @@ def main() -> int:
             print(f"  - {ROASTPILOT_AGENT_ROLE} future-grant violation: {violation}", file=sys.stderr)
         return 1
 
+    app_role_manifest_verdict = (
+        f"{PUBLIC_WEB_ROLE}/{ROASTPILOT_AGENT_ROLE} exactly match their manifests with zero future "
+        "grants visible"
+        if require_complete
+        else f"{PUBLIC_WEB_ROLE}/{ROASTPILOT_AGENT_ROLE} have no disallowed visible grants under "
+        "the DEV-scoped manifest ceiling and zero future grants visible; manifest completeness "
+        "was deferred to the post-deploy audit and was not verified by this run"
+    )
     print(
         f"confirmed: all {len(grant_rows)} grant(s) (+ {len(future_grant_rows)} future grant(s)) on "
         f"{role} stay within {database}/{warehouse}, no PUBLIC current grant violates the "
         f"DEV/account boundary, no PUBLIC-granted default role directly reaches DEV, PUBLIC holds "
         f"zero future grants visible to this role, no other database/warehouse is visible, {user} "
         f"has no unexpected role grants, {user}'s DEFAULT_SECONDARY_ROLES is verified empty, and "
-        f"{PUBLIC_WEB_ROLE}/{ROASTPILOT_AGENT_ROLE} exactly match their manifests with zero future "
-        "grants visible"
+        f"{app_role_manifest_verdict}"
     )
     return 0
 
