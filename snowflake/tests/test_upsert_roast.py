@@ -274,6 +274,36 @@ def test_t10_artifact_replace_delete_is_bound_and_precedes_insert() -> None:
     assert "v_artifact_count" not in transaction.lower()
 
 
+def test_t10b_opt_out_telemetry_purge_is_the_only_delete_path_and_exactly_scoped() -> None:
+    transaction = _transaction()
+    stored = _match(
+        r"select\s+id\s*,\s*public_slug\s+into\s+:v_id\s*,\s*:v_slug.*?;",
+        transaction,
+    )
+    slug_guard = _match(
+        r"if\s*\(\s*v_slug_count\s*<>\s*1\s*\)\s*then\s*"
+        r"raise\s+duplicate_public_slug\s*;\s*end\s+if\s*;",
+        transaction,
+    )
+    pattern = (
+        r"if\s*\(\s*v_contributed_to_learning\s*=\s*false\s*\)\s*then\s*"
+        r"delete\s+from\s+app\.roast_telemetry\s+where\s+roast_id\s*=\s*:v_id\s*;\s*"
+        r"end\s+if\s*;"
+    )
+    blocks = list(re.finditer(pattern, transaction, re.I | re.DOTALL))
+    assert len(blocks) == 1
+    block = blocks[0]
+    prefix = transaction[: block.start()]
+    conditional_opens = len(re.findall(r"\bif\s*\(", prefix, re.I))
+    conditional_thens = len(re.findall(r"\)\s*then\b", prefix, re.I))
+    conditional_closes = len(re.findall(r"\bend\s+if\s*;", prefix, re.I))
+    artifact_delete = _match(r"delete\s+from\s+app\.roast_artifacts", transaction)
+    assert conditional_opens == conditional_thens == conditional_closes
+    assert stored.start() < slug_guard.start() < block.start() < artifact_delete.start()
+    assert len(re.findall(r"delete\s+from\s+app\.roast_telemetry", STRIPPED, re.I)) == 1
+    assert ":p_run_id" not in block.group(0)
+
+
 @pytest.mark.parametrize("kind, expected_path", EXPECTED_STAGE_PATHS.items())
 def test_t11_stage_path_renders_exact_closed_mapping(kind: str, expected_path: str) -> None:
     insert = _artifact_insert()
@@ -464,6 +494,31 @@ def test_t31_operator_rating_bounds_are_one_through_five() -> None:
     assert (minimum, maximum) == (1, 5)
     assert all(not minimum <= value <= maximum for value in (0, 6, -1))
     assert all(minimum <= value <= maximum for value in (1, 5))
+
+
+def test_t31b_roasted_at_requires_explicit_offset_before_timestamp_conversion() -> None:
+    offset_guard = _match(
+        r"if\s*\(\s*typeof\(v_payload:roasted_at_utc\)\s*=\s*'VARCHAR'\s+"
+        r"and\s+not\s+regexp_like\s*\(\s*v_payload:roasted_at_utc::string\s*,\s*"
+        r"'(?P<grammar>\^[^']+\$)'\s*\)\s*\)\s*then\s*"
+        r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
+    )
+    grammar = offset_guard.group("grammar")
+    conversion_guard = _match(
+        r"if\s*\(\s*typeof\(v_payload:roasted_at_utc\)\s*=\s*'VARCHAR'\s+and\s+"
+        r"try_to_timestamp_tz\(v_payload:roasted_at_utc::string\)\s+is\s+null\s*\)\s*then\s*"
+        r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
+    )
+    assert offset_guard.start() < conversion_guard.start()
+    assert re.fullmatch(grammar, "2026-08-24T11:00:00Z")
+    assert re.fullmatch(grammar, "2026-08-24T11:00:00+01:30")
+    assert re.fullmatch(grammar, "2026-08-24T11:00:00-04:00")
+    assert re.fullmatch(grammar, "2026-08-24T11:00:00") is None
+    assert re.search(
+        r"typeof\(v_payload:roasted_at_utc\)\s+not\s+in\s*\(\s*'VARCHAR'\s*,\s*'NULL_VALUE'\s*\)",
+        STRIPPED,
+        re.I,
+    )
 
 
 def test_t32_artifact_kind_set_matches_seed_rules_and_rejects_hostiles() -> None:

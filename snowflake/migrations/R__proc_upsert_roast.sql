@@ -17,11 +17,12 @@
 -- roast metadata is never echoed into logs. Offline guard tests use Python re,
 -- while Snowflake REGEXP_LIKE uses RE2; exact equivalence remains live-gate-only.
 -- Per #419, an opted-out roast (contributed_to_learning = false) must have an
--- empty artifact manifest, preventing this procedure from minting artifact rows.
--- This guard binds the manifest only: telemetry rows and staged files written
--- before an opt-out survive it, so #419's telemetry requirement (a) and the
--- stage-file half of requirement (b) are not closed by this migration. The true
--- case is deliberately unconstrained and may also have an empty manifest.
+-- empty artifact manifest, enforcing the artifact-row half of requirement (b),
+-- while the transactional opt-out telemetry purge enforces requirement (a).
+-- The stage-file half of (b) remains open: staged files survive an opt-out because
+-- the agent holds stage WRITE independently (#317), and #341's directory-scoped
+-- REMOVE runs at deletion time rather than opt-out. The true case is deliberately
+-- unconstrained and may also have an empty manifest.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
@@ -159,6 +160,11 @@ begin
     raise invalid_payload;
   end if;
   if (typeof(v_payload:roasted_at_utc) = 'VARCHAR'
+      and not regexp_like(v_payload:roasted_at_utc::string,
+                          '^.*(Z|[+-][0-9]{2}:[0-9]{2})$')) then
+    raise invalid_payload;
+  end if;
+  if (typeof(v_payload:roasted_at_utc) = 'VARCHAR'
       and try_to_timestamp_tz(v_payload:roasted_at_utc::string) is null) then
     raise invalid_payload;
   end if;
@@ -279,6 +285,11 @@ begin
           and (v_old_bean_origin is distinct from v_new_bean_origin
                or v_old_roast_level is distinct from v_new_roast_level)) then
         call app.recompute_reference_summary(:v_old_bean_origin, :v_old_roast_level);
+      end if;
+
+      -- #419 requirement (a): purge telemetry only on opt-out as a consent revocation, not cleanup.
+      if (v_contributed_to_learning = false) then
+        delete from app.roast_telemetry where roast_id = :v_id;
       end if;
 
       delete from app.roast_artifacts where roast_id = :v_id;
