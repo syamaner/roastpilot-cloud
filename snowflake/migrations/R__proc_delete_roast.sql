@@ -16,9 +16,12 @@
 --
 -- D-314-I: stage-file REMOVE is deferred to #341. This row cascade deletes
 -- artifact rows but not staged files; once the C3 connector begins PUTting files,
--- deleting a roast leaves those files with no row pointing at them. #341 must
--- derive the run id from cloud_roasts.idempotency_key and REMOVE the directory
--- @app.roast_artifacts/<run_id>/ rather than iterate per-row stage_path values.
+-- deleting a roast leaves those files with no row pointing at them.
+-- D-341-A settles #341's mechanism: it reads idempotency_key from cloud_roasts,
+-- validates the derived run id against the exact lowercase-UUID grammar, and
+-- fails closed on NULL, blank, or any mismatch. It issues one directory-scoped
+-- REMOVE of @app.roast_artifacts/<run_id>/, constructed in-procedure, without
+-- ever interpolating a stored stage_path value into REMOVE.
 -- All temperatures are Celsius; this procedure contains no Fahrenheit value or
 -- conversion.
 --
