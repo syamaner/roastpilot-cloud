@@ -172,14 +172,17 @@ counterpart the offline job above always deferred: it runs the grants
 audit (`assert_dev_ci_grants.py`) **twice** — once BEFORE deploying
 migrations against `ROASTPILOT_DEV` with the DEV-scoped CI key
 (`ROASTPILOT_DEV_CI`, role `ROASTPILOT_DEV_CI_ROLE`), and once AFTER. The
-pre-deploy run is the drift gate (catches a grant that was already wrong
-going in, before writing anything); the post-deploy run is the
-migration-output gate (catches a migration that ITSELF introduces a
-forbidden grant — a bad `GRANT ... TO PUBLIC` migration is valid SQL and
-succeeds, so only re-auditing the database AFTER it's applied can catch
-it; a pre-deploy-only check would let that class of bad migration pass).
+pre-deploy run is a narrowed drift gate: it keeps every containment and
+over-privilege check armed but defers manifest completeness because the
+pending migration may add missing grants. The post-deploy run is the full
+audit and migration-output gate (it catches a migration that ITSELF
+introduces a forbidden grant — a bad `GRANT ... TO PUBLIC` migration is
+valid SQL and succeeds, so only re-auditing the database AFTER it's applied
+can catch it; a pre-deploy-only check would let that class pass).
 
-The grants check covers eight independent things, all of which must pass:
+The full post-deploy grants check covers ten independent things, all of which
+must pass. The pre-deploy form applies the same checks except that missing
+application-role manifest grants are intentionally not required:
 `SHOW GRANTS TO ROLE` (current object grants on the primary role stay
 within `ROASTPILOT_DEV`/`DEV_CI_WH`), `SHOW DATABASES`/`SHOW WAREHOUSES`
 (nothing else is even VISIBLE to the role — defense in depth against
@@ -197,7 +200,11 @@ dedicated query; `SHOW FUTURE GRANTS TO ROLE <role>` is real Snowflake
 syntax that lists every future grant for a role account-wide — an earlier
 version of this README/module wrongly claimed no such account-wide query
 existed), and `SHOW USERS LIKE '<user>'` (verifies the CI user's
-`DEFAULT_SECONDARY_ROLES` is actually empty — see "Secondary roles" below).
+`DEFAULT_SECONDARY_ROLES` is actually empty — see "Secondary roles" below),
+`SHOW GRANTS TO ROLE` for `PUBLIC_WEB` and `ROASTPILOT_AGENT` (their DEV
+grants match the manifest exactly in the full audit and never exceed it in
+either mode), and `SHOW FUTURE GRANTS TO ROLE` for both application roles
+(their manifests allow none).
 
 **PUBLIC-audit completeness limit (tracked [#59]):** `SHOW GRANTS TO ROLE
 PUBLIC`/`SHOW FUTURE GRANTS TO ROLE PUBLIC`, run by this DEV-scoped role,

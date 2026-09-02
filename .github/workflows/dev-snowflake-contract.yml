@@ -59,9 +59,12 @@ name: DEV Snowflake Contract Check
 #    migration that ITSELF grants something forbidden -- e.g. a bad
 #    `GRANT ... TO PUBLIC` -- succeeds as valid SQL and would sail through
 #    a pre-deploy-only check, since that check ran before the migration
-#    existed in the database at all). Both runs are the exact same script;
-#    see the two steps' own comments for why the second one also runs even
-#    if the deploy step itself failed partway.
+#    existed in the database at all). The pre-deploy invocation keeps every
+#    containment check armed but defers only missing object-level manifest
+#    grants that a pending migration may add. Missing operator-provisioned
+#    database/schema prerequisites still fail closed. The post-deploy invocation
+#    is the full audit; see the two steps' own comments for why the second one
+#    also runs even if the deploy step failed partway.
 # 7. Secondary roles are kept off for BOTH Snowflake connections in this
 #    job, by two DIFFERENT mechanisms (Codex P1, PR #57, round 2 — an
 #    earlier attempt tried a single `session_parameters`/
@@ -219,7 +222,11 @@ jobs:
         # conditional logic to get wrong. This is NOT the only run of this
         # script in this job -- see the "(post-deploy)" step below, the
         # MIGRATION-OUTPUT gate, for why a pre-deploy-only check would miss
-        # a migration that itself introduces a forbidden grant.
+        # a migration that itself introduces a forbidden grant. This run
+        # defers only missing object-level manifest grants that the pending
+        # deploy may create. Missing operator-provisioned database/schema
+        # prerequisites still fail closed; every over-privilege and containment
+        # detector remains armed.
         # F1-S8 acceptance #3: fails the job if SHOW GRANTS TO ROLE, SHOW
         # GRANTS TO ROLE PUBLIC, SHOW GRANTS TO USER, SHOW FUTURE GRANTS TO
         # ROLE (for the role and for PUBLIC), SHOW DATABASES, or SHOW
@@ -260,7 +267,7 @@ jobs:
           # its known-correct literal (Codex P2, PR #57, round 2).
           SNOWFLAKE_DEV_DATABASE: ${{ vars.SNOWFLAKE_DEV_DATABASE }}
           SNOWFLAKE_DEV_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}
-        run: python3 assert_dev_ci_grants.py
+        run: python3 assert_dev_ci_grants.py --allow-missing-manifest-grants
 
       - name: Deploy migrations for real against ROASTPILOT_DEV
         id: deploy
@@ -337,8 +344,8 @@ jobs:
         # migration that itself contains a forbidden grant (e.g. `GRANT
         # SELECT ON ... TO PUBLIC`) is valid SQL, so schemachange applies it
         # successfully, and the pre-deploy audit has no way to have seen it
-        # since it hadn't been applied yet. Re-running the exact same audit
-        # here, against the now-migrated database, is what actually catches
+        # since it hadn't been applied yet. Running the full audit here,
+        # against the now-migrated database, is what actually catches
         # that class of bad migration -- a failure here means the migration
         # under test introduced a forbidden grant, and fails the job.
         # `if: always()` + explicitly checking the pre-deploy step's own
