@@ -27,7 +27,7 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
     assert check_grant_manifest.main() == 0
-    assert capsys.readouterr().out == "grant manifest matches exactly (11 grants)\n"
+    assert capsys.readouterr().out == "grant manifest matches exactly (12 grants)\n"
 
 
 def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> None:
@@ -309,7 +309,7 @@ def test_t19_every_rendered_grant_parses_with_the_closed_object_type_grammar(
     assert all(check_grant_manifest._GRANT_PATTERN.fullmatch(statement) for statement in statements)
 
 
-def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None:
+def test_t20_manifest_grows_from_nine_by_exactly_the_three_ratified_rows() -> None:
     additions = {
         check_grant_manifest._grant(
             "USAGE", "FILE FORMAT", "app.roast_jsonl_format", "ROASTPILOT_AGENT"
@@ -320,9 +320,15 @@ def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None
             "app.load_roast_telemetry(string, string)",
             "ROASTPILOT_AGENT",
         ),
+        check_grant_manifest._grant(
+            "USAGE",
+            "PROCEDURE",
+            "app.upsert_roast(string, string)",
+            "ROASTPILOT_AGENT",
+        ),
     }
     previous_manifest = check_grant_manifest.EXPECTED_MANIFEST - additions
-    assert len(check_grant_manifest.EXPECTED_MANIFEST) == 11
+    assert len(check_grant_manifest.EXPECTED_MANIFEST) == 12
     assert len(previous_manifest) == 9
     assert check_grant_manifest.EXPECTED_MANIFEST - previous_manifest == additions
 
@@ -339,6 +345,11 @@ def test_t20_manifest_grows_from_nine_by_exactly_the_two_ratified_rows() -> None
             "to role ROASTPILOT_AGENT",
             "app.load_roast_telemetry(string, string)",
         ),
+        (
+            "grant usage on procedure app.upsert_roast(string, string) "
+            "to role ROASTPILOT_AGENT",
+            "app.upsert_roast(string, string)",
+        ),
     ],
 )
 def test_t21_removing_either_new_grant_is_named_missing(
@@ -348,15 +359,18 @@ def test_t21_removing_either_new_grant_is_named_missing(
     assert any("missing grant" in item and object_name in item for item in violations)
 
 
-def test_t22_procedure_signature_separator_is_load_bearing(rendered_sql: str) -> None:
-    committed = "app.load_roast_telemetry(string, string)"
-    malformed = "app.load_roast_telemetry(string,string)"
+@pytest.mark.parametrize("procedure", ["load_roast_telemetry", "upsert_roast"])
+def test_t22_procedure_signature_separator_is_load_bearing(
+    rendered_sql: str, procedure: str
+) -> None:
+    committed = f"app.{procedure}(string, string)"
+    malformed = f"app.{procedure}(string,string)"
     violations = check_grant_manifest.manifest_violations(rendered_sql.replace(committed, malformed))
     assert any("missing grant" in item and committed in item for item in violations)
     assert any("extra grant" in item and malformed in item for item in violations)
     assert (
         assert_dev_ci_grants._live_procedure_signature("ROASTPILOT_DEV", committed)
-        == "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)"
+        == f"ROASTPILOT_DEV.APP.{procedure.upper()}(VARCHAR, VARCHAR)"
     )
 
 
@@ -366,7 +380,7 @@ def test_t23_grant_header_names_new_caller_rights_boundary(rendered_sql: str) ->
     assert "load_roast_telemetry" in header.lower()
 
 
-def test_t24_live_agent_manifest_derives_both_new_rows() -> None:
+def test_t24_live_agent_manifest_derives_all_three_new_rows() -> None:
     agent = assert_dev_ci_grants.expected_role_grants("ROASTPILOT_DEV")["ROASTPILOT_AGENT"]
     assert (
         "USAGE",
@@ -378,6 +392,12 @@ def test_t24_live_agent_manifest_derives_both_new_rows() -> None:
         "USAGE",
         "PROCEDURE",
         "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)",
+        "ROASTPILOT_AGENT",
+    ) in agent
+    assert (
+        "USAGE",
+        "PROCEDURE",
+        "ROASTPILOT_DEV.APP.UPSERT_ROAST(VARCHAR, VARCHAR)",
         "ROASTPILOT_AGENT",
     ) in agent
 

@@ -70,6 +70,7 @@ _SUBMIT_REVIEW_SIGNATURE = (
     "app.submit_review(string, string, int, smallint, smallint, smallint, "
     "smallint, smallint, string, string, string)"
 )
+_UPSERT_ROAST_SIGNATURE = "app.upsert_roast(string, string)"
 _AGENT_TABLES = (
     "app.cloud_roasts",
     "app.roast_telemetry",
@@ -97,6 +98,7 @@ EXPECTED_MANIFEST = frozenset(
             "app.load_roast_telemetry(string, string)",
             "ROASTPILOT_AGENT",
         ),
+        _grant("USAGE", "PROCEDURE", _UPSERT_ROAST_SIGNATURE, "ROASTPILOT_AGENT"),
     }
 )
 
