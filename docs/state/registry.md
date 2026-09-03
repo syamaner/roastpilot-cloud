@@ -169,16 +169,20 @@ Environment misconfigured to a different principal that can activate
 `ROASTPILOT_AGENT` passes the `CURRENT_ROLE()` check while the grant audit reports
 the *intended* user's grants as clean, so writes proceed under another identity with
 the dedicated-principal boundary silently bypassed; and, for that connected
-identity, `SHOW GRANTS TO USER` returning **no role other than** the intended one
-and `PUBLIC`, rather than merely that `CURRENT_ROLE()` is correct. The formulation is an
-**exclusion list, not an equality**, modelled on but **not identical to**
-`find_unexpected_user_role_grants` in `assert_dev_ci_grants.py`, which returns every
-granted role except the expected primary and `PUBLIC`. The difference matters and is
-a required criterion: that helper coerces an absent or blank `role` field to an empty
-string and continues, so reusing it verbatim would let a malformed or unknown
-identity-assignment row pass the new credential gate silently. **#433's check must
-treat a malformed or blank grant row as a violation**, matching the fail-closed
-posture the live PUBLIC audit already takes on unparseable rows. That matters in both directions and both were got
+identity, `SHOW GRANTS TO USER` returning **exactly one intended-role row, which
+must be PRESENT**, and **no role other than** that one and `PUBLIC`.
+
+Three properties, all required, none sufficient alone. **Presence**, because an
+exclusion-only test passes vacuously on an empty or truncated result: the audit
+could not distinguish "holds exactly the intended role" from "did not observe this
+principal's assignments" while `CURRENT_ROLE()` still read correctly.
+**Exclusion**, rejecting every other role. And **fail-closed on a malformed or
+blank row** — this is modelled on `find_unexpected_user_role_grants` in
+`assert_dev_ci_grants.py` but is deliberately **not identical to it**, because that
+helper coerces an absent or blank `role` field to an empty string and continues, so
+reusing it verbatim would let an unknown identity-assignment row pass the credential
+gate in silence. Matching the fail-closed posture the live PUBLIC audit already
+takes on unparseable rows. That matters in both directions and both were got
 wrong before the live evidence arrived — requiring *exactly* the intended role fails
 wherever Snowflake returns the implicit `PUBLIC`, while requiring the role *plus*
 `PUBLIC` fails where it does not. The live provisioning of `ROASTPILOT_AGENT_CI` on
