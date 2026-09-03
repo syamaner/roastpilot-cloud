@@ -48,10 +48,12 @@ class FakeCursor:
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
         owned_roast_id: object = ROAST_ID,
+        owned_roast_id_count: object = 1,
         first_result: object = FIRST_RESULT,
         replay_result: object = FIRST_RESULT,
         slug_result: object = FIRST_RESULT,
         control_result: object = FIRST_RESULT,
+        opt_out_result: object = FIRST_RESULT,
         ambiguous_roast_ids: tuple[object, ...] = (ROAST_ID, "second-roast-id"),
         artifact_count: object = 3,
         artifact_pairs: set[tuple[object, object]] | None = None,
@@ -96,10 +98,12 @@ class FakeCursor:
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
         self.owned_roast_id = owned_roast_id
+        self.owned_roast_id_count = owned_roast_id_count
         self.first_result = first_result
         self.replay_result = replay_result
         self.slug_result = slug_result
         self.control_result = control_result
+        self.opt_out_result = opt_out_result
         self.ambiguous_roast_ids = ambiguous_roast_ids
         self.artifact_count = artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
@@ -154,7 +158,7 @@ class FakeCursor:
                 self.last_call_result = FIRST_RESULT
             elif payload["contributed_to_learning"] is False:
                 self.opted_out = True
-                self.last_call_result = FIRST_RESULT
+                self.last_call_result = self.opt_out_result
             elif not self.call_results:
                 self.last_call_result = self.first_result
             elif len(self.call_results) == 1:
@@ -190,7 +194,9 @@ class FakeCursor:
         if command.startswith("CALL app.upsert_roast"):
             return (self.last_call_result,)
         if command == "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s":
-            return (self.sentinel_owner_count,)
+            if params == (upsert_roast_verify_live.OTHER_ROAST_ID,):
+                return (self.sentinel_owner_count,)
+            return (self.owned_roast_id_count,)
         if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
             self.roast_count_reads += 1
             if self.roast_count_reads == 1:
@@ -789,7 +795,7 @@ def test_database_and_role_reject_before_write(
                     "public_slug": upsert_roast_verify_live.PUBLIC_SLUG,
                 }
             },
-            "contributing replay resolved a different roast",
+            "contributing replay returned a different object",
         ),
         ({"artifact_count": 2}, "artifact count does not match"),
         ({"stored_visibility": "unlisted"}, "changed stored value"),
@@ -964,9 +970,85 @@ def test_slug_replay_must_return_original_public_slug() -> None:
     )
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="slug replay returned a changed public_slug",
+        match="divergent-slug replay returned a different object",
     ):
         _verify(connection)
+
+
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        (
+            {
+                "slug_result": {
+                    "cloud_roast_id": "wrong-slug-replay-id",
+                    "public_slug": upsert_roast_verify_live.PUBLIC_SLUG,
+                }
+            },
+            "divergent-slug replay returned a different object",
+        ),
+        (
+            {
+                "control_result": {
+                    "cloud_roast_id": ROAST_ID,
+                    "public_slug": upsert_roast_verify_live.REPLAY_SLUG,
+                }
+            },
+            "contributing replay returned a different object",
+        ),
+        (
+            {
+                "opt_out_result": {
+                    "cloud_roast_id": "wrong-opt-out-replay-id",
+                    "public_slug": upsert_roast_verify_live.PUBLIC_SLUG,
+                }
+            },
+            "opt-out replay returned a different object",
+        ),
+    ],
+)
+def test_every_successful_replay_must_return_the_complete_first_result(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        _verify(connection)
+
+
+def test_owned_id_collision_reports_ids_and_skips_child_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    colliding_roast_id = "aaaaaaaa-4170-4170-4170-aaaaaaaaaaaa"
+    connection = FakeConnection(
+        owned_roast_id=colliding_roast_id,
+        owned_roast_id_count=2,
+    )
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "_connect",
+        lambda _target: connection,
+    )
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "is not unique" in output
+    assert colliding_roast_id in output
+    assert upsert_roast_verify_live.TEST_RUN_ID in output
+    commands = _commands(connection)
+    assert (
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        (colliding_roast_id,),
+    ) in connection.fake_cursor.executed
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        for command in commands
+    )
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
 
 
 def test_replay_equality_and_artifact_pair_mismatches_are_detected() -> None:

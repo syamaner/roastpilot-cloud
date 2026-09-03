@@ -86,6 +86,7 @@ class UpsertRoastVerifyError(RuntimeError):
         super().__init__(message)
         self.cleanup_failures: list[str] = []
         self.resolved_roast_id: object | None = None
+        self.cleanup_unsafe = False
 
 
 def _validated_fixture_uri(fixture_path: Path) -> str:
@@ -446,6 +447,19 @@ def _verify_replay_idempotency(
             ),
             ("ID",),
         )[0]
+        owned_id_count_row = _fetchone(
+            cursor,
+            "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+            (owned_roast_id,),
+            "owned roast id uniqueness query",
+        )
+        if _count(owned_id_count_row, "COUNT(*)") != 1:
+            collision_error = UpsertRoastVerifyError(
+                f"owned roast id {owned_roast_id} is not unique for run id "
+                f"{TEST_RUN_ID}; cleanup was not attempted"
+            )
+            collision_error.cleanup_unsafe = True
+            raise collision_error
     except BaseException as exc:
         # Preserve the procedure return for diagnostics only. Cleanup is
         # steered exclusively by the id read through the owned run key above.
@@ -511,8 +525,10 @@ def _verify_preserved_columns(
     slug_payload = dict(payload)
     slug_payload["public_slug"] = REPLAY_SLUG
     slug_result = _call_upsert(cursor, slug_payload)
-    if slug_result["public_slug"] != first["public_slug"]:
-        raise UpsertRoastVerifyError("slug replay returned a changed public_slug")
+    if slug_result != first:
+        raise UpsertRoastVerifyError(
+            "divergent-slug replay returned a different object"
+        )
     after = _row_values(
         _fetchone(
             cursor,
@@ -566,9 +582,10 @@ def _verify_visibility_rollback(
 def _verify_telemetry_purge_scope(
     cursor: Cursor,
     payload: Mapping[str, object],
-    resolved_roast_id: object,
+    first: Mapping[str, object],
 ) -> None:
     """Verify purge is conditional, effective, and scoped to this roast."""
+    resolved_roast_id = first["cloud_roast_id"]
     _execute(
         cursor,
         "INSERT INTO app.roast_telemetry "
@@ -590,8 +607,10 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError("telemetry setup did not insert two roast rows")
 
     control_result = _call_upsert(cursor, payload)
-    if control_result["cloud_roast_id"] != resolved_roast_id:
-        raise UpsertRoastVerifyError("contributing replay resolved a different roast")
+    if control_result != first:
+        raise UpsertRoastVerifyError(
+            "contributing replay returned a different object"
+        )
     control_roast_count_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
@@ -614,7 +633,9 @@ def _verify_telemetry_purge_scope(
     opt_out_payload = dict(payload)
     opt_out_payload["contributed_to_learning"] = False
     opt_out_payload["artifact_kinds"] = []
-    _call_upsert(cursor, opt_out_payload)
+    opt_out_result = _call_upsert(cursor, opt_out_payload)
+    if opt_out_result != first:
+        raise UpsertRoastVerifyError("opt-out replay returned a different object")
     purged_count_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
@@ -746,7 +767,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         _verify_artifact_manifest(cursor, returned_roast_id)
         updated_at = _verify_preserved_columns(cursor, payload, first)
         _verify_visibility_rollback(cursor, payload, updated_at)
-        _verify_telemetry_purge_scope(cursor, payload, returned_roast_id)
+        _verify_telemetry_purge_scope(cursor, payload, first)
         return str(returned_roast_id)
     except BaseException as exc:
         if isinstance(exc, UpsertRoastVerifyError):
@@ -762,7 +783,8 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         )
         raise body_error from exc
     finally:
-        if preflight_complete and cursor is not None:
+        cleanup_is_safe = body_error is None or not body_error.cleanup_unsafe
+        if preflight_complete and cursor is not None and cleanup_is_safe:
             cleanup_errors = _cleanup_all(cursor, resolved_roast_id)
             if cleanup_errors:
                 if body_error is not None:
