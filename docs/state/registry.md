@@ -75,11 +75,24 @@ via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
 [#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
 **#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
 the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
+**Unit 2 (`snowflake/upsert_roast_verify_live.py`, AC-4's instrument) is built on
+branch `feat/c3-s2-verify-live` and not yet merged.** It cost four pre-open fold
+rounds against four blind review boards, and the third of them hit the S7
+iteration stop, which the operator cleared explicitly on 3 Sep along with the
+**D-417-E** convergence decision recorded on the issue. The durable lesson is in
+that decision: two successive redesigns of the verifier's cleanup block each
+introduced a fresh defect, so the third replaced the contract outright rather than
+patching it again. The unit is far larger than its contract estimate (~190 logic
+lines estimated, roughly four times that shipped), with every line traceable to an
+accepted review finding — worth carrying into #418's and #433's estimates, because
+a live instrument costs far more than a sibling to mirror once each of its own
+guards must be provably falsifiable.
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
 presigned-URL / SNOWFLAKE_SSE owner-download check) is
 `ready-for-conventional-implementation` but blocked on the same credential;
 [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
-privacy-mapping exclusion contract) is `wait-to-implement`.
+privacy-mapping exclusion contract) is `wait-to-implement`, blocked on #417 Unit 2
+merging, with its live half additionally on #433.
 
 **[#433](https://github.com/syamaner/roastpilot-cloud/issues/433) (OPEN-6) is
 C3's critical path**, not any remaining story. It is the live-contract vehicle
