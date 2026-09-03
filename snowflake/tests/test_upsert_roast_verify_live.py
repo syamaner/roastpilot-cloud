@@ -46,6 +46,7 @@ class FakeCursor:
         control_roast_count: object = 1,
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
+        owned_roast_id: object = ROAST_ID,
         first_result: object = FIRST_RESULT,
         replay_result: object = FIRST_RESULT,
         slug_result: object = FIRST_RESULT,
@@ -93,6 +94,7 @@ class FakeCursor:
         self.control_roast_count = control_roast_count
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
+        self.owned_roast_id = owned_roast_id
         self.first_result = first_result
         self.replay_result = replay_result
         self.slug_result = slug_result
@@ -211,6 +213,8 @@ class FakeCursor:
                 upsert_roast_verify_live.PRESERVED_COLUMNS,
                 tuple(values),
             )
+        if command == "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s":
+            return self._row(("id",), (self.owned_roast_id,))
         if command.startswith("SELECT visibility, operator_notes"):
             return self._row(
                 ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
@@ -346,13 +350,14 @@ def test_payload_pins_closed_keys_private_visibility_and_null_groups() -> None:
 
 
 def test_first_value_and_row_values_accept_mappings() -> None:
-    row = {"CURRENT_DATABASE()": "ROASTPILOT_DEV"}
+    row = {"current_database()": "ROASTPILOT_DEV", "owner_id": None}
     assert upsert_roast_verify_live._first_value(row, "CURRENT_DATABASE()") == (
         "ROASTPILOT_DEV"
     )
     assert upsert_roast_verify_live._row_values(row, ("CURRENT_DATABASE()",)) == (
         "ROASTPILOT_DEV",
     )
+    assert upsert_roast_verify_live._row_values(row, ("OWNER_ID",)) == (None,)
 
 
 def test_row_values_rejects_incomplete_mapping() -> None:
@@ -645,6 +650,7 @@ def test_main_reports_sanitized_connection_close_failure(
     assert "Snowflake connection close failed" in output
     assert upsert_roast_verify_live.TEST_RUN_ID in output
     assert ROAST_ID in output
+    assert output.count(f"diagnostic cloud_roast_id={ROAST_ID}") == 1
     if body_fails:
         assert "replay did not leave exactly one roast" in output
     else:
@@ -932,6 +938,57 @@ def test_replay_equality_and_artifact_pair_mismatches_are_detected() -> None:
         _verify(connection)
 
 
+def test_wrong_returned_id_never_reaches_destructive_cleanup_predicates() -> None:
+    wrong_returned_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    wrong_result = {
+        "cloud_roast_id": wrong_returned_id,
+        "public_slug": upsert_roast_verify_live.PUBLIC_SLUG,
+    }
+    connection = FakeConnection(
+        first_result=wrong_result,
+        replay_result=wrong_result,
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="stored id and slug do not match first return",
+    ) as caught:
+        _verify(connection)
+    assert caught.value.resolved_roast_id == wrong_returned_id
+    child_deletes = [
+        entry
+        for entry in connection.fake_cursor.executed
+        if entry[0].startswith("DELETE FROM app.roast_artifacts")
+        or entry[0].startswith("DELETE FROM app.roast_telemetry WHERE (")
+    ]
+    assert [params for _command, params in child_deletes] == [
+        (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID),
+        (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID),
+    ]
+    assert all(
+        wrong_returned_id not in params
+        for _command, params in child_deletes
+        if params is not None
+    )
+
+
+def test_raw_replay_exception_preserves_returned_id_for_diagnostics() -> None:
+    class NoneAmbiguousRowsCursor(FakeCursor):
+        def fetchall(self):
+            command = self.executed[-1][0]
+            if command.startswith("SELECT id FROM app.cloud_roasts"):
+                return None
+            return super().fetchall()
+
+    connection = FakeConnection(roast_count=2)
+    connection.fake_cursor = NoneAmbiguousRowsCursor(roast_count=2)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="live verification body failed",
+    ) as caught:
+        _verify(connection)
+    assert caught.value.resolved_roast_id == ROAST_ID
+
+
 @pytest.mark.parametrize("updated_after", [1, object()])
 def test_updated_at_must_strictly_and_comparably_advance(updated_after: object) -> None:
     connection = FakeConnection(updated_after=updated_after)
@@ -1132,7 +1189,6 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         "stage REMOVE cleanup",
     ):
         assert step in output
-    assert f"roast_id={ROAST_ID}" in output
     assert f"roast_id={upsert_roast_verify_live.OTHER_ROAST_ID}" in output
     assert f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}" in output
     assert " OR idempotency_key=" not in output

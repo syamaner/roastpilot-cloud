@@ -114,9 +114,25 @@ def _first_value(row: object, label: str) -> object:
 
 def _row_values(row: object, labels: Sequence[str]) -> tuple[object, ...]:
     if isinstance(row, Mapping):
-        if any(label not in row for label in labels):
-            raise UpsertRoastVerifyError("live query returned an incomplete row")
-        return tuple(row[label] for label in labels)
+        values: list[object] = []
+        missing = object()
+        for label in labels:
+            if label in row:
+                values.append(row[label])
+                continue
+            folded_label = label.casefold()
+            matching_value = next(
+                (
+                    value
+                    for key, value in row.items()
+                    if isinstance(key, str) and key.casefold() == folded_label
+                ),
+                missing,
+            )
+            if matching_value is missing:
+                raise UpsertRoastVerifyError("live query returned an incomplete row")
+            values.append(matching_value)
+        return tuple(values)
     if isinstance(row, Sequence) and not isinstance(row, (str, bytes)):
         if len(row) == len(labels):
             return tuple(row)
@@ -386,7 +402,7 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
 
 def _verify_replay_idempotency(
     cursor: Cursor,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[dict[str, object], dict[str, object], object]:
     """Verify identical calls return equally and leave one roast."""
     payload = _payload()
     first = _call_upsert(cursor, payload)
@@ -417,12 +433,21 @@ def _verify_replay_idempotency(
             raise UpsertRoastVerifyError(
                 "identical replay returned a different object"
             )
-    except UpsertRoastVerifyError as exc:
-        # Preserve diagnostic state only; cleanup still receives the unchanged
-        # top-level resolved_roast_id and retains D-417-E's exact predicates.
-        exc.resolved_roast_id = first["cloud_roast_id"]
+        owned_roast_id = _row_values(
+            _fetchone(
+                cursor,
+                "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+                (TEST_RUN_ID,),
+                "owned roast id query",
+            ),
+            ("ID",),
+        )[0]
+    except BaseException as exc:
+        # Preserve the procedure return for diagnostics only. Cleanup is
+        # steered exclusively by the id read through the owned run key above.
+        setattr(exc, "resolved_roast_id", first["cloud_roast_id"])
         raise
-    return payload, first
+    return payload, first, owned_roast_id
 
 
 def _verify_artifact_manifest(cursor: Cursor, resolved_roast_id: object) -> None:
@@ -706,26 +731,31 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
     cursor: Cursor | None = None
     preflight_complete = False
     resolved_roast_id: object | None = None
+    returned_roast_id: object | None = None
     body_error: UpsertRoastVerifyError | None = None
     try:
         cursor = _preflight(connection, expected_target)
         preflight_complete = True
         _stage_and_verify_fixtures(cursor)
-        payload, first = _verify_replay_idempotency(cursor)
-        resolved_roast_id = first["cloud_roast_id"]
-        _verify_artifact_manifest(cursor, resolved_roast_id)
+        payload, first, resolved_roast_id = _verify_replay_idempotency(cursor)
+        returned_roast_id = first["cloud_roast_id"]
+        _verify_artifact_manifest(cursor, returned_roast_id)
         updated_at = _verify_preserved_columns(cursor, payload, first)
         _verify_visibility_rollback(cursor, payload, updated_at)
-        _verify_telemetry_purge_scope(cursor, payload, resolved_roast_id)
-        return str(resolved_roast_id)
+        _verify_telemetry_purge_scope(cursor, payload, returned_roast_id)
+        return str(returned_roast_id)
     except BaseException as exc:
         if isinstance(exc, UpsertRoastVerifyError):
             body_error = exc
-            if resolved_roast_id is not None:
-                body_error.resolved_roast_id = resolved_roast_id
+            if returned_roast_id is not None:
+                body_error.resolved_roast_id = returned_roast_id
             raise
         body_error = UpsertRoastVerifyError("live verification body failed")
-        body_error.resolved_roast_id = resolved_roast_id
+        body_error.resolved_roast_id = (
+            getattr(exc, "resolved_roast_id", None)
+            or returned_roast_id
+            or resolved_roast_id
+        )
         raise body_error from exc
     finally:
         if preflight_complete and cursor is not None:
@@ -747,7 +777,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
                     _attach_cleanup_failures(
                         cleanup_failure,
                         cleanup_errors,
-                        resolved_roast_id,
+                        returned_roast_id or resolved_roast_id,
                     )
                     raise cleanup_failure
 
@@ -830,10 +860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if resolved_roast_id is None and roast_id:
             resolved_roast_id = roast_id
-        close_message = "Snowflake connection close failed"
-        if resolved_roast_id is not None:
-            close_message += f" [cloud_roast_id={resolved_roast_id}]"
-        close_error = UpsertRoastVerifyError(close_message)
+        close_error = UpsertRoastVerifyError("Snowflake connection close failed")
         if failure is None:
             failure = UpsertRoastVerifyError("live verification cleanup failed")
         _attach_cleanup_failures(failure, (close_error,), resolved_roast_id)
