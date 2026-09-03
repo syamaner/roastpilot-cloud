@@ -76,9 +76,12 @@ via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
 **#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
 the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
 **Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument** — an
-operator-run verifier, not a CI step, because every step of
-`dev-snowflake-contract.yml` authenticates as the deploy role while the verifier
-asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. Its merge state
+operator-run verifier, not a CI step, because every Snowflake connection
+`dev-snowflake-contract.yml` opens authenticates as the deploy role, while the
+verifier asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. (Most of
+that workflow's steps — runner hardening, checkout, Python setup, dependency
+install, the static grant scan, the summary — open no Snowflake connection at all;
+it is the connections that are deploy-role-bound, not every step.) Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
 pre-open fold rounds against five blind review boards, the third of which hit the
 S7 iteration stop, cleared by the operator on 3 Sep alongside the **D-417-E**
@@ -116,8 +119,12 @@ close it, because approving a dispatch is not reading the diff of the ref it wil
 run. The existing path now has an owner in
 [#437](https://github.com/syamaner/roastpilot-cloud/issues/437). The general
 role-assignment audit is assigned in writing to
-[#358](https://github.com/syamaner/roastpilot-cloud/issues/358); and a failed
-cleanup failing the job. It is decided and ready for a contract, but **not
+[#358](https://github.com/syamaner/roastpilot-cloud/issues/358). And **D-433-E: a
+failed cleanup fails the job**, fail-closed, because a silent partial cleanup is
+how DEV accumulates unattributable residue that a later run misreads — the
+operator clears it by hand from the run id, resolved roast id and per-statement
+addressing keys the verifier prints, so the job's evidence artifact must capture
+stderr as well as stdout. It is decided and ready for a contract, but **not
 provisioned** — creating the user, its key and the Environment secret are
 operator actions no agent holds access to perform.
 
