@@ -1,0 +1,123 @@
+name: DEV Snowflake Agent Verification
+
+# SECURITY MODEL: this workflow holds the ROASTPILOT_AGENT_CI key and runs
+# live, write-capable verification only after a human approves the
+# dev-snowflake-agent Environment. That Environment's deployment-branch policy
+# permits main only; workflow_dispatch is the sole trigger. Egress is blocked
+# except for the same endpoints used by the existing DEV contract workflow.
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: dev-snowflake-agent
+  cancel-in-progress: false
+
+jobs:
+  agent-verify:
+    name: Live agent-role verification (ROASTPILOT_DEV)
+    runs-on: ubuntu-latest
+    environment: dev-snowflake-agent
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (block all egress except what this job needs)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            *.snowflakecomputing.com:443
+            ocsp.snowflakecomputing.com:80
+
+      - name: Checkout roastpilot-cloud
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install schemachange + Snowflake connector dependencies
+        run: pip install -r snowflake/requirements.txt
+
+      - name: Assert the live verifier is the fixed agent CI principal
+        id: principal-guard
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ROASTPILOT_AGENT_CI
+          SNOWFLAKE_ROLE: ROASTPILOT_AGENT
+          SNOWFLAKE_WAREHOUSE: ROASTPILOT_WH
+          SNOWFLAKE_DATABASE: ROASTPILOT_DEV
+          SNOWFLAKE_AGENT_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY }}
+          SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE }}
+        # `-P` is intentionally omitted: this main-pinned Environment job's
+        # scripts import the assert_dev_ci_grants sibling by design. The
+        # untrusted PR-head shadow-planting threat guarded by `-P` in offline
+        # CI does not apply after the Environment deployment policy admits main.
+        run: python3 assert_agent_ci_principal.py --target ROASTPILOT_DEV
+
+      - name: Run the agent-role live verifiers
+        id: run-verifiers
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ROASTPILOT_AGENT_CI
+          SNOWFLAKE_ROLE: ROASTPILOT_AGENT
+          SNOWFLAKE_WAREHOUSE: ROASTPILOT_WH
+          SNOWFLAKE_DATABASE: ROASTPILOT_DEV
+          SNOWFLAKE_AGENT_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY }}
+          SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE }}
+          EVIDENCE: ${{ github.workspace }}/agent-verify-evidence.log
+        # `-P` is intentionally omitted: these scripts import the
+        # assert_dev_ci_grants sibling, and the Environment deployment policy
+        # admits reviewed main only. The PR-head shadow-planting threat guarded
+        # by `-P` in offline CI therefore does not apply to this live job.
+        run: |
+          set -euo pipefail
+          umask 077
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "$SNOWFLAKE_AGENT_PRIVATE_KEY" > "$KEY_FILE"
+          export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
+          export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE"
+          python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
+          python3 load_telemetry_verify_live.py --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
+
+      - name: Upload agent verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-verify-evidence
+          path: agent-verify-evidence.log
+          retention-days: 14
+
+      - name: Write summary
+        if: always()
+        env:
+          SUMMARY_DATABASE: ROASTPILOT_DEV
+          SUMMARY_ROLE: ROASTPILOT_AGENT
+          SUMMARY_USER: ROASTPILOT_AGENT_CI
+          SUMMARY_WAREHOUSE: ROASTPILOT_WH
+        run: |
+          {
+            echo "## DEV Snowflake agent verification"
+            echo ""
+            echo "- **Principal guard:** ${{ steps.principal-guard.outcome }}"
+            echo "- **Live verifiers:** ${{ steps.run-verifiers.outcome }}"
+            echo "- **Database:** \`${SUMMARY_DATABASE}\`"
+            echo "- **Role:** \`${SUMMARY_ROLE}\`"
+            echo "- **User:** \`${SUMMARY_USER}\`"
+            echo "- **Warehouse:** \`${SUMMARY_WAREHOUSE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

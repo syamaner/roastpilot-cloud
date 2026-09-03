@@ -286,7 +286,7 @@ jobs:
         # in this repo. Set a few points below the current 98% so routine
         # additions (a new branch, an edge case) don't need a threshold
         # bump every time -- only a real coverage regression trips it.
-        run: python3 -P -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_grant_manifest --cov=check_mutation_score --cov=ci_change_classifier --cov=ci_gate_result --cov-report=term-missing --cov-fail-under=90
+        run: python3 -P -m pytest tests/ --cov=with_connection_env --cov=validate_migrations --cov=assert_dev_ci_grants --cov=check_forbidden_grants --cov=check_grant_manifest --cov=check_mutation_score --cov=ci_change_classifier --cov=ci_gate_result --cov=assert_agent_ci_principal --cov-report=term-missing --cov-fail-under=90
 
       - name: Validate migration filenames + render
         run: python3 -P snowflake/validate_migrations.py
