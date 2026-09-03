@@ -61,6 +61,7 @@ class FakeCursor:
         cleanup_identity_query_fails: bool = False,
         artifact_count: object = 3,
         empty_manifest_artifact_count: object = 0,
+        final_artifact_count: object = 0,
         artifact_pairs: set[tuple[object, object]] | None = None,
         before_pair: tuple[object, object] = (
             ROAST_ID,
@@ -125,6 +126,7 @@ class FakeCursor:
         self.cleanup_identity_query_fails = cleanup_identity_query_fails
         self.artifact_count = artifact_count
         self.empty_manifest_artifact_count = empty_manifest_artifact_count
+        self.final_artifact_count = final_artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
             (kind, f"@app.roast_artifacts/{run_id}/{basename}")
             for kind, basename in upsert_roast_verify_live.ARTIFACT_BASENAMES.items()
@@ -250,7 +252,9 @@ class FakeCursor:
             self.artifact_count_reads += 1
             if self.artifact_count_reads == 1:
                 return (self.artifact_count,)
-            return (self.empty_manifest_artifact_count,)
+            if self.artifact_count_reads == 2:
+                return (self.empty_manifest_artifact_count,)
+            return (self.final_artifact_count,)
         if command.startswith("SELECT id, idempotency_key"):
             self.preserved_reads += 1
             values = list(BEFORE)
@@ -1543,6 +1547,17 @@ def test_contributing_empty_manifest_replay_must_clear_artifact_manifest() -> No
         match="contributing empty-manifest replay did not clear the artifact manifest",
     ):
         _verify(connection)
+
+
+def test_final_opt_out_replay_must_not_recreate_artifacts() -> None:
+    connection = FakeConnection(final_artifact_count=1)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="final opt-out replay recreated an artifact",
+    ):
+        _verify(connection)
+    assert connection.fake_cursor.opted_out is True
+    assert connection.fake_cursor.artifact_count_reads == 3
 
 
 def test_sentinel_result_asserts_one_absolute_row() -> None:

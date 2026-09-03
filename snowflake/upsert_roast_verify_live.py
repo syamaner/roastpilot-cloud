@@ -839,6 +839,17 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "final replay did not advance updated_at beyond the first call"
         )
+
+    # Final persisted-state observation: the checks above already cover the
+    # roast row and telemetry rows after opt-out; close the artifact state too.
+    final_artifact_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
+        (owned_roast_id,),
+        "final persisted-state artifact count query",
+    )
+    if _count(final_artifact_count_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError("final opt-out replay recreated an artifact")
     return previous_updated_at
 
 
