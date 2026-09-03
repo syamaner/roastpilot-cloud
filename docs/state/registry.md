@@ -182,13 +182,15 @@ blank row** — this is modelled on `find_unexpected_user_role_grants` in
 helper coerces an absent or blank `role` field to an empty string and continues, so
 reusing it verbatim would let an unknown identity-assignment row pass the credential
 gate in silence. Matching the fail-closed posture the live PUBLIC audit already
-takes on unparseable rows. That matters in both directions and both were got
-wrong before the live evidence arrived — requiring *exactly* the intended role fails
-wherever Snowflake returns the implicit `PUBLIC`, while requiring the role *plus*
-`PUBLIC` fails where it does not. The live provisioning of `ROASTPILOT_AGENT_CI` on
-3 Sep returned only `ROASTPILOT_AGENT`, with no `PUBLIC` row, so the exclusion form
-is the only one that holds either way. Together with an empty
-`DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
+takes on unparseable rows.
+
+Why `PUBLIC` is tolerated rather than required: the live provisioning of
+`ROASTPILOT_AGENT_CI` on 3 Sep returned only `ROASTPILOT_AGENT` with no `PUBLIC`
+row, so requiring it would fail on this account, while requiring *exactly* the
+intended role would fail on any account that does return it. Tolerating it in the
+exclusion holds either way.
+
+Also required: an empty `DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
 extra granted role can be activated in another session and would escape the
 intended five-table-and-stage boundary. And **D-433-E: a
 failed cleanup fails the job**, fail-closed, because a silent partial cleanup is
