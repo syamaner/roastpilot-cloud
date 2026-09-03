@@ -84,15 +84,22 @@ install, the static grant scan, the summary — open no Snowflake connection at 
 it is the connections that are deploy-role-bound, not every step.) Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
 pre-open fold rounds against blind review boards, the third of which hit the S7
-iteration stop. **D-417-E** settled how to converge the cleanup contract. The stop
-itself is **NOT yet recorded as cleared**: the grant that cleared it was given
-in-session and never written down, and the after-the-fact transcription on the
-issue, **D-417-F**, is agent-authored and **awaiting the operator's ratification**.
-Until the operator confirms it, treat the S7 clearance and the conditional merge
-authority it describes as **pending, not established** — an agent's transcription
-of a grant is not the grant. The process failure is written up on the issue rather
-than tidied away, because "record the decision before anything cites it" is the
-rule it broke, and `pr-triage` blocked this PR for exactly that. The durable lesson is in
+iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
+itself was cleared by a separate operator grant, **D-417-F**, which also carries
+conditional merge authority — the full bar or it parks — and explicitly does **not**
+extend to provisioning any credential. **The operator ratified D-417-F on 3 Sep**,
+and that ratification is recorded on the issue.
+
+The route it took there is the part worth keeping. The grant was given in-session
+and never written down; the registry cited it; `pr-triage` returned FIX-FIRST and
+the Codex connector independently raised the same point as a P1, both on the
+grounds that an agent's after-the-fact transcription is not the grant. Six other
+decisions this session were recorded correctly before anything cited them. The one
+missed was the grant authorising work past a hard stop and authorising merge —
+which is precisely the case where an unrecorded grant is indistinguishable from an
+invented one. **D-417-G** then set the stop rule for the remaining review passes:
+fold a finding when the instrument fails to verify its own criterion, record it as
+an accepted residual when it hardens against a hypothetically broken procedure. The durable lesson is in
 that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
