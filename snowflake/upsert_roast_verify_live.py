@@ -96,7 +96,17 @@ def _validated_fixture_uri(fixture_path: Path) -> str:
 
 def _first_value(row: object, label: str) -> object:
     if isinstance(row, Mapping):
-        return row.get(label)
+        if label in row:
+            return row[label]
+        folded_label = label.casefold()
+        return next(
+            (
+                value
+                for key, value in row.items()
+                if isinstance(key, str) and key.casefold() == folded_label
+            ),
+            None,
+        )
     if isinstance(row, Sequence) and not isinstance(row, (str, bytes)) and row:
         return row[0]
     return None
@@ -321,7 +331,8 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
     )
     if existing_stage_rows:
         raise UpsertRoastVerifyError(
-            f"test stage prefix already contains files: {stage_prefix}"
+            f"test stage prefix contains {len(existing_stage_rows)} existing file(s): "
+            f"{stage_prefix}"
         )
     return cursor
 
@@ -616,7 +627,7 @@ def _cleanup_all(
         )
         child_params = (resolved_roast_id, TEST_RUN_ID)
         child_address = (
-            f"roast_id={resolved_roast_id}; idempotency_key={TEST_RUN_ID}"
+            f"roast_id={resolved_roast_id} OR idempotency_key={TEST_RUN_ID}"
         )
     stage_prefix = f"@app.roast_artifacts/{TEST_RUN_ID}/"
 
@@ -684,6 +695,8 @@ def _attach_cleanup_failures(
     failure.resolved_roast_id = resolved_roast_id
     for cleanup_error in cleanup_errors:
         message = f"cleanup failed for run id {TEST_RUN_ID}: {cleanup_error}"
+        if resolved_roast_id is not None:
+            message += f"; diagnostic cloud_roast_id={resolved_roast_id}"
         failure.cleanup_failures.append(message)
         failure.add_note(message)
 

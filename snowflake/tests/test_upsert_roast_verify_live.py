@@ -243,6 +243,8 @@ class FakeCursor:
                 names = self.listed_names
             return [(name,) for name in sorted(names)]
         if command.startswith("SELECT id FROM app.cloud_roasts"):
+            if self.mapping_rows:
+                return [{"id": roast_id} for roast_id in self.ambiguous_roast_ids]
             return [(roast_id,) for roast_id in self.ambiguous_roast_ids]
         if command.startswith("SELECT kind, stage_path"):
             rows = sorted(self.artifact_pairs)
@@ -564,7 +566,8 @@ def test_post_remove_list_must_be_empty() -> None:
         "cleanup failed for run id "
         f"{upsert_roast_verify_live.TEST_RUN_ID}: stage REMOVE verification "
         "failed [stage_prefix="
-        f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/]"
+        f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/]; "
+        f"diagnostic cloud_roast_id={ROAST_ID}"
     ]
     assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
@@ -595,7 +598,11 @@ def test_main_prints_narrow_evidence_and_closes(
     ("fail_on", "static_message"),
     [
         ({"PUT "}, "staging fixture PUT failed"),
-        ({"DELETE FROM app.cloud_roasts"}, "parent cleanup"),
+        (
+            {"DELETE FROM app.cloud_roasts"},
+            "parent cleanup [idempotency_key="
+            f"{upsert_roast_verify_live.TEST_RUN_ID}] failed",
+        ),
     ],
 )
 def test_main_sanitizes_body_and_cleanup_connector_paths(
@@ -750,6 +757,7 @@ def test_replay_count_mismatch_prints_every_matching_roast_id(
     connection = FakeConnection(
         roast_count=2,
         ambiguous_roast_ids=matching_ids,
+        mapping_rows=True,
     )
     monkeypatch.setattr(
         upsert_roast_verify_live,
@@ -835,8 +843,9 @@ def test_preexisting_stage_prefix_guard_fails_before_any_write() -> None:
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match=re.escape(stage_prefix),
-    ):
+    ) as caught:
         _verify(connection)
+    assert "contains 1 existing file(s)" in str(caught.value)
     assert _commands(connection)[-1] == f"LIST {stage_prefix}"
     assert all(
         command == "USE SECONDARY ROLES NONE"
@@ -1082,8 +1091,9 @@ def test_cleanup_failure_does_not_gate_later_cleanup_actions() -> None:
     assert raised.value.cleanup_failures == [
         "cleanup failed for run id "
         f"{upsert_roast_verify_live.TEST_RUN_ID}: artifact cleanup "
-        f"[roast_id={ROAST_ID}; "
-        f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}] failed"
+        f"[roast_id={ROAST_ID} OR "
+        f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}] failed; "
+        f"diagnostic cloud_roast_id={ROAST_ID}"
     ]
 
 
@@ -1092,7 +1102,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection(
-        artifact_count=2,
+        roast_count=2,
         fail_on={
             "DELETE FROM app.roast_artifacts",
             "DELETE FROM app.roast_telemetry",
@@ -1108,7 +1118,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     )
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
-    assert "artifact count does not match manifest" in output
+    assert "replay did not leave exactly one roast" in output
     assert output.count(
         f"cleanup failed for run id {upsert_roast_verify_live.TEST_RUN_ID}:"
     ) == 5
@@ -1125,6 +1135,13 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     assert f"roast_id={ROAST_ID}" in output
     assert f"roast_id={upsert_roast_verify_live.OTHER_ROAST_ID}" in output
     assert f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}" in output
+    assert " OR idempotency_key=" not in output
+    assert f"diagnostic cloud_roast_id={ROAST_ID}" in output
+    assert (
+        "parent cleanup [idempotency_key="
+        f"{upsert_roast_verify_live.TEST_RUN_ID}] failed"
+        in output
+    )
     assert (
         f"stage_prefix=@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
         in output
@@ -1135,7 +1152,4 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         for entry in connection.fake_cursor.executed
         if entry[0].startswith("DELETE FROM app.roast_artifacts")
     )
-    assert artifact_cleanup[1] == (
-        ROAST_ID,
-        upsert_roast_verify_live.TEST_RUN_ID,
-    )
+    assert artifact_cleanup[1] == (upsert_roast_verify_live.TEST_RUN_ID,)
