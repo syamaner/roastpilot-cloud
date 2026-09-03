@@ -84,12 +84,15 @@ install, the static grant scan, the summary — open no Snowflake connection at 
 it is the connections that are deploy-role-bound, not every step.) Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
 pre-open fold rounds against blind review boards, the third of which hit the S7
-iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
-itself was cleared by a separate operator grant recorded as **D-417-F**, which also
-carries the conditional merge authority. That grant was given in-session and
-recorded only after `pr-triage` blocked this PR for citing it before it existed —
-the process failure is written up on the issue rather than tidied away, because
-"record the decision before anything cites it" is the rule it broke. The durable lesson is in
+iteration stop. **D-417-E** settled how to converge the cleanup contract. The stop
+itself is **NOT yet recorded as cleared**: the grant that cleared it was given
+in-session and never written down, and the after-the-fact transcription on the
+issue, **D-417-F**, is agent-authored and **awaiting the operator's ratification**.
+Until the operator confirms it, treat the S7 clearance and the conditional merge
+authority it describes as **pending, not established** — an agent's transcription
+of a grant is not the grant. The process failure is written up on the issue rather
+than tidied away, because "record the decision before anything cites it" is the
+rule it broke, and `pr-triage` blocked this PR for exactly that. The durable lesson is in
 that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
@@ -111,8 +114,17 @@ five of its design questions were settled 3 Sep 2026 as **D-433-A..E** (recorded
 on the issue): a dedicated `ROASTPILOT_AGENT_CI` user; both blast-radius axes
 recorded, with the principal axis a genuine escalation over the deploy role; a
 **new** `dev-snowflake-agent` Environment rather than reusing `dev-snowflake-ci`,
-so the two credentials are not co-resident; a **fail-closed default-branch ref
-check**, which `dev-snowflake-contract.yml` does not currently have. That gap is
+so the two credentials are not co-resident; a **fail-closed default-branch
+boundary** — and it must be **base-controlled or platform-level**, not an
+in-workflow `github.ref` condition. D-433-C originally specified the latter and
+that was wrong: when `workflow_dispatch` selects a feature ref, that ref also
+supplies the workflow definition, so a branch can delete or relax an in-workflow
+check before the Environment ever releases the credential. The guard would be
+mutable by precisely the thing it constrains. The Environment's deployment-branch
+policy is the right mechanism, being configured in repository settings rather than
+in the branch, which is also what Rigour Calibration means by preferring a
+base-controlled platform constraint. `dev-snowflake-contract.yml` today has neither
+form. That gap is
 **not** confined to the new agent job, and this entry's first draft was wrong to
 imply it was: the deploy workflow's checkout is unpinned, so a feature-ref dispatch
 installs dependencies from the branch's `requirements.txt` and runs the branch's
@@ -132,7 +144,8 @@ stderr as well as stdout. It is decided and ready for a contract, but **not
 provisioned** — creating the user, its key and the Environment secret are
 operator actions no agent holds access to perform.
 
-**Three C3 defects split out of #417's review boards, each now decided:**
+**Two C3 defects split out of #417's review boards, plus one original story whose
+decision was updated:**
 [#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
 before telemetry exists) — **D-430-A** takes Option A, the recompute moves into
 `load_roast_telemetry`, because the alternatives make cloud-side correctness
@@ -147,7 +160,9 @@ inherits an orphaned residual: `privacy-auditor` raised the whole-summary
 side-channel during #311 and it was recorded as owned by C4/#315, but #315 was a
 field-mapping assertion test that could not add an enforcement boundary and
 closed 24 Aug without doing so.
-[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) — **D-419-A**
+[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) is **not** a
+review-discovered defect — it is one of the four stories decomposed at C3 kickoff,
+listed above — but its open question is now settled: **D-419-A**
 records that the aggregation-exclusion half is **already enforced at read**
 (`R__proc_recompute_summary.sql:49`), so no second mechanism is built and the
 story stays a contract-test story.
