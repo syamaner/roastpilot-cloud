@@ -909,6 +909,40 @@ def test_injectable_live_guards_reject_independently(
         _verify(connection)
 
 
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"artifact_count": 2}, "artifact count does not match"),
+        ({"stored_visibility": "unlisted"}, "changed stored value"),
+        (
+            {"telemetry_control_count": 0},
+            "contributing replay unexpectedly purged",
+        ),
+    ],
+)
+def test_later_stage_failures_run_full_cleanup(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        _verify(connection)
+
+    destructive_commands = [
+        command
+        for command in _commands(connection)
+        if command.startswith("DELETE ") or command.startswith("REMOVE ")
+    ]
+    assert len(destructive_commands) == 5
+    assert destructive_commands[0].startswith("DELETE FROM app.roast_artifacts")
+    assert destructive_commands[1].startswith("DELETE FROM app.roast_telemetry WHERE (")
+    assert destructive_commands[2:] == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
+
+
 def test_replay_count_mismatch_reports_every_id_and_skips_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -964,6 +998,7 @@ def test_replay_count_diagnostic_failure_still_skips_cleanup() -> None:
 
 
 def test_control_replay_count_mismatch_skips_cleanup() -> None:
+    # This is the cleanup_unsafe counterpart to the cleanup-ran matrix above.
     connection = FakeConnection(control_roast_count=2)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
@@ -1563,19 +1598,16 @@ def test_final_opt_out_replay_must_not_recreate_artifacts() -> None:
 def test_sentinel_result_asserts_one_absolute_row() -> None:
     connection = FakeConnection()
     assert _verify(connection) == ROAST_ID
+    sentinel_query = (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (upsert_roast_verify_live.OTHER_ROAST_ID,),
+    )
     sentinel_reads = [
         entry
         for entry in connection.fake_cursor.executed
-        if entry
-        == (
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (upsert_roast_verify_live.OTHER_ROAST_ID,),
-        )
+        if entry == sentinel_query
     ]
-    assert len(sentinel_reads) == 2
-    assert not any(
-        "sentinel baseline" in command for command in _commands(connection)
-    )
+    assert sentinel_reads == [sentinel_query, sentinel_query]
 
 
 def test_early_abort_without_verified_id_skips_cleanup() -> None:
