@@ -83,9 +83,13 @@ that workflow's steps — runner hardening, checkout, Python setup, dependency
 install, the static grant scan, the summary — open no Snowflake connection at all;
 it is the connections that are deploy-role-bound, not every step.) Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
-pre-open fold rounds against five blind review boards, the third of which hit the
-S7 iteration stop, cleared by the operator on 3 Sep alongside the **D-417-E**
-convergence decision recorded on the issue. The durable lesson is in
+pre-open fold rounds against blind review boards, the third of which hit the S7
+iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
+itself was cleared by a separate operator grant recorded as **D-417-F**, which also
+carries the conditional merge authority. That grant was given in-session and
+recorded only after `pr-triage` blocked this PR for citing it before it existed —
+the process failure is written up on the issue rather than tidied away, because
+"record the decision before anything cites it" is the rule it broke. The durable lesson is in
 that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
