@@ -7,6 +7,7 @@ import re
 import sys
 from decimal import Decimal
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -692,6 +693,56 @@ def test_connect_path_error_is_sanitized_before_main_prints(
     output = capsys.readouterr().err
     assert RAW_PRIVATE_PATH not in output
     assert "SNOWFLAKE_PRIVATE_KEY_FILE configuration failed" in output
+
+
+def test_connect_pins_autocommit_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    connect_calls: list[dict[str, object]] = []
+    expected_connection = object()
+
+    connector_module = ModuleType("snowflake.connector")
+
+    def connect(**kwargs: object) -> object:
+        connect_calls.append(kwargs)
+        return expected_connection
+
+    connector_module.connect = connect  # type: ignore[attr-defined]
+    snowflake_module = ModuleType("snowflake")
+    snowflake_module.connector = connector_module  # type: ignore[attr-defined]
+
+    key_loader_module = ModuleType("assert_dev_ci_grants")
+    key_loader_module.load_private_key_der = (  # type: ignore[attr-defined]
+        lambda _pem, _passphrase: b"private-key-der"
+    )
+
+    monkeypatch.setitem(sys.modules, "snowflake", snowflake_module)
+    monkeypatch.setitem(sys.modules, "snowflake.connector", connector_module)
+    monkeypatch.setitem(sys.modules, "assert_dev_ci_grants", key_loader_module)
+    monkeypatch.setattr(Path, "read_text", lambda _path, **_kwargs: "private key")
+    environment = {
+        "SNOWFLAKE_PRIVATE_KEY_FILE": "/private/key.p8",
+        "SNOWFLAKE_ACCOUNT": "test-account",
+        "SNOWFLAKE_USER": "test-user",
+        "SNOWFLAKE_ROLE": "ROASTPILOT_AGENT",
+        "SNOWFLAKE_WAREHOUSE": "TEST_WAREHOUSE",
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert (
+        upsert_roast_verify_live._connect("ROASTPILOT_DEV")
+        is expected_connection
+    )
+    assert connect_calls == [
+        {
+            "account": "test-account",
+            "user": "test-user",
+            "role": "ROASTPILOT_AGENT",
+            "warehouse": "TEST_WAREHOUSE",
+            "database": "ROASTPILOT_DEV",
+            "private_key": b"private-key-der",
+            "autocommit": True,
+        }
+    ]
 
 
 def test_allowed_targets_are_dev_only_and_preview_is_rejected() -> None:

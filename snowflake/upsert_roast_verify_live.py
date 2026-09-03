@@ -13,6 +13,10 @@ Snowflake's exact ``LIST`` name-column prefix spelling for this
 schema-qualified internal stage remains a live-gate-only unknown; verification
 therefore anchors on the case-insensitive run-id path segment.
 
+The connection explicitly pins autocommit rather than inheriting an account or
+user setting, so direct telemetry setup and every ordered cleanup statement are
+persisted when the session closes.
+
 This is a serial-operator-only instrument. Its ownership checks are
 point-in-time reads; concurrent invocations using the fixed ``TEST_RUN_ID`` can
 pass together and one invocation's cleanup can remove the other's live state.
@@ -821,6 +825,7 @@ def _connect(target: str) -> Connection:  # pragma: no cover - real operator bou
             warehouse=warehouse,
             database=target,
             private_key=private_key,
+            autocommit=True,
         )
     except Exception:
         raise UpsertRoastVerifyError(
