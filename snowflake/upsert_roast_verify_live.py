@@ -12,6 +12,10 @@ visibility, notes, or timestamp change.
 Snowflake's exact ``LIST`` name-column prefix spelling for this
 schema-qualified internal stage remains a live-gate-only unknown; verification
 therefore anchors on the case-insensitive run-id path segment.
+
+This is a serial-operator-only instrument. Its ownership checks are
+point-in-time reads; concurrent invocations using the fixed ``TEST_RUN_ID`` can
+pass together and one invocation's cleanup can remove the other's live state.
 """
 from __future__ import annotations
 
@@ -305,7 +309,20 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
         "sentinel telemetry ownership query",
     )
     if _count(sentinel_telemetry_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError("sentinel telemetry id is already owned")
+        raise UpsertRoastVerifyError(
+            f"sentinel telemetry id is already owned: {OTHER_ROAST_ID}"
+        )
+    stage_prefix = f"@app.roast_artifacts/{TEST_RUN_ID}/"
+    existing_stage_rows = _fetchall(
+        cursor,
+        f"LIST {stage_prefix}",
+        None,
+        "test stage ownership query",
+    )
+    if existing_stage_rows:
+        raise UpsertRoastVerifyError(
+            f"test stage prefix already contains files: {stage_prefix}"
+        )
     return cursor
 
 
@@ -331,16 +348,24 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
         None,
         "staging fixture LIST",
     )
-    run_segment = f"/{TEST_RUN_ID}/"
     listed_names: set[str] = set()
     for row in listed_rows:
         listed_path = str(_first_value(row, "name"))
-        segment_start = listed_path.lower().find(run_segment.lower())
-        if segment_start < 0:
+        path_segments = listed_path.split("/")
+        run_index = next(
+            (
+                index
+                for index, segment in enumerate(path_segments)
+                if segment.casefold() == TEST_RUN_ID.casefold()
+            ),
+            None,
+        )
+        if run_index is None:
             raise UpsertRoastVerifyError("staged fixture LIST has an invalid prefix")
-        relative_name = listed_path[segment_start + len(run_segment) :]
-        if not relative_name or "/" in relative_name:
+        relative_segments = path_segments[run_index + 1 :]
+        if len(relative_segments) != 1 or not relative_segments[0]:
             raise UpsertRoastVerifyError("staged fixture LIST contains a nested path")
+        relative_name = relative_segments[0]
         listed_names.add(relative_name)
     if any(name.lower().endswith(".gz") for name in listed_names):
         raise UpsertRoastVerifyError("staged fixture LIST contains a compressed file")
@@ -365,7 +390,18 @@ def _verify_replay_idempotency(
         # Defence in depth: independently re-assert the procedure's own
         # ambiguous_idempotency_key guard as part of AC-4's live evidence.
         if _count(roast_count_row, "COUNT(*)") != 1:
-            raise UpsertRoastVerifyError("replay did not leave exactly one roast")
+            roast_id_rows = _fetchall(
+                cursor,
+                "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+                (TEST_RUN_ID,),
+                "ambiguous replay id query",
+            )
+            roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
+            recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
+            raise UpsertRoastVerifyError(
+                "replay did not leave exactly one roast; "
+                f"ids for run id {TEST_RUN_ID}: {recorded_ids}"
+            )
         if second != first:
             raise UpsertRoastVerifyError(
                 "identical replay returned a different object"
@@ -495,12 +531,6 @@ def _verify_telemetry_purge_scope(
     """Verify purge is conditional, effective, and scoped to this roast."""
     _execute(
         cursor,
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-        (OTHER_ROAST_ID,),
-        "sentinel pre-cleanup",
-    )
-    _execute(
-        cursor,
         "INSERT INTO app.roast_telemetry "
         "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
         "fan_percent, ror_c_per_min, raw) "
@@ -578,62 +608,70 @@ def _cleanup_all(
             "WHERE idempotency_key = %s)"
         )
         child_params: tuple[object, ...] = (TEST_RUN_ID,)
+        child_address = f"idempotency_key={TEST_RUN_ID}"
     else:
         child_where = (
             "(roast_id = %s OR roast_id IN (SELECT id FROM app.cloud_roasts "
             "WHERE idempotency_key = %s))"
         )
         child_params = (resolved_roast_id, TEST_RUN_ID)
+        child_address = (
+            f"roast_id={resolved_roast_id}; idempotency_key={TEST_RUN_ID}"
+        )
+    stage_prefix = f"@app.roast_artifacts/{TEST_RUN_ID}/"
 
     _cleanup_statement(
         cursor,
         f"DELETE FROM app.roast_artifacts WHERE {child_where}",
         child_params,
-        "artifact cleanup",
+        f"artifact cleanup [{child_address}]",
         cleanup_errors,
     )
     _cleanup_statement(
         cursor,
         f"DELETE FROM app.roast_telemetry WHERE {child_where}",
         child_params,
-        "roast telemetry cleanup",
+        f"roast telemetry cleanup [{child_address}]",
         cleanup_errors,
     )
     _cleanup_statement(
         cursor,
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         (OTHER_ROAST_ID,),
-        "sentinel telemetry cleanup",
+        f"sentinel telemetry cleanup [roast_id={OTHER_ROAST_ID}]",
         cleanup_errors,
     )
     _cleanup_statement(
         cursor,
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
         (TEST_RUN_ID,),
-        "parent cleanup",
+        f"parent cleanup [idempotency_key={TEST_RUN_ID}]",
         cleanup_errors,
     )
     remove_ran = _cleanup_statement(
         cursor,
-        f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
+        f"REMOVE {stage_prefix}",
         None,
-        "stage REMOVE cleanup",
+        f"stage REMOVE cleanup [stage_prefix={stage_prefix}]",
         cleanup_errors,
     )
     if remove_ran:
         try:
             remaining = _fetchall(
                 cursor,
-                f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
+                f"LIST {stage_prefix}",
                 None,
-                "post-REMOVE LIST cleanup",
+                f"post-REMOVE LIST cleanup [stage_prefix={stage_prefix}]",
             )
         except UpsertRoastVerifyError as exc:
             cleanup_errors.append(exc)
         else:
             if remaining:
                 cleanup_errors.append(
-                    UpsertRoastVerifyError("stage REMOVE verification failed")
+                    UpsertRoastVerifyError(
+                        "stage REMOVE verification failed "
+                        f"[stage_prefix={stage_prefix}]"
+                    )
                 )
     return cleanup_errors
 
@@ -645,10 +683,7 @@ def _attach_cleanup_failures(
 ) -> None:
     failure.resolved_roast_id = resolved_roast_id
     for cleanup_error in cleanup_errors:
-        context = f"run id {TEST_RUN_ID}"
-        if resolved_roast_id is not None:
-            context += f", cloud roast id {resolved_roast_id}"
-        message = f"cleanup failed for {context}: {cleanup_error}"
+        message = f"cleanup failed for run id {TEST_RUN_ID}: {cleanup_error}"
         failure.cleanup_failures.append(message)
         failure.add_note(message)
 
@@ -777,12 +812,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         connection.close()
     except BaseException:
-        close_error = UpsertRoastVerifyError("Snowflake connection close failed")
-        if failure is None:
-            failure = UpsertRoastVerifyError("live verification cleanup failed")
-        resolved_roast_id = failure.resolved_roast_id
+        resolved_roast_id = (
+            failure.resolved_roast_id if failure is not None else None
+        )
         if resolved_roast_id is None and roast_id:
             resolved_roast_id = roast_id
+        close_message = "Snowflake connection close failed"
+        if resolved_roast_id is not None:
+            close_message += f" [cloud_roast_id={resolved_roast_id}]"
+        close_error = UpsertRoastVerifyError(close_message)
+        if failure is None:
+            failure = UpsertRoastVerifyError("live verification cleanup failed")
         _attach_cleanup_failures(failure, (close_error,), resolved_roast_id)
     if failure is not None:
         _print_failure(failure)

@@ -39,6 +39,7 @@ class FakeCursor:
         database: str = "ROASTPILOT_DEV",
         role: str = "ROASTPILOT_AGENT",
         listed_names: set[str] | None = None,
+        preexisting_stage_names: set[str] | None = None,
         remove_leaves_files: bool = False,
         existing_run_count: object = 0,
         roast_count: object = 1,
@@ -49,6 +50,7 @@ class FakeCursor:
         replay_result: object = FIRST_RESULT,
         slug_result: object = FIRST_RESULT,
         control_result: object = FIRST_RESULT,
+        ambiguous_roast_ids: tuple[object, ...] = (ROAST_ID, "second-roast-id"),
         artifact_count: object = 3,
         artifact_pairs: set[tuple[object, object]] | None = None,
         before_pair: tuple[object, object] = (
@@ -82,6 +84,9 @@ class FakeCursor:
             f"roast_artifacts/{run_id}/{path.name}"
             for path in upsert_roast_verify_live.FIXTURE_PATHS
         }
+        self.preexisting_stage_names = (
+            set() if preexisting_stage_names is None else preexisting_stage_names
+        )
         self.remove_leaves_files = remove_leaves_files
         self.existing_run_count = existing_run_count
         self.roast_count = roast_count
@@ -92,6 +97,7 @@ class FakeCursor:
         self.replay_result = replay_result
         self.slug_result = slug_result
         self.control_result = control_result
+        self.ambiguous_roast_ids = ambiguous_roast_ids
         self.artifact_count = artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
             (kind, f"@app.roast_artifacts/{run_id}/{basename}")
@@ -124,6 +130,7 @@ class FakeCursor:
         self.control_replayed = False
         self.opted_out = False
         self.removed = False
+        self.put_started = False
 
     def _row(self, labels: tuple[str, ...], values: tuple[object, ...]):
         return dict(zip(labels, values)) if self.mapping_rows else values
@@ -133,7 +140,9 @@ class FakeCursor:
         self.executed.append((command, normalized))
         if any(command.startswith(prefix) for prefix in self.fail_on):
             raise RuntimeError(self.failure_message)
-        if command.startswith("CALL app.upsert_roast"):
+        if command.startswith("PUT "):
+            self.put_started = True
+        elif command.startswith("CALL app.upsert_roast"):
             assert normalized is not None
             payload = json.loads(str(normalized[1]))
             if payload["operator_notes"] == upsert_roast_verify_live.ROLLBACK_NOTES:
@@ -226,10 +235,15 @@ class FakeCursor:
     def fetchall(self):
         command = self.executed[-1][0]
         if command.startswith("LIST "):
-            names = self.listed_names
             if self.removed and not self.remove_leaves_files:
                 names = set()
+            elif not self.put_started:
+                names = self.preexisting_stage_names
+            else:
+                names = self.listed_names
             return [(name,) for name in sorted(names)]
+        if command.startswith("SELECT id FROM app.cloud_roasts"):
+            return [(roast_id,) for roast_id in self.ambiguous_roast_ids]
         if command.startswith("SELECT kind, stage_path"):
             rows = sorted(self.artifact_pairs)
             if self.mapping_rows:
@@ -435,13 +449,16 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
     ]
+    assert commands[6] == (
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
+    )
     expected_puts = [
         f"PUT '{path.resolve().as_uri()}' "
         f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/ "
         "AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
         for path in upsert_roast_verify_live.FIXTURE_PATHS
     ]
-    assert commands[6:8] == expected_puts
+    assert commands[7:9] == expected_puts
     calls = [
         entry
         for entry in connection.fake_cursor.executed
@@ -545,8 +562,9 @@ def test_post_remove_list_must_be_empty() -> None:
         _verify(connection)
     assert caught.value.cleanup_failures == [
         "cleanup failed for run id "
-        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}: "
-        "stage REMOVE verification failed"
+        f"{upsert_roast_verify_live.TEST_RUN_ID}: stage REMOVE verification "
+        "failed [stage_prefix="
+        f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/]"
     ]
     assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
@@ -577,7 +595,7 @@ def test_main_prints_narrow_evidence_and_closes(
     ("fail_on", "static_message"),
     [
         ({"PUT "}, "staging fixture PUT failed"),
-        ({"DELETE FROM app.cloud_roasts"}, "parent cleanup failed"),
+        ({"DELETE FROM app.cloud_roasts"}, "parent cleanup"),
     ],
 )
 def test_main_sanitizes_body_and_cleanup_connector_paths(
@@ -619,6 +637,7 @@ def test_main_reports_sanitized_connection_close_failure(
     assert RAW_PRIVATE_PATH not in output
     assert "Snowflake connection close failed" in output
     assert upsert_roast_verify_live.TEST_RUN_ID in output
+    assert ROAST_ID in output
     if body_fails:
         assert "replay did not leave exactly one roast" in output
     else:
@@ -723,6 +742,27 @@ def test_injectable_live_guards_reject_independently(
         _verify(connection)
 
 
+def test_replay_count_mismatch_prints_every_matching_roast_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    matching_ids = (ROAST_ID, "d4d4d4d4-4170-4170-4170-d4d4d4d4d4d4")
+    connection = FakeConnection(
+        roast_count=2,
+        ambiguous_roast_ids=matching_ids,
+    )
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "_connect",
+        lambda _target: connection,
+    )
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "replay did not leave exactly one roast" in output
+    for roast_id in matching_ids:
+        assert roast_id in output
+
+
 def test_existing_test_run_guard_fails_before_any_write() -> None:
     connection = FakeConnection(existing_run_count=1)
     with pytest.raises(
@@ -758,13 +798,20 @@ def test_sentinel_owner_guard_fails_before_any_write() -> None:
     ]
 
 
-def test_sentinel_telemetry_guard_fails_before_any_write() -> None:
+def test_sentinel_telemetry_guard_prints_id_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     connection = FakeConnection(sentinel_telemetry_count=1)
-    with pytest.raises(
-        upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="sentinel telemetry id is already owned",
-    ):
-        _verify(connection)
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "_connect",
+        lambda _target: connection,
+    )
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "sentinel telemetry id is already owned" in output
+    assert upsert_roast_verify_live.OTHER_ROAST_ID in output
     assert _commands(connection) == [
         "USE SECONDARY ROLES NONE",
         "SELECT CURRENT_DATABASE()",
@@ -775,6 +822,26 @@ def test_sentinel_telemetry_guard_fails_before_any_write() -> None:
     ]
     assert all(
         command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
+        for command in _commands(connection)
+    )
+
+
+def test_preexisting_stage_prefix_guard_fails_before_any_write() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    stage_prefix = f"@app.roast_artifacts/{run_id}/"
+    connection = FakeConnection(
+        preexisting_stage_names={f"roast_artifacts/{run_id}/operator-file.json"}
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=re.escape(stage_prefix),
+    ):
+        _verify(connection)
+    assert _commands(connection)[-1] == f"LIST {stage_prefix}"
+    assert all(
+        command == "USE SECONDARY ROLES NONE"
+        or command.startswith("SELECT ")
+        or command.startswith("LIST ")
         for command in _commands(connection)
     )
 
@@ -1011,11 +1078,12 @@ def test_cleanup_failure_does_not_gate_later_cleanup_actions() -> None:
         command.startswith("DELETE FROM app.cloud_roasts") for command in commands
     )
     assert any(command.startswith("REMOVE ") for command in commands)
-    assert sum(command.startswith("LIST ") for command in commands) == 2
+    assert sum(command.startswith("LIST ") for command in commands) == 3
     assert raised.value.cleanup_failures == [
         "cleanup failed for run id "
-        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}: "
-        "artifact cleanup failed"
+        f"{upsert_roast_verify_live.TEST_RUN_ID}: artifact cleanup "
+        f"[roast_id={ROAST_ID}; "
+        f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}] failed"
     ]
 
 
@@ -1024,7 +1092,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection(
-        roast_count=2,
+        artifact_count=2,
         fail_on={
             "DELETE FROM app.roast_artifacts",
             "DELETE FROM app.roast_telemetry",
@@ -1040,25 +1108,34 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     )
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
-    assert "replay did not leave exactly one roast" in output
+    assert "artifact count does not match manifest" in output
     assert output.count(
-        "cleanup failed for run id "
-        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}:"
+        f"cleanup failed for run id {upsert_roast_verify_live.TEST_RUN_ID}:"
     ) == 5
     assert upsert_roast_verify_live.TEST_RUN_ID in output
     assert ROAST_ID in output
     for step in (
-        "artifact cleanup failed",
-        "roast telemetry cleanup failed",
-        "sentinel telemetry cleanup failed",
-        "parent cleanup failed",
-        "stage REMOVE cleanup failed",
+        "artifact cleanup",
+        "roast telemetry cleanup",
+        "sentinel telemetry cleanup",
+        "parent cleanup",
+        "stage REMOVE cleanup",
     ):
         assert step in output
+    assert f"roast_id={ROAST_ID}" in output
+    assert f"roast_id={upsert_roast_verify_live.OTHER_ROAST_ID}" in output
+    assert f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}" in output
+    assert (
+        f"stage_prefix=@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
+        in output
+    )
     assert RAW_PRIVATE_PATH not in output
     artifact_cleanup = next(
         entry
         for entry in connection.fake_cursor.executed
         if entry[0].startswith("DELETE FROM app.roast_artifacts")
     )
-    assert artifact_cleanup[1] == (upsert_roast_verify_live.TEST_RUN_ID,)
+    assert artifact_cleanup[1] == (
+        ROAST_ID,
+        upsert_roast_verify_live.TEST_RUN_ID,
+    )
