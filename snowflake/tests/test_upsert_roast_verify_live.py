@@ -54,12 +54,13 @@ class FakeCursor:
         replay_result: object = FIRST_RESULT,
         slug_result: object = FIRST_RESULT,
         control_result: object = FIRST_RESULT,
+        empty_manifest_result: object = FIRST_RESULT,
         opt_out_result: object = FIRST_RESULT,
         ambiguous_roast_ids: tuple[object, ...] = (ROAST_ID, "second-roast-id"),
         cleanup_roast_ids: tuple[object, ...] = (ROAST_ID,),
         cleanup_identity_query_fails: bool = False,
         artifact_count: object = 3,
-        final_artifact_count: object = 0,
+        empty_manifest_artifact_count: object = 0,
         artifact_pairs: set[tuple[object, object]] | None = None,
         before_pair: tuple[object, object] = (
             ROAST_ID,
@@ -72,6 +73,7 @@ class FakeCursor:
         identical_preserved_change: tuple[int, object] | None = None,
         preserved_change: tuple[int, object] | None = None,
         control_preserved_change: tuple[int, object] | None = None,
+        empty_manifest_preserved_change: tuple[int, object] | None = None,
         final_preserved_change: tuple[int, object] | None = None,
         mapping_rows: bool = False,
         stored_visibility: object = "private",
@@ -79,6 +81,7 @@ class FakeCursor:
         stored_updated_at: object = 2,
         telemetry_setup_count: object = 2,
         telemetry_control_count: object = 2,
+        telemetry_empty_manifest_count: object = 2,
         telemetry_survives: bool = False,
         sentinel_rows: int = 0,
         sentinel_survives: bool = True,
@@ -87,6 +90,7 @@ class FakeCursor:
         identical_updated_at: object = 1,
         updated_after: object = 2,
         control_updated_at: object = 3,
+        empty_manifest_updated_at: object = 4,
         final_updated_at: object = 4,
         fail_on: set[str] | None = None,
         failure_message: str = "scripted connector failure",
@@ -114,12 +118,13 @@ class FakeCursor:
         self.replay_result = replay_result
         self.slug_result = slug_result
         self.control_result = control_result
+        self.empty_manifest_result = empty_manifest_result
         self.opt_out_result = opt_out_result
         self.ambiguous_roast_ids = ambiguous_roast_ids
         self.cleanup_roast_ids = cleanup_roast_ids
         self.cleanup_identity_query_fails = cleanup_identity_query_fails
         self.artifact_count = artifact_count
-        self.final_artifact_count = final_artifact_count
+        self.empty_manifest_artifact_count = empty_manifest_artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
             (kind, f"@app.roast_artifacts/{run_id}/{basename}")
             for kind, basename in upsert_roast_verify_live.ARTIFACT_BASENAMES.items()
@@ -129,6 +134,7 @@ class FakeCursor:
         self.identical_preserved_change = identical_preserved_change
         self.preserved_change = preserved_change
         self.control_preserved_change = control_preserved_change
+        self.empty_manifest_preserved_change = empty_manifest_preserved_change
         self.final_preserved_change = final_preserved_change
         self.mapping_rows = mapping_rows
         self.stored_visibility = stored_visibility
@@ -136,6 +142,7 @@ class FakeCursor:
         self.stored_updated_at = stored_updated_at
         self.telemetry_setup_count = telemetry_setup_count
         self.telemetry_control_count = telemetry_control_count
+        self.telemetry_empty_manifest_count = telemetry_empty_manifest_count
         self.telemetry_survives = telemetry_survives
         self.sentinel_rows = sentinel_rows
         self.sentinel_survives = sentinel_survives
@@ -144,6 +151,7 @@ class FakeCursor:
         self.identical_updated_at = identical_updated_at
         self.updated_after = updated_after
         self.control_updated_at = control_updated_at
+        self.empty_manifest_updated_at = empty_manifest_updated_at
         self.final_updated_at = final_updated_at
         self.fail_on = set() if fail_on is None else fail_on
         self.failure_message = failure_message
@@ -156,6 +164,7 @@ class FakeCursor:
         self.preserved_reads = 0
         self.telemetry_seeded = False
         self.control_replayed = False
+        self.empty_manifest_replayed = False
         self.opted_out = False
         self.removed = False
         self.put_started = False
@@ -193,6 +202,9 @@ class FakeCursor:
                 self.last_call_result = self.replay_result
             elif len(self.call_results) == 2:
                 self.last_call_result = self.slug_result
+            elif payload["artifact_kinds"] == []:
+                self.empty_manifest_replayed = True
+                self.last_call_result = self.empty_manifest_result
             else:
                 if self.telemetry_seeded:
                     self.control_replayed = True
@@ -238,7 +250,7 @@ class FakeCursor:
             self.artifact_count_reads += 1
             if self.artifact_count_reads == 1:
                 return (self.artifact_count,)
-            return (self.final_artifact_count,)
+            return (self.empty_manifest_artifact_count,)
         if command.startswith("SELECT id, idempotency_key"):
             self.preserved_reads += 1
             values = list(BEFORE)
@@ -256,19 +268,26 @@ class FakeCursor:
                 values[6] = self.updated_after
                 if self.preserved_change is not None:
                     values[self.preserved_change[0]] = self.preserved_change[1]
-            elif not self.opted_out:
-                values[0], values[3] = self.stored_pair
-                values[6] = self.control_updated_at
-                if self.control_preserved_change is not None:
-                    values[self.control_preserved_change[0]] = (
-                        self.control_preserved_change[1]
-                    )
-            else:
+            elif self.opted_out:
                 values[0], values[3] = self.stored_pair
                 values[6] = self.final_updated_at
                 if self.final_preserved_change is not None:
                     values[self.final_preserved_change[0]] = (
                         self.final_preserved_change[1]
+                    )
+            elif self.empty_manifest_replayed:
+                values[0], values[3] = self.stored_pair
+                values[6] = self.empty_manifest_updated_at
+                if self.empty_manifest_preserved_change is not None:
+                    values[self.empty_manifest_preserved_change[0]] = (
+                        self.empty_manifest_preserved_change[1]
+                    )
+            else:
+                values[0], values[3] = self.stored_pair
+                values[6] = self.control_updated_at
+                if self.control_preserved_change is not None:
+                    values[self.control_preserved_change[0]] = (
+                        self.control_preserved_change[1]
                     )
             return self._row(
                 upsert_roast_verify_live.PRESERVED_COLUMNS,
@@ -292,6 +311,8 @@ class FakeCursor:
                 return (self.sentinel_rows,)
             if self.opted_out:
                 return (2 if self.telemetry_survives else 0,)
+            if self.empty_manifest_replayed:
+                return (self.telemetry_empty_manifest_count,)
             if self.control_replayed:
                 return (self.telemetry_control_count,)
             return (self.telemetry_setup_count if self.telemetry_seeded else 0,)
@@ -535,13 +556,19 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
         for entry in connection.fake_cursor.executed
         if entry[0].startswith("CALL")
     ]
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert calls[0][1] == calls[1][1] == calls[4][1]
     visibility_payload = json.loads(str(calls[3][1][1]))
     assert (
         visibility_payload["operator_notes"]
         == upsert_roast_verify_live.ROLLBACK_NOTES
     )
+    empty_manifest_payload = json.loads(str(calls[5][1][1]))
+    assert empty_manifest_payload["contributed_to_learning"] is True
+    assert empty_manifest_payload["artifact_kinds"] == []
+    opt_out_payload = json.loads(str(calls[6][1][1]))
+    assert opt_out_payload["contributed_to_learning"] is False
+    assert opt_out_payload["artifact_kinds"] == []
     assert commands[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
         f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
@@ -853,6 +880,15 @@ def test_database_and_role_reject_before_write(
                 }
             },
             "contributing replay returned a different object",
+        ),
+        (
+            {
+                "empty_manifest_result": {
+                    "cloud_roast_id": ROAST_ID,
+                    "public_slug": upsert_roast_verify_live.REPLAY_SLUG,
+                }
+            },
+            "contributing empty-manifest replay returned a different object",
         ),
         ({"artifact_count": 2}, "artifact count does not match"),
         ({"stored_visibility": "unlisted"}, "changed stored value"),
@@ -1388,6 +1424,7 @@ def test_final_replay_must_advance_beyond_first_call() -> None:
         updated_after=1,
         stored_updated_at=1,
         control_updated_at=1,
+        empty_manifest_updated_at=1,
         final_updated_at=1,
     )
     with pytest.raises(
@@ -1457,6 +1494,16 @@ def test_control_replay_preservation_is_checked_before_opt_out_restore() -> None
     assert connection.fake_cursor.opted_out is False
 
 
+def test_contributing_empty_manifest_replay_must_not_purge_telemetry() -> None:
+    connection = FakeConnection(telemetry_empty_manifest_count=0)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="contributing empty-manifest replay unexpectedly purged telemetry",
+    ):
+        _verify(connection)
+    assert connection.fake_cursor.opted_out is False
+
+
 def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
     connection = FakeConnection(final_roast_count=2)
     with pytest.raises(
@@ -1464,8 +1511,8 @@ def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
         match="opt-out replay changed the roast count",
     ):
         _verify(connection)
-    assert connection.fake_cursor.preserved_reads == 4
-    assert connection.fake_cursor.artifact_count_reads == 1
+    assert connection.fake_cursor.preserved_reads == 5
+    assert connection.fake_cursor.artifact_count_reads == 2
 
 
 def test_final_opt_out_replay_must_preserve_columns() -> None:
@@ -1489,11 +1536,11 @@ def test_final_opt_out_replay_requires_non_decreasing_comparable_updated_at(
         _verify(connection)
 
 
-def test_final_opt_out_replay_must_clear_artifact_manifest() -> None:
-    connection = FakeConnection(final_artifact_count=1)
+def test_contributing_empty_manifest_replay_must_clear_artifact_manifest() -> None:
+    connection = FakeConnection(empty_manifest_artifact_count=1)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="opt-out replay did not clear the artifact manifest",
+        match="contributing empty-manifest replay did not clear the artifact manifest",
     ):
         _verify(connection)
 

@@ -718,9 +718,63 @@ def _verify_telemetry_purge_scope(
         )
     previous_updated_at = control_preserved_state[6]
 
-    opt_out_payload = dict(payload)
+    empty_manifest_payload = dict(payload)
+    empty_manifest_payload["artifact_kinds"] = []
+    empty_manifest_result = _call_upsert(cursor, empty_manifest_payload)
+    if empty_manifest_result != first:
+        raise UpsertRoastVerifyError(
+            "contributing empty-manifest replay returned a different object"
+        )
+    empty_manifest_telemetry_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "contributing empty-manifest replay telemetry query",
+    )
+    if _count(empty_manifest_telemetry_row, "COUNT(*)") != 2:
+        raise UpsertRoastVerifyError(
+            "contributing empty-manifest replay unexpectedly purged telemetry"
+        )
+    empty_manifest_preserved_state = _row_values(
+        _fetchone(
+            cursor,
+            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+            "created_at, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "contributing empty-manifest replay preserved-column query",
+        ),
+        PRESERVED_COLUMNS,
+    )
+    if empty_manifest_preserved_state[:6] != preserved_state[:6]:
+        raise UpsertRoastVerifyError(
+            "contributing empty-manifest replay changed a preserved column"
+        )
+    try:
+        empty_manifest_updated_non_decreasing = (
+            empty_manifest_preserved_state[6] >= previous_updated_at
+        )
+    except TypeError:
+        empty_manifest_updated_non_decreasing = False
+    if not empty_manifest_updated_non_decreasing:
+        raise UpsertRoastVerifyError(
+            "contributing empty-manifest replay did not preserve non-decreasing "
+            "updated_at"
+        )
+    previous_updated_at = empty_manifest_preserved_state[6]
+    empty_manifest_artifact_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
+        (owned_roast_id,),
+        "contributing empty-manifest replay artifact count query",
+    )
+    if _count(empty_manifest_artifact_count_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError(
+            "contributing empty-manifest replay did not clear the artifact manifest"
+        )
+
+    opt_out_payload = dict(empty_manifest_payload)
     opt_out_payload["contributed_to_learning"] = False
-    opt_out_payload["artifact_kinds"] = []
     opt_out_result = _call_upsert(cursor, opt_out_payload)
     if opt_out_result != first:
         raise UpsertRoastVerifyError("opt-out replay returned a different object")
@@ -784,16 +838,6 @@ def _verify_telemetry_purge_scope(
     if not final_updated_advanced:
         raise UpsertRoastVerifyError(
             "final replay did not advance updated_at beyond the first call"
-        )
-    final_artifact_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
-        (owned_roast_id,),
-        "opt-out replay artifact count query",
-    )
-    if _count(final_artifact_count_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError(
-            "opt-out replay did not clear the artifact manifest"
         )
     return previous_updated_at
 
