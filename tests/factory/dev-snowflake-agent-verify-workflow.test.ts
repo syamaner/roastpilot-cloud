@@ -121,6 +121,9 @@ describe("DEV Snowflake agent verification workflow", () => {
       "files.pythonhosted.org:443",
       "*.snowflakecomputing.com:443",
       "ocsp.snowflakecomputing.com:80",
+      "*.blob.core.windows.net:443",
+      "oneocsp.microsoft.com:80",
+      "ocsp.digicert.com:80",
     ]);
     expect(steps[1].uses).toBe(
       "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",

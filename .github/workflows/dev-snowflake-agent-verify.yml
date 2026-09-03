@@ -29,6 +29,12 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
+          # Snowflake internal-stage PUTs for this Azure account upload to Azure Blob Storage.
+          # Per operator decision #433, *.blob.core.windows.net is deliberately broad for
+          # reliability rather than pinning the rotating eewaqmsfcb1stg stage-storage host.
+          # The Microsoft/DigiCert OCSP responders sign the Azure blob certificate chain and
+          # come from SYSTEM$ALLOWLIST(); irrelevant AWS amazontrust responders are excluded,
+          # while SNOWFLAKE_DEPLOYMENT is already covered by *.snowflakecomputing.com.
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -39,6 +45,9 @@ jobs:
             files.pythonhosted.org:443
             *.snowflakecomputing.com:443
             ocsp.snowflakecomputing.com:80
+            *.blob.core.windows.net:443
+            oneocsp.microsoft.com:80
+            ocsp.digicert.com:80
 
       - name: Checkout roastpilot-cloud
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
