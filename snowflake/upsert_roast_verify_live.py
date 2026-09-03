@@ -777,6 +777,31 @@ def _cleanup_all(
         identity_error.cleanup_unsafe = True
         cleanup_errors.append(identity_error)
         return cleanup_errors
+    try:
+        cleanup_id_count_row = _fetchone(
+            cursor,
+            "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+            (resolved_roast_id,),
+            "cleanup roast id uniqueness query",
+        )
+        cleanup_id_count = _count(cleanup_id_count_row, "COUNT(*)")
+    except BaseException as exc:
+        uniqueness_error = UpsertRoastVerifyError(
+            "cleanup roast id uniqueness revalidation failed "
+            f"[idempotency_key={TEST_RUN_ID}; resolved_roast_id={resolved_roast_id}]"
+        )
+        uniqueness_error.__cause__ = exc
+        uniqueness_error.cleanup_unsafe = True
+        cleanup_errors.append(uniqueness_error)
+        return cleanup_errors
+    if cleanup_id_count != 1:
+        uniqueness_error = UpsertRoastVerifyError(
+            "cleanup roast id is not globally unique "
+            f"[idempotency_key={TEST_RUN_ID}; resolved_roast_id={resolved_roast_id}]"
+        )
+        uniqueness_error.cleanup_unsafe = True
+        cleanup_errors.append(uniqueness_error)
+        return cleanup_errors
     if resolved_roast_id is None:
         child_where = (
             "roast_id IN (SELECT id FROM app.cloud_roasts "

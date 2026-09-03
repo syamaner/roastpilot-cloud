@@ -1444,12 +1444,34 @@ def test_cleanup_identity_query_failure_skips_every_destructive_statement() -> N
     )
 
 
+def test_cleanup_global_id_collision_skips_every_destructive_statement() -> None:
+    cursor = FakeCursor(owned_roast_id_count=2)
+    cleanup_errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+
+    assert len(cleanup_errors) == 1
+    assert cleanup_errors[0].cleanup_unsafe is True
+    assert upsert_roast_verify_live.TEST_RUN_ID in str(cleanup_errors[0])
+    assert ROAST_ID in str(cleanup_errors[0])
+    assert (
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        (ROAST_ID,),
+    ) in cursor.executed
+    assert not any(
+        command.startswith("DELETE ") or command.startswith("REMOVE ")
+        for command, _params in cursor.executed
+    )
+
+
 def test_cleanup_revalidates_identity_then_runs_full_sequence_in_order() -> None:
     connection = FakeConnection()
     _verify(connection)
-    assert connection.fake_cursor.executed[-7] == (
+    assert connection.fake_cursor.executed[-8] == (
         "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
         (upsert_roast_verify_live.TEST_RUN_ID,),
+    )
+    assert connection.fake_cursor.executed[-7] == (
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        (ROAST_ID,),
     )
     cleanup = connection.fake_cursor.executed[-6:]
     assert [command.split(maxsplit=2)[:2] for command, _params in cleanup] == [
