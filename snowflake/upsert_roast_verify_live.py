@@ -430,10 +430,12 @@ def _verify_replay_idempotency(
             )
             roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
             recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
-            raise UpsertRoastVerifyError(
+            ambiguous_error = UpsertRoastVerifyError(
                 "replay did not leave exactly one roast; "
                 f"ids for run id {TEST_RUN_ID}: {recorded_ids}"
             )
+            ambiguous_error.cleanup_unsafe = True
+            raise ambiguous_error
         if second != first:
             raise UpsertRoastVerifyError(
                 "identical replay returned a different object"
@@ -683,6 +685,14 @@ def _verify_telemetry_purge_scope(
     )
     if final_preserved_state[:6] != preserved_state[:6]:
         raise UpsertRoastVerifyError("opt-out replay changed a preserved column")
+    try:
+        final_updated_advanced = final_preserved_state[6] > preserved_state[6]
+    except TypeError:
+        final_updated_advanced = False
+    if not final_updated_advanced:
+        raise UpsertRoastVerifyError(
+            "opt-out replay did not advance updated_at"
+        )
     final_artifact_count_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",

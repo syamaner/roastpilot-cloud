@@ -81,6 +81,7 @@ class FakeCursor:
         visibility_raises: bool = True,
         visibility_error: str = "-20012 visibility_change_not_supported",
         updated_after: object = 2,
+        final_updated_at: object = 3,
         fail_on: set[str] | None = None,
         failure_message: str = "scripted connector failure",
     ) -> None:
@@ -131,6 +132,7 @@ class FakeCursor:
         self.visibility_raises = visibility_raises
         self.visibility_error = visibility_error
         self.updated_after = updated_after
+        self.final_updated_at = final_updated_at
         self.fail_on = set() if fail_on is None else fail_on
         self.failure_message = failure_message
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
@@ -230,7 +232,7 @@ class FakeCursor:
                     values[self.preserved_change[0]] = self.preserved_change[1]
             else:
                 values[0], values[3] = self.stored_pair
-                values[6] = 3
+                values[6] = self.final_updated_at
                 if self.final_preserved_change is not None:
                     values[self.final_preserved_change[0]] = (
                         self.final_preserved_change[1]
@@ -831,7 +833,7 @@ def test_injectable_live_guards_reject_independently(
         _verify(connection)
 
 
-def test_replay_count_mismatch_prints_every_matching_roast_id(
+def test_replay_count_mismatch_reports_every_id_and_skips_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -851,6 +853,16 @@ def test_replay_count_mismatch_prints_every_matching_roast_id(
     assert "replay did not leave exactly one roast" in output
     for roast_id in matching_ids:
         assert roast_id in output
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        for command in commands
+    )
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
 
 
 def test_existing_test_run_guard_fails_before_any_write() -> None:
@@ -1237,6 +1249,18 @@ def test_final_opt_out_replay_must_preserve_columns() -> None:
         _verify(connection)
 
 
+@pytest.mark.parametrize("final_updated_at", [2, 1, object()])
+def test_final_opt_out_replay_requires_strict_comparable_updated_at(
+    final_updated_at: object,
+) -> None:
+    connection = FakeConnection(final_updated_at=final_updated_at)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="opt-out replay did not advance updated_at",
+    ):
+        _verify(connection)
+
+
 def test_final_opt_out_replay_must_clear_artifact_manifest() -> None:
     connection = FakeConnection(final_artifact_count=1)
     with pytest.raises(
@@ -1358,7 +1382,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection(
-        roast_count=2,
+        artifact_count=2,
         fail_on={
             "DELETE FROM app.roast_artifacts",
             "DELETE FROM app.roast_telemetry",
@@ -1374,7 +1398,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     )
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
-    assert "replay did not leave exactly one roast" in output
+    assert "artifact count does not match manifest" in output
     assert output.count(
         f"cleanup failed for run id {upsert_roast_verify_live.TEST_RUN_ID}:"
     ) == 5
@@ -1390,7 +1414,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         assert step in output
     assert f"roast_id={upsert_roast_verify_live.OTHER_ROAST_ID}" in output
     assert f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}" in output
-    assert " OR idempotency_key=" not in output
+    assert " OR idempotency_key=" in output
     assert f"diagnostic cloud_roast_id={ROAST_ID}" in output
     assert (
         "parent cleanup [idempotency_key="
@@ -1407,4 +1431,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         for entry in connection.fake_cursor.executed
         if entry[0].startswith("DELETE FROM app.roast_artifacts")
     )
-    assert artifact_cleanup[1] == (upsert_roast_verify_live.TEST_RUN_ID,)
+    assert artifact_cleanup[1] == (
+        ROAST_ID,
+        upsert_roast_verify_live.TEST_RUN_ID,
+    )
