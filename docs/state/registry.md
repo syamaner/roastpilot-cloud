@@ -99,7 +99,14 @@ missed was the grant authorising work past a hard stop and authorising merge —
 which is precisely the case where an unrecorded grant is indistinguishable from an
 invented one. **D-417-G** then set the stop rule for the remaining review passes:
 fold a finding when the instrument fails to verify its own criterion, record it as
-an accepted residual when it hardens against a hypothetically broken procedure. The durable lesson is in
+an accepted residual when it hardens against a hypothetically broken procedure.
+
+**D-417-E** is the cleanup-convergence decision, and its lesson is separate from
+both of the above: two successive redesigns of the verifier's `finally` block each
+introduced a fresh defect — one gated the parent delete and broke the
+nothing-created branch, the next removed the gating and broke the general case, and
+both orphaned rows on different paths — so the third replaced the cleanup contract
+outright rather than patching it again. The durable lesson is in
 that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
@@ -140,9 +147,23 @@ writable `SNOWFLAKE_DEV_PRIVATE_KEY`. It executes mutable repository code agains
 live credential exactly as the agent job would, and the Environment gate does not
 close it, because approving a dispatch is not reading the diff of the ref it will
 run. The existing path now has an owner in
-[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). The general
-role-assignment audit is assigned in writing to
-[#358](https://github.com/syamaner/roastpilot-cloud/issues/358). And **D-433-E: a
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). Its criteria
+deliberately allow either the platform-level guard or a recorded justified
+residual, per the operator's decision on 3 Sep to settle the branch-dispatch
+trade-off at implementation time with real usage evidence rather than by guess.
+**The residual option is not a default and cannot be taken silently:** it needs an
+explicit operator decision recorded on the issue, and until one or the other lands
+the exposure stays open, so #437 does not close on the strength of the capability
+merely being convenient. The general **cross-environment** role-assignment audit
+stays with [#358](https://github.com/syamaner/roastpilot-cloud/issues/358), but
+**D-433-D is amended**: #358 is C7-gated and not yet realisable, so assigning the
+audit there alone would leave the new principal's scope unverified for as long as
+it exists. #433's own job must therefore assert the **exact** granted-role set for
+`ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning exactly the intended role,
+not merely that `CURRENT_ROLE()` is correct — together with an empty
+`DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
+extra granted role can be activated in another session and would escape the
+intended five-table-and-stage boundary. And **D-433-E: a
 failed cleanup fails the job**, fail-closed, because a silent partial cleanup is
 how DEV accumulates unattributable residue that a later run misreads — the
 operator clears it by hand from the run id, resolved roast id and per-statement
