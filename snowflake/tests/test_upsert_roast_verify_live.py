@@ -1225,6 +1225,37 @@ def test_identical_replay_rejects_preserved_column_mutation() -> None:
         upsert_roast_verify_live._verify_replay_idempotency(cursor)
 
 
+def test_identical_replay_failure_carries_verified_id_to_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection(
+        identical_preserved_change=(2, "changed-owner"),
+    )
+    cleanup_ids: list[object | None] = []
+    cleanup_all = upsert_roast_verify_live._cleanup_all
+
+    def recording_cleanup(cursor, resolved_roast_id):
+        cleanup_ids.append(resolved_roast_id)
+        return cleanup_all(cursor, resolved_roast_id)
+
+    monkeypatch.setattr(upsert_roast_verify_live, "_cleanup_all", recording_cleanup)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="identical replay changed a preserved column",
+    ):
+        _verify(connection)
+
+    assert cleanup_ids == [ROAST_ID]
+    commands = _commands(connection)
+    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in commands)
+    assert any(
+        command.startswith("DELETE FROM app.roast_telemetry WHERE (")
+        for command in commands
+    )
+    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in commands)
+    assert any(command.startswith("REMOVE ") for command in commands)
+
+
 def test_identical_replay_preserves_first_call_baseline() -> None:
     cursor = FakeCursor(existing_run_count=1)
 

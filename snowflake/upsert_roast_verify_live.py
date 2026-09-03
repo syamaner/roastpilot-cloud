@@ -411,6 +411,7 @@ def _verify_replay_idempotency(
     """Verify identical calls return equally and leave one roast."""
     payload = _payload()
     first = _call_upsert(cursor, payload)
+    owned_roast_id = None
     try:
         preserved_select = (
             "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
@@ -510,6 +511,8 @@ def _verify_replay_idempotency(
         # Preserve the procedure return for diagnostics only. Cleanup is
         # steered exclusively by the id read through the owned run key above.
         setattr(exc, "resolved_roast_id", first["cloud_roast_id"])
+        if owned_roast_id is not None:
+            setattr(exc, "cleanup_roast_id", owned_roast_id)
         raise
     return payload, first, owned_roast_id, first_call_baseline
 
@@ -968,6 +971,8 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         )
         return str(returned_roast_id)
     except BaseException as exc:
+        if resolved_roast_id is None:
+            resolved_roast_id = getattr(exc, "cleanup_roast_id", None)
         if isinstance(exc, UpsertRoastVerifyError):
             body_error = exc
             if returned_roast_id is not None:
