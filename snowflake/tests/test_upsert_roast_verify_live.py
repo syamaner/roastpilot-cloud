@@ -45,6 +45,7 @@ class FakeCursor:
         existing_run_count: object = 0,
         roast_count: object = 1,
         control_roast_count: object = 1,
+        final_roast_count: object = 1,
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
         owned_roast_id: object = ROAST_ID,
@@ -56,6 +57,7 @@ class FakeCursor:
         opt_out_result: object = FIRST_RESULT,
         ambiguous_roast_ids: tuple[object, ...] = (ROAST_ID, "second-roast-id"),
         artifact_count: object = 3,
+        final_artifact_count: object = 0,
         artifact_pairs: set[tuple[object, object]] | None = None,
         before_pair: tuple[object, object] = (
             ROAST_ID,
@@ -66,6 +68,7 @@ class FakeCursor:
             upsert_roast_verify_live.PUBLIC_SLUG,
         ),
         preserved_change: tuple[int, object] | None = None,
+        final_preserved_change: tuple[int, object] | None = None,
         mapping_rows: bool = False,
         stored_visibility: object = "private",
         stored_notes: object = upsert_roast_verify_live.ORIGINAL_NOTES,
@@ -95,6 +98,7 @@ class FakeCursor:
         self.existing_run_count = existing_run_count
         self.roast_count = roast_count
         self.control_roast_count = control_roast_count
+        self.final_roast_count = final_roast_count
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
         self.owned_roast_id = owned_roast_id
@@ -106,6 +110,7 @@ class FakeCursor:
         self.opt_out_result = opt_out_result
         self.ambiguous_roast_ids = ambiguous_roast_ids
         self.artifact_count = artifact_count
+        self.final_artifact_count = final_artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
             (kind, f"@app.roast_artifacts/{run_id}/{basename}")
             for kind, basename in upsert_roast_verify_live.ARTIFACT_BASENAMES.items()
@@ -113,6 +118,7 @@ class FakeCursor:
         self.before_pair = before_pair
         self.stored_pair = stored_pair
         self.preserved_change = preserved_change
+        self.final_preserved_change = final_preserved_change
         self.mapping_rows = mapping_rows
         self.stored_visibility = stored_visibility
         self.stored_notes = stored_notes
@@ -131,6 +137,7 @@ class FakeCursor:
         self.call_results: list[object] = []
         self.last_call_result: object = None
         self.roast_count_reads = 0
+        self.artifact_count_reads = 0
         self.sentinel_count_reads = 0
         self.preserved_reads = 0
         self.telemetry_seeded = False
@@ -203,19 +210,31 @@ class FakeCursor:
                 return (self.existing_run_count,)
             if self.roast_count_reads == 2:
                 return (self.roast_count,)
-            return (self.control_roast_count,)
+            if self.roast_count_reads == 3:
+                return (self.control_roast_count,)
+            return (self.final_roast_count,)
         if command.startswith("SELECT COUNT(*) FROM app.roast_artifacts"):
-            return (self.artifact_count,)
+            self.artifact_count_reads += 1
+            if self.artifact_count_reads == 1:
+                return (self.artifact_count,)
+            return (self.final_artifact_count,)
         if command.startswith("SELECT id, idempotency_key"):
             self.preserved_reads += 1
             values = list(BEFORE)
             if self.preserved_reads == 1:
                 values[0], values[3] = self.before_pair
-            else:
+            elif self.preserved_reads == 2:
                 values[0], values[3] = self.stored_pair
                 values[6] = self.updated_after
                 if self.preserved_change is not None:
                     values[self.preserved_change[0]] = self.preserved_change[1]
+            else:
+                values[0], values[3] = self.stored_pair
+                values[6] = 3
+                if self.final_preserved_change is not None:
+                    values[self.final_preserved_change[0]] = (
+                        self.final_preserved_change[1]
+                    )
             return self._row(
                 upsert_roast_verify_live.PRESERVED_COLUMNS,
                 tuple(values),
@@ -1195,6 +1214,35 @@ def test_opt_out_purge_is_complete_and_scoped(
 ) -> None:
     connection = FakeConnection(**option)
     with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        _verify(connection)
+
+
+def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
+    connection = FakeConnection(final_roast_count=2)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="opt-out replay changed the roast count",
+    ):
+        _verify(connection)
+    assert connection.fake_cursor.preserved_reads == 2
+    assert connection.fake_cursor.artifact_count_reads == 1
+
+
+def test_final_opt_out_replay_must_preserve_columns() -> None:
+    connection = FakeConnection(final_preserved_change=(2, "changed-owner"))
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="opt-out replay changed a preserved column",
+    ):
+        _verify(connection)
+
+
+def test_final_opt_out_replay_must_clear_artifact_manifest() -> None:
+    connection = FakeConnection(final_artifact_count=1)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="opt-out replay did not clear the artifact manifest",
+    ):
         _verify(connection)
 
 

@@ -501,8 +501,8 @@ def _verify_preserved_columns(
     cursor: Cursor,
     payload: Mapping[str, object],
     first: Mapping[str, object],
-) -> object:
-    """Verify slug replay preservation and return its stored updated_at."""
+) -> tuple[object, ...]:
+    """Verify slug replay preservation and return its stored row."""
     preserved_select = (
         "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
         "created_at, updated_at FROM app.cloud_roasts WHERE idempotency_key = %s"
@@ -551,7 +551,7 @@ def _verify_preserved_columns(
         updated_advanced = False
     if not updated_advanced:
         raise UpsertRoastVerifyError("slug replay did not advance updated_at")
-    return after[6]
+    return after
 
 
 def _verify_visibility_rollback(
@@ -588,6 +588,8 @@ def _verify_telemetry_purge_scope(
     cursor: Cursor,
     payload: Mapping[str, object],
     first: Mapping[str, object],
+    owned_roast_id: object,
+    preserved_state: tuple[object, ...],
 ) -> None:
     """Verify purge is conditional, effective, and scoped to this roast."""
     resolved_roast_id = first["cloud_roast_id"]
@@ -659,6 +661,37 @@ def _verify_telemetry_purge_scope(
     if sentinel_after != 1:
         raise UpsertRoastVerifyError(
             "opt-out replay did not preserve one unrelated telemetry row"
+        )
+    final_roast_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        "opt-out replay roast count query",
+    )
+    if _count(final_roast_count_row, "COUNT(*)") != 1:
+        raise UpsertRoastVerifyError("opt-out replay changed the roast count")
+    final_preserved_state = _row_values(
+        _fetchone(
+            cursor,
+            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+            "created_at, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "opt-out replay preserved-column query",
+        ),
+        PRESERVED_COLUMNS,
+    )
+    if final_preserved_state[:6] != preserved_state[:6]:
+        raise UpsertRoastVerifyError("opt-out replay changed a preserved column")
+    final_artifact_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
+        (owned_roast_id,),
+        "opt-out replay artifact count query",
+    )
+    if _count(final_artifact_count_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError(
+            "opt-out replay did not clear the artifact manifest"
         )
 
 
@@ -770,9 +803,15 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         payload, first, resolved_roast_id = _verify_replay_idempotency(cursor)
         returned_roast_id = first["cloud_roast_id"]
         _verify_artifact_manifest(cursor, returned_roast_id)
-        updated_at = _verify_preserved_columns(cursor, payload, first)
-        _verify_visibility_rollback(cursor, payload, updated_at)
-        _verify_telemetry_purge_scope(cursor, payload, first)
+        preserved_state = _verify_preserved_columns(cursor, payload, first)
+        _verify_visibility_rollback(cursor, payload, preserved_state[6])
+        _verify_telemetry_purge_scope(
+            cursor,
+            payload,
+            first,
+            resolved_roast_id,
+            preserved_state,
+        )
         return str(returned_roast_id)
     except BaseException as exc:
         if isinstance(exc, UpsertRoastVerifyError):
