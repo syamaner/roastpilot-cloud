@@ -733,8 +733,50 @@ def _cleanup_all(
     cursor: Cursor,
     resolved_roast_id: object | None,
 ) -> list[UpsertRoastVerifyError]:
-    """Attempt every ordered cleanup action and return every failure."""
+    """Revalidate identity, then attempt every ordered cleanup action."""
     cleanup_errors: list[UpsertRoastVerifyError] = []
+    try:
+        cleanup_identity_rows = _fetchall(
+            cursor,
+            "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "cleanup identity query",
+        )
+        cleanup_roast_ids = [
+            _first_value(row, "ID") for row in cleanup_identity_rows
+        ]
+    except BaseException as exc:
+        if isinstance(exc, UpsertRoastVerifyError):
+            identity_error = exc
+            identity_error.args = (
+                "cleanup identity revalidation failed "
+                f"[idempotency_key={TEST_RUN_ID}; observed_ids=unknown]",
+            )
+        else:
+            identity_error = UpsertRoastVerifyError(
+                "cleanup identity revalidation failed "
+                f"[idempotency_key={TEST_RUN_ID}; observed_ids=unknown]"
+            )
+            identity_error.__cause__ = exc
+        identity_error.cleanup_unsafe = True
+        cleanup_errors.append(identity_error)
+        return cleanup_errors
+    if (
+        len(cleanup_roast_ids) != 1
+        or resolved_roast_id is None
+        or cleanup_roast_ids[0] != resolved_roast_id
+    ):
+        observed_ids = ", ".join(str(roast_id) for roast_id in cleanup_roast_ids)
+        if not observed_ids:
+            observed_ids = "none"
+        identity_error = UpsertRoastVerifyError(
+            "cleanup identity is not uniquely verified "
+            f"[idempotency_key={TEST_RUN_ID}; carried_id={resolved_roast_id}; "
+            f"observed_ids={observed_ids}]"
+        )
+        identity_error.cleanup_unsafe = True
+        cleanup_errors.append(identity_error)
+        return cleanup_errors
     if resolved_roast_id is None:
         child_where = (
             "roast_id IN (SELECT id FROM app.cloud_roasts "

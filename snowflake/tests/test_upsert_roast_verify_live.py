@@ -56,6 +56,8 @@ class FakeCursor:
         control_result: object = FIRST_RESULT,
         opt_out_result: object = FIRST_RESULT,
         ambiguous_roast_ids: tuple[object, ...] = (ROAST_ID, "second-roast-id"),
+        cleanup_roast_ids: tuple[object, ...] = (ROAST_ID,),
+        cleanup_identity_query_fails: bool = False,
         artifact_count: object = 3,
         final_artifact_count: object = 0,
         artifact_pairs: set[tuple[object, object]] | None = None,
@@ -111,6 +113,8 @@ class FakeCursor:
         self.control_result = control_result
         self.opt_out_result = opt_out_result
         self.ambiguous_roast_ids = ambiguous_roast_ids
+        self.cleanup_roast_ids = cleanup_roast_ids
+        self.cleanup_identity_query_fails = cleanup_identity_query_fails
         self.artifact_count = artifact_count
         self.final_artifact_count = final_artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
@@ -156,6 +160,13 @@ class FakeCursor:
     def execute(self, command: str, params=None):
         normalized = tuple(params) if params is not None else None
         self.executed.append((command, normalized))
+        if (
+            self.cleanup_identity_query_fails
+            and self.opted_out
+            and command
+            == "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s"
+        ):
+            raise RuntimeError(self.failure_message)
         if any(command.startswith(prefix) for prefix in self.fail_on):
             raise RuntimeError(self.failure_message)
         if command.startswith("PUT "):
@@ -279,9 +290,12 @@ class FakeCursor:
                 names = self.listed_names
             return [(name,) for name in sorted(names)]
         if command.startswith("SELECT id FROM app.cloud_roasts"):
+            roast_ids = self.cleanup_roast_ids
+            if self.roast_count_reads == 2 and self.roast_count != 1:
+                roast_ids = self.ambiguous_roast_ids
             if self.mapping_rows:
-                return [{"id": roast_id} for roast_id in self.ambiguous_roast_ids]
-            return [(roast_id,) for roast_id in self.ambiguous_roast_ids]
+                return [{"id": roast_id} for roast_id in roast_ids]
+            return [(roast_id,) for roast_id in roast_ids]
         if command.startswith("SELECT kind, stage_path"):
             rows = sorted(self.artifact_pairs)
             if self.mapping_rows:
@@ -1352,47 +1366,91 @@ def test_sentinel_result_asserts_one_absolute_row() -> None:
     )
 
 
-def test_early_abort_runs_unresolved_cleanup_without_false_failure() -> None:
-    connection = FakeConnection(listed_names=set())
+def test_early_abort_without_verified_id_skips_cleanup() -> None:
+    connection = FakeConnection(listed_names=set(), cleanup_roast_ids=())
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match="LIST is not exact",
     ) as raised:
         _verify(connection)
-    assert not hasattr(raised.value, "__notes__")
+    assert raised.value.cleanup_failures
     commands = _commands(connection)
-    assert "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s" in commands
-    assert any(
+    assert not any(
         command.startswith("DELETE FROM app.roast_artifacts")
-        and "SELECT id FROM app.cloud_roasts" in command
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        or command.startswith("DELETE FROM app.cloud_roasts")
+        or command.startswith("REMOVE ")
         for command in commands
     )
-    assert any(command.startswith("REMOVE ") for command in commands)
 
 
-def test_malformed_first_return_cleans_children_by_idempotency_subquery() -> None:
+def test_malformed_first_return_without_verified_id_skips_cleanup() -> None:
     connection = FakeConnection(first_result="{")
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match="returned invalid JSON",
     ) as raised:
         _verify(connection)
-    assert not hasattr(raised.value, "__notes__")
-    artifact_cleanup = next(
-        entry
-        for entry in connection.fake_cursor.executed
-        if entry[0].startswith("DELETE FROM app.roast_artifacts")
-    )
-    assert "SELECT id FROM app.cloud_roasts" in artifact_cleanup[0]
-    assert artifact_cleanup[1] == (upsert_roast_verify_live.TEST_RUN_ID,)
-    assert "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s" in _commands(
-        connection
+    assert raised.value.cleanup_failures
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        or command.startswith("DELETE FROM app.cloud_roasts")
+        or command.startswith("REMOVE ")
+        for command in commands
     )
 
 
-def test_cleanup_always_runs_in_order_and_addresses_resolved_and_recovered_id() -> None:
+def test_cleanup_identity_ambiguity_skips_every_destructive_statement() -> None:
+    other_id = "dddddddd-4170-4170-4170-dddddddddddd"
+    connection = FakeConnection(cleanup_roast_ids=(ROAST_ID, other_id))
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="live verification cleanup failed",
+    ) as raised:
+        _verify(connection)
+    cleanup_report = "\n".join(raised.value.cleanup_failures)
+    assert upsert_roast_verify_live.TEST_RUN_ID in cleanup_report
+    assert ROAST_ID in cleanup_report
+    assert other_id in cleanup_report
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        or command.startswith("DELETE FROM app.cloud_roasts")
+        or command.startswith("REMOVE ")
+        for command in commands
+    )
+
+
+def test_cleanup_identity_query_failure_skips_every_destructive_statement() -> None:
+    connection = FakeConnection(cleanup_identity_query_fails=True)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="live verification cleanup failed",
+    ) as raised:
+        _verify(connection)
+    cleanup_report = "\n".join(raised.value.cleanup_failures)
+    assert "cleanup identity revalidation failed" in cleanup_report
+    assert upsert_roast_verify_live.TEST_RUN_ID in cleanup_report
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        or command.startswith("DELETE FROM app.cloud_roasts")
+        or command.startswith("REMOVE ")
+        for command in commands
+    )
+
+
+def test_cleanup_revalidates_identity_then_runs_full_sequence_in_order() -> None:
     connection = FakeConnection()
     _verify(connection)
+    assert connection.fake_cursor.executed[-7] == (
+        "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (upsert_roast_verify_live.TEST_RUN_ID,),
+    )
     cleanup = connection.fake_cursor.executed[-6:]
     assert [command.split(maxsplit=2)[:2] for command, _params in cleanup] == [
         ["DELETE", "FROM"],
