@@ -105,9 +105,17 @@ on the issue): a dedicated `ROASTPILOT_AGENT_CI` user; both blast-radius axes
 recorded, with the principal axis a genuine escalation over the deploy role; a
 **new** `dev-snowflake-agent` Environment rather than reusing `dev-snowflake-ci`,
 so the two credentials are not co-resident; a **fail-closed default-branch ref
-check**, which `dev-snowflake-contract.yml` does not currently have and which
-matters far more for a credential that runs a repo-resident script than for one
-that deploys migrations; the general role-assignment audit assigned in writing to
+check**, which `dev-snowflake-contract.yml` does not currently have. That gap is
+**not** confined to the new agent job, and this entry's first draft was wrong to
+imply it was: the deploy workflow's checkout is unpinned, so a feature-ref dispatch
+installs dependencies from the branch's `requirements.txt` and runs the branch's
+own `assert_dev_ci_grants.py` and `with_connection_env.py` while holding the
+writable `SNOWFLAKE_DEV_PRIVATE_KEY`. It executes mutable repository code against a
+live credential exactly as the agent job would, and the Environment gate does not
+close it, because approving a dispatch is not reading the diff of the ref it will
+run. The existing path now has an owner in
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). The general
+role-assignment audit is assigned in writing to
 [#358](https://github.com/syamaner/roastpilot-cloud/issues/358); and a failed
 cleanup failing the job. It is decided and ready for a contract, but **not
 provisioned** — creating the user, its key and the Environment secret are
@@ -134,9 +142,12 @@ records that the aggregation-exclusion half is **already enforced at read**
 story stays a contract-test story.
 
 [#435](https://github.com/syamaner/roastpilot-cloud/issues/435) filed 3 Sep:
-`load_telemetry_verify_live.py` records cleanup failures with `add_note`, which
-renders only in traceback formatting, while its `main()` prints `str(exc)` — so
-every cleanup failure that verifier records is invisible to the operator.
+`load_telemetry_verify_live.py` loses cleanup failures attached with `add_note`,
+which renders only in traceback formatting while its `main()` prints `str(exc)`.
+The scope is narrower than "every cleanup failure": when the body SUCCEEDS the
+first cleanup error is raised directly and is printed. What is invisible is every
+cleanup failure accompanying a body failure, and every failure after the first
+when the body succeeded.
 
 **Durable #416 lesson:** three of its five fold rounds traced to one contract
 omission: it specified the field mapping exhaustively but never the external
