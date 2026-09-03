@@ -159,8 +159,12 @@ stays with [#358](https://github.com/syamaner/roastpilot-cloud/issues/358), but
 **D-433-D is amended**: #358 is C7-gated and not yet realisable, so assigning the
 audit there alone would leave the new principal's scope unverified for as long as
 it exists. #433's own job must therefore assert the **exact** granted-role set for
-`ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning exactly the intended role,
-not merely that `CURRENT_ROLE()` is correct — together with an empty
+`ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning the intended role **plus the implicit
+`PUBLIC`** and nothing else, rather than merely that `CURRENT_ROLE()` is correct.
+The implicit `PUBLIC` matters: a correctly provisioned user always returns it, so a
+literal "exactly the intended role" check would fail every compliant run before any
+write, and `assert_dev_ci_grants.py` already documents and handles that. Together
+with an empty
 `DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
 extra granted role can be activated in another session and would escape the
 intended five-table-and-stage boundary. And **D-433-E: a
@@ -183,7 +187,13 @@ depend on connector discipline the repo has already ruled out relying on.
 write-boundary key grammar as the primary control, since a curated projection
 cannot cover `recompute_reference_summary`'s second read of the same VARIANT,
 plus a curated `roast_by_slug` projection that **supersedes D-311-B**; a
-recursive content scan is rejected on the D-312-M precedent. That issue also
+recursive content scan is rejected on the D-312-M precedent. **#431's scope is not
+narrowed to `summary`:** `bean_origin`, `bean_varietal`, `profile_name` and
+`roast_level` are projected directly by `R__secure_views.sql` and are recorded in
+`R__proc_upsert_roast.sql`'s own header as belonging to #431 alongside `summary`, so
+they remain in scope and #431 cannot close while they can still carry a raw IP or
+Fahrenheit content to `PUBLIC_WEB`. What D-431-A settles for them is the
+*mechanism* — no bottomless scan — not their removal from the issue. That issue also
 inherits an orphaned residual: `privacy-auditor` raised the whole-summary
 side-channel during #311 and it was recorded as owned by C4/#315, but #315 was a
 field-mapping assertion test that could not add an enforcement boundary and
