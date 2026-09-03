@@ -71,6 +71,7 @@ class FakeCursor:
         ),
         identical_preserved_change: tuple[int, object] | None = None,
         preserved_change: tuple[int, object] | None = None,
+        control_preserved_change: tuple[int, object] | None = None,
         final_preserved_change: tuple[int, object] | None = None,
         mapping_rows: bool = False,
         stored_visibility: object = "private",
@@ -126,6 +127,7 @@ class FakeCursor:
         self.stored_pair = stored_pair
         self.identical_preserved_change = identical_preserved_change
         self.preserved_change = preserved_change
+        self.control_preserved_change = control_preserved_change
         self.final_preserved_change = final_preserved_change
         self.mapping_rows = mapping_rows
         self.stored_visibility = stored_visibility
@@ -251,6 +253,13 @@ class FakeCursor:
                 values[6] = self.updated_after
                 if self.preserved_change is not None:
                     values[self.preserved_change[0]] = self.preserved_change[1]
+            elif not self.opted_out:
+                values[0], values[3] = self.stored_pair
+                values[6] = self.control_updated_at
+                if self.control_preserved_change is not None:
+                    values[self.control_preserved_change[0]] = (
+                        self.control_preserved_change[1]
+                    )
             else:
                 values[0], values[3] = self.stored_pair
                 values[6] = self.final_updated_at
@@ -264,8 +273,6 @@ class FakeCursor:
             )
         if command == "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s":
             return self._row(("id",), (self.owned_roast_id,))
-        if command.startswith("SELECT updated_at FROM app.cloud_roasts"):
-            return self._row(("UPDATED_AT",), (self.control_updated_at,))
         if command.startswith("SELECT visibility, operator_notes"):
             return self._row(
                 ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
@@ -1340,6 +1347,18 @@ def test_opt_out_purge_is_complete_and_scoped(
         _verify(connection)
 
 
+def test_control_replay_preservation_is_checked_before_opt_out_restore() -> None:
+    connection = FakeConnection(
+        control_preserved_change=(2, "changed-owner"),
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="contributing replay changed a preserved column",
+    ):
+        _verify(connection)
+    assert connection.fake_cursor.opted_out is False
+
+
 def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
     connection = FakeConnection(final_roast_count=2)
     with pytest.raises(
@@ -1347,7 +1366,7 @@ def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
         match="opt-out replay changed the roast count",
     ):
         _verify(connection)
-    assert connection.fake_cursor.preserved_reads == 3
+    assert connection.fake_cursor.preserved_reads == 4
     assert connection.fake_cursor.artifact_count_reads == 1
 
 

@@ -678,15 +678,32 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "contributing replay unexpectedly purged telemetry"
         )
-    pre_opt_out_updated_at = _first_value(
+    control_preserved_state = _row_values(
         _fetchone(
             cursor,
-            "SELECT updated_at FROM app.cloud_roasts WHERE idempotency_key = %s",
+            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+            "created_at, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s",
             (TEST_RUN_ID,),
-            "pre-opt-out updated_at query",
+            "contributing replay preserved-column query",
         ),
-        "UPDATED_AT",
+        PRESERVED_COLUMNS,
     )
+    if control_preserved_state[:6] != preserved_state[:6]:
+        raise UpsertRoastVerifyError(
+            "contributing replay changed a preserved column"
+        )
+    try:
+        control_updated_non_decreasing = (
+            control_preserved_state[6] >= preserved_state[6]
+        )
+    except TypeError:
+        control_updated_non_decreasing = False
+    if not control_updated_non_decreasing:
+        raise UpsertRoastVerifyError(
+            "contributing replay did not preserve non-decreasing updated_at"
+        )
+    pre_opt_out_updated_at = control_preserved_state[6]
 
     opt_out_payload = dict(payload)
     opt_out_payload["contributed_to_learning"] = False
