@@ -48,7 +48,6 @@ class FakeCursor:
         final_roast_count: object = 1,
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
-        owned_roast_id: object = ROAST_ID,
         owned_roast_id_count: object = 1,
         first_result: object = FIRST_RESULT,
         replay_result: object = FIRST_RESULT,
@@ -113,7 +112,6 @@ class FakeCursor:
         self.final_roast_count = final_roast_count
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
-        self.owned_roast_id = owned_roast_id
         self.owned_roast_id_count = owned_roast_id_count
         self.first_result = first_result
         self.replay_result = replay_result
@@ -297,8 +295,6 @@ class FakeCursor:
                 upsert_roast_verify_live.PRESERVED_COLUMNS,
                 tuple(values),
             )
-        if command == "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s":
-            return self._row(("id",), (self.owned_roast_id,))
         if command.startswith("SELECT visibility, operator_notes"):
             return self._row(
                 ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
@@ -1242,7 +1238,7 @@ def test_owned_id_collision_reports_ids_and_skips_child_cleanup(
 ) -> None:
     colliding_roast_id = "aaaaaaaa-4170-4170-4170-aaaaaaaaaaaa"
     connection = FakeConnection(
-        owned_roast_id=colliding_roast_id,
+        before_pair=(colliding_roast_id, upsert_roast_verify_live.PUBLIC_SLUG),
         owned_roast_id_count=2,
     )
     monkeypatch.setattr(
@@ -1321,6 +1317,40 @@ def test_different_identical_result_carries_verified_id_to_cleanup(
     )
     assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in commands)
     assert any(command.startswith("REMOVE ") for command in commands)
+
+
+def test_malformed_second_replay_carries_first_baseline_id_to_cleanup() -> None:
+    connection = FakeConnection(replay_result="{")
+
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="returned invalid JSON",
+    ):
+        _verify(connection)
+
+    destructive_entries = [
+        entry
+        for entry in connection.fake_cursor.executed
+        if entry[0].startswith("DELETE ") or entry[0].startswith("REMOVE ")
+    ]
+    assert len(destructive_entries) == 5
+    assert destructive_entries[0][0].startswith("DELETE FROM app.roast_artifacts")
+    assert destructive_entries[0][1] == (
+        ROAST_ID,
+        upsert_roast_verify_live.TEST_RUN_ID,
+    )
+    assert destructive_entries[1][0].startswith(
+        "DELETE FROM app.roast_telemetry WHERE ("
+    )
+    assert destructive_entries[1][1] == (
+        ROAST_ID,
+        upsert_roast_verify_live.TEST_RUN_ID,
+    )
+    assert [entry[0] for entry in destructive_entries[2:]] == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
 
 
 def test_identical_replay_rejects_preserved_column_mutation() -> None:

@@ -429,6 +429,7 @@ def _verify_replay_idempotency(
             ),
             PRESERVED_COLUMNS,
         )
+        owned_roast_id = first_call_baseline[0]
         previous_updated_at = first_call_baseline[6]
         second = _call_upsert(cursor, payload)
         roast_count_row = _fetchone(
@@ -461,15 +462,6 @@ def _verify_replay_idempotency(
                 f"ids for run id {TEST_RUN_ID}: {recorded_ids}",
             )
             raise ambiguous_error
-        owned_roast_id = _row_values(
-            _fetchone(
-                cursor,
-                "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
-                (TEST_RUN_ID,),
-                "owned roast id query",
-            ),
-            ("ID",),
-        )[0]
         owned_id_count_row = _fetchone(
             cursor,
             "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
@@ -513,7 +505,7 @@ def _verify_replay_idempotency(
         previous_updated_at = identical_replay_state[6]
     except BaseException as exc:
         # Preserve the procedure return for diagnostics only. Cleanup is
-        # steered exclusively by the id read through the owned run key above.
+        # steered exclusively by the id read from the first-call baseline above.
         setattr(exc, "resolved_roast_id", first["cloud_roast_id"])
         if owned_roast_id is not None:
             setattr(exc, "cleanup_roast_id", owned_roast_id)
