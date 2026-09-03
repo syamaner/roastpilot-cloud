@@ -75,11 +75,14 @@ via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
 [#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
 **#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
 the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
-**Unit 2 (`snowflake/upsert_roast_verify_live.py`, AC-4's instrument) is built on
-branch `feat/c3-s2-verify-live` and not yet merged.** It cost four pre-open fold
-rounds against four blind review boards, and the third of them hit the S7
-iteration stop, which the operator cleared explicitly on 3 Sep along with the
-**D-417-E** convergence decision recorded on the issue. The durable lesson is in
+**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument** — an
+operator-run verifier, not a CI step, because every step of
+`dev-snowflake-contract.yml` authenticates as the deploy role while the verifier
+asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. Its merge state
+lives on the issue and its PR, not here. What belongs here is what it cost: five
+pre-open fold rounds against five blind review boards, the third of which hit the
+S7 iteration stop, cleared by the operator on 3 Sep alongside the **D-417-E**
+convergence decision recorded on the issue. The durable lesson is in
 that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
