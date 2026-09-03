@@ -203,33 +203,32 @@ gated workflow does not exist, needs a `story-planner` contract and a mandatory
 material inline.
 
 **Two C3 defects split out of #417's review boards, plus one original story whose
-decision was updated:**
-[#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
-before telemetry exists) — **D-430-A** takes Option A, the recompute moves into
-`load_roast_telemetry`, because the alternatives make cloud-side correctness
-depend on connector discipline the repo has already ruled out relying on.
-[#431](https://github.com/syamaner/roastpilot-cloud/issues/431) (unvalidated
-`summary` VARIANT reaching the public view) — **D-431-A** takes a closed
-write-boundary key grammar as the primary control, since a curated projection
-cannot cover `recompute_reference_summary`'s second read of the same VARIANT,
-plus a curated `roast_by_slug` projection that **supersedes D-311-B**; a
-recursive content scan is rejected on the D-312-M precedent. **#431's scope is not
-narrowed to `summary`:** `bean_origin`, `bean_varietal`, `profile_name` and
-`roast_level` are projected directly by `R__secure_views.sql` and are recorded in
-`R__proc_upsert_roast.sql`'s own header as belonging to #431 alongside `summary`, so
-they remain in scope and #431 cannot close while they can still carry a raw IP or
-Fahrenheit content to `PUBLIC_WEB`. What D-431-A settles for them is the
-*mechanism* — no bottomless scan — not their removal from the issue. That issue also
-inherits an orphaned residual: `privacy-auditor` raised the whole-summary
-side-channel during #311 and it was recorded as owned by C4/#315, but #315 was a
-field-mapping assertion test that could not add an enforcement boundary and
-closed 24 Aug without doing so.
-[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) is **not** a
-review-discovered defect — it is one of the four stories decomposed at C3 kickoff,
-listed above — but its open question is now settled: **D-419-A**
-records that the aggregation-exclusion half is **already enforced at read**
-(`R__proc_recompute_summary.sql:49`), so no second mechanism is built and the
-story stays a contract-test story.
+open question was addressed. All three decisions were taken 3 Sep and all three
+then had defects found by review — the decisions and their current status live on
+the issues; this row is a pointer, deliberately not a restatement.**
+
+- [#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
+  before telemetry exists). **D-430-A chose Option A and is now SUSPENDED**: it is
+  unimplementable as written, because `load_roast_telemetry` is `EXECUTE AS CALLER`
+  and `ROASTPILOT_AGENT` has no grant on `recompute_reference_summary`, and it also
+  reopens the group-change case `upsert_roast`'s two-group recompute handles today.
+  Needs a fresh decision round. Unbuilt.
+- [#431](https://github.com/syamaner/roastpilot-cloud/issues/431) (unvalidated
+  `summary` reaching the public view). **D-431-A is amended in scope**: a closed key
+  grammar does not stop free text inside an admitted key, and `roaster_driver` /
+  `first_crack_model.repo_id` are exactly that shape — the latter is where #311's
+  privacy pass found the only PII this corpus has ever held. The decision must state
+  what happens to values inside admitted keys. It also inherits the whole-summary
+  residual orphaned when it was routed to #315, a field-mapping test that closed
+  without adding enforcement. Unbuilt.
+- [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) is **not** a
+  review-discovered defect — it is one of the four stories decomposed at C3 kickoff.
+  **D-419-A stands on aggregation exclusion** (already enforced at read,
+  `R__proc_recompute_summary.sql:49`, so no second mechanism is built) but was too
+  narrow: `R__proc_upsert_roast.sql:65-87` assigns two enforcement halves here and
+  both remain open, so it is not a test-only story. Its change to
+  `load_roast_telemetry` interacts with #430's. `wait-to-implement`.
+
 
 [#435](https://github.com/syamaner/roastpilot-cloud/issues/435) filed 3 Sep:
 `load_telemetry_verify_live.py` loses cleanup failures attached with `add_note`,
