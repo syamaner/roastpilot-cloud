@@ -14,6 +14,10 @@ const UNAFFECTED_WORKFLOWS = new Set([
   "dependency-review.yml",
   "claude-code-review.yml",
   "dev-snowflake-contract.yml",
+  // Issue #433: workflow_dispatch-only and human-gated by the
+  // dev-snowflake-agent Environment. It has no FACTORY_PAUSED/enable-variable
+  // gate and no automatic/event trigger can reach it, so halt does not act on it.
+  "dev-snowflake-agent-verify.yml",
   // 28 Aug 2026, D-F2-C2: C1 ships this issue-only classifier dark on its
   // enable variable alone. D-F2-A6 adds FACTORY_PAUSED and the numeric workflow
   // ID inventory together at activation, after GitHub assigns the live ID.

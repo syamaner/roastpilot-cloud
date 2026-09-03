@@ -74,6 +74,7 @@ source_paths = ["."]
 # toolchain with zero mutants to generate would be unverifiable scope-creep
 # for what this slice asks for (see PR body for the fuller reasoning).
 only_mutate = [
+    "assert_agent_ci_principal.py",
     "assert_dev_ci_grants.py",
     "ci_change_classifier.py",
     "ci_gate_result.py",
