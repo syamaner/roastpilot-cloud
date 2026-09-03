@@ -29,6 +29,7 @@ BEFORE = (
     "created",
     1,
 )
+RAW_PRIVATE_PATH = "/Users/private-operator/keys/snowflake.p8"
 
 
 class FakeCursor:
@@ -38,55 +39,86 @@ class FakeCursor:
         database: str = "ROASTPILOT_DEV",
         role: str = "ROASTPILOT_AGENT",
         listed_names: set[str] | None = None,
+        remove_leaves_files: bool = False,
         roast_count: object = 1,
-        replay_result: dict[str, object] | None = None,
+        first_result: object = FIRST_RESULT,
+        replay_result: object = FIRST_RESULT,
         artifact_count: object = 3,
         artifact_pairs: set[tuple[object, object]] | None = None,
-        stored_pair: tuple[object, object] = (ROAST_ID, upsert_roast_verify_live.PUBLIC_SLUG),
+        before_pair: tuple[object, object] = (
+            ROAST_ID,
+            upsert_roast_verify_live.PUBLIC_SLUG,
+        ),
+        stored_pair: tuple[object, object] = (
+            ROAST_ID,
+            upsert_roast_verify_live.PUBLIC_SLUG,
+        ),
+        preserved_change: tuple[int, object] | None = None,
+        mapping_rows: bool = False,
         stored_visibility: object = "private",
         stored_notes: object = upsert_roast_verify_live.ORIGINAL_NOTES,
+        stored_updated_at: object = 2,
         telemetry_setup_count: object = 2,
+        telemetry_control_count: object = 2,
         telemetry_survives: bool = False,
+        sentinel_rows: int = 0,
         sentinel_survives: bool = True,
         visibility_raises: bool = True,
         visibility_error: str = "-20012 visibility_change_not_supported",
         updated_after: object = 2,
         fail_on: set[str] | None = None,
+        failure_message: str = "scripted connector failure",
     ) -> None:
         run_id = upsert_roast_verify_live.TEST_RUN_ID
-        self.database, self.role = database, role
+        self.database = database
+        self.role = role
         self.listed_names = listed_names if listed_names is not None else {
             f"roast_artifacts/{run_id}/{path.name}"
             for path in upsert_roast_verify_live.FIXTURE_PATHS
         }
+        self.remove_leaves_files = remove_leaves_files
         self.roast_count = roast_count
-        self.replay_result = FIRST_RESULT if replay_result is None else replay_result
+        self.first_result = first_result
+        self.replay_result = replay_result
         self.artifact_count = artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
             (kind, f"@app.roast_artifacts/{run_id}/{basename}")
             for kind, basename in upsert_roast_verify_live.ARTIFACT_BASENAMES.items()
         }
+        self.before_pair = before_pair
         self.stored_pair = stored_pair
-        self.stored_visibility, self.stored_notes = stored_visibility, stored_notes
+        self.preserved_change = preserved_change
+        self.mapping_rows = mapping_rows
+        self.stored_visibility = stored_visibility
+        self.stored_notes = stored_notes
+        self.stored_updated_at = stored_updated_at
         self.telemetry_setup_count = telemetry_setup_count
-        self.telemetry_survives, self.sentinel_survives = (
-            telemetry_survives, sentinel_survives
-        )
-        self.visibility_raises, self.visibility_error = visibility_raises, visibility_error
+        self.telemetry_control_count = telemetry_control_count
+        self.telemetry_survives = telemetry_survives
+        self.sentinel_rows = sentinel_rows
+        self.sentinel_survives = sentinel_survives
+        self.visibility_raises = visibility_raises
+        self.visibility_error = visibility_error
         self.updated_after = updated_after
         self.fail_on = set() if fail_on is None else fail_on
+        self.failure_message = failure_message
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
-        self.call_results: list[dict[str, object]] = []
-        self.last_call_result: dict[str, object] | None = None
+        self.call_results: list[object] = []
+        self.last_call_result: object = None
         self.preserved_reads = 0
-        self.opted_out = False
         self.telemetry_seeded = False
+        self.control_replayed = False
+        self.opted_out = False
+        self.removed = False
+
+    def _row(self, labels: tuple[str, ...], values: tuple[object, ...]):
+        return dict(zip(labels, values)) if self.mapping_rows else values
 
     def execute(self, command: str, params=None):
         normalized = tuple(params) if params is not None else None
         self.executed.append((command, normalized))
         if any(command.startswith(prefix) for prefix in self.fail_on):
-            raise RuntimeError(f"scripted cleanup failure: {command.split()[0]}")
+            raise RuntimeError(self.failure_message)
         if command.startswith("CALL app.upsert_roast"):
             assert normalized is not None
             payload = json.loads(str(normalized[1]))
@@ -97,16 +129,28 @@ class FakeCursor:
             elif payload["contributed_to_learning"] is False:
                 self.opted_out = True
                 self.last_call_result = FIRST_RESULT
+            elif not self.call_results:
+                self.last_call_result = self.first_result
             elif len(self.call_results) == 1:
                 self.last_call_result = self.replay_result
             else:
+                if self.telemetry_seeded:
+                    self.control_replayed = True
                 self.last_call_result = FIRST_RESULT
             self.call_results.append(self.last_call_result)
+        elif command.startswith("DELETE FROM app.roast_telemetry"):
+            if normalized == (upsert_roast_verify_live.OTHER_ROAST_ID,):
+                self.sentinel_rows = 0
         elif command.startswith("INSERT INTO app.roast_telemetry"):
             assert normalized == (
-                ROAST_ID, ROAST_ID, upsert_roast_verify_live.OTHER_ROAST_ID
+                ROAST_ID,
+                ROAST_ID,
+                upsert_roast_verify_live.OTHER_ROAST_ID,
             )
             self.telemetry_seeded = True
+            self.sentinel_rows += 1
+        elif command.startswith("REMOVE "):
+            self.removed = True
         return self
 
     def fetchone(self):
@@ -123,29 +167,48 @@ class FakeCursor:
             return (self.artifact_count,)
         if command.startswith("SELECT id, idempotency_key"):
             self.preserved_reads += 1
+            values = list(BEFORE)
             if self.preserved_reads == 1:
-                return BEFORE
-            return (
-                self.stored_pair[0], BEFORE[1], BEFORE[2], self.stored_pair[1],
-                BEFORE[4], BEFORE[5], self.updated_after,
+                values[0], values[3] = self.before_pair
+            else:
+                values[0], values[3] = self.stored_pair
+                values[6] = self.updated_after
+                if self.preserved_change is not None:
+                    values[self.preserved_change[0]] = self.preserved_change[1]
+            return self._row(
+                upsert_roast_verify_live.PRESERVED_COLUMNS,
+                tuple(values),
             )
         if command.startswith("SELECT visibility, operator_notes"):
-            return self.stored_visibility, self.stored_notes
+            return self._row(
+                ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
+                (self.stored_visibility, self.stored_notes, self.stored_updated_at),
+            )
         if command.startswith("SELECT COUNT(*) FROM app.roast_telemetry"):
             assert params is not None
             if params[0] == upsert_roast_verify_live.OTHER_ROAST_ID:
-                return (1 if self.telemetry_seeded and self.sentinel_survives else 0,)
+                if self.opted_out and not self.sentinel_survives:
+                    return (0,)
+                return (self.sentinel_rows,)
             if self.opted_out:
-                return (2 if self.telemetry_seeded and self.telemetry_survives else 0,)
+                return (2 if self.telemetry_survives else 0,)
+            if self.control_replayed:
+                return (self.telemetry_control_count,)
             return (self.telemetry_setup_count if self.telemetry_seeded else 0,)
         raise AssertionError(f"unexpected fetchone after: {command}")
 
     def fetchall(self):
         command = self.executed[-1][0]
         if command.startswith("LIST "):
-            return [(name,) for name in sorted(self.listed_names)]
+            names = self.listed_names
+            if self.removed and not self.remove_leaves_files:
+                names = set()
+            return [(name,) for name in sorted(names)]
         if command.startswith("SELECT kind, stage_path"):
-            return sorted(self.artifact_pairs)
+            rows = sorted(self.artifact_pairs)
+            if self.mapping_rows:
+                return [dict(zip(("KIND", "STAGE_PATH"), row)) for row in rows]
+            return rows
         raise AssertionError(f"unexpected fetchall after: {command}")
 
 
@@ -165,22 +228,6 @@ def _commands(connection: FakeConnection) -> list[str]:
     return [command for command, _ in connection.fake_cursor.executed]
 
 
-def _cleanup_commands(include_parent: bool = True) -> list[str]:
-    commands = [
-        "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-    ]
-    if include_parent:
-        commands.append(
-            "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s"
-        )
-    commands.append(
-        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
-    )
-    return commands
-
-
 def _verify(connection: FakeConnection) -> str:
     return upsert_roast_verify_live.verify_live_upsert(connection, "ROASTPILOT_DEV")
 
@@ -192,17 +239,70 @@ def test_test_run_id_is_a_lowercase_uuid() -> None:
     )
 
 
-def test_payload_keeps_private_visibility_and_null_grouping_keys() -> None:
+def test_invalid_test_run_id_rejects_before_any_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(upsert_roast_verify_live, "TEST_RUN_ID", "c3_s2_live_verify")
+    connection = FakeConnection()
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="not a lowercase UUID",
+    ):
+        _verify(connection)
+    assert connection.fake_cursor.executed == []
+
+
+def test_cursor_setup_error_is_sanitized() -> None:
+    class BrokenConnection:
+        def cursor(self):
+            raise RuntimeError(RAW_PRIVATE_PATH)
+
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="^Snowflake cursor setup failed$",
+    ) as caught:
+        upsert_roast_verify_live.verify_live_upsert(
+            BrokenConnection(),  # type: ignore[arg-type]
+            "ROASTPILOT_DEV",
+        )
+    assert RAW_PRIVATE_PATH not in str(caught.value)
+
+
+def test_payload_pins_closed_keys_private_visibility_and_null_groups() -> None:
     payload = upsert_roast_verify_live._payload()
+    expected_keys = {
+        "public_slug",
+        "visibility",
+        "bean_origin",
+        "bean_varietal",
+        "bean_weight_g",
+        "profile_name",
+        "roast_level",
+        "operator_rating",
+        "operator_notes",
+        "contributed_to_learning",
+        "roasted_at_utc",
+        "summary",
+        "artifact_kinds",
+    }
+    assert set(payload) == expected_keys
     assert payload["visibility"] == "private"
     assert payload["bean_origin"] is None
     assert payload["roast_level"] is None
+    opt_out = dict(payload)
+    opt_out["contributed_to_learning"] = False
+    opt_out["artifact_kinds"] = []
+    assert set(opt_out) == expected_keys
 
 
-def test_first_value_reads_mapping_by_label() -> None:
-    assert upsert_roast_verify_live._first_value(
-        {"CURRENT_DATABASE()": "ROASTPILOT_DEV"}, "CURRENT_DATABASE()"
-    ) == "ROASTPILOT_DEV"
+def test_first_value_and_row_values_accept_mappings() -> None:
+    row = {"CURRENT_DATABASE()": "ROASTPILOT_DEV"}
+    assert upsert_roast_verify_live._first_value(row, "CURRENT_DATABASE()") == (
+        "ROASTPILOT_DEV"
+    )
+    assert upsert_roast_verify_live._row_values(row, ("CURRENT_DATABASE()",)) == (
+        "ROASTPILOT_DEV",
+    )
 
 
 @pytest.mark.parametrize(
@@ -210,32 +310,30 @@ def test_first_value_reads_mapping_by_label() -> None:
     [Path("/tmp/outside.jsonl"), upsert_roast_verify_live.FIXTURES_DIR / "bad'name"],
 )
 def test_fixture_uri_rejects_outside_or_quote_bearing_path(fixture_path: Path) -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="rejected upsert fixture path"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="rejected upsert fixture path",
+    ):
         upsert_roast_verify_live._validated_fixture_uri(fixture_path)
 
 
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("{", "returned invalid JSON"),
+        ([], "did not return an object"),
+        ({"cloud_roast_id": ROAST_ID}, "returned an unexpected object"),
+    ],
+)
+def test_variant_object_rejects_malformed_results(value: object, message: str) -> None:
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        upsert_roast_verify_live._variant_object(value)
+
+
 def test_variant_object_decodes_json_string() -> None:
-    encoded = json.dumps(FIRST_RESULT)
-    assert upsert_roast_verify_live._variant_object(encoded) == FIRST_RESULT
-
-
-def test_variant_object_rejects_invalid_json() -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="returned invalid JSON"):
-        upsert_roast_verify_live._variant_object("{")
-
-
-def test_variant_object_rejects_non_mapping() -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="did not return an object"):
-        upsert_roast_verify_live._variant_object([])
-
-
-def test_variant_object_rejects_wrong_key_set() -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="returned an unexpected object"):
-        upsert_roast_verify_live._variant_object({"cloud_roast_id": ROAST_ID})
+    assert upsert_roast_verify_live._variant_object(json.dumps(FIRST_RESULT)) == (
+        FIRST_RESULT
+    )
 
 
 def test_count_accepts_int_and_decimal() -> None:
@@ -245,29 +343,32 @@ def test_count_accepts_int_and_decimal() -> None:
 
 @pytest.mark.parametrize("value", [True, "1", 1.0, None])
 def test_count_rejects_bool_and_non_numeric_values(value: object) -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="did not return a numeric count"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="did not return a numeric count",
+    ):
         upsert_roast_verify_live._count((value,), "COUNT(*)")
 
 
-def test_stored_pair_reads_mapping() -> None:
+def test_stored_pair_mapping_and_unexpected_row() -> None:
     assert upsert_roast_verify_live._stored_pair(
         {"ID": ROAST_ID, "PUBLIC_SLUG": upsert_roast_verify_live.PUBLIC_SLUG}
     ) == (ROAST_ID, upsert_roast_verify_live.PUBLIC_SLUG)
-
-
-def test_stored_pair_rejects_unexpected_row() -> None:
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="unexpected row"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="unexpected row shape",
+    ):
         upsert_roast_verify_live._stored_pair((ROAST_ID,))
 
 
-def test_happy_path_pins_put_list_calls_binding_and_cleanup() -> None:
+def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
     connection = FakeConnection()
     assert _verify(connection) == ROAST_ID
     commands = _commands(connection)
     assert commands[:3] == [
-        "USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()", "SELECT CURRENT_ROLE()"
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
     ]
     expected_puts = [
         f"PUT '{path.resolve().as_uri()}' "
@@ -276,17 +377,22 @@ def test_happy_path_pins_put_list_calls_binding_and_cleanup() -> None:
         for path in upsert_roast_verify_live.FIXTURE_PATHS
     ]
     assert commands[3:5] == expected_puts
-    assert commands[5] == (
-        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
-    )
-    calls = [entry for entry in connection.fake_cursor.executed
-             if entry[0].startswith("CALL")]
-    assert len(calls) == 5 and calls[0][1] == calls[1][1]
-    assert all(command == "CALL app.upsert_roast(%s, %s)" for command, _ in calls)
+    calls = [
+        entry
+        for entry in connection.fake_cursor.executed
+        if entry[0].startswith("CALL")
+    ]
+    assert len(calls) == 6
+    assert calls[0][1] == calls[1][1] == calls[4][1]
     visibility_payload = json.loads(str(calls[3][1][1]))
-    assert visibility_payload["visibility"] == "unlisted"
-    assert visibility_payload["operator_notes"] == upsert_roast_verify_live.ROLLBACK_NOTES
-    assert _commands(connection)[-5:] == _cleanup_commands()
+    assert (
+        visibility_payload["operator_notes"]
+        == upsert_roast_verify_live.ROLLBACK_NOTES
+    )
+    assert commands[-2:] == [
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -294,75 +400,126 @@ def test_happy_path_pins_put_list_calls_binding_and_cleanup() -> None:
     [
         {"roast_artifacts/run/roast.jsonl"},
         {"roast_artifacts/run/roast.jsonl.gz", "roast_artifacts/run/summary.json"},
+        {
+            "roast_artifacts/run/roast.jsonl",
+            "roast_artifacts/run/summary.json",
+            "roast_artifacts/run/stale.csv",
+        },
     ],
 )
-def test_list_rejects_missing_or_gzipped_staged_fixture(listed_names: set[str]) -> None:
+def test_initial_list_requires_exact_uncompressed_fixture_set(
+    listed_names: set[str],
+) -> None:
     connection = FakeConnection(listed_names=listed_names)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="LIST is missing or compressed"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="LIST is not exact or uncompressed",
+    ):
         _verify(connection)
 
 
+def test_post_remove_list_must_be_empty() -> None:
+    connection = FakeConnection(remove_leaves_files=True)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="stage REMOVE verification failed",
+    ):
+        _verify(connection)
+    assert _commands(connection)[-2:] == [
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
+
+
 def test_main_prints_narrow_evidence_and_closes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection()
-    monkeypatch.setattr(upsert_roast_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "_connect",
+        lambda _target: connection,
+    )
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 0
     assert connection.closed is True
     output = capsys.readouterr().out
-    assert "staged artifact paths for the jsonl and summary fixtures" in output
-    assert "scoped opt-out telemetry purge" in output
+    assert "staged artifact PUT/REMOVE paths" in output
+    assert "conditional and scoped opt-out telemetry purge" in output
     assert ROAST_ID in output
 
 
-def test_connect_path_error_is_sanitized_before_main_prints(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("fail_on", "static_message"),
+    [
+        ({"PUT "}, "staging fixture PUT failed"),
+        ({"DELETE FROM app.cloud_roasts"}, "parent cleanup failed"),
+    ],
+)
+def test_main_sanitizes_body_and_cleanup_connector_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fail_on: set[str],
+    static_message: str,
 ) -> None:
-    secret_path = "/Users/private-operator/keys/snowflake.p8"
-    monkeypatch.setenv("SNOWFLAKE_PRIVATE_KEY_FILE", secret_path)
+    connection = FakeConnection(fail_on=fail_on, failure_message=RAW_PRIVATE_PATH)
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "_connect",
+        lambda _target: connection,
+    )
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert RAW_PRIVATE_PATH not in output
+    assert static_message in output
+
+
+def test_connect_path_error_is_sanitized_before_main_prints(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SNOWFLAKE_PRIVATE_KEY_FILE", RAW_PRIVATE_PATH)
 
     def fail_read(_path: Path, **_kwargs: object) -> str:
-        raise FileNotFoundError(secret_path)
+        raise FileNotFoundError(RAW_PRIVATE_PATH)
 
     monkeypatch.setattr(Path, "read_text", fail_read)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
-    output = capsys.readouterr()
-    assert secret_path not in output.err
-    assert "SNOWFLAKE_PRIVATE_KEY_FILE configuration failed" in output.err
+    output = capsys.readouterr().err
+    assert RAW_PRIVATE_PATH not in output
+    assert "SNOWFLAKE_PRIVATE_KEY_FILE configuration failed" in output
 
 
 def test_allowed_targets_are_dev_only_and_preview_is_rejected() -> None:
     connection = FakeConnection()
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="rejected upsert target"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="rejected upsert target",
+    ):
         upsert_roast_verify_live.verify_live_upsert(connection, "ROASTPILOT_PREVIEW")
     assert connection.fake_cursor.executed == []
 
 
-def test_parser_rejects_non_dev_target_before_connect(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(upsert_roast_verify_live, "_connect",
-                        lambda _target: pytest.fail("connect must not run"))
-    with pytest.raises(SystemExit):
-        upsert_roast_verify_live.main(["--target", "ROASTPILOT_PREVIEW"])
-
-
 @pytest.mark.parametrize(
-    ("options", "message", "commands"),
+    ("options", "message", "statement_count"),
     [
         ({"database": "ROASTPILOT_PROD"}, "database does not match", 2),
         ({"role": "ACCOUNTADMIN"}, "role is not ROASTPILOT_AGENT", 3),
     ],
 )
 def test_database_and_role_reject_before_write(
-    options: dict[str, object], message: str, commands: int
+    options: dict[str, object],
+    message: str,
+    statement_count: int,
 ) -> None:
     connection = FakeConnection(**options)
     with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
         _verify(connection)
     assert _commands(connection) == [
-        "USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()", "SELECT CURRENT_ROLE()"
-    ][:commands]
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+    ][:statement_count]
 
 
 @pytest.mark.parametrize(
@@ -370,110 +527,207 @@ def test_database_and_role_reject_before_write(
     [
         ({"roast_count": 2}, "exactly one roast"),
         ({"artifact_count": 2}, "artifact count does not match"),
-        ({"stored_pair": ("changed", upsert_roast_verify_live.PUBLIC_SLUG)},
-         "slug replay changed a preserved column"),
         ({"stored_visibility": "unlisted"}, "changed stored value"),
         ({"telemetry_setup_count": 1}, "did not insert two roast rows"),
+        ({"telemetry_control_count": 0}, "contributing replay unexpectedly purged"),
     ],
 )
 def test_injectable_live_guards_reject_independently(
-    option: dict[str, object], message: str
+    option: dict[str, object],
+    message: str,
 ) -> None:
     connection = FakeConnection(**option)
     with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
         _verify(connection)
 
 
-def test_replay_equality_mismatch_is_detected() -> None:
-    connection = FakeConnection(replay_result={
-        "cloud_roast_id": ROAST_ID, "public_slug": upsert_roast_verify_live.REPLAY_SLUG
-    })
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="identical replay returned a different object"):
+def test_first_stored_pair_must_match_return() -> None:
+    connection = FakeConnection(
+        before_pair=("different", upsert_roast_verify_live.PUBLIC_SLUG)
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="stored id and slug do not match first return",
+    ):
         _verify(connection)
 
 
-def test_artifact_pair_mismatch_is_detected() -> None:
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"stored_pair": ("changed", upsert_roast_verify_live.PUBLIC_SLUG)},
+        {"stored_pair": (ROAST_ID, upsert_roast_verify_live.REPLAY_SLUG)},
+        {"preserved_change": (1, "changed-run-id")},
+        {"preserved_change": (2, "changed-owner")},
+        {"preserved_change": (4, "public")},
+        {"preserved_change": (5, "changed-created-at")},
+    ],
+)
+def test_each_preserved_column_is_checked(option: dict[str, object]) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="slug replay changed a preserved column",
+    ):
+        _verify(connection)
+
+
+def test_mapping_rows_do_not_bypass_preserved_guard() -> None:
+    connection = FakeConnection(
+        mapping_rows=True,
+        stored_pair=(ROAST_ID, upsert_roast_verify_live.REPLAY_SLUG),
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="slug replay changed a preserved column",
+    ):
+        _verify(connection)
+
+
+def test_replay_equality_and_artifact_pair_mismatches_are_detected() -> None:
+    connection = FakeConnection(replay_result={
+        "cloud_roast_id": ROAST_ID,
+        "public_slug": upsert_roast_verify_live.REPLAY_SLUG,
+    })
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="identical replay returned a different object",
+    ):
+        _verify(connection)
+
     path = f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/roast.jsonl"
     connection = FakeConnection(artifact_pairs={("summary", path)})
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="kind and stage_path pairs"):
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="kind and stage_path pairs",
+    ):
         _verify(connection)
 
 
-def test_updated_at_must_strictly_advance() -> None:
-    connection = FakeConnection(updated_after=1)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="did not advance updated_at"):
+@pytest.mark.parametrize("updated_after", [1, object()])
+def test_updated_at_must_strictly_and_comparably_advance(updated_after: object) -> None:
+    connection = FakeConnection(updated_after=updated_after)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="did not advance updated_at",
+    ):
         _verify(connection)
 
 
-def test_visibility_call_not_raising_is_a_failure() -> None:
-    connection = FakeConnection(visibility_raises=False)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="visibility replay unexpectedly succeeded"):
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"visibility_raises": False}, "visibility replay unexpectedly succeeded"),
+        ({"visibility_error": "-20009 invalid payload"}, "unexpected error"),
+        ({"stored_notes": upsert_roast_verify_live.ROLLBACK_NOTES}, "roll back update"),
+        ({"stored_updated_at": 3}, "changed updated_at"),
+    ],
+)
+def test_visibility_replay_requires_expected_error_and_full_rollback(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
         _verify(connection)
 
 
-def test_unexpected_visibility_error_is_not_swallowed() -> None:
-    connection = FakeConnection(visibility_error="-20009 invalid payload")
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="failed with an unexpected error") as raised:
-        _verify(connection)
-    assert isinstance(raised.value.__cause__, RuntimeError)
-
-
-def test_visibility_failure_must_roll_back_operator_notes() -> None:
-    connection = FakeConnection(stored_notes=upsert_roast_verify_live.ROLLBACK_NOTES)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="did not roll back update"):
-        _verify(connection)
-
-
-def test_telemetry_purge_fails_when_roast_rows_survive() -> None:
-    connection = FakeConnection(telemetry_survives=True)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="did not purge telemetry"):
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"telemetry_survives": True}, "did not purge telemetry"),
+        ({"sentinel_survives": False}, "changed unrelated telemetry"),
+    ],
+)
+def test_opt_out_purge_is_complete_and_scoped(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
         _verify(connection)
 
 
-def test_telemetry_purge_must_not_delete_unrelated_row() -> None:
-    connection = FakeConnection(sentinel_survives=False)
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="purged unrelated telemetry"):
-        _verify(connection)
-
-
-def test_successful_child_cleanup_runs_parent_delete_by_resolved_id() -> None:
-    connection = FakeConnection()
-    _verify(connection)
-    assert _commands(connection)[-5:] == _cleanup_commands()
-    assert connection.fake_cursor.executed[-2] == (
-        "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
-        (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID),
+def test_stale_sentinel_is_removed_before_delta_measurement() -> None:
+    connection = FakeConnection(sentinel_rows=3)
+    assert _verify(connection) == ROAST_ID
+    insert_index = next(
+        index
+        for index, command in enumerate(_commands(connection))
+        if command.startswith("INSERT INTO app.roast_telemetry")
+    )
+    assert connection.fake_cursor.executed[insert_index - 2] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        (upsert_roast_verify_live.OTHER_ROAST_ID,),
     )
 
 
-def test_failed_child_cleanup_skips_parent_and_names_run_id() -> None:
-    connection = FakeConnection(fail_on={"DELETE FROM app.roast_artifacts"})
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match=upsert_roast_verify_live.TEST_RUN_ID) as raised:
+def test_early_abort_uses_safety_net_without_false_child_note() -> None:
+    connection = FakeConnection(listed_names=set())
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="LIST is not exact",
+    ) as raised:
         _verify(connection)
-    assert _commands(connection)[-4:] == _cleanup_commands(include_parent=False)
-    assert not any(command.startswith("DELETE FROM app.cloud_roasts")
-                   for command in _commands(connection))
+    assert not hasattr(raised.value, "__notes__")
+    assert (
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s"
+        in _commands(connection)
+    )
+
+
+def test_malformed_first_return_still_uses_safety_net_parent_delete() -> None:
+    connection = FakeConnection(first_result="{")
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="returned invalid JSON",
+    ) as raised:
+        _verify(connection)
+    assert not hasattr(raised.value, "__notes__")
+    assert (
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s"
+        in _commands(connection)
+    )
+
+
+def test_successful_children_delete_parent_and_verify_remove() -> None:
+    connection = FakeConnection()
+    _verify(connection)
+    assert (
+        "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s"
+        in _commands(connection)
+    )
+    assert _commands(connection)[-1].startswith("LIST ")
+
+
+def test_failed_child_cleanup_retains_parent_and_files_and_names_run_id() -> None:
+    connection = FakeConnection(fail_on={"DELETE FROM app.roast_artifacts"})
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=upsert_roast_verify_live.TEST_RUN_ID,
+    ) as raised:
+        _verify(connection)
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
+    assert sum(command.startswith("LIST ") for command in commands) == 1
     assert raised.value.__notes__ == [
-        "additional cleanup failure: RuntimeError('scripted cleanup failure: DELETE')"
+        "additional cleanup failure: UpsertRoastVerifyError('artifact cleanup failed')"
     ]
 
 
-def test_cleanup_errors_are_notes_and_do_not_mask_body_error() -> None:
+def test_cleanup_errors_are_static_notes_and_do_not_mask_body_error() -> None:
     connection = FakeConnection(
         roast_count=2,
         fail_on={"DELETE FROM app.roast_artifacts", "DELETE FROM app.roast_telemetry"},
+        failure_message=RAW_PRIVATE_PATH,
     )
-    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError,
-                       match="exactly one roast") as raised:
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="exactly one roast",
+    ) as raised:
         _verify(connection)
     assert upsert_roast_verify_live.TEST_RUN_ID in raised.value.__notes__[0]
-    assert all(note.startswith("cleanup failed:") for note in raised.value.__notes__)
+    assert RAW_PRIVATE_PATH not in "\n".join(raised.value.__notes__)
