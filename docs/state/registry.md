@@ -47,12 +47,16 @@ decomposed at kickoff via `to-issues` (never bulk-up-front) into
 **C3-S1 ([#416](https://github.com/syamaner/roastpilot-cloud/issues/416),
 telemetry ingest: JSON file format + `load_roast_telemetry` proc) built and
 merged via [#423](https://github.com/syamaner/roastpilot-cloud/pull/423), squash
-`8787484`.** The issue remains **OPEN**: AC-3 is undischarged because there is
-no live-proc vehicle in CI. The live half runs via the operator-run
-`snowflake/load_telemetry_verify_live.py` against `ROASTPILOT_DEV` alongside,
-not inside, a `dev-snowflake-contract.yml` dispatch; the workflow has no
-procedure-call step. The verifier prints its result to stdout; the operator
-must capture that output and post it to #416 to discharge AC-3.
+`8787484`.** #416 is **CLOSED** (2 Sep 2026): AC-1/AC-2/AC-4 from the merged
+migration and its offline suite, AC-3 from a live verifier run recorded on the
+issue. **The vehicle that discharged it no longer exists.** AC-3 was closed by
+granting `ROASTPILOT_AGENT` to the operator's own `ROASTPILOT_CLI` user for one
+run and revoking it after; that merged a human interactive identity with an
+application service role, so it is explicitly not repeatable. Every later C3 live
+criterion is blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433).
+**The blocker is now the gated JOB, not the credential** — the principal was
+provisioned 3 Sep and the details are below; do not re-run that provisioning, as
+`CREATE USER` is not idempotent.
 
 **Live grant-audit correction [#422](https://github.com/syamaner/roastpilot-cloud/issues/422)
 landed.** Split out of #416's review board by operator decision, then built and
@@ -67,12 +71,178 @@ capture; `MATERIALIZED_VIEW` remains **inferred** because creating one requires
 Enterprise edition.
 
 **C3 queue.** [#417](https://github.com/syamaner/roastpilot-cloud/issues/417)
-(C3-S2, `upsert_roast` proc + artifact `stage_path` pin, blocks #341) and
+(C3-S2) landed **Unit 1** (the `upsert_roast` proc + artifact `stage_path` pin)
+via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
+`d15471d`, with a header-accuracy fast-follow in
+[#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
+**#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
+the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
+**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument** — an
+operator-run verifier, not a CI step, because every Snowflake connection
+`dev-snowflake-contract.yml` opens authenticates as the deploy role, while the
+verifier asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. (Most of
+that workflow's steps — runner hardening, checkout, Python setup, dependency
+install, the static grant scan, the summary — open no Snowflake connection at all;
+it is the connections that are deploy-role-bound, not every step.) Its merge state
+lives on the issue and its PR, not here. What belongs here is what it cost: five
+pre-open fold rounds against blind review boards, the third of which hit the S7
+iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
+itself was cleared by a separate operator grant, **D-417-F**, which also carries
+conditional merge authority — the full bar or it parks — and explicitly does **not**
+extend to provisioning any credential. **The operator ratified D-417-F on 3 Sep**,
+and that ratification is recorded on the issue.
+
+The route it took there is the part worth keeping. The grant was given in-session
+and never written down; the registry cited it; `pr-triage` returned FIX-FIRST and
+the Codex connector independently raised the same point as a P1, both on the
+grounds that an agent's after-the-fact transcription is not the grant. Six other
+decisions this session were recorded correctly before anything cited them. The one
+missed was the grant authorising work past a hard stop and authorising merge —
+which is precisely the case where an unrecorded grant is indistinguishable from an
+invented one. **D-417-G** then set the stop rule for the remaining review passes:
+fold a finding when the instrument fails to verify its own criterion, record it as
+an accepted residual when it hardens against a hypothetically broken procedure.
+
+**D-417-E** is the cleanup-convergence decision, and its lesson is separate from
+both of the above: two successive redesigns of the verifier's `finally` block each
+introduced a fresh defect — one gated the parent delete and broke the
+nothing-created branch, the next removed the gating and broke the general case, and
+both orphaned rows on different paths — so the third replaced the cleanup contract
+outright rather than patching it again. The durable lesson is in
+that decision: two successive redesigns of the verifier's cleanup block each
+introduced a fresh defect, so the third replaced the contract outright rather than
+patching it again. The unit is far larger than its contract estimate (~190 logic
+lines estimated, roughly four times that shipped), with every line traceable to an
+accepted review finding — worth carrying into #418's and #433's estimates, because
+a live instrument costs far more than a sibling to mirror once each of its own
+guards must be provably falsifiable.
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
-presigned-URL / SNOWFLAKE_SSE owner-download check) are
-`ready-for-conventional-implementation`; [#419](https://github.com/syamaner/roastpilot-cloud/issues/419)
-(C3-S4, privacy-mapping exclusion contract) is `wait-to-implement`, blocked on
-#416 + #417.
+presigned-URL / SNOWFLAKE_SSE owner-download check) is
+`ready-for-conventional-implementation` but blocked on the same **job**, the
+credential itself now existing;
+[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
+privacy-mapping exclusion contract) is `wait-to-implement`, blocked on #417 Unit 2
+merging, with its live half additionally on #433.
+
+**[#433](https://github.com/syamaner/roastpilot-cloud/issues/433) (OPEN-6) is
+C3's critical path**, not any remaining story. It is the live-contract vehicle
+every agent-role verifier needs, and its **gated job** — not its credential, which
+now exists — blocks #417 AC-4 and #418 alike. All
+five of its design questions were settled 3 Sep 2026 as **D-433-A..E** (recorded
+on the issue): a dedicated `ROASTPILOT_AGENT_CI` user; both blast-radius axes
+recorded, with the principal axis a genuine escalation over the deploy role; a
+**new** `dev-snowflake-agent` Environment rather than reusing `dev-snowflake-ci`,
+so the two credentials are not co-resident; a **fail-closed default-branch
+boundary** — and it must be **base-controlled or platform-level**, not an
+in-workflow `github.ref` condition. D-433-C originally specified the latter and
+that was wrong: when `workflow_dispatch` selects a feature ref, that ref also
+supplies the workflow definition, so a branch can delete or relax an in-workflow
+check before the Environment ever releases the credential. The guard would be
+mutable by precisely the thing it constrains. The Environment's deployment-branch
+policy is the right mechanism, being configured in repository settings rather than
+in the branch, which is also what Rigour Calibration means by preferring a
+base-controlled platform constraint. `dev-snowflake-contract.yml` today has neither
+form. That gap is
+**not** confined to the new agent job, and this entry's first draft was wrong to
+imply it was: the deploy workflow's checkout is unpinned, so a feature-ref dispatch
+installs dependencies from the branch's `requirements.txt` and runs the branch's
+own `assert_dev_ci_grants.py` and `with_connection_env.py` while holding the
+writable `SNOWFLAKE_DEV_PRIVATE_KEY`. It executes mutable repository code against a
+live credential exactly as the agent job would, and the Environment gate does not
+close it, because approving a dispatch is not reading the diff of the ref it will
+run. The existing path now has an owner in
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). Its criteria
+deliberately allow either the platform-level guard or a recorded justified
+residual, per the operator's decision on 3 Sep to settle the branch-dispatch
+trade-off at implementation time with real usage evidence rather than by guess.
+**The residual option is not a default and cannot be taken silently:** it needs an
+explicit operator decision recorded on the issue, and until one or the other lands
+the exposure stays open, so #437 does not close on the strength of the capability
+merely being convenient. The general **cross-environment** role-assignment audit
+stays with [#358](https://github.com/syamaner/roastpilot-cloud/issues/358), but
+**D-433-D is amended**: #358 is C7-gated and not yet realisable, so assigning the
+audit there alone would leave the new principal's scope unverified for as long as
+it exists. #433's own job must therefore assert the **exact** granted-role set for
+`ROASTPILOT_AGENT_CI` — an exact `CURRENT_USER()` assertion **before any write**, binding the audit to the
+identity actually connected rather than to a hardcoded name — without it, an
+Environment misconfigured to a different principal that can activate
+`ROASTPILOT_AGENT` passes the `CURRENT_ROLE()` check while the grant audit reports
+the *intended* user's grants as clean, so writes proceed under another identity with
+the dedicated-principal boundary silently bypassed; and, for that connected
+identity, `SHOW GRANTS TO USER` returning **exactly one intended-role row, which
+must be PRESENT**, and **no role other than** that one and `PUBLIC`.
+
+Three properties, all required, none sufficient alone. **Presence**, because an
+exclusion-only test passes vacuously on an empty or truncated result: the audit
+could not distinguish "holds exactly the intended role" from "did not observe this
+principal's assignments" while `CURRENT_ROLE()` still read correctly.
+**Exclusion**, rejecting every other role. And **fail-closed on a malformed or
+blank row** — this is modelled on `find_unexpected_user_role_grants` in
+`assert_dev_ci_grants.py` but is deliberately **not identical to it**, because that
+helper coerces an absent or blank `role` field to an empty string and continues, so
+reusing it verbatim would let an unknown identity-assignment row pass the credential
+gate in silence. Matching the fail-closed posture the live PUBLIC audit already
+takes on unparseable rows.
+
+Why `PUBLIC` is tolerated rather than required: the live provisioning of
+`ROASTPILOT_AGENT_CI` on 3 Sep returned only `ROASTPILOT_AGENT` with no `PUBLIC`
+row, so requiring it would fail on this account, while requiring *exactly* the
+intended role would fail on any account that does return it. Tolerating it in the
+exclusion holds either way.
+
+Also required: an empty `DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
+extra granted role can be activated in another session and would escape the
+intended five-table-and-stage boundary. And **D-433-E: a
+failed cleanup fails the job**, fail-closed, because a silent partial cleanup is
+how DEV accumulates unattributable residue that a later run misreads — the
+operator clears it by hand from the run id, resolved roast id and per-statement
+addressing keys the verifier prints, so the job's evidence artifact must capture
+stderr as well as stdout. **The principal is now provisioned** (3 Sep): `ROASTPILOT_AGENT_CI` exists as a
+`TYPE = SERVICE` user with `DEFAULT_SECONDARY_ROLES = ()` and `ROASTPILOT_AGENT`
+granted and nothing else, and the `dev-snowflake-agent` Environment carries a
+required reviewer, a deployment-branch policy naming `main` only, and both key
+secrets. The public-key fingerprint was cross-checked between GitHub and Snowflake
+before either was trusted. **What remains is the job, not the credential:** #433's
+gated workflow does not exist, needs a `story-planner` contract and a mandatory
+`factory-security-reviewer` pass, and must reconcile the verifier reading
+`SNOWFLAKE_PRIVATE_KEY_FILE` as a path against the workflow pattern that passes key
+material inline.
+
+**Two C3 defects split out of #417's review boards, plus one original story whose
+open question was addressed. All three decisions were taken 3 Sep and all three
+then had defects found by review — the decisions and their current status live on
+the issues; this row is a pointer, deliberately not a restatement.**
+
+- [#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
+  before telemetry exists). **D-430-A chose Option A and is now SUSPENDED**: it is
+  unimplementable as written, because `load_roast_telemetry` is `EXECUTE AS CALLER`
+  and `ROASTPILOT_AGENT` has no grant on `recompute_reference_summary`, and it also
+  reopens the group-change case `upsert_roast`'s two-group recompute handles today.
+  Needs a fresh decision round. Unbuilt.
+- [#431](https://github.com/syamaner/roastpilot-cloud/issues/431) (unvalidated
+  `summary` reaching the public view). **D-431-A is amended in scope**: a closed key
+  grammar does not stop free text inside an admitted key, and `roaster_driver` /
+  `first_crack_model.repo_id` are exactly that shape — the latter is where #311's
+  privacy pass found the only PII this corpus has ever held. The decision must state
+  what happens to values inside admitted keys. It also inherits the whole-summary
+  residual orphaned when it was routed to #315, a field-mapping test that closed
+  without adding enforcement. Unbuilt.
+- [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) is **not** a
+  review-discovered defect — it is one of the four stories decomposed at C3 kickoff.
+  **D-419-A stands on aggregation exclusion** (already enforced at read,
+  `R__proc_recompute_summary.sql:49`, so no second mechanism is built) but was too
+  narrow: `R__proc_upsert_roast.sql:65-87` assigns two enforcement halves here and
+  both remain open, so it is not a test-only story. Its change to
+  `load_roast_telemetry` interacts with #430's. `wait-to-implement`.
+
+
+[#435](https://github.com/syamaner/roastpilot-cloud/issues/435) filed 3 Sep:
+`load_telemetry_verify_live.py` loses cleanup failures attached with `add_note`,
+which renders only in traceback formatting while its `main()` prints `str(exc)`.
+The scope is narrower than "every cleanup failure": when the body SUCCEEDS the
+first cleanup error is raised directly and is printed. What is invisible is every
+cleanup failure accompanying a body failure, and every failure after the first
+when the body succeeded.
 
 **Durable #416 lesson:** three of its five fold rounds traced to one contract
 omission: it specified the field mapping exhaustively but never the external
@@ -81,32 +251,53 @@ system's stage-read semantics; a stage path is a prefix, not a filename,
 parsed, sibling artifacts share the run directory, and #417's contract must
 state those semantics up front because #417 sits on the same surface.
 
-**LIVE DISPATCH BLOCKED on [#425](https://github.com/syamaner/roastpilot-cloud/issues/425).**
-The first dispatch after #416/#422 landed, run
-[`33601164514`](https://github.com/syamaner/roastpilot-cloud/actions/runs/33601164514)
-on `main` `491c748` on 2 Sep 2026, failed at the pre-deploy grants assertion;
-the deploy and post-deploy steps were correctly skipped. The workflow invokes
-`assert_dev_ci_grants.py` identically before and after deploy, but the script
-also checks the `missing manifest grant:` class, which alone is structurally
-unsatisfiable before deployment whenever a migration adds a grant. The
-correction recorded on #425 is to suppress only that class before deployment;
-the five over-privilege classes emitted alongside it stay armed in the
-pre-deploy gate. #416 grew the manifest from 9 to 11 rows, and both new rows
-grant on objects created by the pending migration. This is **not a #422
-regression**: this pre-deploy run reports two missing entries and zero extra
-entries, one missing entry per new manifest row, which is the bootstrap
-signature; it names `FILE_FORMAT` in the live vocabulary, showing that the
-offline-to-live map is applied rather than the old spaced comparison. The old
-bug's missing/extra pair belongs to the post-deploy state, once the file format
-exists, not to this run. The repair is tracked as #425, filed, contracted and
-`ready-for-conventional-implementation`. Until it lands, #416's AC-3 cannot
-be discharged and every migration that adds a grant will burn a human-gated
-dispatch; #417 is next.
+**Live dispatch unblocked; [#425](https://github.com/syamaner/roastpilot-cloud/issues/425)
+landed** via [#427](https://github.com/syamaner/roastpilot-cloud/pull/427), squash
+`011d1b2`. The first dispatch after #416/#422 landed (run
+[`33601164514`](https://github.com/syamaner/roastpilot-cloud/actions/runs/33601164514),
+`main` `491c748`, 2 Sep 2026) failed at the **pre-deploy** grants assertion, with
+deploy and post-deploy correctly skipped. The workflow invoked
+`assert_dev_ci_grants.py` identically before and after deploy, but the script also
+checks the `missing manifest grant:` class, which is structurally unsatisfiable
+before deployment whenever a migration adds a grant. #425 defers only that class
+to the post-deploy audit; the five over-privilege classes stay armed pre-deploy.
+That was never a #422 regression — the run reported two missing entries and zero
+extra, one per new manifest row, which is the bootstrap signature, and it named
+`FILE_FORMAT` in the live vocabulary, showing the offline-to-live map was already
+applied.
+
+**The durable lesson from that episode is about ownership, not the class split:**
+grants in a migration must respect the deploy role's OWNERSHIP. Only object-level
+grants on CI-created objects belong in a migration; account- and schema-level
+`USAGE` is operator ACCOUNTADMIN DDL. The minimal CI role cannot grant what it
+does not own, and that gap is invisible to every offline lens — only the live #11
+gate catches it.
 
 **C2 Schema story line delivered; epic remains open.** Two residuals remain:
 [#341](https://github.com/syamaner/roastpilot-cloud/issues/341) (`delete_roast`
-stage-file `REMOVE`), gated on C3-S2 #417 landing the `stage_path` contract;
-this makes #417 the right next story for a second reason. The other is
+stage-file `REMOVE`). Its C3 `stage_path` dependency is **met** — #417 Unit 1 landed
+that contract in `d15471d` — but **#341 is gated again by D-341-B** (3 Sep):
+`ROASTPILOT_AGENT` holds `UPDATE` on `app.cloud_roasts`, so the `idempotency_key`
+the destructive prefix is derived from is agent-writable, and the lowercase-UUID
+grammar buys containment but **not provenance**. An agent can point roast A's key at
+roast B's run UUID and have `delete_roast(A)` silently remove **B's** staged files
+while reporting success. D-341-A's mechanism stands, but #341 stays
+`wait-to-implement` until it has an immutable or independently proven roast-to-run
+association, or a privilege boundary stopping the agent rewriting that field.
+Accepting the residual was declined because the destructive path does not exist yet,
+so closing it costs one design round rather than a change to working code. **D-341-A** (2 Sep 2026, operator-delegated,
+recorded on #341 and in the plan repo before any PR cited it) settles the
+mechanism: `delete_roast` issues one directory-scoped `REMOVE` of a prefix it
+constructs itself from the roast's validated `idempotency_key`, failing closed
+unless that run id matches the exact lowercase-UUID grammar, and never
+interpolating a stored `stage_path`. The deciding argument was that all three
+candidate mechanisms construct the same prefix, so containment was never the
+differentiator -- what differs is the input each trusts, and `ROASTPILOT_AGENT`
+holds direct DML on `app.roast_artifacts`, making a stored `stage_path`
+agent-writable free text whose validation is the bottomless sanitiser shape
+D-312-M ruled against. Accepted residual, deliberate: a row whose `stage_path`
+points outside the run directory is not removed, because chasing it means firing
+a destructive `REMOVE` at an attacker-chosen path. The other is
 [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-environment app-role grant audit), the ROASTPILOT_AGENT cross-environment
 residual from #345, C7-gated and not yet realisable. C2 Schema kicked off 18
@@ -134,10 +325,17 @@ landed before merge, and the live deploy confirmed the proc **compiles and
 deploys** clean — runtime behaviour is covered by the offline suite +
 reviewers, not a live behavioural run; see D-313-D on #313); before that
 discipline #310's fold-half took three post-merge connector rounds. The live
-#11 gate is **available since 22 Aug 2026** (run 32600848432) and enforces
-**main-only** validation — the `dev-snowflake-ci` credential boundary rejects
-a pre-merge feature-branch dispatch (learned on #313), so live proc validation
-is post-merge. Two **F1** tails remain in
+#11 gate is **available since 22 Aug 2026** (run 32600848432) and live proc
+validation is **post-merge in practice**. Correcting a claim this row previously
+made: that is a **convention, not a mechanism**. `dev-snowflake-contract.yml` has
+no `github.ref` test, so `workflow_dispatch` can select any ref, and the checkout
+is unpinned — a feature-ref dispatch would install dependencies from the branch
+and run the branch's own gate scripts with the writable key. The
+`dev-snowflake-ci` Environment gate makes a run supervised, not reviewed, and does
+not reject a feature-branch dispatch. What was learned on #313 is that we *run* it
+post-merge, not that anything enforces it. Making that a mechanism, or recording it
+as a justified residual, is
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). Two **F1** tails remain in
 progress (they do not block C2 delivery):
 F1-S6 9h operator-driven activation ([#9](https://github.com/syamaner/roastpilot-cloud/issues/9))
 and F1-S11 live-provider eval ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14),
@@ -239,17 +437,17 @@ the base DDL (C2-S1, #307) lands before its dependents.
 | Story | Issue | Status |
 |---|---|---|
 | C2-S1 Base DDL migration (five tables + artifact stage) | [#307](https://github.com/syamaner/roastpilot-cloud/issues/307) | **Done — merged via [#323](https://github.com/syamaner/roastpilot-cloud/pull/323).** Enumerated-column AC rebuild of the closed #318 (bounced on 5 schema divergences from a compare-to-§4 AC); `schema-migration-reviewer` + `privacy-auditor` clean pre-open. Routed conventional: 506 combined lines exceeded the factory envelope (coverage kept, not trimmed). Deferred residual [#321](https://github.com/syamaner/roastpilot-cloud/issues/321) is unrelated (a #320 factory-pipeline note). |
-| C2-S3 Secure views (`roast_by_slug` + `reviews_by_roast`) | [#311](https://github.com/syamaner/roastpilot-cloud/issues/311) | **Done — merged via [#332](https://github.com/syamaner/roastpilot-cloud/pull/332).** First **hands-off** factory C2 build: raised issue → enumerated-AC `story-planner` contract → triage bot `ready-to-implement` → factory implement agent → publisher opened the PR (single commit, 199 combined lines, envelope-passed) with no orchestrator code involvement. The Codex connector then found two genuine fixes the factory cannot self-fold (owner-task-apply / dial-1 dark pending [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)) — `OBJECT_CONSTRUCT_KEEP_NULL` (six-key curve contract holds for nullable telemetry) and `COPY GRANTS` (grants survive the repeatable re-apply once #317 lands) — folded conventionally. `schema-migration-reviewer` + `privacy-auditor` CONFIRMED-SOUND. Documented residuals: correlated-subquery FP (live #11 verify only); duplicate-id write-path-owned (#313/#317); whole-`summary` PII constraint owned by C4/#315. Proof: the factory's build-half runs hands-off end-to-end; the fold-half is the concrete #237/dial-1 gap. |
+| C2-S3 Secure views (`roast_by_slug` + `reviews_by_roast`) | [#311](https://github.com/syamaner/roastpilot-cloud/issues/311) | **Done — merged via [#332](https://github.com/syamaner/roastpilot-cloud/pull/332).** First **hands-off** factory C2 build: raised issue → enumerated-AC `story-planner` contract → triage bot `ready-to-implement` → factory implement agent → publisher opened the PR (single commit, 199 combined lines, envelope-passed) with no orchestrator code involvement. The Codex connector then found two genuine fixes the factory cannot self-fold (owner-task-apply / dial-1 dark pending [#237](https://github.com/syamaner/roastpilot-cloud/issues/237)) — `OBJECT_CONSTRUCT_KEEP_NULL` (six-key curve contract holds for nullable telemetry) and `COPY GRANTS` (grants survive the repeatable re-apply once #317 lands) — folded conventionally. `schema-migration-reviewer` + `privacy-auditor` CONFIRMED-SOUND. Documented residuals: correlated-subquery FP (live #11 verify only); duplicate-id write-path-owned (#313/#317); whole-`summary` PII constraint **now owned by [#431](https://github.com/syamaner/roastpilot-cloud/issues/431)**, not C4/#315 — that routing was mistaken and left the residual orphaned, because #315 was a field-mapping *assertion test* that could not add an enforcement boundary and closed 24 Aug without doing so. Proof: the factory's build-half runs hands-off end-to-end; the fold-half is the concrete #237/dial-1 gap. |
 | C2-S4 RECOMPUTE_REFERENCE_SUMMARY proc + derivation rules | [#310](https://github.com/syamaner/roastpilot-cloud/issues/310) | **Done — merged via [#334](https://github.com/syamaner/roastpilot-cloud/pull/334).** Second **hands-off** factory C2 build: enumerated-AC `story-planner` contract (the two-anchor derivation resolved from fixture arithmetic — `started_at_utc` for the telemetry temperature join, `beans_added_at_utc` for the charge-relative FC-time metric) → triage bot `ready-to-implement` → factory implement agent → publisher opened the PR (single commit, envelope-passed) with no orchestrator code. The build-half ran hands-off; the fold-half then took **three** conventional rounds of real Snowflake deploy/semantics fixes offline gates + Claude reviewers structurally can't catch, each surfaced by the cross-family Codex connector: `copy grants` clause position + `$$` body delimiters (fold-1, D-334-A); an un-flattenable correlated `min_by` scalar subquery rewritten to deterministic `ROW_NUMBER()` ranked CTEs + a tie-determinism fix (fold-2, D-334-B); and a VARIANT JSON-null NEG-E gap closed by cast-before-null-check (fold-3, D-334-C). `schema-migration-reviewer` CONFIRMED-SOUND (×4) + `privacy-auditor` PASS; connector clean on both channels; `pr-triage` MERGEABLE. Accepted non-fail-open residuals: `started_at_utc`-null degenerate ranking + true VARIANT-null runtime semantics (both live-#11-DEV-gated). Grants on the proc are #317. **Repeated evidence: hands-off BUILD is solid; the FOLD-half for Snowflake procs needs live #11 / dial-1 (#237) to converge. #310 unblocks #313/#314.** |
 | C2-S5 SUBMIT_REVIEW proc (hashed IP + 30-day purge) | [#313](https://github.com/syamaner/roastpilot-cloud/issues/313) | **Done — merged via [#339](https://github.com/syamaner/roastpilot-cloud/pull/339); live-deploy-validated on ROASTPILOT_DEV (run 32636880462, `scripts_applied=1`, grant audit clean).** First C2 proc built against the live #11 gate and the first with **zero post-merge fold rounds** — pre-open review carrying the L134-banked Snowflake specifics got the deploy semantics right, and the live deploy confirmed it. Conventional/interactive: `story-planner` contract → 3 operator-ratified decisions (**D-313-A** proc takes the public slug not `roast_id`, since PUBLIC_WEB can't hold an internal id; **D-313-B** raw IP never enters Snowflake — the proc validates a pre-computed 64-hex SHA-256 and RAISEs otherwise, pinning C5 to emit the digest; **D-313-C** AC-LIVE) → Codex-MCP → **four pre-open `codex review` folds** (write-trio atomicity → one all-or-nothing `begin transaction`; visibility TOCTOU → visibility-qualified `INSERT…SELECT` + `sqlrowcount<>1→raise` inside the txn; purge boundary `<`→`<=`; IF colon-bind → bare) → `schema-migration-reviewer` CONFIRMED-SOUND ×2 + `privacy-auditor` PASS. Connector purge-dormancy P1 **reject-in-thread** (`pr-triage`/D23: plan.md §8 mandates "no cron, no serverless task"; table-wide purge + salted-hash-never-projected = fail-safe). **D-313-D** closed AC-LIVE on the passed deploy-validation + offline evidence (16 contract tests, full mutation battery, 3 domain reviewers): the behavioural half was blocked by legitimate role isolation (`ROASTPILOT_ADMIN` siloed from CI-role-owned DEV objects) and is covered by compile+create. Grant on the proc is #317. |
-| C2-S6 DELETE_ROAST proc (row cascade; stage REMOVE → #341) | [#314](https://github.com/syamaner/roastpilot-cloud/issues/314) | **Done — merged via [#342](https://github.com/syamaner/roastpilot-cloud/pull/342); live-deploy-validated on ROASTPILOT_DEV (run 32649254129, `scripts_applied=1`, grant audit clean).** Owner/agent revocation path: internal `id`, **no visibility filter** (D-314-A — must delete private roasts); UUID guard, ambiguous-id fail-closed (pre-check + authoritative in-txn `sqlrowcount<>1`, D-314-H), idempotent no-op (D-314-D); transactional row-cascade (tasting_reviews/roast_telemetry/roast_artifacts rows + cloud_roasts row) + `app.`-qualified recompute. **The stage-file `REMOVE` was SPLIT to [#341](https://github.com/syamaner/roastpilot-cloud/issues/341) (D-314-I)** — the cross-family floor found its `stage_path` format/`@`-prefix/concurrency are an undefined C3 connector contract, so guessing a destructive `REMOVE` was unsafe; #341 is gated to land before C3 writes artifacts (in C2 no real staged artifacts exist). `privacy-auditor` PASS + `schema-migration-reviewer` CONFIRMED-SOUND + `qa` PASS; connector CLEAN on the final head. Two P1s `pr-triage`-adjudicated (D23): stage-REMOVE deferral sound (Rigour Calibration reject-what-is-not-used); concurrency-orphan accept-and-document (structurally invisible via the `reviews_by_roast` inner join + recompute-reads-through-roast + age-based IP purge). plan.md reconciled — `stage_path` is `<run_id>/…` (D-314-F). Grant on the proc is #317. **Two conventional halts on genuine judgment calls (the run_id must-block, the C3-contract dependency) — the conservative-merge interpretation held; nothing was force-merged.** |
+| C2-S6 DELETE_ROAST proc (row cascade; stage REMOVE → #341) | [#314](https://github.com/syamaner/roastpilot-cloud/issues/314) | **Done — merged via [#342](https://github.com/syamaner/roastpilot-cloud/pull/342); live-deploy-validated on ROASTPILOT_DEV (run 32649254129, `scripts_applied=1`, grant audit clean).** Owner/agent revocation path: internal `id`, **no visibility filter** (D-314-A — must delete private roasts); UUID guard, ambiguous-id fail-closed (pre-check + authoritative in-txn `sqlrowcount<>1`, D-314-H), idempotent no-op (D-314-D); transactional row-cascade (tasting_reviews/roast_telemetry/roast_artifacts rows + cloud_roasts row) + `app.`-qualified recompute. **The stage-file `REMOVE` was SPLIT to [#341](https://github.com/syamaner/roastpilot-cloud/issues/341) (D-314-I)** — the cross-family floor found its `stage_path` format/`@`-prefix/concurrency are an undefined C3 connector contract, so guessing a destructive `REMOVE` was unsafe; #341 was gated to land before C3 writes artifacts (in C2 no real staged artifacts existed). **That boundary has since been crossed** — #417 Unit 1 landed the `stage_path` contract in `d15471d` — and #341 is now gated by a different and stronger constraint, **D-341-B**: the `idempotency_key` its destructive prefix derives from is agent-writable, so the UUID grammar gives containment but not provenance and `delete_roast(A)` could silently remove roast B's staged files. It stays `wait-to-implement` until an immutable or proven roast-to-run association, or a privilege boundary, exists. `privacy-auditor` PASS + `schema-migration-reviewer` CONFIRMED-SOUND + `qa` PASS; connector CLEAN on the final head. Two P1s `pr-triage`-adjudicated (D23): stage-REMOVE deferral sound (Rigour Calibration reject-what-is-not-used); concurrency-orphan accept-and-document (structurally invisible via the `reviews_by_roast` inner join + recompute-reads-through-roast + age-based IP purge). plan.md reconciled — `stage_path` is `<run_id>/…` (D-314-F). Grant on the proc is #317. **Two conventional halts on genuine judgment calls (the run_id must-block, the C3-contract dependency) — the conservative-merge interpretation held; nothing was force-merged.** |
 | C2-S7 Roles/grants migration — the PUBLIC_WEB boundary keystone | [#317](https://github.com/syamaner/roastpilot-cloud/issues/317) | **Done — merged via [#344](https://github.com/syamaner/roastpilot-cloud/pull/344) → [#346](https://github.com/syamaner/roastpilot-cloud/pull/346) → [#347](https://github.com/syamaner/roastpilot-cloud/pull/347); AC-10 live-validated on ROASTPILOT_DEV (run 32664173130, `scripts_applied=1`, grant audit clean).** The grant model + an offline fail-closed exact-manifest gate (`check_grant_manifest.py`, wired into CI + mutation). **Converged through the live gate across 3 PRs / 3 dispatches — each AC-10 deploy revealed a layer of what the intentionally-minimal deploy role can't grant (invisible offline):** #344 (15 grants) failed on account-level `DATABASE/WAREHOUSE` USAGE (42501, D-317-D); #346 (11 grants) failed on `SCHEMA` USAGE (D-317-E); #347 (9 objects-only grants) PASSED. **Final model:** the migration grants the 9 object-level grants the deploy role owns (PUBLIC_WEB → SELECT on the two secure views + `USAGE ON PROCEDURE submit_review`; ROASTPILOT_AGENT → table DML ×5 + stage READ/WRITE); the account/schema-level prerequisites (`USAGE ON DATABASE/SCHEMA/WAREHOUSE`) are **operator-run ACCOUNTADMIN DDL** (D106-class). Decisions: D-317-A (defer agent proc-USAGE → C3/C6), D-317-C (defer application-role live audit → [#345](https://github.com/syamaner/roastpilot-cloud/issues/345)), D-317-D/E (grant-ownership split). Every lens across the 3 PRs: `schema-migration-reviewer` CONFIRMED-SOUND, `privacy-auditor` PASS, `factory-security-reviewer` CONFIRMED-SOUND (ci.yml + factory-guard edit), `qa` PASS, `codex review` clean, connector 👍/adjudicated (P1 live-audit gap → #345; P2 provision-roles → rejected D106), `pr-triage` MERGEABLE; all merges operator-authorized. **Residuals:** [#345](https://github.com/syamaner/roastpilot-cloud/issues/345) **now DONE** (live app-role audit delivered via [#357](https://github.com/syamaner/roastpilot-cloud/pull/357); see the dedicated C2-S7-residual row below); #308 (operator role + account/schema-grant provisioning runbook) is **now CLOSED**. **KEY: the live #11 gate is the only control that catches deploy-role-privilege mismatches — 3 dispatches converged the keystone that all 6 offline lenses passed as correct.** |
 | C2-S11 Preview/CI synthetic-telemetry seed pipeline (D101) | [#312](https://github.com/syamaner/roastpilot-cloud/issues/312) | **Done — 3 conventional slices merged:** [#349](https://github.com/syamaner/roastpilot-cloud/pull/349) (seed validator + fail-closed allowlist prod-guard + seeded-RNG synthesisers); [#350](https://github.com/syamaner/roastpilot-cloud/pull/350) (fail-closed M1 export parser + a de-identified **real** 2-session fixture at `snowflake/fixtures/m1-export/` — also **satisfies C2-S9 [#309]**, closed); [#351](https://github.com/syamaner/roastpilot-cloud/pull/351) (fan-out generator: 24 synthetic roasts × 12 `(bean_origin, roast_level)` groups with bounded per-roast perturbation + provenance-synthesised timestamps [intervals preserved], prod-guarded loader with an injected `execute` seam, offline CLI module, + a **partial** offline `validateSeedOutput` `data_quality_violations` stand-in). **The live Snowflake seed-load adapter (D-312-J) landed as [#356](https://github.com/syamaner/roastpilot-cloud/issues/356)** — an operator-run Python loader + read-only validator; it live-seeded DEV on 26 Aug (1230 rows), so C2-S8 [#316]'s live validation against seeded rows is now satisfied. The offline `validateSeedOutput` reconciles the three summary aggregates but does **not** validate the four FC/drop temperature statistics (`first_crack_temp_avg_c`/`stddev_c`, `drop_temp_avg_c`/`stddev_c`); those are **cross-table telemetry-derived aggregates computed by the recompute proc (C2-S4 [#310])** — NOT the C2-S8 [#316] `data_quality_violations` view, whose scope is the four single-column would-be constraints (score/rating 1–5, sliders 0–100, visibility enum, duplicate idempotency_key) per **D-316-C** (corrected from an earlier over-broad wording that mis-assigned these aggregates to #316). Their **behavioral validation against seeded outputs is now discharged (via #356)** — `test_recompute_summary.py` is structural (token/region shape only), and the #356 live validator confirmed all 12 `(bean_origin, roast_level)` temp-aggregate groups match the offline recompute re-derivation within 1e-6 on live-seeded DEV (the same dependency as #316's D-316-A, both cleared by #356). **The parser grammar was PARKED then rebuilt against the REAL export shape** (operator decisions D-312-D/E/F: the real `roast.jsonl`/`summary.json` field names, not the plan.md destination-column names; `bean_origin`/`roast_level` synthesised since absent from M1) — plan.md §4/§9 reconciled. PR-2 converged ~32 findings over 19 pre-open `codex review` floor rounds + 4 connector cycles + `schema-migration-reviewer` CONFIRMED-SOUND ×2 + `privacy-auditor` PASS ×2 + `qa`; the terminal free-text IP/Fahrenheit sanitizer edges are **documented zero-instance residuals** (D-312-M/N, operator-accepted) — the must-blocks are enforced BY CONSTRUCTION (the generator emits only null/synthetic-constant free-text + closed Celsius-numeric variants), `pr-triage` independently verified unreachability. Decisions D-312-A…N. **Unblocks C2-S8 [#316] (`data_quality_violations` view) + C2-S10 [#315] (summary-mapping test).** |
 | C2-S9 Real MCP export fixture (data-only) | [#309](https://github.com/syamaner/roastpilot-cloud/issues/309) | **Done — closed via [#350](https://github.com/syamaner/roastpilot-cloud/pull/350).** A de-identified **real** 2-session `roastpilot-agent` export at `snowflake/fixtures/m1-export/session-{1,2}/` (shape verbatim; only `session_id` synthesised; PII scan clean), the shared contract fixture the seed pipeline (C2-S11) and the mapping test (C2-S10 [#315]) map against. A hand-authored synthetic fixture is banned here (D-312-F) — it masked the shape mismatch that parked Slice 2. |
 | C2-S10 Summary-variant field-mapping contract test | [#315](https://github.com/syamaner/roastpilot-cloud/issues/315) | **Done — merged via [#353](https://github.com/syamaner/roastpilot-cloud/pull/353); CLOSED.** A Vitest contract test pinning the six `summary` VARIANT fields the recompute proc reads against the real M1-export fixture, + absence assertions (no FC/drop temp in summary → sourced from telemetry; no synthesised `bean_origin`/`roast_level`; the `metrics` decoy not the source), each with a deep-clone mutation check. Grounded on the real fixture + `R__proc_recompute_summary.sql`, not plan.md. **Zero post-open review rounds** (the tighter-first-cut-spec antidote to #312): schema-migration-reviewer CONFIRMED-SOUND, qa NEEDS-WORK→both mutation-proven gaps folded pre-open (dead malformed-ISO check; untested/too-weak `^` anchor → un-anchored), codex-review P2 (bind-to-proc consumer-drift) accept-and-documented as out-of-scope (**D-315-A**, pr-triage-concurred — the proc is #310's, the AC covers source-shape drift), connector clean verdict. |
 | C2-S8 `data_quality_violations` view | [#316](https://github.com/syamaner/roastpilot-cloud/issues/316) | **View delivered + AC-10 live-deploy-validated — merged via [#354](https://github.com/syamaner/roastpilot-cloud/pull/354); AC-10 PASSED on ROASTPILOT_DEV (run 32751084213, `Applying R__data_quality_view.sql … scripts_applied=1`, pre/post grant audit clean, boundary held).** A repeatable view (`R__data_quality_view.sql`) = nine UNION-ALL branches surfacing the **four** declarative would-be constraints (score/operator_rating 1–5, five sliders 0–100, visibility enum, duplicate idempotency_key), mirroring `rules.ts` so it stays empty on the seed; projects only non-PII metadata (`table_name, row_identity, field, rule`), granted to nobody (no `copy grants` → re-apply resets owner-only, fail-closed). Offline oracle+SQL-parity contract test. **Full gauntlet:** schema-migration-reviewer CONFIRMED-SOUND ×2, privacy-auditor PASS, qa (parity-tautology fold), codex-review CLEAN, connector clean. **D-316-C** fenced four scope-expansions (temp-aggregate/IP-retention/orphan-FK/dup-slug) as out-of-scope (the #312 balloon trap; pr-triage D23-concurred). **D-316-B** slider/operator_rating flagged only when non-null (mirrors rules.ts + the nullable seed). **D-316-A discharged (via [#356](https://github.com/syamaner/roastpilot-cloud/issues/356)):** the live \"zero rows on **seeded** DEV\" assertion passed 26 Aug — `data_quality_violations = 0` non-vacuous on live-seeded ROASTPILOT_DEV (1230 rows, via #356/#367). |
 | C2-S7 residual (D-317-C) — live app-role grant audit (PUBLIC_WEB + ROASTPILOT_AGENT) | [#345](https://github.com/syamaner/roastpilot-cloud/issues/345) | **Done — merged via [#357](https://github.com/syamaner/roastpilot-cloud/pull/357) (squash `87af0f6`); AC-10 live-validated on ROASTPILOT_DEV (run 32840781328, operator-approved gate): both pre- and post-deploy assert "PUBLIC_WEB/ROASTPILOT_AGENT exactly match their manifests with zero future grants visible" against the cleaned grant state (DEV_CI_WH revoked, ROASTPILOT_WH restored, schema USAGE granted per D-345-E/F/G).** Extends the live grant audit from the PUBLIC boundary (#11) to the two application roles: DEV.APP object exact-match + a shared-warehouse allowlist (`{ROASTPILOT_WH}`, the D106 account-level shared warehouse) + a PUBLIC_WEB cross-env guard (owned-DB family `{ROASTPILOT_DEV, ROASTPILOT_PREVIEW, ROASTPILOT}` + name-exact + priv-exact + grant_option fail-closed). **The cross-family `codex review` floor was load-bearing** — it caught ~7 real fail-opens the mandatory Claude lens passed each round, including the D106 misframing that started the arc from an orchestrator error (calling the shared `ROASTPILOT_WH` grant "drift"); corrected against factory.md D106 (D-345-D/E). The arc converged where the connector never posts a clean 👍 (it re-derives the `MANAGE GRANTS`-forbidden completeness limit + the #358 agent cross-env gap as permanent residuals every round): `pr-triage` (D23) reframed the never-clean-connector as mechanical thread-resolution + an operator merge-call (Codex is advisory-not-required), and the operator approved the merge over the three dispositioned residuals. Decisions D-345-A…G. **Residual: [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)** (per-env app-role cross-env audit — the DEV gate is blind to prod/preview object escalation; C7-gated). **KEY: the grants-ownership-boundary lesson extends to provisioning *decisions* — check factory.md D106 before advising revoke/keep on any grant; the cross-family codex lens is the load-bearing control on grant boundaries.** |
-| C2-S2 Account-role provisioning runbook | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308) | **Closed.** The D106-class account-role provisioning it covered is no longer tracked as an open C2 residual. Open C2 residuals: **#341** (DELETE_ROAST stage-file REMOVE, gated on the C3 `stage_path` contract), **#358** (per-env app-role cross-env grant audit, D-345 residual, C7-gated). Done since last sync: **[#356](https://github.com/syamaner/roastpilot-cloud/issues/356)** (D-312-J live-seed-load adapter — done 26 Aug: operator-unblocked live seed of `ROASTPILOT_DEV` (1230 rows) + read-only validation passed, `data_quality_violations = 0` non-vacuous + 12 temp-aggregate groups matched → discharges the #316 D-316-A live-seeded-empty assertion **and** the #310 temp-aggregate behavioural residual; U1/U2/U3/emit [#360](https://github.com/syamaner/roastpilot-cloud/pull/360)/[#361](https://github.com/syamaner/roastpilot-cloud/pull/361)/[#362](https://github.com/syamaner/roastpilot-cloud/pull/362)/[#363](https://github.com/syamaner/roastpilot-cloud/pull/363) + the D-356-H live-bug fix [#367](https://github.com/syamaner/roastpilot-cloud/pull/367)), **[#337](https://github.com/syamaner/roastpilot-cloud/issues/337)** (AGENTS.md PUBLIC-grant wording reconciliation → two-layer D-11-B..E, PR #366, D-337-A/B). #11 live DEV-CI gate available (main-only, post-merge). |
+| C2-S2 Account-role provisioning runbook | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308) | **Closed.** The D106-class account-role provisioning it covered is no longer tracked as an open C2 residual. Open C2 residuals: **#341** (DELETE_ROAST stage-file REMOVE — its C3 `stage_path` dependency is **met**, #417 Unit 1 landed it in `d15471d`, and D-341-A settles the mechanism, but the story is **GATED AGAIN by D-341-B**: the `idempotency_key` the destructive prefix derives from is agent-writable, so the UUID grammar gives containment but not provenance and `delete_roast(A)` could silently remove roast B's staged files. Stays `wait-to-implement` until an immutable or proven roast-to-run association, or a privilege boundary, exists — see the C2 section above), **#358** (per-env app-role cross-env grant audit, D-345 residual, C7-gated). Done since last sync: **[#356](https://github.com/syamaner/roastpilot-cloud/issues/356)** (D-312-J live-seed-load adapter — done 26 Aug: operator-unblocked live seed of `ROASTPILOT_DEV` (1230 rows) + read-only validation passed, `data_quality_violations = 0` non-vacuous + 12 temp-aggregate groups matched → discharges the #316 D-316-A live-seeded-empty assertion **and** the #310 temp-aggregate behavioural residual; U1/U2/U3/emit [#360](https://github.com/syamaner/roastpilot-cloud/pull/360)/[#361](https://github.com/syamaner/roastpilot-cloud/pull/361)/[#362](https://github.com/syamaner/roastpilot-cloud/pull/362)/[#363](https://github.com/syamaner/roastpilot-cloud/pull/363) + the D-356-H live-bug fix [#367](https://github.com/syamaner/roastpilot-cloud/pull/367)), **[#337](https://github.com/syamaner/roastpilot-cloud/issues/337)** (AGENTS.md PUBLIC-grant wording reconciliation → two-layer D-11-B..E, PR #366, D-337-A/B). #11 live DEV-CI gate available (post-merge **by convention, not by mechanism** — see the C2 section above and [#437](https://github.com/syamaner/roastpilot-cloud/issues/437)). |
 
 This registry is authoritative for current delivery status. Verify GitHub
 issue, project, label, and PR fields against it before and after each
