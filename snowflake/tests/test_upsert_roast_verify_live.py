@@ -81,7 +81,8 @@ class FakeCursor:
         visibility_raises: bool = True,
         visibility_error: str = "-20012 visibility_change_not_supported",
         updated_after: object = 2,
-        final_updated_at: object = 3,
+        control_updated_at: object = 3,
+        final_updated_at: object = 4,
         fail_on: set[str] | None = None,
         failure_message: str = "scripted connector failure",
     ) -> None:
@@ -132,6 +133,7 @@ class FakeCursor:
         self.visibility_raises = visibility_raises
         self.visibility_error = visibility_error
         self.updated_after = updated_after
+        self.control_updated_at = control_updated_at
         self.final_updated_at = final_updated_at
         self.fail_on = set() if fail_on is None else fail_on
         self.failure_message = failure_message
@@ -243,6 +245,8 @@ class FakeCursor:
             )
         if command == "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s":
             return self._row(("id",), (self.owned_roast_id,))
+        if command.startswith("SELECT updated_at FROM app.cloud_roasts"):
+            return self._row(("UPDATED_AT",), (self.control_updated_at,))
         if command.startswith("SELECT visibility, operator_notes"):
             return self._row(
                 ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
@@ -1249,7 +1253,7 @@ def test_final_opt_out_replay_must_preserve_columns() -> None:
         _verify(connection)
 
 
-@pytest.mark.parametrize("final_updated_at", [2, 1, object()])
+@pytest.mark.parametrize("final_updated_at", [3, 2, object()])
 def test_final_opt_out_replay_requires_strict_comparable_updated_at(
     final_updated_at: object,
 ) -> None:
