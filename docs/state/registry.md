@@ -159,12 +159,16 @@ stays with [#358](https://github.com/syamaner/roastpilot-cloud/issues/358), but
 **D-433-D is amended**: #358 is C7-gated and not yet realisable, so assigning the
 audit there alone would leave the new principal's scope unverified for as long as
 it exists. #433's own job must therefore assert the **exact** granted-role set for
-`ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning the intended role **plus the implicit
-`PUBLIC`** and nothing else, rather than merely that `CURRENT_ROLE()` is correct.
-The implicit `PUBLIC` matters: a correctly provisioned user always returns it, so a
-literal "exactly the intended role" check would fail every compliant run before any
-write, and `assert_dev_ci_grants.py` already documents and handles that. Together
-with an empty
+`ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning **no role other than** the intended one and
+`PUBLIC`, rather than merely that `CURRENT_ROLE()` is correct. The formulation is an
+**exclusion list, not an equality**, which is what `find_unexpected_user_role_grants`
+in `assert_dev_ci_grants.py` already does: it returns every granted role except the
+expected primary and `PUBLIC`. That matters in both directions and both were got
+wrong before the live evidence arrived — requiring *exactly* the intended role fails
+wherever Snowflake returns the implicit `PUBLIC`, while requiring the role *plus*
+`PUBLIC` fails where it does not. The live provisioning of `ROASTPILOT_AGENT_CI` on
+3 Sep returned only `ROASTPILOT_AGENT`, with no `PUBLIC` row, so the exclusion form
+is the only one that holds either way. Together with an empty
 `DEFAULT_SECONDARY_ROLES`, because `assert_dev_ci_grants.py` documents that an
 extra granted role can be activated in another session and would escape the
 intended five-table-and-stage boundary. And **D-433-E: a
