@@ -422,19 +422,26 @@ def _verify_replay_idempotency(
         # Defence in depth: independently re-assert the procedure's own
         # ambiguous_idempotency_key guard as part of AC-4's live evidence.
         if _count(roast_count_row, "COUNT(*)") != 1:
-            roast_id_rows = _fetchall(
-                cursor,
-                "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
-                (TEST_RUN_ID,),
-                "ambiguous replay id query",
-            )
-            roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
-            recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
             ambiguous_error = UpsertRoastVerifyError(
-                "replay did not leave exactly one roast; "
-                f"ids for run id {TEST_RUN_ID}: {recorded_ids}"
+                "replay did not leave exactly one roast"
             )
             ambiguous_error.cleanup_unsafe = True
+            try:
+                roast_id_rows = _fetchall(
+                    cursor,
+                    "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+                    (TEST_RUN_ID,),
+                    "ambiguous replay id query",
+                )
+            except BaseException as exc:
+                setattr(exc, "cleanup_unsafe", ambiguous_error.cleanup_unsafe)
+                raise
+            roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
+            recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
+            ambiguous_error.args = (
+                "replay did not leave exactly one roast; "
+                f"ids for run id {TEST_RUN_ID}: {recorded_ids}",
+            )
             raise ambiguous_error
         if second != first:
             raise UpsertRoastVerifyError(
@@ -627,7 +634,11 @@ def _verify_telemetry_purge_scope(
         "contributing replay roast count query",
     )
     if _count(control_roast_count_row, "COUNT(*)") != 1:
-        raise UpsertRoastVerifyError("contributing replay changed the roast count")
+        ambiguous_error = UpsertRoastVerifyError(
+            "contributing replay changed the roast count"
+        )
+        ambiguous_error.cleanup_unsafe = True
+        raise ambiguous_error
     control_count_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
@@ -680,7 +691,11 @@ def _verify_telemetry_purge_scope(
         "opt-out replay roast count query",
     )
     if _count(final_roast_count_row, "COUNT(*)") != 1:
-        raise UpsertRoastVerifyError("opt-out replay changed the roast count")
+        ambiguous_error = UpsertRoastVerifyError(
+            "opt-out replay changed the roast count"
+        )
+        ambiguous_error.cleanup_unsafe = True
+        raise ambiguous_error
     final_preserved_state = _row_values(
         _fetchone(
             cursor,

@@ -869,6 +869,66 @@ def test_replay_count_mismatch_reports_every_id_and_skips_cleanup(
     assert not any(command.startswith("REMOVE ") for command in commands)
 
 
+def test_replay_count_diagnostic_failure_still_skips_cleanup() -> None:
+    connection = FakeConnection(
+        roast_count=2,
+        fail_on={"SELECT id FROM app.cloud_roasts"},
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="ambiguous replay id query failed",
+    ):
+        _verify(connection)
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        for command in commands
+    )
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
+
+
+def test_control_replay_count_mismatch_skips_cleanup() -> None:
+    connection = FakeConnection(control_roast_count=2)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="contributing replay changed the roast count",
+    ):
+        _verify(connection)
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        for command in commands
+    )
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
+
+
+def test_final_opt_out_count_mismatch_skips_cleanup() -> None:
+    connection = FakeConnection(final_roast_count=2)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="opt-out replay changed the roast count",
+    ):
+        _verify(connection)
+    commands = _commands(connection)
+    assert not any(
+        command.startswith("DELETE FROM app.roast_artifacts")
+        or command.startswith("DELETE FROM app.roast_telemetry")
+        for command in commands
+    )
+    assert not any(
+        command.startswith("DELETE FROM app.cloud_roasts") for command in commands
+    )
+    assert not any(command.startswith("REMOVE ") for command in commands)
+
+
 def test_existing_test_run_guard_fails_before_any_write() -> None:
     connection = FakeConnection(existing_run_count=1)
     with pytest.raises(
