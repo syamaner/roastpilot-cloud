@@ -161,9 +161,14 @@ audit there alone would leave the new principal's scope unverified for as long a
 it exists. #433's own job must therefore assert the **exact** granted-role set for
 `ROASTPILOT_AGENT_CI` — `SHOW GRANTS TO USER` returning **no role other than** the intended one and
 `PUBLIC`, rather than merely that `CURRENT_ROLE()` is correct. The formulation is an
-**exclusion list, not an equality**, which is what `find_unexpected_user_role_grants`
-in `assert_dev_ci_grants.py` already does: it returns every granted role except the
-expected primary and `PUBLIC`. That matters in both directions and both were got
+**exclusion list, not an equality**, modelled on but **not identical to**
+`find_unexpected_user_role_grants` in `assert_dev_ci_grants.py`, which returns every
+granted role except the expected primary and `PUBLIC`. The difference matters and is
+a required criterion: that helper coerces an absent or blank `role` field to an empty
+string and continues, so reusing it verbatim would let a malformed or unknown
+identity-assignment row pass the new credential gate silently. **#433's check must
+treat a malformed or blank grant row as a violation**, matching the fail-closed
+posture the live PUBLIC audit already takes on unparseable rows. That matters in both directions and both were got
 wrong before the live evidence arrived — requiring *exactly* the intended role fails
 wherever Snowflake returns the implicit `PUBLIC`, while requiring the role *plus*
 `PUBLIC` fails where it does not. The live provisioning of `ROASTPILOT_AGENT_CI` on
@@ -176,9 +181,16 @@ failed cleanup fails the job**, fail-closed, because a silent partial cleanup is
 how DEV accumulates unattributable residue that a later run misreads — the
 operator clears it by hand from the run id, resolved roast id and per-statement
 addressing keys the verifier prints, so the job's evidence artifact must capture
-stderr as well as stdout. It is decided and ready for a contract, but **not
-provisioned** — creating the user, its key and the Environment secret are
-operator actions no agent holds access to perform.
+stderr as well as stdout. **The principal is now provisioned** (3 Sep): `ROASTPILOT_AGENT_CI` exists as a
+`TYPE = SERVICE` user with `DEFAULT_SECONDARY_ROLES = ()` and `ROASTPILOT_AGENT`
+granted and nothing else, and the `dev-snowflake-agent` Environment carries a
+required reviewer, a deployment-branch policy naming `main` only, and both key
+secrets. The public-key fingerprint was cross-checked between GitHub and Snowflake
+before either was trusted. **What remains is the job, not the credential:** #433's
+gated workflow does not exist, needs a `story-planner` contract and a mandatory
+`factory-security-reviewer` pass, and must reconcile the verifier reading
+`SNOWFLAKE_PRIVATE_KEY_FILE` as a path against the workflow pattern that passes key
+material inline.
 
 **Two C3 defects split out of #417's review boards, plus one original story whose
 decision was updated:**
