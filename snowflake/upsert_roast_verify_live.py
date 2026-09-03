@@ -516,6 +516,11 @@ def _verify_preserved_columns(
         ),
         PRESERVED_COLUMNS,
     )
+    if (
+        first["public_slug"] != payload["public_slug"]
+        or before[3] != payload["public_slug"]
+    ):
+        raise UpsertRoastVerifyError("first call substituted the requested slug")
     if _stored_pair((before[0], before[3])) != (
         first["cloud_roast_id"],
         first["public_slug"],

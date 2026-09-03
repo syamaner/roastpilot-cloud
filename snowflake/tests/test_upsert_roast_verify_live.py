@@ -929,6 +929,24 @@ def test_first_stored_pair_must_match_return() -> None:
         _verify(connection)
 
 
+def test_first_call_rejects_returned_and_stored_slug_substitution() -> None:
+    substituted_slug = "ABCDEFGH123456789"
+    substituted_result = {
+        "cloud_roast_id": ROAST_ID,
+        "public_slug": substituted_slug,
+    }
+    connection = FakeConnection(
+        first_result=substituted_result,
+        replay_result=substituted_result,
+        before_pair=(ROAST_ID, substituted_slug),
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="first call substituted the requested slug",
+    ):
+        _verify(connection)
+
+
 @pytest.mark.parametrize(
     "option",
     [
