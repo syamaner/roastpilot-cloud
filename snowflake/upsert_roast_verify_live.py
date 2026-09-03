@@ -407,11 +407,25 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
 
 def _verify_replay_idempotency(
     cursor: Cursor,
-) -> tuple[dict[str, object], dict[str, object], object]:
+) -> tuple[dict[str, object], dict[str, object], object, tuple[object, ...]]:
     """Verify identical calls return equally and leave one roast."""
     payload = _payload()
     first = _call_upsert(cursor, payload)
     try:
+        preserved_select = (
+            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+            "created_at, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s"
+        )
+        first_call_baseline = _row_values(
+            _fetchone(
+                cursor,
+                preserved_select,
+                (TEST_RUN_ID,),
+                "first-call preserved-column query",
+            ),
+            PRESERVED_COLUMNS,
+        )
         second = _call_upsert(cursor, payload)
         roast_count_row = _fetchone(
             cursor,
@@ -469,12 +483,35 @@ def _verify_replay_idempotency(
             )
             collision_error.cleanup_unsafe = True
             raise collision_error
+        identical_replay_state = _row_values(
+            _fetchone(
+                cursor,
+                preserved_select,
+                (TEST_RUN_ID,),
+                "identical replay preserved-column query",
+            ),
+            PRESERVED_COLUMNS,
+        )
+        if identical_replay_state[:6] != first_call_baseline[:6]:
+            raise UpsertRoastVerifyError(
+                "identical replay changed a preserved column"
+            )
+        try:
+            identical_updated_non_decreasing = (
+                identical_replay_state[6] >= first_call_baseline[6]
+            )
+        except TypeError:
+            identical_updated_non_decreasing = False
+        if not identical_updated_non_decreasing:
+            raise UpsertRoastVerifyError(
+                "identical replay did not preserve non-decreasing updated_at"
+            )
     except BaseException as exc:
         # Preserve the procedure return for diagnostics only. Cleanup is
         # steered exclusively by the id read through the owned run key above.
         setattr(exc, "resolved_roast_id", first["cloud_roast_id"])
         raise
-    return payload, first, owned_roast_id
+    return payload, first, owned_roast_id, first_call_baseline
 
 
 def _verify_artifact_manifest(cursor: Cursor, resolved_roast_id: object) -> None:
@@ -510,20 +547,12 @@ def _verify_preserved_columns(
     cursor: Cursor,
     payload: Mapping[str, object],
     first: Mapping[str, object],
+    before: tuple[object, ...],
 ) -> tuple[object, ...]:
     """Verify slug replay preservation and return its stored row."""
     preserved_select = (
         "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
         "created_at, updated_at FROM app.cloud_roasts WHERE idempotency_key = %s"
-    )
-    before = _row_values(
-        _fetchone(
-            cursor,
-            preserved_select,
-            (TEST_RUN_ID,),
-            "pre-replay preserved-column query",
-        ),
-        PRESERVED_COLUMNS,
     )
     if (
         first["public_slug"] != payload["public_slug"]
@@ -901,10 +930,17 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         cursor = _preflight(connection, expected_target)
         preflight_complete = True
         _stage_and_verify_fixtures(cursor)
-        payload, first, resolved_roast_id = _verify_replay_idempotency(cursor)
+        payload, first, resolved_roast_id, first_call_baseline = (
+            _verify_replay_idempotency(cursor)
+        )
         returned_roast_id = first["cloud_roast_id"]
         _verify_artifact_manifest(cursor, returned_roast_id)
-        preserved_state = _verify_preserved_columns(cursor, payload, first)
+        preserved_state = _verify_preserved_columns(
+            cursor,
+            payload,
+            first,
+            first_call_baseline,
+        )
         _verify_visibility_rollback(cursor, payload, preserved_state[6])
         _verify_telemetry_purge_scope(
             cursor,

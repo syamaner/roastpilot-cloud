@@ -69,6 +69,7 @@ class FakeCursor:
             ROAST_ID,
             upsert_roast_verify_live.PUBLIC_SLUG,
         ),
+        identical_preserved_change: tuple[int, object] | None = None,
         preserved_change: tuple[int, object] | None = None,
         final_preserved_change: tuple[int, object] | None = None,
         mapping_rows: bool = False,
@@ -123,6 +124,7 @@ class FakeCursor:
         }
         self.before_pair = before_pair
         self.stored_pair = stored_pair
+        self.identical_preserved_change = identical_preserved_change
         self.preserved_change = preserved_change
         self.final_preserved_change = final_preserved_change
         self.mapping_rows = mapping_rows
@@ -239,6 +241,12 @@ class FakeCursor:
             if self.preserved_reads == 1:
                 values[0], values[3] = self.before_pair
             elif self.preserved_reads == 2:
+                values[0], values[3] = self.before_pair
+                if self.identical_preserved_change is not None:
+                    values[self.identical_preserved_change[0]] = (
+                        self.identical_preserved_change[1]
+                    )
+            elif self.preserved_reads == 3:
                 values[0], values[3] = self.stored_pair
                 values[6] = self.updated_after
                 if self.preserved_change is not None:
@@ -1198,6 +1206,31 @@ def test_replay_equality_and_artifact_pair_mismatches_are_detected() -> None:
         _verify(connection)
 
 
+def test_identical_replay_rejects_preserved_column_mutation() -> None:
+    cursor = FakeCursor(
+        existing_run_count=1,
+        identical_preserved_change=(2, "changed-owner"),
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="identical replay changed a preserved column",
+    ):
+        upsert_roast_verify_live._verify_replay_idempotency(cursor)
+
+
+def test_identical_replay_preserves_first_call_baseline() -> None:
+    cursor = FakeCursor(existing_run_count=1)
+
+    payload, first, owned_roast_id, baseline = (
+        upsert_roast_verify_live._verify_replay_idempotency(cursor)
+    )
+
+    assert payload == upsert_roast_verify_live._payload()
+    assert first == FIRST_RESULT
+    assert owned_roast_id == ROAST_ID
+    assert baseline == BEFORE
+
+
 def test_wrong_returned_id_never_reaches_destructive_cleanup_predicates() -> None:
     wrong_returned_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     wrong_result = {
@@ -1314,7 +1347,7 @@ def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
         match="opt-out replay changed the roast count",
     ):
         _verify(connection)
-    assert connection.fake_cursor.preserved_reads == 2
+    assert connection.fake_cursor.preserved_reads == 3
     assert connection.fake_cursor.artifact_count_reads == 1
 
 
