@@ -40,9 +40,11 @@ class FakeCursor:
         role: str = "ROASTPILOT_AGENT",
         listed_names: set[str] | None = None,
         remove_leaves_files: bool = False,
+        existing_run_count: object = 0,
         roast_count: object = 1,
         control_roast_count: object = 1,
         sentinel_owner_count: object = 0,
+        sentinel_telemetry_count: object = 0,
         first_result: object = FIRST_RESULT,
         replay_result: object = FIRST_RESULT,
         slug_result: object = FIRST_RESULT,
@@ -81,9 +83,11 @@ class FakeCursor:
             for path in upsert_roast_verify_live.FIXTURE_PATHS
         }
         self.remove_leaves_files = remove_leaves_files
+        self.existing_run_count = existing_run_count
         self.roast_count = roast_count
         self.control_roast_count = control_roast_count
         self.sentinel_owner_count = sentinel_owner_count
+        self.sentinel_telemetry_count = sentinel_telemetry_count
         self.first_result = first_result
         self.replay_result = replay_result
         self.slug_result = slug_result
@@ -114,6 +118,7 @@ class FakeCursor:
         self.call_results: list[object] = []
         self.last_call_result: object = None
         self.roast_count_reads = 0
+        self.sentinel_count_reads = 0
         self.preserved_reads = 0
         self.telemetry_seeded = False
         self.control_replayed = False
@@ -177,6 +182,8 @@ class FakeCursor:
         if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
             self.roast_count_reads += 1
             if self.roast_count_reads == 1:
+                return (self.existing_run_count,)
+            if self.roast_count_reads == 2:
                 return (self.roast_count,)
             return (self.control_roast_count,)
         if command.startswith("SELECT COUNT(*) FROM app.roast_artifacts"):
@@ -203,6 +210,9 @@ class FakeCursor:
         if command.startswith("SELECT COUNT(*) FROM app.roast_telemetry"):
             assert params is not None
             if params[0] == upsert_roast_verify_live.OTHER_ROAST_ID:
+                self.sentinel_count_reads += 1
+                if self.sentinel_count_reads == 1:
+                    return (self.sentinel_telemetry_count,)
                 if self.opted_out and not self.sentinel_survives:
                     return (0,)
                 return (self.sentinel_rows,)
@@ -420,14 +430,18 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
         "SELECT CURRENT_DATABASE()",
         "SELECT CURRENT_ROLE()",
     ]
-    assert commands[3] == "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s"
+    assert commands[3:6] == [
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+    ]
     expected_puts = [
         f"PUT '{path.resolve().as_uri()}' "
         f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/ "
         "AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
         for path in upsert_roast_verify_live.FIXTURE_PATHS
     ]
-    assert commands[4:6] == expected_puts
+    assert commands[6:8] == expected_puts
     calls = [
         entry
         for entry in connection.fake_cursor.executed
@@ -453,10 +467,6 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
             f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/roast.jsonl"
         },
         {
-            f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/roast.jsonl.gz",
-            f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/summary.json",
-        },
-        {
             f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/roast.jsonl",
             f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/summary.json",
             f"roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/stale.csv",
@@ -469,9 +479,35 @@ def test_initial_list_requires_exact_uncompressed_fixture_set(
     connection = FakeConnection(listed_names=listed_names)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="LIST is not exact or uncompressed",
+        match="LIST is not exact",
     ):
         _verify(connection)
+
+
+def test_initial_list_reports_compression_before_set_mismatch() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    connection = FakeConnection(
+        listed_names={
+            f"roast_artifacts/{run_id}/roast.jsonl.gz",
+            f"roast_artifacts/{run_id}/summary.json",
+        }
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="LIST contains a compressed file",
+    ):
+        _verify(connection)
+
+
+def test_initial_list_accepts_unknown_case_insensitive_stage_prefix() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID.upper()
+    connection = FakeConnection(
+        listed_names={
+            f"DATABASE.SCHEMA.ROAST_ARTIFACTS/{run_id}/roast.jsonl",
+            f"DATABASE.SCHEMA.ROAST_ARTIFACTS/{run_id}/summary.json",
+        }
+    )
+    assert _verify(connection) == ROAST_ID
 
 
 def test_initial_list_rejects_nested_fixture_name() -> None:
@@ -489,6 +525,17 @@ def test_initial_list_rejects_nested_fixture_name() -> None:
         _verify(connection)
 
 
+def test_initial_list_rejects_name_without_run_segment() -> None:
+    connection = FakeConnection(
+        listed_names={"unknown-prefix/roast.jsonl", "unknown-prefix/summary.json"}
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="LIST has an invalid prefix",
+    ):
+        _verify(connection)
+
+
 def test_post_remove_list_must_be_empty() -> None:
     connection = FakeConnection(remove_leaves_files=True)
     with pytest.raises(
@@ -498,7 +545,8 @@ def test_post_remove_list_must_be_empty() -> None:
         _verify(connection)
     assert caught.value.cleanup_failures == [
         "cleanup failed for run id "
-        f"{upsert_roast_verify_live.TEST_RUN_ID}: stage REMOVE verification failed"
+        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}: "
+        "stage REMOVE verification failed"
     ]
     assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
@@ -675,6 +723,25 @@ def test_injectable_live_guards_reject_independently(
         _verify(connection)
 
 
+def test_existing_test_run_guard_fails_before_any_write() -> None:
+    connection = FakeConnection(existing_run_count=1)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="test run id is already owned",
+    ):
+        _verify(connection)
+    assert _commands(connection) == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+    ]
+    assert all(
+        command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
+        for command in _commands(connection)
+    )
+
+
 def test_sentinel_owner_guard_fails_before_any_write() -> None:
     connection = FakeConnection(sentinel_owner_count=1)
     with pytest.raises(
@@ -686,8 +753,30 @@ def test_sentinel_owner_guard_fails_before_any_write() -> None:
         "USE SECONDARY ROLES NONE",
         "SELECT CURRENT_DATABASE()",
         "SELECT CURRENT_ROLE()",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
     ]
+
+
+def test_sentinel_telemetry_guard_fails_before_any_write() -> None:
+    connection = FakeConnection(sentinel_telemetry_count=1)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="sentinel telemetry id is already owned",
+    ):
+        _verify(connection)
+    assert _commands(connection) == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+    ]
+    assert all(
+        command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
+        for command in _commands(connection)
+    )
 
 
 def test_first_stored_pair_must_match_return() -> None:
@@ -810,7 +899,10 @@ def test_visibility_error_accepts_each_contract_marker(message: str) -> None:
     ("option", "message"),
     [
         ({"telemetry_survives": True}, "did not purge telemetry"),
-        ({"sentinel_survives": False}, "changed unrelated telemetry"),
+        (
+            {"sentinel_survives": False},
+            "did not preserve one unrelated telemetry row",
+        ),
     ],
 )
 def test_opt_out_purge_is_complete_and_scoped(
@@ -822,17 +914,21 @@ def test_opt_out_purge_is_complete_and_scoped(
         _verify(connection)
 
 
-def test_stale_sentinel_is_removed_before_delta_measurement() -> None:
-    connection = FakeConnection(sentinel_rows=3)
+def test_sentinel_result_asserts_one_absolute_row() -> None:
+    connection = FakeConnection()
     assert _verify(connection) == ROAST_ID
-    insert_index = next(
-        index
-        for index, command in enumerate(_commands(connection))
-        if command.startswith("INSERT INTO app.roast_telemetry")
-    )
-    assert connection.fake_cursor.executed[insert_index - 2] == (
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-        (upsert_roast_verify_live.OTHER_ROAST_ID,),
+    sentinel_reads = [
+        entry
+        for entry in connection.fake_cursor.executed
+        if entry
+        == (
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (upsert_roast_verify_live.OTHER_ROAST_ID,),
+        )
+    ]
+    assert len(sentinel_reads) == 2
+    assert not any(
+        "sentinel baseline" in command for command in _commands(connection)
     )
 
 
@@ -918,7 +1014,8 @@ def test_cleanup_failure_does_not_gate_later_cleanup_actions() -> None:
     assert sum(command.startswith("LIST ") for command in commands) == 2
     assert raised.value.cleanup_failures == [
         "cleanup failed for run id "
-        f"{upsert_roast_verify_live.TEST_RUN_ID}: artifact cleanup failed"
+        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}: "
+        "artifact cleanup failed"
     ]
 
 
@@ -945,8 +1042,11 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     output = capsys.readouterr().err
     assert "replay did not leave exactly one roast" in output
     assert output.count(
-        f"cleanup failed for run id {upsert_roast_verify_live.TEST_RUN_ID}:"
+        "cleanup failed for run id "
+        f"{upsert_roast_verify_live.TEST_RUN_ID}, cloud roast id {ROAST_ID}:"
     ) == 5
+    assert upsert_roast_verify_live.TEST_RUN_ID in output
+    assert ROAST_ID in output
     for step in (
         "artifact cleanup failed",
         "roast telemetry cleanup failed",
@@ -956,3 +1056,9 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     ):
         assert step in output
     assert RAW_PRIVATE_PATH not in output
+    artifact_cleanup = next(
+        entry
+        for entry in connection.fake_cursor.executed
+        if entry[0].startswith("DELETE FROM app.roast_artifacts")
+    )
+    assert artifact_cleanup[1] == (upsert_roast_verify_live.TEST_RUN_ID,)

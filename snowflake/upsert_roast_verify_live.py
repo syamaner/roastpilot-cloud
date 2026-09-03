@@ -8,6 +8,10 @@ row this verifier cannot safely clean up, so AC-3's recompute write path is
 deliberately not exercised live here. The procedure source establishes its
 write-then-rollback ordering; this run observes only rejection with no net
 visibility, notes, or timestamp change.
+
+Snowflake's exact ``LIST`` name-column prefix spelling for this
+schema-qualified internal stage remains a live-gate-only unknown; verification
+therefore anchors on the case-insensitive run-id path segment.
 """
 from __future__ import annotations
 
@@ -73,6 +77,7 @@ class UpsertRoastVerifyError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.cleanup_failures: list[str] = []
+        self.resolved_roast_id: object | None = None
 
 
 def _validated_fixture_uri(fixture_path: Path) -> str:
@@ -277,6 +282,14 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
     role_row = _fetchone(cursor, "SELECT CURRENT_ROLE()", None, "role assertion")
     if _first_value(role_row, "CURRENT_ROLE()") != EXPECTED_ROLE:
         raise UpsertRoastVerifyError("connected role is not ROASTPILOT_AGENT")
+    existing_run_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        "test run ownership query",
+    )
+    if _count(existing_run_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError("test run id is already owned")
     sentinel_owner_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
@@ -285,6 +298,14 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
     )
     if _count(sentinel_owner_row, "COUNT(*)") != 0:
         raise UpsertRoastVerifyError("sentinel roast id is already owned")
+    sentinel_telemetry_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel telemetry ownership query",
+    )
+    if _count(sentinel_telemetry_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError("sentinel telemetry id is already owned")
     return cursor
 
 
@@ -310,22 +331,21 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
         None,
         "staging fixture LIST",
     )
-    stage_prefix = f"roast_artifacts/{TEST_RUN_ID}/"
+    run_segment = f"/{TEST_RUN_ID}/"
     listed_names: set[str] = set()
     for row in listed_rows:
         listed_path = str(_first_value(row, "name"))
-        if not listed_path.startswith(stage_prefix):
+        segment_start = listed_path.lower().find(run_segment.lower())
+        if segment_start < 0:
             raise UpsertRoastVerifyError("staged fixture LIST has an invalid prefix")
-        relative_name = listed_path[len(stage_prefix) :]
+        relative_name = listed_path[segment_start + len(run_segment) :]
         if not relative_name or "/" in relative_name:
             raise UpsertRoastVerifyError("staged fixture LIST contains a nested path")
         listed_names.add(relative_name)
-    if listed_names != staged_names or any(
-        name.endswith(".gz") for name in listed_names
-    ):
-        raise UpsertRoastVerifyError(
-            "staged fixture LIST is not exact or uncompressed"
-        )
+    if any(name.lower().endswith(".gz") for name in listed_names):
+        raise UpsertRoastVerifyError("staged fixture LIST contains a compressed file")
+    if listed_names != staged_names:
+        raise UpsertRoastVerifyError("staged fixture LIST is not exact")
 
 
 def _verify_replay_idempotency(
@@ -334,19 +354,27 @@ def _verify_replay_idempotency(
     """Verify identical calls return equally and leave one roast."""
     payload = _payload()
     first = _call_upsert(cursor, payload)
-    second = _call_upsert(cursor, payload)
-    roast_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-        (TEST_RUN_ID,),
-        "roast count query",
-    )
-    # Defence in depth: independently re-assert the procedure's own
-    # ambiguous_idempotency_key guard as part of AC-4's live evidence.
-    if _count(roast_count_row, "COUNT(*)") != 1:
-        raise UpsertRoastVerifyError("replay did not leave exactly one roast")
-    if second != first:
-        raise UpsertRoastVerifyError("identical replay returned a different object")
+    try:
+        second = _call_upsert(cursor, payload)
+        roast_count_row = _fetchone(
+            cursor,
+            "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "roast count query",
+        )
+        # Defence in depth: independently re-assert the procedure's own
+        # ambiguous_idempotency_key guard as part of AC-4's live evidence.
+        if _count(roast_count_row, "COUNT(*)") != 1:
+            raise UpsertRoastVerifyError("replay did not leave exactly one roast")
+        if second != first:
+            raise UpsertRoastVerifyError(
+                "identical replay returned a different object"
+            )
+    except UpsertRoastVerifyError as exc:
+        # Preserve diagnostic state only; cleanup still receives the unchanged
+        # top-level resolved_roast_id and retains D-417-E's exact predicates.
+        exc.resolved_roast_id = first["cloud_roast_id"]
+        raise
     return payload, first
 
 
@@ -471,13 +499,6 @@ def _verify_telemetry_purge_scope(
         (OTHER_ROAST_ID,),
         "sentinel pre-cleanup",
     )
-    sentinel_before_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-        (OTHER_ROAST_ID,),
-        "sentinel baseline query",
-    )
-    sentinel_before = _count(sentinel_before_row, "COUNT(*)")
     _execute(
         cursor,
         "INSERT INTO app.roast_telemetry "
@@ -539,8 +560,10 @@ def _verify_telemetry_purge_scope(
         "sentinel result query",
     )
     sentinel_after = _count(sentinel_after_row, "COUNT(*)")
-    if sentinel_after - sentinel_before != 1:
-        raise UpsertRoastVerifyError("opt-out replay changed unrelated telemetry")
+    if sentinel_after != 1:
+        raise UpsertRoastVerifyError(
+            "opt-out replay did not preserve one unrelated telemetry row"
+        )
 
 
 def _cleanup_all(
@@ -618,9 +641,14 @@ def _cleanup_all(
 def _attach_cleanup_failures(
     failure: UpsertRoastVerifyError,
     cleanup_errors: Sequence[UpsertRoastVerifyError],
+    resolved_roast_id: object | None = None,
 ) -> None:
+    failure.resolved_roast_id = resolved_roast_id
     for cleanup_error in cleanup_errors:
-        message = f"cleanup failed for run id {TEST_RUN_ID}: {cleanup_error}"
+        context = f"run id {TEST_RUN_ID}"
+        if resolved_roast_id is not None:
+            context += f", cloud roast id {resolved_roast_id}"
+        message = f"cleanup failed for {context}: {cleanup_error}"
         failure.cleanup_failures.append(message)
         failure.add_note(message)
 
@@ -645,20 +673,34 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
     except BaseException as exc:
         if isinstance(exc, UpsertRoastVerifyError):
             body_error = exc
+            if resolved_roast_id is not None:
+                body_error.resolved_roast_id = resolved_roast_id
             raise
         body_error = UpsertRoastVerifyError("live verification body failed")
+        body_error.resolved_roast_id = resolved_roast_id
         raise body_error from exc
     finally:
         if preflight_complete and cursor is not None:
             cleanup_errors = _cleanup_all(cursor, resolved_roast_id)
             if cleanup_errors:
                 if body_error is not None:
-                    _attach_cleanup_failures(body_error, cleanup_errors)
+                    diagnostic_roast_id = body_error.resolved_roast_id
+                    if diagnostic_roast_id is None:
+                        diagnostic_roast_id = resolved_roast_id
+                    _attach_cleanup_failures(
+                        body_error,
+                        cleanup_errors,
+                        diagnostic_roast_id,
+                    )
                 else:
                     cleanup_failure = UpsertRoastVerifyError(
                         "live verification cleanup failed"
                     )
-                    _attach_cleanup_failures(cleanup_failure, cleanup_errors)
+                    _attach_cleanup_failures(
+                        cleanup_failure,
+                        cleanup_errors,
+                        resolved_roast_id,
+                    )
                     raise cleanup_failure
 
 
@@ -738,7 +780,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         close_error = UpsertRoastVerifyError("Snowflake connection close failed")
         if failure is None:
             failure = UpsertRoastVerifyError("live verification cleanup failed")
-        _attach_cleanup_failures(failure, (close_error,))
+        resolved_roast_id = failure.resolved_roast_id
+        if resolved_roast_id is None and roast_id:
+            resolved_roast_id = roast_id
+        _attach_cleanup_failures(failure, (close_error,), resolved_roast_id)
     if failure is not None:
         _print_failure(failure)
         return 1
