@@ -44,7 +44,9 @@ class FakeCursor:
         remove_leaves_files: bool = False,
         existing_run_count: object = 0,
         roast_count: object = 1,
+        slug_roast_count: object = 1,
         control_roast_count: object = 1,
+        empty_manifest_roast_count: object = 1,
         final_roast_count: object = 1,
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
@@ -59,6 +61,9 @@ class FakeCursor:
         cleanup_roast_ids: tuple[object, ...] = (ROAST_ID,),
         cleanup_identity_query_fails: bool = False,
         artifact_count: object = 3,
+        identical_artifact_count: object = 3,
+        slug_artifact_count: object = 3,
+        control_artifact_count: object = 3,
         empty_manifest_artifact_count: object = 0,
         final_artifact_count: object = 0,
         artifact_pairs: set[tuple[object, object]] | None = None,
@@ -108,7 +113,9 @@ class FakeCursor:
         self.remove_leaves_files = remove_leaves_files
         self.existing_run_count = existing_run_count
         self.roast_count = roast_count
+        self.slug_roast_count = slug_roast_count
         self.control_roast_count = control_roast_count
+        self.empty_manifest_roast_count = empty_manifest_roast_count
         self.final_roast_count = final_roast_count
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
@@ -123,6 +130,9 @@ class FakeCursor:
         self.cleanup_roast_ids = cleanup_roast_ids
         self.cleanup_identity_query_fails = cleanup_identity_query_fails
         self.artifact_count = artifact_count
+        self.identical_artifact_count = identical_artifact_count
+        self.slug_artifact_count = slug_artifact_count
+        self.control_artifact_count = control_artifact_count
         self.empty_manifest_artifact_count = empty_manifest_artifact_count
         self.final_artifact_count = final_artifact_count
         self.artifact_pairs = artifact_pairs if artifact_pairs is not None else {
@@ -244,13 +254,23 @@ class FakeCursor:
             if self.roast_count_reads == 2:
                 return (self.roast_count,)
             if self.roast_count_reads == 3:
+                return (self.slug_roast_count,)
+            if self.roast_count_reads == 4:
                 return (self.control_roast_count,)
+            if self.roast_count_reads == 5:
+                return (self.empty_manifest_roast_count,)
             return (self.final_roast_count,)
         if command.startswith("SELECT COUNT(*) FROM app.roast_artifacts"):
             self.artifact_count_reads += 1
             if self.artifact_count_reads == 1:
-                return (self.artifact_count,)
+                return (self.identical_artifact_count,)
             if self.artifact_count_reads == 2:
+                return (self.artifact_count,)
+            if self.artifact_count_reads == 3:
+                return (self.slug_artifact_count,)
+            if self.artifact_count_reads == 4:
+                return (self.control_artifact_count,)
+            if self.artifact_count_reads == 5:
                 return (self.empty_manifest_artifact_count,)
             return (self.final_artifact_count,)
         if command.startswith("SELECT id, idempotency_key"):
@@ -743,7 +763,7 @@ def test_main_reports_sanitized_connection_close_failure(
     assert ROAST_ID in output
     assert output.count(f"diagnostic cloud_roast_id={ROAST_ID}") == 1
     if body_fails:
-        assert "replay did not leave exactly one roast" in output
+        assert "identical replay changed the roast count" in output
     else:
         assert "live verification cleanup failed" in output
 
@@ -870,7 +890,7 @@ def test_database_and_role_reject_before_write(
 @pytest.mark.parametrize(
     ("option", "message"),
     [
-        ({"roast_count": 2}, "exactly one roast"),
+        ({"roast_count": 2}, "identical replay changed the roast count"),
         ({"control_roast_count": 2}, "contributing replay changed the roast count"),
         (
             {
@@ -903,6 +923,103 @@ def test_injectable_live_guards_reject_independently(
     connection = FakeConnection(**option)
     with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
         _verify(connection)
+
+
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        pytest.param(
+            {"roast_count": 2},
+            "identical replay changed the roast count",
+            id="identical",
+        ),
+        pytest.param(
+            {"slug_roast_count": 2},
+            "slug replay changed the roast count",
+            id="divergent-slug",
+        ),
+        pytest.param(
+            {"control_roast_count": 2},
+            "contributing replay changed the roast count",
+            id="control",
+        ),
+        pytest.param(
+            {"empty_manifest_roast_count": 2},
+            "contributing empty-manifest replay changed the roast count",
+            id="isolation",
+        ),
+        pytest.param(
+            {"final_roast_count": 2},
+            "opt-out replay changed the roast count",
+            id="opt-out",
+        ),
+    ],
+)
+def test_each_replay_row_count_mismatch_skips_cleanup(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        _verify(connection)
+
+    assert not any(
+        command.startswith("DELETE ") or command.startswith("REMOVE ")
+        for command in _commands(connection)
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        pytest.param(
+            {"identical_artifact_count": 2},
+            "identical replay artifact count does not match expected manifest",
+            id="identical",
+        ),
+        pytest.param(
+            {"slug_artifact_count": 2},
+            "slug replay artifact count does not match expected manifest",
+            id="divergent-slug-p2-i",
+        ),
+        pytest.param(
+            {"control_artifact_count": 2},
+            "contributing replay artifact count does not match expected manifest",
+            id="control",
+        ),
+        pytest.param(
+            {"empty_manifest_artifact_count": 1},
+            "contributing empty-manifest replay artifact count does not match expected manifest",
+            id="isolation",
+        ),
+        pytest.param(
+            {"final_artifact_count": 1},
+            "opt-out replay artifact count does not match expected manifest",
+            id="opt-out",
+        ),
+    ],
+)
+def test_each_replay_artifact_mismatch_runs_cleanup(
+    option: dict[str, object],
+    message: str,
+) -> None:
+    connection = FakeConnection(**option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        _verify(connection)
+
+    destructive_commands = [
+        command
+        for command in _commands(connection)
+        if command.startswith("DELETE ") or command.startswith("REMOVE ")
+    ]
+    assert len(destructive_commands) == 5
+    assert destructive_commands[0].startswith("DELETE FROM app.roast_artifacts")
+    assert destructive_commands[1].startswith("DELETE FROM app.roast_telemetry WHERE (")
+    assert destructive_commands[2:] == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -956,7 +1073,7 @@ def test_replay_count_mismatch_reports_every_id_and_skips_cleanup(
     )
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
-    assert "replay did not leave exactly one roast" in output
+    assert "identical replay changed the roast count" in output
     for roast_id in matching_ids:
         assert roast_id in output
     commands = _commands(connection)
@@ -1581,7 +1698,7 @@ def test_final_opt_out_replay_must_leave_exactly_one_roast() -> None:
     ):
         _verify(connection)
     assert connection.fake_cursor.preserved_reads == 5
-    assert connection.fake_cursor.artifact_count_reads == 2
+    assert connection.fake_cursor.artifact_count_reads == 5
 
 
 def test_final_opt_out_replay_must_preserve_columns() -> None:
@@ -1609,7 +1726,10 @@ def test_contributing_empty_manifest_replay_must_clear_artifact_manifest() -> No
     connection = FakeConnection(empty_manifest_artifact_count=1)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="contributing empty-manifest replay did not clear the artifact manifest",
+        match=(
+            "contributing empty-manifest replay artifact count does not match "
+            "expected manifest"
+        ),
     ):
         _verify(connection)
 
@@ -1618,11 +1738,11 @@ def test_final_opt_out_replay_must_not_recreate_artifacts() -> None:
     connection = FakeConnection(final_artifact_count=1)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="final opt-out replay recreated an artifact",
+        match="opt-out replay artifact count does not match expected manifest",
     ):
         _verify(connection)
     assert connection.fake_cursor.opted_out is True
-    assert connection.fake_cursor.artifact_count_reads == 3
+    assert connection.fake_cursor.artifact_count_reads == 6
 
 
 def test_sentinel_result_asserts_one_absolute_row() -> None:

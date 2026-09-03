@@ -405,6 +405,81 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
         raise UpsertRoastVerifyError("staged fixture LIST is not exact")
 
 
+def _assert_replay_state(
+    cursor: Cursor,
+    first_call_baseline: tuple[object, ...],
+    previous_updated_at: object,
+    expected_artifact_count: int,
+    owned_roast_id: object,
+    replay_name: str,
+) -> object:
+    """Assert one replay's complete persisted state and return its timestamp."""
+    roast_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        f"{replay_name} roast count query",
+    )
+    if _count(roast_count_row, "COUNT(*)") != 1:
+        ambiguous_error = UpsertRoastVerifyError(
+            f"{replay_name} changed the roast count"
+        )
+        ambiguous_error.cleanup_unsafe = True
+        try:
+            roast_id_rows = _fetchall(
+                cursor,
+                "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+                (TEST_RUN_ID,),
+                "ambiguous replay id query",
+            )
+        except BaseException as exc:
+            setattr(exc, "cleanup_unsafe", ambiguous_error.cleanup_unsafe)
+            raise
+        roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
+        recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
+        ambiguous_error.args = (
+            f"{replay_name} changed the roast count; "
+            f"ids for run id {TEST_RUN_ID}: {recorded_ids}",
+        )
+        raise ambiguous_error
+
+    replay_state = _row_values(
+        _fetchone(
+            cursor,
+            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+            "created_at, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            f"{replay_name} preserved-column query",
+        ),
+        PRESERVED_COLUMNS,
+    )
+    if replay_state[:6] != first_call_baseline[:6]:
+        raise UpsertRoastVerifyError(
+            f"{replay_name} changed a preserved column"
+        )
+    try:
+        updated_non_decreasing = replay_state[6] >= previous_updated_at
+    except TypeError:
+        updated_non_decreasing = False
+    if not updated_non_decreasing:
+        raise UpsertRoastVerifyError(
+            f"{replay_name} did not preserve non-decreasing updated_at"
+        )
+
+    artifact_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
+        (owned_roast_id,),
+        f"{replay_name} artifact count query",
+    )
+    if _count(artifact_count_row, "COUNT(*)") != expected_artifact_count:
+        raise UpsertRoastVerifyError(
+            f"{replay_name} artifact count does not match expected manifest"
+        )
+    return replay_state[6]
+
+
 def _verify_replay_idempotency(
     cursor: Cursor,
 ) -> tuple[
@@ -432,36 +507,14 @@ def _verify_replay_idempotency(
         owned_roast_id = first_call_baseline[0]
         previous_updated_at = first_call_baseline[6]
         second = _call_upsert(cursor, payload)
-        roast_count_row = _fetchone(
+        previous_updated_at = _assert_replay_state(
             cursor,
-            "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-            (TEST_RUN_ID,),
-            "roast count query",
+            first_call_baseline,
+            previous_updated_at,
+            len(ARTIFACT_KINDS),
+            owned_roast_id,
+            "identical replay",
         )
-        # Defence in depth: independently re-assert the procedure's own
-        # ambiguous_idempotency_key guard as part of AC-4's live evidence.
-        if _count(roast_count_row, "COUNT(*)") != 1:
-            ambiguous_error = UpsertRoastVerifyError(
-                "replay did not leave exactly one roast"
-            )
-            ambiguous_error.cleanup_unsafe = True
-            try:
-                roast_id_rows = _fetchall(
-                    cursor,
-                    "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
-                    (TEST_RUN_ID,),
-                    "ambiguous replay id query",
-                )
-            except BaseException as exc:
-                setattr(exc, "cleanup_unsafe", ambiguous_error.cleanup_unsafe)
-                raise
-            roast_ids = [str(_first_value(row, "ID")) for row in roast_id_rows]
-            recorded_ids = ", ".join(roast_ids) if roast_ids else "none returned"
-            ambiguous_error.args = (
-                "replay did not leave exactly one roast; "
-                f"ids for run id {TEST_RUN_ID}: {recorded_ids}",
-            )
-            raise ambiguous_error
         owned_id_count_row = _fetchone(
             cursor,
             "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
@@ -479,30 +532,6 @@ def _verify_replay_idempotency(
             raise UpsertRoastVerifyError(
                 "identical replay returned a different object"
             )
-        identical_replay_state = _row_values(
-            _fetchone(
-                cursor,
-                preserved_select,
-                (TEST_RUN_ID,),
-                "identical replay preserved-column query",
-            ),
-            PRESERVED_COLUMNS,
-        )
-        if identical_replay_state[:6] != first_call_baseline[:6]:
-            raise UpsertRoastVerifyError(
-                "identical replay changed a preserved column"
-            )
-        try:
-            identical_updated_non_decreasing = (
-                identical_replay_state[6] >= previous_updated_at
-            )
-        except TypeError:
-            identical_updated_non_decreasing = False
-        if not identical_updated_non_decreasing:
-            raise UpsertRoastVerifyError(
-                "identical replay did not preserve non-decreasing updated_at"
-            )
-        previous_updated_at = identical_replay_state[6]
     except BaseException as exc:
         # Preserve the procedure return for diagnostics only. Cleanup is
         # steered exclusively by the id read from the first-call baseline above.
@@ -548,12 +577,9 @@ def _verify_preserved_columns(
     first: Mapping[str, object],
     before: tuple[object, ...],
     previous_updated_at: object,
+    owned_roast_id: object,
 ) -> tuple[tuple[object, ...], object]:
-    """Verify slug replay preservation and return its stored row."""
-    preserved_select = (
-        "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
-        "created_at, updated_at FROM app.cloud_roasts WHERE idempotency_key = %s"
-    )
+    """Verify slug replay state and return the stable first-call baseline."""
     if (
         first["public_slug"] != payload["public_slug"]
         or before[3] != payload["public_slug"]
@@ -568,31 +594,19 @@ def _verify_preserved_columns(
     slug_payload = dict(payload)
     slug_payload["public_slug"] = REPLAY_SLUG
     slug_result = _call_upsert(cursor, slug_payload)
+    previous_updated_at = _assert_replay_state(
+        cursor,
+        before,
+        previous_updated_at,
+        len(ARTIFACT_KINDS),
+        owned_roast_id,
+        "slug replay",
+    )
     if slug_result != first:
         raise UpsertRoastVerifyError(
             "divergent-slug replay returned a different object"
         )
-    after = _row_values(
-        _fetchone(
-            cursor,
-            preserved_select,
-            (TEST_RUN_ID,),
-            "post-replay preserved-column query",
-        ),
-        PRESERVED_COLUMNS,
-    )
-    if before[:6] != after[:6]:
-        raise UpsertRoastVerifyError("slug replay changed a preserved column")
-    try:
-        updated_non_decreasing = after[6] >= previous_updated_at
-    except TypeError:
-        updated_non_decreasing = False
-    if not updated_non_decreasing:
-        raise UpsertRoastVerifyError(
-            "slug replay did not preserve non-decreasing updated_at"
-        )
-    previous_updated_at = after[6]
-    return after, previous_updated_at
+    return before, previous_updated_at
 
 
 def _verify_visibility_rollback(
@@ -657,22 +671,18 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError("telemetry setup did not insert two roast rows")
 
     control_result = _call_upsert(cursor, payload)
+    previous_updated_at = _assert_replay_state(
+        cursor,
+        preserved_state,
+        previous_updated_at,
+        len(ARTIFACT_KINDS),
+        owned_roast_id,
+        "contributing replay",
+    )
     if control_result != first:
         raise UpsertRoastVerifyError(
             "contributing replay returned a different object"
         )
-    control_roast_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-        (TEST_RUN_ID,),
-        "contributing replay roast count query",
-    )
-    if _count(control_roast_count_row, "COUNT(*)") != 1:
-        ambiguous_error = UpsertRoastVerifyError(
-            "contributing replay changed the roast count"
-        )
-        ambiguous_error.cleanup_unsafe = True
-        raise ambiguous_error
     control_count_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
@@ -683,36 +693,18 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "contributing replay unexpectedly purged telemetry"
         )
-    control_preserved_state = _row_values(
-        _fetchone(
-            cursor,
-            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
-            "created_at, updated_at FROM app.cloud_roasts "
-            "WHERE idempotency_key = %s",
-            (TEST_RUN_ID,),
-            "contributing replay preserved-column query",
-        ),
-        PRESERVED_COLUMNS,
-    )
-    if control_preserved_state[:6] != preserved_state[:6]:
-        raise UpsertRoastVerifyError(
-            "contributing replay changed a preserved column"
-        )
-    try:
-        control_updated_non_decreasing = (
-            control_preserved_state[6] >= previous_updated_at
-        )
-    except TypeError:
-        control_updated_non_decreasing = False
-    if not control_updated_non_decreasing:
-        raise UpsertRoastVerifyError(
-            "contributing replay did not preserve non-decreasing updated_at"
-        )
-    previous_updated_at = control_preserved_state[6]
 
     empty_manifest_payload = dict(payload)
     empty_manifest_payload["artifact_kinds"] = []
     empty_manifest_result = _call_upsert(cursor, empty_manifest_payload)
+    previous_updated_at = _assert_replay_state(
+        cursor,
+        preserved_state,
+        previous_updated_at,
+        0,
+        owned_roast_id,
+        "contributing empty-manifest replay",
+    )
     if empty_manifest_result != first:
         raise UpsertRoastVerifyError(
             "contributing empty-manifest replay returned a different object"
@@ -727,47 +719,18 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "contributing empty-manifest replay unexpectedly purged telemetry"
         )
-    empty_manifest_preserved_state = _row_values(
-        _fetchone(
-            cursor,
-            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
-            "created_at, updated_at FROM app.cloud_roasts "
-            "WHERE idempotency_key = %s",
-            (TEST_RUN_ID,),
-            "contributing empty-manifest replay preserved-column query",
-        ),
-        PRESERVED_COLUMNS,
-    )
-    if empty_manifest_preserved_state[:6] != preserved_state[:6]:
-        raise UpsertRoastVerifyError(
-            "contributing empty-manifest replay changed a preserved column"
-        )
-    try:
-        empty_manifest_updated_non_decreasing = (
-            empty_manifest_preserved_state[6] >= previous_updated_at
-        )
-    except TypeError:
-        empty_manifest_updated_non_decreasing = False
-    if not empty_manifest_updated_non_decreasing:
-        raise UpsertRoastVerifyError(
-            "contributing empty-manifest replay did not preserve non-decreasing "
-            "updated_at"
-        )
-    previous_updated_at = empty_manifest_preserved_state[6]
-    empty_manifest_artifact_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
-        (owned_roast_id,),
-        "contributing empty-manifest replay artifact count query",
-    )
-    if _count(empty_manifest_artifact_count_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError(
-            "contributing empty-manifest replay did not clear the artifact manifest"
-        )
 
     opt_out_payload = dict(empty_manifest_payload)
     opt_out_payload["contributed_to_learning"] = False
     opt_out_result = _call_upsert(cursor, opt_out_payload)
+    previous_updated_at = _assert_replay_state(
+        cursor,
+        preserved_state,
+        previous_updated_at,
+        0,
+        owned_roast_id,
+        "opt-out replay",
+    )
     if opt_out_result != first:
         raise UpsertRoastVerifyError("opt-out replay returned a different object")
     purged_count_row = _fetchone(
@@ -789,40 +752,6 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "opt-out replay did not preserve one unrelated telemetry row"
         )
-    final_roast_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-        (TEST_RUN_ID,),
-        "opt-out replay roast count query",
-    )
-    if _count(final_roast_count_row, "COUNT(*)") != 1:
-        ambiguous_error = UpsertRoastVerifyError(
-            "opt-out replay changed the roast count"
-        )
-        ambiguous_error.cleanup_unsafe = True
-        raise ambiguous_error
-    final_preserved_state = _row_values(
-        _fetchone(
-            cursor,
-            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
-            "created_at, updated_at FROM app.cloud_roasts "
-            "WHERE idempotency_key = %s",
-            (TEST_RUN_ID,),
-            "opt-out replay preserved-column query",
-        ),
-        PRESERVED_COLUMNS,
-    )
-    if final_preserved_state[:6] != preserved_state[:6]:
-        raise UpsertRoastVerifyError("opt-out replay changed a preserved column")
-    try:
-        final_updated_non_decreasing = final_preserved_state[6] >= previous_updated_at
-    except TypeError:
-        final_updated_non_decreasing = False
-    if not final_updated_non_decreasing:
-        raise UpsertRoastVerifyError(
-            "opt-out replay did not preserve non-decreasing updated_at"
-        )
-    previous_updated_at = final_preserved_state[6]
     try:
         final_updated_advanced = previous_updated_at > first_call_updated_at
     except TypeError:
@@ -831,17 +760,6 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "final replay did not advance updated_at beyond the first call"
         )
-
-    # Final persisted-state observation: the checks above already cover the
-    # roast row and telemetry rows after opt-out; close the artifact state too.
-    final_artifact_count_row = _fetchone(
-        cursor,
-        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
-        (owned_roast_id,),
-        "final persisted-state artifact count query",
-    )
-    if _count(final_artifact_count_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError("final opt-out replay recreated an artifact")
     return previous_updated_at
 
 
@@ -1028,6 +946,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
             first,
             first_call_baseline,
             previous_updated_at,
+            resolved_roast_id,
         )
         _verify_visibility_rollback(cursor, payload, previous_updated_at)
         previous_updated_at = _verify_telemetry_purge_scope(
