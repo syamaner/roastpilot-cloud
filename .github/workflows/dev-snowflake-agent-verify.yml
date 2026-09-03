@@ -21,7 +21,7 @@ jobs:
     name: Live agent-role verification (ROASTPILOT_DEV)
     runs-on: ubuntu-latest
     environment: dev-snowflake-agent
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:

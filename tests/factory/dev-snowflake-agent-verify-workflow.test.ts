@@ -91,7 +91,7 @@ describe("DEV Snowflake agent verification workflow", () => {
       group: "dev-snowflake-agent",
       "cancel-in-progress": false,
     });
-    expect(agentVerify["timeout-minutes"]).toBe(15);
+    expect(agentVerify["timeout-minutes"]).toBe(20);
   });
 
   it("AW-4 preserves the hardened, pinned setup envelope and step order", () => {
