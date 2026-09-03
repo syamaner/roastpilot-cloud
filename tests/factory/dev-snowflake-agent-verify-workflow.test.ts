@@ -65,8 +65,10 @@ trap 'rm -f "$KEY_FILE"' EXIT
 printf '%s' "$SNOWFLAKE_AGENT_PRIVATE_KEY" > "$KEY_FILE"
 export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
 export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE"
+# The verifier reads the key file; keep the raw PEM out of the tee'd
+# process environment whose output becomes the uploaded artifact.
+unset SNOWFLAKE_AGENT_PRIVATE_KEY
 python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
-python3 load_telemetry_verify_live.py --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 `;
 
 describe("DEV Snowflake agent verification workflow", () => {
@@ -74,6 +76,9 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(mapping(workflow.on)).toEqual({ workflow_dispatch: {} });
     expect(source).not.toContain("github.ref");
     expect(agentVerify.environment).toBe("dev-snowflake-agent");
+    expect(source).toContain("required reviewer approves the");
+    expect(source).toContain("Environment-scoped secrets there");
+    expect(source).toContain("base-controlled deployment-branch policy permits main only");
   });
 
   it("AW-2 defaults permissions closed and grants only job-level contents read", () => {
@@ -133,14 +138,14 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(guard["working-directory"]).toBe("snowflake");
     expect(mapping(guard.env)).toEqual(principalEnv);
     expect(guard.run).toBe(
-      "python3 assert_agent_ci_principal.py --target ROASTPILOT_DEV",
+      "python3 -P assert_agent_ci_principal.py --target ROASTPILOT_DEV",
     );
-    expect(guard.run).not.toContain("-P");
+    expect(guard.run).toContain("python3 -P");
     expect(guard.if).toBeUndefined();
     expect(guard["continue-on-error"]).toBeUndefined();
   });
 
-  it("AW-6 runs both real verifiers with the same principal and secure key file", () => {
+  it("AW-6 runs only the upsert verifier with the same principal and secure key file", () => {
     const verifiers = stepById("run-verifiers");
     expect(verifiers["working-directory"]).toBe("snowflake");
     expect(mapping(verifiers.env)).toEqual({
@@ -149,12 +154,18 @@ describe("DEV Snowflake agent verification workflow", () => {
     });
     expect(runBody(verifiers)).toBe(verifierScript);
     expect(runBody(verifiers)).not.toContain("python3 -P");
+    expect(runBody(verifiers)).toContain("python3 upsert_roast_verify_live.py");
+    expect(runBody(verifiers)).not.toContain("load_telemetry_verify_live.py");
+    expect(verifiers["timeout-minutes"]).toBe(10);
     expect(runBody(verifiers)).toContain("set -euo pipefail");
     expect(runBody(verifiers).indexOf("umask 077")).toBeLessThan(
       runBody(verifiers).indexOf('KEY_FILE="$(mktemp)"'),
     );
     expect(runBody(verifiers)).toContain("trap 'rm -f \"$KEY_FILE\"' EXIT");
-    expect(source.match(/`-P` is intentionally omitted/g)).toHaveLength(2);
+    expect(runBody(verifiers).indexOf("unset SNOWFLAKE_AGENT_PRIVATE_KEY")).toBeLessThan(
+      runBody(verifiers).indexOf("python3 upsert_roast_verify_live.py"),
+    );
+    expect(source.match(/`-P` is intentionally omitted/g)).toHaveLength(1);
   });
 
   it("AW-7 makes guard failure skip the verifier step through default propagation", () => {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +18,38 @@ EXPECTED_USER = "ROASTPILOT_AGENT_CI"
 EXPECTED_ROLE = "ROASTPILOT_AGENT"
 
 
+def test_sibling_loader_resolves_the_real_grant_guard() -> None:
+    module = assert_agent_ci_principal._load_sibling_module("assert_dev_ci_grants")
+
+    assert module.identifiers_match("ROASTPILOT_AGENT", EXPECTED_ROLE) is True
+    assert module.require_env.__name__ == "require_env"
+
+
+def test_sibling_loader_wraps_a_missing_file_as_import_error() -> None:
+    with pytest.raises(ImportError, match="cannot load sibling module"):
+        assert_agent_ci_principal._load_sibling_module("this_module_does_not_exist")
+
+
+@pytest.mark.parametrize("missing_spec", [None, SimpleNamespace(loader=None)])
+def test_sibling_loader_fails_closed_without_a_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_spec: object,
+) -> None:
+    monkeypatch.setattr(
+        assert_agent_ci_principal.importlib.util,
+        "spec_from_file_location",
+        lambda *_args: missing_spec,
+    )
+
+    with pytest.raises(ImportError, match="cannot construct a loader"):
+        assert_agent_ci_principal._load_sibling_module("assert_dev_ci_grants")
+
+
 class FakeCursor:
     def __init__(
         self,
         *,
-        current_user: str = EXPECTED_USER,
+        current_user: str | None = EXPECTED_USER,
         include_current_user_column: bool = True,
         grant_rows: list[dict[str, object]] | None = None,
         user_rows: list[dict[str, object]] | None = None,
@@ -44,8 +72,10 @@ class FakeCursor:
         self.executed.append(command)
         return self
 
-    def fetchone(self) -> dict[str, object]:
+    def fetchone(self) -> dict[str, object] | None:
         assert self.executed[-1] == "SELECT CURRENT_USER()"
+        if self.current_user is None:
+            return None
         if self.include_current_user_column:
             return {"CURRENT_USER()": self.current_user}
         return {}
@@ -209,6 +239,22 @@ def test_help_uses_the_guard_module_description(
     )
 
 
+def test_help_resolves_sibling_import_under_python_safe_path() -> None:
+    snowflake_dir = Path(__file__).resolve().parent.parent
+
+    result = subprocess.run(
+        [sys.executable, "-P", "assert_agent_ci_principal.py", "--help"],
+        cwd=snowflake_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "Fail-closed preflight for the gated ROASTPILOT_AGENT_CI" in result.stdout
+
+
 def test_parser_configuration_pins_false_not_an_equivalent_falsey_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,6 +390,24 @@ def test_missing_current_user_column_fails_closed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     cursor = FakeCursor(include_current_user_column=False)
+    result, connection, _, _ = _run(monkeypatch, cursor)
+
+    assert result == 1
+    assert connection.fake_cursor.executed == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_USER()",
+    ]
+    assert connection.closed is True
+    assert capsys.readouterr().err == (
+        "G1: CURRENT_USER() is ''; expected 'ROASTPILOT_AGENT_CI'\n"
+    )
+
+
+def test_missing_current_user_row_fails_closed_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cursor = FakeCursor(current_user=None)
     result, connection, _, _ = _run(monkeypatch, cursor)
 
     assert result == 1

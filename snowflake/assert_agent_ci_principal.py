@@ -17,18 +17,40 @@ blank identity/grant data fails closed rather than being ignored.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
+from types import ModuleType
 
 import snowflake.connector
-from assert_dev_ci_grants import (
-    assert_sql_identifier_safe,
-    find_default_secondary_roles_violation,
-    identifiers_match,
-    load_private_key_der,
-    require_env,
+
+
+def _load_sibling_module(module_name: str) -> ModuleType:
+    """Load one fixed sibling by path without adding its directory to sys.path."""
+    module_path = Path(__file__).resolve().parent / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"cannot construct a loader for sibling module {module_name!r}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except FileNotFoundError as exc:
+        raise ImportError(
+            f"cannot load sibling module {module_name!r} from {module_path}"
+        ) from exc
+    return module
+
+
+_assert_dev_ci_grants = _load_sibling_module("assert_dev_ci_grants")
+assert_sql_identifier_safe = _assert_dev_ci_grants.assert_sql_identifier_safe
+find_default_secondary_roles_violation = (
+    _assert_dev_ci_grants.find_default_secondary_roles_violation
 )
+identifiers_match = _assert_dev_ci_grants.identifiers_match
+load_private_key_der = _assert_dev_ci_grants.load_private_key_der
+require_env = _assert_dev_ci_grants.require_env
 
 
 _EXPECTED_USER = "ROASTPILOT_AGENT_CI"
@@ -148,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         cursor.execute("SELECT CURRENT_USER()")
         current_user_row = cursor.fetchone()
-        current_user = str(current_user_row.get("CURRENT_USER()", ""))
+        current_user = str((current_user_row or {}).get("CURRENT_USER()", ""))
         if not identifiers_match(current_user, _EXPECTED_USER):
             violations.append(
                 f"G1: CURRENT_USER() is {current_user!r}; expected {_EXPECTED_USER!r}"
