@@ -248,8 +248,17 @@ gate catches it.
 
 **C2 Schema story line delivered; epic remains open.** Two residuals remain:
 [#341](https://github.com/syamaner/roastpilot-cloud/issues/341) (`delete_roast`
-stage-file `REMOVE`), whose blocking dependency is now **met**: #417 Unit 1 landed
-the `stage_path` contract in `d15471d`. **D-341-A** (2 Sep 2026, operator-delegated,
+stage-file `REMOVE`). Its C3 `stage_path` dependency is **met** — #417 Unit 1 landed
+that contract in `d15471d` — but **#341 is gated again by D-341-B** (3 Sep):
+`ROASTPILOT_AGENT` holds `UPDATE` on `app.cloud_roasts`, so the `idempotency_key`
+the destructive prefix is derived from is agent-writable, and the lowercase-UUID
+grammar buys containment but **not provenance**. An agent can point roast A's key at
+roast B's run UUID and have `delete_roast(A)` silently remove **B's** staged files
+while reporting success. D-341-A's mechanism stands, but #341 stays
+`wait-to-implement` until it has an immutable or independently proven roast-to-run
+association, or a privilege boundary stopping the agent rewriting that field.
+Accepting the residual was declined because the destructive path does not exist yet,
+so closing it costs one design round rather than a change to working code. **D-341-A** (2 Sep 2026, operator-delegated,
 recorded on #341 and in the plan repo before any PR cited it) settles the
 mechanism: `delete_roast` issues one directory-scoped `REMOVE` of a prefix it
 constructs itself from the roast's validated `idempotency_key`, failing closed
