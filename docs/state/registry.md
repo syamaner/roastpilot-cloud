@@ -47,12 +47,14 @@ decomposed at kickoff via `to-issues` (never bulk-up-front) into
 **C3-S1 ([#416](https://github.com/syamaner/roastpilot-cloud/issues/416),
 telemetry ingest: JSON file format + `load_roast_telemetry` proc) built and
 merged via [#423](https://github.com/syamaner/roastpilot-cloud/pull/423), squash
-`8787484`.** The issue remains **OPEN**: AC-3 is undischarged because there is
-no live-proc vehicle in CI. The live half runs via the operator-run
-`snowflake/load_telemetry_verify_live.py` against `ROASTPILOT_DEV` alongside,
-not inside, a `dev-snowflake-contract.yml` dispatch; the workflow has no
-procedure-call step. The verifier prints its result to stdout; the operator
-must capture that output and post it to #416 to discharge AC-3.
+`8787484`.** #416 is **CLOSED** (2 Sep 2026): AC-1/AC-2/AC-4 from the merged
+migration and its offline suite, AC-3 from a live verifier run recorded on the
+issue. **The vehicle that discharged it no longer exists.** AC-3 was closed by
+granting `ROASTPILOT_AGENT` to the operator's own `ROASTPILOT_CLI` user for one
+run and revoking it after; that merged a human interactive identity with an
+application service role, so it is explicitly not repeatable. Every later C3
+live criterion is blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433)
+providing a principal.
 
 **Live grant-audit correction [#422](https://github.com/syamaner/roastpilot-cloud/issues/422)
 landed.** Split out of #416's review board by operator decision, then built and
@@ -67,12 +69,58 @@ capture; `MATERIALIZED_VIEW` remains **inferred** because creating one requires
 Enterprise edition.
 
 **C3 queue.** [#417](https://github.com/syamaner/roastpilot-cloud/issues/417)
-(C3-S2, `upsert_roast` proc + artifact `stage_path` pin, blocks #341) and
+(C3-S2) landed **Unit 1** (the `upsert_roast` proc + artifact `stage_path` pin)
+via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
+`d15471d`, with a header-accuracy fast-follow in
+[#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
+**#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
+the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
-presigned-URL / SNOWFLAKE_SSE owner-download check) are
-`ready-for-conventional-implementation`; [#419](https://github.com/syamaner/roastpilot-cloud/issues/419)
-(C3-S4, privacy-mapping exclusion contract) is `wait-to-implement`, blocked on
-#416 + #417.
+presigned-URL / SNOWFLAKE_SSE owner-download check) is
+`ready-for-conventional-implementation` but blocked on the same credential;
+[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
+privacy-mapping exclusion contract) is `wait-to-implement`.
+
+**[#433](https://github.com/syamaner/roastpilot-cloud/issues/433) (OPEN-6) is
+C3's critical path**, not any remaining story. It is the live-contract vehicle
+every agent-role verifier needs, and it blocks #417 AC-4 and #418 alike. All
+five of its design questions were settled 3 Sep 2026 as **D-433-A..E** (recorded
+on the issue): a dedicated `ROASTPILOT_AGENT_CI` user; both blast-radius axes
+recorded, with the principal axis a genuine escalation over the deploy role; a
+**new** `dev-snowflake-agent` Environment rather than reusing `dev-snowflake-ci`,
+so the two credentials are not co-resident; a **fail-closed default-branch ref
+check**, which `dev-snowflake-contract.yml` does not currently have and which
+matters far more for a credential that runs a repo-resident script than for one
+that deploys migrations; the general role-assignment audit assigned in writing to
+[#358](https://github.com/syamaner/roastpilot-cloud/issues/358); and a failed
+cleanup failing the job. It is decided and ready for a contract, but **not
+provisioned** — creating the user, its key and the Environment secret are
+operator actions no agent holds access to perform.
+
+**Three C3 defects split out of #417's review boards, each now decided:**
+[#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
+before telemetry exists) — **D-430-A** takes Option A, the recompute moves into
+`load_roast_telemetry`, because the alternatives make cloud-side correctness
+depend on connector discipline the repo has already ruled out relying on.
+[#431](https://github.com/syamaner/roastpilot-cloud/issues/431) (unvalidated
+`summary` VARIANT reaching the public view) — **D-431-A** takes a closed
+write-boundary key grammar as the primary control, since a curated projection
+cannot cover `recompute_reference_summary`'s second read of the same VARIANT,
+plus a curated `roast_by_slug` projection that **supersedes D-311-B**; a
+recursive content scan is rejected on the D-312-M precedent. That issue also
+inherits an orphaned residual: `privacy-auditor` raised the whole-summary
+side-channel during #311 and it was recorded as owned by C4/#315, but #315 was a
+field-mapping assertion test that could not add an enforcement boundary and
+closed 24 Aug without doing so.
+[#419](https://github.com/syamaner/roastpilot-cloud/issues/419) — **D-419-A**
+records that the aggregation-exclusion half is **already enforced at read**
+(`R__proc_recompute_summary.sql:49`), so no second mechanism is built and the
+story stays a contract-test story.
+
+[#435](https://github.com/syamaner/roastpilot-cloud/issues/435) filed 3 Sep:
+`load_telemetry_verify_live.py` records cleanup failures with `add_note`, which
+renders only in traceback formatting, while its `main()` prints `str(exc)` — so
+every cleanup failure that verifier records is invisible to the operator.
 
 **Durable #416 lesson:** three of its five fold rounds traced to one contract
 omission: it specified the field mapping exhaustively but never the external
@@ -81,32 +129,44 @@ system's stage-read semantics; a stage path is a prefix, not a filename,
 parsed, sibling artifacts share the run directory, and #417's contract must
 state those semantics up front because #417 sits on the same surface.
 
-**LIVE DISPATCH BLOCKED on [#425](https://github.com/syamaner/roastpilot-cloud/issues/425).**
-The first dispatch after #416/#422 landed, run
-[`33601164514`](https://github.com/syamaner/roastpilot-cloud/actions/runs/33601164514)
-on `main` `491c748` on 2 Sep 2026, failed at the pre-deploy grants assertion;
-the deploy and post-deploy steps were correctly skipped. The workflow invokes
-`assert_dev_ci_grants.py` identically before and after deploy, but the script
-also checks the `missing manifest grant:` class, which alone is structurally
-unsatisfiable before deployment whenever a migration adds a grant. The
-correction recorded on #425 is to suppress only that class before deployment;
-the five over-privilege classes emitted alongside it stay armed in the
-pre-deploy gate. #416 grew the manifest from 9 to 11 rows, and both new rows
-grant on objects created by the pending migration. This is **not a #422
-regression**: this pre-deploy run reports two missing entries and zero extra
-entries, one missing entry per new manifest row, which is the bootstrap
-signature; it names `FILE_FORMAT` in the live vocabulary, showing that the
-offline-to-live map is applied rather than the old spaced comparison. The old
-bug's missing/extra pair belongs to the post-deploy state, once the file format
-exists, not to this run. The repair is tracked as #425, filed, contracted and
-`ready-for-conventional-implementation`. Until it lands, #416's AC-3 cannot
-be discharged and every migration that adds a grant will burn a human-gated
-dispatch; #417 is next.
+**Live dispatch unblocked; [#425](https://github.com/syamaner/roastpilot-cloud/issues/425)
+landed** via [#427](https://github.com/syamaner/roastpilot-cloud/pull/427), squash
+`011d1b2`. The first dispatch after #416/#422 landed (run
+[`33601164514`](https://github.com/syamaner/roastpilot-cloud/actions/runs/33601164514),
+`main` `491c748`, 2 Sep 2026) failed at the **pre-deploy** grants assertion, with
+deploy and post-deploy correctly skipped. The workflow invoked
+`assert_dev_ci_grants.py` identically before and after deploy, but the script also
+checks the `missing manifest grant:` class, which is structurally unsatisfiable
+before deployment whenever a migration adds a grant. #425 defers only that class
+to the post-deploy audit; the five over-privilege classes stay armed pre-deploy.
+That was never a #422 regression — the run reported two missing entries and zero
+extra, one per new manifest row, which is the bootstrap signature, and it named
+`FILE_FORMAT` in the live vocabulary, showing the offline-to-live map was already
+applied.
+
+**The durable lesson from that episode is about ownership, not the class split:**
+grants in a migration must respect the deploy role's OWNERSHIP. Only object-level
+grants on CI-created objects belong in a migration; account- and schema-level
+`USAGE` is operator ACCOUNTADMIN DDL. The minimal CI role cannot grant what it
+does not own, and that gap is invisible to every offline lens — only the live #11
+gate catches it.
 
 **C2 Schema story line delivered; epic remains open.** Two residuals remain:
 [#341](https://github.com/syamaner/roastpilot-cloud/issues/341) (`delete_roast`
-stage-file `REMOVE`), gated on C3-S2 #417 landing the `stage_path` contract;
-this makes #417 the right next story for a second reason. The other is
+stage-file `REMOVE`), whose blocking dependency is now **met**: #417 Unit 1 landed
+the `stage_path` contract in `d15471d`. **D-341-A** (2 Sep 2026, operator-delegated,
+recorded on #341 and in the plan repo before any PR cited it) settles the
+mechanism: `delete_roast` issues one directory-scoped `REMOVE` of a prefix it
+constructs itself from the roast's validated `idempotency_key`, failing closed
+unless that run id matches the exact lowercase-UUID grammar, and never
+interpolating a stored `stage_path`. The deciding argument was that all three
+candidate mechanisms construct the same prefix, so containment was never the
+differentiator -- what differs is the input each trusts, and `ROASTPILOT_AGENT`
+holds direct DML on `app.roast_artifacts`, making a stored `stage_path`
+agent-writable free text whose validation is the bottomless sanitiser shape
+D-312-M ruled against. Accepted residual, deliberate: a row whose `stage_path`
+points outside the run directory is not removed, because chasing it means firing
+a destructive `REMOVE` at an attacker-chosen path. The other is
 [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-environment app-role grant audit), the ROASTPILOT_AGENT cross-environment
 residual from #345, C7-gated and not yet realisable. C2 Schema kicked off 18
