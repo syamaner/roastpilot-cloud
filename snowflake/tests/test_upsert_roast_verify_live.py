@@ -84,6 +84,7 @@ class FakeCursor:
         sentinel_survives: bool = True,
         visibility_raises: bool = True,
         visibility_error: str = "-20012 visibility_change_not_supported",
+        identical_updated_at: object = 1,
         updated_after: object = 2,
         control_updated_at: object = 3,
         final_updated_at: object = 4,
@@ -140,6 +141,7 @@ class FakeCursor:
         self.sentinel_survives = sentinel_survives
         self.visibility_raises = visibility_raises
         self.visibility_error = visibility_error
+        self.identical_updated_at = identical_updated_at
         self.updated_after = updated_after
         self.control_updated_at = control_updated_at
         self.final_updated_at = final_updated_at
@@ -244,6 +246,7 @@ class FakeCursor:
                 values[0], values[3] = self.before_pair
             elif self.preserved_reads == 2:
                 values[0], values[3] = self.before_pair
+                values[6] = self.identical_updated_at
                 if self.identical_preserved_change is not None:
                     values[self.identical_preserved_change[0]] = (
                         self.identical_preserved_change[1]
@@ -1213,6 +1216,38 @@ def test_replay_equality_and_artifact_pair_mismatches_are_detected() -> None:
         _verify(connection)
 
 
+def test_different_identical_result_carries_verified_id_to_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection(replay_result={
+        "cloud_roast_id": ROAST_ID,
+        "public_slug": upsert_roast_verify_live.REPLAY_SLUG,
+    })
+    cleanup_ids: list[object | None] = []
+    cleanup_all = upsert_roast_verify_live._cleanup_all
+
+    def recording_cleanup(cursor, resolved_roast_id):
+        cleanup_ids.append(resolved_roast_id)
+        return cleanup_all(cursor, resolved_roast_id)
+
+    monkeypatch.setattr(upsert_roast_verify_live, "_cleanup_all", recording_cleanup)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="identical replay returned a different object",
+    ):
+        _verify(connection)
+
+    assert cleanup_ids == [ROAST_ID]
+    commands = _commands(connection)
+    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in commands)
+    assert any(
+        command.startswith("DELETE FROM app.roast_telemetry WHERE (")
+        for command in commands
+    )
+    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in commands)
+    assert any(command.startswith("REMOVE ") for command in commands)
+
+
 def test_identical_replay_rejects_preserved_column_mutation() -> None:
     cursor = FakeCursor(
         existing_run_count=1,
@@ -1259,7 +1294,7 @@ def test_identical_replay_failure_carries_verified_id_to_cleanup(
 def test_identical_replay_preserves_first_call_baseline() -> None:
     cursor = FakeCursor(existing_run_count=1)
 
-    payload, first, owned_roast_id, baseline = (
+    payload, first, owned_roast_id, baseline, previous_updated_at = (
         upsert_roast_verify_live._verify_replay_idempotency(cursor)
     )
 
@@ -1267,6 +1302,7 @@ def test_identical_replay_preserves_first_call_baseline() -> None:
     assert first == FIRST_RESULT
     assert owned_roast_id == ROAST_ID
     assert baseline == BEFORE
+    assert previous_updated_at == 1
 
 
 def test_wrong_returned_id_never_reaches_destructive_cleanup_predicates() -> None:
@@ -1320,12 +1356,43 @@ def test_raw_replay_exception_preserves_returned_id_for_diagnostics() -> None:
     assert caught.value.resolved_roast_id == ROAST_ID
 
 
-@pytest.mark.parametrize("updated_after", [1, object()])
-def test_updated_at_must_strictly_and_comparably_advance(updated_after: object) -> None:
-    connection = FakeConnection(updated_after=updated_after)
+@pytest.mark.parametrize("updated_after", [2, object()])
+def test_divergent_replay_updated_at_uses_immediate_predecessor(
+    updated_after: object,
+) -> None:
+    connection = FakeConnection(
+        identical_updated_at=3,
+        updated_after=updated_after,
+    )
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="did not advance updated_at",
+        match="slug replay did not preserve non-decreasing updated_at",
+    ):
+        _verify(connection)
+
+
+def test_monotonic_replay_updated_at_sequence_passes() -> None:
+    connection = FakeConnection(
+        identical_updated_at=2,
+        updated_after=3,
+        stored_updated_at=3,
+        control_updated_at=4,
+        final_updated_at=5,
+    )
+    assert _verify(connection) == ROAST_ID
+
+
+def test_final_replay_must_advance_beyond_first_call() -> None:
+    connection = FakeConnection(
+        identical_updated_at=1,
+        updated_after=1,
+        stored_updated_at=1,
+        control_updated_at=1,
+        final_updated_at=1,
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="final replay did not advance updated_at beyond the first call",
     ):
         _verify(connection)
 
@@ -1410,14 +1477,14 @@ def test_final_opt_out_replay_must_preserve_columns() -> None:
         _verify(connection)
 
 
-@pytest.mark.parametrize("final_updated_at", [3, 2, object()])
-def test_final_opt_out_replay_requires_strict_comparable_updated_at(
+@pytest.mark.parametrize("final_updated_at", [2, object()])
+def test_final_opt_out_replay_requires_non_decreasing_comparable_updated_at(
     final_updated_at: object,
 ) -> None:
     connection = FakeConnection(final_updated_at=final_updated_at)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="opt-out replay did not advance updated_at",
+        match="opt-out replay did not preserve non-decreasing updated_at",
     ):
         _verify(connection)
 

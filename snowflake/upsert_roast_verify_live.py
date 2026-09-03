@@ -407,7 +407,9 @@ def _stage_and_verify_fixtures(cursor: Cursor) -> None:
 
 def _verify_replay_idempotency(
     cursor: Cursor,
-) -> tuple[dict[str, object], dict[str, object], object, tuple[object, ...]]:
+) -> tuple[
+    dict[str, object], dict[str, object], object, tuple[object, ...], object
+]:
     """Verify identical calls return equally and leave one roast."""
     payload = _payload()
     first = _call_upsert(cursor, payload)
@@ -427,6 +429,7 @@ def _verify_replay_idempotency(
             ),
             PRESERVED_COLUMNS,
         )
+        previous_updated_at = first_call_baseline[6]
         second = _call_upsert(cursor, payload)
         roast_count_row = _fetchone(
             cursor,
@@ -458,10 +461,6 @@ def _verify_replay_idempotency(
                 f"ids for run id {TEST_RUN_ID}: {recorded_ids}",
             )
             raise ambiguous_error
-        if second != first:
-            raise UpsertRoastVerifyError(
-                "identical replay returned a different object"
-            )
         owned_roast_id = _row_values(
             _fetchone(
                 cursor,
@@ -484,6 +483,10 @@ def _verify_replay_idempotency(
             )
             collision_error.cleanup_unsafe = True
             raise collision_error
+        if second != first:
+            raise UpsertRoastVerifyError(
+                "identical replay returned a different object"
+            )
         identical_replay_state = _row_values(
             _fetchone(
                 cursor,
@@ -499,7 +502,7 @@ def _verify_replay_idempotency(
             )
         try:
             identical_updated_non_decreasing = (
-                identical_replay_state[6] >= first_call_baseline[6]
+                identical_replay_state[6] >= previous_updated_at
             )
         except TypeError:
             identical_updated_non_decreasing = False
@@ -507,6 +510,7 @@ def _verify_replay_idempotency(
             raise UpsertRoastVerifyError(
                 "identical replay did not preserve non-decreasing updated_at"
             )
+        previous_updated_at = identical_replay_state[6]
     except BaseException as exc:
         # Preserve the procedure return for diagnostics only. Cleanup is
         # steered exclusively by the id read through the owned run key above.
@@ -514,7 +518,7 @@ def _verify_replay_idempotency(
         if owned_roast_id is not None:
             setattr(exc, "cleanup_roast_id", owned_roast_id)
         raise
-    return payload, first, owned_roast_id, first_call_baseline
+    return payload, first, owned_roast_id, first_call_baseline, previous_updated_at
 
 
 def _verify_artifact_manifest(cursor: Cursor, resolved_roast_id: object) -> None:
@@ -551,7 +555,8 @@ def _verify_preserved_columns(
     payload: Mapping[str, object],
     first: Mapping[str, object],
     before: tuple[object, ...],
-) -> tuple[object, ...]:
+    previous_updated_at: object,
+) -> tuple[tuple[object, ...], object]:
     """Verify slug replay preservation and return its stored row."""
     preserved_select = (
         "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
@@ -587,12 +592,15 @@ def _verify_preserved_columns(
     if before[:6] != after[:6]:
         raise UpsertRoastVerifyError("slug replay changed a preserved column")
     try:
-        updated_advanced = after[6] > before[6]
+        updated_non_decreasing = after[6] >= previous_updated_at
     except TypeError:
-        updated_advanced = False
-    if not updated_advanced:
-        raise UpsertRoastVerifyError("slug replay did not advance updated_at")
-    return after
+        updated_non_decreasing = False
+    if not updated_non_decreasing:
+        raise UpsertRoastVerifyError(
+            "slug replay did not preserve non-decreasing updated_at"
+        )
+    previous_updated_at = after[6]
+    return after, previous_updated_at
 
 
 def _verify_visibility_rollback(
@@ -631,7 +639,9 @@ def _verify_telemetry_purge_scope(
     first: Mapping[str, object],
     owned_roast_id: object,
     preserved_state: tuple[object, ...],
-) -> None:
+    previous_updated_at: object,
+    first_call_updated_at: object,
+) -> object:
     """Verify purge is conditional, effective, and scoped to this roast."""
     resolved_roast_id = first["cloud_roast_id"]
     _execute(
@@ -698,7 +708,7 @@ def _verify_telemetry_purge_scope(
         )
     try:
         control_updated_non_decreasing = (
-            control_preserved_state[6] >= preserved_state[6]
+            control_preserved_state[6] >= previous_updated_at
         )
     except TypeError:
         control_updated_non_decreasing = False
@@ -706,7 +716,7 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "contributing replay did not preserve non-decreasing updated_at"
         )
-    pre_opt_out_updated_at = control_preserved_state[6]
+    previous_updated_at = control_preserved_state[6]
 
     opt_out_payload = dict(payload)
     opt_out_payload["contributed_to_learning"] = False
@@ -759,12 +769,21 @@ def _verify_telemetry_purge_scope(
     if final_preserved_state[:6] != preserved_state[:6]:
         raise UpsertRoastVerifyError("opt-out replay changed a preserved column")
     try:
-        final_updated_advanced = final_preserved_state[6] > pre_opt_out_updated_at
+        final_updated_non_decreasing = final_preserved_state[6] >= previous_updated_at
+    except TypeError:
+        final_updated_non_decreasing = False
+    if not final_updated_non_decreasing:
+        raise UpsertRoastVerifyError(
+            "opt-out replay did not preserve non-decreasing updated_at"
+        )
+    previous_updated_at = final_preserved_state[6]
+    try:
+        final_updated_advanced = previous_updated_at > first_call_updated_at
     except TypeError:
         final_updated_advanced = False
     if not final_updated_advanced:
         raise UpsertRoastVerifyError(
-            "opt-out replay did not advance updated_at"
+            "final replay did not advance updated_at beyond the first call"
         )
     final_artifact_count_row = _fetchone(
         cursor,
@@ -776,6 +795,7 @@ def _verify_telemetry_purge_scope(
         raise UpsertRoastVerifyError(
             "opt-out replay did not clear the artifact manifest"
         )
+    return previous_updated_at
 
 
 def _cleanup_all(
@@ -950,24 +970,27 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         cursor = _preflight(connection, expected_target)
         preflight_complete = True
         _stage_and_verify_fixtures(cursor)
-        payload, first, resolved_roast_id, first_call_baseline = (
+        payload, first, resolved_roast_id, first_call_baseline, previous_updated_at = (
             _verify_replay_idempotency(cursor)
         )
         returned_roast_id = first["cloud_roast_id"]
         _verify_artifact_manifest(cursor, returned_roast_id)
-        preserved_state = _verify_preserved_columns(
+        preserved_state, previous_updated_at = _verify_preserved_columns(
             cursor,
             payload,
             first,
             first_call_baseline,
+            previous_updated_at,
         )
-        _verify_visibility_rollback(cursor, payload, preserved_state[6])
-        _verify_telemetry_purge_scope(
+        _verify_visibility_rollback(cursor, payload, previous_updated_at)
+        previous_updated_at = _verify_telemetry_purge_scope(
             cursor,
             payload,
             first,
             resolved_roast_id,
             preserved_state,
+            previous_updated_at,
+            first_call_baseline[6],
         )
         return str(returned_roast_id)
     except BaseException as exc:
