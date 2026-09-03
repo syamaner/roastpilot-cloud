@@ -5,7 +5,9 @@ Only JSONL and summary fixtures are staged; no roast.csv exists. ``bean_origin``
 and ``roast_level`` are deliberately null so recompute returns through its
 null-grouping-key branch. Populating them would write a shared reference-summary
 row this verifier cannot safely clean up, so AC-3's recompute write path is
-deliberately not exercised live here.
+deliberately not exercised live here. The procedure source establishes its
+write-then-rollback ordering; this run observes only rejection with no net
+visibility, notes, or timestamp change.
 """
 from __future__ import annotations
 
@@ -68,12 +70,16 @@ class Connection(Protocol):
 class UpsertRoastVerifyError(RuntimeError):
     """Raised when live upsert behavior differs from the ratified contract."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.cleanup_failures: list[str] = []
+
 
 def _validated_fixture_uri(fixture_path: Path) -> str:
     """Return a closed, quote-safe URI for the repository fixture tree."""
     resolved = fixture_path.resolve()
     if not resolved.is_relative_to(FIXTURES_DIR) or "'" in str(resolved):
-        raise UpsertRoastVerifyError(f"rejected upsert fixture path: {fixture_path}")
+        raise UpsertRoastVerifyError("rejected upsert fixture path")
     # Path.as_uri(), not the apostrophe pre-check, closes the PUT literal: it
     # percent-encodes every path byte outside the RFC 3986 unreserved set.
     return resolved.as_uri()
@@ -235,12 +241,12 @@ def _call_expect_visibility_error(
     raise UpsertRoastVerifyError("visibility replay unexpectedly succeeded")
 
 
-def _cleanup(
+def _cleanup_statement(
     cursor: Cursor,
     command: str,
     params: Sequence[object] | None,
     step: str,
-    errors: list[BaseException],
+    errors: list[UpsertRoastVerifyError],
 ) -> bool:
     try:
         _execute(cursor, command, params, step)
@@ -250,23 +256,12 @@ def _cleanup(
         return False
 
 
-def verify_live_upsert(connection: Connection, expected_target: str) -> str:
-    """Exercise staged paths, replay, rollback, and scoped opt-out purge."""
+def _preflight(connection: Connection, expected_target: str) -> Cursor:
+    """Validate the target and identity before permitting any live write."""
     if expected_target not in ALLOWED_TARGETS:
         raise UpsertRoastVerifyError(f"rejected upsert target: {expected_target!r}")
     if RUN_ID_PATTERN.fullmatch(TEST_RUN_ID) is None:
         raise UpsertRoastVerifyError("TEST_RUN_ID is not a lowercase UUID")
-
-    staged_names = {path.name for path in FIXTURE_PATHS}
-    if not staged_names <= set(ARTIFACT_BASENAMES.values()):
-        raise UpsertRoastVerifyError(
-            "staged fixture names are outside artifact grammar"
-        )
-    expected_artifacts = {
-        (kind, f"@app.roast_artifacts/{TEST_RUN_ID}/{basename}")
-        for kind, basename in ARTIFACT_BASENAMES.items()
-    }
-
     try:
         cursor = connection.cursor()
     except UpsertRoastVerifyError:
@@ -282,212 +277,370 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
     role_row = _fetchone(cursor, "SELECT CURRENT_ROLE()", None, "role assertion")
     if _first_value(role_row, "CURRENT_ROLE()") != EXPECTED_ROLE:
         raise UpsertRoastVerifyError("connected role is not ROASTPILOT_AGENT")
+    sentinel_owner_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel ownership query",
+    )
+    if _count(sentinel_owner_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError("sentinel roast id is already owned")
+    return cursor
 
-    body_error: BaseException | None = None
-    resolved_roast_id: object | None = None
-    sentinel_owned = False
-    try:
-        for fixture_path in FIXTURE_PATHS:
-            _execute(
-                cursor,
-                f"PUT '{_validated_fixture_uri(fixture_path)}' "
-                f"@app.roast_artifacts/{TEST_RUN_ID}/ "
-                "AUTO_COMPRESS=FALSE OVERWRITE=TRUE",
-                None,
-                "staging fixture PUT",
-            )
-        listed_rows = _fetchall(
+
+def _stage_and_verify_fixtures(cursor: Cursor) -> None:
+    """PUT the two available fixtures and verify their exact recursive LIST."""
+    staged_names = {path.name for path in FIXTURE_PATHS}
+    if not staged_names <= set(ARTIFACT_BASENAMES.values()):
+        raise UpsertRoastVerifyError(
+            "staged fixture names are outside artifact grammar"
+        )
+    for fixture_path in FIXTURE_PATHS:
+        _execute(
             cursor,
-            f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
+            f"PUT '{_validated_fixture_uri(fixture_path)}' "
+            f"@app.roast_artifacts/{TEST_RUN_ID}/ "
+            "AUTO_COMPRESS=FALSE OVERWRITE=TRUE",
             None,
-            "staging fixture LIST",
+            "staging fixture PUT",
         )
-        listed_names = {
-            str(_first_value(row, "name")).rsplit("/", 1)[-1]
-            for row in listed_rows
-        }
-        if listed_names != staged_names or any(
-            name.endswith(".gz") for name in listed_names
-        ):
-            raise UpsertRoastVerifyError(
-                "staged fixture LIST is not exact or uncompressed"
-            )
+    listed_rows = _fetchall(
+        cursor,
+        f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
+        None,
+        "staging fixture LIST",
+    )
+    stage_prefix = f"roast_artifacts/{TEST_RUN_ID}/"
+    listed_names: set[str] = set()
+    for row in listed_rows:
+        listed_path = str(_first_value(row, "name"))
+        if not listed_path.startswith(stage_prefix):
+            raise UpsertRoastVerifyError("staged fixture LIST has an invalid prefix")
+        relative_name = listed_path[len(stage_prefix) :]
+        if not relative_name or "/" in relative_name:
+            raise UpsertRoastVerifyError("staged fixture LIST contains a nested path")
+        listed_names.add(relative_name)
+    if listed_names != staged_names or any(
+        name.endswith(".gz") for name in listed_names
+    ):
+        raise UpsertRoastVerifyError(
+            "staged fixture LIST is not exact or uncompressed"
+        )
 
-        payload = _payload()
-        first = _call_upsert(cursor, payload)
-        resolved_roast_id = first["cloud_roast_id"]
-        second = _call_upsert(cursor, payload)
-        roast_count_row = _fetchone(
+
+def _verify_replay_idempotency(
+    cursor: Cursor,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Verify identical calls return equally and leave one roast."""
+    payload = _payload()
+    first = _call_upsert(cursor, payload)
+    second = _call_upsert(cursor, payload)
+    roast_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        "roast count query",
+    )
+    # Defence in depth: independently re-assert the procedure's own
+    # ambiguous_idempotency_key guard as part of AC-4's live evidence.
+    if _count(roast_count_row, "COUNT(*)") != 1:
+        raise UpsertRoastVerifyError("replay did not leave exactly one roast")
+    if second != first:
+        raise UpsertRoastVerifyError("identical replay returned a different object")
+    return payload, first
+
+
+def _verify_artifact_manifest(cursor: Cursor, resolved_roast_id: object) -> None:
+    """Verify the exact closed kind and stored-stage-path pair set."""
+    expected_artifacts = {
+        (kind, f"@app.roast_artifacts/{TEST_RUN_ID}/{basename}")
+        for kind, basename in ARTIFACT_BASENAMES.items()
+    }
+    artifact_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "artifact count query",
+    )
+    if _count(artifact_count_row, "COUNT(*)") != len(ARTIFACT_KINDS):
+        raise UpsertRoastVerifyError("artifact count does not match manifest")
+    artifact_rows = _fetchall(
+        cursor,
+        "SELECT kind, stage_path FROM app.roast_artifacts WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "artifact query",
+    )
+    actual_artifacts = {
+        _stored_pair(row, ("KIND", "STAGE_PATH")) for row in artifact_rows
+    }
+    if actual_artifacts != expected_artifacts:
+        raise UpsertRoastVerifyError(
+            "artifact kind and stage_path pairs do not match"
+        )
+
+
+def _verify_preserved_columns(
+    cursor: Cursor,
+    payload: Mapping[str, object],
+    first: Mapping[str, object],
+) -> object:
+    """Verify slug replay preservation and return its stored updated_at."""
+    preserved_select = (
+        "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
+        "created_at, updated_at FROM app.cloud_roasts WHERE idempotency_key = %s"
+    )
+    before = _row_values(
+        _fetchone(
             cursor,
-            "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+            preserved_select,
             (TEST_RUN_ID,),
-            "roast count query",
-        )
-        # Defence in depth: independently re-assert the procedure's own
-        # ambiguous_idempotency_key guard as part of AC-4's live evidence.
-        if _count(roast_count_row, "COUNT(*)") != 1:
-            raise UpsertRoastVerifyError("replay did not leave exactly one roast")
-        if second != first:
-            raise UpsertRoastVerifyError("identical replay returned a different object")
+            "pre-replay preserved-column query",
+        ),
+        PRESERVED_COLUMNS,
+    )
+    if _stored_pair((before[0], before[3])) != (
+        first["cloud_roast_id"],
+        first["public_slug"],
+    ):
+        raise UpsertRoastVerifyError("stored id and slug do not match first return")
 
-        artifact_count_row = _fetchone(
+    slug_payload = dict(payload)
+    slug_payload["public_slug"] = REPLAY_SLUG
+    slug_result = _call_upsert(cursor, slug_payload)
+    if slug_result["public_slug"] != first["public_slug"]:
+        raise UpsertRoastVerifyError("slug replay returned a changed public_slug")
+    after = _row_values(
+        _fetchone(
             cursor,
-            "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
-            (resolved_roast_id,),
-            "artifact count query",
-        )
-        if _count(artifact_count_row, "COUNT(*)") != len(ARTIFACT_KINDS):
-            raise UpsertRoastVerifyError("artifact count does not match manifest")
-        artifact_rows = _fetchall(
+            preserved_select,
+            (TEST_RUN_ID,),
+            "post-replay preserved-column query",
+        ),
+        PRESERVED_COLUMNS,
+    )
+    if before[:6] != after[:6]:
+        raise UpsertRoastVerifyError("slug replay changed a preserved column")
+    try:
+        updated_advanced = after[6] > before[6]
+    except TypeError:
+        updated_advanced = False
+    if not updated_advanced:
+        raise UpsertRoastVerifyError("slug replay did not advance updated_at")
+    return after[6]
+
+
+def _verify_visibility_rollback(
+    cursor: Cursor,
+    payload: Mapping[str, object],
+    expected_updated_at: object,
+) -> None:
+    """Verify visibility change rejection leaves no observable net change."""
+    visibility_payload = dict(payload)
+    visibility_payload["visibility"] = "unlisted"
+    visibility_payload["operator_notes"] = ROLLBACK_NOTES
+    _call_expect_visibility_error(cursor, visibility_payload)
+    visibility_state = _row_values(
+        _fetchone(
             cursor,
-            "SELECT kind, stage_path FROM app.roast_artifacts WHERE roast_id = %s",
-            (resolved_roast_id,),
-            "artifact query",
+            "SELECT visibility, operator_notes, updated_at FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "visibility no-net-change query",
+        ),
+        ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
+    )
+    if visibility_state[0] != payload["visibility"]:
+        raise UpsertRoastVerifyError("failed visibility replay changed stored value")
+    if visibility_state[1] != payload["operator_notes"]:
+        raise UpsertRoastVerifyError(
+            "failed visibility replay changed operator_notes"
         )
-        actual_artifacts = {
-            _stored_pair(row, ("KIND", "STAGE_PATH")) for row in artifact_rows
-        }
-        if actual_artifacts != expected_artifacts:
-            raise UpsertRoastVerifyError(
-                "artifact kind and stage_path pairs do not match"
-            )
+    if visibility_state[2] != expected_updated_at:
+        raise UpsertRoastVerifyError("failed visibility replay changed updated_at")
 
-        preserved_select = (
-            "SELECT id, idempotency_key, owner_id, public_slug, visibility, "
-            "created_at, updated_at FROM app.cloud_roasts WHERE idempotency_key = %s"
-        )
-        before = _row_values(
-            _fetchone(
-                cursor,
-                preserved_select,
-                (TEST_RUN_ID,),
-                "pre-replay preserved-column query",
-            ),
-            PRESERVED_COLUMNS,
-        )
-        if _stored_pair((before[0], before[3])) != (
-            first["cloud_roast_id"],
-            first["public_slug"],
-        ):
-            raise UpsertRoastVerifyError("stored id and slug do not match first return")
 
-        slug_payload = dict(payload)
-        slug_payload["public_slug"] = REPLAY_SLUG
-        _call_upsert(cursor, slug_payload)
-        after = _row_values(
-            _fetchone(
-                cursor,
-                preserved_select,
-                (TEST_RUN_ID,),
-                "post-replay preserved-column query",
-            ),
-            PRESERVED_COLUMNS,
+def _verify_telemetry_purge_scope(
+    cursor: Cursor,
+    payload: Mapping[str, object],
+    resolved_roast_id: object,
+) -> None:
+    """Verify purge is conditional, effective, and scoped to this roast."""
+    _execute(
+        cursor,
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel pre-cleanup",
+    )
+    sentinel_before_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel baseline query",
+    )
+    sentinel_before = _count(sentinel_before_row, "COUNT(*)")
+    _execute(
+        cursor,
+        "INSERT INTO app.roast_telemetry "
+        "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
+        "fan_percent, ror_c_per_min, raw) "
+        "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}') UNION ALL "
+        "SELECT %s, 5, 22, 23, 75, 35, 24, PARSE_JSON('{}') UNION ALL "
+        "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}')",
+        (resolved_roast_id, resolved_roast_id, OTHER_ROAST_ID),
+        "telemetry setup insert",
+    )
+    telemetry_setup_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "telemetry setup query",
+    )
+    if _count(telemetry_setup_row, "COUNT(*)") != 2:
+        raise UpsertRoastVerifyError("telemetry setup did not insert two roast rows")
+
+    control_result = _call_upsert(cursor, payload)
+    if control_result["cloud_roast_id"] != resolved_roast_id:
+        raise UpsertRoastVerifyError("contributing replay resolved a different roast")
+    control_roast_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        "contributing replay roast count query",
+    )
+    if _count(control_roast_count_row, "COUNT(*)") != 1:
+        raise UpsertRoastVerifyError("contributing replay changed the roast count")
+    control_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "contributing replay telemetry query",
+    )
+    if _count(control_count_row, "COUNT(*)") != 2:
+        raise UpsertRoastVerifyError(
+            "contributing replay unexpectedly purged telemetry"
         )
-        if before[:6] != after[:6]:
-            raise UpsertRoastVerifyError("slug replay changed a preserved column")
+
+    opt_out_payload = dict(payload)
+    opt_out_payload["contributed_to_learning"] = False
+    opt_out_payload["artifact_kinds"] = []
+    _call_upsert(cursor, opt_out_payload)
+    purged_count_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (resolved_roast_id,),
+        "opt-out telemetry query",
+    )
+    if _count(purged_count_row, "COUNT(*)") != 0:
+        raise UpsertRoastVerifyError("opt-out replay did not purge telemetry")
+    sentinel_after_row = _fetchone(
+        cursor,
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel result query",
+    )
+    sentinel_after = _count(sentinel_after_row, "COUNT(*)")
+    if sentinel_after - sentinel_before != 1:
+        raise UpsertRoastVerifyError("opt-out replay changed unrelated telemetry")
+
+
+def _cleanup_all(
+    cursor: Cursor,
+    resolved_roast_id: object | None,
+) -> list[UpsertRoastVerifyError]:
+    """Attempt every ordered cleanup action and return every failure."""
+    cleanup_errors: list[UpsertRoastVerifyError] = []
+    if resolved_roast_id is None:
+        child_where = (
+            "roast_id IN (SELECT id FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s)"
+        )
+        child_params: tuple[object, ...] = (TEST_RUN_ID,)
+    else:
+        child_where = (
+            "(roast_id = %s OR roast_id IN (SELECT id FROM app.cloud_roasts "
+            "WHERE idempotency_key = %s))"
+        )
+        child_params = (resolved_roast_id, TEST_RUN_ID)
+
+    _cleanup_statement(
+        cursor,
+        f"DELETE FROM app.roast_artifacts WHERE {child_where}",
+        child_params,
+        "artifact cleanup",
+        cleanup_errors,
+    )
+    _cleanup_statement(
+        cursor,
+        f"DELETE FROM app.roast_telemetry WHERE {child_where}",
+        child_params,
+        "roast telemetry cleanup",
+        cleanup_errors,
+    )
+    _cleanup_statement(
+        cursor,
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        (OTHER_ROAST_ID,),
+        "sentinel telemetry cleanup",
+        cleanup_errors,
+    )
+    _cleanup_statement(
+        cursor,
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+        (TEST_RUN_ID,),
+        "parent cleanup",
+        cleanup_errors,
+    )
+    remove_ran = _cleanup_statement(
+        cursor,
+        f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
+        None,
+        "stage REMOVE cleanup",
+        cleanup_errors,
+    )
+    if remove_ran:
         try:
-            updated_advanced = after[6] > before[6]
-        except TypeError:
-            updated_advanced = False
-        if not updated_advanced:
-            raise UpsertRoastVerifyError("slug replay did not advance updated_at")
-
-        visibility_payload = dict(payload)
-        visibility_payload["visibility"] = "unlisted"
-        visibility_payload["operator_notes"] = ROLLBACK_NOTES
-        _call_expect_visibility_error(cursor, visibility_payload)
-        visibility_state = _row_values(
-            _fetchone(
+            remaining = _fetchall(
                 cursor,
-                "SELECT visibility, operator_notes, updated_at FROM app.cloud_roasts "
-                "WHERE idempotency_key = %s",
-                (TEST_RUN_ID,),
-                "visibility rollback query",
-            ),
-            ("VISIBILITY", "OPERATOR_NOTES", "UPDATED_AT"),
-        )
-        if visibility_state[0] != payload["visibility"]:
-            raise UpsertRoastVerifyError(
-                "failed visibility replay changed stored value"
+                f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
+                None,
+                "post-REMOVE LIST cleanup",
             )
-        if visibility_state[1] != payload["operator_notes"]:
-            raise UpsertRoastVerifyError(
-                "failed visibility replay did not roll back update"
-            )
-        if visibility_state[2] != after[6]:
-            raise UpsertRoastVerifyError("failed visibility replay changed updated_at")
+        except UpsertRoastVerifyError as exc:
+            cleanup_errors.append(exc)
+        else:
+            if remaining:
+                cleanup_errors.append(
+                    UpsertRoastVerifyError("stage REMOVE verification failed")
+                )
+    return cleanup_errors
 
-        _execute(
-            cursor,
-            "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-            (OTHER_ROAST_ID,),
-            "sentinel pre-cleanup",
-        )
-        sentinel_owned = True
-        sentinel_before_row = _fetchone(
-            cursor,
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (OTHER_ROAST_ID,),
-            "sentinel baseline query",
-        )
-        sentinel_before = _count(sentinel_before_row, "COUNT(*)")
-        _execute(
-            cursor,
-            "INSERT INTO app.roast_telemetry "
-            "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
-            "fan_percent, ror_c_per_min, raw) "
-            "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}') UNION ALL "
-            "SELECT %s, 5, 22, 23, 75, 35, 24, PARSE_JSON('{}') UNION ALL "
-            "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}')",
-            (resolved_roast_id, resolved_roast_id, OTHER_ROAST_ID),
-            "telemetry setup insert",
-        )
-        telemetry_setup_row = _fetchone(
-            cursor,
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (resolved_roast_id,),
-            "telemetry setup query",
-        )
-        if _count(telemetry_setup_row, "COUNT(*)") != 2:
-            raise UpsertRoastVerifyError(
-                "telemetry setup did not insert two roast rows"
-            )
 
-        _call_upsert(cursor, payload)
-        control_count_row = _fetchone(
-            cursor,
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (resolved_roast_id,),
-            "contributing replay telemetry query",
-        )
-        if _count(control_count_row, "COUNT(*)") != 2:
-            raise UpsertRoastVerifyError(
-                "contributing replay unexpectedly purged telemetry"
-            )
+def _attach_cleanup_failures(
+    failure: UpsertRoastVerifyError,
+    cleanup_errors: Sequence[UpsertRoastVerifyError],
+) -> None:
+    for cleanup_error in cleanup_errors:
+        message = f"cleanup failed for run id {TEST_RUN_ID}: {cleanup_error}"
+        failure.cleanup_failures.append(message)
+        failure.add_note(message)
 
-        opt_out_payload = dict(payload)
-        opt_out_payload["contributed_to_learning"] = False
-        opt_out_payload["artifact_kinds"] = []
-        if set(opt_out_payload) != set(payload):
-            raise UpsertRoastVerifyError("opt-out payload changed the closed key set")
-        _call_upsert(cursor, opt_out_payload)
-        purged_count_row = _fetchone(
-            cursor,
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (resolved_roast_id,),
-            "opt-out telemetry query",
-        )
-        if _count(purged_count_row, "COUNT(*)") != 0:
-            raise UpsertRoastVerifyError("opt-out replay did not purge telemetry")
-        sentinel_after_row = _fetchone(
-            cursor,
-            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-            (OTHER_ROAST_ID,),
-            "sentinel result query",
-        )
-        sentinel_after = _count(sentinel_after_row, "COUNT(*)")
-        if sentinel_after - sentinel_before != 1:
-            raise UpsertRoastVerifyError("opt-out replay changed unrelated telemetry")
+
+def verify_live_upsert(connection: Connection, expected_target: str) -> str:
+    """Exercise replay, no-net-change rejection, and scoped opt-out purge."""
+    cursor: Cursor | None = None
+    preflight_complete = False
+    resolved_roast_id: object | None = None
+    body_error: UpsertRoastVerifyError | None = None
+    try:
+        cursor = _preflight(connection, expected_target)
+        preflight_complete = True
+        _stage_and_verify_fixtures(cursor)
+        payload, first = _verify_replay_idempotency(cursor)
+        resolved_roast_id = first["cloud_roast_id"]
+        _verify_artifact_manifest(cursor, resolved_roast_id)
+        updated_at = _verify_preserved_columns(cursor, payload, first)
+        _verify_visibility_rollback(cursor, payload, updated_at)
+        _verify_telemetry_purge_scope(cursor, payload, resolved_roast_id)
         return str(resolved_roast_id)
     except BaseException as exc:
         if isinstance(exc, UpsertRoastVerifyError):
@@ -496,95 +649,17 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         body_error = UpsertRoastVerifyError("live verification body failed")
         raise body_error from exc
     finally:
-        cleanup_errors: list[BaseException] = []
-        children_clean = True
-        if resolved_roast_id is None:
-            _cleanup(
-                cursor,
-                "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
-                (TEST_RUN_ID,),
-                "safety-net parent cleanup",
-                cleanup_errors,
-            )
-        else:
-            artifact_clean = _cleanup(
-                cursor,
-                "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
-                (resolved_roast_id,),
-                "artifact cleanup",
-                cleanup_errors,
-            )
-            telemetry_clean = _cleanup(
-                cursor,
-                "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-                (resolved_roast_id,),
-                "roast telemetry cleanup",
-                cleanup_errors,
-            )
-            children_clean = artifact_clean and telemetry_clean
-            if children_clean:
-                _cleanup(
-                    cursor,
-                    "DELETE FROM app.cloud_roasts "
-                    "WHERE id = %s AND idempotency_key = %s",
-                    (resolved_roast_id, TEST_RUN_ID),
-                    "parent cleanup",
-                    cleanup_errors,
-                )
-            else:
-                cleanup_errors.insert(
-                    0,
-                    UpsertRoastVerifyError(
-                        f"parent cleanup skipped for run id {TEST_RUN_ID}: "
-                        "child cleanup failed"
-                    ),
-                )
-
-        if sentinel_owned:
-            _cleanup(
-                cursor,
-                "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
-                (OTHER_ROAST_ID,),
-                "sentinel telemetry cleanup",
-                cleanup_errors,
-            )
-
-        remove_ran = False
-        if children_clean:
-            remove_ran = _cleanup(
-                cursor,
-                f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
-                None,
-                "stage REMOVE cleanup",
-                cleanup_errors,
-            )
-        if remove_ran:
-            try:
-                remaining = _fetchall(
-                    cursor,
-                    f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
-                    None,
-                    "post-REMOVE LIST cleanup",
-                )
-            except UpsertRoastVerifyError as exc:
-                cleanup_errors.append(exc)
-            else:
-                if remaining:
-                    cleanup_errors.append(
-                        UpsertRoastVerifyError("stage REMOVE verification failed")
+        if preflight_complete and cursor is not None:
+            cleanup_errors = _cleanup_all(cursor, resolved_roast_id)
+            if cleanup_errors:
+                if body_error is not None:
+                    _attach_cleanup_failures(body_error, cleanup_errors)
+                else:
+                    cleanup_failure = UpsertRoastVerifyError(
+                        "live verification cleanup failed"
                     )
-
-        if cleanup_errors:
-            if body_error is not None:
-                for cleanup_error in cleanup_errors:
-                    body_error.add_note(f"cleanup failed: {cleanup_error!r}")
-            else:
-                primary_cleanup_error = cleanup_errors[0]
-                for cleanup_error in cleanup_errors[1:]:
-                    primary_cleanup_error.add_note(
-                        f"additional cleanup failure: {cleanup_error!r}"
-                    )
-                raise primary_cleanup_error
+                    _attach_cleanup_failures(cleanup_failure, cleanup_errors)
+                    raise cleanup_failure
 
 
 def _required_env(name: str) -> str:
@@ -633,6 +708,12 @@ def _connect(target: str) -> Connection:  # pragma: no cover - real operator bou
         ) from None
 
 
+def _print_failure(failure: UpsertRoastVerifyError) -> None:
+    print(f"upsert verification failed: {failure}", file=sys.stderr)
+    for cleanup_failure in failure.cleanup_failures:
+        print(cleanup_failure, file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
@@ -640,7 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         connection = _connect(args.target)
     except UpsertRoastVerifyError as exc:
-        print(f"upsert verification failed: {exc}", file=sys.stderr)
+        _print_failure(exc)
         return 1
 
     failure: UpsertRoastVerifyError | None = None
@@ -656,17 +737,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BaseException:
         close_error = UpsertRoastVerifyError("Snowflake connection close failed")
         if failure is None:
-            failure = close_error
-        else:
-            failure.add_note(f"cleanup failed: {close_error!r}")
+            failure = UpsertRoastVerifyError("live verification cleanup failed")
+        _attach_cleanup_failures(failure, (close_error,))
     if failure is not None:
-        print(f"upsert verification failed: {failure}", file=sys.stderr)
+        _print_failure(failure)
         return 1
 
     print(
-        "verified UPSERT_ROAST replay preservation, visibility rollback, conditional "
-        "and scoped opt-out telemetry purge, and staged artifact PUT/REMOVE paths for "
-        f"the jsonl and summary fixtures in {args.target} (cloud_roast_id={roast_id})"
+        "verified UPSERT_ROAST replay preservation, visibility change rejection with "
+        "no net change, conditional and scoped opt-out telemetry purge, and staged "
+        "artifact PUT/REMOVE paths for the jsonl and summary fixtures in "
+        f"{args.target} (cloud_roast_id={roast_id})"
     )
     return 0
 
