@@ -50,8 +50,12 @@ found); the deploy is done. **#418** (C3-S3) is
 `ready-for-conventional-implementation` and its live vehicle now exists (the earlier
 `#433` block is cleared). Remaining C3: **#419** (C3-S4, per the amended **D-419-A**),
 the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
-and **#341** (gated by **D-341-B**). The detailed narrative below is **historical**
-context; the issues and the plan-repo ledger (through L249) are the source of truth.
+**#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
+`str(exc)`; still open), and **#341** (gated by **D-341-B**). Where a clause in the
+detailed narrative below conflicts with this block, **this block wins**; that narrative
+predates these closures but still carries genuinely-current constraints (e.g. #437), so
+it is not wholesale archived. The issues and the plan-repo ledger (through L249) are the
+source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
 [C3 Sync](https://github.com/syamaner/roastpilot-cloud/milestone/4) (#4),
@@ -71,9 +75,10 @@ granting `ROASTPILOT_AGENT` to the operator's own `ROASTPILOT_CLI` user for one
 run and revoking it after; that merged a human interactive identity with an
 application service role, so it is explicitly not repeatable. Every later C3 live
 criterion was blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433)
-until 4 Sep, when its gated job discharged them (see the C3 status block above); the
-principal was provisioned 3 Sep — do not re-run that provisioning, as `CREATE USER` is
-not idempotent.
+until 4 Sep, when its gated job discharged **#417 AC-4** and unblocked the rest — it ran
+only `upsert_roast_verify_live.py`, so #418's and #419's live halves are unblocked, not
+yet live-verified (see the C3 status block above); the principal was provisioned 3 Sep —
+do not re-run that provisioning, as `CREATE USER` is not idempotent.
 
 **Live grant-audit correction [#422](https://github.com/syamaner/roastpilot-cloud/issues/422)
 landed.** Split out of #416's review board by operator decision, then built and
@@ -135,11 +140,11 @@ a live instrument costs far more than a sibling to mirror once each of its own
 guards must be provably falsifiable.
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
 presigned-URL / SNOWFLAKE_SSE owner-download check) is
-`ready-for-conventional-implementation` but blocked on the same **job**, the
-credential itself now existing;
+`ready-for-conventional-implementation`; its live vehicle now exists (#433 CLOSED),
+so it is **unblocked** (not yet built).
 [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
-privacy-mapping exclusion contract) is `wait-to-implement`, blocked on #417 Unit 2
-merging, with its live half additionally on #433.
+privacy-mapping exclusion contract): its #417 Unit 2 dependency is **met** (#417 merged
++ closed 4 Sep); remaining scope per the amended **D-419-A**.
 
 **[#433](https://github.com/syamaner/roastpilot-cloud/issues/433) (OPEN-6) is
 CLOSED (4 Sep).** It delivered the live-contract vehicle every agent-role verifier
@@ -219,11 +224,12 @@ stderr as well as stdout. **The principal is now provisioned** (3 Sep): `ROASTPI
 granted and nothing else, and the `dev-snowflake-agent` Environment carries a
 required reviewer, a deployment-branch policy naming `main` only, and both key
 secrets. The public-key fingerprint was cross-checked between GitHub and Snowflake
-before either was trusted. **What remains is the job, not the credential:** #433's
-gated workflow does not exist, needs a `story-planner` contract and a mandatory
-`factory-security-reviewer` pass, and must reconcile the verifier reading
-`SNOWFLAKE_PRIVATE_KEY_FILE` as a path against the workflow pattern that passes key
-material inline.
+before either was trusted. **The job now exists (4 Sep) and #433 is CLOSED:** the gated workflow
+`dev-snowflake-agent-verify.yml` shipped via #440 — with the `story-planner` contract,
+the mandatory `factory-security-reviewer` pass (CONFIRMED-SOUND), and the temp-file
+handling that reconciles the verifier reading `SNOWFLAKE_PRIVATE_KEY_FILE` as a path
+against inline key material — plus the Azure-stage egress fix #441. It discharged #417
+AC-4 live (run 33848392855).
 
 **Two C3 defects split out of #417's review boards, plus one original story whose
 open question was addressed. All three decisions were taken 3 Sep and all three
