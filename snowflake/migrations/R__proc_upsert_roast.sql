@@ -255,6 +255,39 @@ begin
     raise invalid_payload;
   end if;
 
+  -- #431 / D-431-D: enforce raw-IP-never-stored and Celsius-only on free text
+  -- projected to roast_by_slug; operator_notes proactively enforces storage too.
+  if (v_payload:bean_origin::string is not null
+      and (regexp_count(v_payload:bean_origin::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:bean_origin::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:bean_origin::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:bean_varietal::string is not null
+      and (regexp_count(v_payload:bean_varietal::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:bean_varietal::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:bean_varietal::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:profile_name::string is not null
+      and (regexp_count(v_payload:profile_name::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:profile_name::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:profile_name::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:roast_level::string is not null
+      and (regexp_count(v_payload:roast_level::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:roast_level::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:roast_level::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:summary:roaster_driver::string is not null
+      and (regexp_count(v_payload:summary:roaster_driver::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:summary:roaster_driver::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:summary:roaster_driver::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:summary:first_crack_model:repo_id::string is not null
+      and (regexp_count(v_payload:summary:first_crack_model:repo_id::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:summary:first_crack_model:repo_id::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:summary:first_crack_model:repo_id::string, '(°[ ]?[Ff])|℉') > 0)
+      or v_payload:operator_notes::string is not null
+      and (regexp_count(v_payload:operator_notes::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+           or regexp_count(v_payload:operator_notes::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+           or regexp_count(v_payload:operator_notes::string, '(°[ ]?[Ff])|℉') > 0)) then
+    raise invalid_payload;
+  end if;
+
   -- Values are assigned only after their types and ranges have passed.
   v_public_slug := v_payload:public_slug::string;
   v_visibility := v_payload:visibility::string;
