@@ -36,8 +36,8 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], and OPEN-6
-[#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
+**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
+and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
 `dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
 human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
 policy + required reviewer). **#417 AC-4 is discharged** — the gated job ran the
@@ -53,13 +53,24 @@ owner-download verifier merged via [#443](https://github.com/syamaner/roastpilot
 ([run 33867033451](https://github.com/syamaner/roastpilot-cloud/actions/runs/33867033451),
 evidence `verified 78680 presigned URL bytes` == the fixture size), so the SSE stage
 serves presigned GETs as plaintext under the primary `ROASTPILOT_AGENT` read grant —
-no new or PUBLIC grant, no migration change. Remaining C3: **#419** (C3-S4, per the amended **D-419-A**),
-the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
+no new or PUBLIC grant, no migration change. **#419 (C3-S4) is CLOSED** — the
+`load_roast_telemetry` `contributed_to_learning` consent guard (Guard 3,
+defence-in-depth) merged via [#445](https://github.com/syamaner/roastpilot-cloud/pull/445)
+(squash `8c25437`), a live-only verifier `PARSE_JSON`-in-`VALUES` fix followed in
+[#447](https://github.com/syamaner/roastpilot-cloud/pull/447) (squash `3a9050e`), and
+its live L-a/L-b/L-c discharged green against `ROASTPILOT_DEV`
+([run 33894946891](https://github.com/syamaner/roastpilot-cloud/actions/runs/33894946891),
+evidence `verified 273 telemetry rows`). Per **D-419-B** the guard is
+defence-in-depth, not the enforcement boundary (the agent holds direct telemetry-table
+DML); the true boundary is tracked at **#446** (**D-446-A**: Option A — a read-side
+`contributed_to_learning = true` filter on `roast_by_slug`'s curve, mirroring the
+aggregation read-filter). Remaining C3: **#446** (the deferred boundary, Option A to
+build), the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
 **#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
 `str(exc)`; still open), and **#341** (gated by **D-341-B**). Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L251) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L259) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
