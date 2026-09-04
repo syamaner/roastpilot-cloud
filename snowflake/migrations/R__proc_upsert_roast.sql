@@ -72,7 +72,7 @@
 -- The telemetry purge is only a transactional best-effort revocation on this
 -- upsert path, not an enforcement boundary: it removes the previously published
 -- curve at the instant of the upsert. It does not close the revocation-replay
--- case either: load_roast_telemetry has no contributed_to_learning guard, and the
+-- case either: load_roast_telemetry's Guard 3 is defence-in-depth only, and the
 -- agent holds direct insert on app.roast_telemetry, so nothing prevents the purged
 -- rows from being re-inserted from the still-staged export. With the current
 -- signatures, the telemetry load necessarily runs after this procedure returns

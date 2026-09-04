@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -25,6 +26,8 @@ STAND_IN_ROW = {
 EXPECTED_TUPLE = tuple(
     STAND_IN_ROW[column] for column in load_telemetry_verify_live.SELECT_COLUMNS
 )
+SUMMARY_BEFORE = (0, 0, None, None, None, None, None, None, None, None)
+SUMMARY_AFTER_OPT_IN = (1, 0, None, 24.0, None, 147.0, None, 25.0, 590.0, 1190.0)
 
 
 class FakeCursor:
@@ -36,19 +39,99 @@ class FakeCursor:
         loaded: object = "1",
         actual: list[tuple[object, ...]] | None = None,
         fail_on: str | None = None,
+        cloud_preflight_count: object = 0,
+        telemetry_preflight_count: object = 0,
+        artifact_preflight_count: object = 0,
+        summary_preflight_count: object = 0,
+        stage_preflight_rows: tuple[str, ...] = (),
+        missing_raises: bool = True,
+        missing_error: str = "-20013 Roast has not consented to learning",
+        missing_telemetry_count: object = 0,
+        opt_out_raises: bool = True,
+        opt_out_error: str = "-20013 Roast has not consented to learning",
+        manifest_raises: bool = True,
+        manifest_error: str = (
+            "-20009 Payload does not match the closed roast grammar"
+        ),
+        summary_after_opt_out: tuple[object, ...] = SUMMARY_BEFORE,
+        summary_after_opt_in: tuple[object, ...] = SUMMARY_AFTER_OPT_IN,
+        rejected_manifest_artifact_count: object = 0,
+        empty_manifest_artifact_count: object = 0,
     ) -> None:
         self.database = database
         self.role = role
         self.loaded = loaded
         self.actual = [EXPECTED_TUPLE] if actual is None else actual
         self.fail_on = fail_on
+        self.cloud_preflight_count = cloud_preflight_count
+        self.telemetry_preflight_count = telemetry_preflight_count
+        self.artifact_preflight_count = artifact_preflight_count
+        self.summary_preflight_count = summary_preflight_count
+        self.stage_preflight_rows = stage_preflight_rows
+        self.missing_raises = missing_raises
+        self.missing_error = missing_error
+        self.missing_telemetry_count = missing_telemetry_count
+        self.opt_out_raises = opt_out_raises
+        self.opt_out_error = opt_out_error
+        self.manifest_raises = manifest_raises
+        self.manifest_error = manifest_error
+        self.summary_rows = (
+            summary_after_opt_out,
+            summary_after_opt_in,
+        )
+        self.rejected_manifest_artifact_count = rejected_manifest_artifact_count
+        self.empty_manifest_artifact_count = empty_manifest_artifact_count
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
+        self.contributing = False
+        self.summary_reads = 0
+        self.sentinel_present = False
+        self.last_upsert_kind: str | None = None
 
     def execute(self, command: str, params=None):
         normalized = tuple(params) if params is not None else None
         self.executed.append((command, normalized))
-        if self.fail_on is not None and command.startswith(self.fail_on):
+        load_roast_id = (
+            normalized[1]
+            if command.startswith("CALL app.load_roast_telemetry")
+            and normalized is not None
+            else None
+        )
+        expected_guard_call = (
+            load_roast_id == load_telemetry_verify_live.MISSING_ROAST_ID
+            or (
+                load_roast_id == load_telemetry_verify_live.TEST_ROAST_ID
+                and not self.contributing
+            )
+        )
+        if (
+            self.fail_on is not None
+            and command.startswith(self.fail_on)
+            and not expected_guard_call
+        ):
             raise RuntimeError("scripted telemetry verification failure")
+        if command.startswith("INSERT INTO app.roast_telemetry"):
+            self.sentinel_present = True
+        elif command.startswith("UPDATE app.cloud_roasts"):
+            self.contributing = True
+        elif command.startswith("CALL app.load_roast_telemetry"):
+            if load_roast_id == load_telemetry_verify_live.MISSING_ROAST_ID:
+                if self.missing_raises:
+                    raise RuntimeError(self.missing_error)
+            elif not self.contributing:
+                if self.opt_out_raises:
+                    raise RuntimeError(self.opt_out_error)
+            return self
+        elif command.startswith("CALL app.upsert_roast"):
+            assert normalized is not None
+            payload = json.loads(str(normalized[1]))
+            if payload["contributed_to_learning"] is False and payload["artifact_kinds"]:
+                self.last_upsert_kind = "rejected_manifest"
+                if self.manifest_raises:
+                    raise RuntimeError(self.manifest_error)
+            elif payload["contributed_to_learning"] is False:
+                self.last_upsert_kind = "empty_manifest"
+            else:
+                self.last_upsert_kind = "contributing"
         return self
 
     def fetchone(self):
@@ -57,12 +140,50 @@ class FakeCursor:
             return (self.database,)
         if command == "SELECT CURRENT_ROLE()":
             return (self.role,)
+        if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
+            return (self.cloud_preflight_count,)
+        if command.startswith("SELECT COUNT(*) FROM app.roast_artifacts"):
+            if self.last_upsert_kind == "rejected_manifest":
+                return (self.rejected_manifest_artifact_count,)
+            if self.last_upsert_kind == "empty_manifest":
+                return (self.empty_manifest_artifact_count,)
+            return (self.artifact_preflight_count,)
+        if command.startswith("SELECT COUNT(*) FROM app.reference_roast_summaries"):
+            return (self.summary_preflight_count,)
+        if command.startswith("SELECT COUNT(*) FROM app.roast_telemetry"):
+            assert self.executed[-1][1] is not None
+            if " IN " in command:
+                return (self.telemetry_preflight_count,)
+            roast_id = self.executed[-1][1][0]
+            if roast_id == load_telemetry_verify_live.MISSING_ROAST_ID:
+                return (self.missing_telemetry_count,)
+            if roast_id == load_telemetry_verify_live.SENTINEL_ROAST_ID:
+                return (1 if self.sentinel_present else 0,)
+            return (0,)
+        if command.startswith(
+            "SELECT " + ", ".join(load_telemetry_verify_live.SUMMARY_COLUMNS)
+        ):
+            row = self.summary_rows[self.summary_reads]
+            self.summary_reads += 1
+            return row
+        if command.startswith("CALL app.upsert_roast"):
+            return (
+                {
+                    "cloud_roast_id": load_telemetry_verify_live.TEST_ROAST_ID,
+                    "public_slug": load_telemetry_verify_live.PUBLIC_SLUG,
+                },
+            )
         if command.startswith("CALL app.load_roast_telemetry"):
             return (self.loaded,)
         raise AssertionError(f"unexpected fetchone after: {command}")
 
     def fetchall(self):
-        return self.actual
+        command = self.executed[-1][0]
+        if command.startswith("LIST "):
+            return [(row,) for row in self.stage_preflight_rows]
+        if command.startswith("SELECT roast_id, elapsed_s"):
+            return self.actual
+        raise AssertionError(f"unexpected fetchall after: {command}")
 
 
 class FakeConnection:
@@ -136,27 +257,87 @@ def test_happy_path_pins_put_call_select_and_cleanup(
     assert commands.index("SELECT CURRENT_ROLE()") < next(
         index for index, command in enumerate(commands) if command.startswith("PUT ")
     )
-    assert commands[3] == (
+    put = (
         f"PUT '{load_telemetry_verify_live.FIXTURE_PATH.resolve().as_uri()}' "
         f"@app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID} "
         "AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
     )
-    assert connection.fake_cursor.executed[4] == (
+    positive_call = (
         "CALL app.load_roast_telemetry(%s, %s)",
         (
             load_telemetry_verify_live.TEST_RUN_ID,
             load_telemetry_verify_live.TEST_ROAST_ID,
         ),
     )
-    assert connection.fake_cursor.executed[5] == (
+    telemetry_select = (
         f"SELECT {', '.join(load_telemetry_verify_live.SELECT_COLUMNS)} "
         "FROM app.roast_telemetry WHERE roast_id = %s ORDER BY elapsed_s",
         (load_telemetry_verify_live.TEST_ROAST_ID,),
     )
-    assert connection.fake_cursor.executed[-2:] == [
+    put_index = commands.index(put)
+    update_index = next(
+        index for index, command in enumerate(commands)
+        if command.startswith("UPDATE app.cloud_roasts SET contributed_to_learning = TRUE")
+    )
+    positive_call_index = connection.fake_cursor.executed.index(
+        positive_call, update_index
+    )
+    select_index = connection.fake_cursor.executed.index(
+        telemetry_select, positive_call_index
+    )
+    assert put_index < update_index < positive_call_index < select_index
+    load_roast_ids = [
+        params[1]
+        for command, params in connection.fake_cursor.executed
+        if command.startswith("CALL app.load_roast_telemetry") and params is not None
+    ]
+    assert load_roast_ids == [
+        load_telemetry_verify_live.MISSING_ROAST_ID,
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.TEST_ROAST_ID,
+    ]
+    assert not any(
+        command.startswith("CALL app.recompute_reference_summary")
+        for command in commands
+    )
+    assert "SELECT COUNT(*) FROM app.data_quality_violations" not in commands
+    upsert_payloads = [
+        json.loads(str(params[1]))
+        for command, params in connection.fake_cursor.executed
+        if command.startswith("CALL app.upsert_roast") and params is not None
+    ]
+    assert [payload["contributed_to_learning"] for payload in upsert_payloads] == [
+        False,
+        False,
+        True,
+    ]
+    assert connection.fake_cursor.executed[-5:] == [
         (
-            "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+            "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
+            (
+                load_telemetry_verify_live.TEST_ROAST_ID,
+                load_telemetry_verify_live.SENTINEL_ROAST_ID,
+                load_telemetry_verify_live.MISSING_ROAST_ID,
+            ),
+        ),
+        (
+            "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
             (load_telemetry_verify_live.TEST_ROAST_ID,),
+        ),
+        (
+            "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
+            (
+                load_telemetry_verify_live.TEST_ROAST_ID,
+                load_telemetry_verify_live.TEST_RUN_ID,
+            ),
+        ),
+        (
+            "DELETE FROM app.reference_roast_summaries "
+            "WHERE bean_origin = %s AND roast_level = %s",
+            (
+                load_telemetry_verify_live.BEAN_ORIGIN,
+                load_telemetry_verify_live.ROAST_LEVEL,
+            ),
         ),
         (
             f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
@@ -207,7 +388,10 @@ def test_database_mismatch_rejects_before_put_or_cleanup(
             load_telemetry_verify_live.FIXTURE_PATH,
             "ROASTPILOT_DEV",
         )
-    assert _commands(connection) == ["USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()"]
+    assert _commands(connection) == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+    ]
 
 
 def test_role_mismatch_rejects_before_put_or_cleanup(
@@ -229,6 +413,83 @@ def test_role_mismatch_rejects_before_put_or_cleanup(
         "SELECT CURRENT_DATABASE()",
         "SELECT CURRENT_ROLE()",
     ]
+
+
+def _assert_preflight_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    **cursor_options: object,
+) -> FakeConnection:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(**cursor_options)
+    with pytest.raises(load_telemetry_verify_live.TelemetryVerifyError, match=message):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    mutation_prefixes = ("PUT ", "INSERT ", "UPDATE ", "DELETE ", "REMOVE ", "CALL ")
+    assert not any(
+        command.startswith(mutation_prefixes) for command in _commands(connection)
+    )
+    return connection
+
+
+def test_sentinel_cloud_roast_collision_aborts_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _assert_preflight_collision(
+        monkeypatch,
+        "telemetry verifier roast keys are already owned",
+        cloud_preflight_count=1,
+    )
+    cloud_query = next(
+        executed
+        for executed in connection.fake_cursor.executed
+        if executed[0].startswith("SELECT COUNT(*) FROM app.cloud_roasts")
+    )
+    assert cloud_query[1] is not None
+    assert load_telemetry_verify_live.SENTINEL_ROAST_ID in cloud_query[1]
+
+
+def test_telemetry_row_collision_aborts_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_preflight_collision(
+        monkeypatch,
+        "telemetry verifier row keys are already owned",
+        telemetry_preflight_count=1,
+    )
+
+
+def test_artifact_row_collision_aborts_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_preflight_collision(
+        monkeypatch,
+        "telemetry verifier artifact key is already owned",
+        artifact_preflight_count=1,
+    )
+
+
+def test_reference_summary_collision_aborts_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_preflight_collision(
+        monkeypatch,
+        "telemetry verifier summary key is already owned",
+        summary_preflight_count=1,
+    )
+
+
+def test_stage_prefix_collision_aborts_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_preflight_collision(
+        monkeypatch,
+        "telemetry verifier stage prefix is already owned",
+        stage_preflight_rows=("existing/roast.jsonl",),
+    )
 
 
 def test_row_count_mismatch_is_detected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,7 +553,8 @@ def test_cleanup_runs_when_the_live_body_raises(monkeypatch: pytest.MonkeyPatch)
             "ROASTPILOT_DEV",
         )
     assert _commands(connection)[-2:] == [
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        "DELETE FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
         f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
     ]
 
@@ -315,12 +577,19 @@ def test_body_error_survives_delete_cleanup_failure(
             "ROASTPILOT_DEV",
         )
 
-    assert _commands(connection)[-2:] == [
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+    assert _commands(connection)[-5:] == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
+        "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
+        "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
+        "DELETE FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
         f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
     ]
     assert raised.value.__notes__ == [
-        "cleanup failed: RuntimeError('scripted telemetry verification failure')"
+        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
+        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
+        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
+        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
     ]
 
 
@@ -337,7 +606,162 @@ def test_cleanup_error_surfaces_when_body_succeeds(
             "ROASTPILOT_DEV",
         )
 
-    assert _commands(connection)[-2:] == [
-        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+    assert _commands(connection)[-5:] == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
+        "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
+        "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
+        "DELETE FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
         f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
     ]
+
+
+def test_opt_out_call_carries_20013_and_inserts_no_rows() -> None:
+    cursor = FakeCursor()
+    load_telemetry_verify_live._expect_sql_error(
+        cursor,
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+        "-20013",
+        "opt-out telemetry load",
+    )
+    cursor.execute(
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+    assert cursor.fetchone() == (0,)
+
+
+def test_missing_roast_call_must_raise_20013(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(missing_raises=False)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="missing-roast telemetry load unexpectedly succeeded",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_missing_roast_call_must_insert_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(missing_telemetry_count=1)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="missing-roast telemetry load inserted rows",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_opt_out_call_must_raise_instead_of_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(opt_out_raises=False)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="opt-out telemetry load unexpectedly succeeded",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    assert not any(
+        command.startswith("UPDATE app.cloud_roasts SET contributed_to_learning = TRUE")
+        for command in _commands(connection)
+    )
+
+
+def test_opt_out_recompute_must_leave_zero_contribution_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    changed = (1, *SUMMARY_BEFORE[1:])
+    connection = FakeConnection(summary_after_opt_out=changed)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="opt-out roast contributed to the reference summary",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+def test_opt_in_recompute_must_move_count_and_averages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(summary_after_opt_in=SUMMARY_BEFORE)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="opt-in roast did not move the reference summary",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_non_empty_opt_out_manifest_must_be_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(manifest_raises=False)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="opt-out non-empty artifact manifest unexpectedly succeeded",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_rejected_opt_out_manifest_must_leave_no_artifact_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(rejected_manifest_artifact_count=1)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="rejected opt-out manifest inserted artifact rows",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_empty_opt_out_manifest_must_leave_no_artifact_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(empty_manifest_artifact_count=1)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="empty opt-out manifest left artifact rows",
+    ):
+        load_telemetry_verify_live.verify_live_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )

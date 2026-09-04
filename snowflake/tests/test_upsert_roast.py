@@ -445,7 +445,7 @@ def test_t27_exception_codes_are_the_unique_contiguous_allocation() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 13)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 14)})
 
 
 def test_t28_closed_payload_key_set_is_exactly_13() -> None:

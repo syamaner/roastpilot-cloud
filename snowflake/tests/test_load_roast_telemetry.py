@@ -267,13 +267,132 @@ def test_t_roast_id_guard_literal_executes_against_hostile_table() -> None:
 def test_t_guards_precede_dynamic_sql_transaction_and_dml() -> None:
     roast_guard = re.search(r"regexp_like\s*\(\s*p_roast_id", STRIPPED, re.I)
     run_guard = re.search(r"regexp_like\s*\(\s*p_run_id", STRIPPED, re.I)
+    consent_read = re.search(
+        r"select\s+count\s*\(\s*\*\s*\)\s*,\s*"
+        r"coalesce\s*\(\s*count_if\s*\(\s*contributed_to_learning\s*=\s*true\s*\)\s*,\s*0\s*\).*?"
+        r"from\s+app\.cloud_roasts",
+        STRIPPED,
+        re.I | re.S,
+    )
+    consent_raise = re.search(r"raise\s+roast_not_contributing\s*;", STRIPPED, re.I)
     transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.I)
     execute = re.search(r"execute\s+immediate", STRIPPED, re.I)
     first_dml = re.search(r"delete\s+from\s+app\.roast_telemetry", STRIPPED, re.I)
-    assert all(match is not None for match in (roast_guard, run_guard, transaction, execute, first_dml))
-    assert roast_guard.start() < run_guard.start() < transaction.start() < execute.start()
-    assert roast_guard.start() < first_dml.start()
-    assert run_guard.start() < first_dml.start()
+    matches = (
+        roast_guard,
+        run_guard,
+        consent_read,
+        consent_raise,
+        transaction,
+        execute,
+        first_dml,
+    )
+    assert all(match is not None for match in matches)
+    assert (
+        roast_guard.start()
+        < run_guard.start()
+        < consent_read.start()
+        < consent_raise.start()
+        < transaction.start()
+        < first_dml.start()
+        < execute.start()
+    )
+
+
+def test_t_consent_guard_declarations_are_in_declare_block() -> None:
+    declare = re.search(r"\bdeclare\b(?P<body>.*?)\bbegin\b", STRIPPED, re.I | re.S)
+    assert declare is not None
+    assert re.search(
+        r"roast_not_contributing\s+exception\s*\(\s*-20013\s*,\s*"
+        r"'Roast has not consented to learning'\s*\)\s*;",
+        declare.group("body"),
+        re.I,
+    ) is not None
+    assert re.search(
+        r"v_total_count\s+int\s*;", declare.group("body"), re.I
+    ) is not None
+    assert re.search(
+        r"v_contributing_count\s+int\s*;", declare.group("body"), re.I
+    ) is not None
+
+
+def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
+    guard = re.search(
+        r"select\s+count\s*\(\s*\*\s*\)\s*,\s*"
+        r"coalesce\s*\(\s*count_if\s*\(\s*"
+        r"contributed_to_learning\s*=\s*true\s*\)\s*,\s*0\s*\)\s*"
+        r"into\s+:v_total_count\s*,\s*:v_contributing_count\s+"
+        r"from\s+app\.cloud_roasts\s+"
+        r"where\s+id\s*=\s*:p_roast_id\s*;\s*"
+        r"if\s*\(\s*v_total_count\s*=\s*0\s+or\s+"
+        r"v_contributing_count\s*<>\s*v_total_count\s*\)\s*then\s*"
+        r"raise\s+roast_not_contributing\s*;\s*end\s+if\s*;",
+        STRIPPED,
+        re.I | re.S,
+    )
+    assert guard is not None
+    assert re.search(
+        r"count_if\s*\(\s*contributed_to_learning\s*=\s*false\s*\)",
+        STRIPPED,
+        re.I,
+    ) is None
+    assert re.search(r"v_contributing_count\s*=\s*false", STRIPPED, re.I) is None
+    assert re.search(r"v_total_count\s*(?:<>|!=|>)\s*0", STRIPPED, re.I) is None
+    assert re.search(
+        r"if\s*\([^)]*v_contributing_count\s*=\s*v_total_count",
+        STRIPPED,
+        re.I,
+    ) is None
+
+
+def test_t_consent_guard_refuses_missing_opted_out_and_mixed_rows() -> None:
+    def refuses(total_count: int, raw_contributing_count: int | None) -> bool:
+        contributing_count = (
+            0 if raw_contributing_count is None else raw_contributing_count
+        )
+        return total_count == 0 or contributing_count != total_count
+
+    assert refuses(0, None) is True
+    assert refuses(1, None) is True
+    assert refuses(1, 0) is True
+    assert refuses(2, 1) is True
+    assert refuses(1, 1) is False
+    assert refuses(2, 2) is False
+
+
+def test_t_consent_guard_reads_exactly_one_roast_by_bound_id() -> None:
+    reads = re.findall(r"from\s+app\.cloud_roasts\b", STRIPPED, re.I)
+    assert len(reads) == 1
+    assert re.search(
+        r"from\s+app\.cloud_roasts\s+where\s+id\s*=\s*:p_roast_id\s*;",
+        STRIPPED,
+        re.I,
+    ) is not None
+
+
+def test_t_header_states_defence_in_depth_and_deferred_boundary() -> None:
+    header = MIGRATION.split("use schema app;", 1)[0]
+    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
+    assert "#419: Guard 3 is defence-in-depth, not an enforcement boundary" in normalized
+    assert "direct INSERT on app.roast_telemetry" in normalized
+    assert "a direct INSERT bypasses this procedure's consent guard" in normalized
+    assert "deferred to a separate operator-owned issue per D-419-B" in normalized
+    assert "#430 (SUSPENDED)" in normalized
+    assert "preserve Guard 3's pre-transaction placement" in normalized
+
+
+def test_t_header_makes_no_positive_boundary_claim_for_consent_guard() -> None:
+    header = MIGRATION.split("use schema app;", 1)[0]
+    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
+    forbidden = (
+        "Guard 3 is an enforcement boundary",
+        "consent guard is an enforcement boundary",
+        "Guard 3 prevents",
+        "consent guard prevents",
+        "Guard 3 guarantees",
+        "consent guard guarantees",
+    )
+    assert all(claim.casefold() not in normalized.casefold() for claim in forbidden)
 
 
 def test_t_replay_delete_is_bound_scoped_and_inside_transaction() -> None:
@@ -330,7 +449,7 @@ def test_t_exception_codes_are_unique_across_procedures() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 13)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 14)})
 
 
 def test_t_stage_basename_is_single_and_pinned_adjacent() -> None:

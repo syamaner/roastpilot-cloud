@@ -30,6 +30,15 @@
 -- and the exact basename and case. The default TRUE stores that basename with
 -- a .gz suffix, which matches neither PATTERN nor METADATA$FILENAME equality.
 --
+-- #419: Guard 3 is defence-in-depth, not an enforcement boundary. The
+-- ROASTPILOT_AGENT role holds direct INSERT on app.roast_telemetry
+-- (R__z_roles_grants.sql:34), so a direct INSERT bypasses this procedure's
+-- consent guard. The true boundary -- revoking agent direct DML and moving to
+-- owner-rights gated writes -- is deferred to a separate operator-owned issue
+-- per D-419-B and is out of scope here. #430 (SUSPENDED), which also edits this
+-- procedure, must preserve Guard 3's pre-transaction placement if it later
+-- reorders the telemetry load.
+--
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
 use schema app;
@@ -45,6 +54,9 @@ declare
   invalid_roast_id exception (-20005, 'Roast id must be a UUID');
   invalid_run_id exception (-20006, 'Run id contains disallowed characters');
   no_telemetry_loaded exception (-20007, 'No telemetry rows loaded');
+  roast_not_contributing exception (-20013, 'Roast has not consented to learning');
+  v_total_count int;
+  v_contributing_count int;
   v_insert_sql string;
   v_loaded_rows int;
 begin
@@ -59,6 +71,23 @@ begin
   if (p_run_id is null
       or not regexp_like(p_run_id, '^[0-9a-zA-Z_-]{1,64}$')) then
     raise invalid_run_id;
+  end if;
+
+  -- Guard 3 (#419 requirement (a)): consent gate, defence-in-depth only.
+  -- Refuse the load unless the stored roast consent is affirmatively true.
+  -- count(*) makes an empty id match unambiguously 0; coalesce guards against
+  -- count_if returning NULL when no matching row satisfies the predicate (an
+  -- opted-out single-row roast), which would otherwise make the comparison NULL
+  -- and skip the raise -- a fail-open. Comparing contributing to total refuses
+  -- any opted-out or mixed duplicate-id set.
+  select
+      count(*),
+      coalesce(count_if(contributed_to_learning = true), 0)
+    into :v_total_count, :v_contributing_count
+    from app.cloud_roasts
+    where id = :p_roast_id;
+  if (v_total_count = 0 or v_contributing_count <> v_total_count) then
+    raise roast_not_contributing;
   end if;
 
   begin
