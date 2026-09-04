@@ -36,8 +36,8 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], and OPEN-6 [#433] are all
-CLOSED.** The repeatable live-verify vehicle now exists on `main`:
+**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], and OPEN-6
+[#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
 `dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
 human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
 policy + required reviewer). **#417 AC-4 is discharged** — the gated job ran the
@@ -46,15 +46,20 @@ policy + required reviewer). **#417 AC-4 is discharged** — the gated job ran t
 ([run 33848392855](https://github.com/syamaner/roastpilot-cloud/actions/runs/33848392855),
 evidence on #417). That run also required deploying the C3-S2 migrations to DEV
 (`app.upsert_roast` had never been deployed — the live-only gap the first dispatches
-found); the deploy is done. **#418** (C3-S3) is
-`ready-for-conventional-implementation` and its live vehicle now exists (the earlier
-`#433` block is cleared). Remaining C3: **#419** (C3-S4, per the amended **D-419-A**),
+found); the deploy is done. **#418 (C3-S3) is CLOSED** — the presigned-URL
+owner-download verifier merged via [#443](https://github.com/syamaner/roastpilot-cloud/pull/443)
+(squash `295efb1`) and its AC-1/AC-2/AC-3 discharged live: the same gated job ran
+`presigned_url_verify_live.py` green against `ROASTPILOT_DEV`
+([run 33867033451](https://github.com/syamaner/roastpilot-cloud/actions/runs/33867033451),
+evidence `verified 78680 presigned URL bytes` == the fixture size), so the SSE stage
+serves presigned GETs as plaintext under the primary `ROASTPILOT_AGENT` read grant —
+no new or PUBLIC grant, no migration change. Remaining C3: **#419** (C3-S4, per the amended **D-419-A**),
 the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
 **#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
 `str(exc)`; still open), and **#341** (gated by **D-341-B**). Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L249) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L251) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
@@ -75,9 +80,10 @@ granting `ROASTPILOT_AGENT` to the operator's own `ROASTPILOT_CLI` user for one
 run and revoking it after; that merged a human interactive identity with an
 application service role, so it is explicitly not repeatable. Every later C3 live
 criterion was blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433)
-until 4 Sep, when its gated job discharged **#417 AC-4** and unblocked the rest — it ran
-only `upsert_roast_verify_live.py`, so #418's and #419's live halves are unblocked, not
-yet live-verified (see the C3 status block above); the principal was provisioned 3 Sep —
+until 4 Sep, when its gated job discharged **#417 AC-4** and unblocked the rest. It first ran
+only `upsert_roast_verify_live.py`; #443 then added `presigned_url_verify_live.py` to the same
+job, live-verifying **#418 (C3-S3, now CLOSED)**, so only #419's live half remains unblocked and
+not yet built (see the C3 status block above); the principal was provisioned 3 Sep —
 do not re-run that provisioning, as `CREATE USER` is not idempotent.
 
 **Live grant-audit correction [#422](https://github.com/syamaner/roastpilot-cloud/issues/422)
@@ -136,13 +142,14 @@ that decision: two successive redesigns of the verifier's cleanup block each
 introduced a fresh defect, so the third replaced the contract outright rather than
 patching it again. The unit is far larger than its contract estimate (~190 logic
 lines estimated, roughly four times that shipped), with every line traceable to an
-accepted review finding — worth carrying into #418's and #433's estimates, because
+accepted review finding — a lesson worth carrying into future live-instrument estimates, because
 a live instrument costs far more than a sibling to mirror once each of its own
-guards must be provably falsifiable.
+guards must be provably falsifiable (borne out by #418, whose verifier + tests shipped larger
+than the ~80-line contract estimate for exactly this reason).
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
-presigned-URL / SNOWFLAKE_SSE owner-download check) is
-`ready-for-conventional-implementation`; its live vehicle now exists (#433 CLOSED),
-so it is **unblocked** (not yet built).
+presigned-URL / SNOWFLAKE_SSE owner-download check) is **CLOSED** — built and merged via
+[#443](https://github.com/syamaner/roastpilot-cloud/pull/443) (squash `295efb1`) and
+live-verified against `ROASTPILOT_DEV`.
 [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
 privacy-mapping exclusion contract): its #417 Unit 2 dependency is **met** (#417 merged
 + closed 4 Sep); remaining scope per the amended **D-419-A**.
