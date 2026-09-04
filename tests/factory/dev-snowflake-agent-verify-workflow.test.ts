@@ -70,6 +70,7 @@ export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE
 unset SNOWFLAKE_AGENT_PRIVATE_KEY
 python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 python3 presigned_url_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
+python3 load_telemetry_verify_live.py --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 `;
 
 describe("DEV Snowflake agent verification workflow", () => {
@@ -149,7 +150,7 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(guard["continue-on-error"]).toBeUndefined();
   });
 
-  it("AW-6 runs the upsert and presigned verifiers with the same principal and secure key file", () => {
+  it("AW-6 runs all three verifiers with the same principal and secure key file", () => {
     const verifiers = stepById("run-verifiers");
     expect(verifiers["working-directory"]).toBe("snowflake");
     expect(mapping(verifiers.env)).toEqual({
@@ -160,12 +161,17 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(runBody(verifiers)).not.toContain("python3 -P");
     expect(runBody(verifiers)).toContain("python3 upsert_roast_verify_live.py");
     expect(runBody(verifiers)).toContain("python3 presigned_url_verify_live.py");
+    expect(runBody(verifiers)).toContain("python3 load_telemetry_verify_live.py");
     expect(
       runBody(verifiers).indexOf("python3 upsert_roast_verify_live.py"),
     ).toBeLessThan(
       runBody(verifiers).indexOf("python3 presigned_url_verify_live.py"),
     );
-    expect(runBody(verifiers)).not.toContain("load_telemetry_verify_live.py");
+    expect(
+      runBody(verifiers).indexOf("python3 presigned_url_verify_live.py"),
+    ).toBeLessThan(
+      runBody(verifiers).indexOf("python3 load_telemetry_verify_live.py"),
+    );
     expect(verifiers["timeout-minutes"]).toBe(10);
     expect(runBody(verifiers)).toContain("set -euo pipefail");
     expect(runBody(verifiers).indexOf("umask 077")).toBeLessThan(
