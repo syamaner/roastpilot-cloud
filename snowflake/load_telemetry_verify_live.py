@@ -305,7 +305,7 @@ def verify_live_load(
             "INSERT INTO app.roast_telemetry "
             "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
             "fan_percent, ror_c_per_min, raw) "
-            "VALUES (%s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}'))",
+            "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}')",
             (SENTINEL_ROAST_ID,),
         )
 
