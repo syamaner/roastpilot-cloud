@@ -262,6 +262,11 @@ def _is_visibility_error(exc: BaseException) -> bool:
     return "-20012" in message or "visibility_change_not_supported" in message
 
 
+def _is_invalid_payload_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "-20009" in message or "invalid_payload" in message
+
+
 def _call_expect_visibility_error(
     cursor: Cursor,
     payload: Mapping[str, object],
@@ -279,6 +284,25 @@ def _call_expect_visibility_error(
             "visibility replay failed with an unexpected error"
         ) from exc
     raise UpsertRoastVerifyError("visibility replay unexpectedly succeeded")
+
+
+def _call_expect_invalid_payload_error(
+    cursor: Cursor,
+    payload: Mapping[str, object],
+) -> None:
+    try:
+        cursor.execute(
+            "CALL app.upsert_roast(%s, %s)",
+            (TEST_RUN_ID, _encoded_payload(payload)),
+        )
+        cursor.fetchone()
+    except BaseException as exc:
+        if _is_invalid_payload_error(exc):
+            return
+        raise UpsertRoastVerifyError(
+            "value-guard rejection failed with an unexpected error"
+        ) from exc
+    raise UpsertRoastVerifyError("value-guard rejection unexpectedly succeeded")
 
 
 def _cleanup_statement(
@@ -949,6 +973,22 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
             resolved_roast_id,
         )
         _verify_visibility_rollback(cursor, payload, previous_updated_at)
+        _call_expect_invalid_payload_error(
+            cursor,
+            {**_payload(), "bean_origin": "192.168.1.5"},
+        )
+        _call_expect_invalid_payload_error(
+            cursor,
+            {**_payload(), "bean_origin": "230°F"},
+        )
+        _call_expect_invalid_payload_error(
+            cursor,
+            {**_payload(), "bean_origin": "2001:db8::1"},
+        )
+        _call_expect_invalid_payload_error(
+            cursor,
+            {**_payload(), "bean_origin": "110℉"},
+        )
         previous_updated_at = _verify_telemetry_purge_scope(
             cursor,
             payload,
@@ -1087,6 +1127,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_failure(failure)
         return 1
 
+    print(
+        "verified upsert_roast rejects raw IP (v4/v6) and Fahrenheit (°F/℉) in "
+        "guarded free text (#431)"
+    )
     print(
         "verified UPSERT_ROAST replay preservation, visibility change rejection with "
         "no net change, conditional and scoped opt-out telemetry purge, and staged "
