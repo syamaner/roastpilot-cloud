@@ -106,6 +106,7 @@ jobs:
           # process environment whose output becomes the uploaded artifact.
           unset SNOWFLAKE_AGENT_PRIVATE_KEY
           python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
+          python3 presigned_url_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 
       - name: Upload agent verification evidence
         if: always()
