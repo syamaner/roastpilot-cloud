@@ -36,6 +36,27 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
+**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], and OPEN-6 [#433] are all
+CLOSED.** The repeatable live-verify vehicle now exists on `main`:
+`dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
+human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
+policy + required reviewer). **#417 AC-4 is discharged** — the gated job ran the
+`upsert_roast_verify_live.py` verifier green live against `ROASTPILOT_DEV` as
+`ROASTPILOT_AGENT_CI`
+([run 33848392855](https://github.com/syamaner/roastpilot-cloud/actions/runs/33848392855),
+evidence on #417). That run also required deploying the C3-S2 migrations to DEV
+(`app.upsert_roast` had never been deployed — the live-only gap the first dispatches
+found); the deploy is done. **#418** (C3-S3) is
+`ready-for-conventional-implementation` and its live vehicle now exists (the earlier
+`#433` block is cleared). Remaining C3: **#419** (C3-S4, per the amended **D-419-A**),
+the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
+**#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
+`str(exc)`; still open), and **#341** (gated by **D-341-B**). Where a clause in the
+detailed narrative below conflicts with this block, **this block wins**; that narrative
+predates these closures but still carries genuinely-current constraints (e.g. #437), so
+it is not wholesale archived. The issues and the plan-repo ledger (through L249) are the
+source of truth.
+
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
 [C3 Sync](https://github.com/syamaner/roastpilot-cloud/milestone/4) (#4),
 decomposed at kickoff via `to-issues` (never bulk-up-front) into
@@ -53,10 +74,11 @@ issue. **The vehicle that discharged it no longer exists.** AC-3 was closed by
 granting `ROASTPILOT_AGENT` to the operator's own `ROASTPILOT_CLI` user for one
 run and revoking it after; that merged a human interactive identity with an
 application service role, so it is explicitly not repeatable. Every later C3 live
-criterion is blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433).
-**The blocker is now the gated JOB, not the credential** — the principal was
-provisioned 3 Sep and the details are below; do not re-run that provisioning, as
-`CREATE USER` is not idempotent.
+criterion was blocked on [#433](https://github.com/syamaner/roastpilot-cloud/issues/433)
+until 4 Sep, when its gated job discharged **#417 AC-4** and unblocked the rest — it ran
+only `upsert_roast_verify_live.py`, so #418's and #419's live halves are unblocked, not
+yet live-verified (see the C3 status block above); the principal was provisioned 3 Sep —
+do not re-run that provisioning, as `CREATE USER` is not idempotent.
 
 **Live grant-audit correction [#422](https://github.com/syamaner/roastpilot-cloud/issues/422)
 landed.** Split out of #416's review board by operator decision, then built and
@@ -75,15 +97,16 @@ Enterprise edition.
 via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
 `d15471d`, with a header-accuracy fast-follow in
 [#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
-**#417 stays OPEN for AC-4**, which merging cannot discharge: the criterion needs
-the Unit 2 verifier run live as `ROASTPILOT_AGENT`, and that needs #433.
-**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument** — an
-operator-run verifier, not a CI step, because every Snowflake connection
-`dev-snowflake-contract.yml` opens authenticates as the deploy role, while the
-verifier asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. (Most of
-that workflow's steps — runner hardening, checkout, Python setup, dependency
-install, the static grant scan, the summary — open no Snowflake connection at all;
-it is the connections that are deploy-role-bound, not every step.) Its merge state
+**#417 is CLOSED (4 Sep): AC-4 was discharged** by the live Unit 2 verifier run,
+executed as `ROASTPILOT_AGENT` via #433's gated job (see the C3 status block above).
+**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument.** It could not
+run in `dev-snowflake-contract.yml` because every Snowflake connection that workflow
+opens authenticates as the deploy role, while the verifier asserts `CURRENT_ROLE()` is
+`ROASTPILOT_AGENT` before any write. #433 resolved that by giving the verifier its own
+workflow — `dev-snowflake-agent-verify.yml`, authenticating as `ROASTPILOT_AGENT_CI`
+(which carries `ROASTPILOT_AGENT`) — so as of 4 Sep it **is** a human-gated CI step
+there, and AC-4 was discharged by that job (not by `dev-snowflake-contract.yml`, whose
+connections remain deploy-role-bound). Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
 pre-open fold rounds against blind review boards, the third of which hit the S7
 iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
@@ -118,16 +141,16 @@ a live instrument costs far more than a sibling to mirror once each of its own
 guards must be provably falsifiable.
 [#418](https://github.com/syamaner/roastpilot-cloud/issues/418) (C3-S3,
 presigned-URL / SNOWFLAKE_SSE owner-download check) is
-`ready-for-conventional-implementation` but blocked on the same **job**, the
-credential itself now existing;
+`ready-for-conventional-implementation`; its live vehicle now exists (#433 CLOSED),
+so it is **unblocked** (not yet built).
 [#419](https://github.com/syamaner/roastpilot-cloud/issues/419) (C3-S4,
-privacy-mapping exclusion contract) is `wait-to-implement`, blocked on #417 Unit 2
-merging, with its live half additionally on #433.
+privacy-mapping exclusion contract): its #417 Unit 2 dependency is **met** (#417 merged
++ closed 4 Sep); remaining scope per the amended **D-419-A**.
 
 **[#433](https://github.com/syamaner/roastpilot-cloud/issues/433) (OPEN-6) is
-C3's critical path**, not any remaining story. It is the live-contract vehicle
-every agent-role verifier needs, and its **gated job** — not its credential, which
-now exists — blocks #417 AC-4 and #418 alike. All
+CLOSED (4 Sep).** It delivered the live-contract vehicle every agent-role verifier
+needs — the gated job `dev-snowflake-agent-verify.yml` (#440 + egress fix #441) —
+which discharged #417 AC-4 and unblocked #418. All
 five of its design questions were settled 3 Sep 2026 as **D-433-A..E** (recorded
 on the issue): a dedicated `ROASTPILOT_AGENT_CI` user; both blast-radius axes
 recorded, with the principal axis a genuine escalation over the deploy role; a
@@ -202,11 +225,12 @@ stderr as well as stdout. **The principal is now provisioned** (3 Sep): `ROASTPI
 granted and nothing else, and the `dev-snowflake-agent` Environment carries a
 required reviewer, a deployment-branch policy naming `main` only, and both key
 secrets. The public-key fingerprint was cross-checked between GitHub and Snowflake
-before either was trusted. **What remains is the job, not the credential:** #433's
-gated workflow does not exist, needs a `story-planner` contract and a mandatory
-`factory-security-reviewer` pass, and must reconcile the verifier reading
-`SNOWFLAKE_PRIVATE_KEY_FILE` as a path against the workflow pattern that passes key
-material inline.
+before either was trusted. **The job now exists (4 Sep) and #433 is CLOSED:** the gated workflow
+`dev-snowflake-agent-verify.yml` shipped via #440 — with the `story-planner` contract,
+the mandatory `factory-security-reviewer` pass (CONFIRMED-SOUND), and the temp-file
+handling that reconciles the verifier reading `SNOWFLAKE_PRIVATE_KEY_FILE` as a path
+against inline key material — plus the Azure-stage egress fix #441. It discharged #417
+AC-4 live (run 33848392855).
 
 **Two C3 defects split out of #417's review boards, plus one original story whose
 open question was addressed. All three decisions were taken 3 Sep and all three
