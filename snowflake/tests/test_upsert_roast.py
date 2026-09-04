@@ -692,3 +692,229 @@ def test_t38_exception_messages_are_static_and_never_echo_payload() -> None:
     assert len(declarations) == 5
     assert all("p_payload" not in declaration.lower() for declaration in declarations)
     assert re.search(r"raise\s+invalid_payload\s*\|\|", STRIPPED, re.I) is None
+
+
+VALUE_GUARD_FIELDS = (
+    "v_payload:bean_origin",
+    "v_payload:bean_varietal",
+    "v_payload:profile_name",
+    "v_payload:roast_level",
+    "v_payload:summary:roaster_driver",
+    "v_payload:summary:first_crack_model:repo_id",
+    "v_payload:operator_notes",
+)
+
+
+def _value_guard() -> str:
+    return _match(
+        r"if\s*\(\s*v_payload:bean_origin::string\s+is\s+not\s+null.*?"
+        r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
+    ).group(0)
+
+
+def _value_guard_patterns() -> tuple[str, str, str]:
+    patterns = re.findall(
+        r"regexp_count\s*\(\s*v_payload:bean_origin::string\s*,\s*'([^']+)'\s*\)\s*>\s*0",
+        _value_guard(),
+        re.I,
+    )
+    assert len(patterns) == 3
+    return patterns[0], patterns[1], patterns[2]
+
+
+def test_t39_value_guard_is_one_closed_seven_field_block() -> None:
+    """Assert the shipped guard shape.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    guard = _value_guard()
+    assert len(re.findall(r"\bif\s*\(", guard, re.I)) == 1
+    assert len(re.findall(r"\braise\s+invalid_payload\s*;", guard, re.I)) == 1
+    assert len(re.findall(r"\bend\s+if\s*;", guard, re.I)) == 1
+    expected_patterns = _value_guard_patterns()
+    for field in VALUE_GUARD_FIELDS:
+        patterns = re.findall(
+            rf"regexp_count\s*\(\s*{re.escape(field)}::string\s*,\s*'([^']+)'\s*\)\s*>\s*0",
+            guard,
+            re.I,
+        )
+        assert tuple(patterns) == expected_patterns, field
+
+
+def test_t40_value_guard_precedes_transaction() -> None:
+    """Pin write-side ordering.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    guard_offset = STRIPPED.index(_value_guard())
+    raise_offset = STRIPPED.index("raise invalid_payload;", guard_offset)
+    transaction_offset = _match(r"begin\s+transaction\s*;").start()
+    assert raise_offset < transaction_offset
+
+
+def test_t41_ipv4_literal_catches_dotted_quad_examples() -> None:
+    """Transcribe IPv4 matching.
+
+    The construct is backslash-free so Python re and Snowflake RE2 agree.
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    ipv4, _, _ = _value_guard_patterns()
+    assert ipv4 == "([0-9]{1,3}[.]){3}[0-9]{1,3}"
+    assert re.search(ipv4, "192.168.1.5") is not None
+    assert re.search(ipv4, "10.0.0.1") is not None
+    assert re.search(ipv4, "leak10.0.0.1") is not None
+    assert re.search(ipv4, "device10.0.0.1") is not None
+
+
+def test_t42_ipv6_literal_catches_full_and_compressed_examples() -> None:
+    """Transcribe IPv6 matching.
+
+    The construct is backslash-free so Python re and Snowflake RE2 agree.
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    _, ipv6, _ = _value_guard_patterns()
+    assert ipv6 == (
+        "(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})"
+        "|(::([0-9A-Fa-f]{1,4}:?){1,})"
+        "|(([0-9A-Fa-f]{1,4}:){1,}:)"
+    )
+    assert re.search(ipv6, "2001:db8:0:0:0:0:0:1") is not None
+    assert re.search(ipv6, "fe80::1") is not None
+    assert re.search(ipv6, "::1") is not None
+    assert re.search(ipv6, "fe80::") is not None
+    assert re.search(ipv6, "1::") is not None
+    assert re.search(ipv6, "::") is None
+
+
+def test_t43_temperature_literal_catches_degree_mark_examples() -> None:
+    """Transcribe temperature matching.
+
+    The construct is backslash-free so Python re and Snowflake RE2 agree.
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    _, _, temperature = _value_guard_patterns()
+    assert temperature == "(°[ ]?[Ff])|℉"
+    assert re.search(temperature, "230°F") is not None
+    assert re.search(temperature, "230° F") is not None
+    assert re.search(temperature, "230℉") is not None
+
+
+def test_t44_value_guard_accepts_benign_values() -> None:
+    """Transcribe benign cases.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    patterns = _value_guard_patterns()
+    values = ("hottop_kn8828b_2k_plus", "Ethiopia Yirgacheffe", "City+")
+    assert all(re.search(pattern, value) is None for pattern in patterns for value in values)
+
+
+def test_t45_repo_path_is_accepted() -> None:
+    """Transcribe the valid repo path.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    patterns = _value_guard_patterns()
+    repo_id = "syamaner/coffee-first-crack-detection"
+    assert all(re.search(pattern, repo_id) is None for pattern in patterns)
+
+
+def test_t46_repo_id_remains_subject_to_denylist() -> None:
+    """Reject an address in repo_id.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    ipv4, _, _ = _value_guard_patterns()
+    assert re.search(ipv4, "10.0.0.1/x") is not None
+
+
+def test_t47_each_clause_is_null_safe_and_empty_text_is_benign() -> None:
+    """Prove the scalar NULL shape.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    guard = _value_guard()
+    for field in VALUE_GUARD_FIELDS:
+        assert re.search(
+            rf"{re.escape(field)}::string\s+is\s+not\s+null\s+and\s*\(",
+            guard,
+            re.I,
+        )
+    assert all(re.search(pattern, "") is None for pattern in _value_guard_patterns())
+
+
+def test_t48_deliberate_arc_residuals_stay_pinned() -> None:
+    """Pin accepted #312 gaps.
+
+    The temperature construct is backslash-free across both regex engines.
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    ipv4, _, temperature = _value_guard_patterns()
+    assert re.search(temperature, "455F") is None
+    assert re.search(temperature, "fahrenheit") is None
+    assert re.search(ipv4, "192.168.1.5:8080") is not None
+
+
+def test_t49_new_guard_preserves_celsius_forbidden_scan() -> None:
+    """Reapply the Celsius scan.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    assert CELSIUS_FORBIDDEN.search(_value_guard()) is None
+
+
+def test_t50_real_summary_corpus_stays_clean() -> None:
+    """Check shipped summaries.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    patterns = _value_guard_patterns()
+    fixture_root = SNOWFLAKE_DIR / "fixtures" / "m1-export"
+    for session in ("session-1", "session-2"):
+        summary = json.loads((fixture_root / session / "summary.json").read_text())
+        assert "operator_notes" not in summary
+        values = (summary["roaster_driver"], summary["first_crack_model"]["repo_id"])
+        assert all(re.search(pattern, value) is None for pattern in patterns for value in values)
+
+
+def test_t51_exception_and_static_sql_fences_are_unchanged() -> None:
+    """Reassert static fences.
+
+    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
+    is not executed offline; RE2 equivalence and three-valued logic remain
+    live-gate residuals.
+    """
+    declarations = re.findall(
+        r"exception\s*\(\s*(-200\d+)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I
+    )
+    assert declarations == ["-20008", "-20009", "-20010", "-20011", "-20012"]
+    codes: list[str] = []
+    for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
+        codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 14)})
+    assert re.search(r"execute\s+immediate", STRIPPED, re.I) is None
+    assert len(re.findall(r"\|\|", STRIPPED)) == 3
