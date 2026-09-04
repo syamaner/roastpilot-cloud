@@ -93,6 +93,14 @@ def test_scope_fence_no_grant_role_proc_table_stage():
 def test_roast_by_slug_has_visibility_private_filter():
     assert re.search(r"visibility\s*<>\s*'private'", SLUG_REGION, re.IGNORECASE)
 
+def test_roast_by_slug_curve_gated_on_contributed_to_learning():
+    assert re.search(
+        r"case\s+when\s+r\.contributed_to_learning\s*=\s*true\s+then\s*\(\s*"
+        r"select\s+array_agg\s*\(.*?\)\s+within\s+group\s*\(\s*order\s+by\s+t\.elapsed_s\s*\)\s+"
+        r"from\s+roast_telemetry\s+t\s+where\s+t\.roast_id\s*=\s*r\.id\s*\)\s*end\s+as\s+curve",
+        SLUG_REGION, re.IGNORECASE | re.DOTALL,
+    )
+
 def test_reviews_by_roast_has_visibility_private_filter():
     assert re.search(r"visibility\s*<>\s*'private'", REVIEWS_REGION, re.IGNORECASE)
 
