@@ -92,6 +92,8 @@ class FakeCursor:
         sentinel_survives: bool = True,
         visibility_raises: bool = True,
         visibility_error: str = "-20012 visibility_change_not_supported",
+        invalid_payload_raises: bool = True,
+        invalid_payload_error: str = "-20009 invalid_payload",
         identical_updated_at: object = 1,
         updated_after: object = 2,
         control_updated_at: object = 3,
@@ -158,6 +160,8 @@ class FakeCursor:
         self.sentinel_survives = sentinel_survives
         self.visibility_raises = visibility_raises
         self.visibility_error = visibility_error
+        self.invalid_payload_raises = invalid_payload_raises
+        self.invalid_payload_error = invalid_payload_error
         self.identical_updated_at = identical_updated_at
         self.updated_after = updated_after
         self.control_updated_at = control_updated_at
@@ -202,6 +206,15 @@ class FakeCursor:
             if payload["operator_notes"] == upsert_roast_verify_live.ROLLBACK_NOTES:
                 if self.visibility_raises:
                     raise RuntimeError(self.visibility_error)
+                self.last_call_result = FIRST_RESULT
+            elif payload["bean_origin"] in {
+                "192.168.1.5",
+                "230°F",
+                "2001:db8::1",
+                "110℉",
+            }:
+                if self.invalid_payload_raises:
+                    raise RuntimeError(self.invalid_payload_error)
                 self.last_call_result = FIRST_RESULT
             elif payload["contributed_to_learning"] is False:
                 self.opted_out = True
@@ -576,17 +589,21 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
         for entry in connection.fake_cursor.executed
         if entry[0].startswith("CALL")
     ]
-    assert len(calls) == 7
-    assert calls[0][1] == calls[1][1] == calls[4][1]
+    assert len(calls) == 11
+    assert calls[0][1] == calls[1][1] == calls[8][1]
     visibility_payload = json.loads(str(calls[3][1][1]))
     assert (
         visibility_payload["operator_notes"]
         == upsert_roast_verify_live.ROLLBACK_NOTES
     )
-    empty_manifest_payload = json.loads(str(calls[5][1][1]))
+    assert json.loads(str(calls[4][1][1]))["bean_origin"] == "192.168.1.5"
+    assert json.loads(str(calls[5][1][1]))["bean_origin"] == "230°F"
+    assert json.loads(str(calls[6][1][1]))["bean_origin"] == "2001:db8::1"
+    assert json.loads(str(calls[7][1][1]))["bean_origin"] == "110℉"
+    empty_manifest_payload = json.loads(str(calls[9][1][1]))
     assert empty_manifest_payload["contributed_to_learning"] is True
     assert empty_manifest_payload["artifact_kinds"] == []
-    opt_out_payload = json.loads(str(calls[6][1][1]))
+    opt_out_payload = json.loads(str(calls[10][1][1]))
     assert opt_out_payload["contributed_to_learning"] is False
     assert opt_out_payload["artifact_kinds"] == []
     assert commands[-2:] == [
@@ -707,6 +724,10 @@ def test_main_prints_narrow_evidence_and_closes(
     assert "staged artifact PUT/REMOVE paths" in output
     assert "conditional and scoped opt-out telemetry purge" in output
     assert "visibility change rejection with no net change" in output
+    assert (
+        "verified upsert_roast rejects raw IP (v4/v6) and Fahrenheit (°F/℉) in "
+        "guarded free text (#431)" in output
+    )
     assert ROAST_ID in output
 
 
@@ -1647,6 +1668,50 @@ def test_visibility_replay_requires_expected_error_and_no_net_change(
 )
 def test_visibility_error_accepts_each_contract_marker(message: str) -> None:
     assert upsert_roast_verify_live._is_visibility_error(RuntimeError(message))
+
+
+def test_live_flow_accepts_invalid_payload_errors_for_poisoned_calls() -> None:
+    connection = FakeConnection(
+        invalid_payload_raises=True,
+        invalid_payload_error="-20009 invalid_payload",
+    )
+    assert _verify(connection) == ROAST_ID
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("SQL compilation error -20009", True),
+        ("invalid_payload", True),
+        ("unrelated error", False),
+    ],
+)
+def test_invalid_payload_error_matches_contract_markers(
+    message: str,
+    expected: bool,
+) -> None:
+    assert upsert_roast_verify_live._is_invalid_payload_error(
+        RuntimeError(message)
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    ("cursor_option", "message"),
+    [
+        ({"invalid_payload_raises": False}, "unexpectedly succeeded"),
+        ({"invalid_payload_error": "unexpected error"}, "unexpected error"),
+    ],
+)
+def test_invalid_payload_call_requires_expected_rejection(
+    cursor_option: dict[str, object],
+    message: str,
+) -> None:
+    cursor = FakeCursor(**cursor_option)
+    with pytest.raises(upsert_roast_verify_live.UpsertRoastVerifyError, match=message):
+        upsert_roast_verify_live._call_expect_invalid_payload_error(
+            cursor,
+            {**upsert_roast_verify_live._payload(), "bean_origin": "192.168.1.5"},
+        )
 
 
 @pytest.mark.parametrize(
