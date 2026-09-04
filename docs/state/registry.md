@@ -99,13 +99,14 @@ via [#432](https://github.com/syamaner/roastpilot-cloud/pull/432), squash
 [#434](https://github.com/syamaner/roastpilot-cloud/pull/434), squash `6f9064a`.
 **#417 is CLOSED (4 Sep): AC-4 was discharged** by the live Unit 2 verifier run,
 executed as `ROASTPILOT_AGENT` via #433's gated job (see the C3 status block above).
-**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument** — an
-operator-run verifier, not a CI step, because every Snowflake connection
-`dev-snowflake-contract.yml` opens authenticates as the deploy role, while the
-verifier asserts `CURRENT_ROLE()` is `ROASTPILOT_AGENT` before any write. (Most of
-that workflow's steps — runner hardening, checkout, Python setup, dependency
-install, the static grant scan, the summary — open no Snowflake connection at all;
-it is the connections that are deploy-role-bound, not every step.) Its merge state
+**Unit 2 is `snowflake/upsert_roast_verify_live.py`, AC-4's instrument.** It could not
+run in `dev-snowflake-contract.yml` because every Snowflake connection that workflow
+opens authenticates as the deploy role, while the verifier asserts `CURRENT_ROLE()` is
+`ROASTPILOT_AGENT` before any write. #433 resolved that by giving the verifier its own
+workflow — `dev-snowflake-agent-verify.yml`, authenticating as `ROASTPILOT_AGENT_CI`
+(which carries `ROASTPILOT_AGENT`) — so as of 4 Sep it **is** a human-gated CI step
+there, and AC-4 was discharged by that job (not by `dev-snowflake-contract.yml`, whose
+connections remain deploy-role-bound). Its merge state
 lives on the issue and its PR, not here. What belongs here is what it cost: five
 pre-open fold rounds against blind review boards, the third of which hit the S7
 iteration stop. **D-417-E** settled how to converge the cleanup contract; the stop
