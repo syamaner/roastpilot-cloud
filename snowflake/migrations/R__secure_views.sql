@@ -23,6 +23,12 @@ use schema app;
 -- is an ordered array_agg(object_construct_keep_null(...)) over
 -- roast_telemetry, carrying exactly the 6 Celsius keys even when a sensor
 -- value is NULL; `raw` is deliberately excluded.
+-- Per #446 / D-446-A, an outer CASE gates `curve` at read on
+-- `contributed_to_learning = true`, yielding an explicit NULL curve for an
+-- opted-out roast even when telemetry rows arrived via a path that bypasses
+-- the load proc, and mirroring the aggregation read-filter.
+-- `cloud_roasts.summary` is deliberately not gated here; that separate
+-- D-417-D-adjacent product question is deferred and flagged on #446.
 -- The row-owner column and `visibility` itself are deliberately not
 -- projected (AC-7-NEG) -- visibility only gates the filter below.
 create or replace secure view roast_by_slug copy grants as
@@ -36,20 +42,22 @@ select
   r.roasted_at_utc,
   r.created_at,
   r.summary,
-  (
-    select array_agg(
-      object_construct_keep_null(
-        'elapsed_s', t.elapsed_s,
-        'bean_temp_c', t.bean_temp_c,
-        'env_temp_c', t.env_temp_c,
-        'heat_percent', t.heat_percent,
-        'fan_percent', t.fan_percent,
-        'ror_c_per_min', t.ror_c_per_min
-      )
-    ) within group (order by t.elapsed_s)
-    from roast_telemetry t
-    where t.roast_id = r.id
-  ) as curve
+  case
+    when r.contributed_to_learning = true then (
+      select array_agg(
+        object_construct_keep_null(
+          'elapsed_s', t.elapsed_s,
+          'bean_temp_c', t.bean_temp_c,
+          'env_temp_c', t.env_temp_c,
+          'heat_percent', t.heat_percent,
+          'fan_percent', t.fan_percent,
+          'ror_c_per_min', t.ror_c_per_min
+        )
+      ) within group (order by t.elapsed_s)
+      from roast_telemetry t
+      where t.roast_id = r.id
+    )
+  end as curve
 from cloud_roasts r
 where r.visibility <> 'private';
 
