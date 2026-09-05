@@ -371,6 +371,60 @@ def test_main_connects_verifies_and_closes(
     assert captured.err == ""
 
 
+def test_main_connect_failure_is_sanitised_load_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_connect(_target: str) -> None:
+        raise RuntimeError(
+            "account=SENTINELHOST.snowflakecomputing.com "
+            "private_key=/secret/keys/agent.p8"
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", fail_connect)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert "Snowflake connection or authentication failed" in captured.err
+    assert "SENTINELHOST" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+
+
+def test_main_key_read_failure_is_sanitised_load_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_connect(_target: str) -> None:
+        raise FileNotFoundError("/secret/keys/agent.p8")
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", fail_connect)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert "Snowflake connection or authentication failed" in captured.err
+    assert "SENTINELHOST" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+
+
+def test_main_connect_validation_error_keeps_detail_load_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_connect(_target: str) -> None:
+        raise load_telemetry_verify_live.TelemetryVerifyError(
+            "missing required environment variable: SNOWFLAKE_ACCOUNT"
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", fail_connect)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "telemetry verification failed: missing required environment variable: "
+        "SNOWFLAKE_ACCOUNT\n"
+    )
+
+
 def test_main_sanitises_an_unexpected_raw_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

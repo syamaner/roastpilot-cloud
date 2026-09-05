@@ -357,8 +357,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block -
             _connect,
             datetime.now(timezone.utc),
         )
-    except Exception as exc:
+    except SeedLoadError as exc:
         print(f"seed load failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        print(
+            "seed load failed: an unexpected error occurred "
+            "(details withheld from public output)",
+            file=sys.stderr,
+        )
         return 1
     print(json.dumps({"target": args.target, "row_counts": counts}, sort_keys=True))
     return 0
