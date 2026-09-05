@@ -39,6 +39,7 @@ class FakeCursor:
         loaded: object = "1",
         actual: list[tuple[object, ...]] | None = None,
         fail_on: str | None = None,
+        cleanup_error_text: str = "scripted telemetry verification failure",
         cloud_preflight_count: object = 0,
         telemetry_preflight_count: object = 0,
         artifact_preflight_count: object = 0,
@@ -63,6 +64,7 @@ class FakeCursor:
         self.loaded = loaded
         self.actual = [EXPECTED_TUPLE] if actual is None else actual
         self.fail_on = fail_on
+        self.cleanup_error_text = cleanup_error_text
         self.cloud_preflight_count = cloud_preflight_count
         self.telemetry_preflight_count = telemetry_preflight_count
         self.artifact_preflight_count = artifact_preflight_count
@@ -108,7 +110,7 @@ class FakeCursor:
             and command.startswith(self.fail_on)
             and not expected_guard_call
         ):
-            raise RuntimeError("scripted telemetry verification failure")
+            raise RuntimeError(self.cleanup_error_text)
         if command.startswith("INSERT INTO app.roast_telemetry"):
             self.sentinel_present = True
         elif command.startswith("UPDATE app.cloud_roasts"):
@@ -187,8 +189,14 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, **cursor_options: object) -> None:
+    def __init__(
+        self,
+        *,
+        close_error_text: str | None = None,
+        **cursor_options: object,
+    ) -> None:
         self.fake_cursor = FakeCursor(**cursor_options)
+        self.close_error_text = close_error_text
         self.closed = False
 
     def cursor(self):
@@ -196,6 +204,8 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error_text is not None:
+            raise RuntimeError(self.close_error_text)
 
 
 def _patch_expected_helper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,7 +366,61 @@ def test_main_connects_verifies_and_closes(
 
     assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 0
     assert connection.closed is True
-    assert capsys.readouterr().out == "verified 1 telemetry rows in ROASTPILOT_DEV\n"
+    captured = capsys.readouterr()
+    assert captured.out == "verified 1 telemetry rows in ROASTPILOT_DEV\n"
+    assert captured.err == ""
+
+
+def test_main_sanitises_an_unexpected_raw_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _fixture_path, _target) -> int:
+        raise RuntimeError(
+            "account ab12345.eu-west-1.snowflakecomputing.com at /Users/op/key.p8"
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "telemetry verification failed: telemetry verification failed\n"
+    )
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
+
+
+def test_main_surfaces_sanitised_close_failure_after_body_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        close_error_text=(
+            "close failed at ab12345.eu-west-1.snowflakecomputing.com "
+            "/Users/op/key.p8"
+        )
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "telemetry verification failed: telemetry verification cleanup failed",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "Snowflake connection close failed",
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
 
 
 def test_allowed_targets_are_dev_only_and_preview_is_rejected() -> None:
@@ -543,15 +607,19 @@ def test_fixture_path_must_be_under_fixtures_and_quote_free(fixture_path: Path) 
     assert connection.fake_cursor.executed == []
 
 
-def test_cleanup_runs_when_the_live_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_body_failure_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_expected_helper(monkeypatch)
     connection = FakeConnection(fail_on="CALL app.load_roast_telemetry")
-    with pytest.raises(RuntimeError, match="scripted telemetry verification failure"):
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="live verification body failed",
+    ) as raised:
         load_telemetry_verify_live.verify_live_load(
             connection,
             load_telemetry_verify_live.FIXTURE_PATH,
             "ROASTPILOT_DEV",
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
     assert _commands(connection)[-2:] == [
         "DELETE FROM app.reference_roast_summaries "
         "WHERE bean_origin = %s AND roast_level = %s",
@@ -561,21 +629,15 @@ def test_cleanup_runs_when_the_live_body_raises(monkeypatch: pytest.MonkeyPatch)
 
 def test_body_error_survives_delete_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _patch_expected_helper(monkeypatch)
     mismatched = list(EXPECTED_TUPLE)
     mismatched[2] = 99.0
     connection = FakeConnection(actual=[tuple(mismatched)], fail_on="DELETE")
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
 
-    with pytest.raises(
-        load_telemetry_verify_live.TelemetryVerifyError,
-        match="loaded telemetry does not match fixture expectation",
-    ) as raised:
-        load_telemetry_verify_live.verify_live_load(
-            connection,
-            load_telemetry_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
-        )
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
 
     assert _commands(connection)[-5:] == [
         "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
@@ -585,26 +647,39 @@ def test_body_error_survives_delete_cleanup_failure(
         "WHERE bean_origin = %s AND roast_level = %s",
         f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
     ]
-    assert raised.value.__notes__ == [
-        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
-        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
-        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
-        "cleanup failed: RuntimeError('scripted telemetry verification failure')",
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "telemetry verification failed: loaded telemetry does not match fixture expectation",
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "telemetry rows cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "artifact rows cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "cloud_roasts cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "reference summary cleanup failed"
+        ),
     ]
+    assert connection.closed is True
 
 
 def test_cleanup_error_surfaces_when_body_succeeds(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _patch_expected_helper(monkeypatch)
     connection = FakeConnection(fail_on="DELETE")
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
 
-    with pytest.raises(RuntimeError, match="scripted telemetry verification failure"):
-        load_telemetry_verify_live.verify_live_load(
-            connection,
-            load_telemetry_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
-        )
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
 
     assert _commands(connection)[-5:] == [
         "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
@@ -614,6 +689,90 @@ def test_cleanup_error_surfaces_when_body_succeeds(
         "WHERE bean_origin = %s AND roast_level = %s",
         f"REMOVE @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
     ]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "telemetry verification failed: telemetry verification cleanup failed",
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "telemetry rows cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "artifact rows cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "cloud_roasts cleanup failed"
+        ),
+        (
+            f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+            "reference summary cleanup failed"
+        ),
+    ]
+    assert connection.closed is True
+
+
+def test_cleanup_failure_output_is_sanitised(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        fail_on="DELETE",
+        cleanup_error_text=(
+            "connect failed for account "
+            "ab12345.eu-west-1.snowflakecomputing.com at /Users/op/.snowflake/key.p8"
+        ),
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert "telemetry rows cleanup failed" in captured.err
+
+
+def test_main_preserves_body_and_cleanup_evidence_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    mismatched = list(EXPECTED_TUPLE)
+    mismatched[2] = 99.0
+    connection = FakeConnection(
+        actual=[tuple(mismatched)],
+        fail_on="DELETE",
+        close_error_text=(
+            "close failed at ab12345.eu-west-1.snowflakecomputing.com "
+            "/Users/op/key.p8"
+        ),
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "telemetry verification failed: loaded telemetry does not match fixture expectation",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "telemetry rows cleanup failed",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "artifact rows cleanup failed",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "cloud_roasts cleanup failed",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "reference summary cleanup failed",
+        f"cleanup failed for run id {load_telemetry_verify_live.TEST_RUN_ID}: "
+        "Snowflake connection close failed",
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
 
 
 def test_opt_out_call_carries_20013_and_inserts_no_rows() -> None:

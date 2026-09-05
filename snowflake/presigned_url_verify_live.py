@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import traceback
 import urllib.request
 import uuid
 from collections.abc import Mapping, Sequence
@@ -36,6 +35,10 @@ class Connection(Protocol):
 
 class PresignedUrlVerifyError(RuntimeError):
     """Raised when live presigned-URL behavior differs from the contract."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.cleanup_failures: list[str] = []
 
 
 def _validated_fixture_uri(fixture_path: Path) -> str:
@@ -78,7 +81,7 @@ def verify_live_presigned(
     if _first_value(cursor.fetchone(), "CURRENT_ROLE()") != EXPECTED_ROLE:
         raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")
 
-    body_error: BaseException | None = None
+    body_error: PresignedUrlVerifyError | None = None
     try:
         cursor.execute(
             f"PUT '{fixture_uri}' "
@@ -124,23 +127,65 @@ def verify_live_presigned(
             )
         return len(fetched_bytes)
     except BaseException as exc:
-        body_error = exc
-        raise
+        if isinstance(exc, PresignedUrlVerifyError):
+            body_error = exc
+            raise
+        body_error = PresignedUrlVerifyError("live verification body failed")
+        raise body_error from exc
     finally:
+        cleanup_errors: list[PresignedUrlVerifyError] = []
         try:
             cursor.execute(f"REMOVE @app.roast_artifacts/{test_run_id}/")
-            cursor.execute(f"LIST @app.roast_artifacts/{test_run_id}/")
-            residual_rows = cursor.fetchall()
-            if residual_rows:
-                raise PresignedUrlVerifyError(
-                    "presigned URL cleanup verification failed for run id "
-                    f"{test_run_id}: {len(residual_rows)} residual object(s)"
-                )
         except BaseException as exc:
-            if body_error is not None:
-                body_error.add_note(f"cleanup failed: {exc!r}")
+            cleanup_error = PresignedUrlVerifyError("stage REMOVE cleanup failed")
+            cleanup_error.__cause__ = exc
+            cleanup_errors.append(cleanup_error)
+        else:
+            try:
+                cursor.execute(f"LIST @app.roast_artifacts/{test_run_id}/")
+                residual_rows = cursor.fetchall()
+            except BaseException as exc:
+                cleanup_error = PresignedUrlVerifyError(
+                    "post-REMOVE LIST cleanup failed"
+                )
+                cleanup_error.__cause__ = exc
+                cleanup_errors.append(cleanup_error)
             else:
-                raise
+                if residual_rows:
+                    cleanup_errors.append(
+                        PresignedUrlVerifyError(
+                            "presigned URL cleanup verification failed for run id "
+                            f"{test_run_id}: {len(residual_rows)} residual object(s)"
+                        )
+                    )
+
+        if cleanup_errors:
+            if body_error is not None:
+                _attach_cleanup_failures(body_error, cleanup_errors, test_run_id)
+            else:
+                cleanup_failure = PresignedUrlVerifyError(
+                    "presigned URL verification cleanup failed"
+                )
+                _attach_cleanup_failures(
+                    cleanup_failure,
+                    cleanup_errors,
+                    test_run_id,
+                )
+                raise cleanup_failure
+
+
+def _attach_cleanup_failures(
+    failure: PresignedUrlVerifyError,
+    cleanup_errors: Sequence[PresignedUrlVerifyError],
+    test_run_id: str | None = None,
+) -> None:
+    for cleanup_error in cleanup_errors:
+        if test_run_id is None:
+            message = f"cleanup failed: {cleanup_error}"
+        else:
+            message = f"cleanup failed for run id {test_run_id}: {cleanup_error}"
+        failure.cleanup_failures.append(message)
+        failure.add_note(message)
 
 
 def _required_env(name: str) -> str:  # pragma: no cover - real operator boundary
@@ -169,9 +214,10 @@ def _connect(target: str) -> Connection:  # pragma: no cover - real operator bou
     )
 
 
-def _print_failure(failure: BaseException) -> None:
-    print("presigned URL verification failed:", file=sys.stderr)
-    traceback.print_exception(failure, file=sys.stderr)
+def _print_failure(failure: PresignedUrlVerifyError) -> None:
+    print(f"presigned URL verification failed: {failure}", file=sys.stderr)
+    for cleanup_failure in failure.cleanup_failures:
+        print(cleanup_failure, file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -179,13 +225,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)
     connection = _connect(args.target)
+    failure: PresignedUrlVerifyError | None = None
+    count = 0
     try:
         count = verify_live_presigned(connection, FIXTURE_PATH, args.target)
+    except PresignedUrlVerifyError as exc:
+        failure = exc
     except Exception as exc:
-        _print_failure(exc)
-        return 1
-    finally:
+        failure = PresignedUrlVerifyError("presigned URL verification failed")
+        failure.__cause__ = exc
+    try:
         connection.close()
+    except BaseException as exc:
+        close_error = PresignedUrlVerifyError("Snowflake connection close failed")
+        close_error.__cause__ = exc
+        if failure is None:
+            failure = PresignedUrlVerifyError(
+                "presigned URL verification cleanup failed"
+            )
+        _attach_cleanup_failures(failure, (close_error,))
+    if failure is not None:
+        _print_failure(failure)
+        return 1
     print(f"verified {count} presigned URL bytes in {args.target}")
     return 0
 
