@@ -525,7 +525,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)
-    connection = _connect(args.target)
+    try:
+        connection = _connect(args.target)
+    except TelemetryVerifyError as exc:
+        _print_failure(exc)
+        return 1
+    except Exception as exc:
+        failure = TelemetryVerifyError("Snowflake connection or authentication failed")
+        failure.__cause__ = exc
+        _print_failure(failure)
+        return 1
     failure: TelemetryVerifyError | None = None
     count = 0
     try:

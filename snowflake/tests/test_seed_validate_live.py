@@ -572,3 +572,88 @@ def test_cli_returns_nonzero_on_validation_failure(monkeypatch, tmp_path: Path):
                         lambda *_args: (_ for _ in ()).throw(RuntimeError("failure")))
     assert seed_validate_live.main(
         [str(tmp_path / "seed.json"), "--target", "ROASTPILOT_DEV"]) == 1
+
+
+def test_main_connect_failure_is_sanitised_seed_validate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps(artifact()), encoding="utf-8")
+
+    def fail_connect(_target: str) -> None:
+        raise RuntimeError(
+            "account=SENTINELHOST.snowflakecomputing.com "
+            "private_key=/secret/keys/agent.p8"
+        )
+
+    monkeypatch.setattr(seed_validate_live, "_connect", fail_connect)
+
+    assert seed_validate_live.main(
+        [str(path), "--target", "ROASTPILOT_DEV"]
+    ) == 1
+    captured = capsys.readouterr()
+    assert "an unexpected error occurred" in captured.err
+    assert "SENTINELHOST" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+
+
+def test_main_key_read_failure_is_sanitised_seed_validate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps(artifact()), encoding="utf-8")
+
+    def fail_connect(_target: str) -> None:
+        raise FileNotFoundError("/secret/keys/agent.p8")
+
+    monkeypatch.setattr(seed_validate_live, "_connect", fail_connect)
+
+    assert seed_validate_live.main(
+        [str(path), "--target", "ROASTPILOT_DEV"]
+    ) == 1
+    captured = capsys.readouterr()
+    assert "an unexpected error occurred" in captured.err
+    assert "SENTINELHOST" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+
+
+def test_main_body_failure_is_sanitised_seed_validate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_validation(*_args: object) -> None:
+        raise RuntimeError(
+            "cursor.execute failed at SENTINELHOST.snowflakecomputing.com "
+            "/secret/keys/agent.p8"
+        )
+
+    monkeypatch.setattr(
+        seed_validate_live, "run_operator_validation", fail_validation
+    )
+
+    assert seed_validate_live.main(
+        [str(tmp_path / "seed.json"), "--target", "ROASTPILOT_DEV"]
+    ) == 1
+    captured = capsys.readouterr()
+    assert "an unexpected error occurred" in captured.err
+    assert "SENTINELHOST" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+
+
+def test_main_validation_error_keeps_detail_seed_validate(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps(artifact("ROASTPILOT_PREVIEW")), encoding="utf-8")
+
+    assert seed_validate_live.main(
+        [str(path), "--target", "ROASTPILOT_DEV"]
+    ) == 1
+    captured = capsys.readouterr()
+    assert "artifact target is not byte-equal to the requested target" in captured.err

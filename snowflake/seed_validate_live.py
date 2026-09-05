@@ -307,8 +307,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block -
     try:
         result = run_operator_validation(
             args.artifact, args.target, _connect, datetime.now(timezone.utc))
-    except Exception as exc:
+    except SeedValidateError as exc:
         print(f"seed validation failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        print(
+            "seed validation failed: an unexpected error occurred "
+            "(details withheld from public output)",
+            file=sys.stderr,
+        )
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0
