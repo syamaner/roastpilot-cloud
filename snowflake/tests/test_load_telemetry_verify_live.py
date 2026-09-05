@@ -280,7 +280,7 @@ def test_first_value_reads_first_sequence_element() -> None:
     assert load_telemetry_verify_live._first_value(("first", "second"), "LABEL") == "first"
 
 
-@pytest.mark.parametrize("row", ["a string", b"bytes", (), None, 7])
+@pytest.mark.parametrize("row", ["a string", b"bytes", (), None])
 def test_first_value_returns_none_for_unsupported_row_shapes(row: object) -> None:
     assert load_telemetry_verify_live._first_value(row, "LABEL") is None
 
@@ -784,7 +784,7 @@ def test_allowed_targets_are_dev_only_and_preview_is_rejected() -> None:
     connection = FakeConnection()
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="rejected telemetry target",
+        match=r"^rejected telemetry target: 'ROASTPILOT_PREVIEW'$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -801,7 +801,7 @@ def test_database_mismatch_rejects_before_put_or_cleanup(
     connection = FakeConnection(database="ROASTPILOT_PROD")
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="connected database does not match target",
+        match=r"^connected database does not match target$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -821,7 +821,7 @@ def test_role_mismatch_rejects_before_put_or_cleanup(
     connection = FakeConnection(role="ACCOUNTADMIN")
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="connected role is not ROASTPILOT_AGENT",
+        match=r"^connected role is not ROASTPILOT_AGENT$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -860,7 +860,7 @@ def test_sentinel_cloud_roast_collision_aborts_before_mutation(
 ) -> None:
     connection = _assert_preflight_collision(
         monkeypatch,
-        "telemetry verifier roast keys are already owned",
+        r"^telemetry verifier roast keys are already owned$",
         cloud_preflight_count=1,
     )
     cloud_query = next(
@@ -877,7 +877,7 @@ def test_telemetry_row_collision_aborts_before_mutation(
 ) -> None:
     _assert_preflight_collision(
         monkeypatch,
-        "telemetry verifier row keys are already owned",
+        r"^telemetry verifier row keys are already owned$",
         telemetry_preflight_count=1,
     )
 
@@ -887,7 +887,7 @@ def test_artifact_row_collision_aborts_before_mutation(
 ) -> None:
     _assert_preflight_collision(
         monkeypatch,
-        "telemetry verifier artifact key is already owned",
+        r"^telemetry verifier artifact key is already owned$",
         artifact_preflight_count=1,
     )
 
@@ -897,7 +897,7 @@ def test_reference_summary_collision_aborts_before_mutation(
 ) -> None:
     _assert_preflight_collision(
         monkeypatch,
-        "telemetry verifier summary key is already owned",
+        r"^telemetry verifier summary key is already owned$",
         summary_preflight_count=1,
     )
 
@@ -907,7 +907,7 @@ def test_stage_prefix_collision_aborts_before_mutation(
 ) -> None:
     _assert_preflight_collision(
         monkeypatch,
-        "telemetry verifier stage prefix is already owned",
+        r"^telemetry verifier stage prefix is already owned$",
         stage_preflight_rows=("existing/roast.jsonl",),
     )
 
@@ -917,7 +917,7 @@ def test_row_count_mismatch_is_detected(monkeypatch: pytest.MonkeyPatch) -> None
     connection = FakeConnection(loaded="2")
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="procedure row count",
+        match=r"^procedure row count does not match fixture expectation$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -968,7 +968,7 @@ def test_raw_body_failure_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = FakeConnection(fail_on="CALL app.load_roast_telemetry")
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="live verification body failed",
+        match=r"^live verification body failed$",
     ) as raised:
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1173,7 +1173,7 @@ def test_missing_roast_call_must_insert_no_rows(
     connection = FakeConnection(missing_telemetry_count=1)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="missing-roast telemetry load inserted rows",
+        match=r"^missing-roast telemetry load inserted rows$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1210,7 +1210,7 @@ def test_opt_out_recompute_must_leave_zero_contribution_summary(
     connection = FakeConnection(summary_after_opt_out=changed)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-out roast contributed to the reference summary",
+        match=r"^opt-out roast contributed to the reference summary$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1225,7 +1225,7 @@ def test_opt_in_recompute_must_move_count_and_averages(
     connection = FakeConnection(summary_after_opt_in=SUMMARY_BEFORE)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-in roast did not move the reference summary",
+        match=r"^opt-in roast did not move the reference summary$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1257,7 +1257,7 @@ def test_rejected_opt_out_manifest_must_leave_no_artifact_rows(
     connection = FakeConnection(rejected_manifest_artifact_count=1)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="rejected opt-out manifest inserted artifact rows",
+        match=r"^rejected opt-out manifest inserted artifact rows$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1273,7 +1273,7 @@ def test_empty_opt_out_manifest_must_leave_no_artifact_rows(
     connection = FakeConnection(empty_manifest_artifact_count=1)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="empty opt-out manifest left artifact rows",
+        match=r"^empty opt-out manifest left artifact rows$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1289,7 +1289,7 @@ def test_opt_out_load_must_not_insert_target_rows(
     connection = FakeConnection(opt_out_telemetry_count=1)
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-out telemetry load inserted rows",
+        match=r"^opt-out telemetry load inserted rows$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1305,7 +1305,7 @@ def test_opt_out_load_must_not_change_sentinel_row(
     connection = FakeConnection(sentinel_counts=(0, 1))
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-out telemetry load changed the sentinel row",
+        match=r"^opt-out telemetry load changed the sentinel row$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1321,7 +1321,7 @@ def test_opt_in_load_must_not_change_sentinel_row(
     connection = FakeConnection(sentinel_counts=(1, 0))
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-in telemetry load changed the sentinel row",
+        match=r"^opt-in telemetry load changed the sentinel row$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1339,7 +1339,7 @@ def test_opt_in_recompute_must_populate_summary_averages(
     )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-in roast did not populate summary averages",
+        match=r"^opt-in roast did not populate summary averages$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1359,7 +1359,7 @@ def test_opt_out_nonzero_review_count_is_flagged(
     )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-out roast contributed to the reference summary",
+        match=r"^opt-out roast contributed to the reference summary$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1379,7 +1379,7 @@ def test_opt_out_nonzero_average_is_flagged(
     )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-out roast contributed to the reference summary",
+        match=r"^opt-out roast contributed to the reference summary$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,
@@ -1399,7 +1399,7 @@ def test_opt_in_wrong_count_flags_move_even_when_distinct(
     )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match="opt-in roast did not move the reference summary",
+        match=r"^opt-in roast did not move the reference summary$",
     ):
         load_telemetry_verify_live.verify_live_load(
             connection,

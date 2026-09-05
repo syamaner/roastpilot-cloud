@@ -75,15 +75,17 @@ def verify_live_presigned(
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
-    # _first_value normalizes the label case-insensitively, so case-only label
-    # mutations are equivalent; the != comparison stays mutable on its own line.
+    # Production and every test return tuple-shaped rows, so _first_value takes
+    # its Sequence branch (row[0]) and ignores the label argument entirely;
+    # label-text mutations are therefore equivalent. The != comparison below
+    # stays mutable on its own line.
     current_database = _first_value(cursor.fetchone(), "CURRENT_DATABASE()")  # pragma: no mutate
     if current_database != expected_target:
-        raise PresignedUrlVerifyError("connected database does not match target")  # pragma: no mutate
+        raise PresignedUrlVerifyError("connected database does not match target")
     cursor.execute("SELECT CURRENT_ROLE()")
     current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
     if current_role != EXPECTED_ROLE:
-        raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")  # pragma: no mutate
+        raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")
 
     body_error: PresignedUrlVerifyError | None = None
     try:
@@ -105,11 +107,13 @@ def verify_live_presigned(
             "SELECT GET_PRESIGNED_URL(@app.roast_artifacts, %s, %s)",
             (object_path, URL_EXPIRY_SECONDS),
         )
+        # Tuple-shaped rows take _first_value's Sequence branch (row[0]) and
+        # ignore the label, so the label-text mutation is equivalent here.
         presigned_url = _first_value(cursor.fetchone(), "GET_PRESIGNED_URL")  # pragma: no mutate
         if not isinstance(presigned_url, str):
-            raise PresignedUrlVerifyError("GET_PRESIGNED_URL did not return a URL")  # pragma: no mutate
+            raise PresignedUrlVerifyError("GET_PRESIGNED_URL did not return a URL")
         if urlparse(presigned_url).scheme != "https":
-            raise PresignedUrlVerifyError("presigned URL did not use HTTPS")  # pragma: no mutate
+            raise PresignedUrlVerifyError("presigned URL did not use HTTPS")
         try:
             with urllib.request.urlopen(
                 presigned_url,
@@ -124,7 +128,7 @@ def verify_live_presigned(
         except PresignedUrlVerifyError:
             raise
         except BaseException as exc:
-            raise PresignedUrlVerifyError("presigned URL fetch failed") from exc  # pragma: no mutate
+            raise PresignedUrlVerifyError("presigned URL fetch failed") from exc
         if fetched_bytes != fixture_bytes:
             raise PresignedUrlVerifyError(
                 "presigned URL bytes do not match the uploaded fixture"
@@ -134,7 +138,7 @@ def verify_live_presigned(
         if isinstance(exc, PresignedUrlVerifyError):
             body_error = exc
             raise
-        body_error = PresignedUrlVerifyError("live verification body failed")  # pragma: no mutate
+        body_error = PresignedUrlVerifyError("live verification body failed")
         raise body_error from exc
     finally:
         cleanup_errors: list[PresignedUrlVerifyError] = []
@@ -142,6 +146,8 @@ def verify_live_presigned(
             cursor.execute(f"REMOVE @app.roast_artifacts/{test_run_id}/")
         except BaseException as exc:
             cleanup_error = PresignedUrlVerifyError("stage REMOVE cleanup failed")
+            # __cause__ is never printed (output is sanitised), so swapping it to
+            # None is behaviourally invisible to any test.
             cleanup_error.__cause__ = exc  # pragma: no mutate
             cleanup_errors.append(cleanup_error)
         else:
@@ -152,6 +158,8 @@ def verify_live_presigned(
                 cleanup_error = PresignedUrlVerifyError(
                     "post-REMOVE LIST cleanup failed"
                 )
+                # __cause__ is never printed (output is sanitised), so swapping
+                # it to None is behaviourally invisible to any test.
                 cleanup_error.__cause__ = exc  # pragma: no mutate
                 cleanup_errors.append(cleanup_error)
             else:
@@ -195,7 +203,7 @@ def _attach_cleanup_failures(
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise PresignedUrlVerifyError(f"missing required environment variable: {name}")  # pragma: no mutate
+        raise PresignedUrlVerifyError(f"missing required environment variable: {name}")
     return value
 
 

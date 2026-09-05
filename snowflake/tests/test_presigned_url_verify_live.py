@@ -169,7 +169,7 @@ def test_target_rejected_before_any_cursor_call() -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="rejected presigned URL target",
+        match=r"^rejected presigned URL target: 'ROASTPILOT_PREVIEW'$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -226,7 +226,7 @@ def test_database_mismatch_rejects_before_put_or_cleanup() -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="connected database does not match target",
+        match=r"^connected database does not match target$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -245,7 +245,7 @@ def test_role_mismatch_rejects_before_put() -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="connected role is not ROASTPILOT_AGENT",
+        match=r"^connected role is not ROASTPILOT_AGENT$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -291,7 +291,7 @@ def test_non_https_presigned_url_rejected() -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="did not use HTTPS",
+        match=r"^presigned URL did not use HTTPS$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -310,7 +310,7 @@ def test_missing_presigned_url_rejected() -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="did not return a URL",
+        match=r"^GET_PRESIGNED_URL did not return a URL$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -382,7 +382,7 @@ def test_cleanup_runs_when_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="presigned URL fetch failed",
+        match=r"^presigned URL fetch failed$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -408,7 +408,7 @@ def test_execute_failure_propagates_and_cleanup_is_verified(fail_on: str) -> Non
 
     with pytest.raises(
         presigned_url_verify_live.PresignedUrlVerifyError,
-        match="live verification body failed",
+        match=r"^live verification body failed$",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
