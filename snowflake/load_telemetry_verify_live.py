@@ -200,8 +200,9 @@ def _summary_row(cursor: Cursor) -> tuple[object, ...]:
         "WHERE bean_origin = %s AND roast_level = %s",
         (BEAN_ORIGIN, ROAST_LEVEL),
     )
-    # _row_values normalizes labels case-insensitively, so the .upper() case
-    # transform is an equivalent mutation.
+    # The cursor returns tuple-shaped rows here, so _row_values takes the
+    # Sequence branch and only checks len(labels), never the label text, so the
+    # .upper() case transform is equivalent.
     labels = tuple(column.upper() for column in SUMMARY_COLUMNS)  # pragma: no mutate
     return _row_values(cursor.fetchone(), labels)
 
@@ -231,12 +232,15 @@ def verify_live_load(
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
-    # _first_value normalizes the label case-insensitively, so case-only label
-    # mutations are equivalent; the != comparison stays mutable on its own line.
+    # The cursor returns tuple-shaped rows here, so _first_value takes the
+    # Sequence branch (row[0]) and ignores the label text/case entirely, making
+    # the label mutant equivalent; the != comparison stays mutable on its own line.
     current_database = _first_value(cursor.fetchone(), "CURRENT_DATABASE()")  # pragma: no mutate
     if current_database != expected_target:
         raise TelemetryVerifyError("connected database does not match target")
     cursor.execute("SELECT CURRENT_ROLE()")
+    # Tuple-shaped row: _first_value takes the Sequence branch (row[0]) and
+    # ignores the label, so the label mutant is equivalent here too.
     current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
     if current_role != EXPECTED_ROLE:
         raise TelemetryVerifyError("connected role is not ROASTPILOT_AGENT")
@@ -386,8 +390,9 @@ def verify_live_load(
             "CALL app.load_roast_telemetry(%s, %s)",
             (TEST_RUN_ID, TEST_ROAST_ID),
         )
-        # _first_value normalizes the label case-insensitively and the fake
-        # cursor returns a tuple row, so the label text is equivalent here.
+        # The cursor returns a tuple-shaped row, so _first_value takes the
+        # Sequence branch (row[0]) and ignores the label text entirely, making
+        # the label mutant equivalent here.
         loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")  # pragma: no mutate
         cursor.execute(
             f"SELECT {', '.join(SELECT_COLUMNS)} FROM app.roast_telemetry "
