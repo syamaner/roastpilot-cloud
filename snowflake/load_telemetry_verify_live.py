@@ -96,9 +96,10 @@ def _validated_fixture_uri(fixture_path: Path) -> str:
 def _load_test_helper() -> Callable[[Path, str], list[dict[str, object]]]:
     """Import the fixture expectation from its path-anchored test helper."""
     helper_path = SNOWFLAKE_DIR / "tests" / "test_load_roast_telemetry.py"
-    # The module label passed to spec_from_file_location is behaviourally inert
-    # (it only names the throwaway import), so case/text mutations are equivalent.
-    spec = importlib.util.spec_from_file_location("telemetry_contract_helper", helper_path)  # pragma: no mutate
+    # The module label is a throwaway import name (inert); pragma just this
+    # literal so the load-bearing helper_path argument stays mutable.
+    helper_module_label = "telemetry_contract_helper"  # pragma: no mutate
+    spec = importlib.util.spec_from_file_location(helper_module_label, helper_path)
     if spec is None or spec.loader is None:  # pragma: no cover; pragma: no mutate
         raise ImportError(f"cannot load telemetry contract helper from {helper_path}")  # pragma: no mutate
     module = importlib.util.module_from_spec(spec)
