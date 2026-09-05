@@ -36,7 +36,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 status (4 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
+**C3 status (5 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
 `dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
 human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
@@ -62,15 +62,31 @@ its live L-a/L-b/L-c discharged green against `ROASTPILOT_DEV`
 ([run 33894946891](https://github.com/syamaner/roastpilot-cloud/actions/runs/33894946891),
 evidence `verified 273 telemetry rows`). Per **D-419-B** the guard is
 defence-in-depth, not the enforcement boundary (the agent holds direct telemetry-table
-DML); the true boundary is tracked at **#446** (**D-446-A**: Option A — a read-side
-`contributed_to_learning = true` filter on `roast_by_slug`'s curve, mirroring the
-aggregation read-filter). Remaining C3: **#446** (the deferred boundary, Option A to
-build), the offline defects **#430** (**D-430-A SUSPENDED**) and **#431** (**D-431-A** amended),
+DML). **#446 Option A is DONE** — the read-side `contributed_to_learning = true` gate on
+`roast_by_slug`'s curve (**D-446-A**) merged via
+[#449](https://github.com/syamaner/roastpilot-cloud/pull/449) (squash `470f2d4`) and is
+deployed live to `ROASTPILOT_DEV`
+([run 33903317008](https://github.com/syamaner/roastpilot-cloud/actions/runs/33903317008));
+**D-446-B** settled that an opted-out roast's `summary` timing fields stay public
+(curve-only). #446 stays **OPEN** only for **Option B** (revoke the agent's direct
+`cloud_roasts` DML — the authoritative write boundary) plus its artifacts/stage-file half.
+**#431 is CLOSED** — the write-side free-text value guard in `upsert_roast` that rejects
+raw IP / Fahrenheit values in seven guarded free-text fields (six projected to
+`roast_by_slug` plus `operator_notes`, guarded storage-only per **D-431-C** since the
+view does not select it) (**D-431-B..G**) merged via
+[#450](https://github.com/syamaner/roastpilot-cloud/pull/450) (squash `d09ca8a`) with a
+live verifier [#451](https://github.com/syamaner/roastpilot-cloud/pull/451) (squash
+`77faf39`), and its live discharge ran green
+([run 33930595786](https://github.com/syamaner/roastpilot-cloud/actions/runs/33930595786),
+evidence `verified upsert_roast rejects raw IP (v4/v6) and Fahrenheit (°F/℉) in guarded
+free text (#431)`); the connector Pydantic mirror is deferred cross-repo, consumer-first
+(**D-431-C**). Remaining C3: the offline defects **#430** (**D-430-A SUSPENDED**) and
 **#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
-`str(exc)`; still open), and **#341** (gated by **D-341-B**). Where a clause in the
+`str(exc)`; still open), **#341** (gated by **D-341-B**), and **#446**'s remaining
+Option B / artifacts scope. Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L259) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L267) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
