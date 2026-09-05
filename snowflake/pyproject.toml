@@ -80,6 +80,8 @@ only_mutate = [
     "ci_gate_result.py",
     "check_forbidden_grants.py",
     "check_grant_manifest.py",
+    "load_telemetry_verify_live.py",
+    "presigned_url_verify_live.py",
     "seed_load_live.py",
     "seed_validate_live.py",
     "validate_migrations.py",

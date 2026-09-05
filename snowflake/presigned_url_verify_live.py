@@ -75,11 +75,15 @@ def verify_live_presigned(
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
-    if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
-        raise PresignedUrlVerifyError("connected database does not match target")
+    # _first_value normalizes the label case-insensitively, so case-only label
+    # mutations are equivalent; the != comparison stays mutable on its own line.
+    current_database = _first_value(cursor.fetchone(), "CURRENT_DATABASE()")  # pragma: no mutate
+    if current_database != expected_target:
+        raise PresignedUrlVerifyError("connected database does not match target")  # pragma: no mutate
     cursor.execute("SELECT CURRENT_ROLE()")
-    if _first_value(cursor.fetchone(), "CURRENT_ROLE()") != EXPECTED_ROLE:
-        raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")
+    current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
+    if current_role != EXPECTED_ROLE:
+        raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")  # pragma: no mutate
 
     body_error: PresignedUrlVerifyError | None = None
     try:
@@ -101,11 +105,11 @@ def verify_live_presigned(
             "SELECT GET_PRESIGNED_URL(@app.roast_artifacts, %s, %s)",
             (object_path, URL_EXPIRY_SECONDS),
         )
-        presigned_url = _first_value(cursor.fetchone(), "GET_PRESIGNED_URL")
+        presigned_url = _first_value(cursor.fetchone(), "GET_PRESIGNED_URL")  # pragma: no mutate
         if not isinstance(presigned_url, str):
-            raise PresignedUrlVerifyError("GET_PRESIGNED_URL did not return a URL")
+            raise PresignedUrlVerifyError("GET_PRESIGNED_URL did not return a URL")  # pragma: no mutate
         if urlparse(presigned_url).scheme != "https":
-            raise PresignedUrlVerifyError("presigned URL did not use HTTPS")
+            raise PresignedUrlVerifyError("presigned URL did not use HTTPS")  # pragma: no mutate
         try:
             with urllib.request.urlopen(
                 presigned_url,
@@ -120,7 +124,7 @@ def verify_live_presigned(
         except PresignedUrlVerifyError:
             raise
         except BaseException as exc:
-            raise PresignedUrlVerifyError("presigned URL fetch failed") from exc
+            raise PresignedUrlVerifyError("presigned URL fetch failed") from exc  # pragma: no mutate
         if fetched_bytes != fixture_bytes:
             raise PresignedUrlVerifyError(
                 "presigned URL bytes do not match the uploaded fixture"
@@ -130,7 +134,7 @@ def verify_live_presigned(
         if isinstance(exc, PresignedUrlVerifyError):
             body_error = exc
             raise
-        body_error = PresignedUrlVerifyError("live verification body failed")
+        body_error = PresignedUrlVerifyError("live verification body failed")  # pragma: no mutate
         raise body_error from exc
     finally:
         cleanup_errors: list[PresignedUrlVerifyError] = []
@@ -138,7 +142,7 @@ def verify_live_presigned(
             cursor.execute(f"REMOVE @app.roast_artifacts/{test_run_id}/")
         except BaseException as exc:
             cleanup_error = PresignedUrlVerifyError("stage REMOVE cleanup failed")
-            cleanup_error.__cause__ = exc
+            cleanup_error.__cause__ = exc  # pragma: no mutate
             cleanup_errors.append(cleanup_error)
         else:
             try:
@@ -148,7 +152,7 @@ def verify_live_presigned(
                 cleanup_error = PresignedUrlVerifyError(
                     "post-REMOVE LIST cleanup failed"
                 )
-                cleanup_error.__cause__ = exc
+                cleanup_error.__cause__ = exc  # pragma: no mutate
                 cleanup_errors.append(cleanup_error)
             else:
                 if residual_rows:
@@ -188,14 +192,14 @@ def _attach_cleanup_failures(
         failure.add_note(message)
 
 
-def _required_env(name: str) -> str:  # pragma: no cover - real operator boundary
+def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise PresignedUrlVerifyError(f"missing required environment variable: {name}")
+        raise PresignedUrlVerifyError(f"missing required environment variable: {name}")  # pragma: no mutate
     return value
 
 
-def _connect(target: str) -> Connection:  # pragma: no cover - real operator boundary
+def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate block - real operator boundary
     import snowflake.connector
     from assert_dev_ci_grants import load_private_key_der
 
@@ -220,7 +224,7 @@ def _print_failure(failure: PresignedUrlVerifyError) -> None:
         print(cleanup_failure, file=sys.stderr)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block - CLI wrapper
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)

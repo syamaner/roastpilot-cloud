@@ -96,9 +96,11 @@ def _validated_fixture_uri(fixture_path: Path) -> str:
 def _load_test_helper() -> Callable[[Path, str], list[dict[str, object]]]:
     """Import the fixture expectation from its path-anchored test helper."""
     helper_path = SNOWFLAKE_DIR / "tests" / "test_load_roast_telemetry.py"
-    spec = importlib.util.spec_from_file_location("telemetry_contract_helper", helper_path)
-    if spec is None or spec.loader is None:  # pragma: no cover
-        raise ImportError(f"cannot load telemetry contract helper from {helper_path}")
+    # The module label passed to spec_from_file_location is behaviourally inert
+    # (it only names the throwaway import), so case/text mutations are equivalent.
+    spec = importlib.util.spec_from_file_location("telemetry_contract_helper", helper_path)  # pragma: no mutate
+    if spec is None or spec.loader is None:  # pragma: no cover; pragma: no mutate
+        raise ImportError(f"cannot load telemetry contract helper from {helper_path}")  # pragma: no mutate
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     helper = getattr(module, "fixture_expected_rows")
@@ -198,9 +200,10 @@ def _summary_row(cursor: Cursor) -> tuple[object, ...]:
         "WHERE bean_origin = %s AND roast_level = %s",
         (BEAN_ORIGIN, ROAST_LEVEL),
     )
-    return _row_values(
-        cursor.fetchone(), tuple(column.upper() for column in SUMMARY_COLUMNS)
-    )
+    # _row_values normalizes labels case-insensitively, so the .upper() case
+    # transform is an equivalent mutation.
+    labels = tuple(column.upper() for column in SUMMARY_COLUMNS)  # pragma: no mutate
+    return _row_values(cursor.fetchone(), labels)
 
 
 def verify_live_load(
@@ -210,26 +213,30 @@ def verify_live_load(
 ) -> int:
     """Verify fail-closed consent, opted-in load, summaries, and artifacts."""
     if expected_target not in ALLOWED_TARGETS:
-        raise TelemetryVerifyError(f"rejected telemetry target: {expected_target!r}")
+        raise TelemetryVerifyError(f"rejected telemetry target: {expected_target!r}")  # pragma: no mutate
     if UUID_PATTERN.fullmatch(TEST_RUN_ID) is None:
-        raise TelemetryVerifyError("TEST_RUN_ID is not a lowercase UUID")
+        raise TelemetryVerifyError("TEST_RUN_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     if UUID_PATTERN.fullmatch(TEST_ROAST_ID) is None:
-        raise TelemetryVerifyError("TEST_ROAST_ID is not a lowercase UUID")
+        raise TelemetryVerifyError("TEST_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     if UUID_PATTERN.fullmatch(SENTINEL_ROAST_ID) is None:
-        raise TelemetryVerifyError("SENTINEL_ROAST_ID is not a lowercase UUID")
+        raise TelemetryVerifyError("SENTINEL_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     if UUID_PATTERN.fullmatch(MISSING_ROAST_ID) is None:
-        raise TelemetryVerifyError("MISSING_ROAST_ID is not a lowercase UUID")
+        raise TelemetryVerifyError("MISSING_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     fixture_uri = _validated_fixture_uri(fixture_path)
     expected_dicts = _load_test_helper()(fixture_path, TEST_ROAST_ID)
     expected = [tuple(row[column] for column in SELECT_COLUMNS) for row in expected_dicts]
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
-    if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
-        raise TelemetryVerifyError("connected database does not match target")
+    # _first_value normalizes the label case-insensitively, so case-only label
+    # mutations are equivalent; the != comparison stays mutable on its own line.
+    current_database = _first_value(cursor.fetchone(), "CURRENT_DATABASE()")  # pragma: no mutate
+    if current_database != expected_target:
+        raise TelemetryVerifyError("connected database does not match target")  # pragma: no mutate
     cursor.execute("SELECT CURRENT_ROLE()")
-    if _first_value(cursor.fetchone(), "CURRENT_ROLE()") != EXPECTED_ROLE:
-        raise TelemetryVerifyError("connected role is not ROASTPILOT_AGENT")
+    current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
+    if current_role != EXPECTED_ROLE:
+        raise TelemetryVerifyError("connected role is not ROASTPILOT_AGENT")  # pragma: no mutate
 
     cursor.execute(
         "SELECT COUNT(*) FROM app.cloud_roasts "
@@ -243,29 +250,29 @@ def verify_live_load(
         ),
     )
     if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier roast keys are already owned")
+        raise TelemetryVerifyError("telemetry verifier roast keys are already owned")  # pragma: no mutate
     cursor.execute(
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
         (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID),
     )
     if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier row keys are already owned")
+        raise TelemetryVerifyError("telemetry verifier row keys are already owned")  # pragma: no mutate
     cursor.execute(
         "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
         (TEST_ROAST_ID,),
     )
     if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier artifact key is already owned")
+        raise TelemetryVerifyError("telemetry verifier artifact key is already owned")  # pragma: no mutate
     cursor.execute(
         "SELECT COUNT(*) FROM app.reference_roast_summaries "
         "WHERE bean_origin = %s AND roast_level = %s",
         (BEAN_ORIGIN, ROAST_LEVEL),
     )
     if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier summary key is already owned")
+        raise TelemetryVerifyError("telemetry verifier summary key is already owned")  # pragma: no mutate
     cursor.execute(f"LIST @app.roast_artifacts/{TEST_RUN_ID}/")
     if cursor.fetchall():
-        raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")
+        raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")  # pragma: no mutate
 
     body_error: TelemetryVerifyError | None = None
     try:
@@ -286,7 +293,7 @@ def verify_live_load(
             (MISSING_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 0:
-            raise TelemetryVerifyError("missing-roast telemetry load inserted rows")
+            raise TelemetryVerifyError("missing-roast telemetry load inserted rows")  # pragma: no mutate
 
         cursor.execute(
             "INSERT INTO app.cloud_roasts "
@@ -325,13 +332,13 @@ def verify_live_load(
             (TEST_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 0:
-            raise TelemetryVerifyError("opt-out telemetry load inserted rows")
+            raise TelemetryVerifyError("opt-out telemetry load inserted rows")  # pragma: no mutate
         cursor.execute(
             "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
             (SENTINEL_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 1:
-            raise TelemetryVerifyError("opt-out telemetry load changed the sentinel row")
+            raise TelemetryVerifyError("opt-out telemetry load changed the sentinel row")  # pragma: no mutate
 
         _expect_sql_error(
             cursor,
@@ -345,7 +352,7 @@ def verify_live_load(
             (TEST_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 0:
-            raise TelemetryVerifyError("rejected opt-out manifest inserted artifact rows")
+            raise TelemetryVerifyError("rejected opt-out manifest inserted artifact rows")  # pragma: no mutate
 
         cursor.execute(
             "CALL app.upsert_roast(%s, %s)",
@@ -357,7 +364,7 @@ def verify_live_load(
             (TEST_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 0:
-            raise TelemetryVerifyError("empty opt-out manifest left artifact rows")
+            raise TelemetryVerifyError("empty opt-out manifest left artifact rows")  # pragma: no mutate
 
         after_opt_out = _summary_row(cursor)
         if (
@@ -365,9 +372,7 @@ def verify_live_load(
             or after_opt_out[1] != 0
             or any(value is not None for value in after_opt_out[2:])
         ):
-            raise TelemetryVerifyError(
-                "opt-out roast contributed to the reference summary"
-            )
+            raise TelemetryVerifyError("opt-out roast contributed to the reference summary")  # pragma: no mutate
 
         cursor.execute(
             "UPDATE app.cloud_roasts SET contributed_to_learning = TRUE "
@@ -378,7 +383,7 @@ def verify_live_load(
             "CALL app.load_roast_telemetry(%s, %s)",
             (TEST_RUN_ID, TEST_ROAST_ID),
         )
-        loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")
+        loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")  # pragma: no mutate
         cursor.execute(
             f"SELECT {', '.join(SELECT_COLUMNS)} FROM app.roast_telemetry "
             "WHERE roast_id = %s ORDER BY elapsed_s",
@@ -388,14 +393,14 @@ def verify_live_load(
         if actual != expected:
             raise TelemetryVerifyError("loaded telemetry does not match fixture expectation")
         if str(loaded) != str(len(expected)):
-            raise TelemetryVerifyError("procedure row count does not match fixture expectation")
+            raise TelemetryVerifyError("procedure row count does not match fixture expectation")  # pragma: no mutate
 
         cursor.execute(
             "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
             (SENTINEL_ROAST_ID,),
         )
         if _count(cursor.fetchone()) != 1:
-            raise TelemetryVerifyError("opt-in telemetry load changed the sentinel row")
+            raise TelemetryVerifyError("opt-in telemetry load changed the sentinel row")  # pragma: no mutate
 
         # Trigger the owner-rights recompute through the only agent-callable
         # write path; ROASTPILOT_AGENT has no direct USAGE on the recompute proc.
@@ -406,9 +411,9 @@ def verify_live_load(
         cursor.fetchone()
         after_opt_in = _summary_row(cursor)
         if after_opt_in[0] != 1 or after_opt_in == after_opt_out:
-            raise TelemetryVerifyError("opt-in roast did not move the reference summary")
+            raise TelemetryVerifyError("opt-in roast did not move the reference summary")  # pragma: no mutate
         if not any(value is not None for value in after_opt_in[3:]):
-            raise TelemetryVerifyError("opt-in roast did not populate summary averages")
+            raise TelemetryVerifyError("opt-in roast did not populate summary averages")  # pragma: no mutate
 
         # This agent-role verifier deliberately does not read
         # app.data_quality_violations, which is outside the exact agent surface.
@@ -420,7 +425,7 @@ def verify_live_load(
         if isinstance(exc, TelemetryVerifyError):
             body_error = exc
             raise
-        body_error = TelemetryVerifyError("live verification body failed")
+        body_error = TelemetryVerifyError("live verification body failed")  # pragma: no mutate
         raise body_error from exc
     finally:
         cleanup_errors: list[TelemetryVerifyError] = []
@@ -462,7 +467,7 @@ def verify_live_load(
                     cursor.execute(command, params)
             except BaseException as exc:
                 cleanup_error = TelemetryVerifyError(f"{step} failed")
-                cleanup_error.__cause__ = exc
+                cleanup_error.__cause__ = exc  # pragma: no mutate
                 cleanup_errors.append(cleanup_error)
 
         if cleanup_errors:
@@ -489,11 +494,11 @@ def _attach_cleanup_failures(
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise TelemetryVerifyError(f"missing required environment variable: {name}")
+        raise TelemetryVerifyError(f"missing required environment variable: {name}")  # pragma: no mutate
     return value
 
 
-def _connect(target: str) -> Connection:  # pragma: no cover - real operator boundary
+def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate block - real operator boundary
     import snowflake.connector
     from assert_dev_ci_grants import load_private_key_der
 
@@ -521,7 +526,7 @@ def _print_failure(failure: TelemetryVerifyError) -> None:
         print(cleanup_failure, file=sys.stderr)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block - CLI wrapper
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)
@@ -559,5 +564,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

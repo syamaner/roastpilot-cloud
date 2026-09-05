@@ -149,6 +149,21 @@ def test_happy_path_full_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fetches == [(CANNED_URL, presigned_url_verify_live.FETCH_TIMEOUT_SECONDS)]
 
 
+def test_required_env_accepts_nonempty_and_rejects_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRESIGNED_VERIFY_TEST_ENV", "present")
+    assert (
+        presigned_url_verify_live._required_env("PRESIGNED_VERIFY_TEST_ENV") == "present"
+    )
+    monkeypatch.delenv("PRESIGNED_VERIFY_TEST_ENV")
+    with pytest.raises(
+        presigned_url_verify_live.PresignedUrlVerifyError,
+        match="^missing required environment variable: PRESIGNED_VERIFY_TEST_ENV$",
+    ):
+        presigned_url_verify_live._required_env("PRESIGNED_VERIFY_TEST_ENV")
+
+
 def test_target_rejected_before_any_cursor_call() -> None:
     connection = FakeConnection()
 
