@@ -80,13 +80,18 @@ live verifier [#451](https://github.com/syamaner/roastpilot-cloud/pull/451) (squ
 ([run 33930595786](https://github.com/syamaner/roastpilot-cloud/actions/runs/33930595786),
 evidence `verified upsert_roast rejects raw IP (v4/v6) and Fahrenheit (°F/℉) in guarded
 free text (#431)`); the connector Pydantic mirror is deferred cross-repo, consumer-first
-(**D-431-C**). Remaining C3: the offline defects **#430** (**D-430-A SUSPENDED**) and
-**#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures hidden from
-`str(exc)`; still open), **#341** (gated by **D-341-B**), and **#446**'s remaining
-Option B / artifacts scope. Where a clause in the
+(**D-431-C**). **#435** (telemetry-verifier cleanup-evidence gap — `add_note` failures
+hidden from `str(exc)`) is **CLOSED** — merged via
+[#453](https://github.com/syamaner/roastpilot-cloud/pull/453) (squash `5025290`): the
+D-417-E cleanup-reporting shape ported to both live verifiers (sanitised static step
+messages, a single `_print_failure` channel on both the body-failed and body-succeeded
+paths, sanitised `connection.close()`), with the presigned verifier folded as Unit 2
+(**D-435-A**). Remaining C3: the offline defect **#430** (**D-430-A SUSPENDED**),
+**#341** (gated by **D-341-B**), and **#446**'s remaining Option B / artifacts scope.
+Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L267) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L271) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
@@ -300,7 +305,21 @@ which renders only in traceback formatting while its `main()` prints `str(exc)`.
 The scope is narrower than "every cleanup failure": when the body SUCCEEDS the
 first cleanup error is raised directly and is printed. What is invisible is every
 cleanup failure accompanying a body failure, and every failure after the first
-when the body succeeded.
+when the body succeeded. **CLOSED 5 Sep** — merged via
+[#453](https://github.com/syamaner/roastpilot-cloud/pull/453) (squash `5025290`):
+ported the D-417-E shape (a `cleanup_failures` list, static step-named messages, a
+single `_print_failure` channel through `main()` on both paths, an outer body wrap, and
+sanitised `connection.close()` handling), with the presigned verifier folded as Unit 2
+(**D-435-A**, class sweep; its raw-chain `traceback` printer removed). **D-435-B**
+records the two pre-existing `pyright` `reportReturnType` errors at the untouched
+`_connect` as accept-and-document (unchanged by the diff; CI does not run pyright). Two
+pre-open fold rounds — the executing `codex review` caught a `connection.close()`
+evidence-drop P1 the five-lens read-only board missed, because the flaw sat in the
+contract's own `main()` pseudocode — and zero post-open rounds. Two pre-existing
+residuals are documented on the issue as recommended follow-ups: `_connect` called
+outside `main()`'s try (a connect-failure raw-traceback leak the reference verifier
+already handles), and the verifier modules being absent from `only_mutate` / the CI
+`--cov` list.
 
 **Durable #416 lesson:** three of its five fold rounds traced to one contract
 omission: it specified the field mapping exhaustively but never the external
