@@ -80,6 +80,10 @@ class Connection(Protocol):
 class TelemetryVerifyError(RuntimeError):
     """Raised when live telemetry differs from the fixture-derived contract."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.cleanup_failures: list[str] = []
+
 
 def _validated_fixture_uri(fixture_path: Path) -> str:
     """Return a closed, quote-safe URI for the repository fixture tree."""
@@ -263,7 +267,7 @@ def verify_live_load(
     if cursor.fetchall():
         raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")
 
-    body_error: BaseException | None = None
+    body_error: TelemetryVerifyError | None = None
     try:
         cursor.execute(
             f"PUT '{fixture_uri}' "
@@ -413,50 +417,73 @@ def verify_live_load(
         # live zero-count assertion.
         return len(actual)
     except BaseException as exc:
-        body_error = exc
-        raise
+        if isinstance(exc, TelemetryVerifyError):
+            body_error = exc
+            raise
+        body_error = TelemetryVerifyError("live verification body failed")
+        raise body_error from exc
     finally:
-        cleanup_errors: list[BaseException] = []
-        cleanup_statements: tuple[tuple[str, tuple[object, ...] | None], ...] = (
+        cleanup_errors: list[TelemetryVerifyError] = []
+        cleanup_statements: tuple[
+            tuple[str, tuple[object, ...] | None, str], ...
+        ] = (
             (
                 "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
                 (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID),
+                "telemetry rows cleanup",
             ),
             (
                 "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
                 (TEST_ROAST_ID,),
+                "artifact rows cleanup",
             ),
             (
                 "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
                 (TEST_ROAST_ID, TEST_RUN_ID),
+                "cloud_roasts cleanup",
             ),
             (
                 "DELETE FROM app.reference_roast_summaries "
                 "WHERE bean_origin = %s AND roast_level = %s",
                 (BEAN_ORIGIN, ROAST_LEVEL),
+                "reference summary cleanup",
             ),
-            (f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/", None),
+            (
+                f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
+                None,
+                "stage REMOVE cleanup",
+            ),
         )
-        for command, params in cleanup_statements:
+        for command, params, step in cleanup_statements:
             try:
                 if params is None:
                     cursor.execute(command)
                 else:
                     cursor.execute(command, params)
             except BaseException as exc:
-                cleanup_errors.append(exc)
+                cleanup_error = TelemetryVerifyError(f"{step} failed")
+                cleanup_error.__cause__ = exc
+                cleanup_errors.append(cleanup_error)
 
         if cleanup_errors:
             if body_error is not None:
-                for cleanup_error in cleanup_errors:
-                    body_error.add_note(f"cleanup failed: {cleanup_error!r}")
+                _attach_cleanup_failures(body_error, cleanup_errors)
             else:
-                primary_cleanup_error = cleanup_errors[0]
-                for cleanup_error in cleanup_errors[1:]:
-                    primary_cleanup_error.add_note(
-                        f"additional cleanup failure: {cleanup_error!r}"
-                    )
-                raise primary_cleanup_error
+                cleanup_failure = TelemetryVerifyError(
+                    "telemetry verification cleanup failed"
+                )
+                _attach_cleanup_failures(cleanup_failure, cleanup_errors)
+                raise cleanup_failure
+
+
+def _attach_cleanup_failures(
+    failure: TelemetryVerifyError,
+    cleanup_errors: Sequence[TelemetryVerifyError],
+) -> None:
+    for cleanup_error in cleanup_errors:
+        message = f"cleanup failed for run id {TEST_RUN_ID}: {cleanup_error}"
+        failure.cleanup_failures.append(message)
+        failure.add_note(message)
 
 
 def _required_env(name: str) -> str:
@@ -488,18 +515,37 @@ def _connect(target: str) -> Connection:  # pragma: no cover - real operator bou
     )
 
 
+def _print_failure(failure: TelemetryVerifyError) -> None:
+    print(f"telemetry verification failed: {failure}", file=sys.stderr)
+    for cleanup_failure in failure.cleanup_failures:
+        print(cleanup_failure, file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)
     connection = _connect(args.target)
+    failure: TelemetryVerifyError | None = None
+    count = 0
     try:
         count = verify_live_load(connection, FIXTURE_PATH, args.target)
+    except TelemetryVerifyError as exc:
+        failure = exc
     except Exception as exc:
-        print(f"telemetry verification failed: {exc}", file=sys.stderr)
-        return 1
-    finally:
+        failure = TelemetryVerifyError("telemetry verification failed")
+        failure.__cause__ = exc
+    try:
         connection.close()
+    except BaseException as exc:
+        close_error = TelemetryVerifyError("Snowflake connection close failed")
+        close_error.__cause__ = exc
+        if failure is None:
+            failure = TelemetryVerifyError("telemetry verification cleanup failed")
+        _attach_cleanup_failures(failure, (close_error,))
+    if failure is not None:
+        _print_failure(failure)
+        return 1
     print(f"verified {count} telemetry rows in {args.target}")
     return 0
 

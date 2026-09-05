@@ -38,12 +38,14 @@ class FakeCursor:
         role: str = "ROASTPILOT_AGENT",
         presigned_url: object = CANNED_URL,
         fail_on: str | None = None,
+        cleanup_error_text: str = "scripted presigned URL verification failure",
         list_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self.database = database
         self.role = role
         self.presigned_url = presigned_url
         self.fail_on = fail_on
+        self.cleanup_error_text = cleanup_error_text
         self.list_rows = [] if list_rows is None else list_rows
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
 
@@ -51,7 +53,7 @@ class FakeCursor:
         normalized = tuple(params) if params is not None else None
         self.executed.append((command, normalized))
         if self.fail_on is not None and command.startswith(self.fail_on):
-            raise RuntimeError("scripted presigned URL verification failure")
+            raise RuntimeError(self.cleanup_error_text)
         return self
 
     def fetchone(self):
@@ -72,8 +74,14 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, **cursor_options: object) -> None:
+    def __init__(
+        self,
+        *,
+        close_error_text: str | None = None,
+        **cursor_options: object,
+    ) -> None:
         self.fake_cursor = FakeCursor(**cursor_options)
+        self.close_error_text = close_error_text
         self.closed = False
 
     def cursor(self):
@@ -81,6 +89,8 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error_text is not None:
+            raise RuntimeError(self.close_error_text)
 
 
 def _commands(connection: FakeConnection) -> list[str]:
@@ -382,8 +392,8 @@ def test_execute_failure_propagates_and_cleanup_is_verified(fail_on: str) -> Non
     connection = FakeConnection(fail_on=fail_on)
 
     with pytest.raises(
-        RuntimeError,
-        match="scripted presigned URL verification failure",
+        presigned_url_verify_live.PresignedUrlVerifyError,
+        match="live verification body failed",
     ):
         presigned_url_verify_live.verify_live_presigned(
             connection,
@@ -407,31 +417,43 @@ def test_execute_failure_propagates_and_cleanup_is_verified(fail_on: str) -> Non
 
 def test_body_error_survives_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
         presigned_url_verify_live.urllib.request,
         "urlopen",
         lambda _url, timeout: FakeResponse(b"not the fixture"),
     )
-    connection = FakeConnection(fail_on="REMOVE")
+    connection = FakeConnection(
+        fail_on="REMOVE",
+        cleanup_error_text=(
+            "connect failed for account "
+            "ab12345.eu-west-1.snowflakecomputing.com at /Users/op/.snowflake/key.p8"
+        ),
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
 
-    with pytest.raises(
-        presigned_url_verify_live.PresignedUrlVerifyError,
-        match="bytes do not match",
-    ) as raised:
-        presigned_url_verify_live.verify_live_presigned(
-            connection,
-            presigned_url_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
-        )
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
 
-    assert raised.value.__notes__ == [
-        "cleanup failed: RuntimeError('scripted presigned URL verification failure')"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        (
+            "presigned URL verification failed: presigned URL bytes do not match the "
+            "uploaded fixture"
+        ),
+        f"cleanup failed for run id {TEST_RUN_ID}: stage REMOVE cleanup failed",
     ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
 
 
 def test_cleanup_error_surfaces_when_body_succeeds(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
         presigned_url_verify_live.urllib.request,
@@ -440,21 +462,139 @@ def test_cleanup_error_surfaces_when_body_succeeds(
             presigned_url_verify_live.FIXTURE_PATH.read_bytes()
         ),
     )
-    connection = FakeConnection(fail_on="REMOVE")
+    connection = FakeConnection(
+        fail_on="REMOVE",
+        cleanup_error_text=(
+            "connect failed for account "
+            "ab12345.eu-west-1.snowflakecomputing.com at /Users/op/.snowflake/key.p8"
+        ),
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
 
-    with pytest.raises(
-        RuntimeError,
-        match="scripted presigned URL verification failure",
-    ):
-        presigned_url_verify_live.verify_live_presigned(
-            connection,
-            presigned_url_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "presigned URL verification failed: presigned URL verification cleanup failed",
+        f"cleanup failed for run id {TEST_RUN_ID}: stage REMOVE cleanup failed",
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
+
+
+def test_main_surfaces_sanitised_close_failure_after_body_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        presigned_url_verify_live.urllib.request,
+        "urlopen",
+        lambda _url, timeout: FakeResponse(
+            presigned_url_verify_live.FIXTURE_PATH.read_bytes()
+        ),
+    )
+    connection = FakeConnection(
+        close_error_text=(
+            "close failed at ab12345.eu-west-1.snowflakecomputing.com "
+            "/Users/op/key.p8"
         )
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
+
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "presigned URL verification failed: presigned URL verification cleanup failed",
+        "cleanup failed: Snowflake connection close failed",
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
+
+
+def test_main_preserves_body_and_cleanup_evidence_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        presigned_url_verify_live.urllib.request,
+        "urlopen",
+        lambda _url, timeout: FakeResponse(b"not the fixture"),
+    )
+    connection = FakeConnection(
+        fail_on="REMOVE",
+        cleanup_error_text="scripted cleanup failure",
+        close_error_text=(
+            "close failed at ab12345.eu-west-1.snowflakecomputing.com "
+            "/Users/op/key.p8"
+        ),
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
+
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        (
+            "presigned URL verification failed: presigned URL bytes do not match the "
+            "uploaded fixture"
+        ),
+        f"cleanup failed for run id {TEST_RUN_ID}: stage REMOVE cleanup failed",
+        "cleanup failed: Snowflake connection close failed",
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
+    assert connection.closed is True
+
+
+def test_list_cleanup_failure_is_sanitised(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        presigned_url_verify_live.urllib.request,
+        "urlopen",
+        lambda _url, timeout: FakeResponse(
+            presigned_url_verify_live.FIXTURE_PATH.read_bytes()
+        ),
+    )
+    connection = FakeConnection(
+        fail_on="LIST",
+        cleanup_error_text="private host snowflakecomputing.com under /Users/op",
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
+
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "presigned URL verification failed: presigned URL verification cleanup failed",
+        (
+            f"cleanup failed for run id {TEST_RUN_ID}: "
+            "post-REMOVE LIST cleanup failed"
+        ),
+    ]
+    assert "snowflakecomputing.com" not in captured.err
+    assert "/Users/op" not in captured.err
 
 
 def test_residual_stage_rows_fail_closed_with_run_id(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
         presigned_url_verify_live.urllib.request,
@@ -464,25 +604,31 @@ def test_residual_stage_rows_fail_closed_with_run_id(
         ),
     )
     connection = FakeConnection(list_rows=[(f"stage/{TEST_RUN_ID}/roast.jsonl",)])
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
 
-    with pytest.raises(
-        presigned_url_verify_live.PresignedUrlVerifyError,
-        match=rf"run id {TEST_RUN_ID}: 1 residual object",
-    ):
-        presigned_url_verify_live.verify_live_presigned(
-            connection,
-            presigned_url_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
-        )
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
 
     assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
         f"LIST @app.roast_artifacts/{TEST_RUN_ID}/",
     ]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "presigned URL verification failed: presigned URL verification cleanup failed",
+        (
+            f"cleanup failed for run id {TEST_RUN_ID}: presigned URL cleanup "
+            f"verification failed for run id {TEST_RUN_ID}: 1 residual object(s)"
+        ),
+    ]
+    assert connection.closed is True
 
 
 def test_body_error_survives_residual_cleanup_verification_failure(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
         presigned_url_verify_live.urllib.request,
@@ -490,22 +636,28 @@ def test_body_error_survives_residual_cleanup_verification_failure(
         lambda _url, timeout: FakeResponse(b"not the fixture"),
     )
     connection = FakeConnection(list_rows=[(f"stage/{TEST_RUN_ID}/roast.jsonl",)])
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
 
-    with pytest.raises(
-        presigned_url_verify_live.PresignedUrlVerifyError,
-        match="bytes do not match",
-    ) as raised:
-        presigned_url_verify_live.verify_live_presigned(
-            connection,
-            presigned_url_verify_live.FIXTURE_PATH,
-            "ROASTPILOT_DEV",
-        )
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
 
-    assert len(raised.value.__notes__) == 1
-    assert f"run id {TEST_RUN_ID}: 1 residual object" in raised.value.__notes__[0]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        (
+            "presigned URL verification failed: presigned URL bytes do not match the "
+            "uploaded fixture"
+        ),
+        (
+            f"cleanup failed for run id {TEST_RUN_ID}: presigned URL cleanup "
+            f"verification failed for run id {TEST_RUN_ID}: 1 residual object(s)"
+        ),
+    ]
+    assert connection.closed is True
 
 
-def test_main_prints_chained_cause(
+def test_main_does_not_leak_chained_cause(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -513,8 +665,8 @@ def test_main_prints_chained_cause(
 
     def failing_verify(_connection, _fixture_path, _target) -> int:
         try:
-            raise OSError("underlying fetch cause")
-        except OSError as exc:
+            raise ValueError("private hostname snowflakecomputing.com")
+        except ValueError as exc:
             raise presigned_url_verify_live.PresignedUrlVerifyError(
                 "outer verification failure"
             ) from exc
@@ -531,9 +683,39 @@ def test_main_prints_chained_cause(
     assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "outer verification failure" in captured.err
-    assert "underlying fetch cause" in captured.err
-    assert "direct cause" in captured.err
+    assert captured.err == (
+        "presigned URL verification failed: outer verification failure\n"
+    )
+    assert "snowflakecomputing.com" not in captured.err
+    assert connection.closed is True
+
+
+def test_main_sanitises_an_unexpected_raw_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _fixture_path, _target) -> int:
+        raise OSError("underlying fetch cause at /Users/op/key.p8")
+
+    monkeypatch.setattr(
+        presigned_url_verify_live, "_connect", lambda _target: connection
+    )
+    monkeypatch.setattr(
+        presigned_url_verify_live,
+        "verify_live_presigned",
+        failing_verify,
+    )
+
+    assert presigned_url_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "presigned URL verification failed: presigned URL verification failed\n"
+    )
+    assert "underlying fetch cause" not in captured.err
+    assert "/Users/op" not in captured.err
     assert connection.closed is True
 
 
@@ -590,6 +772,8 @@ def test_main_connects_verifies_and_closes(
         )
     ]
     assert connection.closed is True
-    assert capsys.readouterr().out == (
+    captured = capsys.readouterr()
+    assert captured.out == (
         "verified 123 presigned URL bytes in ROASTPILOT_DEV\n"
     )
+    assert captured.err == ""
