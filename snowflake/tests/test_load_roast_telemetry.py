@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
-from telemetry_expectation_oracle import map_source_row, fixture_expected_rows
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from telemetry_expectation_oracle import map_source_row, fixture_expected_rows  # noqa: E402
 
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
