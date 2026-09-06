@@ -86,9 +86,10 @@ hidden from `str(exc)`) is **CLOSED** — merged via
 D-417-E cleanup-reporting shape ported to both live verifiers (sanitised static step
 messages, a single `_print_failure` channel on both the body-failed and body-succeeded
 paths, sanitised `connection.close()`), with the presigned verifier folded as Unit 2
-(**D-435-A**). Remaining C3: the offline defect **#430** (**D-430-A SUSPENDED**),
-**#341** (gated by **D-341-B**), **#446**'s remaining Option B / artifacts scope, and
-**#458** (two mutation-scope completeness follow-ups carried over from #455 PR-2).
+(**D-435-A**). **#458** (two mutation-scope completeness follow-ups carried over from
+#455 PR-2) is **CLOSED** (PR #461, squash `0a0ab58`). Remaining C3: the offline defect
+**#430** (**D-430-A SUSPENDED**), **#341** (gated by **D-341-B**), and **#446**'s
+remaining Option B / artifacts scope.
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
@@ -354,8 +355,19 @@ decision **D-VH-1** (PR-1 unconditional, PR-2 as specced, PR-3 measure-then-deci
   clean, `pr-triage` MERGEABLE.
 
 Both #435 residuals are now closed;
-[#458](https://github.com/syamaner/roastpilot-cloud/issues/458) tracks the two PR-2
-mutation-scope completeness follow-ups.
+[#458](https://github.com/syamaner/roastpilot-cloud/issues/458) (the two PR-2
+mutation-scope completeness follow-ups) is **CLOSED 6 Sep** via
+[#461](https://github.com/syamaner/roastpilot-cloud/pull/461) (squash `0a0ab58`): the
+telemetry expectation oracle (`map_source_row`, `fixture_expected_rows`) was extracted
+verbatim from the test file into a new source module, the dynamic-exec `_load_test_helper`
+removed, and the module added to `only_mutate` and the CI `--cov` list (baseline ratcheted
+to killed 3343 / total 3546, survived unchanged 203, zero oracle survivors). Finding A
+(splitting the six sibling `_first_value` label pragmas) was **reverted** per **D-458-A**
+after the draft-first CI mutmut run proved those sites carry no killable call mutant — only
+the equivalent `label→None`, unlike line 101's real literals — so the split gave no
+mutation-coverage benefit. `factory-security-reviewer` CONFIRMED-SOUND twice, the local
+`codex review` caught a `-P` collection-order defect the read-only lenses missed, connector
+clean, `pr-triage` MERGEABLE, zero post-open rounds.
 
 **Durable #416 lesson:** three of its five fold rounds traced to one contract
 omission: it specified the field mapping exhaustively but never the external
