@@ -2038,3 +2038,173 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         ROAST_ID,
         upsert_roast_verify_live.TEST_RUN_ID,
     )
+
+
+def test_first_value_prefers_exact_mapping_key() -> None:
+    row = {"id": "folded value", "ID": ROAST_ID}
+    assert upsert_roast_verify_live._first_value(row, "ID") == ROAST_ID
+
+
+@pytest.mark.parametrize("row", [42, (), [], "text", b"bytes"])
+def test_first_value_returns_none_without_a_row_value(row: object) -> None:
+    assert upsert_roast_verify_live._first_value(row, "ID") is None
+
+
+@pytest.mark.parametrize("method", ["execute", "fetchone", "fetchall"])
+def test_cursor_helpers_preserve_typed_error_identity(
+    monkeypatch: pytest.MonkeyPatch, method: str,
+) -> None:
+    cursor = FakeCursor()
+    failure = upsert_roast_verify_live.UpsertRoastVerifyError("typed cursor failure")
+
+    def fail(*_args: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(cursor, method, fail)
+    helper = getattr(upsert_roast_verify_live, f"_{method}")
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^typed cursor failure$",
+    ) as raised:
+        helper(cursor, "SELECT CURRENT_DATABASE()", None, "cursor read")
+    assert raised.value is failure
+    assert type(raised.value) is upsert_roast_verify_live.UpsertRoastVerifyError
+
+
+@pytest.mark.parametrize("method", ["fetchone", "fetchall"])
+def test_fetch_helpers_wrap_base_exception(
+    monkeypatch: pytest.MonkeyPatch, method: str,
+) -> None:
+    cursor = FakeCursor()
+    failure = BaseException(RAW_PRIVATE_PATH)
+
+    def fail() -> None:
+        raise failure
+
+    monkeypatch.setattr(cursor, method, fail)
+    helper = getattr(upsert_roast_verify_live, f"_{method}")
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^cursor read failed$",
+    ) as raised:
+        helper(cursor, "SELECT CURRENT_DATABASE()", None, "cursor read")
+    assert raised.value.__cause__ is failure
+    assert cursor.executed == [("SELECT CURRENT_DATABASE()", None)]
+
+
+def test_encoded_payload_wraps_unencodable_value() -> None:
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^payload encoding failed$",
+    ) as raised:
+        upsert_roast_verify_live._encoded_payload({"x": object()})
+    assert isinstance(raised.value.__cause__, TypeError)
+
+
+def test_preflight_preserves_typed_cursor_setup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection()
+    failure = upsert_roast_verify_live.UpsertRoastVerifyError("typed setup failure")
+
+    def fail() -> None:
+        raise failure
+
+    monkeypatch.setattr(connection, "cursor", fail)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^typed setup failure$",
+    ) as raised:
+        upsert_roast_verify_live._preflight(connection, "ROASTPILOT_DEV")
+    assert raised.value is failure
+    assert connection.fake_cursor.executed == []
+
+
+def test_final_replay_rejects_noncomparable_first_call_timestamp() -> None:
+    connection = FakeConnection()
+    cursor = upsert_roast_verify_live._preflight(connection, "ROASTPILOT_DEV")
+    payload, first, owned_roast_id, baseline, previous_updated_at = (
+        upsert_roast_verify_live._verify_replay_idempotency(cursor)
+    )
+    upsert_roast_verify_live._verify_artifact_manifest(cursor, owned_roast_id)
+    preserved_state, previous_updated_at = (
+        upsert_roast_verify_live._verify_preserved_columns(
+            cursor, payload, first, baseline, previous_updated_at, owned_roast_id,
+        )
+    )
+    # Immediate-predecessor comparisons stay numeric; only the final comparison
+    # against the first-call timestamp receives a non-comparable object.
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^final replay did not advance updated_at beyond the first call$",
+    ):
+        upsert_roast_verify_live._verify_telemetry_purge_scope(
+            cursor, payload, first, owned_roast_id, preserved_state,
+            previous_updated_at, object(),
+        )
+    assert connection.fake_cursor.opted_out is True
+
+
+def test_cleanup_uniqueness_query_failure_prevents_destructive_statements() -> None:
+    cursor = FakeCursor(
+        fail_on={"SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s"},
+        failure_message=RAW_PRIVATE_PATH,
+    )
+    errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+    assert len(errors) == 1
+    expected = (
+        "cleanup roast id uniqueness revalidation failed "
+        f"[idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}; "
+        f"resolved_roast_id={ROAST_ID}]"
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=rf"^{re.escape(expected)}$",
+    ):
+        raise errors[0]
+    assert errors[0].cleanup_unsafe is True
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^cleanup roast id uniqueness query failed$",
+    ):
+        raise errors[0].__cause__
+    assert isinstance(errors[0].__cause__.__cause__, RuntimeError)
+    assert not any(
+        command.startswith("DELETE ") or command.startswith("REMOVE ")
+        for command, _params in cursor.executed
+    )
+
+
+def test_cleanup_reports_post_remove_list_failure() -> None:
+    cursor = FakeCursor(fail_on={"LIST "}, failure_message=RAW_PRIVATE_PATH)
+    errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+    assert len(errors) == 1
+    stage_prefix = f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
+    expected = f"post-REMOVE LIST cleanup [stage_prefix={stage_prefix}] failed"
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=rf"^{re.escape(expected)}$",
+    ):
+        raise errors[0]
+    assert isinstance(errors[0].__cause__, RuntimeError)
+    assert cursor.removed is True
+    assert cursor.executed[-2:] == [
+        (f"REMOVE {stage_prefix}", None),
+        (f"LIST {stage_prefix}", None),
+    ]
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_required_env_rejects_unset_or_empty_value(
+    monkeypatch: pytest.MonkeyPatch, value: str | None,
+) -> None:
+    name = "SNOWFLAKE_ACCOUNT"
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^missing required environment variable: SNOWFLAKE_ACCOUNT$",
+    ):
+        upsert_roast_verify_live._required_env(name)

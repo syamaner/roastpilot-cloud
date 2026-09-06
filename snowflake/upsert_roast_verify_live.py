@@ -860,7 +860,9 @@ def _cleanup_all(
         uniqueness_error.cleanup_unsafe = True
         cleanup_errors.append(uniqueness_error)
         return cleanup_errors
-    if resolved_roast_id is None:
+    # Statically unreachable: the identity guard above includes
+    # `or resolved_roast_id is None` and returns cleanup_errors when true.
+    if resolved_roast_id is None:  # pragma: no cover
         child_where = (
             "roast_id IN (SELECT id FROM app.cloud_roasts "
             "WHERE idempotency_key = %s)"
@@ -1140,5 +1142,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - script entry point
     raise SystemExit(main())
