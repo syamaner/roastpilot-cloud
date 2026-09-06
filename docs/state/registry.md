@@ -93,7 +93,7 @@ remaining Option B / artifacts scope.
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L271) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L278) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
