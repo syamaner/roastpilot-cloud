@@ -8,15 +8,16 @@ cleans only those keys. The fixture and all synthesized rows are de-identified.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
+
+from telemetry_expectation_oracle import fixture_expected_rows
 
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent
@@ -91,21 +92,6 @@ def _validated_fixture_uri(fixture_path: Path) -> str:
     if not resolved.is_relative_to(FIXTURES_DIR) or "'" in str(resolved):
         raise TelemetryVerifyError(f"rejected telemetry fixture path: {fixture_path}")
     return resolved.as_uri()
-
-
-def _load_test_helper() -> Callable[[Path, str], list[dict[str, object]]]:
-    """Import the fixture expectation from its path-anchored test helper."""
-    helper_path = SNOWFLAKE_DIR / "tests" / "test_load_roast_telemetry.py"
-    # The module label is a throwaway import name (inert); pragma just this
-    # literal so the load-bearing helper_path argument stays mutable.
-    helper_module_label = "telemetry_contract_helper"  # pragma: no mutate
-    spec = importlib.util.spec_from_file_location(helper_module_label, helper_path)
-    if spec is None or spec.loader is None:  # pragma: no cover; pragma: no mutate
-        raise ImportError(f"cannot load telemetry contract helper from {helper_path}")  # pragma: no mutate
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    helper = getattr(module, "fixture_expected_rows")
-    return helper
 
 
 def _first_value(row: object, label: str) -> object:
@@ -228,7 +214,7 @@ def verify_live_load(
     if UUID_PATTERN.fullmatch(MISSING_ROAST_ID) is None:
         raise TelemetryVerifyError("MISSING_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     fixture_uri = _validated_fixture_uri(fixture_path)
-    expected_dicts = _load_test_helper()(fixture_path, TEST_ROAST_ID)
+    expected_dicts = fixture_expected_rows(fixture_path, TEST_ROAST_ID)
     expected = [tuple(row[column] for column in SELECT_COLUMNS) for row in expected_dicts]
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")

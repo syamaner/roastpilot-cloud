@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from telemetry_expectation_oracle import map_source_row, fixture_expected_rows  # noqa: E402
 
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
@@ -94,29 +99,6 @@ def _insert_projection() -> tuple[list[str], list[str]]:
     expressions = [item.strip() for item in match.group("expressions").split(",")]
     expressions[0] = expressions[0].replace(ROAST_ID, "<p_roast_id>")
     return columns, expressions
-
-
-def map_source_row(row: dict[str, object], roast_id: str) -> dict[str, object] | None:
-    """Express the ratified mapping intent; this does not emulate Snowflake."""
-    if row.get("type") != "telemetry":
-        return None
-    return {
-        "roast_id": roast_id,
-        "elapsed_s": row.get("monotonic_seconds"),
-        "bean_temp_c": row.get("bean_temp_c"),
-        "env_temp_c": row.get("env_temp_c"),
-        "heat_percent": row.get("heat_level_percent"),
-        "fan_percent": row.get("fan_level_percent"),
-        "ror_c_per_min": None,
-        "raw": None,
-    }
-
-
-def fixture_expected_rows(path: Path, roast_id: str) -> list[dict[str, object]]:
-    """Derive live-verifier expectations from one real JSONL fixture."""
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    mapped = [map_source_row(row, roast_id) for row in rows]
-    return [row for row in mapped if row is not None]
 
 
 def _roast_id_guard_grammar(migration: str) -> str:

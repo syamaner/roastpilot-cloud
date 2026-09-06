@@ -84,6 +84,7 @@ only_mutate = [
     "presigned_url_verify_live.py",
     "seed_load_live.py",
     "seed_validate_live.py",
+    "telemetry_expectation_oracle.py",
     "validate_migrations.py",
 ]
 
