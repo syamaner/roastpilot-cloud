@@ -358,14 +358,17 @@ Both #435 residuals are now closed;
 [#458](https://github.com/syamaner/roastpilot-cloud/issues/458) (the two PR-2
 mutation-scope completeness follow-ups) is **CLOSED 6 Sep** via
 [#461](https://github.com/syamaner/roastpilot-cloud/pull/461) (squash `0a0ab58`): the
-telemetry expectation oracle (`map_source_row`, `fixture_expected_rows`) was extracted
-verbatim from the test file into a new source module, the dynamic-exec `_load_test_helper`
+telemetry expectation oracle was moved from the test file into a new source module
+(`map_source_row` byte-identical; `fixture_expected_rows` refactored to isolate the
+behaviourally-equivalent `read_text(encoding=...)` on its own pragma'd line, keeping
+`json.loads`/`splitlines` mutable), the dynamic-exec `_load_test_helper`
 removed, and the module added to `only_mutate` and the CI `--cov` list (baseline ratcheted
 to killed 3343 / total 3546, survived unchanged 203, zero oracle survivors). Finding A
 (splitting the six sibling `_first_value` label pragmas) was **reverted** per **D-458-A**
 after the draft-first CI mutmut run proved those sites carry no killable call mutant — only
-the equivalent `label→None`, unlike line 101's real literals — so the split gave no
-mutation-coverage benefit. `factory-security-reviewer` CONFIRMED-SOUND twice, the local
+the equivalent `label→None` (unlike the #457 split of `_load_test_helper`'s
+`spec_from_file_location(..., helper_path)`, which exposed real path-string literals; that
+helper is itself removed in #461) — so the split gave no mutation-coverage benefit. `factory-security-reviewer` CONFIRMED-SOUND twice, the local
 `codex review` caught a `-P` collection-order defect the read-only lenses missed, connector
 clean, `pr-triage` MERGEABLE, zero post-open rounds.
 
