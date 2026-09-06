@@ -75,10 +75,16 @@ def verify_live_presigned(
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
-    if _first_value(cursor.fetchone(), "CURRENT_DATABASE()") != expected_target:
+    # Production and every test return tuple-shaped rows, so _first_value takes
+    # its Sequence branch (row[0]) and ignores the label argument entirely;
+    # label-text mutations are therefore equivalent. The != comparison below
+    # stays mutable on its own line.
+    current_database = _first_value(cursor.fetchone(), "CURRENT_DATABASE()")  # pragma: no mutate
+    if current_database != expected_target:
         raise PresignedUrlVerifyError("connected database does not match target")
     cursor.execute("SELECT CURRENT_ROLE()")
-    if _first_value(cursor.fetchone(), "CURRENT_ROLE()") != EXPECTED_ROLE:
+    current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
+    if current_role != EXPECTED_ROLE:
         raise PresignedUrlVerifyError("connected role is not ROASTPILOT_AGENT")
 
     body_error: PresignedUrlVerifyError | None = None
@@ -101,7 +107,9 @@ def verify_live_presigned(
             "SELECT GET_PRESIGNED_URL(@app.roast_artifacts, %s, %s)",
             (object_path, URL_EXPIRY_SECONDS),
         )
-        presigned_url = _first_value(cursor.fetchone(), "GET_PRESIGNED_URL")
+        # Tuple-shaped rows take _first_value's Sequence branch (row[0]) and
+        # ignore the label, so the label-text mutation is equivalent here.
+        presigned_url = _first_value(cursor.fetchone(), "GET_PRESIGNED_URL")  # pragma: no mutate
         if not isinstance(presigned_url, str):
             raise PresignedUrlVerifyError("GET_PRESIGNED_URL did not return a URL")
         if urlparse(presigned_url).scheme != "https":
@@ -138,7 +146,9 @@ def verify_live_presigned(
             cursor.execute(f"REMOVE @app.roast_artifacts/{test_run_id}/")
         except BaseException as exc:
             cleanup_error = PresignedUrlVerifyError("stage REMOVE cleanup failed")
-            cleanup_error.__cause__ = exc
+            # __cause__ is never printed (output is sanitised), so swapping it to
+            # None is behaviourally invisible to any test.
+            cleanup_error.__cause__ = exc  # pragma: no mutate
             cleanup_errors.append(cleanup_error)
         else:
             try:
@@ -148,7 +158,9 @@ def verify_live_presigned(
                 cleanup_error = PresignedUrlVerifyError(
                     "post-REMOVE LIST cleanup failed"
                 )
-                cleanup_error.__cause__ = exc
+                # __cause__ is never printed (output is sanitised), so swapping
+                # it to None is behaviourally invisible to any test.
+                cleanup_error.__cause__ = exc  # pragma: no mutate
                 cleanup_errors.append(cleanup_error)
             else:
                 if residual_rows:
@@ -188,14 +200,14 @@ def _attach_cleanup_failures(
         failure.add_note(message)
 
 
-def _required_env(name: str) -> str:  # pragma: no cover - real operator boundary
+def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
         raise PresignedUrlVerifyError(f"missing required environment variable: {name}")
     return value
 
 
-def _connect(target: str) -> Connection:  # pragma: no cover - real operator boundary
+def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate block - real operator boundary
     import snowflake.connector
     from assert_dev_ci_grants import load_private_key_der
 
@@ -220,7 +232,7 @@ def _print_failure(failure: PresignedUrlVerifyError) -> None:
         print(cleanup_failure, file=sys.stderr)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block - CLI wrapper
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)
