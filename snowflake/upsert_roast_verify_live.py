@@ -1049,7 +1049,7 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate block - real operator boundary
+def _connect(target: str) -> Connection:  # pragma: no cover - real operator boundary
     try:
         import snowflake.connector
         from assert_dev_ci_grants import load_private_key_der
@@ -1095,7 +1095,7 @@ def _print_failure(failure: UpsertRoastVerifyError) -> None:
         print(cleanup_failure, file=sys.stderr)
 
 
-def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block - CLI wrapper
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=sorted(ALLOWED_TARGETS))
     args = parser.parse_args(argv)

@@ -84,7 +84,6 @@ only_mutate = [
     "presigned_url_verify_live.py",
     "seed_load_live.py",
     "seed_validate_live.py",
-    "upsert_roast_verify_live.py",
     "validate_migrations.py",
 ]
 
