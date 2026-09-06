@@ -228,8 +228,8 @@ def _patch_expected_helper(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         load_telemetry_verify_live,
-        "_load_test_helper",
-        lambda: helper,
+        "fixture_expected_rows",
+        helper,
     )
 
 
@@ -238,7 +238,7 @@ def _commands(connection: FakeConnection) -> list[str]:
 
 
 def test_real_fixture_helper_derives_session_one_first_row() -> None:
-    first_row = load_telemetry_verify_live._load_test_helper()(
+    first_row = load_telemetry_verify_live.fixture_expected_rows(
         load_telemetry_verify_live.FIXTURE_PATH,
         load_telemetry_verify_live.TEST_ROAST_ID,
     )[0]
