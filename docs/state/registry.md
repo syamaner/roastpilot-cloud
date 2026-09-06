@@ -87,7 +87,8 @@ D-417-E cleanup-reporting shape ported to both live verifiers (sanitised static 
 messages, a single `_print_failure` channel on both the body-failed and body-succeeded
 paths, sanitised `connection.close()`), with the presigned verifier folded as Unit 2
 (**D-435-A**). Remaining C3: the offline defect **#430** (**D-430-A SUSPENDED**),
-**#341** (gated by **D-341-B**), and **#446**'s remaining Option B / artifacts scope.
+**#341** (gated by **D-341-B**), **#446**'s remaining Option B / artifacts scope, and
+**#458** (two mutation-scope completeness follow-ups carried over from #455 PR-2).
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
@@ -340,13 +341,15 @@ decision **D-VH-1** (PR-1 unconditional, PR-2 as specced, PR-3 measure-then-deci
   [#458](https://github.com/syamaner/roastpilot-cloud/issues/458).
 - **PR-3 (Slice 2b)** merged via
   [#459](https://github.com/syamaner/roastpilot-cloud/pull/459) (squash `46fff83`):
-  the upsert verifier added to CI `--cov` at 100 per cent via 170 anchored tests.
-  Mutation was measured then declined per D-VH-1. The first CI mutmut pass generated
-  1462 upsert mutants with 301 survived and zero no_tests, a benign
+  the upsert verifier added to CI `--cov` via 170 lines of anchored tests (the
+  module reached 100 per cent coverage as observed at merge time; the enforced CI
+  control is `--cov-fail-under=90` on aggregate coverage, not a per-file 100 per cent
+  gate). Mutation was measured then declined per D-VH-1. The first CI mutmut pass
+  generated 1462 upsert mutants with 301 survived and zero no_tests, a benign
   diagnostic-string / SQL-literal tail on a non-production test instrument whose
   guard behaviours are pinned by behavioural tests, so upsert stays out of
   `only_mutate` (the mutation run reproduces 3320 / 3523, baseline unchanged) while
-  the 100 per cent coverage gate carries it. `factory-security-reviewer`
+  the aggregate coverage gate carries it. `factory-security-reviewer`
   CONFIRMED-SOUND twice, `qa` PASS, local `codex review` clean twice, connector
   clean, `pr-triage` MERGEABLE.
 
