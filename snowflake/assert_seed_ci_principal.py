@@ -68,6 +68,14 @@ RoleGrant = tuple[str, str, str, str]
 # check_grant_manifest.EXPECTED_MANIFEST, which defines application roles.
 # Each privilege is expanded into the exact database-qualified uppercase shape
 # returned by SHOW GRANTS.
+#
+# SELECT on the four seed tables is required, not optional: Snowflake needs
+# SELECT on the target table to evaluate a DELETE/UPDATE WHERE predicate, so
+# the seed verifier's filtered-DML teardown (its DELETEs) and arrange steps
+# (the consent-flip UPDATE) cannot run without it. This was live-revealed on
+# the first post-revoke agent-verify run (34165649434); the operator has since
+# granted SELECT on DEV, so the expected manifest must include it or the G7
+# exact-manifest audit would flag the now-"extra" live SELECT.
 _EXPECTED_SEED_ROLE_GRANTS: frozenset[RoleGrant] = frozenset(
     {
         ("USAGE", "DATABASE", "ROASTPILOT_DEV", _EXPECTED_ROLE),
@@ -111,6 +119,30 @@ _EXPECTED_SEED_ROLE_GRANTS: frozenset[RoleGrant] = frozenset(
         ),
         (
             "DELETE",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
+            _EXPECTED_ROLE,
+        ),
+        (
+            "SELECT",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+            _EXPECTED_ROLE,
+        ),
+        (
+            "SELECT",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
+            _EXPECTED_ROLE,
+        ),
+        (
+            "SELECT",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
+            _EXPECTED_ROLE,
+        ),
+        (
+            "SELECT",
             "TABLE",
             "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
             _EXPECTED_ROLE,
