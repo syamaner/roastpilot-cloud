@@ -808,6 +808,28 @@ def test_main_seed_connect_failure_closes_agent_and_is_sanitized(
     assert connection.closed is True
 
 
+def test_main_seed_connect_failure_swallows_agent_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection(
+        close_error=RuntimeError(f"agent close boom {RAW_PRIVATE_PATH}")
+    )
+    monkeypatch.setattr(
+        upsert_roast_verify_live, "_connect", lambda _target: connection
+    )
+
+    def fail_seed(_target: str) -> None:
+        raise SystemExit(RAW_PRIVATE_PATH)
+
+    monkeypatch.setattr(upsert_roast_verify_live, "connect_seed", fail_seed)
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == "upsert verification failed: Snowflake seed connection failed\n"
+    assert RAW_PRIVATE_PATH not in output
+    assert connection.closed is True
+
+
 @pytest.mark.parametrize(
     ("fail_on", "static_message"),
     [

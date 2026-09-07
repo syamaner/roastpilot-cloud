@@ -1045,6 +1045,29 @@ def test_main_seed_connect_failure_closes_agent_and_is_sanitised(
     assert connection.closed is True
 
 
+def test_main_seed_connect_failure_swallows_agent_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection(close_error_text="agent close boom /secret/keys/agent.p8")
+    monkeypatch.setattr(
+        load_telemetry_verify_live, "_connect", lambda _target: connection
+    )
+
+    def fail_seed(_target: str) -> None:
+        raise SystemExit("seed key at /secret/keys/seed.p8")
+
+    monkeypatch.setattr(load_telemetry_verify_live, "connect_seed", fail_seed)
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "telemetry verification failed: Snowflake seed connection failed\n"
+    )
+    assert "/secret/keys/seed.p8" not in captured.err
+    assert "/secret/keys/agent.p8" not in captured.err
+    assert connection.closed is True
+
+
 def test_main_key_read_failure_is_sanitised_load_telemetry(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
