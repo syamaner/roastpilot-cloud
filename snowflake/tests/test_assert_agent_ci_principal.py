@@ -90,10 +90,15 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, cursor: FakeCursor | None = None) -> None:
+    def __init__(
+        self,
+        cursor: FakeCursor | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
         self.fake_cursor = cursor or FakeCursor()
         self.cursor_argument: object | None = None
         self.closed = False
+        self.close_error = close_error
 
     def cursor(self, cursor_class: object) -> FakeCursor:
         self.cursor_argument = cursor_class
@@ -101,6 +106,8 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,6 +184,82 @@ def test_happy_path_pins_connection_and_command_order(
         "verified ROASTPILOT_AGENT_CI has exactly one ROASTPILOT_AGENT role grant "
         "and empty DEFAULT_SECONDARY_ROLES in ROASTPILOT_DEV\n"
     )
+
+
+@pytest.mark.parametrize("failing_boundary", ["key_parse", "connect"])
+def test_pre_connection_failure_is_static_and_sanitised(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_boundary: str,
+) -> None:
+    _set_required_env(monkeypatch)
+    raw_error = "secret.example ORG-ACCOUNT private-key /keys/agent.pem"
+
+    def fake_load_private_key(_pem: str, _passphrase: str | None) -> bytes:
+        if failing_boundary == "key_parse":
+            raise RuntimeError(raw_error)
+        return b"private-key-der"
+
+    def fake_connect(**_kwargs: object) -> FakeConnection:
+        if failing_boundary == "connect":
+            raise RuntimeError(raw_error)
+        pytest.fail("connect must not run after key parsing fails")
+
+    monkeypatch.setattr(
+        assert_agent_ci_principal, "load_private_key_der", fake_load_private_key
+    )
+    monkeypatch.setattr(assert_agent_ci_principal, "_connect", fake_connect)
+
+    result = assert_agent_ci_principal.main(["--target", "ROASTPILOT_DEV"])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "error: Snowflake principal audit connection or query failed\n"
+    )
+    assert "secret.example" not in captured.err
+    assert "private-key" not in captured.err
+    assert "ORG-ACCOUNT" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_query_failure_is_static_sanitised_and_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_required_env(monkeypatch)
+    raw_error = "query failed at secret.example for ORG-ACCOUNT using private-key"
+    cursor = FakeCursor()
+    original_execute = cursor.execute
+
+    def failing_execute(command: str):
+        result = original_execute(command)
+        if command == f"SHOW GRANTS TO USER {EXPECTED_USER}":
+            raise RuntimeError(raw_error)
+        return result
+
+    monkeypatch.setattr(cursor, "execute", failing_execute)
+    connection = FakeConnection(
+        cursor,
+        close_error=RuntimeError("close leaked /keys/agent.pem"),
+    )
+    _patch_boundaries(monkeypatch, connection)
+
+    result = assert_agent_ci_principal.main(["--target", "ROASTPILOT_DEV"])
+
+    assert result == 1
+    assert connection.closed is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "error: Snowflake principal audit connection or query failed\n"
+    )
+    assert "secret.example" not in captured.err
+    assert "private-key" not in captured.err
+    assert "ORG-ACCOUNT" not in captured.err
+    assert "/keys/agent.pem" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_target_is_dev_only_and_rejected_before_any_statement(
@@ -385,6 +468,54 @@ def test_wrong_current_user_fails_before_show_grants(
     )
 
 
+def test_close_failure_preserves_audit_evidence_without_leaking_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_required_env(monkeypatch)
+    cursor = FakeCursor(current_user="ROASTPILOT_AGENT_CI_LOOKALIKE")
+    connection = FakeConnection(
+        cursor,
+        close_error=RuntimeError("close failed at secret.example with private-key"),
+    )
+    _patch_boundaries(monkeypatch, connection)
+
+    result = assert_agent_ci_principal.main(["--target", "ROASTPILOT_DEV"])
+
+    assert result == 1
+    assert connection.closed is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "G1: CURRENT_USER() is 'ROASTPILOT_AGENT_CI_LOOKALIKE'; "
+        "expected 'ROASTPILOT_AGENT_CI'\n"
+    )
+    assert "secret.example" not in captured.err
+    assert "private-key" not in captured.err
+
+
+def test_close_failure_after_passing_audit_fails_without_leaking_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_required_env(monkeypatch)
+    raw_error = "raw connector failure at secret.example using /keys/agent.pem"
+    connection = FakeConnection(close_error=RuntimeError(raw_error))
+    _patch_boundaries(monkeypatch, connection)
+
+    result = assert_agent_ci_principal.main(["--target", "ROASTPILOT_DEV"])
+
+    assert result == 1
+    assert connection.closed is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: Snowflake principal audit connection close failed\n"
+    assert "verified" not in captured.out
+    assert raw_error not in captured.err
+    assert "secret.example" not in captured.err
+    assert "/keys/agent.pem" not in captured.err
+
+
 def test_missing_current_user_column_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -469,6 +600,25 @@ def test_env_user_drift_exits_before_key_load_or_connect(
     assert str(exc_info.value) == (
         "error: SNOWFLAKE_USER is 'WRONG_AGENT_CI', expected 'ROASTPILOT_AGENT_CI' "
         "-- refusing to audit a repointed agent verifier principal"
+    )
+    assert key_calls == []
+    assert connect_calls == []
+    assert connection.fake_cursor.executed == []
+
+
+def test_missing_required_env_keeps_its_specific_pre_connect_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_ACCOUNT")
+    connection = FakeConnection()
+    key_calls, connect_calls = _patch_boundaries(monkeypatch, connection)
+
+    with pytest.raises(SystemExit) as exc_info:
+        assert_agent_ci_principal.main(["--target", "ROASTPILOT_DEV"])
+
+    assert str(exc_info.value) == (
+        "error: missing required environment variable: SNOWFLAKE_ACCOUNT"
     )
     assert key_calls == []
     assert connect_calls == []

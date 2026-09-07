@@ -154,15 +154,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     _assert_drift_anchor(args.target, _EXPECTED_DATABASE, "--target")
     assert_sql_identifier_safe(user, "SNOWFLAKE_USER")
 
-    private_key = load_private_key_der(private_key_pem, passphrase)
-    connection = _connect(
-        account=account,
-        user=user,
-        role=role,
-        warehouse=warehouse,
-        database=database,
-        private_key=private_key,
-    )
+    try:
+        private_key = load_private_key_der(private_key_pem, passphrase)
+        connection = _connect(
+            account=account,
+            user=user,
+            role=role,
+            warehouse=warehouse,
+            database=database,
+            private_key=private_key,
+        )
+    except Exception:
+        print(
+            "error: Snowflake principal audit connection or query failed",
+            file=sys.stderr,
+        )
+        return 1
+
     violations: list[str] = []
     try:
         cursor = connection.cursor(snowflake.connector.DictCursor)
@@ -187,8 +195,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if secondary_roles_violation is not None:
                 violations.append(f"G6: {secondary_roles_violation}")
-    finally:
+    except Exception:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        print(
+            "error: Snowflake principal audit connection or query failed",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
         connection.close()
+    except Exception:
+        if violations:
+            for violation in violations:
+                print(violation, file=sys.stderr)
+        else:
+            print(
+                "error: Snowflake principal audit connection close failed",
+                file=sys.stderr,
+            )
+        return 1
 
     if violations:
         for violation in violations:

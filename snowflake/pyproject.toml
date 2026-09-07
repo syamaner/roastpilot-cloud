@@ -76,6 +76,7 @@ source_paths = ["."]
 only_mutate = [
     "assert_agent_ci_principal.py",
     "assert_dev_ci_grants.py",
+    "assert_seed_ci_principal.py",
     "ci_change_classifier.py",
     "ci_gate_result.py",
     "check_forbidden_grants.py",
@@ -86,6 +87,7 @@ only_mutate = [
     "seed_validate_live.py",
     "telemetry_expectation_oracle.py",
     "validate_migrations.py",
+    "verify_seed_connection.py",
 ]
 
 # Matches ci.yml's own `pytest tests/` invocation (relative to snowflake/).
