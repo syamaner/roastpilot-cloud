@@ -101,6 +101,7 @@ class FakeCursor:
         final_updated_at: object = 4,
         fail_on: set[str] | None = None,
         failure_message: str = "scripted connector failure",
+        shared_state: dict[str, bool] | None = None,
     ) -> None:
         run_id = upsert_roast_verify_live.TEST_RUN_ID
         self.database = database
@@ -156,7 +157,7 @@ class FakeCursor:
         self.telemetry_control_count = telemetry_control_count
         self.telemetry_empty_manifest_count = telemetry_empty_manifest_count
         self.telemetry_survives = telemetry_survives
-        self.sentinel_rows = sentinel_rows
+        self.sentinel_rows = sentinel_rows or 1
         self.sentinel_survives = sentinel_survives
         self.visibility_raises = visibility_raises
         self.visibility_error = visibility_error
@@ -169,6 +170,7 @@ class FakeCursor:
         self.final_updated_at = final_updated_at
         self.fail_on = set() if fail_on is None else fail_on
         self.failure_message = failure_message
+        self.shared_state = {} if shared_state is None else shared_state
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
         self.call_results: list[object] = []
         self.last_call_result: object = None
@@ -229,7 +231,7 @@ class FakeCursor:
                 self.empty_manifest_replayed = True
                 self.last_call_result = self.empty_manifest_result
             else:
-                if self.telemetry_seeded:
+                if self.shared_state.get("telemetry_seeded", False):
                     self.control_replayed = True
                 self.last_call_result = self.control_result
             self.call_results.append(self.last_call_result)
@@ -243,6 +245,7 @@ class FakeCursor:
                 upsert_roast_verify_live.OTHER_ROAST_ID,
             )
             self.telemetry_seeded = True
+            self.shared_state["telemetry_seeded"] = True
             self.sentinel_rows += 1
         elif command.startswith("REMOVE "):
             self.removed = True
@@ -348,7 +351,7 @@ class FakeCursor:
                 return (self.telemetry_empty_manifest_count,)
             if self.control_replayed:
                 return (self.telemetry_control_count,)
-            return (self.telemetry_setup_count if self.telemetry_seeded else 0,)
+            return (self.telemetry_setup_count,)
         raise AssertionError(f"unexpected fetchone after: {command}")
 
     def fetchall(self):
@@ -381,11 +384,23 @@ class FakeConnection:
         self,
         *,
         close_error: BaseException | None = None,
+        make_seed: bool = True,
+        shared_state: dict[str, bool] | None = None,
         **cursor_options: object,
     ) -> None:
-        self.fake_cursor = FakeCursor(**cursor_options)
+        state = {} if shared_state is None else shared_state
+        self.fake_cursor = FakeCursor(shared_state=state, **cursor_options)
         self.closed = False
         self.close_error = close_error
+        self.seed_connection = (
+            FakeConnection(
+                make_seed=False,
+                shared_state=state,
+                **cursor_options,
+            )
+            if make_seed
+            else None
+        )
 
     def cursor(self):
         return self.fake_cursor
@@ -400,8 +415,31 @@ def _commands(connection: FakeConnection) -> list[str]:
     return [command for command, _ in connection.fake_cursor.executed]
 
 
+def _seed_commands(connection: FakeConnection) -> list[str]:
+    assert connection.seed_connection is not None
+    return _commands(connection.seed_connection)
+
+
 def _verify(connection: FakeConnection) -> str:
-    return upsert_roast_verify_live.verify_live_upsert(connection, "ROASTPILOT_DEV")
+    assert connection.seed_connection is not None
+    return upsert_roast_verify_live.verify_live_upsert(
+        connection, connection.seed_connection, "ROASTPILOT_DEV"
+    )
+
+
+def _patch_main_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    connection: FakeConnection,
+) -> None:
+    assert connection.seed_connection is not None
+    monkeypatch.setattr(
+        upsert_roast_verify_live, "_connect", lambda _target: connection
+    )
+    monkeypatch.setattr(
+        upsert_roast_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
 
 
 def test_test_run_id_is_a_lowercase_uuid() -> None:
@@ -422,6 +460,7 @@ def test_invalid_test_run_id_rejects_before_any_statement(
     ):
         _verify(connection)
     assert connection.fake_cursor.executed == []
+    assert _seed_commands(connection) == []
 
 
 def test_cursor_setup_error_is_sanitized() -> None:
@@ -435,6 +474,7 @@ def test_cursor_setup_error_is_sanitized() -> None:
     ) as caught:
         upsert_roast_verify_live.verify_live_upsert(
             BrokenConnection(),  # type: ignore[arg-type]
+            FakeConnection(make_seed=False),
             "ROASTPILOT_DEV",
         )
     assert RAW_PRIVATE_PATH not in str(caught.value)
@@ -610,6 +650,25 @@ def test_happy_path_pins_put_calls_control_and_verified_cleanup() -> None:
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
         f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
     ]
+    assert connection.seed_connection is not None
+    seed_commands = _seed_commands(connection)
+    assert [command.split(maxsplit=2)[:2] for command in seed_commands] == [
+        ["INSERT", "INTO"],
+        ["DELETE", "FROM"],
+        ["DELETE", "FROM"],
+        ["DELETE", "FROM"],
+        ["DELETE", "FROM"],
+    ]
+    direct_dml = ("INSERT INTO app.", "UPDATE app.", "DELETE FROM app.")
+    assert not any(command.startswith(direct_dml) for command in commands)
+    assert not any(
+        command.startswith(("SELECT ", "CALL ", "LIST ", "PUT ", "REMOVE "))
+        for command in seed_commands
+    )
+    assert not any(
+        re.search(r"\bSELECT\b[\s\S]*\bFROM\b", command, re.IGNORECASE)
+        for command in seed_commands
+    )
 
 
 @pytest.mark.parametrize(
@@ -713,13 +772,11 @@ def test_main_prints_narrow_evidence_and_closes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection()
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 0
     assert connection.closed is True
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.closed is True
     output = capsys.readouterr().out
     assert "staged artifact PUT/REMOVE paths" in output
     assert "conditional and scoped opt-out telemetry purge" in output
@@ -729,6 +786,48 @@ def test_main_prints_narrow_evidence_and_closes(
         "guarded free text (#431)" in output
     )
     assert ROAST_ID in output
+
+
+def test_main_seed_connect_failure_closes_agent_and_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+    monkeypatch.setattr(
+        upsert_roast_verify_live, "_connect", lambda _target: connection
+    )
+
+    def fail_seed(_target: str) -> None:
+        raise SystemExit(RAW_PRIVATE_PATH)
+
+    monkeypatch.setattr(upsert_roast_verify_live, "connect_seed", fail_seed)
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == "upsert verification failed: Snowflake seed connection failed\n"
+    assert RAW_PRIVATE_PATH not in output
+    assert connection.closed is True
+
+
+def test_main_seed_connect_failure_swallows_agent_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection(
+        close_error=RuntimeError(f"agent close boom {RAW_PRIVATE_PATH}")
+    )
+    monkeypatch.setattr(
+        upsert_roast_verify_live, "_connect", lambda _target: connection
+    )
+
+    def fail_seed(_target: str) -> None:
+        raise SystemExit(RAW_PRIVATE_PATH)
+
+    monkeypatch.setattr(upsert_roast_verify_live, "connect_seed", fail_seed)
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == "upsert verification failed: Snowflake seed connection failed\n"
+    assert RAW_PRIVATE_PATH not in output
+    assert connection.closed is True
 
 
 @pytest.mark.parametrize(
@@ -749,11 +848,7 @@ def test_main_sanitizes_body_and_cleanup_connector_paths(
     static_message: str,
 ) -> None:
     connection = FakeConnection(fail_on=fail_on, failure_message=RAW_PRIVATE_PATH)
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert RAW_PRIVATE_PATH not in output
@@ -771,11 +866,7 @@ def test_main_reports_sanitized_connection_close_failure(
         close_error=RuntimeError(RAW_PRIVATE_PATH),
         **options,
     )
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert RAW_PRIVATE_PATH not in output
@@ -789,18 +880,33 @@ def test_main_reports_sanitized_connection_close_failure(
         assert "live verification cleanup failed" in output
 
 
+def test_main_reports_sanitized_seed_connection_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+    assert connection.seed_connection is not None
+    connection.seed_connection.close_error = RuntimeError(RAW_PRIVATE_PATH)
+    _patch_main_connections(monkeypatch, connection)
+
+    assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "Snowflake seed connection close failed" in output
+    assert RAW_PRIVATE_PATH not in output
+    assert connection.closed is True
+    assert connection.seed_connection.closed is True
+
+
 def test_main_sanitizes_generic_base_exception_fallback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection()
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
 
-    def fail_verify(_connection: object, _target: str) -> str:
+    def fail_verify(
+        _connection: object, _seed_connection: object, _target: str
+    ) -> str:
         raise KeyboardInterrupt(RAW_PRIVATE_PATH)
 
     monkeypatch.setattr(upsert_roast_verify_live, "verify_live_upsert", fail_verify)
@@ -882,7 +988,10 @@ def test_allowed_targets_are_dev_only_and_preview_is_rejected() -> None:
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match="rejected upsert target",
     ):
-        upsert_roast_verify_live.verify_live_upsert(connection, "ROASTPILOT_PREVIEW")
+        assert connection.seed_connection is not None
+        upsert_roast_verify_live.verify_live_upsert(
+            connection, connection.seed_connection, "ROASTPILOT_PREVIEW"
+        )
     assert connection.fake_cursor.executed == []
 
 
@@ -906,6 +1015,7 @@ def test_database_and_role_reject_before_write(
         "SELECT CURRENT_DATABASE()",
         "SELECT CURRENT_ROLE()",
     ][:statement_count]
+    assert _seed_commands(connection) == []
 
 
 @pytest.mark.parametrize(
@@ -988,6 +1098,7 @@ def test_each_replay_row_count_mismatch_skips_cleanup(
         command.startswith("DELETE ") or command.startswith("REMOVE ")
         for command in _commands(connection)
     )
+    assert not any(command.startswith("DELETE ") for command in _seed_commands(connection))
 
 
 @pytest.mark.parametrize(
@@ -1029,17 +1140,20 @@ def test_each_replay_artifact_mismatch_runs_cleanup(
         _verify(connection)
 
     destructive_commands = [
-        command
-        for command in _commands(connection)
-        if command.startswith("DELETE ") or command.startswith("REMOVE ")
+        command for command in _seed_commands(connection) if command.startswith("DELETE ")
     ]
-    assert len(destructive_commands) == 5
+    assert len(destructive_commands) == 4
     assert destructive_commands[0].startswith("DELETE FROM app.roast_artifacts")
-    assert destructive_commands[1].startswith("DELETE FROM app.roast_telemetry WHERE (")
+    assert destructive_commands[1] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+    )
     assert destructive_commands[2:] == [
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+    ]
+    assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
     ]
 
 
@@ -1063,17 +1177,20 @@ def test_later_stage_failures_run_full_cleanup(
         _verify(connection)
 
     destructive_commands = [
-        command
-        for command in _commands(connection)
-        if command.startswith("DELETE ") or command.startswith("REMOVE ")
+        command for command in _seed_commands(connection) if command.startswith("DELETE ")
     ]
-    assert len(destructive_commands) == 5
+    assert len(destructive_commands) == 4
+    assert _commands(connection)[-2:] == [
+        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+    ]
     assert destructive_commands[0].startswith("DELETE FROM app.roast_artifacts")
-    assert destructive_commands[1].startswith("DELETE FROM app.roast_telemetry WHERE (")
+    assert destructive_commands[1] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+    )
     assert destructive_commands[2:] == [
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
-        f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
     ]
 
 
@@ -1087,11 +1204,7 @@ def test_replay_count_mismatch_reports_every_id_and_skips_cleanup(
         ambiguous_roast_ids=matching_ids,
         mapping_rows=True,
     )
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert "identical replay changed the roast count" in output
@@ -1187,6 +1300,7 @@ def test_existing_test_run_guard_fails_before_any_write() -> None:
         command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
         for command in _commands(connection)
     )
+    assert _seed_commands(connection) == []
 
 
 def test_sentinel_owner_guard_fails_before_any_write() -> None:
@@ -1203,6 +1317,7 @@ def test_sentinel_owner_guard_fails_before_any_write() -> None:
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
     ]
+    assert _seed_commands(connection) == []
 
 
 def test_sentinel_telemetry_guard_prints_id_before_any_write(
@@ -1210,11 +1325,7 @@ def test_sentinel_telemetry_guard_prints_id_before_any_write(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection = FakeConnection(sentinel_telemetry_count=1)
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert "sentinel telemetry id is already owned" in output
@@ -1231,6 +1342,7 @@ def test_sentinel_telemetry_guard_prints_id_before_any_write(
         command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
         for command in _commands(connection)
     )
+    assert _seed_commands(connection) == []
 
 
 def test_preexisting_stage_prefix_guard_fails_before_any_write() -> None:
@@ -1379,11 +1491,7 @@ def test_owned_id_collision_reports_ids_and_skips_child_cleanup(
         before_pair=(colliding_roast_id, upsert_roast_verify_live.PUBLIC_SLUG),
         owned_roast_id_count=2,
     )
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert "is not unique" in output
@@ -1435,9 +1543,9 @@ def test_different_identical_result_carries_verified_id_to_cleanup(
     cleanup_ids: list[object | None] = []
     cleanup_all = upsert_roast_verify_live._cleanup_all
 
-    def recording_cleanup(cursor, resolved_roast_id):
+    def recording_cleanup(cursor, seed_cursor, resolved_roast_id):
         cleanup_ids.append(resolved_roast_id)
-        return cleanup_all(cursor, resolved_roast_id)
+        return cleanup_all(cursor, seed_cursor, resolved_roast_id)
 
     monkeypatch.setattr(upsert_roast_verify_live, "_cleanup_all", recording_cleanup)
     with pytest.raises(
@@ -1448,12 +1556,13 @@ def test_different_identical_result_carries_verified_id_to_cleanup(
 
     assert cleanup_ids == [ROAST_ID]
     commands = _commands(connection)
-    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in commands)
+    seed_commands = _seed_commands(connection)
+    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in seed_commands)
     assert any(
-        command.startswith("DELETE FROM app.roast_telemetry WHERE (")
-        for command in commands
+        command == "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+        for command in seed_commands
     )
-    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in commands)
+    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in seed_commands)
     assert any(command.startswith("REMOVE ") for command in commands)
 
 
@@ -1466,28 +1575,30 @@ def test_malformed_second_replay_carries_first_baseline_id_to_cleanup() -> None:
     ):
         _verify(connection)
 
+    assert connection.seed_connection is not None
     destructive_entries = [
         entry
-        for entry in connection.fake_cursor.executed
-        if entry[0].startswith("DELETE ") or entry[0].startswith("REMOVE ")
+        for entry in connection.seed_connection.fake_cursor.executed
+        if entry[0].startswith("DELETE ")
     ]
-    assert len(destructive_entries) == 5
+    assert len(destructive_entries) == 4
     assert destructive_entries[0][0].startswith("DELETE FROM app.roast_artifacts")
     assert destructive_entries[0][1] == (
         ROAST_ID,
-        upsert_roast_verify_live.TEST_RUN_ID,
     )
-    assert destructive_entries[1][0].startswith(
-        "DELETE FROM app.roast_telemetry WHERE ("
+    assert destructive_entries[1][0] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
     )
     assert destructive_entries[1][1] == (
         ROAST_ID,
-        upsert_roast_verify_live.TEST_RUN_ID,
     )
     assert [entry[0] for entry in destructive_entries[2:]] == [
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+    ]
+    assert _commands(connection)[-2:] == [
         f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
+        f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/",
     ]
 
 
@@ -1512,9 +1623,9 @@ def test_identical_replay_failure_carries_verified_id_to_cleanup(
     cleanup_ids: list[object | None] = []
     cleanup_all = upsert_roast_verify_live._cleanup_all
 
-    def recording_cleanup(cursor, resolved_roast_id):
+    def recording_cleanup(cursor, seed_cursor, resolved_roast_id):
         cleanup_ids.append(resolved_roast_id)
-        return cleanup_all(cursor, resolved_roast_id)
+        return cleanup_all(cursor, seed_cursor, resolved_roast_id)
 
     monkeypatch.setattr(upsert_roast_verify_live, "_cleanup_all", recording_cleanup)
     with pytest.raises(
@@ -1525,12 +1636,13 @@ def test_identical_replay_failure_carries_verified_id_to_cleanup(
 
     assert cleanup_ids == [ROAST_ID]
     commands = _commands(connection)
-    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in commands)
+    seed_commands = _seed_commands(connection)
+    assert any(command.startswith("DELETE FROM app.roast_artifacts") for command in seed_commands)
     assert any(
-        command.startswith("DELETE FROM app.roast_telemetry WHERE (")
-        for command in commands
+        command == "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+        for command in seed_commands
     )
-    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in commands)
+    assert any(command.startswith("DELETE FROM app.cloud_roasts") for command in seed_commands)
     assert any(command.startswith("REMOVE ") for command in commands)
 
 
@@ -1564,15 +1676,19 @@ def test_wrong_returned_id_never_reaches_destructive_cleanup_predicates() -> Non
     ) as caught:
         _verify(connection)
     assert caught.value.resolved_roast_id == wrong_returned_id
+    assert connection.seed_connection is not None
     child_deletes = [
         entry
-        for entry in connection.fake_cursor.executed
+        for entry in connection.seed_connection.fake_cursor.executed
         if entry[0].startswith("DELETE FROM app.roast_artifacts")
-        or entry[0].startswith("DELETE FROM app.roast_telemetry WHERE (")
+        or (
+            entry[0] == "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+            and entry[1] == (ROAST_ID,)
+        )
     ]
     assert [params for _command, params in child_deletes] == [
-        (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID),
-        (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID),
+        (ROAST_ID,),
+        (ROAST_ID,),
     ]
     assert all(
         wrong_returned_id not in params
@@ -1905,7 +2021,10 @@ def test_cleanup_identity_query_failure_skips_every_destructive_statement() -> N
 
 def test_cleanup_global_id_collision_skips_every_destructive_statement() -> None:
     cursor = FakeCursor(owned_roast_id_count=2)
-    cleanup_errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+    seed_cursor = FakeCursor()
+    cleanup_errors = upsert_roast_verify_live._cleanup_all(
+        cursor, seed_cursor, ROAST_ID
+    )
 
     assert len(cleanup_errors) == 1
     assert cleanup_errors[0].cleanup_unsafe is True
@@ -1924,27 +2043,28 @@ def test_cleanup_global_id_collision_skips_every_destructive_statement() -> None
 def test_cleanup_revalidates_identity_then_runs_full_sequence_in_order() -> None:
     connection = FakeConnection()
     _verify(connection)
-    assert connection.fake_cursor.executed[-8] == (
+    assert connection.fake_cursor.executed[-4] == (
         "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
         (upsert_roast_verify_live.TEST_RUN_ID,),
     )
-    assert connection.fake_cursor.executed[-7] == (
+    assert connection.fake_cursor.executed[-3] == (
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
         (ROAST_ID,),
     )
-    cleanup = connection.fake_cursor.executed[-6:]
+    assert connection.seed_connection is not None
+    cleanup = connection.seed_connection.fake_cursor.executed[-4:]
     assert [command.split(maxsplit=2)[:2] for command, _params in cleanup] == [
         ["DELETE", "FROM"],
         ["DELETE", "FROM"],
         ["DELETE", "FROM"],
         ["DELETE", "FROM"],
-        ["REMOVE", f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"],
-        ["LIST", f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"],
     ]
     assert cleanup[0][0].startswith("DELETE FROM app.roast_artifacts")
-    assert cleanup[0][1] == (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID)
-    assert cleanup[1][0].startswith("DELETE FROM app.roast_telemetry WHERE (")
-    assert cleanup[1][1] == (ROAST_ID, upsert_roast_verify_live.TEST_RUN_ID)
+    assert cleanup[0][1] == (ROAST_ID,)
+    assert cleanup[1] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        (ROAST_ID,),
+    )
     assert cleanup[2] == (
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         (upsert_roast_verify_live.OTHER_ROAST_ID,),
@@ -1953,6 +2073,10 @@ def test_cleanup_revalidates_identity_then_runs_full_sequence_in_order() -> None
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
         (upsert_roast_verify_live.TEST_RUN_ID,),
     )
+    assert connection.fake_cursor.executed[-2:] == [
+        (f"REMOVE @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/", None),
+        (f"LIST @app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/", None),
+    ]
 
 
 def test_cleanup_failure_does_not_gate_later_cleanup_actions() -> None:
@@ -1962,20 +2086,19 @@ def test_cleanup_failure_does_not_gate_later_cleanup_actions() -> None:
         match="live verification cleanup failed",
     ) as raised:
         _verify(connection)
-    commands = _commands(connection)
+    commands = _seed_commands(connection)
     assert any(
         command.startswith("DELETE FROM app.roast_telemetry") for command in commands
     )
     assert any(
         command.startswith("DELETE FROM app.cloud_roasts") for command in commands
     )
-    assert any(command.startswith("REMOVE ") for command in commands)
-    assert sum(command.startswith("LIST ") for command in commands) == 3
+    assert any(command.startswith("REMOVE ") for command in _commands(connection))
+    assert sum(command.startswith("LIST ") for command in _commands(connection)) == 3
     assert raised.value.cleanup_failures == [
         "cleanup failed for run id "
         f"{upsert_roast_verify_live.TEST_RUN_ID}: artifact cleanup "
-        f"[roast_id={ROAST_ID} OR "
-        f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}] failed; "
+        f"[roast_id={ROAST_ID}] failed; "
         f"diagnostic cloud_roast_id={ROAST_ID}"
     ]
 
@@ -1994,11 +2117,7 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         },
         failure_message=RAW_PRIVATE_PATH,
     )
-    monkeypatch.setattr(
-        upsert_roast_verify_live,
-        "_connect",
-        lambda _target: connection,
-    )
+    _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert "artifact count does not match manifest" in output
@@ -2017,7 +2136,6 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
         assert step in output
     assert f"roast_id={upsert_roast_verify_live.OTHER_ROAST_ID}" in output
     assert f"idempotency_key={upsert_roast_verify_live.TEST_RUN_ID}" in output
-    assert " OR idempotency_key=" in output
     assert f"diagnostic cloud_roast_id={ROAST_ID}" in output
     assert (
         "parent cleanup [idempotency_key="
@@ -2031,12 +2149,11 @@ def test_main_prints_every_cleanup_failure_without_masking_body_error(
     assert RAW_PRIVATE_PATH not in output
     artifact_cleanup = next(
         entry
-        for entry in connection.fake_cursor.executed
+        for entry in connection.seed_connection.fake_cursor.executed
         if entry[0].startswith("DELETE FROM app.roast_artifacts")
     )
     assert artifact_cleanup[1] == (
         ROAST_ID,
-        upsert_roast_verify_live.TEST_RUN_ID,
     )
 
 
@@ -2139,7 +2256,7 @@ def test_final_replay_rejects_noncomparable_first_call_timestamp() -> None:
         match=r"^final replay did not advance updated_at beyond the first call$",
     ):
         upsert_roast_verify_live._verify_telemetry_purge_scope(
-            cursor, payload, first, owned_roast_id, preserved_state,
+            cursor, FakeCursor(), payload, first, owned_roast_id, preserved_state,
             previous_updated_at, object(),
         )
     assert connection.fake_cursor.opted_out is True
@@ -2150,7 +2267,7 @@ def test_cleanup_uniqueness_query_failure_prevents_destructive_statements() -> N
         fail_on={"SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s"},
         failure_message=RAW_PRIVATE_PATH,
     )
-    errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+    errors = upsert_roast_verify_live._cleanup_all(cursor, FakeCursor(), ROAST_ID)
     assert len(errors) == 1
     expected = (
         "cleanup roast id uniqueness revalidation failed "
@@ -2177,7 +2294,7 @@ def test_cleanup_uniqueness_query_failure_prevents_destructive_statements() -> N
 
 def test_cleanup_reports_post_remove_list_failure() -> None:
     cursor = FakeCursor(fail_on={"LIST "}, failure_message=RAW_PRIVATE_PATH)
-    errors = upsert_roast_verify_live._cleanup_all(cursor, ROAST_ID)
+    errors = upsert_roast_verify_live._cleanup_all(cursor, FakeCursor(), ROAST_ID)
     assert len(errors) == 1
     stage_prefix = f"@app.roast_artifacts/{upsert_roast_verify_live.TEST_RUN_ID}/"
     expected = f"post-REMOVE LIST cleanup [stage_prefix={stage_prefix}] failed"

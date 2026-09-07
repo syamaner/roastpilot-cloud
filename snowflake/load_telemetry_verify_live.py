@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from telemetry_expectation_oracle import fixture_expected_rows
+from verify_seed_connection import connect_seed
 
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent
@@ -29,7 +30,18 @@ TEST_RUN_ID = "41900000-0000-0000-0000-000000000001"
 TEST_ROAST_ID = "c3c3c3c3-4160-4160-4160-c3c3c3c3c3c3"
 SENTINEL_ROAST_ID = "41900000-0000-0000-0000-000000000002"
 MISSING_ROAST_ID = "41900000-0000-0000-0000-000000000003"
+MIXED_CONSENT_ROAST_ID = "41900000-0000-0000-0000-000000000004"
+OPTED_OUT_ROAST_ID = "41900000-0000-0000-0000-000000000005"
+CONSENT_FLIP_ROAST_ID = "41900000-0000-0000-0000-000000000006"
+MIXED_CONSENT_TRUE_RUN_ID = "41900000-0000-0000-0000-000000000007"
+MIXED_CONSENT_FALSE_RUN_ID = "41900000-0000-0000-0000-000000000008"
+OPTED_OUT_RUN_ID = "41900000-0000-0000-0000-000000000009"
+CONSENT_FLIP_RUN_ID = "41900000-0000-0000-0000-00000000000a"
 PUBLIC_SLUG = "419419419ABCDEFGH"
+MIXED_CONSENT_TRUE_SLUG = "419419419ABCDEFGI"
+MIXED_CONSENT_FALSE_SLUG = "419419419ABCDEFGJ"
+OPTED_OUT_SLUG = "419419419ABCDEFGK"
+CONSENT_FLIP_SLUG = "419419419ABCDEFGL"
 BEAN_ORIGIN = "__C3_S4_419_LIVE_ORIGIN__"
 ROAST_LEVEL = "__C3_S4_419_LIVE_LEVEL__"
 UUID_PATTERN = re.compile(
@@ -196,6 +208,7 @@ def _summary_row(cursor: Cursor) -> tuple[object, ...]:
 
 def verify_live_load(
     connection: Connection,
+    seed_connection: Connection,
     fixture_path: Path,
     expected_target: str,
 ) -> int:
@@ -213,6 +226,13 @@ def verify_live_load(
         raise TelemetryVerifyError("SENTINEL_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     if UUID_PATTERN.fullmatch(MISSING_ROAST_ID) is None:
         raise TelemetryVerifyError("MISSING_ROAST_ID is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
+    gate_a_ids = (
+        MIXED_CONSENT_ROAST_ID,
+        OPTED_OUT_ROAST_ID,
+        CONSENT_FLIP_ROAST_ID,
+    )
+    if any(UUID_PATTERN.fullmatch(roast_id) is None for roast_id in gate_a_ids):
+        raise TelemetryVerifyError("Gate-A roast id is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     fixture_uri = _validated_fixture_uri(fixture_path)
     expected_dicts = fixture_expected_rows(fixture_path, TEST_ROAST_ID)
     expected = [tuple(row[column] for column in SELECT_COLUMNS) for row in expected_dicts]
@@ -234,26 +254,39 @@ def verify_live_load(
 
     cursor.execute(
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE id IN (%s, %s, %s) OR idempotency_key = %s OR public_slug = %s",
+        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)",
         (
             TEST_ROAST_ID,
             SENTINEL_ROAST_ID,
             MISSING_ROAST_ID,
+            *gate_a_ids,
             TEST_RUN_ID,
+            MIXED_CONSENT_TRUE_RUN_ID,
+            MIXED_CONSENT_FALSE_RUN_ID,
+            OPTED_OUT_RUN_ID,
+            CONSENT_FLIP_RUN_ID,
             PUBLIC_SLUG,
+            MIXED_CONSENT_TRUE_SLUG,
+            MIXED_CONSENT_FALSE_SLUG,
+            OPTED_OUT_SLUG,
+            CONSENT_FLIP_SLUG,
         ),
     )
     if _count(cursor.fetchone()) != 0:
         raise TelemetryVerifyError("telemetry verifier roast keys are already owned")
     cursor.execute(
-        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
-        (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID),
+        "SELECT COUNT(*) FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID, *gate_a_ids),
     )
     if _count(cursor.fetchone()) != 0:
         raise TelemetryVerifyError("telemetry verifier row keys are already owned")
     cursor.execute(
-        "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
-        (TEST_ROAST_ID,),
+        "SELECT COUNT(*) FROM app.roast_artifacts "
+        "WHERE roast_id IN (%s, %s, %s, %s)",
+        (TEST_ROAST_ID, *gate_a_ids),
     )
     if _count(cursor.fetchone()) != 0:
         raise TelemetryVerifyError("telemetry verifier artifact key is already owned")
@@ -267,6 +300,8 @@ def verify_live_load(
     cursor.execute(f"LIST @app.roast_artifacts/{TEST_RUN_ID}/")
     if cursor.fetchall():
         raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")
+
+    seed_cursor = seed_connection.cursor()
 
     body_error: TelemetryVerifyError | None = None
     try:
@@ -289,13 +324,29 @@ def verify_live_load(
         if _count(cursor.fetchone()) != 0:
             raise TelemetryVerifyError("missing-roast telemetry load inserted rows")
 
-        cursor.execute(
+        seed_cursor.execute(
             "INSERT INTO app.cloud_roasts "
             "(id, idempotency_key, owner_id, public_slug, visibility, bean_origin, "
             "bean_varietal, bean_weight_g, profile_name, roast_level, summary, "
             "operator_rating, operator_notes, contributed_to_learning, roasted_at_utc) "
             "SELECT %s, %s, NULL, %s, 'private', %s, 'C3-S4 live verifier', 250, "
             "'telemetry consent verification', %s, PARSE_JSON(%s), 4, NULL, FALSE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'Gate-A mixed true', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'Gate-A mixed false', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, FALSE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'Gate-A opted out', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, FALSE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'Gate-A consent flip', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
             "'2026-09-02T12:00:00Z'::timestamp_tz",
             (
                 TEST_ROAST_ID,
@@ -304,15 +355,49 @@ def verify_live_load(
                 BEAN_ORIGIN,
                 ROAST_LEVEL,
                 json.dumps(SUMMARY, separators=(",", ":")),
+                MIXED_CONSENT_ROAST_ID,
+                MIXED_CONSENT_TRUE_RUN_ID,
+                MIXED_CONSENT_TRUE_SLUG,
+                json.dumps(SUMMARY, separators=(",", ":")),
+                MIXED_CONSENT_ROAST_ID,
+                MIXED_CONSENT_FALSE_RUN_ID,
+                MIXED_CONSENT_FALSE_SLUG,
+                json.dumps(SUMMARY, separators=(",", ":")),
+                OPTED_OUT_ROAST_ID,
+                OPTED_OUT_RUN_ID,
+                OPTED_OUT_SLUG,
+                json.dumps(SUMMARY, separators=(",", ":")),
+                CONSENT_FLIP_ROAST_ID,
+                CONSENT_FLIP_RUN_ID,
+                CONSENT_FLIP_SLUG,
+                json.dumps(SUMMARY, separators=(",", ":")),
             ),
         )
-        cursor.execute(
+        seed_cursor.execute(
             "INSERT INTO app.roast_telemetry "
             "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
             "fan_percent, ror_c_per_min, raw) "
             "SELECT %s, 0, 20, 21, 80, 30, NULL, PARSE_JSON('{}')",
             (SENTINEL_ROAST_ID,),
         )
+
+        for roast_id, label in (
+            (MIXED_CONSENT_ROAST_ID, "mixed-consent telemetry load"),
+            (OPTED_OUT_ROAST_ID, "single opt-out telemetry load"),
+        ):
+            _expect_sql_error(
+                cursor,
+                "CALL app.load_roast_telemetry(%s, %s)",
+                (TEST_RUN_ID, roast_id),
+                "-20013",
+                label,
+            )
+            cursor.execute(
+                "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+                (roast_id,),
+            )
+            if _count(cursor.fetchone()) != 0:
+                raise TelemetryVerifyError(f"{label} inserted rows")
 
         _expect_sql_error(
             cursor,
@@ -368,11 +453,43 @@ def verify_live_load(
         ):
             raise TelemetryVerifyError("opt-out roast contributed to the reference summary")
 
-        cursor.execute(
-            "UPDATE app.cloud_roasts SET contributed_to_learning = TRUE "
-            "WHERE id = %s AND idempotency_key = %s",
-            (TEST_ROAST_ID, TEST_RUN_ID),
+        # This probe deterministically exercises Guard 3's pre-transaction
+        # consent rejection (-20013), which shares byte-identical consent logic
+        # with the proc's consent-conditioned INSERT predicate. That INSERT
+        # predicate's NEGATIVE branch in isolation is reachable only under a
+        # consent opt-out committed in the window between Guard 3's read and the
+        # INSERT statement (a read-committed concurrency race), which a single
+        # synchronous verifier cannot trigger deterministically. That race is
+        # the accepted residual per D-446-J (Gate B accept-residual); the INSERT
+        # predicate's POSITIVE branch is covered by the opt-in happy path, and
+        # the read-side consent gate (roast_by_slug + recompute) remains the
+        # authoritative public boundary.
+        seed_cursor.execute(
+            "UPDATE app.cloud_roasts SET contributed_to_learning = "
+            "CASE WHEN id = %s THEN TRUE ELSE FALSE END "
+            "WHERE (id = %s AND idempotency_key = %s) "
+            "OR (id = %s AND idempotency_key = %s)",
+            (
+                TEST_ROAST_ID,
+                TEST_ROAST_ID,
+                TEST_RUN_ID,
+                CONSENT_FLIP_ROAST_ID,
+                CONSENT_FLIP_RUN_ID,
+            ),
         )
+        _expect_sql_error(
+            cursor,
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (TEST_RUN_ID, CONSENT_FLIP_ROAST_ID),
+            "-20013",
+            "committed consent-flip telemetry load",
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (CONSENT_FLIP_ROAST_ID,),
+        )
+        if _count(cursor.fetchone()) != 0:
+            raise TelemetryVerifyError("committed consent-flip telemetry load inserted rows")
         cursor.execute(
             "CALL app.load_roast_telemetry(%s, %s)",
             (TEST_RUN_ID, TEST_ROAST_ID),
@@ -430,18 +547,22 @@ def verify_live_load(
             tuple[str, tuple[object, ...] | None, str], ...
         ] = (
             (
-                "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s, %s, %s)",
-                (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID),
+                "DELETE FROM app.roast_telemetry "
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+                (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID, *gate_a_ids),
                 "telemetry rows cleanup",
             ),
             (
-                "DELETE FROM app.roast_artifacts WHERE roast_id = %s",
-                (TEST_ROAST_ID,),
+                "DELETE FROM app.roast_artifacts "
+                "WHERE roast_id IN (%s, %s, %s, %s)",
+                (TEST_ROAST_ID, *gate_a_ids),
                 "artifact rows cleanup",
             ),
             (
-                "DELETE FROM app.cloud_roasts WHERE id = %s AND idempotency_key = %s",
-                (TEST_ROAST_ID, TEST_RUN_ID),
+                "DELETE FROM app.cloud_roasts "
+                "WHERE (id = %s AND idempotency_key = %s) "
+                "OR id IN (%s, %s, %s)",
+                (TEST_ROAST_ID, TEST_RUN_ID, *gate_a_ids),
                 "cloud_roasts cleanup",
             ),
             (
@@ -451,17 +572,18 @@ def verify_live_load(
                 "reference summary cleanup",
             ),
             (
-                f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/",
-                None,
-                "stage REMOVE cleanup",
+                f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/", None, "stage REMOVE cleanup"
             ),
         )
         for command, params, step in cleanup_statements:
             try:
+                cleanup_cursor = (
+                    cursor if command.startswith("REMOVE ") else seed_cursor
+                )
                 if params is None:
-                    cursor.execute(command)
+                    cleanup_cursor.execute(command)
                 else:
-                    cursor.execute(command, params)
+                    cleanup_cursor.execute(command, params)
             except BaseException as exc:
                 cleanup_error = TelemetryVerifyError(f"{step} failed")
                 # __cause__ is never printed (output is sanitised), so swapping
@@ -539,23 +661,36 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no mutate block -
         failure.__cause__ = exc
         _print_failure(failure)
         return 1
+    try:
+        seed_connection = connect_seed(args.target)
+    except BaseException:
+        try:
+            connection.close()
+        except BaseException:
+            pass
+        _print_failure(TelemetryVerifyError("Snowflake seed connection failed"))
+        return 1
     failure: TelemetryVerifyError | None = None
     count = 0
     try:
-        count = verify_live_load(connection, FIXTURE_PATH, args.target)
+        count = verify_live_load(connection, seed_connection, FIXTURE_PATH, args.target)
     except TelemetryVerifyError as exc:
         failure = exc
-    except Exception as exc:
+    except BaseException as exc:
         failure = TelemetryVerifyError("telemetry verification failed")
         failure.__cause__ = exc
-    try:
-        connection.close()
-    except BaseException as exc:
-        close_error = TelemetryVerifyError("Snowflake connection close failed")
-        close_error.__cause__ = exc
-        if failure is None:
-            failure = TelemetryVerifyError("telemetry verification cleanup failed")
-        _attach_cleanup_failures(failure, (close_error,))
+    for label, open_connection in (
+        ("Snowflake connection close failed", connection),
+        ("Snowflake seed connection close failed", seed_connection),
+    ):
+        try:
+            open_connection.close()
+        except BaseException as exc:
+            close_error = TelemetryVerifyError(label)
+            close_error.__cause__ = exc
+            if failure is None:
+                failure = TelemetryVerifyError("telemetry verification cleanup failed")
+            _attach_cleanup_failures(failure, (close_error,))
     if failure is not None:
         _print_failure(failure)
         return 1

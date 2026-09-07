@@ -2159,17 +2159,17 @@ jobs:
       // sole input is fetch-depth on the existing Checks checkout.
       //
       // 3 Sep 2026, #433: the human-gated agent verification workflow adds
-      // exactly +1 job, +4 run steps (dependency install, principal guard,
-      // live verifiers, summary), +4 pinned action steps (harden-runner,
-      // checkout, setup-python, upload-artifact), and +7 declared action
-      // inputs (2 + 1 + 1 + 3 respectively).
+      // exactly +1 job, +5 run steps (dependency install, agent principal
+      // guard, seed principal guard, live verifiers, summary), +4 pinned
+      // action steps (harden-runner, checkout, setup-python, upload-artifact),
+      // and +7 declared action inputs (2 + 1 + 1 + 3 respectively).
       //
       // These counters are D140 drift-detection evidence, so noticing a change
       // is exactly their job; the deltas above are deliberate. Do not update
       // them without knowing which steps or inputs moved.
     expect({ jobs, runSteps, actionSteps, inputs }).toEqual({
       jobs: 28,
-      runSteps: 64,
+      runSteps: 65,
       actionSteps: 68,
       inputs: 172,
     });
@@ -2328,7 +2328,10 @@ jobs:
       // measured total therefore stays 220.
       // 29 Aug 2026, #383 Slice 3: same measured +1 job / +1 run step / +3
       // action steps / +7 action inputs as the source-only corpus above.
-      runSteps: 100,
+      // 7 Sep 2026, #446 Slice A PR-2b: the agent verification workflow's
+      // seed principal guard adds exactly +1 run step. Jobs, action steps,
+      // and declared action inputs are unchanged.
+      runSteps: 101,
       actionSteps: 94,
       inputs: 241,
     });
