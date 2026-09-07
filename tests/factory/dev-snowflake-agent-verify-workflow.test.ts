@@ -58,16 +58,29 @@ const principalEnv = {
     "${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE }}",
 };
 
+const seedPrincipalEnv = {
+  SNOWFLAKE_ACCOUNT: "${{ vars.SNOWFLAKE_ACCOUNT }}",
+  SNOWFLAKE_USER: "ROASTPILOT_SEED_CI",
+  SNOWFLAKE_ROLE: "ROASTPILOT_VERIFY_SEED",
+  SNOWFLAKE_WAREHOUSE: "ROASTPILOT_WH",
+  SNOWFLAKE_DATABASE: "ROASTPILOT_DEV",
+  SNOWFLAKE_SEED_PRIVATE_KEY: "${{ secrets.SNOWFLAKE_SEED_PRIVATE_KEY }}",
+};
+
 const verifierScript = `set -euo pipefail
 umask 077
 KEY_FILE="$(mktemp)"
-trap 'rm -f "$KEY_FILE"' EXIT
+SEED_KEY_FILE="$(mktemp)"
+trap 'rm -f "$KEY_FILE" "$SEED_KEY_FILE"' EXIT
 printf '%s' "$SNOWFLAKE_AGENT_PRIVATE_KEY" > "$KEY_FILE"
+printf '%s' "$SNOWFLAKE_SEED_PRIVATE_KEY" > "$SEED_KEY_FILE"
 export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
 export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE"
+export SNOWFLAKE_SEED_PRIVATE_KEY_FILE="$SEED_KEY_FILE"
 # The verifier reads the key file; keep the raw PEM out of the tee'd
 # process environment whose output becomes the uploaded artifact.
 unset SNOWFLAKE_AGENT_PRIVATE_KEY
+unset SNOWFLAKE_SEED_PRIVATE_KEY
 python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 python3 presigned_url_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
 python3 load_telemetry_verify_live.py --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
@@ -103,6 +116,7 @@ describe("DEV Snowflake agent verification workflow", () => {
       "Set up Python",
       "Install schemachange + Snowflake connector dependencies",
       "Assert the live verifier is the fixed agent CI principal",
+      "Assert the live verifier is the fixed seed CI principal",
       "Run the agent-role live verifiers",
       "Upload agent verification evidence",
       "Write summary",
@@ -150,11 +164,24 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(guard["continue-on-error"]).toBeUndefined();
   });
 
-  it("AW-6 runs all three verifiers with the same principal and secure key file", () => {
+  it("AW-6 runs the in-memory seed principal guard with the fixed identity", () => {
+    const guard = stepById("seed-principal-guard");
+    expect(guard["working-directory"]).toBe("snowflake");
+    expect(mapping(guard.env)).toEqual(seedPrincipalEnv);
+    expect(guard.run).toBe(
+      "python3 -P assert_seed_ci_principal.py --target ROASTPILOT_DEV",
+    );
+    expect(guard.run).toContain("python3 -P");
+    expect(guard.if).toBeUndefined();
+    expect(guard["continue-on-error"]).toBeUndefined();
+  });
+
+  it("AW-7 runs all three verifiers with both secure key files", () => {
     const verifiers = stepById("run-verifiers");
     expect(verifiers["working-directory"]).toBe("snowflake");
     expect(mapping(verifiers.env)).toEqual({
       ...principalEnv,
+      SNOWFLAKE_SEED_PRIVATE_KEY: "${{ secrets.SNOWFLAKE_SEED_PRIVATE_KEY }}",
       EVIDENCE: "${{ github.workspace }}/agent-verify-evidence.log",
     });
     expect(runBody(verifiers)).toBe(verifierScript);
@@ -177,23 +204,37 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(runBody(verifiers).indexOf("umask 077")).toBeLessThan(
       runBody(verifiers).indexOf('KEY_FILE="$(mktemp)"'),
     );
-    expect(runBody(verifiers)).toContain("trap 'rm -f \"$KEY_FILE\"' EXIT");
+    expect(runBody(verifiers).indexOf("umask 077")).toBeLessThan(
+      runBody(verifiers).indexOf('SEED_KEY_FILE="$(mktemp)"'),
+    );
+    expect(runBody(verifiers)).toContain(
+      "trap 'rm -f \"$KEY_FILE\" \"$SEED_KEY_FILE\"' EXIT",
+    );
     expect(runBody(verifiers).indexOf("unset SNOWFLAKE_AGENT_PRIVATE_KEY")).toBeLessThan(
+      runBody(verifiers).indexOf("python3 upsert_roast_verify_live.py"),
+    );
+    expect(runBody(verifiers).indexOf("unset SNOWFLAKE_SEED_PRIVATE_KEY")).toBeLessThan(
       runBody(verifiers).indexOf("python3 upsert_roast_verify_live.py"),
     );
     expect(source.match(/`-P` is intentionally omitted/g)).toHaveLength(1);
   });
 
-  it("AW-7 makes guard failure skip the verifier step through default propagation", () => {
-    const guardIndex = steps.indexOf(stepById("principal-guard"));
+  it("AW-8 makes either guard failure skip verifiers through default propagation", () => {
+    const agentGuardIndex = steps.indexOf(stepById("principal-guard"));
+    const seedGuardIndex = steps.indexOf(stepById("seed-principal-guard"));
     const verifierIndex = steps.indexOf(stepById("run-verifiers"));
-    expect(guardIndex).toBeLessThan(verifierIndex);
+    expect(agentGuardIndex).toBeLessThan(seedGuardIndex);
+    expect(seedGuardIndex).toBeLessThan(verifierIndex);
+    expect(stepById("principal-guard").if).toBeUndefined();
+    expect(stepById("principal-guard")["continue-on-error"]).toBeUndefined();
+    expect(stepById("seed-principal-guard").if).toBeUndefined();
+    expect(stepById("seed-principal-guard")["continue-on-error"]).toBeUndefined();
     expect(stepById("run-verifiers").if).toBeUndefined();
     expect(stepById("run-verifiers")["continue-on-error"]).toBeUndefined();
     expect(agentVerify["continue-on-error"]).toBeUndefined();
   });
 
-  it("AW-8 always retains the verifier evidence for fourteen days", () => {
+  it("AW-9 always retains the verifier evidence for fourteen days", () => {
     const upload = stepByName("Upload agent verification evidence");
     expect(upload.if).toBe("always()");
     expect(upload.uses).toBe(
@@ -206,7 +247,7 @@ describe("DEV Snowflake agent verification workflow", () => {
     });
   });
 
-  it("AW-9 always writes an injection-safe summary of both outcomes", () => {
+  it("AW-10 always writes an injection-safe summary of all outcomes", () => {
     const summary = stepByName("Write summary");
     const run = runBody(summary);
     expect(summary.if).toBe("always()");
@@ -217,6 +258,7 @@ describe("DEV Snowflake agent verification workflow", () => {
       SUMMARY_WAREHOUSE: "ROASTPILOT_WH",
     });
     expect(run).toContain("${{ steps.principal-guard.outcome }}");
+    expect(run).toContain("${{ steps.seed-principal-guard.outcome }}");
     expect(run).toContain("${{ steps.run-verifiers.outcome }}");
     expect(run).not.toContain("${{ vars.");
     expect(run).not.toContain("${{ secrets.");
@@ -226,7 +268,7 @@ describe("DEV Snowflake agent verification workflow", () => {
     expect(run).toContain('${SUMMARY_WAREHOUSE}');
   });
 
-  it("AW-10 keeps the composed verifier run block valid Bash", () => {
+  it("AW-11 keeps the composed verifier run block valid Bash", () => {
     const syntaxCheck = spawnSync("bash", ["-n"], {
       input: runBody(stepById("run-verifiers")),
       encoding: "utf8",

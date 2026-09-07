@@ -77,6 +77,18 @@ jobs:
         # so `-P` remains enabled and sibling shadow-protection stays intact.
         run: python3 -P assert_agent_ci_principal.py --target ROASTPILOT_DEV
 
+      - name: Assert the live verifier is the fixed seed CI principal
+        id: seed-principal-guard
+        working-directory: snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ROASTPILOT_SEED_CI
+          SNOWFLAKE_ROLE: ROASTPILOT_VERIFY_SEED
+          SNOWFLAKE_WAREHOUSE: ROASTPILOT_WH
+          SNOWFLAKE_DATABASE: ROASTPILOT_DEV
+          SNOWFLAKE_SEED_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_SEED_PRIVATE_KEY }}
+        run: python3 -P assert_seed_ci_principal.py --target ROASTPILOT_DEV
+
       - name: Run the agent-role live verifiers
         id: run-verifiers
         working-directory: snowflake
@@ -89,6 +101,7 @@ jobs:
           SNOWFLAKE_DATABASE: ROASTPILOT_DEV
           SNOWFLAKE_AGENT_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY }}
           SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE }}
+          SNOWFLAKE_SEED_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_SEED_PRIVATE_KEY }}
           EVIDENCE: ${{ github.workspace }}/agent-verify-evidence.log
         # `-P` is intentionally omitted because upsert_roast_verify_live.py:1013
         # imports the assert_dev_ci_grants sibling by name. This Environment's
@@ -98,13 +111,17 @@ jobs:
           set -euo pipefail
           umask 077
           KEY_FILE="$(mktemp)"
-          trap 'rm -f "$KEY_FILE"' EXIT
+          SEED_KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE" "$SEED_KEY_FILE"' EXIT
           printf '%s' "$SNOWFLAKE_AGENT_PRIVATE_KEY" > "$KEY_FILE"
+          printf '%s' "$SNOWFLAKE_SEED_PRIVATE_KEY" > "$SEED_KEY_FILE"
           export SNOWFLAKE_PRIVATE_KEY_FILE="$KEY_FILE"
           export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE"
+          export SNOWFLAKE_SEED_PRIVATE_KEY_FILE="$SEED_KEY_FILE"
           # The verifier reads the key file; keep the raw PEM out of the tee'd
           # process environment whose output becomes the uploaded artifact.
           unset SNOWFLAKE_AGENT_PRIVATE_KEY
+          unset SNOWFLAKE_SEED_PRIVATE_KEY
           python3 upsert_roast_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
           python3 presigned_url_verify_live.py   --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
           python3 load_telemetry_verify_live.py --target ROASTPILOT_DEV 2>&1 | tee -a "$EVIDENCE"
@@ -129,6 +146,7 @@ jobs:
             echo "## DEV Snowflake agent verification"
             echo ""
             echo "- **Principal guard:** ${{ steps.principal-guard.outcome }}"
+            echo "- **Seed principal guard:** ${{ steps.seed-principal-guard.outcome }}"
             echo "- **Live verifiers:** ${{ steps.run-verifiers.outcome }}"
             echo "- **Database:** \`${SUMMARY_DATABASE}\`"
             echo "- **Role:** \`${SUMMARY_ROLE}\`"

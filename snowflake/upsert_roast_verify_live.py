@@ -33,6 +33,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from verify_seed_connection import connect_seed
+
 
 SNOWFLAKE_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = (SNOWFLAKE_DIR / "fixtures").resolve()
@@ -665,6 +667,7 @@ def _verify_visibility_rollback(
 
 def _verify_telemetry_purge_scope(
     cursor: Cursor,
+    seed_cursor: Cursor,
     payload: Mapping[str, object],
     first: Mapping[str, object],
     owned_roast_id: object,
@@ -675,7 +678,7 @@ def _verify_telemetry_purge_scope(
     """Verify purge is conditional, effective, and scoped to this roast."""
     resolved_roast_id = first["cloud_roast_id"]
     _execute(
-        cursor,
+        seed_cursor,
         "INSERT INTO app.roast_telemetry "
         "(roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, "
         "fan_percent, ror_c_per_min, raw) "
@@ -789,6 +792,7 @@ def _verify_telemetry_purge_scope(
 
 def _cleanup_all(
     cursor: Cursor,
+    seed_cursor: Cursor,
     resolved_roast_id: object | None,
 ) -> list[UpsertRoastVerifyError]:
     """Revalidate identity, then attempt every ordered cleanup action."""
@@ -860,49 +864,34 @@ def _cleanup_all(
         uniqueness_error.cleanup_unsafe = True
         cleanup_errors.append(uniqueness_error)
         return cleanup_errors
-    # Statically unreachable: the identity guard above includes
-    # `or resolved_roast_id is None` and returns cleanup_errors when true.
-    if resolved_roast_id is None:  # pragma: no cover
-        child_where = (
-            "roast_id IN (SELECT id FROM app.cloud_roasts "
-            "WHERE idempotency_key = %s)"
-        )
-        child_params: tuple[object, ...] = (TEST_RUN_ID,)
-        child_address = f"idempotency_key={TEST_RUN_ID}"
-    else:
-        child_where = (
-            "(roast_id = %s OR roast_id IN (SELECT id FROM app.cloud_roasts "
-            "WHERE idempotency_key = %s))"
-        )
-        child_params = (resolved_roast_id, TEST_RUN_ID)
-        child_address = (
-            f"roast_id={resolved_roast_id} OR idempotency_key={TEST_RUN_ID}"
-        )
+    child_where = "roast_id = %s"
+    child_params = (resolved_roast_id,)
+    child_address = f"roast_id={resolved_roast_id}"
     stage_prefix = f"@app.roast_artifacts/{TEST_RUN_ID}/"
 
     _cleanup_statement(
-        cursor,
+        seed_cursor,
         f"DELETE FROM app.roast_artifacts WHERE {child_where}",
         child_params,
         f"artifact cleanup [{child_address}]",
         cleanup_errors,
     )
     _cleanup_statement(
-        cursor,
+        seed_cursor,
         f"DELETE FROM app.roast_telemetry WHERE {child_where}",
         child_params,
         f"roast telemetry cleanup [{child_address}]",
         cleanup_errors,
     )
     _cleanup_statement(
-        cursor,
+        seed_cursor,
         "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
         (OTHER_ROAST_ID,),
         f"sentinel telemetry cleanup [roast_id={OTHER_ROAST_ID}]",
         cleanup_errors,
     )
     _cleanup_statement(
-        cursor,
+        seed_cursor,
         "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
         (TEST_RUN_ID,),
         f"parent cleanup [idempotency_key={TEST_RUN_ID}]",
@@ -950,7 +939,11 @@ def _attach_cleanup_failures(
         failure.add_note(message)
 
 
-def verify_live_upsert(connection: Connection, expected_target: str) -> str:
+def verify_live_upsert(
+    connection: Connection,
+    seed_connection: Connection,
+    expected_target: str,
+) -> str:
     """Exercise replay, no-net-change rejection, and scoped opt-out purge."""
     cursor: Cursor | None = None
     preflight_complete = False
@@ -959,6 +952,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
     body_error: UpsertRoastVerifyError | None = None
     try:
         cursor = _preflight(connection, expected_target)
+        seed_cursor = seed_connection.cursor()
         preflight_complete = True
         _stage_and_verify_fixtures(cursor)
         payload, first, resolved_roast_id, first_call_baseline, previous_updated_at = (
@@ -993,6 +987,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
         )
         previous_updated_at = _verify_telemetry_purge_scope(
             cursor,
+            seed_cursor,
             payload,
             first,
             resolved_roast_id,
@@ -1019,7 +1014,7 @@ def verify_live_upsert(connection: Connection, expected_target: str) -> str:
     finally:
         cleanup_is_safe = body_error is None or not body_error.cleanup_unsafe
         if preflight_complete and cursor is not None and cleanup_is_safe:
-            cleanup_errors = _cleanup_all(cursor, resolved_roast_id)
+            cleanup_errors = _cleanup_all(cursor, seed_cursor, resolved_roast_id)
             if cleanup_errors:
                 if body_error is not None:
                     diagnostic_roast_id = body_error.resolved_roast_id
@@ -1105,26 +1100,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_failure(exc)
         return 1
 
+    try:
+        seed_connection = connect_seed(args.target)
+    except BaseException:
+        try:
+            connection.close()
+        except BaseException:
+            pass
+        _print_failure(UpsertRoastVerifyError("Snowflake seed connection failed"))
+        return 1
+
     failure: UpsertRoastVerifyError | None = None
     roast_id = ""
     try:
-        roast_id = verify_live_upsert(connection, args.target)
+        roast_id = verify_live_upsert(connection, seed_connection, args.target)
     except UpsertRoastVerifyError as exc:
         failure = exc
     except BaseException:
         failure = UpsertRoastVerifyError("live verification failed")
-    try:
-        connection.close()
-    except BaseException:
-        resolved_roast_id = (
-            failure.resolved_roast_id if failure is not None else None
-        )
-        if resolved_roast_id is None and roast_id:
-            resolved_roast_id = roast_id
-        close_error = UpsertRoastVerifyError("Snowflake connection close failed")
-        if failure is None:
-            failure = UpsertRoastVerifyError("live verification cleanup failed")
-        _attach_cleanup_failures(failure, (close_error,), resolved_roast_id)
+    for label, open_connection in (
+        ("Snowflake connection close failed", connection),
+        ("Snowflake seed connection close failed", seed_connection),
+    ):
+        try:
+            open_connection.close()
+        except BaseException:
+            resolved_roast_id = (
+                failure.resolved_roast_id if failure is not None else None
+            )
+            if resolved_roast_id is None and roast_id:
+                resolved_roast_id = roast_id
+            close_error = UpsertRoastVerifyError(label)
+            if failure is None:
+                failure = UpsertRoastVerifyError("live verification cleanup failed")
+            _attach_cleanup_failures(failure, (close_error,), resolved_roast_id)
     if failure is not None:
         _print_failure(failure)
         return 1
