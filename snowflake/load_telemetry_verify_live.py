@@ -77,6 +77,25 @@ SUMMARY = {
     "development_time_percent": 25.0,
     "total_roast_seconds": 1190.0,
 }
+_REVOKED_AGENT_DML_COLUMNS = (
+    ("cloud_roasts", "idempotency_key"),
+    ("roast_telemetry", "roast_id"),
+    ("tasting_reviews", "roast_id"),
+    ("reference_roast_summaries", "bean_origin"),
+)
+REVOKED_AGENT_DML_PROBES = tuple(
+    (table, privilege, command)
+    for table, column in _REVOKED_AGENT_DML_COLUMNS
+    for privilege, command in (
+        (
+            "INSERT",
+            f"INSERT INTO app.{table} ({column}) "
+            "SELECT '__RP_446_DENY_PROBE__' WHERE FALSE",
+        ),
+        ("UPDATE", f"UPDATE app.{table} SET {column} = {column} WHERE FALSE"),
+        ("DELETE", f"DELETE FROM app.{table} WHERE FALSE"),
+    )
+)
 
 
 class Cursor(Protocol):
@@ -193,6 +212,31 @@ def _expect_sql_error(
     raise TelemetryVerifyError(f"{label} unexpectedly succeeded")
 
 
+def _is_insufficient_privileges_error(exc: BaseException) -> bool:
+    """Recognize Snowflake's authorization denial by message or SQL identity."""
+    return (
+        "insufficient privilege" in str(exc).casefold()
+        or getattr(exc, "sqlstate", None) == "42501"
+        or getattr(exc, "errno", None) == 3001
+    )
+
+
+def verify_agent_dml_revoked(cursor: Cursor) -> None:
+    """Prove direct agent DML is denied without risking a data mutation."""
+    for table, privilege, command in REVOKED_AGENT_DML_PROBES:
+        try:
+            cursor.execute(command)
+        except BaseException as exc:
+            if _is_insufficient_privileges_error(exc):
+                continue
+            raise TelemetryVerifyError(
+                f"{table} {privilege} deny-probe returned an unexpected SQL error"
+            ) from exc
+        raise TelemetryVerifyError(
+            f"{table} {privilege} revoke not effective: no-op DML unexpectedly succeeded"
+        )
+
+
 def _summary_row(cursor: Cursor) -> tuple[object, ...]:
     cursor.execute(
         f"SELECT {', '.join(SUMMARY_COLUMNS)} FROM app.reference_roast_summaries "
@@ -251,6 +295,11 @@ def verify_live_load(
     current_role = _first_value(cursor.fetchone(), "CURRENT_ROLE()")  # pragma: no mutate
     if current_role != EXPECTED_ROLE:
         raise TelemetryVerifyError("connected role is not ROASTPILOT_AGENT")
+
+    # This is intentionally a post-deploy assertion: it must fail before the
+    # #446 repeatable revoke migration is live. Every statement is zero-row DML,
+    # so an unexpectedly permitted probe still cannot mutate data.
+    verify_agent_dml_revoked(cursor)
 
     cursor.execute(
         "SELECT COUNT(*) FROM app.cloud_roasts "

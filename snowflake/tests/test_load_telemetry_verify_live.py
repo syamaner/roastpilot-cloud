@@ -112,6 +112,13 @@ class FakeCursor:
     def execute(self, command: str, params=None):
         normalized = tuple(params) if params is not None else None
         self.executed.append((command, normalized))
+        if command in {
+            probe_command
+            for _, _, probe_command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+        }:
+            raise RuntimeError(
+                "003001 (42501): SQL access control error: Insufficient privileges"
+            )
         load_roast_id = (
             normalized[1]
             if command.startswith("CALL app.load_roast_telemetry")
@@ -403,6 +410,130 @@ class _RaisingCursor:
         raise AssertionError("fetchone should not be called")
 
 
+class _DenyProbeCursor:
+    def __init__(
+        self,
+        error: BaseException,
+        *,
+        succeed_on: str | None = None,
+    ) -> None:
+        self.error = error
+        self.succeed_on = succeed_on
+        self.executed: list[str] = []
+
+    def execute(self, command: str, params=None):
+        assert params is None
+        self.executed.append(command)
+        if command != self.succeed_on:
+            raise self.error
+
+
+class _SnowflakeAuthorizationError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        sqlstate: str | None = None,
+        errno: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+        self.errno = errno
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Insufficient privileges to operate on table"),
+        _SnowflakeAuthorizationError("access denied", sqlstate="42501"),
+        _SnowflakeAuthorizationError("access denied", errno=3001),
+    ],
+)
+def test_insufficient_privilege_detection_accepts_snowflake_denial_signals(
+    error: BaseException,
+) -> None:
+    assert load_telemetry_verify_live._is_insufficient_privileges_error(error)
+
+
+def test_insufficient_privilege_detection_rejects_unrelated_errors() -> None:
+    assert not load_telemetry_verify_live._is_insufficient_privileges_error(
+        RuntimeError("object does not exist")
+    )
+
+
+def test_agent_dml_revoke_probe_passes_only_after_all_12_attempts_are_denied() -> None:
+    cursor = _DenyProbeCursor(RuntimeError("Insufficient privileges"))
+
+    load_telemetry_verify_live.verify_agent_dml_revoked(cursor)
+
+    expected_commands = [
+        command
+        for _, _, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+    ]
+    assert cursor.executed == expected_commands
+    assert len(cursor.executed) == 12
+    assert all("WHERE FALSE" in command for command in cursor.executed)
+
+
+def test_agent_dml_revoke_probe_matrix_and_columns_are_independently_pinned() -> None:
+    assert {
+        (table, privilege)
+        for table, privilege, _ in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+    } == {
+        (table, privilege)
+        for table in (
+            "cloud_roasts",
+            "roast_telemetry",
+            "tasting_reviews",
+            "reference_roast_summaries",
+        )
+        for privilege in ("INSERT", "UPDATE", "DELETE")
+    }
+    expected_columns = {
+        "cloud_roasts": "idempotency_key",
+        "roast_telemetry": "roast_id",
+        "tasting_reviews": "roast_id",
+        "reference_roast_summaries": "bean_origin",
+    }
+    for table, privilege, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES:
+        assert f"app.{table}" in command
+        if privilege in {"INSERT", "UPDATE"}:
+            assert expected_columns[table] in command
+
+
+def test_agent_dml_revoke_probe_fails_loudly_if_an_attempt_succeeds() -> None:
+    table = "tasting_reviews"
+    privilege = "UPDATE"
+    command = next(
+        probe_command
+        for probe_table, probe_privilege, probe_command in (
+            load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+        )
+        if (probe_table, probe_privilege) == (table, privilege)
+    )
+    cursor = _DenyProbeCursor(
+        RuntimeError("Insufficient privileges"), succeed_on=command
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^tasting_reviews UPDATE revoke not effective: no-op DML unexpectedly succeeded$",
+    ):
+        load_telemetry_verify_live.verify_agent_dml_revoked(cursor)
+
+
+def test_agent_dml_revoke_probe_fails_closed_on_an_unrelated_sql_error() -> None:
+    cursor = _DenyProbeCursor(RuntimeError("syntax error"))
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^cloud_roasts INSERT deny-probe returned an unexpected SQL error$",
+    ) as raised:
+        load_telemetry_verify_live.verify_agent_dml_revoked(cursor)
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
 def test_expect_sql_error_wraps_unexpected_sql_error() -> None:
     cursor = _RaisingCursor(RuntimeError("-99999 some other failure"))
     with pytest.raises(
@@ -645,7 +776,14 @@ def test_happy_path_executes_exact_statement_sequence(
     seed_statements = connection.seed_connection.fake_cursor.executed
     direct_dml = ("INSERT INTO app.", "UPDATE app.", "DELETE FROM app.")
     agent_only = ("SELECT ", "CALL ", "LIST ", "PUT ", "REMOVE ")
-    assert not any(command.startswith(direct_dml) for command, _ in agent_statements)
+    probe_commands = [
+        command
+        for _, _, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+    ]
+    assert [
+        command for command, _ in agent_statements if command.startswith(direct_dml)
+    ] == probe_commands
+    assert not any(command in probe_commands for command, _ in seed_statements)
     assert all(command.startswith(direct_dml) for command, _ in seed_statements)
     assert not any(command.startswith(agent_only) for command, _ in seed_statements)
     assert not any(
@@ -657,10 +795,11 @@ def test_happy_path_executes_exact_statement_sequence(
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
     )
-    assert agent_statements[:8] == [
+    assert agent_statements[:20] == [
         ("USE SECONDARY ROLES NONE", None),
         ("SELECT CURRENT_DATABASE()", None),
         ("SELECT CURRENT_ROLE()", None),
+        *((command, None) for command in probe_commands),
         (
             "SELECT COUNT(*) FROM app.cloud_roasts "
             "WHERE id IN (%s, %s, %s, %s, %s, %s) "
@@ -865,7 +1004,9 @@ def test_happy_path_executes_exact_statement_sequence(
         ),
     ]
     assert [command.split(maxsplit=1)[0] for command, _ in agent_statements] == [
-        "USE", "SELECT", "SELECT", "SELECT", "SELECT", "SELECT", "SELECT",
+        "USE", "SELECT", "SELECT",
+        *(privilege for _, privilege, _ in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES),
+        "SELECT", "SELECT", "SELECT", "SELECT",
         "LIST", "PUT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "CALL", "SELECT", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "SELECT", "CALL", "SELECT", "CALL", "SELECT", "SELECT", "CALL",
@@ -1260,8 +1401,13 @@ def _assert_preflight_collision(
             "ROASTPILOT_DEV",
         )
     mutation_prefixes = ("PUT ", "INSERT ", "UPDATE ", "DELETE ", "REMOVE ", "CALL ")
+    probe_commands = {
+        command
+        for _, _, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+    }
     assert not any(
-        command.startswith(mutation_prefixes) for command in _commands(connection)
+        command.startswith(mutation_prefixes) and command not in probe_commands
+        for command in _commands(connection)
     )
     assert connection.seed_connection is not None
     assert connection.seed_connection.fake_cursor.executed == []
