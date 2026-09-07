@@ -475,6 +475,32 @@ def test_agent_dml_revoke_probe_passes_only_after_all_12_attempts_are_denied() -
     assert all("WHERE FALSE" in command for command in cursor.executed)
 
 
+def test_agent_dml_revoke_probe_matrix_and_columns_are_independently_pinned() -> None:
+    assert {
+        (table, privilege)
+        for table, privilege, _ in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+    } == {
+        (table, privilege)
+        for table in (
+            "cloud_roasts",
+            "roast_telemetry",
+            "tasting_reviews",
+            "reference_roast_summaries",
+        )
+        for privilege in ("INSERT", "UPDATE", "DELETE")
+    }
+    expected_columns = {
+        "cloud_roasts": "idempotency_key",
+        "roast_telemetry": "roast_id",
+        "tasting_reviews": "roast_id",
+        "reference_roast_summaries": "bean_origin",
+    }
+    for table, privilege, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES:
+        assert f"app.{table}" in command
+        if privilege in {"INSERT", "UPDATE"}:
+            assert expected_columns[table] in command
+
+
 def test_agent_dml_revoke_probe_fails_loudly_if_an_attempt_succeeds() -> None:
     table = "tasting_reviews"
     privilege = "UPDATE"
