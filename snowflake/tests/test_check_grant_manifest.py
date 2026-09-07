@@ -23,11 +23,14 @@ def rendered_sql() -> str:
 def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     rendered_sql: str, capsys
 ) -> None:
-    parsed, parse_violations = check_grant_manifest.parse_rendered_sql(rendered_sql)
+    parsed, revokes, parse_violations = check_grant_manifest.parse_rendered_sql(rendered_sql)
     assert parse_violations == []
     assert parsed == check_grant_manifest.EXPECTED_MANIFEST
+    assert revokes == check_grant_manifest.EXPECTED_REVOKES
     assert check_grant_manifest.main() == 0
-    assert capsys.readouterr().out == "grant manifest matches exactly (12 grants)\n"
+    assert capsys.readouterr().out == (
+        "grant/revoke manifest matches exactly (12 grants, 4 revokes)\n"
+    )
 
 
 def test_t2_rendered_manifest_is_environment_independent(rendered_sql: str) -> None:
@@ -94,18 +97,21 @@ def test_render_migration_wraps_engine_failure_with_migration_name(monkeypatch) 
         check_grant_manifest.render_migration()
 
 
-def test_t3_all_migrations_render_and_grant_migration_has_only_grants_after_use(rendered_sql: str) -> None:
+def test_t3_all_migrations_render_and_manifest_migration_has_only_grants_and_revokes_after_use(
+    rendered_sql: str,
+) -> None:
     assert validate_migrations.main() == 0
     uncommented = check_grant_manifest._COMMENT_PATTERN.sub("", rendered_sql)
     assert re.search(r"\bcreate\s+", uncommented, re.IGNORECASE) is None
     use_match = re.search(r"\buse\s+schema\s+app\s*;", uncommented, re.IGNORECASE)
     grant_match = re.search(r"\bgrant\b", uncommented, re.IGNORECASE)
-    assert use_match is not None and grant_match is not None
-    assert use_match.start() < grant_match.start()
+    revoke_match = re.search(r"\brevoke\b", uncommented, re.IGNORECASE)
+    assert use_match is not None and grant_match is not None and revoke_match is not None
+    assert use_match.start() < grant_match.start() < revoke_match.start()
 
 
 def test_t4_public_web_projection_is_closed(rendered_sql: str) -> None:
-    parsed, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
+    parsed, _, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
     public_web = {grant for grant in parsed if grant.role_name == "PUBLIC_WEB"}
     assert len(public_web) == 3
     assert sum(grant.object_type == "VIEW" and grant.privileges == {"SELECT"} for grant in public_web) == 2
@@ -117,7 +123,7 @@ def test_t4_public_web_projection_is_closed(rendered_sql: str) -> None:
 
 
 def test_t5_agent_table_and_internal_stage_privileges_are_exact(rendered_sql: str) -> None:
-    parsed, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
+    parsed, _, _ = check_grant_manifest.parse_rendered_sql(rendered_sql)
     table_grants = [
         grant
         for grant in parsed
@@ -129,9 +135,112 @@ def test_t5_agent_table_and_internal_stage_privileges_are_exact(rendered_sql: st
         if grant.role_name == "ROASTPILOT_AGENT" and grant.object_type == "STAGE"
     ]
     assert len(table_grants) == 5
-    assert all(grant.privileges == {"SELECT", "INSERT", "UPDATE", "DELETE"} for grant in table_grants)
+    assert {grant.object_name: grant.privileges for grant in table_grants} == {
+        "app.cloud_roasts": {"SELECT"},
+        "app.roast_telemetry": {"SELECT"},
+        "app.roast_artifacts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
+        "app.tasting_reviews": {"SELECT"},
+        "app.reference_roast_summaries": {"SELECT"},
+    }
     assert len(stage_grants) == 1
     assert stage_grants[0].privileges == {"READ", "WRITE"}
+
+
+def test_t5_boundary_revokes_are_the_exact_closed_set(rendered_sql: str) -> None:
+    _, revokes, violations = check_grant_manifest.parse_rendered_sql(rendered_sql)
+    assert violations == []
+    assert revokes == check_grant_manifest.EXPECTED_REVOKES
+    assert len(revokes) == 4
+    assert all(
+        revoke.object_type == "TABLE"
+        and revoke.privileges == {"INSERT", "UPDATE", "DELETE"}
+        and revoke.role_name == "ROASTPILOT_AGENT"
+        for revoke in revokes
+    )
+
+
+def test_t5_drop_one_revoke_is_a_named_missing_revoke(rendered_sql: str) -> None:
+    required = (
+        "revoke insert, update, delete on table app.cloud_roasts "
+        "from role ROASTPILOT_AGENT;"
+    )
+    violations = check_grant_manifest.manifest_violations(
+        rendered_sql.replace(required, "")
+    )
+    assert sum(item.startswith("missing revoke:") for item in violations) == 1
+    assert any("missing revoke:" in item and "app.cloud_roasts" in item for item in violations)
+
+
+@pytest.mark.parametrize("table", ["secret", "roast_artifacts"])
+def test_t5_fifth_or_artifact_revoke_is_a_named_extra_revoke(
+    rendered_sql: str, table: str
+) -> None:
+    violations = check_grant_manifest.manifest_violations(
+        rendered_sql
+        + f"\nREVOKE INSERT, UPDATE, DELETE ON TABLE app.{table} "
+        "FROM ROLE ROASTPILOT_AGENT;"
+    )
+    assert any("extra revoke:" in item and f"app.{table}" in item for item in violations)
+
+
+@pytest.mark.parametrize("privileges", ["SELECT", "ALL"])
+def test_t5_revoke_privilege_set_fails_closed(privileges: str) -> None:
+    sql = (
+        f"REVOKE {privileges} ON TABLE app.cloud_roasts "
+        "FROM ROLE ROASTPILOT_AGENT;"
+    )
+    _, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert len(revokes) == 1
+    assert any(
+        "revoke privileges must be exactly INSERT, UPDATE, DELETE" in item
+        for item in violations
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "REVOKE INSERT, UPDATE, DELETE ON SCHEMA app FROM ROLE ROASTPILOT_AGENT;",
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE VIEW app.x FROM ROLE ROASTPILOT_AGENT;",
+    ],
+)
+def test_t5_revoke_non_table_object_fails_closed(sql: str) -> None:
+    grants, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert grants == revokes == frozenset()
+    assert any("unrecognized object type" in item for item in violations)
+
+
+def test_t5_revoke_disallowed_grantee_fails_closed() -> None:
+    sql = (
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE app.cloud_roasts "
+        "FROM ROLE PUBLIC;"
+    )
+    _, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert len(revokes) == 1
+    assert any("unauthorized grantee" in item and "PUBLIC" in item for item in violations)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE app.cloud_roasts TO ROLE ROASTPILOT_AGENT;",
+        "REVOKE;",
+    ],
+)
+def test_t5_malformed_revoke_is_unrecognized_and_fails_closed(sql: str) -> None:
+    grants, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+    assert grants == revokes == frozenset()
+    assert violations == [f"unrecognized revoke statement: {sql[:-1]}"]
+
+
+def test_t5_narrow_grants_without_revokes_report_four_additive_holes(
+    rendered_sql: str,
+) -> None:
+    without_revokes = re.sub(r"(?im)^revoke\b[^;\n]+;?(?:\n|$)", "", rendered_sql)
+    violations = check_grant_manifest.manifest_violations(without_revokes)
+    assert sum(item.startswith("missing revoke:") for item in violations) == 4
+    assert not any(item.startswith("missing grant:") for item in violations)
+    assert not any(item.startswith("extra grant:") for item in violations)
 
 
 def test_t6_extra_grant_is_a_named_violation(rendered_sql: str) -> None:
@@ -157,25 +266,25 @@ def test_t8_execute_on_procedure_is_rejected(rendered_sql: str) -> None:
 
 def test_t9_public_grantee_is_rejected() -> None:
     sql = "GRANT USAGE ON SCHEMA app TO ROLE PUBLIC;"
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unauthorized grantee" in item and "PUBLIC" in item for item in violations)
 
 
 def test_t10_foreign_role_grantee_is_rejected() -> None:
     sql = "GRANT USAGE ON SCHEMA app TO ROLE ROASTPILOT_ADMIN;"
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unauthorized grantee" in item and "ROASTPILOT_ADMIN" in item for item in violations)
 
 
 def test_t11_quoted_lowercase_lookalike_is_rejected() -> None:
     sql = 'GRANT USAGE ON SCHEMA app TO ROLE "public_web";'
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any('unauthorized grantee' in item and '"public_web"' in item for item in violations)
 
 
 def test_t12_unknown_object_type_names_its_diagnostic() -> None:
     sql = "GRANT USAGE ON INTEGRATION x TO ROLE ROASTPILOT_AGENT;"
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unrecognized object type" in violation for violation in violations)
 
 
@@ -187,12 +296,12 @@ def test_t12_unknown_object_type_names_its_diagnostic() -> None:
     ],
 )
 def test_t12_unparseable_grant_shapes_name_their_diagnostic(sql: str) -> None:
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unrecognized statement" in violation for violation in violations)
 
 
 def test_t12_reports_every_unparseable_statement_in_the_input() -> None:
-    _, violations = check_grant_manifest.parse_rendered_sql("FOO;\nBAR;")
+    _, _, violations = check_grant_manifest.parse_rendered_sql("FOO;\nBAR;")
     unrecognized = [
         violation for violation in violations if "unrecognized statement" in violation
     ]
@@ -209,13 +318,13 @@ def test_t12_reports_every_unparseable_statement_in_the_input() -> None:
     ],
 )
 def test_t12_rejects_grant_option_and_multiple_grantees(sql: str) -> None:
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unrecognized statement" in violation for violation in violations)
 
 
 def test_t13_wrong_internal_stage_privilege_is_rejected() -> None:
     sql = "GRANT USAGE ON STAGE app.roast_artifacts TO ROLE ROASTPILOT_AGENT;"
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("stage privileges must be exactly READ, WRITE" in item for item in violations)
 
 
@@ -228,8 +337,8 @@ def test_t14_privilege_order_is_invariant() -> None:
         "GRANT INSERT, SELECT, DELETE, UPDATE ON TABLE app.cloud_roasts "
         "TO ROLE ROASTPILOT_AGENT;"
     )
-    canonical_set, canonical_violations = check_grant_manifest.parse_rendered_sql(canonical)
-    reordered_set, reordered_violations = check_grant_manifest.parse_rendered_sql(reordered)
+    canonical_set, _, canonical_violations = check_grant_manifest.parse_rendered_sql(canonical)
+    reordered_set, _, reordered_violations = check_grant_manifest.parse_rendered_sql(reordered)
     assert canonical_violations == reordered_violations == []
     assert canonical_set == reordered_set
 
@@ -240,7 +349,7 @@ def test_t15_missing_sibling_module_raises_import_error() -> None:
 
 
 def test_t16_two_word_file_format_type_parses_as_one_closed_type() -> None:
-    parsed, violations = check_grant_manifest.parse_rendered_sql(
+    parsed, _, violations = check_grant_manifest.parse_rendered_sql(
         "GRANT USAGE ON FILE   FORMAT app.roast_jsonl_format TO ROLE ROASTPILOT_AGENT;"
     )
     assert violations == []
@@ -259,14 +368,14 @@ def test_t17_file_format_privilege_is_exactly_usage(privileges: str) -> None:
         f"GRANT {privileges} ON FILE FORMAT app.roast_jsonl_format "
         "TO ROLE ROASTPILOT_AGENT;"
     )
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("file format privilege must be exactly USAGE" in item for item in violations)
 
 
 @pytest.mark.parametrize("role", ["PUBLIC", "ACCOUNTADMIN", "PUBLIC_WEB"])
 def test_t18_file_format_rejects_every_unapproved_grantee(role: str) -> None:
     sql = f"GRANT USAGE ON FILE FORMAT app.roast_jsonl_format TO ROLE {role};"
-    parsed, violations = check_grant_manifest.parse_rendered_sql(sql)
+    parsed, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     if role == "PUBLIC_WEB":
         assert violations == []
         manifest_violations = check_grant_manifest.manifest_violations(sql)
@@ -282,7 +391,7 @@ def test_t18_file_format_rejects_every_unapproved_grantee(role: str) -> None:
 )
 def test_t19_general_two_word_object_types_remain_closed(object_type: str) -> None:
     sql = f"GRANT SELECT ON {object_type} app.x TO ROLE ROASTPILOT_AGENT;"
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert any("unrecognized object type" in item for item in violations)
 
 
@@ -291,7 +400,7 @@ def test_t19_reports_every_unrecognized_multi_word_object_type() -> None:
         f"GRANT SELECT ON {object_type} app.x TO ROLE ROASTPILOT_AGENT"
         for object_type in ("DATABASE ROLE", "MATERIALIZED VIEW", "EXTERNAL TABLE")
     )
-    _, violations = check_grant_manifest.parse_rendered_sql(sql)
+    _, _, violations = check_grant_manifest.parse_rendered_sql(sql)
     assert len(violations) == 3
     assert all("unrecognized object type" in violation for violation in violations)
 
@@ -407,7 +516,7 @@ def test_main_returns_1_and_reports_extra_grant(
 ) -> None:
     extra_sql = (
         rendered_sql
-        + "\nGRANT SELECT ON TABLE app.tasting_reviews TO ROLE PUBLIC_WEB;"
+        + ";\nGRANT SELECT ON TABLE app.tasting_reviews TO ROLE PUBLIC_WEB;"
     )
     monkeypatch.setattr(check_grant_manifest, "render_migration", lambda: extra_sql)
 

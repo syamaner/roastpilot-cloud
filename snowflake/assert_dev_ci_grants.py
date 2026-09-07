@@ -159,13 +159,12 @@ manifest grants that a pending migration may add. Missing operator-provisioned
 database/schema prerequisites still fail closed; the post-deploy invocation
 and the script's default are the full audit.
 
-That deferral resolves the additive/bootstrap case only. Any non-additive
-change to the expected manifest can still make the live, superseded grant an
-``extra grant:`` before deploy and therefore block the migration: a revoke,
-an object rename, a procedure-signature change, or a correction to the
-offline-to-live type/name transform. The operator escape hatch is an
-ACCOUNTADMIN revoke of the superseded grant or drop of its superseded object
-before running the deploy.
+That deferral normally resolves the additive/bootstrap case only. For the #446
+write-boundary transition, the relaxed pre-deploy run also tolerates the exact
+no-grant-option DML tuples that the pending repeatable migration revokes. The
+allowance is derived from the offline revoke manifest, applies only to
+ROASTPILOT_AGENT, and is absent from strict post-deploy runs. Every other
+superseded grant still blocks deploy.
 
 Before connecting at all, `main()` also asserts the
 `SNOWFLAKE_DEV_DATABASE`/`SNOWFLAKE_DEV_WAREHOUSE` env vars still equal
@@ -771,6 +770,20 @@ def _canonical_live_object_name(database: str, offline_name: str) -> str:
     return f"{database}.APP.{object_name.upper()}"
 
 
+def expected_revoked_agent_grants(database: str) -> frozenset[RoleGrant]:
+    """Build the exact live tuples temporarily allowed before the #446 deploy."""
+    return frozenset(
+        (
+            privilege,
+            _live_object_type(revoke.object_type),
+            _canonical_live_object_name(database, revoke.object_name),
+            revoke.role_name,
+        )
+        for revoke in check_grant_manifest.EXPECTED_REVOKES
+        for privilege in revoke.privileges
+    )
+
+
 def _live_manifest_object(
     database: str, grant: check_grant_manifest.Grant
 ) -> tuple[str, str]:
@@ -846,6 +859,7 @@ def find_role_manifest_violations(
     allowed_warehouses: frozenset[str],
     *,
     deferred_missing_grants: frozenset[RoleGrant] = frozenset(),
+    transition_allowed_extra_grants: frozenset[RoleGrant] = frozenset(),
 ) -> list[str]:
     """Audit DEV exactly while permitting owned cross-environment grants.
 
@@ -858,9 +872,11 @@ def find_role_manifest_violations(
     environment-invariant secure surface, and have no grant option. Other
     warehouses, role/account grants, malformed names, and unknown object types
     fail closed. ``deferred_missing_grants`` is the explicit subset of expected
-    rows whose absence may be deferred; its empty default is the strict full
-    audit. Every expected row outside that caller-provided set remains required,
-    so this function never infers that an absent row is migration-supplied.
+    rows whose absence may be deferred. ``transition_allowed_extra_grants`` is
+    the exact subset of no-grant-option extras a pre-deploy transition may
+    tolerate. Both empty defaults preserve the strict full audit. Every expected
+    row outside the caller-provided deferred set remains required, so this
+    function never infers that an absent row is migration-supplied.
     """
     in_scope: list[tuple[RoleGrant, str, bool]] = []
     violations: list[str] = []
@@ -956,7 +972,13 @@ def find_role_manifest_violations(
         f"(grant_option={grant_option_display})"
         for grant, grant_option_display, grant_option_is_false in in_scope
         if not grant_option_is_false
-        or not any(_role_grants_match(grant, item) for item in expected_set)
+        or (
+            not any(_role_grants_match(grant, item) for item in expected_set)
+            and not any(
+                _role_grants_match(grant, item)
+                for item in transition_allowed_extra_grants
+            )
+        )
     )
     violations.extend(
         f"missing manifest grant: {privilege} on {granted_on} {name} to {grantee}"
@@ -1458,6 +1480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not require_complete
             else frozenset()
         ),
+        transition_allowed_extra_grants=frozenset(),
     )
     roastpilot_agent_violations = find_role_manifest_violations(
         ROASTPILOT_AGENT_ROLE,
@@ -1467,6 +1490,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         _ALLOWED_APP_ROLE_WAREHOUSES,
         deferred_missing_grants=(
             object_app_role_grants[ROASTPILOT_AGENT_ROLE]
+            if not require_complete
+            else frozenset()
+        ),
+        transition_allowed_extra_grants=(
+            expected_revoked_agent_grants(database)
             if not require_complete
             else frozenset()
         ),
@@ -1540,7 +1568,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if require_complete
         else f"{PUBLIC_WEB_ROLE}/{ROASTPILOT_AGENT_ROLE} have no disallowed visible grants under "
         "the DEV-scoped manifest ceiling and zero future grants visible; manifest completeness "
-        "was deferred to the post-deploy audit and was not verified by this run"
+        "was deferred to the post-deploy audit and the exact #446 transition allowance was "
+        "applied"
     )
     print(
         f"confirmed: all {len(grant_rows)} grant(s) (+ {len(future_grant_rows)} future grant(s)) on "

@@ -3,8 +3,9 @@
 
 The migration is rendered through schemachange's in-process Jinja engine before
 parsing, matching deployed text; it is currently environment-independent.
-The grammar and manifest are closed: an unrecognised statement, grantee,
-object type, privilege set, missing grant, or extra grant is a violation.
+The GRANT and REVOKE grammars and manifests are closed: an unrecognised
+statement, grantee, object type, privilege set, missing row, or extra row is a
+violation.
 """
 
 from __future__ import annotations
@@ -62,8 +63,22 @@ class Grant:
     role_name: str
 
 
+@dataclass(frozen=True, order=True)
+class Revoke:
+    """One normalized-vocabulary, byte-exact-identifier revoke row."""
+
+    privileges: frozenset[str]
+    object_type: str
+    object_name: str
+    role_name: str
+
+
 def _grant(privileges: str, object_type: str, object_name: str, role_name: str) -> Grant:
     return Grant(frozenset(privileges.split(",")), object_type, object_name, role_name)
+
+
+def _revoke(privileges: str, object_type: str, object_name: str, role_name: str) -> Revoke:
+    return Revoke(frozenset(privileges.split(",")), object_type, object_name, role_name)
 
 
 _SUBMIT_REVIEW_SIGNATURE = (
@@ -71,10 +86,9 @@ _SUBMIT_REVIEW_SIGNATURE = (
     "smallint, smallint, string, string, string)"
 )
 _UPSERT_ROAST_SIGNATURE = "app.upsert_roast(string, string)"
-_AGENT_TABLES = (
+_AGENT_SELECT_ONLY_TABLES = (
     "app.cloud_roasts",
     "app.roast_telemetry",
-    "app.roast_artifacts",
     "app.tasting_reviews",
     "app.reference_roast_summaries",
 )
@@ -87,8 +101,14 @@ EXPECTED_MANIFEST = frozenset(
         _grant("SELECT", "VIEW", "app.reviews_by_roast", "PUBLIC_WEB"),
         _grant("USAGE", "PROCEDURE", _SUBMIT_REVIEW_SIGNATURE, "PUBLIC_WEB"),
         *(
-            _grant("SELECT,INSERT,UPDATE,DELETE", "TABLE", table, "ROASTPILOT_AGENT")
-            for table in _AGENT_TABLES
+            _grant("SELECT", "TABLE", table, "ROASTPILOT_AGENT")
+            for table in _AGENT_SELECT_ONLY_TABLES
+        ),
+        _grant(
+            "SELECT,INSERT,UPDATE,DELETE",
+            "TABLE",
+            "app.roast_artifacts",
+            "ROASTPILOT_AGENT",
         ),
         _grant("READ,WRITE", "STAGE", "app.roast_artifacts", "ROASTPILOT_AGENT"),
         _grant("USAGE", "FILE FORMAT", "app.roast_jsonl_format", "ROASTPILOT_AGENT"),
@@ -100,6 +120,11 @@ EXPECTED_MANIFEST = frozenset(
         ),
         _grant("USAGE", "PROCEDURE", _UPSERT_ROAST_SIGNATURE, "ROASTPILOT_AGENT"),
     }
+)
+
+EXPECTED_REVOKES = frozenset(
+    _revoke("INSERT,UPDATE,DELETE", "TABLE", table, "ROASTPILOT_AGENT")
+    for table in _AGENT_SELECT_ONLY_TABLES
 )
 
 _COMMENT_PATTERN = re.compile(r"--[^\n]*(?:\n|$)|/\*.*?\*/", re.DOTALL)
@@ -126,6 +151,21 @@ _GRANT_SHAPE_PATTERN = re.compile(
     r".+?\s+TO\s+ROLE\s+\S+\Z",
     re.IGNORECASE | re.DOTALL,
 )
+_REVOKE_PATTERN = re.compile(
+    r"REVOKE\s+"
+    r"(?P<privileges>[A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+"
+    r"ON\s+(?P<object_type>TABLE)\b\s+"
+    r"(?P<object_name>.+?)\s+"
+    r"FROM\s+ROLE\s+(?P<role_name>\S+)\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_REVOKE_SHAPE_PATTERN = re.compile(
+    r"REVOKE\s+"
+    r"[A-Za-z]+(?:\s*,\s*[A-Za-z]+)*\s+"
+    r"ON\s+(?P<object_type>[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+"
+    r".+?\s+FROM\s+ROLE\s+\S+\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 _BARE_OBJECT_NAME_PREFIX = re.compile(r"[A-Za-z]+\s+\S", re.DOTALL)
 
 
@@ -138,10 +178,22 @@ def format_grant(grant: Grant) -> str:
     )
 
 
-def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
-    """Parse rendered SQL under the closed grant-manifest grammar."""
+def format_revoke(revoke: Revoke) -> str:
+    """Return a stable human-readable representation for diagnostics."""
+    privileges = ", ".join(sorted(revoke.privileges))
+    return (
+        f"REVOKE {privileges} ON {revoke.object_type} {revoke.object_name} "
+        f"FROM ROLE {revoke.role_name}"
+    )
+
+
+def parse_rendered_sql(
+    rendered_sql: str,
+) -> tuple[frozenset[Grant], frozenset[Revoke], list[str]]:
+    """Parse rendered SQL under the closed grant-and-revoke grammar."""
     uncommented = _COMMENT_PATTERN.sub("", rendered_sql)
     grants: set[Grant] = set()
+    revokes: set[Revoke] = set()
     violations: list[str] = []
 
     for raw_statement in uncommented.split(";"):
@@ -150,7 +202,30 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
             continue
 
         match = _GRANT_PATTERN.fullmatch(statement)
-        if match is None:
+        if match is not None:
+            privileges = frozenset(
+                token.strip().upper() for token in match.group("privileges").split(",")
+            )
+            object_type = re.sub(r"\s+", " ", match.group("object_type")).upper()
+            object_name = match.group("object_name")
+            if _BARE_OBJECT_NAME_PREFIX.match(object_name):
+                violations.append(f"unrecognized object type in: {statement}")
+                continue
+            role_name = match.group("role_name")
+            grant = Grant(privileges, object_type, object_name, role_name)
+            grants.add(grant)
+
+            if role_name not in ALLOWED_ROLES:
+                violations.append(f"unauthorized grantee in: {statement}")
+            if object_type == "PROCEDURE" and privileges != frozenset({"USAGE"}):
+                violations.append(f"procedure privilege must be exactly USAGE in: {statement}")
+            if object_type == "FILE FORMAT" and privileges != frozenset({"USAGE"}):
+                violations.append(f"file format privilege must be exactly USAGE in: {statement}")
+            if object_type == "STAGE" and privileges != frozenset({"READ", "WRITE"}):
+                violations.append(f"stage privileges must be exactly READ, WRITE in: {statement}")
+            continue
+
+        if statement.upper().startswith("GRANT "):
             shape_match = _GRANT_SHAPE_PATTERN.fullmatch(statement)
             if shape_match is None:
                 violations.append(f"unrecognized statement: {statement}")
@@ -158,40 +233,59 @@ def parse_rendered_sql(rendered_sql: str) -> tuple[frozenset[Grant], list[str]]:
                 violations.append(f"unrecognized object type in: {statement}")
             continue
 
-        privileges = frozenset(
-            token.strip().upper() for token in match.group("privileges").split(",")
-        )
-        object_type = re.sub(r"\s+", " ", match.group("object_type")).upper()
-        object_name = match.group("object_name")
-        if _BARE_OBJECT_NAME_PREFIX.match(object_name):
-            violations.append(f"unrecognized object type in: {statement}")
+        match = _REVOKE_PATTERN.fullmatch(statement)
+        if match is not None:
+            privileges = frozenset(
+                token.strip().upper() for token in match.group("privileges").split(",")
+            )
+            object_type = match.group("object_type").upper()
+            object_name = match.group("object_name")
+            if _BARE_OBJECT_NAME_PREFIX.match(object_name):
+                violations.append(f"unrecognized object type in: {statement}")
+                continue
+            role_name = match.group("role_name")
+            revoke = Revoke(privileges, object_type, object_name, role_name)
+            revokes.add(revoke)
+
+            if role_name not in ALLOWED_ROLES:
+                violations.append(f"unauthorized grantee in: {statement}")
+            if privileges != frozenset({"INSERT", "UPDATE", "DELETE"}):
+                violations.append(
+                    f"revoke privileges must be exactly INSERT, UPDATE, DELETE in: {statement}"
+                )
             continue
-        role_name = match.group("role_name")
-        grant = Grant(privileges, object_type, object_name, role_name)
-        grants.add(grant)
 
-        if role_name not in ALLOWED_ROLES:
-            violations.append(f"unauthorized grantee in: {statement}")
-        if object_type == "PROCEDURE" and privileges != frozenset({"USAGE"}):
-            violations.append(f"procedure privilege must be exactly USAGE in: {statement}")
-        if object_type == "FILE FORMAT" and privileges != frozenset({"USAGE"}):
-            violations.append(f"file format privilege must be exactly USAGE in: {statement}")
-        if object_type == "STAGE" and privileges != frozenset({"READ", "WRITE"}):
-            violations.append(f"stage privileges must be exactly READ, WRITE in: {statement}")
+        if re.match(r"REVOKE\b", statement, re.IGNORECASE):
+            shape_match = _REVOKE_SHAPE_PATTERN.fullmatch(statement)
+            if shape_match is None:
+                violations.append(f"unrecognized revoke statement: {statement}")
+            else:
+                violations.append(f"unrecognized object type in: {statement}")
+            continue
 
-    return frozenset(grants), violations
+        violations.append(f"unrecognized statement: {statement}")
+
+    return frozenset(grants), frozenset(revokes), violations
 
 
 def manifest_violations(rendered_sql: str) -> list[str]:
     """Return parser, guard, missing-row, and extra-row violations."""
-    parsed, violations = parse_rendered_sql(rendered_sql)
+    parsed_grants, parsed_revokes, violations = parse_rendered_sql(rendered_sql)
     violations.extend(
         f"missing grant: {format_grant(grant)}"
-        for grant in sorted(EXPECTED_MANIFEST - parsed, key=format_grant)
+        for grant in sorted(EXPECTED_MANIFEST - parsed_grants, key=format_grant)
     )
     violations.extend(
         f"extra grant: {format_grant(grant)}"
-        for grant in sorted(parsed - EXPECTED_MANIFEST, key=format_grant)
+        for grant in sorted(parsed_grants - EXPECTED_MANIFEST, key=format_grant)
+    )
+    violations.extend(
+        f"missing revoke: {format_revoke(revoke)}"
+        for revoke in sorted(EXPECTED_REVOKES - parsed_revokes, key=format_revoke)
+    )
+    violations.extend(
+        f"extra revoke: {format_revoke(revoke)}"
+        for revoke in sorted(parsed_revokes - EXPECTED_REVOKES, key=format_revoke)
     )
     return violations
 
@@ -218,7 +312,10 @@ def main() -> int:
     if violations:
         return 1
 
-    print(f"grant manifest matches exactly ({len(EXPECTED_MANIFEST)} grants)")
+    print(
+        "grant/revoke manifest matches exactly "
+        f"({len(EXPECTED_MANIFEST)} grants, {len(EXPECTED_REVOKES)} revokes)"
+    )
     return 0
 
 

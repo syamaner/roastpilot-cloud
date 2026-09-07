@@ -8,8 +8,9 @@
 -- would otherwise sort after this file, so this migration sorts after every
 -- object-creating repeatable on fresh targets as well as existing ones.
 --
--- Scope fence: GRANT statements only, and only object-level privileges on
--- objects the deploy role owns (views, procedure, tables, and stage). The two
+-- Scope fence: GRANT and REVOKE statements only, and only object-level
+-- privileges on objects the deploy role owns (views, procedures, tables,
+-- stage, and file format). The two
 -- roles and every referenced object already exist; this repeatable migration
 -- creates no role or object. The prerequisites (USAGE ON DATABASE, USAGE ON
 -- SCHEMA APP, and USAGE ON WAREHOUSE for PUBLIC_WEB and ROASTPILOT_AGENT) are
@@ -23,6 +24,8 @@
 -- the owner's other privileges unreachable. UPSERT_ROAST is owner-rights so it
 -- can invoke the ungranted RECOMPUTE_REFERENCE_SUMMARY while its closed guards
 -- bound that authority.
+-- The four table revokes enforce the #446 write boundary: agent writes to
+-- those tables now flow only through owner-rights procedures.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before its first grant.
@@ -32,12 +35,17 @@ grant select on view app.roast_by_slug to role PUBLIC_WEB;
 grant select on view app.reviews_by_roast to role PUBLIC_WEB;
 grant usage on procedure app.submit_review(string, string, int, smallint, smallint, smallint, smallint, smallint, string, string, string) to role PUBLIC_WEB;
 
-grant select, insert, update, delete on table app.cloud_roasts to role ROASTPILOT_AGENT;
-grant select, insert, update, delete on table app.roast_telemetry to role ROASTPILOT_AGENT;
+grant select on table app.cloud_roasts to role ROASTPILOT_AGENT;
+grant select on table app.roast_telemetry to role ROASTPILOT_AGENT;
 grant select, insert, update, delete on table app.roast_artifacts to role ROASTPILOT_AGENT;
-grant select, insert, update, delete on table app.tasting_reviews to role ROASTPILOT_AGENT;
-grant select, insert, update, delete on table app.reference_roast_summaries to role ROASTPILOT_AGENT;
+grant select on table app.tasting_reviews to role ROASTPILOT_AGENT;
+grant select on table app.reference_roast_summaries to role ROASTPILOT_AGENT;
 grant read, write on stage app.roast_artifacts to role ROASTPILOT_AGENT;
 grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT;
 grant usage on procedure app.load_roast_telemetry(string, string) to role ROASTPILOT_AGENT;
 grant usage on procedure app.upsert_roast(string, string) to role ROASTPILOT_AGENT;
+
+revoke insert, update, delete on table app.cloud_roasts from role ROASTPILOT_AGENT;
+revoke insert, update, delete on table app.roast_telemetry from role ROASTPILOT_AGENT;
+revoke insert, update, delete on table app.tasting_reviews from role ROASTPILOT_AGENT;
+revoke insert, update, delete on table app.reference_roast_summaries from role ROASTPILOT_AGENT;

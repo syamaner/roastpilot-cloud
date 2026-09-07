@@ -86,13 +86,13 @@ _LIVE_LOAD_TELEMETRY_SIGNATURE = (
     "ROASTPILOT_DEV.APP.LOAD_ROAST_TELEMETRY(VARCHAR, VARCHAR)"
 )
 _LIVE_UPSERT_ROAST_SIGNATURE = "ROASTPILOT_DEV.APP.UPSERT_ROAST(VARCHAR, VARCHAR)"
-_LIVE_AGENT_TABLES = (
+_LIVE_AGENT_SELECT_ONLY_TABLES = (
     "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
     "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
-    "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
     "ROASTPILOT_DEV.APP.TASTING_REVIEWS",
     "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
 )
+_LIVE_ROAST_ARTIFACTS = "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"
 
 
 def _app_role_rows(role_name: str) -> list[dict[str, object]]:
@@ -113,12 +113,15 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
         grants = [
             *prerequisites,
             *(
-                (privilege, "TABLE", table_name)
-                for table_name in _LIVE_AGENT_TABLES
+                ("SELECT", "TABLE", table_name)
+                for table_name in _LIVE_AGENT_SELECT_ONLY_TABLES
+            ),
+            *(
+                (privilege, "TABLE", _LIVE_ROAST_ARTIFACTS)
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
             ),
-            ("READ", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
-            ("WRITE", "STAGE", "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"),
+            ("READ", "STAGE", _LIVE_ROAST_ARTIFACTS),
+            ("WRITE", "STAGE", _LIVE_ROAST_ARTIFACTS),
             ("USAGE", "FILE_FORMAT", "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"),
             ("USAGE", "PROCEDURE", _LIVE_LOAD_TELEMETRY_SIGNATURE),
             ("USAGE", "PROCEDURE", _LIVE_UPSERT_ROAST_SIGNATURE),
@@ -149,6 +152,24 @@ def _app_role_rows_missing(
             for suffix in object_name_suffixes
         )
     ]
+
+
+def _predeploy_agent_rows() -> list[dict[str, object]]:
+    """Desired manifest plus the 12 direct DML grants pending #446 revocation."""
+    rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+    rows.extend(
+        {
+            "privilege": privilege,
+            "granted_on": granted_on,
+            "name": name,
+            "grantee_name": grantee_name,
+            "grant_option": "false",
+        }
+        for privilege, granted_on, name, grantee_name in sorted(
+            assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+        )
+    )
+    return rows
 
 
 class TestAssertBoundaryVarsNotDrifted:
@@ -993,7 +1014,7 @@ class TestApplicationRoleManifest:
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
-        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 28)],
+        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 16)],
     )
     def test_d345f_capture_with_shared_app_warehouse_is_compliant(
         self, role_name: str, row_count: int
@@ -1095,6 +1116,132 @@ class TestApplicationRoleManifest:
         assert all(row["grant_option"] == "false" for row in rows)
         assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
 
+    def test_expected_revoked_agent_grants_are_exactly_the_12_canonical_tuples(
+        self,
+    ) -> None:
+        revoked = assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+        assert len(revoked) == 12
+        assert {row[0] for row in revoked} == {"INSERT", "UPDATE", "DELETE"}
+        assert {row[1] for row in revoked} == {"TABLE"}
+        assert {row[2] for row in revoked} == set(_LIVE_AGENT_SELECT_ONLY_TABLES)
+        assert {row[3] for row in revoked} == {
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        }
+
+    def test_predeploy_exact_revoked_tuples_are_allowed_and_retained_grants_pass(
+        self,
+    ) -> None:
+        rows = _predeploy_agent_rows()
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            transition_allowed_extra_grants=(
+                assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+            ),
+        )
+        assert violations == []
+        assert any(
+            row["privilege"] == "SELECT" and row["name"] == _LIVE_AGENT_SELECT_ONLY_TABLES[0]
+            for row in rows
+        )
+        assert {
+            row["privilege"]
+            for row in rows
+            if row["granted_on"] == "TABLE" and row["name"] == _LIVE_ROAST_ARTIFACTS
+        } == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+
+    def test_strict_default_flags_all_12_still_live_revoked_tuples(self) -> None:
+        violations = self._violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, _predeploy_agent_rows()
+        )
+        assert len(violations) == 12
+        assert all(item.startswith("extra grant:") for item in violations)
+
+    def test_transition_allowance_does_not_cover_an_unrelated_extra(self) -> None:
+        rows = _predeploy_agent_rows()
+        rows.append(
+            {
+                "privilege": "SELECT",
+                "granted_on": "TABLE",
+                "name": "ROASTPILOT_DEV.APP.SECRET",
+                "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+                "grant_option": "false",
+            }
+        )
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            transition_allowed_extra_grants=(
+                assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+            ),
+        )
+        assert violations == [
+            "extra grant: SELECT on TABLE ROASTPILOT_DEV.APP.SECRET to "
+            "ROASTPILOT_AGENT (grant_option='false')"
+        ]
+
+    def test_transition_allowance_rejects_grant_option_on_a_revoked_tuple(self) -> None:
+        rows = _predeploy_agent_rows()
+        target = next(
+            row
+            for row in rows
+            if row["privilege"] == "INSERT" and row["name"] != _LIVE_ROAST_ARTIFACTS
+        )
+        target["grant_option"] = "true"
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            transition_allowed_extra_grants=(
+                assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+            ),
+        )
+        assert len(violations) == 1
+        assert violations[0].startswith("extra grant: INSERT")
+        assert "grant_option='true'" in violations[0]
+
+    def test_transition_allowance_rejects_byte_lookalike_name(self) -> None:
+        rows = _predeploy_agent_rows()
+        target = next(
+            row
+            for row in rows
+            if row["privilege"] == "UPDATE" and row["name"] != _LIVE_ROAST_ARTIFACTS
+        )
+        target["name"] = "ROASTPILOT_DEV.APP.cloud_roasts"
+        expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
+        ]
+        violations = assert_dev_ci_grants.find_role_manifest_violations(
+            assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
+            rows,
+            expected,
+            _DEV_DB,
+            assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
+            transition_allowed_extra_grants=(
+                assert_dev_ci_grants.expected_revoked_agent_grants(_DEV_DB)
+            ),
+        )
+        assert len(violations) == 1
+        assert violations[0].startswith("extra grant: UPDATE")
+        assert str(target["name"]) in violations[0]
+
     def test_agent_allows_cross_environment_file_format(self) -> None:
         rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
         rows.append(
@@ -1168,7 +1315,7 @@ class TestApplicationRoleManifest:
             for grant in original_manifest
             if grant.role_name == assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
             and grant.object_type == "TABLE"
-            and grant.object_name == "app.cloud_roasts"
+            and grant.object_name == "app.roast_artifacts"
         )
         narrowed = type(target)(
             frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -1188,7 +1335,7 @@ class TestApplicationRoleManifest:
         deleted_privilege = (
             "DELETE",
             "TABLE",
-            "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+            "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
             assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
         )
         assert deleted_privilege not in expected
@@ -1202,7 +1349,7 @@ class TestApplicationRoleManifest:
             assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
         )
         assert violations == [
-            "extra grant: DELETE on TABLE ROASTPILOT_DEV.APP.CLOUD_ROASTS to "
+            "extra grant: DELETE on TABLE ROASTPILOT_DEV.APP.ROAST_ARTIFACTS to "
             "ROASTPILOT_AGENT (grant_option='false')"
         ]
 
@@ -1211,7 +1358,7 @@ class TestApplicationRoleManifest:
             for row in captured_rows
             if not (
                 row["privilege"] == "DELETE"
-                and row["name"] == "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
+                and row["name"] == "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"
             )
         ]
         assert (
@@ -1801,7 +1948,7 @@ class TestApplicationRoleManifest:
         target = next(
             row
             for row in rows
-            if row["name"] == "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
+            if row["name"] == "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"
             and row["privilege"] == "DELETE"
         )
         target["privilege"] = "TRUNCATE"
@@ -2259,6 +2406,67 @@ class TestMain:
         assert exit_code == 0
         assert "missing manifest grant" not in capsys.readouterr().err
 
+    def test_b1a_relaxed_main_allows_all_12_still_live_revoked_tuples(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            roastpilot_agent_grant_rows=_predeploy_agent_rows(),
+        )
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert "exact #446 transition allowance was applied" in captured.out
+
+    def test_b1aa_strict_main_rejects_all_12_still_live_revoked_tuples(
+        self, monkeypatch, capsys
+    ) -> None:
+        exit_code = self._run_main(
+            monkeypatch,
+            [],
+            roastpilot_agent_grant_rows=_predeploy_agent_rows(),
+        )
+
+        assert exit_code == 1
+        assert capsys.readouterr().err.count("extra grant:") == 12
+
+    def test_b1ab_relaxed_main_never_passes_transition_allowance_to_public_web(
+        self, monkeypatch, capsys
+    ) -> None:
+        public_web_rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
+        public_web_extra = (
+            "INSERT",
+            "TABLE",
+            "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+            assert_dev_ci_grants.PUBLIC_WEB_ROLE,
+        )
+        public_web_rows.append(
+            {
+                "privilege": public_web_extra[0],
+                "granted_on": public_web_extra[1],
+                "name": public_web_extra[2],
+                "grantee_name": public_web_extra[3],
+                "grant_option": "false",
+            }
+        )
+        monkeypatch.setattr(
+            assert_dev_ci_grants,
+            "expected_revoked_agent_grants",
+            lambda _database: frozenset({public_web_extra}),
+        )
+
+        exit_code = self._run_main(
+            monkeypatch,
+            ["--allow-missing-manifest-grants"],
+            public_web_grant_rows=public_web_rows,
+        )
+
+        assert exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "PUBLIC_WEB manifest violation: extra grant: INSERT" in stderr
+
     def test_b1b_relaxed_mode_allows_public_web_bootstrap_missing_grant(
         self, monkeypatch, capsys
     ) -> None:
@@ -2376,7 +2584,7 @@ class TestMain:
         assert (
             "PUBLIC_WEB/ROASTPILOT_AGENT have no disallowed visible grants under the DEV-scoped "
             "manifest ceiling and zero future grants visible; manifest completeness was deferred "
-            "to the post-deploy audit and was not verified by this run"
+            "to the post-deploy audit and the exact #446 transition allowance was applied"
         ) in stdout
         assert "exactly match their manifests" not in stdout
 
