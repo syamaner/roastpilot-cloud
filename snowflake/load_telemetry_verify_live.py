@@ -453,6 +453,17 @@ def verify_live_load(
         ):
             raise TelemetryVerifyError("opt-out roast contributed to the reference summary")
 
+        # This probe deterministically exercises Guard 3's pre-transaction
+        # consent rejection (-20013), which shares byte-identical consent logic
+        # with the proc's consent-conditioned INSERT predicate. That INSERT
+        # predicate's NEGATIVE branch in isolation is reachable only under a
+        # consent opt-out committed in the window between Guard 3's read and the
+        # INSERT statement (a read-committed concurrency race), which a single
+        # synchronous verifier cannot trigger deterministically. That race is
+        # the accepted residual per D-446-J (Gate B accept-residual); the INSERT
+        # predicate's POSITIVE branch is covered by the opt-in happy path, and
+        # the read-side consent gate (roast_by_slug + recompute) remains the
+        # authoritative public boundary.
         seed_cursor.execute(
             "UPDATE app.cloud_roasts SET contributed_to_learning = "
             "CASE WHEN id = %s THEN TRUE ELSE FALSE END "
