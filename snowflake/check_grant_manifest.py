@@ -255,7 +255,7 @@ def parse_rendered_sql(
                 )
             continue
 
-        if re.match(r"REVOKE\b", statement, re.IGNORECASE):
+        if re.match(r"REVOKE\b", statement.upper()):
             shape_match = _REVOKE_SHAPE_PATTERN.fullmatch(statement)
             if shape_match is None:
                 violations.append(f"unrecognized revoke statement: {statement}")

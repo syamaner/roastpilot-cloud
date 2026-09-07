@@ -159,6 +159,51 @@ def test_t5_boundary_revokes_are_the_exact_closed_set(rendered_sql: str) -> None
     )
 
 
+def test_t5_grant_and_revoke_builders_preserve_every_field_and_split_privileges() -> None:
+    grant = check_grant_manifest._grant(
+        "SELECT,INSERT", "TABLE", "app.grant_target", "ROASTPILOT_AGENT"
+    )
+    revoke = check_grant_manifest._revoke(
+        "INSERT,UPDATE,DELETE", "TABLE", "app.revoke_target", "ROASTPILOT_AGENT"
+    )
+
+    assert grant == check_grant_manifest.Grant(
+        frozenset({"SELECT", "INSERT"}),
+        "TABLE",
+        "app.grant_target",
+        "ROASTPILOT_AGENT",
+    )
+    assert revoke == check_grant_manifest.Revoke(
+        frozenset({"INSERT", "UPDATE", "DELETE"}),
+        "TABLE",
+        "app.revoke_target",
+        "ROASTPILOT_AGENT",
+    )
+
+
+def test_t5_grant_and_revoke_formatters_render_stable_exact_diagnostics() -> None:
+    grant = check_grant_manifest.Grant(
+        frozenset({"SELECT", "INSERT"}),
+        "TABLE",
+        "app.grant_target",
+        "ROASTPILOT_AGENT",
+    )
+    revoke = check_grant_manifest.Revoke(
+        frozenset({"INSERT", "UPDATE", "DELETE"}),
+        "TABLE",
+        "app.revoke_target",
+        "ROASTPILOT_AGENT",
+    )
+
+    assert check_grant_manifest.format_grant(grant) == (
+        "GRANT INSERT, SELECT ON TABLE app.grant_target TO ROLE ROASTPILOT_AGENT"
+    )
+    assert check_grant_manifest.format_revoke(revoke) == (
+        "REVOKE DELETE, INSERT, UPDATE ON TABLE app.revoke_target "
+        "FROM ROLE ROASTPILOT_AGENT"
+    )
+
+
 def test_t5_drop_one_revoke_is_a_named_missing_revoke(rendered_sql: str) -> None:
     required = (
         "revoke insert, update, delete on table app.cloud_roasts "
@@ -233,6 +278,51 @@ def test_t5_malformed_revoke_is_unrecognized_and_fails_closed(sql: str) -> None:
     assert violations == [f"unrecognized revoke statement: {sql[:-1]}"]
 
 
+def test_t5_malformed_revoke_prefix_detection_is_case_insensitive() -> None:
+    grants, revokes, violations = check_grant_manifest.parse_rendered_sql("rEvOkE;")
+
+    assert grants == revokes == frozenset()
+    assert violations == ["unrecognized revoke statement: rEvOkE"]
+
+
+def test_t5_revoke_object_type_failure_does_not_skip_later_statement() -> None:
+    sql = (
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE VIEW app.x "
+        "FROM ROLE ROASTPILOT_AGENT;"
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE app.cloud_roasts "
+        "FROM ROLE ROASTPILOT_AGENT;"
+    )
+    _, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+
+    assert revokes == frozenset(
+        {
+            check_grant_manifest.Revoke(
+                frozenset({"INSERT", "UPDATE", "DELETE"}),
+                "TABLE",
+                "app.cloud_roasts",
+                "ROASTPILOT_AGENT",
+            )
+        }
+    )
+    assert violations == [
+        "unrecognized object type in: REVOKE INSERT, UPDATE, DELETE ON TABLE "
+        "VIEW app.x FROM ROLE ROASTPILOT_AGENT"
+    ]
+
+
+def test_t5_malformed_revoke_does_not_skip_later_statement() -> None:
+    sql = (
+        "REVOKE;"
+        "REVOKE INSERT, UPDATE, DELETE ON TABLE app.cloud_roasts "
+        "FROM ROLE ROASTPILOT_AGENT;"
+    )
+    _, revokes, violations = check_grant_manifest.parse_rendered_sql(sql)
+
+    assert len(revokes) == 1
+    assert next(iter(revokes)).object_name == "app.cloud_roasts"
+    assert violations == ["unrecognized revoke statement: REVOKE"]
+
+
 def test_t5_narrow_grants_without_revokes_report_four_additive_holes(
     rendered_sql: str,
 ) -> None:
@@ -241,6 +331,75 @@ def test_t5_narrow_grants_without_revokes_report_four_additive_holes(
     assert sum(item.startswith("missing revoke:") for item in violations) == 4
     assert not any(item.startswith("missing grant:") for item in violations)
     assert not any(item.startswith("extra grant:") for item in violations)
+
+
+def test_t5_missing_grant_and_revoke_diagnostics_are_stably_sorted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        check_grant_manifest,
+        "EXPECTED_MANIFEST",
+        frozenset(
+            {
+                check_grant_manifest.Grant(
+                    frozenset({"SELECT"}), "TABLE", "app.z", "ROASTPILOT_AGENT"
+                ),
+                check_grant_manifest.Grant(
+                    frozenset({"INSERT", "SELECT"}),
+                    "TABLE",
+                    "app.a",
+                    "ROASTPILOT_AGENT",
+                ),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        check_grant_manifest,
+        "EXPECTED_REVOKES",
+        frozenset(
+            {
+                check_grant_manifest.Revoke(
+                    frozenset({"SELECT"}), "TABLE", "app.z", "ROASTPILOT_AGENT"
+                ),
+                check_grant_manifest.Revoke(
+                    frozenset({"INSERT", "SELECT"}),
+                    "TABLE",
+                    "app.a",
+                    "ROASTPILOT_AGENT",
+                ),
+            }
+        ),
+    )
+
+    assert check_grant_manifest.manifest_violations("") == [
+        "missing grant: GRANT INSERT, SELECT ON TABLE app.a TO ROLE ROASTPILOT_AGENT",
+        "missing grant: GRANT SELECT ON TABLE app.z TO ROLE ROASTPILOT_AGENT",
+        "missing revoke: REVOKE INSERT, SELECT ON TABLE app.a FROM ROLE ROASTPILOT_AGENT",
+        "missing revoke: REVOKE SELECT ON TABLE app.z FROM ROLE ROASTPILOT_AGENT",
+    ]
+
+
+def test_t5_extra_grant_and_revoke_diagnostics_are_stably_sorted(monkeypatch) -> None:
+    monkeypatch.setattr(check_grant_manifest, "EXPECTED_MANIFEST", frozenset())
+    monkeypatch.setattr(check_grant_manifest, "EXPECTED_REVOKES", frozenset())
+    sql = (
+        "GRANT SELECT ON TABLE app.z TO ROLE ROASTPILOT_AGENT;"
+        "GRANT INSERT, SELECT ON TABLE app.a TO ROLE ROASTPILOT_AGENT;"
+        "REVOKE SELECT ON TABLE app.z FROM ROLE ROASTPILOT_AGENT;"
+        "REVOKE INSERT, SELECT ON TABLE app.a FROM ROLE ROASTPILOT_AGENT;"
+    )
+
+    violations = check_grant_manifest.manifest_violations(sql)
+    extra_diagnostics = [
+        violation
+        for violation in violations
+        if violation.startswith(("extra grant:", "extra revoke:"))
+    ]
+
+    assert extra_diagnostics == [
+        "extra grant: GRANT INSERT, SELECT ON TABLE app.a TO ROLE ROASTPILOT_AGENT",
+        "extra grant: GRANT SELECT ON TABLE app.z TO ROLE ROASTPILOT_AGENT",
+        "extra revoke: REVOKE INSERT, SELECT ON TABLE app.a FROM ROLE ROASTPILOT_AGENT",
+        "extra revoke: REVOKE SELECT ON TABLE app.z FROM ROLE ROASTPILOT_AGENT",
+    ]
 
 
 def test_t6_extra_grant_is_a_named_violation(rendered_sql: str) -> None:
