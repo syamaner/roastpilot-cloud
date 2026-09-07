@@ -18,9 +18,11 @@
 -- SUBMIT_REVIEW. ROASTPILOT_AGENT receives the deferred-Option-B data plane:
 -- five tables, the internal artifact stage and file format, plus procedure
 -- grants for LOAD_ROAST_TELEMETRY and UPSERT_ROAST. LOAD_ROAST_TELEMETRY is
--- caller-rights and confers nothing beyond the role's existing data plane
--- (D-416-C); UPSERT_ROAST is owner-rights so it can invoke the ungranted
--- RECOMPUTE_REFERENCE_SUMMARY while its closed guards bound that authority.
+-- owner-rights; Guard 3 plus its consent-conditioned INSERT are the enforcement
+-- boundary for calls through the procedure, and its injection-free body makes
+-- the owner's other privileges unreachable. UPSERT_ROAST is owner-rights so it
+-- can invoke the ungranted RECOMPUTE_REFERENCE_SUMMARY while its closed guards
+-- bound that authority.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before its first grant.

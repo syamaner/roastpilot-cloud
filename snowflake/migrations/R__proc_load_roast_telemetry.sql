@@ -4,11 +4,15 @@
 -- Scope fence: this file creates exactly one object -- the procedure below.
 -- It contains zero GRANT statements and creates no other object.
 --
--- D-416-C: this procedure deliberately executes as caller. Its sole caller,
--- ROASTPILOT_AGENT, already has INSERT and DELETE on APP.ROAST_TELEMETRY and
--- READ on APP.ROAST_ARTIFACTS. Caller-rights therefore confers nothing beyond
--- that existing data plane; owner-rights would instead run the dynamic SQL as
--- the deploy role and make the run-id guard the sole role-escalation boundary.
+-- D-446-H (#446): this procedure now executes as owner. Guard 3 plus the
+-- consent-conditioned INSERT are the enforcement boundary for telemetry writes
+-- through this procedure. Owner-rights is safe here because the body selects no
+-- object dynamically: the write target is hard-coded, and both interpolants are
+-- grammar-validated by Guards 1 and 2. Guard 2 also rejects `--`, the sole
+-- reachable SQL comment sequence in the unquoted stage path. The owner's other
+-- privileges are therefore unreachable through this procedure. Any future edit
+-- introducing dynamic object selection would break this injection-free safety
+-- property and must draw schema-migration-reviewer + privacy-auditor.
 -- D-416-B uses INSERT SELECT because COPY transformations cannot carry the
 -- mandatory record-kind filter. D-416-A leaves both optional output columns
 -- NULL so no identifying source fields are persisted.
@@ -30,14 +34,17 @@
 -- and the exact basename and case. The default TRUE stores that basename with
 -- a .gz suffix, which matches neither PATTERN nor METADATA$FILENAME equality.
 --
--- #419: Guard 3 is defence-in-depth, not an enforcement boundary. The
--- ROASTPILOT_AGENT role holds direct INSERT on app.roast_telemetry
--- (R__z_roles_grants.sql:34), so a direct INSERT bypasses this procedure's
--- consent guard. The true boundary -- revoking agent direct DML and moving to
--- owner-rights gated writes -- is deferred to a separate operator-owned issue
--- per D-419-B and is out of scope here. #430 (SUSPENDED), which also edits this
--- procedure, must preserve Guard 3's pre-transaction placement if it later
--- reorders the telemetry load.
+-- #419/#446: Guard 3 remains the clear pre-transaction fast-fail. The INSERT
+-- atomically re-checks consent committed before that statement starts, closing
+-- that check-then-write gap. Under read-committed it does not serialize against
+-- a concurrent uncommitted UPSERT_ROAST opt-out, so that cross-procedure race is
+-- a documented residual for the separate #446 follow-up revoke PR, where this
+-- predicate becomes the sole write boundary. Today the agent's direct telemetry
+-- DML bypass still exists, while ROAST_BY_SLUG and recompute independently gate
+-- reads on consent.
+-- The agent also retains stage WRITE and artifact-table DML, so #446 requirement
+-- (b) is not fully closed here. #430 (SUSPENDED), which also edits this procedure,
+-- must preserve Guard 3's pre-transaction placement if it later reorders the load.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
@@ -47,7 +54,7 @@ create or replace procedure load_roast_telemetry(p_run_id string, p_roast_id str
 copy grants
 returns string
 language sql
-execute as caller
+execute as owner
 as
 $$
 declare
@@ -72,21 +79,29 @@ begin
       or not regexp_like(p_run_id, '^[0-9a-zA-Z_-]{1,64}$')) then
     raise invalid_run_id;
   end if;
+  -- The closed charset excludes every other SQL comment opener. Reject its one
+  -- reachable sequence before p_run_id enters the unquoted stage path.
+  if (contains(p_run_id, '--')) then
+    raise invalid_run_id;
+  end if;
 
-  -- Guard 3 (#419 requirement (a)): consent gate, defence-in-depth only.
+  -- Guard 3 (#419 requirement (a)): clear pre-transaction consent fast-fail.
+  -- The INSERT below repeats this condition atomically at the write boundary:
+  -- exactly one row must match and it must be opted in, so an absent, opted-out,
+  -- mixed, or duplicate-id set cannot pass during a consent race.
   -- Refuse the load unless the stored roast consent is affirmatively true.
   -- count(*) makes an empty id match unambiguously 0; coalesce guards against
   -- count_if returning NULL when no matching row satisfies the predicate (an
   -- opted-out single-row roast), which would otherwise make the comparison NULL
-  -- and skip the raise -- a fail-open. Comparing contributing to total refuses
-  -- any opted-out or mixed duplicate-id set.
+  -- and skip the raise -- a fail-open. Exact-one comparisons refuse every
+  -- ambiguous duplicate-id set, including two rows that are both opted in.
   select
       count(*),
       coalesce(count_if(contributed_to_learning = true), 0)
     into :v_total_count, :v_contributing_count
     from app.cloud_roasts
     where id = :p_roast_id;
-  if (v_total_count = 0 or v_contributing_count <> v_total_count) then
+  if (v_total_count <> 1 or v_contributing_count <> 1) then
     raise roast_not_contributing;
   end if;
 
@@ -110,7 +125,9 @@ begin
         '  (file_format => ''app.roast_jsonl_format'', pattern => ''(.*/)?roast[.]jsonl'') ' ||
         -- PINNED AT #417: this is the one admitted export basename.
         'where metadata$filename = ''' || p_run_id || '/roast.jsonl'' ' ||
-        '  and $1:type::string = ''telemetry''';
+        '  and $1:type::string = ''telemetry'' ' ||
+        '  and (select count(*) from app.cloud_roasts where id = ''' || p_roast_id || ''') = 1 ' ||
+        '  and (select count(*) from app.cloud_roasts where id = ''' || p_roast_id || ''' and coalesce(contributed_to_learning, false) = true) = 1';
       execute immediate :v_insert_sql;
       v_loaded_rows := sqlrowcount;
       if (v_loaded_rows = 0) then

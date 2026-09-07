@@ -120,11 +120,11 @@ def test_t_exact_signature_and_attribute_run() -> None:
 copy grants
 returns string
 language sql
-execute as caller
+execute as owner
 as"""
     assert expected in STRIPPED
     assert len(re.findall(r"\bcreate\s+or\s+replace\s+procedure\b", STRIPPED, re.I)) == 1
-    assert re.search(r"\bexecute\s+as\s+owner\b", STRIPPED, re.I) is None
+    assert re.search(r"\bexecute\s+as\s+caller\b", STRIPPED, re.I) is None
 
 
 def test_t_use_schema_precedes_the_only_procedure_create() -> None:
@@ -224,6 +224,36 @@ def test_t_run_id_guard_literal_executes_against_hostile_table() -> None:
     assert re.fullmatch(grammar, "plainAlphanumeric42") is not None
 
 
+def test_t_run_id_guard_rejects_sql_comment_sequence_before_build() -> None:
+    grammar_match = re.search(
+        r"if\s*\(\s*p_run_id\s+is\s+null\s+or\s+not\s+"
+        r"regexp_like\s*\(\s*p_run_id\s*,\s*"
+        r"'(?P<grammar>\^\[0-9a-zA-Z_-\]\{1,64\}\$)'\s*\)\s*\)\s*then\s*"
+        r"raise\s+invalid_run_id\s*;\s*end\s+if\s*;",
+        MIGRATION,
+        re.I | re.S,
+    )
+    comment_guard = re.search(
+        r"if\s*\(\s*contains\s*\(\s*p_run_id\s*,\s*'--'\s*\)\s*\)\s*then\s*"
+        r"raise\s+invalid_run_id\s*;\s*end\s+if\s*;",
+        MIGRATION,
+        re.I | re.S,
+    )
+    build = re.search(r"v_insert_sql\s*:=", MIGRATION, re.I)
+    assert (
+        grammar_match is not None and comment_guard is not None and build is not None
+    )
+    assert grammar_match.end() < comment_guard.start() < build.start()
+
+    grammar = grammar_match.group("grammar")
+
+    def refused(candidate: str) -> bool:
+        return re.fullmatch(grammar, candidate) is None or "--" in candidate
+
+    assert all(refused(candidate) for candidate in ("a--b", "--", "run--1"))
+    assert refused("run-1") is False
+
+
 def test_t_roast_id_guard_is_byte_equal_to_delete_roast() -> None:
     assert _roast_id_guard_grammar(MIGRATION) == _roast_id_guard_grammar(DELETE_MIGRATION)
 
@@ -306,8 +336,8 @@ def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
         r"into\s+:v_total_count\s*,\s*:v_contributing_count\s+"
         r"from\s+app\.cloud_roasts\s+"
         r"where\s+id\s*=\s*:p_roast_id\s*;\s*"
-        r"if\s*\(\s*v_total_count\s*=\s*0\s+or\s+"
-        r"v_contributing_count\s*<>\s*v_total_count\s*\)\s*then\s*"
+        r"if\s*\(\s*v_total_count\s*<>\s*1\s+or\s+"
+        r"v_contributing_count\s*<>\s*1\s*\)\s*then\s*"
         r"raise\s+roast_not_contributing\s*;\s*end\s+if\s*;",
         STRIPPED,
         re.I | re.S,
@@ -327,38 +357,52 @@ def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
     ) is None
 
 
-def test_t_consent_guard_refuses_missing_opted_out_and_mixed_rows() -> None:
+def test_t_consent_guard_refuses_missing_opted_out_and_duplicate_rows() -> None:
     def refuses(total_count: int, raw_contributing_count: int | None) -> bool:
         contributing_count = (
             0 if raw_contributing_count is None else raw_contributing_count
         )
-        return total_count == 0 or contributing_count != total_count
+        return total_count != 1 or contributing_count != 1
 
     assert refuses(0, None) is True
     assert refuses(1, None) is True
     assert refuses(1, 0) is True
     assert refuses(2, 1) is True
+    assert refuses(2, 2) is True
     assert refuses(1, 1) is False
-    assert refuses(2, 2) is False
 
 
 def test_t_consent_guard_reads_exactly_one_roast_by_bound_id() -> None:
-    reads = re.findall(r"from\s+app\.cloud_roasts\b", STRIPPED, re.I)
+    before_dynamic_insert = STRIPPED.split("v_insert_sql :=", 1)[0]
+    reads = re.findall(r"from\s+app\.cloud_roasts\b", before_dynamic_insert, re.I)
     assert len(reads) == 1
     assert re.search(
         r"from\s+app\.cloud_roasts\s+where\s+id\s*=\s*:p_roast_id\s*;",
-        STRIPPED,
+        before_dynamic_insert,
         re.I,
     ) is not None
 
 
-def test_t_header_states_defence_in_depth_and_deferred_boundary() -> None:
+def test_t_header_states_owner_rights_consent_enforcement() -> None:
     header = MIGRATION.split("use schema app;", 1)[0]
     normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
-    assert "#419: Guard 3 is defence-in-depth, not an enforcement boundary" in normalized
-    assert "direct INSERT on app.roast_telemetry" in normalized
-    assert "a direct INSERT bypasses this procedure's consent guard" in normalized
-    assert "deferred to a separate operator-owned issue per D-419-B" in normalized
+    assert "this procedure now executes as owner" in normalized
+    assert (
+        "Guard 3 plus the consent-conditioned INSERT are the enforcement boundary"
+        in normalized
+    )
+    assert "the body selects no object dynamically" in normalized
+    assert "the write target is hard-coded" in normalized
+    assert "both interpolants are grammar-validated by Guards 1 and 2" in normalized
+    assert "Guard 2 also rejects `--`" in normalized
+    assert "sole reachable SQL comment sequence in the unquoted stage path" in normalized
+    assert "direct telemetry DML bypass still exists" in normalized
+    assert "separate #446 follow-up revoke PR" in normalized
+    assert "retains stage WRITE and artifact-table DML" in normalized
+    assert (
+        "dynamic object selection would break this injection-free safety property"
+        in normalized
+    )
     assert "#430 (SUSPENDED)" in normalized
     assert "preserve Guard 3's pre-transaction placement" in normalized
 
@@ -420,11 +464,82 @@ def test_t_transaction_rolls_back_and_reraises() -> None:
 def test_t_dynamic_sql_interpolates_only_validated_parameters() -> None:
     without_literals = re.sub(r"'(?:''|[^'])*'", "", _execute_expression())
     variables = re.findall(r"\b[pv]_[a-z0-9_]+\b", without_literals, re.IGNORECASE)
-    assert variables == ["p_roast_id", "p_run_id", "p_run_id"]
+    assert variables == [
+        "p_roast_id",
+        "p_run_id",
+        "p_run_id",
+        "p_roast_id",
+        "p_roast_id",
+    ]
     operators_only = re.sub(r"\bp_(?:roast|run)_id\b", "", without_literals)
     assert operators_only.replace("||", "").strip() == ";"
     executes = re.findall(r"execute\s+immediate\s+:v_insert_sql\s*;", STRIPPED, re.I)
     assert len(executes) == 1
+
+
+def test_t_owner_rights_insert_is_injection_free_and_consent_conditioned() -> None:
+    owner = re.search(r"\bexecute\s+as\s+owner\b", STRIPPED, re.I)
+    caller = re.search(r"\bexecute\s+as\s+caller\b", STRIPPED, re.I)
+    roast_guard = re.search(
+        r"regexp_like\s*\(\s*p_roast_id\s*,\s*"
+        r"'\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-"
+        r"\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}\$'",
+        STRIPPED,
+        re.I,
+    )
+    run_guard = re.search(
+        r"regexp_like\s*\(\s*p_run_id\s*,\s*"
+        r"'\^\[0-9a-zA-Z_-\]\{1,64\}\$'",
+        STRIPPED,
+    )
+    build = re.search(r"v_insert_sql\s*:=", STRIPPED, re.I)
+    assert owner is not None and caller is None
+    assert roast_guard is not None and run_guard is not None and build is not None
+    assert roast_guard.start() < run_guard.start() < build.start()
+
+    expression = _execute_expression()
+    without_literals = re.sub(r"'(?:''|[^'])*'", "", expression)
+    interpolants = re.findall(r"\b[pv]_[a-z0-9_]+\b", without_literals, re.I)
+    assert set(interpolants) == {"p_roast_id", "p_run_id"}
+
+    dynamic_sql = _render_dynamic_sql()
+    insert_targets = re.findall(
+        r"\binsert\s+into\s+([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)",
+        dynamic_sql,
+        re.I,
+    )
+    assert insert_targets == ["app.roast_telemetry"]
+
+
+def test_t_write_boundary_consent_requires_exactly_one_opted_in_row() -> None:
+    dynamic_sql = _render_dynamic_sql()
+    requires_exactly_one_match = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where id = '{ROAST_ID}') = 1"
+    )
+    requires_exactly_one_opted_in_match = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where id = '{ROAST_ID}' "
+        "and coalesce(contributed_to_learning, false) = true) = 1"
+    )
+    weaker_exists_true = (
+        "and exists (select 1 from app.cloud_roasts "
+        f"where id = '{ROAST_ID}' and contributed_to_learning = true)"
+    )
+    assert requires_exactly_one_match in dynamic_sql
+    assert requires_exactly_one_opted_in_match in dynamic_sql
+    assert weaker_exists_true not in dynamic_sql
+
+    def write_boundary_admits(consents: tuple[bool | None, ...]) -> bool:
+        return len(consents) == 1 and consents[0] is True
+
+    assert write_boundary_admits((True,)) is True
+    assert write_boundary_admits((True, True)) is False
+    assert write_boundary_admits(()) is False
+    assert write_boundary_admits((False,)) is False
+    assert write_boundary_admits((None,)) is False
+    assert write_boundary_admits((True, False)) is False
+    assert write_boundary_admits((True, None)) is False
 
 
 def test_t_exception_codes_are_unique_across_procedures() -> None:
