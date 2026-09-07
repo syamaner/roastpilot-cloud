@@ -93,6 +93,30 @@ def test_expected_seed_role_manifest_is_pinned_per_privilege() -> None:
                 "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
                 EXPECTED_ROLE,
             ),
+            (
+                "SELECT",
+                "TABLE",
+                "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                EXPECTED_ROLE,
+            ),
+            (
+                "SELECT",
+                "TABLE",
+                "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
+                EXPECTED_ROLE,
+            ),
+            (
+                "SELECT",
+                "TABLE",
+                "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
+                EXPECTED_ROLE,
+            ),
+            (
+                "SELECT",
+                "TABLE",
+                "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
+                EXPECTED_ROLE,
+            ),
         }
     )
 
@@ -356,16 +380,18 @@ def test_query_failure_is_static_sanitised_and_closes_connection(
 
 def test_seed_role_manifest_rejects_an_extra_grant() -> None:
     rows = _expected_seed_role_rows()
+    # TRUNCATE is not in the seed manifest, so it is a genuinely unexpected
+    # extra even after SELECT joined the expected set.
     rows.append(
         _role_grant_row(
-            "SELECT", "TABLE", "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
+            "TRUNCATE", "TABLE", "ROASTPILOT_DEV.APP.CLOUD_ROASTS"
         )
     )
 
     violations = assert_seed_ci_principal.find_seed_role_manifest_violations(rows)
 
     assert violations == [
-        "G7: extra seed-role grant: SELECT on TABLE "
+        "G7: extra seed-role grant: TRUNCATE on TABLE "
         "ROASTPILOT_DEV.APP.CLOUD_ROASTS to ROASTPILOT_VERIFY_SEED "
         "(grant_option=False)"
     ]
@@ -521,7 +547,7 @@ def test_seed_role_manifest_violation_is_reported_by_main(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     role_rows = _expected_seed_role_rows()
-    role_rows.append(_role_grant_row("SELECT", "TABLE", "ROASTPILOT_DEV.APP.CLOUD_ROASTS"))
+    role_rows.append(_role_grant_row("TRUNCATE", "TABLE", "ROASTPILOT_DEV.APP.CLOUD_ROASTS"))
 
     result, connection, _, _ = _run(
         monkeypatch, FakeCursor(role_grant_rows=role_rows)
@@ -530,7 +556,7 @@ def test_seed_role_manifest_violation_is_reported_by_main(
     assert result == 1
     assert connection.closed is True
     assert capsys.readouterr().err == (
-        "G7: extra seed-role grant: SELECT on TABLE "
+        "G7: extra seed-role grant: TRUNCATE on TABLE "
         "ROASTPILOT_DEV.APP.CLOUD_ROASTS to ROASTPILOT_VERIFY_SEED "
         "(grant_option=False)\n"
     )
