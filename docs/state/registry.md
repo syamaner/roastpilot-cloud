@@ -61,8 +61,10 @@ defence-in-depth) merged via [#445](https://github.com/syamaner/roastpilot-cloud
 its live L-a/L-b/L-c discharged green against `ROASTPILOT_DEV`
 ([run 33894946891](https://github.com/syamaner/roastpilot-cloud/actions/runs/33894946891),
 evidence `verified 273 telemetry rows`). Per **D-419-B** the guard is
-defence-in-depth, not the enforcement boundary (the agent holds direct telemetry-table
-DML). **#446 Option A is DONE** — the read-side `contributed_to_learning = true` gate on
+defence-in-depth, not the enforcement boundary (when **D-419-B** was decided the agent
+still held direct telemetry-table DML; that direct DML was **since revoked by #446 Option
+B Slice A**, recorded below, so the owner-rights consent-guarded procs are now the write
+boundary). **#446 Option A is DONE** — the read-side `contributed_to_learning = true` gate on
 `roast_by_slug`'s curve (**D-446-A**) merged via
 [#449](https://github.com/syamaner/roastpilot-cloud/pull/449) (squash `470f2d4`) and is
 deployed live to `ROASTPILOT_DEV`
