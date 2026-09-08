@@ -13,6 +13,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
@@ -37,11 +38,17 @@ MIXED_CONSENT_TRUE_RUN_ID = "41900000-0000-0000-0000-000000000007"
 MIXED_CONSENT_FALSE_RUN_ID = "41900000-0000-0000-0000-000000000008"
 OPTED_OUT_RUN_ID = "41900000-0000-0000-0000-000000000009"
 CONSENT_FLIP_RUN_ID = "41900000-0000-0000-0000-00000000000a"
+UNBOUND_RUN_ID = "41900000-0000-0000-0000-00000000000b"
+DUP_BINDING_RUN_ID = "41900000-0000-0000-0000-00000000000c"
+DUP_BINDING_ROAST_ID_A = "41900000-0000-0000-0000-00000000000d"
+DUP_BINDING_ROAST_ID_B = "41900000-0000-0000-0000-00000000000e"
 PUBLIC_SLUG = "419419419ABCDEFGH"
 MIXED_CONSENT_TRUE_SLUG = "419419419ABCDEFGI"
 MIXED_CONSENT_FALSE_SLUG = "419419419ABCDEFGJ"
 OPTED_OUT_SLUG = "419419419ABCDEFGK"
 CONSENT_FLIP_SLUG = "419419419ABCDEFGL"
+DUP_BINDING_SLUG_A = "419419419ABCDEFGM"
+DUP_BINDING_SLUG_B = "419419419ABCDEFGN"
 BEAN_ORIGIN = "__C3_S4_419_LIVE_ORIGIN__"
 ROAST_LEVEL = "__C3_S4_419_LIVE_LEVEL__"
 UUID_PATTERN = re.compile(
@@ -68,6 +75,10 @@ SUMMARY_COLUMNS = (
     "development_percent_avg",
     "first_crack_time_avg_s",
     "total_time_avg_s",
+)
+TELEMETRY_TEMPERATURE_SUMMARY_INDICES = (
+    SUMMARY_COLUMNS.index("first_crack_temp_avg_c"),
+    SUMMARY_COLUMNS.index("drop_temp_avg_c"),
 )
 SUMMARY = {
     "started_at_utc": "2026-09-02T12:00:00Z",
@@ -195,6 +206,37 @@ def _payload(contributing: bool, artifact_kinds: Sequence[str]) -> str:
     )
 
 
+def _fixture_temperature_at(
+    rows: Sequence[Mapping[str, object]], event_timestamp_key: str
+) -> object:
+    started_at = datetime.fromisoformat(str(SUMMARY["started_at_utc"]))
+    event_at = datetime.fromisoformat(str(SUMMARY[event_timestamp_key]))
+    target_elapsed_s = (event_at - started_at).total_seconds()
+    nearest = min(
+        rows,
+        key=lambda row: (
+            abs(float(row["elapsed_s"]) - target_elapsed_s),
+            float(row["elapsed_s"]),
+            (
+                row["bean_temp_c"] is None,
+                float(row["bean_temp_c"])
+                if row["bean_temp_c"] is not None
+                else 0.0,
+            ),
+        ),
+    )
+    return nearest["bean_temp_c"]
+
+
+def _assert_load_summary_moved(
+    after_load: Sequence[object], after_opt_out: Sequence[object]
+) -> None:
+    if after_load[0] != 1 or after_load == after_opt_out:
+        raise TelemetryVerifyError(
+            "load did not populate the reference summary before upsert"
+        )
+
+
 def _expect_sql_error(
     cursor: Cursor,
     command: str,
@@ -274,12 +316,18 @@ def verify_live_load(
         MIXED_CONSENT_ROAST_ID,
         OPTED_OUT_ROAST_ID,
         CONSENT_FLIP_ROAST_ID,
+        DUP_BINDING_ROAST_ID_A,
+        DUP_BINDING_ROAST_ID_B,
     )
     if any(UUID_PATTERN.fullmatch(roast_id) is None for roast_id in gate_a_ids):
         raise TelemetryVerifyError("Gate-A roast id is not a lowercase UUID")  # pragma: no cover; pragma: no mutate
     fixture_uri = _validated_fixture_uri(fixture_path)
     expected_dicts = fixture_expected_rows(fixture_path, TEST_ROAST_ID)
     expected = [tuple(row[column] for column in SELECT_COLUMNS) for row in expected_dicts]
+    expected_reference_temperatures = (
+        _fixture_temperature_at(expected_dicts, "first_crack_at_utc"),
+        _fixture_temperature_at(expected_dicts, "beans_dropped_at_utc"),
+    )
     cursor = connection.cursor()
     cursor.execute("USE SECONDARY ROLES NONE")
     cursor.execute("SELECT CURRENT_DATABASE()")
@@ -305,9 +353,9 @@ def verify_live_load(
     # Phase 1 classifies every reserved key without mutating either surface.
     cloud_preflight_query = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)"
+        "WHERE id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)"
     )
     cloud_preflight_params = (
         TEST_ROAST_ID,
@@ -319,25 +367,29 @@ def verify_live_load(
         MIXED_CONSENT_FALSE_RUN_ID,
         OPTED_OUT_RUN_ID,
         CONSENT_FLIP_RUN_ID,
+        DUP_BINDING_RUN_ID,
+        UNBOUND_RUN_ID,
         PUBLIC_SLUG,
         MIXED_CONSENT_TRUE_SLUG,
         MIXED_CONSENT_FALSE_SLUG,
         OPTED_OUT_SLUG,
         CONSENT_FLIP_SLUG,
+        DUP_BINDING_SLUG_A,
+        DUP_BINDING_SLUG_B,
     )
     cloud_owned_query = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
         "WHERE (id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)"
+        "OR id IN (%s, %s, %s, %s, %s)"
     )
     cloud_owned_params = (TEST_ROAST_ID, TEST_RUN_ID, *gate_a_ids)
     cloud_unhealable_query = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)) "
+        "WHERE (id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)) "
         "AND NOT COALESCE(((id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)), FALSE)"
+        "OR id IN (%s, %s, %s, %s, %s)), FALSE)"
     )
     cursor.execute(
         cloud_unhealable_query,
@@ -349,7 +401,7 @@ def verify_live_load(
 
     telemetry_preflight_query = (
         "SELECT COUNT(*) FROM app.roast_telemetry "
-        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)"
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)"
     )
     telemetry_preflight_params = (
         TEST_ROAST_ID,
@@ -362,7 +414,7 @@ def verify_live_load(
 
     artifact_preflight_query = (
         "SELECT COUNT(*) FROM app.roast_artifacts "
-        "WHERE roast_id IN (%s, %s, %s, %s)"
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)"
     )
     artifact_preflight_params = (TEST_ROAST_ID, *gate_a_ids)
     cursor.execute(artifact_preflight_query, artifact_preflight_params)
@@ -403,7 +455,7 @@ def verify_live_load(
         try:
             seed_cursor.execute(
                 "DELETE FROM app.roast_telemetry "
-                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
                 telemetry_preflight_params,
             )
         except BaseException as exc:
@@ -414,7 +466,7 @@ def verify_live_load(
         try:
             seed_cursor.execute(
                 "DELETE FROM app.roast_artifacts "
-                "WHERE roast_id IN (%s, %s, %s, %s)",
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
                 artifact_preflight_params,
             )
         except BaseException as exc:
@@ -426,7 +478,7 @@ def verify_live_load(
             seed_cursor.execute(
                 "DELETE FROM app.cloud_roasts "
                 "WHERE (id = %s AND idempotency_key = %s) "
-                "OR id IN (%s, %s, %s)",
+                "OR id IN (%s, %s, %s, %s, %s)",
                 cloud_owned_params,
             )
         except BaseException as exc:
@@ -515,6 +567,14 @@ def verify_live_load(
             "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
             "'Gate-A consent flip', 250, 'telemetry consent verification', NULL, "
             "PARSE_JSON(%s), 4, NULL, TRUE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'duplicate binding A', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'duplicate binding B', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
             "'2026-09-02T12:00:00Z'::timestamp_tz",
             (
                 TEST_ROAST_ID,
@@ -538,6 +598,14 @@ def verify_live_load(
                 CONSENT_FLIP_ROAST_ID,
                 CONSENT_FLIP_RUN_ID,
                 CONSENT_FLIP_SLUG,
+                json.dumps(SUMMARY, separators=(",", ":")),
+                DUP_BINDING_ROAST_ID_A,
+                DUP_BINDING_RUN_ID,
+                DUP_BINDING_SLUG_A,
+                json.dumps(SUMMARY, separators=(",", ":")),
+                DUP_BINDING_ROAST_ID_B,
+                DUP_BINDING_RUN_ID,
+                DUP_BINDING_SLUG_B,
                 json.dumps(SUMMARY, separators=(",", ":")),
             ),
         )
@@ -658,6 +726,56 @@ def verify_live_load(
         )
         if _count(cursor.fetchone()) != 0:
             raise TelemetryVerifyError("committed consent-flip telemetry load inserted rows")
+
+        # Only the live gate proves this binding behavior; the mock is scripted.
+        _expect_sql_error(
+            cursor,
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (UNBOUND_RUN_ID, TEST_ROAST_ID),
+            "-20014",
+            "unbound run-id telemetry load",
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (TEST_ROAST_ID,),
+        )
+        if _count(cursor.fetchone()) != 0:
+            raise TelemetryVerifyError("unbound run-id telemetry load inserted rows")
+
+        # Only the live gate proves this binding behavior; the mock is scripted.
+        _expect_sql_error(
+            cursor,
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (OPTED_OUT_RUN_ID, TEST_ROAST_ID),
+            "-20014",
+            "mismatched run-id telemetry load",
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (TEST_ROAST_ID,),
+        )
+        if _count(cursor.fetchone()) != 0:
+            raise TelemetryVerifyError("mismatched run-id telemetry load inserted rows")
+
+        # Only the live gate proves this binding behavior; the mock is scripted.
+        _expect_sql_error(
+            cursor,
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (DUP_BINDING_RUN_ID, DUP_BINDING_ROAST_ID_A),
+            "-20014",
+            "duplicate-idempotency_key telemetry load",
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (DUP_BINDING_ROAST_ID_A,),
+        )
+        if _count(cursor.fetchone()) != 0:
+            raise TelemetryVerifyError(
+                "duplicate-idempotency_key telemetry load inserted rows"
+            )
+
+        # The immediately following matched run-id/roast-id pair proves the
+        # positive counterpart to all three fail-closed binding probes.
         cursor.execute(
             "CALL app.load_roast_telemetry(%s, %s)",
             (TEST_RUN_ID, TEST_ROAST_ID),
@@ -666,6 +784,17 @@ def verify_live_load(
         # Sequence branch (row[0]) and ignores the label text entirely, making
         # the label mutant equivalent here.
         loaded = _first_value(cursor.fetchone(), "LOAD_ROAST_TELEMETRY")  # pragma: no mutate
+        # Only the live gate proves this recompute behavior; the mock is scripted.
+        after_load = _summary_row(cursor)
+        _assert_load_summary_moved(after_load, after_opt_out)
+        observed_reference_temperatures = tuple(
+            after_load[index] for index in TELEMETRY_TEMPERATURE_SUMMARY_INDICES
+        )
+        if observed_reference_temperatures != expected_reference_temperatures:
+            raise TelemetryVerifyError(
+                "load did not populate telemetry-derived reference temperatures "
+                "before upsert"
+            )
         cursor.execute(
             f"SELECT {', '.join(SELECT_COLUMNS)} FROM app.roast_telemetry "
             "WHERE roast_id = %s ORDER BY elapsed_s",
@@ -716,20 +845,20 @@ def verify_live_load(
         ] = (
             (
                 "DELETE FROM app.roast_telemetry "
-                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
                 (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID, *gate_a_ids),
                 "telemetry rows cleanup",
             ),
             (
                 "DELETE FROM app.roast_artifacts "
-                "WHERE roast_id IN (%s, %s, %s, %s)",
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
                 (TEST_ROAST_ID, *gate_a_ids),
                 "artifact rows cleanup",
             ),
             (
                 "DELETE FROM app.cloud_roasts "
                 "WHERE (id = %s AND idempotency_key = %s) "
-                "OR id IN (%s, %s, %s)",
+                "OR id IN (%s, %s, %s, %s, %s)",
                 (TEST_ROAST_ID, TEST_RUN_ID, *gate_a_ids),
                 "cloud_roasts cleanup",
             ),

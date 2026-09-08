@@ -31,7 +31,7 @@ EXPECTED_TUPLE = tuple(
     STAND_IN_ROW[column] for column in load_telemetry_verify_live.SELECT_COLUMNS
 )
 SUMMARY_BEFORE = (0, 0, None, None, None, None, None, None, None, None)
-SUMMARY_AFTER_OPT_IN = (1, 0, None, 24.0, None, 147.0, None, 25.0, 590.0, 1190.0)
+SUMMARY_AFTER_OPT_IN = (1, 0, None, 24.0, None, 24.0, None, 25.0, 590.0, 1190.0)
 
 
 class FakeProgrammingError(SnowflakeError):
@@ -148,11 +148,16 @@ class FakeCursor:
         gate_a_telemetry_count: object = 0,
         gate_a_success_ids: set[str] | None = None,
         gate_a_telemetry_counts: dict[str, object] | None = None,
+        binding_raises: bool = True,
+        binding_error: str = "-20014 Telemetry run is not bound to roast",
+        binding_success_run_ids: set[str] | None = None,
+        binding_telemetry_counts: dict[str, object] | None = None,
         manifest_raises: bool = True,
         manifest_error: str = (
             "-20009 Payload does not match the closed roast grammar"
         ),
         summary_after_opt_out: tuple[object, ...] = SUMMARY_BEFORE,
+        summary_after_load: tuple[object, ...] = SUMMARY_AFTER_OPT_IN,
         summary_after_opt_in: tuple[object, ...] = SUMMARY_AFTER_OPT_IN,
         rejected_manifest_artifact_count: object = 0,
         empty_manifest_artifact_count: object = 0,
@@ -204,10 +209,19 @@ class FakeCursor:
         self.gate_a_telemetry_counts = (
             {} if gate_a_telemetry_counts is None else gate_a_telemetry_counts
         )
+        self.binding_raises = binding_raises
+        self.binding_error = binding_error
+        self.binding_success_run_ids = (
+            set() if binding_success_run_ids is None else binding_success_run_ids
+        )
+        self.binding_telemetry_counts = (
+            {} if binding_telemetry_counts is None else binding_telemetry_counts
+        )
         self.manifest_raises = manifest_raises
         self.manifest_error = manifest_error
         self.summary_rows = (
             summary_after_opt_out,
+            summary_after_load,
             summary_after_opt_in,
         )
         self.rejected_manifest_artifact_count = rejected_manifest_artifact_count
@@ -220,6 +234,7 @@ class FakeCursor:
         self.sentinel_reads = 0
         self.sentinel_present = True
         self.primary_load_calls = 0
+        self.last_binding_run_id: str | None = None
         self.last_upsert_kind: str | None = None
         self.cloud_preflight_reads = 0
         self.telemetry_preflight_reads = 0
@@ -245,6 +260,25 @@ class FakeCursor:
             and normalized is not None
             else None
         )
+        binding_call = (
+            command.startswith("CALL app.load_roast_telemetry")
+            and normalized is not None
+            and (
+                (
+                    normalized[0]
+                    in {
+                        load_telemetry_verify_live.UNBOUND_RUN_ID,
+                        load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+                    }
+                    and normalized[1] == load_telemetry_verify_live.TEST_ROAST_ID
+                )
+                or (
+                    normalized[0] == load_telemetry_verify_live.DUP_BINDING_RUN_ID
+                    and normalized[1]
+                    == load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A
+                )
+            )
+        )
         expected_guard_call = (
             load_roast_id == load_telemetry_verify_live.MISSING_ROAST_ID
             or load_roast_id
@@ -257,6 +291,7 @@ class FakeCursor:
                 load_roast_id == load_telemetry_verify_live.TEST_ROAST_ID
                 and self.primary_load_calls == 0
             )
+            or binding_call
         )
         if (
             self.fail_on is not None
@@ -282,6 +317,14 @@ class FakeCursor:
                     and load_roast_id not in self.gate_a_success_ids
                 ):
                     raise RuntimeError(self.gate_a_error)
+            elif binding_call:
+                assert normalized is not None
+                self.last_binding_run_id = str(normalized[0])
+                if (
+                    self.last_binding_run_id not in self.binding_success_run_ids
+                    and (self.binding_raises or self.binding_success_run_ids)
+                ):
+                    raise RuntimeError(self.binding_error)
             elif self.primary_load_calls == 0:
                 self.primary_load_calls += 1
                 if self.opt_out_raises:
@@ -351,6 +394,10 @@ class FakeCursor:
                         str(roast_id), self.gate_a_telemetry_count
                     ),
                 )
+            if self.last_binding_run_id is not None:
+                binding_run_id = self.last_binding_run_id
+                self.last_binding_run_id = None
+                return (self.binding_telemetry_counts.get(binding_run_id, 0),)
             return (self.opt_out_telemetry_count,)
         if command.startswith(
             "SELECT " + ", ".join(load_telemetry_verify_live.SUMMARY_COLUMNS)
@@ -453,6 +500,33 @@ def test_real_fixture_helper_derives_session_one_first_row() -> None:
         "ror_c_per_min": None,
         "raw": None,
     }
+
+
+def test_real_fixture_derives_reference_temperatures_at_summary_events() -> None:
+    rows = load_telemetry_verify_live.fixture_expected_rows(
+        load_telemetry_verify_live.FIXTURE_PATH,
+        load_telemetry_verify_live.TEST_ROAST_ID,
+    )
+
+    assert load_telemetry_verify_live.TELEMETRY_TEMPERATURE_SUMMARY_INDICES == (3, 5)
+    assert load_telemetry_verify_live._fixture_temperature_at(
+        rows, "first_crack_at_utc"
+    ) == 185.0
+    assert load_telemetry_verify_live._fixture_temperature_at(
+        rows, "beans_dropped_at_utc"
+    ) == 184.0
+
+
+def test_fixture_temperature_tie_uses_bean_temp_ascending_nulls_last() -> None:
+    tied_rows = [
+        {"elapsed_s": 600.0, "bean_temp_c": None},
+        {"elapsed_s": 600.0, "bean_temp_c": 186.0},
+        {"elapsed_s": 600.0, "bean_temp_c": 184.0},
+    ]
+
+    assert load_telemetry_verify_live._fixture_temperature_at(
+        tied_rows, "first_crack_at_utc"
+    ) == 184.0
 
 
 def test_first_value_reads_mapping_by_label() -> None:
@@ -800,6 +874,36 @@ def test_happy_path_pins_put_call_select_and_cleanup(
         "FROM app.roast_telemetry WHERE roast_id = %s ORDER BY elapsed_s",
         (load_telemetry_verify_live.TEST_ROAST_ID,),
     )
+    summary_select = (
+        f"SELECT {', '.join(load_telemetry_verify_live.SUMMARY_COLUMNS)} "
+        "FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            load_telemetry_verify_live.BEAN_ORIGIN,
+            load_telemetry_verify_live.ROAST_LEVEL,
+        ),
+    )
+    unbound_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.UNBOUND_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    mismatched_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    duplicate_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+            load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        ),
+    )
     put_index = commands.index(put)
     assert connection.seed_connection is not None
     seed_commands = _commands(connection.seed_connection)
@@ -811,10 +915,24 @@ def test_happy_path_pins_put_call_select_and_cleanup(
     positive_call_index = connection.fake_cursor.executed.index(
         positive_call, opt_out_call_index + 1
     )
+    unbound_call_index = connection.fake_cursor.executed.index(unbound_call)
+    mismatched_call_index = connection.fake_cursor.executed.index(mismatched_call)
+    duplicate_call_index = connection.fake_cursor.executed.index(duplicate_call)
+    after_load_summary_index = connection.fake_cursor.executed.index(
+        summary_select, positive_call_index
+    )
     select_index = connection.fake_cursor.executed.index(
         telemetry_select, positive_call_index
     )
-    assert put_index < positive_call_index < select_index
+    assert (
+        put_index
+        < unbound_call_index
+        < mismatched_call_index
+        < duplicate_call_index
+        < positive_call_index
+        < after_load_summary_index
+        < select_index
+    )
     assert update_index == 2
     load_roast_ids = [
         params[1]
@@ -827,6 +945,9 @@ def test_happy_path_pins_put_call_select_and_cleanup(
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.TEST_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
         load_telemetry_verify_live.TEST_ROAST_ID,
     ]
     assert not any(
@@ -847,7 +968,7 @@ def test_happy_path_pins_put_call_select_and_cleanup(
     assert connection.seed_connection.fake_cursor.executed[-4:] == [
         (
             "DELETE FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.SENTINEL_ROAST_ID,
@@ -855,27 +976,34 @@ def test_happy_path_pins_put_call_select_and_cleanup(
                 load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
                 load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
                 load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
             ),
         ),
         (
             "DELETE FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
                 load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
                 load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
             ),
         ),
         (
             "DELETE FROM app.cloud_roasts "
-            "WHERE (id = %s AND idempotency_key = %s) OR id IN (%s, %s, %s)",
+            "WHERE (id = %s AND idempotency_key = %s) "
+            "OR id IN (%s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.TEST_RUN_ID,
                 load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
                 load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
                 load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
             ),
         ),
         (
@@ -928,6 +1056,8 @@ def test_happy_path_executes_exact_statement_sequence(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     cloud_params = (
         load_telemetry_verify_live.TEST_ROAST_ID,
@@ -939,11 +1069,15 @@ def test_happy_path_executes_exact_statement_sequence(
         load_telemetry_verify_live.MIXED_CONSENT_FALSE_RUN_ID,
         load_telemetry_verify_live.OPTED_OUT_RUN_ID,
         load_telemetry_verify_live.CONSENT_FLIP_RUN_ID,
+        load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+        load_telemetry_verify_live.UNBOUND_RUN_ID,
         load_telemetry_verify_live.PUBLIC_SLUG,
         load_telemetry_verify_live.MIXED_CONSENT_TRUE_SLUG,
         load_telemetry_verify_live.MIXED_CONSENT_FALSE_SLUG,
         load_telemetry_verify_live.OPTED_OUT_SLUG,
         load_telemetry_verify_live.CONSENT_FLIP_SLUG,
+        load_telemetry_verify_live.DUP_BINDING_SLUG_A,
+        load_telemetry_verify_live.DUP_BINDING_SLUG_B,
     )
     cloud_owned_params = (
         load_telemetry_verify_live.TEST_ROAST_ID,
@@ -952,7 +1086,7 @@ def test_happy_path_executes_exact_statement_sequence(
     )
     telemetry_statement = (
         "SELECT COUNT(*) FROM app.roast_telemetry "
-        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             load_telemetry_verify_live.TEST_ROAST_ID,
             load_telemetry_verify_live.SENTINEL_ROAST_ID,
@@ -962,28 +1096,29 @@ def test_happy_path_executes_exact_statement_sequence(
     )
     artifact_statement = (
         "SELECT COUNT(*) FROM app.roast_artifacts "
-        "WHERE roast_id IN (%s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
         (load_telemetry_verify_live.TEST_ROAST_ID, *gate_a_ids),
     )
     cloud_statement = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        "WHERE id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)",
         cloud_params,
     )
     cloud_owned_statement = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE (id = %s AND idempotency_key = %s) OR id IN (%s, %s, %s)",
+        "WHERE (id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s, %s, %s)",
         cloud_owned_params,
     )
     cloud_unhealable_statement = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)) "
+        "WHERE (id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)) "
         "AND NOT COALESCE(((id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)), FALSE)",
+        "OR id IN (%s, %s, %s, %s, %s)), FALSE)",
         (*cloud_params, *cloud_owned_params),
     )
     summary_statement = (
@@ -1042,6 +1177,14 @@ def test_happy_path_executes_exact_statement_sequence(
             "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
             "'Gate-A consent flip', 250, 'telemetry consent verification', NULL, "
             "PARSE_JSON(%s), 4, NULL, TRUE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'duplicate binding A', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
+            "'2026-09-02T12:00:00Z'::timestamp_tz "
+            "UNION ALL SELECT %s, %s, NULL, %s, 'private', NULL, "
+            "'duplicate binding B', 250, 'telemetry consent verification', NULL, "
+            "PARSE_JSON(%s), 4, NULL, TRUE, "
             "'2026-09-02T12:00:00Z'::timestamp_tz",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
@@ -1065,6 +1208,14 @@ def test_happy_path_executes_exact_statement_sequence(
                 load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
                 load_telemetry_verify_live.CONSENT_FLIP_RUN_ID,
                 load_telemetry_verify_live.CONSENT_FLIP_SLUG,
+                summary_json,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+                load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+                load_telemetry_verify_live.DUP_BINDING_SLUG_A,
+                summary_json,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
+                load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+                load_telemetry_verify_live.DUP_BINDING_SLUG_B,
                 summary_json,
             ),
         ),
@@ -1090,7 +1241,7 @@ def test_happy_path_executes_exact_statement_sequence(
         ),
         (
             "DELETE FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.SENTINEL_ROAST_ID,
@@ -1100,13 +1251,13 @@ def test_happy_path_executes_exact_statement_sequence(
         ),
         (
             "DELETE FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
             (load_telemetry_verify_live.TEST_ROAST_ID, *gate_a_ids),
         ),
         (
             "DELETE FROM app.cloud_roasts "
             "WHERE (id = %s AND idempotency_key = %s) "
-            "OR id IN (%s, %s, %s)",
+            "OR id IN (%s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.TEST_RUN_ID,
@@ -1119,6 +1270,75 @@ def test_happy_path_executes_exact_statement_sequence(
             (
                 load_telemetry_verify_live.BEAN_ORIGIN,
                 load_telemetry_verify_live.ROAST_LEVEL,
+            ),
+        ),
+    ]
+    assert [
+        statement
+        for statement in agent_statements
+        if statement[0].startswith("CALL app.load_roast_telemetry")
+    ] == [
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.MISSING_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.TEST_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.UNBOUND_RUN_ID,
+                load_telemetry_verify_live.TEST_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+                load_telemetry_verify_live.TEST_ROAST_ID,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+                load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+            ),
+        ),
+        (
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live.TEST_ROAST_ID,
             ),
         ),
     ]
@@ -1172,7 +1392,8 @@ def test_happy_path_executes_exact_statement_sequence(
         "SELECT", "SELECT", "SELECT", "SELECT", "LIST",
         "PUT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "CALL", "SELECT", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
-        "SELECT", "CALL", "SELECT", "CALL", "SELECT", "SELECT", "CALL",
+        "SELECT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
+        "CALL", "SELECT", "CALL", "SELECT", "SELECT", "SELECT", "CALL",
         "SELECT", "REMOVE",
     ]
 
@@ -2061,17 +2282,19 @@ def test_cloud_roast_synthetic_orphan_is_self_healed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_self_heal_proceeds(
         monkeypatch,
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        "WHERE id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.cloud_roasts "
             "WHERE (id = %s AND idempotency_key = %s) "
-            "OR id IN (%s, %s, %s)",
+            "OR id IN (%s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.TEST_RUN_ID,
@@ -2093,14 +2316,16 @@ def test_telemetry_synthetic_orphan_is_self_healed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_self_heal_proceeds(
         monkeypatch,
         "SELECT COUNT(*) FROM app.roast_telemetry "
-        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
             ids,
         ),
         telemetry_preflight_counts=(1, 0),
@@ -2115,14 +2340,16 @@ def test_artifact_synthetic_orphan_is_self_healed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_self_heal_proceeds(
         monkeypatch,
         "SELECT COUNT(*) FROM app.roast_artifacts "
-        "WHERE roast_id IN (%s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
             ids,
         ),
         artifact_preflight_counts=(1, 0),
@@ -2242,6 +2469,46 @@ def test_unhealable_cloud_collision_aborts_before_any_self_heal_write(
     _assert_no_verification_body(connection)
 
 
+def test_unbound_run_id_collision_is_unhealable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        cloud_unhealable_rows=(
+            ("pre-existing-roast", load_telemetry_verify_live.UNBOUND_RUN_ID),
+        )
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier roast keys are already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    unhealable_probe = next(
+        statement
+        for statement in connection.fake_cursor.executed
+        if "NOT COALESCE" in statement[0]
+    )
+    assert unhealable_probe[1] is not None
+    assert load_telemetry_verify_live.UNBOUND_RUN_ID in unhealable_probe[1]
+    owned_probe = next(
+        statement
+        for statement in connection.fake_cursor.executed
+        if statement[0].startswith("SELECT COUNT(*) FROM app.cloud_roasts")
+        and "NOT COALESCE" not in statement[0]
+    )
+    assert owned_probe[1] is not None
+    assert load_telemetry_verify_live.UNBOUND_RUN_ID not in owned_probe[1]
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+    _assert_no_verification_body(connection)
+
+
 def test_null_id_reserved_key_cloud_row_aborts_before_any_self_heal_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2286,18 +2553,20 @@ def test_cloud_recheck_residue_still_fails_closed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier roast keys are already owned$",
         "SELECT COUNT(*) FROM app.cloud_roasts "
-        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
-        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        "WHERE id IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.cloud_roasts "
             "WHERE (id = %s AND idempotency_key = %s) "
-            "OR id IN (%s, %s, %s)",
+            "OR id IN (%s, %s, %s, %s, %s)",
             (
                 load_telemetry_verify_live.TEST_ROAST_ID,
                 load_telemetry_verify_live.TEST_RUN_ID,
@@ -2319,15 +2588,17 @@ def test_non_synthetic_telemetry_collision_still_fails_closed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier row keys are already owned$",
         "SELECT COUNT(*) FROM app.roast_telemetry "
-        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
             ids,
         ),
         telemetry_preflight_counts=(1, 1),
@@ -2342,15 +2613,17 @@ def test_non_synthetic_artifact_collision_still_fails_closed(
         load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        load_telemetry_verify_live.DUP_BINDING_ROAST_ID_B,
     )
     _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier artifact key is already owned$",
         "SELECT COUNT(*) FROM app.roast_artifacts "
-        "WHERE roast_id IN (%s, %s, %s, %s)",
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
         (
             "DELETE FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
             ids,
         ),
         artifact_preflight_counts=(1, 1),
@@ -2495,7 +2768,8 @@ def test_stage_recheck_must_be_empty_after_remove(
             "DELETE FROM app.cloud_roasts",
             "telemetry verifier roast keys are already owned",
             "DELETE FROM app.cloud_roasts "
-            "WHERE (id = %s AND idempotency_key = %s) OR id IN (%s, %s, %s)",
+            "WHERE (id = %s AND idempotency_key = %s) "
+            "OR id IN (%s, %s, %s, %s, %s)",
         ),
         (
             "telemetry_preflight_counts",
@@ -2503,7 +2777,7 @@ def test_stage_recheck_must_be_empty_after_remove(
             "DELETE FROM app.roast_telemetry",
             "telemetry verifier row keys are already owned",
             "DELETE FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
         ),
         (
             "artifact_preflight_counts",
@@ -2511,7 +2785,7 @@ def test_stage_recheck_must_be_empty_after_remove(
             "DELETE FROM app.roast_artifacts",
             "telemetry verifier artifact key is already owned",
             "DELETE FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
         ),
         (
             "summary_preflight_counts",
@@ -2674,10 +2948,11 @@ def test_body_error_survives_delete_cleanup_failure(
     assert connection.seed_connection is not None
     assert _commands(connection.seed_connection)[-4:] == [
         "DELETE FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "DELETE FROM app.roast_artifacts "
         "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
-        "DELETE FROM app.roast_artifacts WHERE roast_id IN (%s, %s, %s, %s)",
         "DELETE FROM app.cloud_roasts WHERE (id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)",
+        "OR id IN (%s, %s, %s, %s, %s)",
         "DELETE FROM app.reference_roast_summaries "
         "WHERE bean_origin = %s AND roast_level = %s",
     ]
@@ -2724,10 +2999,11 @@ def test_cleanup_error_surfaces_when_body_succeeds(
     assert connection.seed_connection is not None
     assert _commands(connection.seed_connection)[-4:] == [
         "DELETE FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "DELETE FROM app.roast_artifacts "
         "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
-        "DELETE FROM app.roast_artifacts WHERE roast_id IN (%s, %s, %s, %s)",
         "DELETE FROM app.cloud_roasts WHERE (id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)",
+        "OR id IN (%s, %s, %s, %s, %s)",
         "DELETE FROM app.reference_roast_summaries "
         "WHERE bean_origin = %s AND roast_level = %s",
     ]
@@ -2915,6 +3191,318 @@ def test_opt_out_recompute_must_leave_zero_contribution_summary(
             load_telemetry_verify_live.FIXTURE_PATH,
             "ROASTPILOT_DEV",
         )
+
+
+def test_isolated_recompute_populated_before_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    statements = connection.fake_cursor.executed
+    positive_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    opt_out_call_index = statements.index(positive_call)
+    positive_call_index = statements.index(positive_call, opt_out_call_index + 1)
+    summary_select_index = next(
+        index
+        for index, (command, _) in enumerate(statements[positive_call_index + 1 :], positive_call_index + 1)
+        if command.startswith(
+            "SELECT " + ", ".join(load_telemetry_verify_live.SUMMARY_COLUMNS)
+        )
+    )
+    contributing_upsert_index = next(
+        index
+        for index, (command, params) in enumerate(statements)
+        if command.startswith("CALL app.upsert_roast")
+        and params is not None
+        and json.loads(str(params[1]))["contributed_to_learning"] is True
+    )
+    assert positive_call_index < summary_select_index < contributing_upsert_index
+
+
+def test_isolated_recompute_requires_summary_before_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(summary_after_load=SUMMARY_BEFORE)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^load did not populate the reference summary before upsert$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_isolated_recompute_requires_summary_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        summary_after_load=(2, 0, None, None, None, None, None, None, None, None)
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^load did not populate the reference summary before upsert$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_isolated_recompute_rejects_stale_count_one_summary() -> None:
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^load did not populate the reference summary before upsert$",
+    ):
+        load_telemetry_verify_live._assert_load_summary_moved(
+            SUMMARY_AFTER_OPT_IN,
+            SUMMARY_AFTER_OPT_IN,
+        )
+
+
+def test_isolated_recompute_requires_telemetry_temperatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        summary_after_load=(1, 0, None, None, None, None, None, 25.0, None, None)
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            r"^load did not populate telemetry-derived reference temperatures "
+            r"before upsert$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_isolated_recompute_rejects_wrong_telemetry_temperatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        summary_after_load=(1, 0, None, 25.0, None, 26.0, None, 25.0, None, None)
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            r"^load did not populate telemetry-derived reference temperatures "
+            r"before upsert$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_unbound_run_id_binding_raises_20014_and_loads_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.UNBOUND_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    call_index = connection.fake_cursor.executed.index(call)
+    assert connection.fake_cursor.executed[call_index + 1] == (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+
+
+def test_unbound_run_id_binding_requires_20014(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(binding_raises=False)
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^unbound run-id telemetry load unexpectedly succeeded$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_unbound_run_id_binding_requires_zero_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        binding_telemetry_counts={load_telemetry_verify_live.UNBOUND_RUN_ID: 1}
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^unbound run-id telemetry load inserted rows$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_mismatched_run_id_binding_raises_20014_and_loads_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    call_index = connection.fake_cursor.executed.index(call)
+    assert connection.fake_cursor.executed[call_index + 1] == (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+
+
+def test_mismatched_run_id_binding_requires_20014(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        binding_success_run_ids={load_telemetry_verify_live.OPTED_OUT_RUN_ID}
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^mismatched run-id telemetry load unexpectedly succeeded$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_mismatched_run_id_binding_requires_zero_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        binding_telemetry_counts={load_telemetry_verify_live.OPTED_OUT_RUN_ID: 1}
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^mismatched run-id telemetry load inserted rows$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_duplicate_idempotency_key_binding_raises_20014_and_loads_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.DUP_BINDING_RUN_ID,
+            load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,
+        ),
+    )
+    call_index = connection.fake_cursor.executed.index(call)
+    assert connection.fake_cursor.executed[call_index + 1] == (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.DUP_BINDING_ROAST_ID_A,),
+    )
+
+
+def test_duplicate_idempotency_key_binding_requires_20014(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        binding_raises=False,
+        binding_success_run_ids={load_telemetry_verify_live.DUP_BINDING_RUN_ID}
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^duplicate-idempotency_key telemetry load unexpectedly succeeded$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_duplicate_idempotency_key_binding_requires_zero_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        binding_telemetry_counts={load_telemetry_verify_live.DUP_BINDING_RUN_ID: 1}
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^duplicate-idempotency_key telemetry load inserted rows$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
 
 def test_opt_in_recompute_must_move_count_and_averages(
     monkeypatch: pytest.MonkeyPatch,
