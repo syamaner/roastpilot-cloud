@@ -322,7 +322,11 @@ def _cleanup_statement(
         return False
 
 
-def _preflight(connection: Connection, expected_target: str) -> Cursor:
+def _preflight(
+    connection: Connection,
+    seed_cursor: Cursor,
+    expected_target: str,
+) -> Cursor:
     """Validate the target and identity before permitting any live write."""
     if expected_target not in ALLOWED_TARGETS:
         raise UpsertRoastVerifyError(f"rejected upsert target: {expected_target!r}")
@@ -343,32 +347,29 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
     role_row = _fetchone(cursor, "SELECT CURRENT_ROLE()", None, "role assertion")
     if _first_value(role_row, "CURRENT_ROLE()") != EXPECTED_ROLE:
         raise UpsertRoastVerifyError("connected role is not ROASTPILOT_AGENT")
+
+    # Phase 1 is read-only: detect and classify every collision before healing.
     existing_run_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
         (TEST_RUN_ID,),
         "test run ownership query",
     )
-    if _count(existing_run_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError("test run id is already owned")
+    existing_run_count = _count(existing_run_row, "COUNT(*)")
     sentinel_owner_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
         (OTHER_ROAST_ID,),
         "sentinel ownership query",
     )
-    if _count(sentinel_owner_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError("sentinel roast id is already owned")
+    sentinel_owner_count = _count(sentinel_owner_row, "COUNT(*)")
     sentinel_telemetry_row = _fetchone(
         cursor,
         "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
         (OTHER_ROAST_ID,),
         "sentinel telemetry ownership query",
     )
-    if _count(sentinel_telemetry_row, "COUNT(*)") != 0:
-        raise UpsertRoastVerifyError(
-            f"sentinel telemetry id is already owned: {OTHER_ROAST_ID}"
-        )
+    sentinel_telemetry_count = _count(sentinel_telemetry_row, "COUNT(*)")
     stage_prefix = f"@app.roast_artifacts/{TEST_RUN_ID}/"
     existing_stage_rows = _fetchall(
         cursor,
@@ -376,11 +377,116 @@ def _preflight(connection: Connection, expected_target: str) -> Cursor:
         None,
         "test stage ownership query",
     )
-    if existing_stage_rows:
-        raise UpsertRoastVerifyError(
-            f"test stage prefix contains {len(existing_stage_rows)} existing file(s): "
-            f"{stage_prefix}"
+    stage_rows_are_synthetic = True
+    for row in existing_stage_rows:
+        listed_path = str(_first_value(row, "name"))
+        path_segments = listed_path.split("/")
+        run_index = next(
+            (
+                index
+                for index, segment in enumerate(path_segments)
+                if segment.casefold() == TEST_RUN_ID.casefold()
+            ),
+            None,
         )
+        relative_segments = (
+            () if run_index is None else path_segments[run_index + 1 :]
+        )
+        if (
+            len(relative_segments) != 1
+            or not relative_segments[0]
+            or relative_segments[0] not in ARTIFACT_BASENAMES.values()
+        ):
+            stage_rows_are_synthetic = False
+            break
+
+    if sentinel_owner_count != 0:
+        raise UpsertRoastVerifyError("sentinel roast id is already owned")
+    if not stage_rows_are_synthetic:
+        raise UpsertRoastVerifyError(
+            "test stage prefix contains "
+            f"{len(existing_stage_rows)} existing file(s): {stage_prefix}"
+        )
+
+    # Phase 2 heals only the synthetic state admitted by Phase 1.
+    if existing_run_count != 0:
+        existing_run_id_rows = _fetchall(
+            cursor,
+            "SELECT id FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "test run self-heal identity query",
+        )
+        existing_run_ids = [
+            _first_value(row, "ID") for row in existing_run_id_rows
+        ]
+        if existing_run_ids:
+            placeholders = ", ".join("%s" for _ in existing_run_ids)
+            _execute(
+                seed_cursor,
+                f"DELETE FROM app.roast_artifacts WHERE roast_id IN ({placeholders})",
+                tuple(existing_run_ids),
+                "test run artifact self-heal",
+            )
+            _execute(
+                seed_cursor,
+                f"DELETE FROM app.roast_telemetry WHERE roast_id IN ({placeholders})",
+                tuple(existing_run_ids),
+                "test run telemetry self-heal",
+            )
+        _execute(
+            seed_cursor,
+            "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "test run parent self-heal",
+        )
+    if sentinel_telemetry_count != 0:
+        _execute(
+            seed_cursor,
+            "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+            (OTHER_ROAST_ID,),
+            "sentinel telemetry self-heal",
+        )
+    if existing_stage_rows:
+        _execute(
+            cursor,
+            f"REMOVE {stage_prefix}",
+            None,
+            "test stage self-heal",
+        )
+
+    # Every healed condition must disappear before the verifier body can run.
+    if existing_run_count != 0:
+        existing_run_row = _fetchone(
+            cursor,
+            "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (TEST_RUN_ID,),
+            "test run ownership re-check",
+        )
+        if _count(existing_run_row, "COUNT(*)") != 0:
+            raise UpsertRoastVerifyError("test run id is already owned")
+    if sentinel_telemetry_count != 0:
+        sentinel_telemetry_row = _fetchone(
+            cursor,
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (OTHER_ROAST_ID,),
+            "sentinel telemetry ownership re-check",
+        )
+        if _count(sentinel_telemetry_row, "COUNT(*)") != 0:
+            raise UpsertRoastVerifyError(
+                f"sentinel telemetry id is already owned: {OTHER_ROAST_ID}"
+            )
+    if existing_stage_rows:
+        existing_stage_rows = _fetchall(
+            cursor,
+            f"LIST {stage_prefix}",
+            None,
+            "test stage ownership re-check",
+        )
+        if existing_stage_rows:
+            raise UpsertRoastVerifyError(
+                "test stage prefix contains "
+                f"{len(existing_stage_rows)} existing file(s): {stage_prefix}"
+            )
     return cursor
 
 
@@ -951,8 +1057,8 @@ def verify_live_upsert(
     returned_roast_id: object | None = None
     body_error: UpsertRoastVerifyError | None = None
     try:
-        cursor = _preflight(connection, expected_target)
         seed_cursor = seed_connection.cursor()
+        cursor = _preflight(connection, seed_cursor, expected_target)
         preflight_complete = True
         _stage_and_verify_fixtures(cursor)
         payload, first, resolved_roast_id, first_call_baseline, previous_updated_at = (

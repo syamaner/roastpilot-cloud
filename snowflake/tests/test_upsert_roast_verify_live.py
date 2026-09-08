@@ -43,6 +43,7 @@ class FakeCursor:
         preexisting_stage_names: set[str] | None = None,
         remove_leaves_files: bool = False,
         existing_run_count: object = 0,
+        existing_run_recheck_count: object | None = None,
         roast_count: object = 1,
         slug_roast_count: object = 1,
         control_roast_count: object = 1,
@@ -50,6 +51,7 @@ class FakeCursor:
         final_roast_count: object = 1,
         sentinel_owner_count: object = 0,
         sentinel_telemetry_count: object = 0,
+        sentinel_telemetry_recheck_count: object | None = None,
         owned_roast_id_count: object = 1,
         first_result: object = FIRST_RESULT,
         replay_result: object = FIRST_RESULT,
@@ -115,6 +117,7 @@ class FakeCursor:
         )
         self.remove_leaves_files = remove_leaves_files
         self.existing_run_count = existing_run_count
+        self.existing_run_recheck_count = existing_run_recheck_count
         self.roast_count = roast_count
         self.slug_roast_count = slug_roast_count
         self.control_roast_count = control_roast_count
@@ -122,6 +125,7 @@ class FakeCursor:
         self.final_roast_count = final_roast_count
         self.sentinel_owner_count = sentinel_owner_count
         self.sentinel_telemetry_count = sentinel_telemetry_count
+        self.sentinel_telemetry_recheck_count = sentinel_telemetry_recheck_count
         self.owned_roast_id_count = owned_roast_id_count
         self.first_result = first_result
         self.replay_result = replay_result
@@ -175,6 +179,7 @@ class FakeCursor:
         self.call_results: list[object] = []
         self.last_call_result: object = None
         self.roast_count_reads = 0
+        self.preflight_run_count_reads = 0
         self.artifact_count_reads = 0
         self.sentinel_count_reads = 0
         self.preserved_reads = 0
@@ -202,6 +207,7 @@ class FakeCursor:
             raise RuntimeError(self.failure_message)
         if command.startswith("PUT "):
             self.put_started = True
+            self.removed = False
         elif command.startswith("CALL app.upsert_roast"):
             assert normalized is not None
             payload = json.loads(str(normalized[1]))
@@ -264,6 +270,24 @@ class FakeCursor:
                 return (self.sentinel_owner_count,)
             return (self.owned_roast_id_count,)
         if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
+            if self.existing_run_recheck_count is not None:
+                self.preflight_run_count_reads += 1
+                if self.preflight_run_count_reads == 1:
+                    return (self.existing_run_count,)
+                if self.preflight_run_count_reads == 2:
+                    return (self.existing_run_recheck_count,)
+                body_counts = (
+                    self.roast_count,
+                    self.slug_roast_count,
+                    self.control_roast_count,
+                    self.empty_manifest_roast_count,
+                    self.final_roast_count,
+                )
+                body_index = min(
+                    self.preflight_run_count_reads - 3,
+                    len(body_counts) - 1,
+                )
+                return (body_counts[body_index],)
             self.roast_count_reads += 1
             if self.roast_count_reads == 1:
                 return (self.existing_run_count,)
@@ -342,6 +366,11 @@ class FakeCursor:
                 self.sentinel_count_reads += 1
                 if self.sentinel_count_reads == 1:
                     return (self.sentinel_telemetry_count,)
+                if (
+                    self.sentinel_count_reads == 2
+                    and self.sentinel_telemetry_recheck_count is not None
+                ):
+                    return (self.sentinel_telemetry_recheck_count,)
                 if self.opted_out and not self.sentinel_survives:
                     return (0,)
                 return (self.sentinel_rows,)
@@ -1283,28 +1312,93 @@ def test_final_opt_out_count_mismatch_skips_cleanup() -> None:
     assert not any(command.startswith("REMOVE ") for command in commands)
 
 
-def test_existing_test_run_guard_fails_before_any_write() -> None:
-    connection = FakeConnection(existing_run_count=1)
+def test_existing_test_run_orphan_is_self_healed_before_body() -> None:
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=0,
+    )
+    assert _verify(connection) == ROAST_ID
+    agent_commands = _commands(connection)
+    assert connection.seed_connection is not None
+    seed_entries = connection.seed_connection.fake_cursor.executed
+    assert any(command.startswith("PUT ") for command in agent_commands)
+    assert any(command.startswith("CALL ") for command in agent_commands)
+    assert seed_entries[:3] == [
+        (
+            "DELETE FROM app.roast_artifacts WHERE roast_id IN (%s)",
+            (ROAST_ID,),
+        ),
+        (
+            "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s)",
+            (ROAST_ID,),
+        ),
+        (
+            "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+            (upsert_roast_verify_live.TEST_RUN_ID,),
+        ),
+    ]
+    assert not any(command.startswith("DELETE ") for command in agent_commands)
+
+
+def test_existing_test_run_self_heal_handles_no_resolved_child_ids() -> None:
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=0,
+        cleanup_roast_ids=(),
+    )
+    assert connection.seed_connection is not None
+    cursor = upsert_roast_verify_live._preflight(
+        connection,
+        connection.seed_connection.fake_cursor,
+        "ROASTPILOT_DEV",
+    )
+    assert cursor is connection.fake_cursor
+    assert _seed_commands(connection) == [
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s"
+    ]
+
+
+def test_sentinel_roast_collision_is_not_self_healed() -> None:
+    connection = FakeConnection(sentinel_owner_count=1)
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
-        match="test run id is already owned",
+        match="sentinel roast id is already owned",
     ):
         _verify(connection)
-    assert _commands(connection) == [
-        "USE SECONDARY ROLES NONE",
-        "SELECT CURRENT_DATABASE()",
-        "SELECT CURRENT_ROLE()",
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-    ]
-    assert all(
-        command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
+    assert not any(
+        command.startswith(("PUT ", "CALL ", "DELETE "))
         for command in _commands(connection)
     )
     assert _seed_commands(connection) == []
 
 
-def test_sentinel_owner_guard_fails_before_any_write() -> None:
-    connection = FakeConnection(sentinel_owner_count=1)
+def test_sentinel_telemetry_orphan_is_self_healed_before_body() -> None:
+    connection = FakeConnection(
+        sentinel_telemetry_count=1,
+        sentinel_telemetry_recheck_count=0,
+    )
+    assert _verify(connection) == ROAST_ID
+    agent_commands = _commands(connection)
+    assert any(command.startswith("PUT ") for command in agent_commands)
+    assert any(command.startswith("CALL ") for command in agent_commands)
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed[0] == (
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s",
+        (upsert_roast_verify_live.OTHER_ROAST_ID,),
+    )
+    assert not any(command.startswith("DELETE ") for command in agent_commands)
+
+
+def test_unhealable_sentinel_roast_aborts_before_any_heal() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=0,
+        sentinel_owner_count=1,
+        sentinel_telemetry_count=1,
+        sentinel_telemetry_recheck_count=0,
+        preexisting_stage_names={f"roast_artifacts/{run_id}/roast.jsonl"},
+    )
     with pytest.raises(
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match="sentinel roast id is already owned",
@@ -1316,7 +1410,75 @@ def test_sentinel_owner_guard_fails_before_any_write() -> None:
         "SELECT CURRENT_ROLE()",
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
         "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        f"LIST @app.roast_artifacts/{run_id}/",
     ]
+    assert _seed_commands(connection) == []
+
+
+def test_stage_orphan_is_self_healed_before_body() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    stage_prefix = f"@app.roast_artifacts/{run_id}/"
+    connection = FakeConnection(
+        preexisting_stage_names={
+            f"roast_artifacts/{run_id}/roast.jsonl",
+            f"roast_artifacts/{run_id}/summary.json",
+        }
+    )
+    assert _verify(connection) == ROAST_ID
+    agent_commands = _commands(connection)
+    assert agent_commands[:9] == [
+        "USE SECONDARY ROLES NONE",
+        "SELECT CURRENT_DATABASE()",
+        "SELECT CURRENT_ROLE()",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
+        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        f"LIST {stage_prefix}",
+        f"REMOVE {stage_prefix}",
+        f"LIST {stage_prefix}",
+    ]
+    assert any(command.startswith("PUT ") for command in agent_commands)
+    assert any(command.startswith("CALL ") for command in agent_commands)
+    assert not any(command.startswith("DELETE ") for command in agent_commands)
+    assert not any(
+        command.startswith(("LIST ", "REMOVE "))
+        for command in _seed_commands(connection)
+    )
+
+
+def test_existing_test_run_guard_fails_before_any_write() -> None:
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=1,
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="test run id is already owned",
+    ):
+        _verify(connection)
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
+    )
+    assert not any(command.startswith("DELETE ") for command in _commands(connection))
+    assert _seed_commands(connection) == [
+        "DELETE FROM app.roast_artifacts WHERE roast_id IN (%s)",
+        "DELETE FROM app.roast_telemetry WHERE roast_id IN (%s)",
+        "DELETE FROM app.cloud_roasts WHERE idempotency_key = %s",
+    ]
+
+
+def test_sentinel_owner_guard_fails_before_any_write() -> None:
+    connection = FakeConnection(sentinel_owner_count=1)
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="sentinel roast id is already owned",
+    ):
+        _verify(connection)
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
+    )
+    assert not any(command.startswith("DELETE ") for command in _commands(connection))
     assert _seed_commands(connection) == []
 
 
@@ -1324,25 +1486,22 @@ def test_sentinel_telemetry_guard_prints_id_before_any_write(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    connection = FakeConnection(sentinel_telemetry_count=1)
+    connection = FakeConnection(
+        sentinel_telemetry_count=1,
+        sentinel_telemetry_recheck_count=1,
+    )
     _patch_main_connections(monkeypatch, connection)
     assert upsert_roast_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
     output = capsys.readouterr().err
     assert "sentinel telemetry id is already owned" in output
     assert upsert_roast_verify_live.OTHER_ROAST_ID in output
-    assert _commands(connection) == [
-        "USE SECONDARY ROLES NONE",
-        "SELECT CURRENT_DATABASE()",
-        "SELECT CURRENT_ROLE()",
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE idempotency_key = %s",
-        "SELECT COUNT(*) FROM app.cloud_roasts WHERE id = %s",
-        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
-    ]
-    assert all(
-        command == "USE SECONDARY ROLES NONE" or command.startswith("SELECT ")
-        for command in _commands(connection)
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
     )
-    assert _seed_commands(connection) == []
+    assert not any(command.startswith("DELETE ") for command in _commands(connection))
+    assert _seed_commands(connection) == [
+        "DELETE FROM app.roast_telemetry WHERE roast_id = %s"
+    ]
 
 
 def test_preexisting_stage_prefix_guard_fails_before_any_write() -> None:
@@ -1358,12 +1517,107 @@ def test_preexisting_stage_prefix_guard_fails_before_any_write() -> None:
         _verify(connection)
     assert "contains 1 existing file(s)" in str(caught.value)
     assert _commands(connection)[-1] == f"LIST {stage_prefix}"
+    assert not any(
+        command.startswith(("PUT ", "CALL ", "REMOVE "))
+        for command in _commands(connection)
+    )
+    assert _seed_commands(connection) == []
     assert all(
         command == "USE SECONDARY ROLES NONE"
         or command.startswith("SELECT ")
         or command.startswith("LIST ")
         for command in _commands(connection)
     )
+
+
+def test_preexisting_nested_stage_object_fails_without_remove() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=0,
+        sentinel_telemetry_count=1,
+        sentinel_telemetry_recheck_count=0,
+        preexisting_stage_names={
+            f"roast_artifacts/{run_id}/foreign/roast.jsonl"
+        }
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="test stage prefix contains 1 existing file",
+    ):
+        _verify(connection)
+    assert not any(
+        command.startswith(("PUT ", "CALL ", "REMOVE "))
+        for command in _commands(connection)
+    )
+    assert _seed_commands(connection) == []
+
+
+def test_stage_self_heal_fails_closed_when_remove_leaves_files() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    stage_prefix = f"@app.roast_artifacts/{run_id}/"
+    connection = FakeConnection(
+        preexisting_stage_names={f"roast_artifacts/{run_id}/roast.jsonl"},
+        remove_leaves_files=True,
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match="test stage prefix contains 1 existing file",
+    ):
+        _verify(connection)
+    assert _commands(connection)[-3:] == [
+        f"LIST {stage_prefix}",
+        f"REMOVE {stage_prefix}",
+        f"LIST {stage_prefix}",
+    ]
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
+    )
+
+
+def test_test_run_self_heal_delete_failure_stops_before_body() -> None:
+    connection = FakeConnection(
+        existing_run_count=1,
+        existing_run_recheck_count=0,
+        fail_on={"DELETE FROM app.roast_artifacts"},
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^test run artifact self-heal failed$",
+    ):
+        _verify(connection)
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == [
+        (
+            "DELETE FROM app.roast_artifacts WHERE roast_id IN (%s)",
+            (ROAST_ID,),
+        )
+    ]
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
+    )
+
+
+def test_stage_self_heal_remove_failure_stops_before_body() -> None:
+    run_id = upsert_roast_verify_live.TEST_RUN_ID
+    stage_prefix = f"@app.roast_artifacts/{run_id}/"
+    connection = FakeConnection(
+        preexisting_stage_names={f"roast_artifacts/{run_id}/summary.json"},
+        fail_on={"REMOVE "},
+    )
+    with pytest.raises(
+        upsert_roast_verify_live.UpsertRoastVerifyError,
+        match=r"^test stage self-heal failed$",
+    ):
+        _verify(connection)
+    assert _commands(connection)[-2:] == [
+        f"LIST {stage_prefix}",
+        f"REMOVE {stage_prefix}",
+    ]
+    assert not any(
+        command.startswith(("PUT ", "CALL ")) for command in _commands(connection)
+    )
+    assert _seed_commands(connection) == []
 
 
 def test_first_stored_pair_must_match_return() -> None:
@@ -2232,14 +2486,18 @@ def test_preflight_preserves_typed_cursor_setup_error(
         upsert_roast_verify_live.UpsertRoastVerifyError,
         match=r"^typed setup failure$",
     ) as raised:
-        upsert_roast_verify_live._preflight(connection, "ROASTPILOT_DEV")
+        upsert_roast_verify_live._preflight(
+            connection, FakeCursor(), "ROASTPILOT_DEV"
+        )
     assert raised.value is failure
     assert connection.fake_cursor.executed == []
 
 
 def test_final_replay_rejects_noncomparable_first_call_timestamp() -> None:
     connection = FakeConnection()
-    cursor = upsert_roast_verify_live._preflight(connection, "ROASTPILOT_DEV")
+    cursor = upsert_roast_verify_live._preflight(
+        connection, FakeCursor(), "ROASTPILOT_DEV"
+    )
     payload, first, owned_roast_id, baseline, previous_updated_at = (
         upsert_roast_verify_live._verify_replay_idempotency(cursor)
     )
