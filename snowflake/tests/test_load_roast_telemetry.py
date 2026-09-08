@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import operator
 import re
 import sys
 from collections import Counter
@@ -328,6 +329,18 @@ def test_t_consent_guard_declarations_are_in_declare_block() -> None:
     ) is not None
 
 
+def test_t_binding_guard_declarations_are_in_declare_block() -> None:
+    declare = re.search(r"\bdeclare\b(?P<body>.*?)\bbegin\b", STRIPPED, re.I | re.S)
+    assert declare is not None
+    body = declare.group("body")
+    assert (
+        "run_roast_mismatch exception "
+        "(-20014, 'Run id and roast id do not identify the same roast');"
+        in body
+    )
+    assert "v_binding_count int;" in body
+
+
 def test_t_recompute_grouping_key_declarations_are_in_declare_block() -> None:
     declare = re.search(r"\bdeclare\b(?P<body>.*?)\bbegin\b", STRIPPED, re.I | re.S)
     assert declare is not None
@@ -382,12 +395,87 @@ def test_t_consent_guard_refuses_missing_opted_out_and_duplicate_rows() -> None:
 def test_t_consent_guard_reads_exactly_one_roast_by_bound_id() -> None:
     before_dynamic_insert = STRIPPED.split("v_insert_sql :=", 1)[0]
     reads = re.findall(r"from\s+app\.cloud_roasts\b", before_dynamic_insert, re.I)
-    assert len(reads) == 1
+    assert len(reads) == 3
     assert re.search(
         r"from\s+app\.cloud_roasts\s+where\s+id\s*=\s*:p_roast_id\s*;",
         before_dynamic_insert,
         re.I,
     ) is not None
+    assert re.search(
+        r"from\s+app\.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id\s*;",
+        before_dynamic_insert,
+        re.I,
+    ) is not None
+    assert re.search(
+        r"from\s+app\.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id\s+"
+        r"and\s+id\s*=\s*:p_roast_id\s*;",
+        before_dynamic_insert,
+        re.I,
+    ) is not None
+
+
+def test_t_binding_guard_is_bound_exact_one_and_pre_transaction() -> None:
+    guard = re.search(
+        r"select\s+count\s*\(\s*\*\s*\)\s+"
+        r"into\s+:v_binding_count\s+"
+        r"from\s+app\.cloud_roasts\s+"
+        r"where\s+idempotency_key\s*=\s*:p_run_id\s*;\s*"
+        r"if\s*\(\s*v_binding_count\s*<>\s*1\s*\)\s*then\s*"
+        r"raise\s+run_roast_mismatch\s*;\s*end\s+if\s*;\s*"
+        r"select\s+count\s*\(\s*\*\s*\)\s+"
+        r"into\s+:v_binding_count\s+"
+        r"from\s+app\.cloud_roasts\s+"
+        r"where\s+idempotency_key\s*=\s*:p_run_id\s+and\s+"
+        r"id\s*=\s*:p_roast_id\s*;\s*"
+        r"if\s*\(\s*v_binding_count\s*<>\s*1\s*\)\s*then\s*"
+        r"raise\s+run_roast_mismatch\s*;\s*end\s+if\s*;",
+        STRIPPED,
+        re.I | re.S,
+    )
+    consent_raise = re.search(r"raise\s+roast_not_contributing\s*;", STRIPPED, re.I)
+    transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.I)
+    assert guard is not None and consent_raise is not None and transaction is not None
+    assert consent_raise.end() < guard.start() < guard.end() < transaction.start()
+    guard_sql = guard.group(0)
+    assert guard_sql.count(":p_run_id") == 2
+    assert guard_sql.count(":p_roast_id") == 1
+    assert re.search(r"idempotency_key\s*=\s*'[^']+'", guard_sql, re.I) is None
+
+
+def test_t_binding_guard_comparison_is_fail_closed() -> None:
+    binding_comparisons = re.findall(
+        r"v_binding_count\s*(<>|>=|>)\s*(\d+)", STRIPPED, re.I
+    )
+    assert binding_comparisons == [("<>", "1"), ("<>", "1")]
+    assert re.search(r"v_binding_count\s*>\s*0", STRIPPED, re.I) is None
+    assert re.search(r"v_binding_count\s*>=\s*1", STRIPPED, re.I) is None
+
+
+def test_t_binding_guard_refuses_missing_and_duplicate_rows() -> None:
+    global_uniqueness_guard = re.search(
+        r"select\s+count\s*\(\s*\*\s*\)\s+"
+        r"into\s+:v_binding_count\s+"
+        r"from\s+app\.cloud_roasts\s+"
+        r"where\s+idempotency_key\s*=\s*:p_run_id\s*;\s*"
+        r"if\s*\(\s*v_binding_count\s*(?P<operator><>|>=|>)\s*"
+        r"(?P<required_count>\d+)\s*\)\s*then\s*"
+        r"raise\s+run_roast_mismatch\s*;\s*end\s+if\s*;",
+        STRIPPED,
+        re.I | re.S,
+    )
+    assert global_uniqueness_guard is not None
+    comparison_name = global_uniqueness_guard.group("operator")
+    required_count = int(global_uniqueness_guard.group("required_count"))
+    binding_refuses = {
+        "<>": operator.ne,
+        ">=": operator.ge,
+        ">": operator.gt,
+    }[comparison_name]
+    assert comparison_name == "<>"
+    assert required_count == 1
+    assert binding_refuses(0, required_count) is True
+    assert binding_refuses(2, required_count) is True
+    assert binding_refuses(1, required_count) is False
 
 
 def test_t_header_states_owner_rights_consent_enforcement() -> None:
@@ -412,7 +500,7 @@ def test_t_header_states_owner_rights_consent_enforcement() -> None:
     )
     assert "#430 Decision 2 (this recompute) is implemented" in normalized
     assert "Decision 3" in normalized
-    assert "run_id↔roast_id binding) remains blocked" in normalized
+    assert "run_id↔roast_id binding) is implemented as pre-transaction Guard 4" in normalized
     assert "preserve Guard 3's pre-transaction placement" in normalized
     assert "two recompute call sites cover distinct changes and both are required" in normalized
     assert "UPSERT_ROAST's recompute covers metadata/membership change" in normalized
@@ -420,6 +508,19 @@ def test_t_header_states_owner_rights_consent_enforcement() -> None:
     assert "first sync recomputes twice" in normalized
     assert "accepted and idempotent" in normalized
     assert "full MERGE recomputation of the group" in normalized
+
+
+def test_t_header_documents_binding_forward_constraint_and_prerequisite() -> None:
+    header = MIGRATION.split("use schema app;", 1)[0]
+    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
+    assert "Decision 3 (the run_id↔roast_id binding) is implemented" in normalized
+    assert "run id resolves globally to exactly one roast" in normalized
+    assert "which must be `p_roast_id`; either mismatch raises -20014" in normalized
+    assert (
+        "the C3 connector MUST call with p_run_id = the roast's idempotency_key"
+        in normalized
+    )
+    assert "#446 requirement-(b) prerequisite" in normalized
 
 
 def test_t_header_makes_no_positive_boundary_claim_for_consent_guard() -> None:
@@ -574,6 +675,9 @@ def test_t_dynamic_sql_interpolates_only_validated_parameters() -> None:
         "p_run_id",
         "p_roast_id",
         "p_roast_id",
+        "p_run_id",
+        "p_run_id",
+        "p_roast_id",
     ]
     operators_only = re.sub(r"\bp_(?:roast|run)_id\b", "", without_literals)
     assert operators_only.replace("||", "").strip() == ";"
@@ -646,11 +750,36 @@ def test_t_write_boundary_consent_requires_exactly_one_opted_in_row() -> None:
     assert write_boundary_admits((True, None)) is False
 
 
+def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
+    dynamic_sql = _render_dynamic_sql()
+    requires_exactly_one_match = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where id = '{ROAST_ID}') = 1"
+    )
+    requires_exactly_one_opted_in_match = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where id = '{ROAST_ID}' "
+        "and coalesce(contributed_to_learning, false) = true) = 1"
+    )
+    requires_globally_unique_run = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where idempotency_key = '{RUN_ID}') = 1"
+    )
+    requires_run_owned_by_target = (
+        "and (select count(*) from app.cloud_roasts "
+        f"where idempotency_key = '{RUN_ID}' and id = '{ROAST_ID}') = 1"
+    )
+    assert requires_exactly_one_match in dynamic_sql
+    assert requires_exactly_one_opted_in_match in dynamic_sql
+    assert requires_globally_unique_run in dynamic_sql
+    assert requires_run_owned_by_target in dynamic_sql
+
+
 def test_t_exception_codes_are_unique_across_procedures() -> None:
     codes: list[str] = []
     for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
         codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 14)})
+    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 15)})
 
 
 def test_t_stage_basename_is_single_and_pinned_adjacent() -> None:

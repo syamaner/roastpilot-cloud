@@ -56,9 +56,14 @@
 -- freshly inserted (uncommitted) rows.
 --
 -- #430 Decision 2 (this recompute) is implemented; Decision 3 (the
--- run_id↔roast_id binding) remains blocked on the connector-contract pin, and
--- when it lands its binding guard sits in the pre-transaction guard prologue
--- and/or as an added predicate in the dynamic-INSERT where -- so preserve Guard 3's pre-transaction placement.
+-- run_id↔roast_id binding) is implemented as pre-transaction Guard 4
+-- (the run id resolves globally to exactly one roast, which must be
+-- `p_roast_id`; either mismatch raises -20014) plus the in-INSERT binding
+-- predicates. The binding rule is that the run id must equal the roast's
+-- idempotency key. D-430-C forward constraint:
+-- the C3 connector MUST call with p_run_id = the roast's idempotency_key; the
+-- procedure enforces it fail-closed. This is the #446 requirement-(b)
+-- prerequisite -- so preserve Guard 3's pre-transaction placement.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
@@ -76,8 +81,10 @@ declare
   invalid_run_id exception (-20006, 'Run id contains disallowed characters');
   no_telemetry_loaded exception (-20007, 'No telemetry rows loaded');
   roast_not_contributing exception (-20013, 'Roast has not consented to learning');
+  run_roast_mismatch exception (-20014, 'Run id and roast id do not identify the same roast');
   v_total_count int;
   v_contributing_count int;
+  v_binding_count int;
   v_insert_sql string;
   v_loaded_rows int;
   v_bean_origin string;
@@ -121,6 +128,24 @@ begin
     raise roast_not_contributing;
   end if;
 
+  -- Guard 4: the run id must resolve to exactly one roast globally (idempotency_key
+  -- uniqueness is not enforced by Snowflake, so a run key shared across roasts must
+  -- fail closed, never admit either target), and that roast must be p_roast_id.
+  select count(*)
+    into :v_binding_count
+    from app.cloud_roasts
+    where idempotency_key = :p_run_id;
+  if (v_binding_count <> 1) then
+    raise run_roast_mismatch;
+  end if;
+  select count(*)
+    into :v_binding_count
+    from app.cloud_roasts
+    where idempotency_key = :p_run_id and id = :p_roast_id;
+  if (v_binding_count <> 1) then
+    raise run_roast_mismatch;
+  end if;
+
   begin
     begin transaction;
       delete from app.roast_telemetry where roast_id = :p_roast_id;
@@ -143,7 +168,9 @@ begin
         'where metadata$filename = ''' || p_run_id || '/roast.jsonl'' ' ||
         '  and $1:type::string = ''telemetry'' ' ||
         '  and (select count(*) from app.cloud_roasts where id = ''' || p_roast_id || ''') = 1 ' ||
-        '  and (select count(*) from app.cloud_roasts where id = ''' || p_roast_id || ''' and coalesce(contributed_to_learning, false) = true) = 1';
+        '  and (select count(*) from app.cloud_roasts where id = ''' || p_roast_id || ''' and coalesce(contributed_to_learning, false) = true) = 1' ||
+        '  and (select count(*) from app.cloud_roasts where idempotency_key = ''' || p_run_id || ''') = 1 ' ||
+        '  and (select count(*) from app.cloud_roasts where idempotency_key = ''' || p_run_id || ''' and id = ''' || p_roast_id || ''') = 1';
       execute immediate :v_insert_sql;
       v_loaded_rows := sqlrowcount;
       if (v_loaded_rows = 0) then
