@@ -116,10 +116,24 @@ paths, sanitised `connection.close()`), with the presigned verifier folded as Un
 **#430** (**D-430-A SUSPENDED**), **#341** (gated by **D-341-B**), and **#446**'s
 remaining **requirement-(b)** scope (agent stage WRITE + `roast_artifacts` DML,
 #430-interlocked) — its Option B write-boundary revoke (Slice A) is now done + live-verified above.
+**#469** (live-verifier abort-on-orphan fragility) is **code-merged** — both live verifiers
+(`upsert_roast_verify_live.py` [PR #471](https://github.com/syamaner/roastpilot-cloud/pull/471),
+squash `c0c69e1`; `load_telemetry_verify_live.py`
+[PR #473](https://github.com/syamaner/roastpilot-cloud/pull/473), squash `9ce25dc`) now
+**self-heal their fixed synthetic namespace on preflight** instead of aborting, via a two-phase
+detect-all-first design (**D-469-B**): Phase 1 detects and classifies every collision read-only and
+aborts fail-closed before any write if a collision is unhealable (a reserved-id row outside the owned
+set, or a nested/unrecognised stage object); Phase 2 heals only the admitted synthetic state
+children-before-parent (table DELETEs on the `ROASTPILOT_VERIFY_SEED` seed cursor, stage `REMOVE` on
+the agent cursor) with fail-closed re-checks. Its offline self-heal acceptance is met; three
+shape-proof residuals (count-only ownership admitting a reserved-id row of an unexpected shape) are
+accepted as reserved-id-unreachable per **D-469-C** (the verifier creates no `tasting_reviews` rows and
+no non-`TEST_RUN_ID` artifact paths). #469 stays **OPEN** for the operator-gated live discharge via
+`dev-snowflake-agent-verify.yml`.
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L299) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L303) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
