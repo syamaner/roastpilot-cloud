@@ -336,8 +336,8 @@ def verify_live_load(
         "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
         "OR idempotency_key IN (%s, %s, %s, %s, %s) "
         "OR public_slug IN (%s, %s, %s, %s, %s)) "
-        "AND ((id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)) IS NOT TRUE"
+        "AND NOT COALESCE(((id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s)), FALSE)"
     )
     cursor.execute(
         cloud_unhealable_query,

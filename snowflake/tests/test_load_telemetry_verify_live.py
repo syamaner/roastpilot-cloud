@@ -307,7 +307,7 @@ class FakeCursor:
         if command == "SELECT CURRENT_ROLE()":
             return (self.role,)
         if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
-            if self.cloud_unhealable_rows is not None and "IS NOT TRUE" in command:
+            if self.cloud_unhealable_rows is not None and "NOT COALESCE" in command:
                 return (len(self.cloud_unhealable_rows),)
             value = self.cloud_preflight_counts[self.cloud_preflight_reads]
             self.cloud_preflight_reads += 1
@@ -982,8 +982,8 @@ def test_happy_path_executes_exact_statement_sequence(
         "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
         "OR idempotency_key IN (%s, %s, %s, %s, %s) "
         "OR public_slug IN (%s, %s, %s, %s, %s)) "
-        "AND ((id = %s AND idempotency_key = %s) "
-        "OR id IN (%s, %s, %s)) IS NOT TRUE",
+        "AND NOT COALESCE(((id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s)), FALSE)",
         (*cloud_params, *cloud_owned_params),
     )
     summary_statement = (
@@ -2230,7 +2230,7 @@ def test_unhealable_cloud_collision_aborts_before_any_self_heal_write(
     unhealable_probe = next(
         statement
         for statement in connection.fake_cursor.executed
-        if "IS NOT TRUE" in statement[0]
+        if "NOT COALESCE" in statement[0]
     )
     assert unhealable_probe[1] is not None
     assert load_telemetry_verify_live.SENTINEL_ROAST_ID in unhealable_probe[1]
@@ -2267,7 +2267,7 @@ def test_null_id_reserved_key_cloud_row_aborts_before_any_self_heal_write(
     unhealable_probe = next(
         statement
         for statement in connection.fake_cursor.executed
-        if "IS NOT TRUE" in statement[0]
+        if "NOT COALESCE" in statement[0]
     )
     assert connection.fake_cursor.cloud_unhealable_rows == malformed_cloud_rows
     assert unhealable_probe[1] is not None
