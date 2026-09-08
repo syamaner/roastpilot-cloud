@@ -658,6 +658,23 @@ def verify_live_load(
         )
         if _count(cursor.fetchone()) != 0:
             raise TelemetryVerifyError("committed consent-flip telemetry load inserted rows")
+
+        _expect_sql_error(
+            cursor,
+            "CALL app.load_roast_telemetry(%s, %s)",
+            (OPTED_OUT_RUN_ID, TEST_ROAST_ID),
+            "-20014",
+            "run/roast binding mismatch telemetry load",
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (TEST_ROAST_ID,),
+        )
+        if _count(cursor.fetchone()) != 0:
+            raise TelemetryVerifyError(
+                "run/roast binding mismatch telemetry load inserted rows"
+            )
+
         cursor.execute(
             "CALL app.load_roast_telemetry(%s, %s)",
             (TEST_RUN_ID, TEST_ROAST_ID),
@@ -683,6 +700,16 @@ def verify_live_load(
         )
         if _count(cursor.fetchone()) != 1:
             raise TelemetryVerifyError("opt-in telemetry load changed the sentinel row")
+
+        after_load = _summary_row(cursor)
+        if after_load[0] != 1:
+            raise TelemetryVerifyError(
+                "load-recompute isolation: opt-in load did not move the reference summary"
+            )
+        if after_load[3] is None or after_load[5] is None:
+            raise TelemetryVerifyError(
+                "load-recompute isolation: load did not populate telemetry temperature averages"
+            )
 
         # Trigger the owner-rights recompute through the only agent-callable
         # write path; ROASTPILOT_AGENT has no direct USAGE on the recompute proc.

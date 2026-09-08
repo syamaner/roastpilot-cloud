@@ -31,6 +31,7 @@ EXPECTED_TUPLE = tuple(
     STAND_IN_ROW[column] for column in load_telemetry_verify_live.SELECT_COLUMNS
 )
 SUMMARY_BEFORE = (0, 0, None, None, None, None, None, None, None, None)
+SUMMARY_AFTER_LOAD = (1, 0, None, 24.0, None, 147.0, None, None, None, None)
 SUMMARY_AFTER_OPT_IN = (1, 0, None, 24.0, None, 147.0, None, 25.0, 590.0, 1190.0)
 
 
@@ -148,11 +149,15 @@ class FakeCursor:
         gate_a_telemetry_count: object = 0,
         gate_a_success_ids: set[str] | None = None,
         gate_a_telemetry_counts: dict[str, object] | None = None,
+        mismatch_raises: bool = True,
+        mismatch_error: str = "-20014 Run does not belong to roast",
+        mismatch_telemetry_count: object = 0,
         manifest_raises: bool = True,
         manifest_error: str = (
             "-20009 Payload does not match the closed roast grammar"
         ),
         summary_after_opt_out: tuple[object, ...] = SUMMARY_BEFORE,
+        summary_after_load: tuple[object, ...] = SUMMARY_AFTER_LOAD,
         summary_after_opt_in: tuple[object, ...] = SUMMARY_AFTER_OPT_IN,
         rejected_manifest_artifact_count: object = 0,
         empty_manifest_artifact_count: object = 0,
@@ -204,10 +209,14 @@ class FakeCursor:
         self.gate_a_telemetry_counts = (
             {} if gate_a_telemetry_counts is None else gate_a_telemetry_counts
         )
+        self.mismatch_raises = mismatch_raises
+        self.mismatch_error = mismatch_error
+        self.mismatch_telemetry_count = mismatch_telemetry_count
         self.manifest_raises = manifest_raises
         self.manifest_error = manifest_error
         self.summary_rows = (
             summary_after_opt_out,
+            summary_after_load,
             summary_after_opt_in,
         )
         self.rejected_manifest_artifact_count = rejected_manifest_artifact_count
@@ -220,6 +229,7 @@ class FakeCursor:
         self.sentinel_reads = 0
         self.sentinel_present = True
         self.primary_load_calls = 0
+        self.last_load_run_id: object | None = None
         self.last_upsert_kind: str | None = None
         self.cloud_preflight_reads = 0
         self.telemetry_preflight_reads = 0
@@ -245,6 +255,12 @@ class FakeCursor:
             and normalized is not None
             else None
         )
+        load_run_id = (
+            normalized[0]
+            if command.startswith("CALL app.load_roast_telemetry")
+            and normalized is not None
+            else None
+        )
         expected_guard_call = (
             load_roast_id == load_telemetry_verify_live.MISSING_ROAST_ID
             or load_roast_id
@@ -255,7 +271,10 @@ class FakeCursor:
             }
             or (
                 load_roast_id == load_telemetry_verify_live.TEST_ROAST_ID
-                and self.primary_load_calls == 0
+                and (
+                    self.primary_load_calls == 0
+                    or load_run_id == load_telemetry_verify_live.OPTED_OUT_RUN_ID
+                )
             )
         )
         if (
@@ -269,9 +288,13 @@ class FakeCursor:
         elif command.startswith("UPDATE app.cloud_roasts"):
             self.contributing = True
         elif command.startswith("CALL app.load_roast_telemetry"):
+            self.last_load_run_id = load_run_id
             if load_roast_id == load_telemetry_verify_live.MISSING_ROAST_ID:
                 if self.missing_raises:
                     raise RuntimeError(self.missing_error)
+            elif load_run_id == load_telemetry_verify_live.OPTED_OUT_RUN_ID:
+                if self.mismatch_raises:
+                    raise RuntimeError(self.mismatch_error)
             elif load_roast_id in {
                 load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
                 load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
@@ -351,6 +374,8 @@ class FakeCursor:
                         str(roast_id), self.gate_a_telemetry_count
                     ),
                 )
+            if self.last_load_run_id == load_telemetry_verify_live.OPTED_OUT_RUN_ID:
+                return (self.mismatch_telemetry_count,)
             return (self.opt_out_telemetry_count,)
         if command.startswith(
             "SELECT " + ", ".join(load_telemetry_verify_live.SUMMARY_COLUMNS)
@@ -795,6 +820,26 @@ def test_happy_path_pins_put_call_select_and_cleanup(
             load_telemetry_verify_live.TEST_ROAST_ID,
         ),
     )
+    mismatch_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    target_count = (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+    summary_select = (
+        f"SELECT {', '.join(load_telemetry_verify_live.SUMMARY_COLUMNS)} "
+        "FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            load_telemetry_verify_live.BEAN_ORIGIN,
+            load_telemetry_verify_live.ROAST_LEVEL,
+        ),
+    )
     telemetry_select = (
         f"SELECT {', '.join(load_telemetry_verify_live.SELECT_COLUMNS)} "
         "FROM app.roast_telemetry WHERE roast_id = %s ORDER BY elapsed_s",
@@ -811,10 +856,29 @@ def test_happy_path_pins_put_call_select_and_cleanup(
     positive_call_index = connection.fake_cursor.executed.index(
         positive_call, opt_out_call_index + 1
     )
+    mismatch_call_index = connection.fake_cursor.executed.index(mismatch_call)
     select_index = connection.fake_cursor.executed.index(
         telemetry_select, positive_call_index
     )
-    assert put_index < positive_call_index < select_index
+    after_load_summary_index = connection.fake_cursor.executed.index(
+        summary_select, select_index
+    )
+    contributing_upsert_index = next(
+        index
+        for index, (command, params) in enumerate(connection.fake_cursor.executed)
+        if command.startswith("CALL app.upsert_roast")
+        and params is not None
+        and json.loads(str(params[1]))["contributed_to_learning"] is True
+    )
+    assert connection.fake_cursor.executed[mismatch_call_index + 1] == target_count
+    assert (
+        put_index
+        < mismatch_call_index
+        < positive_call_index
+        < select_index
+        < after_load_summary_index
+        < contributing_upsert_index
+    )
     assert update_index == 2
     load_roast_ids = [
         params[1]
@@ -827,6 +891,7 @@ def test_happy_path_pins_put_call_select_and_cleanup(
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.TEST_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+        load_telemetry_verify_live.TEST_ROAST_ID,
         load_telemetry_verify_live.TEST_ROAST_ID,
     ]
     assert not any(
@@ -998,6 +1063,38 @@ def test_happy_path_executes_exact_statement_sequence(
         f"LIST @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
         None,
     )
+    mismatch_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    target_count = (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+    positive_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    telemetry_select = (
+        f"SELECT {', '.join(load_telemetry_verify_live.SELECT_COLUMNS)} "
+        "FROM app.roast_telemetry WHERE roast_id = %s ORDER BY elapsed_s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+    summary_select = (
+        f"SELECT {', '.join(load_telemetry_verify_live.SUMMARY_COLUMNS)} "
+        "FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            load_telemetry_verify_live.BEAN_ORIGIN,
+            load_telemetry_verify_live.ROAST_LEVEL,
+        ),
+    )
     assert agent_statements[:26] == [
         ("USE SECONDARY ROLES NONE", None),
         ("SELECT CURRENT_DATABASE()", None),
@@ -1165,6 +1262,31 @@ def test_happy_path_executes_exact_statement_sequence(
             (load_telemetry_verify_live.TEST_ROAST_ID,),
         ),
     ]
+    mismatch_index = agent_statements.index(mismatch_call)
+    positive_index = agent_statements.index(positive_call, mismatch_index + 1)
+    telemetry_select_index = agent_statements.index(telemetry_select, positive_index)
+    after_load_summary_index = agent_statements.index(
+        summary_select, telemetry_select_index
+    )
+    assert agent_statements[mismatch_index : mismatch_index + 2] == [
+        mismatch_call,
+        target_count,
+    ]
+    assert agent_statements[after_load_summary_index - 2 : after_load_summary_index + 2] == [
+        telemetry_select,
+        (
+            "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+            (load_telemetry_verify_live.SENTINEL_ROAST_ID,),
+        ),
+        summary_select,
+        (
+            "CALL app.upsert_roast(%s, %s)",
+            (
+                load_telemetry_verify_live.TEST_RUN_ID,
+                load_telemetry_verify_live._payload(True, ()),
+            ),
+        ),
+    ]
     assert [command.split(maxsplit=1)[0] for command, _ in agent_statements] == [
         "USE", "SELECT", "SELECT",
         *(privilege for _, privilege, _ in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES),
@@ -1172,9 +1294,113 @@ def test_happy_path_executes_exact_statement_sequence(
         "SELECT", "SELECT", "SELECT", "SELECT", "LIST",
         "PUT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "CALL", "SELECT", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
-        "SELECT", "CALL", "SELECT", "CALL", "SELECT", "SELECT", "CALL",
-        "SELECT", "REMOVE",
+        "SELECT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
+        "SELECT", "SELECT", "CALL", "SELECT", "REMOVE",
     ]
+
+
+def test_track_a_isolation_reads_summary_after_load_before_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    statements = connection.fake_cursor.executed
+    matched_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    first_matched_index = statements.index(matched_call)
+    load_index = statements.index(matched_call, first_matched_index + 1)
+    summary_indices = [
+        index
+        for index, (command, _) in enumerate(statements)
+        if command.startswith(
+            "SELECT " + ", ".join(load_telemetry_verify_live.SUMMARY_COLUMNS)
+        )
+    ]
+    contributing_upsert_index = next(
+        index
+        for index, (command, params) in enumerate(statements)
+        if command.startswith("CALL app.upsert_roast")
+        and params is not None
+        and json.loads(str(params[1]))["contributed_to_learning"] is True
+    )
+
+    assert len(summary_indices) == 3
+    assert load_index < summary_indices[1] < contributing_upsert_index
+
+
+def test_track_b_mismatch_probe_runs_before_opt_in_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    statements = connection.fake_cursor.executed
+    mismatch_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    matched_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    mismatch_index = statements.index(mismatch_call)
+    matched_index = statements.index(matched_call, mismatch_index + 1)
+
+    assert statements[mismatch_index + 1] == (
+        "SELECT COUNT(*) FROM app.roast_telemetry WHERE roast_id = %s",
+        (load_telemetry_verify_live.TEST_ROAST_ID,),
+    )
+    assert mismatch_index < matched_index
+
+
+def test_track_b_matched_pair_still_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection()
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    matched_call = (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    )
+    matching_calls = [
+        statement
+        for statement in connection.fake_cursor.executed
+        if statement == matched_call
+    ]
+    assert len(matching_calls) == 2
+    assert connection.fake_cursor.primary_load_calls == 1
 
 
 def test_gate_a_probes_arrange_on_seed_and_reject_on_agent(
@@ -2924,6 +3150,147 @@ def test_opt_in_recompute_must_move_count_and_averages(
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
         match=r"^opt-in roast did not move the reference summary$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+@pytest.mark.parametrize(
+    "summary_after_load",
+    [
+        (1, 0, None, None, None, 147.0, None, None, None, None),
+        (1, 0, None, 24.0, None, None, None, None, None, None),
+    ],
+)
+def test_track_a_missing_temp_averages_after_load_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    summary_after_load: tuple[object, ...],
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(summary_after_load=summary_after_load)
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            "^load-recompute isolation: load did not populate telemetry "
+            "temperature averages$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_track_a_json_only_averages_do_not_satisfy_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        summary_after_load=(
+            1,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            25.0,
+            590.0,
+            1190.0,
+        )
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            "^load-recompute isolation: load did not populate telemetry "
+            "temperature averages$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_track_a_wrong_roast_count_after_load_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        summary_after_load=(0, 0, None, 24.0, None, 147.0, None, None, None, None)
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            "^load-recompute isolation: opt-in load did not move the "
+            "reference summary$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_track_b_mismatch_unexpectedly_succeeds_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(mismatch_raises=False)
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="^run/roast binding mismatch telemetry load unexpectedly succeeded$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+
+def test_track_b_mismatch_wrong_error_code_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        mismatch_error="-20013 Roast has not consented to learning"
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            "^run/roast binding mismatch telemetry load returned an unexpected "
+            "SQL error$"
+        ),
+    ) as raised:
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+def test_track_b_mismatch_leaves_rows_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(mismatch_telemetry_count=1)
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match="^run/roast binding mismatch telemetry load inserted rows$",
     ):
         _verify_load(
             connection,
