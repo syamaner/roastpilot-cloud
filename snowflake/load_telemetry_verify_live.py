@@ -2,7 +2,7 @@
 """Operator-run live verification for LOAD_ROAST_TELEMETRY (#416/#419).
 
 This serial-operator-only verifier owns fixed roast, run, stage-prefix, and
-reference-summary keys. It refuses to run if any are already present, then
+reference-summary keys. It self-heals only its enumerated synthetic keys, then
 cleans only those keys. The fixture and all synthesized rows are de-identified.
 """
 from __future__ import annotations
@@ -300,57 +300,176 @@ def verify_live_load(
     # #446 repeatable revoke migration is live. Every statement is zero-row DML,
     # so an unexpectedly permitted probe still cannot mutate data.
     verify_agent_dml_revoked(cursor)
+    seed_cursor = seed_connection.cursor()
 
-    cursor.execute(
+    # Phase 1 classifies every reserved key without mutating either surface.
+    cloud_preflight_query = (
         "SELECT COUNT(*) FROM app.cloud_roasts "
         "WHERE id IN (%s, %s, %s, %s, %s, %s) "
         "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-        "OR public_slug IN (%s, %s, %s, %s, %s)",
-        (
-            TEST_ROAST_ID,
-            SENTINEL_ROAST_ID,
-            MISSING_ROAST_ID,
-            *gate_a_ids,
-            TEST_RUN_ID,
-            MIXED_CONSENT_TRUE_RUN_ID,
-            MIXED_CONSENT_FALSE_RUN_ID,
-            OPTED_OUT_RUN_ID,
-            CONSENT_FLIP_RUN_ID,
-            PUBLIC_SLUG,
-            MIXED_CONSENT_TRUE_SLUG,
-            MIXED_CONSENT_FALSE_SLUG,
-            OPTED_OUT_SLUG,
-            CONSENT_FLIP_SLUG,
-        ),
+        "OR public_slug IN (%s, %s, %s, %s, %s)"
     )
-    if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier roast keys are already owned")
+    cloud_preflight_params = (
+        TEST_ROAST_ID,
+        SENTINEL_ROAST_ID,
+        MISSING_ROAST_ID,
+        *gate_a_ids,
+        TEST_RUN_ID,
+        MIXED_CONSENT_TRUE_RUN_ID,
+        MIXED_CONSENT_FALSE_RUN_ID,
+        OPTED_OUT_RUN_ID,
+        CONSENT_FLIP_RUN_ID,
+        PUBLIC_SLUG,
+        MIXED_CONSENT_TRUE_SLUG,
+        MIXED_CONSENT_FALSE_SLUG,
+        OPTED_OUT_SLUG,
+        CONSENT_FLIP_SLUG,
+    )
+    cloud_owned_query = (
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE (id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s)"
+    )
+    cloud_owned_params = (TEST_ROAST_ID, TEST_RUN_ID, *gate_a_ids)
+    cloud_unhealable_query = (
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)) "
+        "AND ((id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s)) IS NOT TRUE"
+    )
     cursor.execute(
+        cloud_unhealable_query,
+        (*cloud_preflight_params, *cloud_owned_params),
+    )
+    cloud_unhealable_count = _count(cursor.fetchone())
+    cursor.execute(cloud_owned_query, cloud_owned_params)
+    cloud_owned_count = _count(cursor.fetchone())
+
+    telemetry_preflight_query = (
         "SELECT COUNT(*) FROM app.roast_telemetry "
-        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
-        (TEST_ROAST_ID, SENTINEL_ROAST_ID, MISSING_ROAST_ID, *gate_a_ids),
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)"
     )
-    if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier row keys are already owned")
-    cursor.execute(
+    telemetry_preflight_params = (
+        TEST_ROAST_ID,
+        SENTINEL_ROAST_ID,
+        MISSING_ROAST_ID,
+        *gate_a_ids,
+    )
+    cursor.execute(telemetry_preflight_query, telemetry_preflight_params)
+    telemetry_preflight_count = _count(cursor.fetchone())
+
+    artifact_preflight_query = (
         "SELECT COUNT(*) FROM app.roast_artifacts "
-        "WHERE roast_id IN (%s, %s, %s, %s)",
-        (TEST_ROAST_ID, *gate_a_ids),
+        "WHERE roast_id IN (%s, %s, %s, %s)"
     )
-    if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier artifact key is already owned")
-    cursor.execute(
+    artifact_preflight_params = (TEST_ROAST_ID, *gate_a_ids)
+    cursor.execute(artifact_preflight_query, artifact_preflight_params)
+    artifact_preflight_count = _count(cursor.fetchone())
+
+    summary_preflight_query = (
         "SELECT COUNT(*) FROM app.reference_roast_summaries "
-        "WHERE bean_origin = %s AND roast_level = %s",
-        (BEAN_ORIGIN, ROAST_LEVEL),
+        "WHERE bean_origin = %s AND roast_level = %s"
     )
-    if _count(cursor.fetchone()) != 0:
-        raise TelemetryVerifyError("telemetry verifier summary key is already owned")
-    cursor.execute(f"LIST @app.roast_artifacts/{TEST_RUN_ID}/")
-    if cursor.fetchall():
+    summary_preflight_params = (BEAN_ORIGIN, ROAST_LEVEL)
+    cursor.execute(summary_preflight_query, summary_preflight_params)
+    summary_preflight_count = _count(cursor.fetchone())
+
+    stage_preflight_query = f"LIST @app.roast_artifacts/{TEST_RUN_ID}/"
+    cursor.execute(stage_preflight_query)
+    existing_stage_rows = cursor.fetchall()
+    # Fake and real LIST rows are positional tuples, so the name label is ignored.
+    stage_object_name = (
+        _first_value(existing_stage_rows[0], "name")  # pragma: no mutate
+        if len(existing_stage_rows) == 1
+        else None
+    )
+    stage_marker = f"{TEST_RUN_ID}/"
+    stage_relative_path = (
+        stage_object_name.partition(stage_marker)[2]
+        if isinstance(stage_object_name, str) and stage_marker in stage_object_name
+        else None
+    )
+    stage_is_healable = stage_relative_path == FIXTURE_PATH.name
+
+    if cloud_unhealable_count != 0:
+        raise TelemetryVerifyError("telemetry verifier roast keys are already owned")
+    if existing_stage_rows and not stage_is_healable:
         raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")
 
-    seed_cursor = seed_connection.cursor()
+    # Phase 2 is reachable only when every detected collision is healable.
+    if telemetry_preflight_count != 0:
+        try:
+            seed_cursor.execute(
+                "DELETE FROM app.roast_telemetry "
+                "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+                telemetry_preflight_params,
+            )
+        except BaseException as exc:
+            raise TelemetryVerifyError(
+                "telemetry verifier row keys are already owned"
+            ) from exc
+    if artifact_preflight_count != 0:
+        try:
+            seed_cursor.execute(
+                "DELETE FROM app.roast_artifacts "
+                "WHERE roast_id IN (%s, %s, %s, %s)",
+                artifact_preflight_params,
+            )
+        except BaseException as exc:
+            raise TelemetryVerifyError(
+                "telemetry verifier artifact key is already owned"
+            ) from exc
+    if cloud_owned_count != 0:
+        try:
+            seed_cursor.execute(
+                "DELETE FROM app.cloud_roasts "
+                "WHERE (id = %s AND idempotency_key = %s) "
+                "OR id IN (%s, %s, %s)",
+                cloud_owned_params,
+            )
+        except BaseException as exc:
+            raise TelemetryVerifyError(
+                "telemetry verifier roast keys are already owned"
+            ) from exc
+    if summary_preflight_count != 0:
+        try:
+            seed_cursor.execute(
+                "DELETE FROM app.reference_roast_summaries "
+                "WHERE bean_origin = %s AND roast_level = %s",
+                summary_preflight_params,
+            )
+        except BaseException as exc:
+            raise TelemetryVerifyError(
+                "telemetry verifier summary key is already owned"
+            ) from exc
+    if stage_is_healable:
+        try:
+            cursor.execute(f"REMOVE @app.roast_artifacts/{TEST_RUN_ID}/")
+        except BaseException as exc:
+            raise TelemetryVerifyError(
+                "telemetry verifier stage prefix is already owned"
+            ) from exc
+
+    # Re-check every reserved namespace, including those absent in Phase 1.
+    cursor.execute(cloud_preflight_query, cloud_preflight_params)
+    if _count(cursor.fetchone()) != 0:
+        raise TelemetryVerifyError("telemetry verifier roast keys are already owned")
+    cursor.execute(telemetry_preflight_query, telemetry_preflight_params)
+    if _count(cursor.fetchone()) != 0:
+        raise TelemetryVerifyError("telemetry verifier row keys are already owned")
+    cursor.execute(artifact_preflight_query, artifact_preflight_params)
+    if _count(cursor.fetchone()) != 0:
+        raise TelemetryVerifyError(
+            "telemetry verifier artifact key is already owned"
+        )
+    cursor.execute(summary_preflight_query, summary_preflight_params)
+    if _count(cursor.fetchone()) != 0:
+        raise TelemetryVerifyError("telemetry verifier summary key is already owned")
+    cursor.execute(stage_preflight_query)
+    if cursor.fetchall():
+        raise TelemetryVerifyError("telemetry verifier stage prefix is already owned")
 
     body_error: TelemetryVerifyError | None = None
     try:
