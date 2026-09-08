@@ -1190,8 +1190,48 @@ def _connect(target: str) -> Connection:  # pragma: no cover - real operator bou
         ) from None
 
 
+def _sanitised_cause(exc: BaseException) -> str:
+    try:
+        try:
+            name = (
+                re.sub(r"[^A-Za-z0-9_.]", "", type(exc).__name__)[:64]
+                or "UnknownError"
+            )
+        except BaseException:
+            name = "UnknownError"
+        parts = [name]
+        try:
+            from snowflake.connector.errors import Error as _SnowflakeError
+        except BaseException:
+            _SnowflakeError = ()
+        if issubclass(type(exc), _SnowflakeError):
+            try:
+                # Missing attribute is caught below and becomes the same None.
+                errno = getattr(exc, "errno", None)  # pragma: no mutate
+            except BaseException:
+                # Empty-string mutant fails the exact-int check identically.
+                errno = None  # pragma: no mutate
+            try:
+                # Missing attribute is caught below and becomes the same None.
+                sqlstate = getattr(exc, "sqlstate", None)  # pragma: no mutate
+            except BaseException:
+                # Empty-string mutant fails the five-character check identically.
+                sqlstate = None  # pragma: no mutate
+            if type(errno) is int and -1_000_000_000 < errno < 1_000_000_000:
+                parts.append(f"errno={errno}")
+            if type(sqlstate) is str and re.fullmatch(
+                r"[A-Za-z0-9]{5}", sqlstate
+            ):
+                parts.append(f"sqlstate={sqlstate}")
+        return " ".join(parts)
+    except BaseException:
+        return "UnknownError"
+
+
 def _print_failure(failure: UpsertRoastVerifyError) -> None:
     print(f"upsert verification failed: {failure}", file=sys.stderr)
+    if failure.__cause__ is not None:
+        print(f"root cause: {_sanitised_cause(failure.__cause__)}", file=sys.stderr)
     for cleanup_failure in failure.cleanup_failures:
         print(cleanup_failure, file=sys.stderr)
 
@@ -1222,8 +1262,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         roast_id = verify_live_upsert(connection, seed_connection, args.target)
     except UpsertRoastVerifyError as exc:
         failure = exc
-    except BaseException:
+    except BaseException as exc:
         failure = UpsertRoastVerifyError("live verification failed")
+        failure.__cause__ = exc
     for label, open_connection in (
         ("Snowflake connection close failed", connection),
         ("Snowflake seed connection close failed", seed_connection),

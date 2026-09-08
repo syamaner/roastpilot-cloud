@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import urllib.request
 import uuid
@@ -146,8 +147,9 @@ def verify_live_presigned(
             cursor.execute(f"REMOVE @app.roast_artifacts/{test_run_id}/")
         except BaseException as exc:
             cleanup_error = PresignedUrlVerifyError("stage REMOVE cleanup failed")
-            # __cause__ is never printed (output is sanitised), so swapping it to
-            # None is behaviourally invisible to any test.
+            # _print_failure only reports the top-level failure's sanitised
+            # cause summary. This nested cleanup cause is never printed, so
+            # swapping it to None is behaviourally invisible to any test.
             cleanup_error.__cause__ = exc  # pragma: no mutate
             cleanup_errors.append(cleanup_error)
         else:
@@ -158,8 +160,9 @@ def verify_live_presigned(
                 cleanup_error = PresignedUrlVerifyError(
                     "post-REMOVE LIST cleanup failed"
                 )
-                # __cause__ is never printed (output is sanitised), so swapping
-                # it to None is behaviourally invisible to any test.
+                # _print_failure only reports the top-level failure's sanitised
+                # cause summary. This nested cleanup cause is never printed, so
+                # swapping it to None is behaviourally invisible to any test.
                 cleanup_error.__cause__ = exc  # pragma: no mutate
                 cleanup_errors.append(cleanup_error)
             else:
@@ -226,8 +229,48 @@ def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate 
     )
 
 
+def _sanitised_cause(exc: BaseException) -> str:
+    try:
+        try:
+            name = (
+                re.sub(r"[^A-Za-z0-9_.]", "", type(exc).__name__)[:64]
+                or "UnknownError"
+            )
+        except BaseException:
+            name = "UnknownError"
+        parts = [name]
+        try:
+            from snowflake.connector.errors import Error as _SnowflakeError
+        except BaseException:
+            _SnowflakeError = ()
+        if issubclass(type(exc), _SnowflakeError):
+            try:
+                # Missing attribute is caught below and becomes the same None.
+                errno = getattr(exc, "errno", None)  # pragma: no mutate
+            except BaseException:
+                # Empty-string mutant fails the exact-int check identically.
+                errno = None  # pragma: no mutate
+            try:
+                # Missing attribute is caught below and becomes the same None.
+                sqlstate = getattr(exc, "sqlstate", None)  # pragma: no mutate
+            except BaseException:
+                # Empty-string mutant fails the five-character check identically.
+                sqlstate = None  # pragma: no mutate
+            if type(errno) is int and -1_000_000_000 < errno < 1_000_000_000:
+                parts.append(f"errno={errno}")
+            if type(sqlstate) is str and re.fullmatch(
+                r"[A-Za-z0-9]{5}", sqlstate
+            ):
+                parts.append(f"sqlstate={sqlstate}")
+        return " ".join(parts)
+    except BaseException:
+        return "UnknownError"
+
+
 def _print_failure(failure: PresignedUrlVerifyError) -> None:
     print(f"presigned URL verification failed: {failure}", file=sys.stderr)
+    if failure.__cause__ is not None:
+        print(f"root cause: {_sanitised_cause(failure.__cause__)}", file=sys.stderr)
     for cleanup_failure in failure.cleanup_failures:
         print(cleanup_failure, file=sys.stderr)
 

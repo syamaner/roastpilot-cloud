@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import re
 import sys
@@ -9,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from snowflake.connector.errors import Error as SnowflakeError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -30,6 +32,88 @@ EXPECTED_TUPLE = tuple(
 )
 SUMMARY_BEFORE = (0, 0, None, None, None, None, None, None, None, None)
 SUMMARY_AFTER_OPT_IN = (1, 0, None, 24.0, None, 147.0, None, 25.0, 590.0, 1190.0)
+
+
+class FakeProgrammingError(SnowflakeError):
+    def __init__(
+        self, message: str, *, errno: object = 2003, sqlstate: object = "42S02"
+    ) -> None:
+        super().__init__(message, send_telemetry=False)
+        self.errno = errno
+        self.sqlstate = sqlstate
+
+
+class ThrowingCauseAttributeError(SnowflakeError):
+    def __init__(self, throwing_attribute: str) -> None:
+        self._throwing_attribute: str | None = None
+        super().__init__(
+            "SENTINEL-TELEMETRY-THROWING-DESCRIPTOR", send_telemetry=False
+        )
+        self._errno: object = None
+        self._sqlstate: object = None
+        self._throwing_attribute = throwing_attribute
+
+    @property
+    def errno(self) -> object:
+        if self._throwing_attribute == "errno":
+            raise KeyboardInterrupt("SENTINEL-TELEMETRY-ERRNO-DESCRIPTOR")
+        return self._errno
+
+    @errno.setter
+    def errno(self, value: object) -> None:
+        self._errno = value
+
+    @property
+    def sqlstate(self) -> object:
+        if self._throwing_attribute == "sqlstate":
+            raise SystemExit("SENTINEL-TELEMETRY-SQLSTATE-DESCRIPTOR")
+        return self._sqlstate
+
+    @sqlstate.setter
+    def sqlstate(self, value: object) -> None:
+        self._sqlstate = value
+
+
+class SecretFormattingInt(int):
+    def __str__(self) -> str:
+        return "SENTINEL-TELEMETRY-INT-STR\nforged-int-line"
+
+    def __format__(self, _format_spec: str) -> str:
+        return "SENTINEL-TELEMETRY-INT-FORMAT\nforged-int-line"
+
+
+class SecretFormattingStr(str):
+    def __str__(self) -> str:
+        return "SENTINEL-TELEMETRY-STR-STR\nforged-str-line"
+
+    def __format__(self, _format_spec: str) -> str:
+        return "SENTINEL-TELEMETRY-STR-FORMAT\nforged-str-line"
+
+
+class RaisingClassPropertyError(Exception):
+    @property
+    def __class__(self) -> type:
+        raise RuntimeError("SENTINEL-TELEMETRY-RAISING-CLASS")
+
+
+class SpoofingClassPropertyError(Exception):
+    def __init__(self) -> None:
+        super().__init__("SENTINEL-TELEMETRY-SPOOFING-CLASS")
+        self.attribute_reads: list[str] = []
+
+    @property
+    def __class__(self) -> type:
+        return SnowflakeError
+
+    @property
+    def errno(self) -> SecretFormattingInt:
+        self.attribute_reads.append("errno")
+        return SecretFormattingInt(2003)
+
+    @property
+    def sqlstate(self) -> SecretFormattingStr:
+        self.attribute_reads.append("sqlstate")
+        return SecretFormattingStr("42S02")
 
 
 class FakeCursor:
@@ -1347,10 +1431,376 @@ def test_main_sanitises_an_unexpected_raw_failure(
     assert captured.out == ""
     assert captured.err == (
         "telemetry verification failed: telemetry verification failed\n"
+        "root cause: RuntimeError\n"
     )
     assert "snowflakecomputing.com" not in captured.err
     assert "/Users/op" not in captured.err
     assert connection.closed is True
+
+
+def test_main_ignores_raising_instance_class_property(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise RaisingClassPropertyError("SENTINEL-TELEMETRY-CLASS-MESSAGE")
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: telemetry verification failed\n"
+        "root cause: RaisingClassPropertyError\n"
+    )
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+def test_main_rejects_spoofed_instance_class_property(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+    cause = SpoofingClassPropertyError()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise cause
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: telemetry verification failed\n"
+        "root cause: SpoofingClassPropertyError\n"
+    )
+    assert cause.attribute_reads == []
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+def test_main_reports_only_structured_codes_for_unexpected_raw_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+    secret = "private-key=SENTINEL-TELEMETRY-SECRET"
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError(secret)
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    captured = capsys.readouterr()
+    assert "root cause: FakeProgrammingError errno=2003 sqlstate=42S02\n" in (
+        captured.err
+    )
+    assert secret not in captured.err
+
+
+def test_print_failure_emits_lowercase_connector_sqlstate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failure = load_telemetry_verify_live.TelemetryVerifyError("outer failure")
+    failure.__cause__ = FakeProgrammingError(
+        "SENTINEL-TELEMETRY-LOWERCASE", errno=None, sqlstate="42s02"
+    )
+
+    load_telemetry_verify_live._print_failure(failure)
+
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: outer failure\n"
+        "root cause: FakeProgrammingError sqlstate=42s02\n"
+    )
+    assert "SENTINEL" not in output
+
+
+def test_sanitised_cause_fails_safe_when_connector_import_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fail_connector_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "snowflake.connector.errors":
+            raise SystemExit("SENTINEL-TELEMETRY-CONNECTOR-IMPORT")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_connector_import)
+    cause = FakeProgrammingError("SENTINEL-TELEMETRY-IMPORT-CAUSE")
+
+    assert load_telemetry_verify_live._sanitised_cause(cause) == (
+        "FakeProgrammingError"
+    )
+
+
+@pytest.mark.parametrize(
+    ("unsafe_name", "safe_name"),
+    [
+        ("Bad\nName\t", "BadName"),
+        ("\n\t\x1b ", "UnknownError"),
+        ("A" * 65, "A" * 64),
+    ],
+)
+def test_print_failure_sanitises_and_bounds_cause_type_name(
+    capsys: pytest.CaptureFixture[str],
+    unsafe_name: str,
+    safe_name: str,
+) -> None:
+    cause_type = type(unsafe_name, (Exception,), {})
+    failure = load_telemetry_verify_live.TelemetryVerifyError("outer failure")
+    failure.__cause__ = cause_type("SENTINEL-TELEMETRY-TYPE-MESSAGE")
+
+    load_telemetry_verify_live._print_failure(failure)
+
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: outer failure\n"
+        f"root cause: {safe_name}\n"
+    )
+    assert "\nName" not in output
+    assert "\t" not in output
+    assert "\x1b" not in output
+    assert "SENTINEL" not in output
+
+
+def test_print_failure_handles_throwing_cause_type_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class ThrowingNameMeta(type):
+        def __getattribute__(self, attribute: str) -> object:
+            if attribute == "__name__":
+                raise SystemExit("SENTINEL-TELEMETRY-TYPE-NAME")
+            return super().__getattribute__(attribute)
+
+    cause_type = ThrowingNameMeta("InternalError", (Exception,), {})
+    failure = load_telemetry_verify_live.TelemetryVerifyError("outer failure")
+    failure.__cause__ = cause_type("SENTINEL-TELEMETRY-TYPE-MESSAGE")
+
+    load_telemetry_verify_live._print_failure(failure)
+
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: outer failure\n"
+        "root cause: UnknownError\n"
+    )
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+def test_print_failure_uses_outer_fallback_when_summary_operation_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failure = load_telemetry_verify_live.TelemetryVerifyError("outer failure")
+    failure.__cause__ = FakeProgrammingError("SENTINEL-TELEMETRY-OUTER-FALLBACK")
+
+    def fail_fullmatch(_pattern: str, _value: str) -> None:
+        raise SystemExit("SENTINEL-TELEMETRY-FULLMATCH")
+
+    monkeypatch.setattr(load_telemetry_verify_live.re, "fullmatch", fail_fullmatch)
+    load_telemetry_verify_live._print_failure(failure)
+
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: outer failure\n"
+        "root cause: UnknownError\n"
+    )
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize(
+    "invalid_errno", ["SENTINEL-TELEMETRY-ERRNO\nforged-log-line", True]
+)
+def test_main_omits_invalid_errno_from_sanitised_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid_errno: object,
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError("SENTINEL-TELEMETRY-MESSAGE", errno=invalid_errno)
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "root cause: FakeProgrammingError sqlstate=42S02\n" in output
+    assert "errno=" not in output
+    assert "SENTINEL-TELEMETRY" not in output
+    assert "forged-log-line" not in output
+
+
+@pytest.mark.parametrize(
+    "invalid_sqlstate",
+    ["", "ABCD", "ABCDEF", "SECRET123XYZ", "42S02\nforged", 42000],
+)
+def test_main_omits_invalid_sqlstate_from_sanitised_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid_sqlstate: object,
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError(
+            "SENTINEL-TELEMETRY-SQLSTATE", sqlstate=invalid_sqlstate
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "root cause: FakeProgrammingError errno=2003\n" in output
+    assert "sqlstate=" not in output
+    assert "SENTINEL-TELEMETRY-SQLSTATE" not in output
+    assert "forged" not in output
+
+
+@pytest.mark.parametrize("throwing_attribute", ["errno", "sqlstate"])
+def test_print_failure_omits_throwing_cause_attribute(
+    capsys: pytest.CaptureFixture[str],
+    throwing_attribute: str,
+) -> None:
+    failure = load_telemetry_verify_live.TelemetryVerifyError("outer failure")
+    failure.__cause__ = ThrowingCauseAttributeError(throwing_attribute)
+
+    load_telemetry_verify_live._print_failure(failure)
+
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: outer failure\n"
+        "root cause: ThrowingCauseAttributeError\n"
+    )
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+def test_main_omits_errno_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError(
+            "SENTINEL-TELEMETRY-INT-MESSAGE", errno=SecretFormattingInt(2003)
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "root cause: FakeProgrammingError sqlstate=42S02\n" in output
+    assert "errno=" not in output
+    assert "SENTINEL" not in output
+    assert "forged-int-line" not in output
+
+
+@pytest.mark.parametrize(
+    "oversized_errno",
+    [1_000_000_000, -1_000_000_000, 10**5000, -(10**5000)],
+    ids=["upper-bound", "lower-bound", "huge-positive", "huge-negative"],
+)
+def test_main_omits_oversized_errno_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    oversized_errno: int,
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError(
+            "SENTINEL-TELEMETRY-HUGE-INT", errno=oversized_errno, sqlstate=None
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert output == (
+        "telemetry verification failed: telemetry verification failed\n"
+        "root cause: FakeProgrammingError\n"
+    )
+    assert "SENTINEL" not in output
+    assert "Traceback" not in output
+
+
+def test_main_omits_sqlstate_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    def failing_verify(_connection, _seed_connection, _fixture_path, _target) -> int:
+        raise FakeProgrammingError(
+            "SENTINEL-TELEMETRY-STR-MESSAGE",
+            errno=None,
+            sqlstate=SecretFormattingStr("42S02"),
+        )
+
+    monkeypatch.setattr(load_telemetry_verify_live, "_connect", lambda _target: connection)
+    monkeypatch.setattr(
+        load_telemetry_verify_live,
+        "connect_seed",
+        lambda _target: connection.seed_connection,
+    )
+    monkeypatch.setattr(load_telemetry_verify_live, "verify_live_load", failing_verify)
+
+    assert load_telemetry_verify_live.main(["--target", "ROASTPILOT_DEV"]) == 1
+    output = capsys.readouterr().err
+    assert "root cause: FakeProgrammingError\n" in output
+    assert "sqlstate=" not in output
+    assert "SENTINEL" not in output
+    assert "forged-str-line" not in output
 
 
 def test_main_surfaces_sanitised_close_failure_after_body_succeeds(
