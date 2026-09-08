@@ -328,6 +328,13 @@ def test_t_consent_guard_declarations_are_in_declare_block() -> None:
     ) is not None
 
 
+def test_t_recompute_grouping_key_declarations_are_in_declare_block() -> None:
+    declare = re.search(r"\bdeclare\b(?P<body>.*?)\bbegin\b", STRIPPED, re.I | re.S)
+    assert declare is not None
+    assert re.search(r"v_bean_origin\s+string\s*;", declare.group("body"), re.I)
+    assert re.search(r"v_roast_level\s+string\s*;", declare.group("body"), re.I)
+
+
 def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
     guard = re.search(
         r"select\s+count\s*\(\s*\*\s*\)\s*,\s*"
@@ -403,8 +410,16 @@ def test_t_header_states_owner_rights_consent_enforcement() -> None:
         "dynamic object selection would break this injection-free safety property"
         in normalized
     )
-    assert "#430 (SUSPENDED)" in normalized
+    assert "#430 Decision 2 (this recompute) is implemented" in normalized
+    assert "Decision 3" in normalized
+    assert "run_id↔roast_id binding) remains blocked" in normalized
     assert "preserve Guard 3's pre-transaction placement" in normalized
+    assert "two recompute call sites cover distinct changes and both are required" in normalized
+    assert "UPSERT_ROAST's recompute covers metadata/membership change" in normalized
+    assert "this procedure's recompute covers telemetry arrival" in normalized
+    assert "first sync recomputes twice" in normalized
+    assert "accepted and idempotent" in normalized
+    assert "full MERGE recomputation of the group" in normalized
 
 
 def test_t_header_makes_no_positive_boundary_claim_for_consent_guard() -> None:
@@ -451,6 +466,95 @@ def test_t_zero_row_guard_is_after_insert_before_commit() -> None:
     commit = re.search(r"\bcommit\s*;", STRIPPED, re.IGNORECASE)
     assert insert is not None and guard is not None and commit is not None
     assert insert.start() < guard.start() < commit.start()
+
+
+def test_t_recompute_is_called_exactly_once() -> None:
+    calls = re.findall(
+        r"call\s+app\.recompute_reference_summary\s*\(", STRIPPED, re.I
+    )
+    assert len(calls) == 1
+
+
+def test_t_recompute_uses_grouping_keys_read_by_bound_roast_id() -> None:
+    assert re.search(
+        r"select\s+bean_origin\s*,\s*roast_level\s+"
+        r"into\s+:v_bean_origin\s*,\s*:v_roast_level\s+"
+        r"from\s+app\.cloud_roasts\s+where\s+id\s*=\s*:p_roast_id\s*;",
+        STRIPPED,
+        re.I | re.S,
+    )
+    assert re.search(
+        r"call\s+app\.recompute_reference_summary\s*\(\s*"
+        r":v_bean_origin\s*,\s*:v_roast_level\s*\)\s*;",
+        STRIPPED,
+        re.I,
+    )
+
+
+def test_t_recompute_order_is_after_zero_row_guard_before_commit() -> None:
+    transaction = re.search(
+        r"begin\s+transaction\s*;(?P<body>.*?\bcommit\s*;)",
+        STRIPPED,
+        re.I | re.S,
+    )
+    assert transaction is not None
+    body = transaction.group("body")
+    execute = re.search(r"execute\s+immediate", body, re.I)
+    zero_row_raise = re.search(r"raise\s+no_telemetry_loaded\s*;", body, re.I)
+    recompute = re.search(
+        r"call\s+app\.recompute_reference_summary\s*\(", body, re.I
+    )
+    commit = re.search(r"\bcommit\s*;", body, re.I)
+    assert all(match is not None for match in (execute, zero_row_raise, recompute, commit))
+    assert execute.start() < zero_row_raise.start() < recompute.start() < commit.start()
+
+
+def test_t_recompute_call_has_no_immediately_preceding_null_key_guard() -> None:
+    key_read = re.search(
+        r"select\s+bean_origin\s*,\s*roast_level\s+"
+        r"into\s+:v_bean_origin\s*,\s*:v_roast_level\b.*?;",
+        STRIPPED,
+        re.I | re.S,
+    )
+    call = re.search(
+        r"call\s+app\.recompute_reference_summary\s*\(", STRIPPED, re.I
+    )
+    assert key_read is not None and call is not None
+    assert key_read.end() < call.start()
+    between_key_read_and_call = STRIPPED[key_read.end() : call.start()]
+    assert re.search(r"\bif\b", between_key_read_and_call, re.I) is None
+
+    before_call = STRIPPED[: call.start()]
+    assert re.search(
+        r"if\s*\([^;]*\bis\s+null\b[^;]*\)\s*then\s*"
+        r"(?:(?!end\s+if\s*;).)*end\s+if\s*;\s*$",
+        before_call,
+        re.I | re.S,
+    ) is None
+
+
+def test_n_recompute_has_only_bound_grouping_keys_not_run_id() -> None:
+    assert re.search(
+        r"recompute_reference_summary\s*\(\s*:v_bean_origin\s*,\s*"
+        r":v_roast_level\s*\)",
+        STRIPPED,
+        re.I,
+    )
+    assert re.search(
+        r"recompute_reference_summary\s*\([^)]*p_run_id", STRIPPED, re.I
+    ) is None
+
+
+def test_n_grouping_key_read_is_after_dynamic_insert_build() -> None:
+    build = re.search(r"v_insert_sql\s*:=", STRIPPED, re.I)
+    key_read = re.search(
+        r"select\s+bean_origin\s*,\s*roast_level\s+"
+        r"into\s+:v_bean_origin",
+        STRIPPED,
+        re.I | re.S,
+    )
+    assert build is not None and key_read is not None
+    assert build.start() < key_read.start()
 
 
 def test_t_transaction_rolls_back_and_reraises() -> None:
