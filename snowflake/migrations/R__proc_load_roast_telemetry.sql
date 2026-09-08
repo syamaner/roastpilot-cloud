@@ -43,8 +43,22 @@
 -- DML bypass still exists, while ROAST_BY_SLUG and recompute independently gate
 -- reads on consent.
 -- The agent also retains stage WRITE and artifact-table DML, so #446 requirement
--- (b) is not fully closed here. #430 (SUSPENDED), which also edits this procedure,
--- must preserve Guard 3's pre-transaction placement if it later reorders the load.
+-- (b) is not fully closed here.
+--
+-- The two recompute call sites cover distinct changes and both are required:
+-- UPSERT_ROAST's recompute covers metadata/membership change, including the
+-- two-group recompute on a group change; this procedure's recompute covers
+-- telemetry arrival. A first sync recomputes twice, once from UPSERT_ROAST with
+-- no telemetry yet and once from this load. That is accepted and idempotent
+-- because RECOMPUTE_REFERENCE_SUMMARY is a full MERGE recomputation of the group.
+-- This recompute reads the loaded roast's (bean_origin, roast_level) from
+-- app.cloud_roasts by p_roast_id inside the load transaction, so it observes the
+-- freshly inserted (uncommitted) rows.
+--
+-- #430 Decision 2 (this recompute) is implemented; Decision 3 (the
+-- run_id↔roast_id binding) remains blocked on the connector-contract pin, and
+-- when it lands its binding guard sits in the pre-transaction guard prologue
+-- and/or as an added predicate in the dynamic-INSERT where -- so preserve Guard 3's pre-transaction placement.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
 -- migration explicitly selects APP before creating the procedure.
@@ -66,6 +80,8 @@ declare
   v_contributing_count int;
   v_insert_sql string;
   v_loaded_rows int;
+  v_bean_origin string;
+  v_roast_level string;
 begin
   -- Guard 1: byte-identical UUID grammar to DELETE_ROAST.
   if (p_roast_id is null
@@ -133,6 +149,11 @@ begin
       if (v_loaded_rows = 0) then
         raise no_telemetry_loaded;
       end if;
+      select bean_origin, roast_level
+        into :v_bean_origin, :v_roast_level
+        from app.cloud_roasts
+        where id = :p_roast_id;
+      call app.recompute_reference_summary(:v_bean_origin, :v_roast_level);
     commit;
   exception
     when other then
