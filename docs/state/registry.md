@@ -68,8 +68,31 @@ DML). **#446 Option A is DONE** — the read-side `contributed_to_learning = tru
 deployed live to `ROASTPILOT_DEV`
 ([run 33903317008](https://github.com/syamaner/roastpilot-cloud/actions/runs/33903317008));
 **D-446-B** settled that an opted-out roast's `summary` timing fields stay public
-(curve-only). #446 stays **OPEN** only for **Option B** (revoke the agent's direct
-`cloud_roasts` DML — the authoritative write boundary) plus its artifacts/stage-file half.
+(curve-only). **#446 Option B Slice A is DONE + live-verified** — the four-table revoke
+of the agent's direct INSERT/UPDATE/DELETE on `cloud_roasts`, `roast_telemetry`,
+`tasting_reviews`, `reference_roast_summaries` (agent writes now flow only through the
+owner-rights consent-guarded procs; SELECT retained) shipped as
+[#463](https://github.com/syamaner/roastpilot-cloud/pull/463) (owner-rights
+`load_roast_telemetry` + consent-conditioned INSERT),
+[#464](https://github.com/syamaner/roastpilot-cloud/pull/464) (seed-verifier guards),
+[#465](https://github.com/syamaner/roastpilot-cloud/pull/465) (verifier re-plumb onto
+`ROASTPILOT_VERIFY_SEED` + Gate-A probes),
+[#466](https://github.com/syamaner/roastpilot-cloud/pull/466) (the revoke keystone), and
+[#467](https://github.com/syamaner/roastpilot-cloud/pull/467) (seed-role SELECT
+fix-forward), under **D-446-C/F/G/H/I/J/K/L/M**. The revoke deployed live to
+`ROASTPILOT_DEV`
+([run 34165495523](https://github.com/syamaner/roastpilot-cloud/actions/runs/34165495523),
+operator-approved gate: the post-deploy strict audit confirms `ROASTPILOT_AGENT` grants
+exactly match the narrowed SELECT-only manifest), and the write boundary is behaviourally
+proven — `dev-snowflake-agent-verify.yml`
+([run 34189410886](https://github.com/syamaner/roastpilot-cloud/actions/runs/34189410886))
+discharged the agent-DML deny-probe (direct IUD denied on all four tables) alongside the
+re-plumbed upsert/presigned/load verifiers. **D-446-J** (Gate B) accepts the
+read-committed consent-race residual as the read-side gate stays the public boundary;
+**D-446-K** replaced the pre-deploy transition allowance with a one-time manual revoke;
+**D-446-M** added the seed role's SELECT (Snowflake needs SELECT to evaluate a
+DELETE/UPDATE `WHERE`). #446 stays **OPEN** only for **requirement (b)** — the agent
+retains stage WRITE + `roast_artifacts` DML (**#430-interlocked**).
 **#431 is CLOSED** — the write-side free-text value guard in `upsert_roast` that rejects
 raw IP / Fahrenheit values in seven guarded free-text fields (six projected to
 `roast_by_slug` plus `operator_notes`, guarded storage-only per **D-431-C** since the
@@ -89,11 +112,12 @@ paths, sanitised `connection.close()`), with the presigned verifier folded as Un
 (**D-435-A**). **#458** (two mutation-scope completeness follow-ups carried over from
 #455 PR-2) is **CLOSED** (PR #461, squash `0a0ab58`). Remaining C3: the offline defect
 **#430** (**D-430-A SUSPENDED**), **#341** (gated by **D-341-B**), and **#446**'s
-remaining Option B / artifacts scope.
+remaining **requirement-(b)** scope (agent stage WRITE + `roast_artifacts` DML,
+#430-interlocked) — its Option B write-boundary revoke (Slice A) is now done + live-verified above.
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L278) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L299) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
