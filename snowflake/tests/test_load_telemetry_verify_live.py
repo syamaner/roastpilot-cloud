@@ -43,10 +43,17 @@ class FakeCursor:
         fail_on: str | None = None,
         cleanup_error_text: str = "scripted telemetry verification failure",
         cloud_preflight_count: object = 0,
+        cloud_preflight_counts: tuple[object, ...] | None = None,
+        cloud_unhealable_rows: tuple[tuple[object, object], ...] | None = None,
         telemetry_preflight_count: object = 0,
+        telemetry_preflight_counts: tuple[object, ...] | None = None,
         artifact_preflight_count: object = 0,
+        artifact_preflight_counts: tuple[object, ...] | None = None,
         summary_preflight_count: object = 0,
+        summary_preflight_counts: tuple[object, ...] | None = None,
         stage_preflight_rows: tuple[str, ...] = (),
+        stage_preflight_reads: tuple[tuple[str, ...], ...] | None = None,
+        allowed_probe: str | None = None,
         missing_raises: bool = True,
         missing_error: str = "-20013 Roast has not consented to learning",
         missing_telemetry_count: object = 0,
@@ -74,11 +81,33 @@ class FakeCursor:
         self.actual = [EXPECTED_TUPLE] if actual is None else actual
         self.fail_on = fail_on
         self.cleanup_error_text = cleanup_error_text
-        self.cloud_preflight_count = cloud_preflight_count
-        self.telemetry_preflight_count = telemetry_preflight_count
-        self.artifact_preflight_count = artifact_preflight_count
-        self.summary_preflight_count = summary_preflight_count
-        self.stage_preflight_rows = stage_preflight_rows
+        self.cloud_preflight_counts = (
+            (cloud_preflight_count, 0, 0)
+            if cloud_preflight_counts is None
+            else cloud_preflight_counts
+        )
+        self.cloud_unhealable_rows = cloud_unhealable_rows
+        self.telemetry_preflight_counts = (
+            (telemetry_preflight_count, 0)
+            if telemetry_preflight_counts is None
+            else telemetry_preflight_counts
+        )
+        self.artifact_preflight_counts = (
+            (artifact_preflight_count, 0)
+            if artifact_preflight_counts is None
+            else artifact_preflight_counts
+        )
+        self.summary_preflight_counts = (
+            (summary_preflight_count, 0)
+            if summary_preflight_counts is None
+            else summary_preflight_counts
+        )
+        self.stage_preflight_reads = (
+            (stage_preflight_rows, ())
+            if stage_preflight_reads is None
+            else stage_preflight_reads
+        )
+        self.allowed_probe = allowed_probe
         self.missing_raises = missing_raises
         self.missing_error = missing_error
         self.missing_telemetry_count = missing_telemetry_count
@@ -108,6 +137,11 @@ class FakeCursor:
         self.sentinel_present = True
         self.primary_load_calls = 0
         self.last_upsert_kind: str | None = None
+        self.cloud_preflight_reads = 0
+        self.telemetry_preflight_reads = 0
+        self.artifact_preflight_reads = 0
+        self.summary_preflight_reads = 0
+        self.stage_preflight_read_count = 0
 
     def execute(self, command: str, params=None):
         normalized = tuple(params) if params is not None else None
@@ -116,6 +150,8 @@ class FakeCursor:
             probe_command
             for _, _, probe_command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
         }:
+            if command == self.allowed_probe:
+                return self
             raise RuntimeError(
                 "003001 (42501): SQL access control error: Insufficient privileges"
             )
@@ -187,19 +223,31 @@ class FakeCursor:
         if command == "SELECT CURRENT_ROLE()":
             return (self.role,)
         if command.startswith("SELECT COUNT(*) FROM app.cloud_roasts"):
-            return (self.cloud_preflight_count,)
+            if self.cloud_unhealable_rows is not None and "IS NOT TRUE" in command:
+                return (len(self.cloud_unhealable_rows),)
+            value = self.cloud_preflight_counts[self.cloud_preflight_reads]
+            self.cloud_preflight_reads += 1
+            return (value,)
         if command.startswith("SELECT COUNT(*) FROM app.roast_artifacts"):
             if self.last_upsert_kind == "rejected_manifest":
                 return (self.rejected_manifest_artifact_count,)
             if self.last_upsert_kind == "empty_manifest":
                 return (self.empty_manifest_artifact_count,)
-            return (self.artifact_preflight_count,)
+            value = self.artifact_preflight_counts[self.artifact_preflight_reads]
+            self.artifact_preflight_reads += 1
+            return (value,)
         if command.startswith("SELECT COUNT(*) FROM app.reference_roast_summaries"):
-            return (self.summary_preflight_count,)
+            value = self.summary_preflight_counts[self.summary_preflight_reads]
+            self.summary_preflight_reads += 1
+            return (value,)
         if command.startswith("SELECT COUNT(*) FROM app.roast_telemetry"):
             assert self.executed[-1][1] is not None
             if " IN " in command:
-                return (self.telemetry_preflight_count,)
+                value = self.telemetry_preflight_counts[
+                    self.telemetry_preflight_reads
+                ]
+                self.telemetry_preflight_reads += 1
+                return (value,)
             roast_id = self.executed[-1][1][0]
             if roast_id == load_telemetry_verify_live.MISSING_ROAST_ID:
                 return (self.missing_telemetry_count,)
@@ -240,7 +288,9 @@ class FakeCursor:
     def fetchall(self):
         command = self.executed[-1][0]
         if command.startswith("LIST "):
-            return [(row,) for row in self.stage_preflight_rows]
+            rows = self.stage_preflight_reads[self.stage_preflight_read_count]
+            self.stage_preflight_read_count += 1
+            return [(row,) for row in rows]
         if command.startswith("SELECT roast_id, elapsed_s"):
             return self.actual
         raise AssertionError(f"unexpected fetchall after: {command}")
@@ -795,60 +845,91 @@ def test_happy_path_executes_exact_statement_sequence(
         load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
         load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
     )
-    assert agent_statements[:20] == [
+    cloud_params = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.SENTINEL_ROAST_ID,
+        load_telemetry_verify_live.MISSING_ROAST_ID,
+        *gate_a_ids,
+        load_telemetry_verify_live.TEST_RUN_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_TRUE_RUN_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_FALSE_RUN_ID,
+        load_telemetry_verify_live.OPTED_OUT_RUN_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_RUN_ID,
+        load_telemetry_verify_live.PUBLIC_SLUG,
+        load_telemetry_verify_live.MIXED_CONSENT_TRUE_SLUG,
+        load_telemetry_verify_live.MIXED_CONSENT_FALSE_SLUG,
+        load_telemetry_verify_live.OPTED_OUT_SLUG,
+        load_telemetry_verify_live.CONSENT_FLIP_SLUG,
+    )
+    cloud_owned_params = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.TEST_RUN_ID,
+        *gate_a_ids,
+    )
+    telemetry_statement = (
+        "SELECT COUNT(*) FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        (
+            load_telemetry_verify_live.TEST_ROAST_ID,
+            load_telemetry_verify_live.SENTINEL_ROAST_ID,
+            load_telemetry_verify_live.MISSING_ROAST_ID,
+            *gate_a_ids,
+        ),
+    )
+    artifact_statement = (
+        "SELECT COUNT(*) FROM app.roast_artifacts "
+        "WHERE roast_id IN (%s, %s, %s, %s)",
+        (load_telemetry_verify_live.TEST_ROAST_ID, *gate_a_ids),
+    )
+    cloud_statement = (
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        cloud_params,
+    )
+    cloud_owned_statement = (
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE (id = %s AND idempotency_key = %s) OR id IN (%s, %s, %s)",
+        cloud_owned_params,
+    )
+    cloud_unhealable_statement = (
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE (id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)) "
+        "AND ((id = %s AND idempotency_key = %s) "
+        "OR id IN (%s, %s, %s)) IS NOT TRUE",
+        (*cloud_params, *cloud_owned_params),
+    )
+    summary_statement = (
+        "SELECT COUNT(*) FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            load_telemetry_verify_live.BEAN_ORIGIN,
+            load_telemetry_verify_live.ROAST_LEVEL,
+        ),
+    )
+    list_statement = (
+        f"LIST @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
+        None,
+    )
+    assert agent_statements[:26] == [
         ("USE SECONDARY ROLES NONE", None),
         ("SELECT CURRENT_DATABASE()", None),
         ("SELECT CURRENT_ROLE()", None),
         *((command, None) for command in probe_commands),
-        (
-            "SELECT COUNT(*) FROM app.cloud_roasts "
-            "WHERE id IN (%s, %s, %s, %s, %s, %s) "
-            "OR idempotency_key IN (%s, %s, %s, %s, %s) "
-            "OR public_slug IN (%s, %s, %s, %s, %s)",
-            (
-                load_telemetry_verify_live.TEST_ROAST_ID,
-                load_telemetry_verify_live.SENTINEL_ROAST_ID,
-                load_telemetry_verify_live.MISSING_ROAST_ID,
-                *gate_a_ids,
-                load_telemetry_verify_live.TEST_RUN_ID,
-                load_telemetry_verify_live.MIXED_CONSENT_TRUE_RUN_ID,
-                load_telemetry_verify_live.MIXED_CONSENT_FALSE_RUN_ID,
-                load_telemetry_verify_live.OPTED_OUT_RUN_ID,
-                load_telemetry_verify_live.CONSENT_FLIP_RUN_ID,
-                load_telemetry_verify_live.PUBLIC_SLUG,
-                load_telemetry_verify_live.MIXED_CONSENT_TRUE_SLUG,
-                load_telemetry_verify_live.MIXED_CONSENT_FALSE_SLUG,
-                load_telemetry_verify_live.OPTED_OUT_SLUG,
-                load_telemetry_verify_live.CONSENT_FLIP_SLUG,
-            ),
-        ),
-        (
-            "SELECT COUNT(*) FROM app.roast_telemetry "
-            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
-            (
-                load_telemetry_verify_live.TEST_ROAST_ID,
-                load_telemetry_verify_live.SENTINEL_ROAST_ID,
-                load_telemetry_verify_live.MISSING_ROAST_ID,
-                *gate_a_ids,
-            ),
-        ),
-        (
-            "SELECT COUNT(*) FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
-            (load_telemetry_verify_live.TEST_ROAST_ID, *gate_a_ids),
-        ),
-        (
-            "SELECT COUNT(*) FROM app.reference_roast_summaries "
-            "WHERE bean_origin = %s AND roast_level = %s",
-            (
-                load_telemetry_verify_live.BEAN_ORIGIN,
-                load_telemetry_verify_live.ROAST_LEVEL,
-            ),
-        ),
-        (
-            f"LIST @app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/",
-            None,
-        ),
+        cloud_unhealable_statement,
+        cloud_owned_statement,
+        telemetry_statement,
+        artifact_statement,
+        summary_statement,
+        list_statement,
+        cloud_statement,
+        telemetry_statement,
+        artifact_statement,
+        summary_statement,
+        list_statement,
     ]
     summary_json = json.dumps(
         load_telemetry_verify_live.SUMMARY, separators=(",", ":")
@@ -989,11 +1070,8 @@ def test_happy_path_executes_exact_statement_sequence(
         for statement in agent_statements
         if statement[0].startswith("SELECT COUNT(*) FROM app.roast_artifacts")
     ] == [
-        (
-            "SELECT COUNT(*) FROM app.roast_artifacts "
-            "WHERE roast_id IN (%s, %s, %s, %s)",
-            (load_telemetry_verify_live.TEST_ROAST_ID, *gate_a_ids),
-        ),
+        artifact_statement,
+        artifact_statement,
         (
             "SELECT COUNT(*) FROM app.roast_artifacts WHERE roast_id = %s",
             (load_telemetry_verify_live.TEST_ROAST_ID,),
@@ -1006,8 +1084,9 @@ def test_happy_path_executes_exact_statement_sequence(
     assert [command.split(maxsplit=1)[0] for command, _ in agent_statements] == [
         "USE", "SELECT", "SELECT",
         *(privilege for _, privilege, _ in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES),
-        "SELECT", "SELECT", "SELECT", "SELECT",
-        "LIST", "PUT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
+        "SELECT", "SELECT", "SELECT", "SELECT", "SELECT", "LIST",
+        "SELECT", "SELECT", "SELECT", "SELECT", "LIST",
+        "PUT", "CALL", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "CALL", "SELECT", "SELECT", "CALL", "SELECT", "CALL", "SELECT",
         "SELECT", "CALL", "SELECT", "CALL", "SELECT", "SELECT", "CALL",
         "SELECT", "REMOVE",
@@ -1350,7 +1429,9 @@ def test_database_mismatch_rejects_before_put_or_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_expected_helper(monkeypatch)
-    connection = FakeConnection(database="ROASTPILOT_PROD")
+    connection = FakeConnection(
+        database="ROASTPILOT_PROD", cloud_preflight_counts=(0, 1, 0)
+    )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
         match=r"^connected database does not match target$",
@@ -1364,13 +1445,17 @@ def test_database_mismatch_rejects_before_put_or_cleanup(
         "USE SECONDARY ROLES NONE",
         "SELECT CURRENT_DATABASE()",
     ]
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
 
 
 def test_role_mismatch_rejects_before_put_or_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_expected_helper(monkeypatch)
-    connection = FakeConnection(role="ACCOUNTADMIN")
+    connection = FakeConnection(
+        role="ACCOUNTADMIN", cloud_preflight_counts=(0, 1, 0)
+    )
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
         match=r"^connected role is not ROASTPILOT_AGENT$",
@@ -1385,11 +1470,122 @@ def test_role_mismatch_rejects_before_put_or_cleanup(
         "SELECT CURRENT_DATABASE()",
         "SELECT CURRENT_ROLE()",
     ]
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
 
 
-def _assert_preflight_collision(
+def test_uuid_shape_guard_rejects_before_self_heal_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(load_telemetry_verify_live, "TEST_RUN_ID", "NOT-A-UUID")
+    connection = FakeConnection(cloud_preflight_counts=(0, 1, 0))
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^TEST_RUN_ID is not a lowercase UUID$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert connection.fake_cursor.executed == []
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+
+
+def test_agent_dml_revoke_assertion_rejects_before_self_heal_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    allowed_probe = next(
+        command
+        for table, privilege, command in (
+            load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+        )
+        if (table, privilege) == ("cloud_roasts", "INSERT")
+    )
+    connection = FakeConnection(
+        allowed_probe=allowed_probe, cloud_preflight_counts=(0, 1, 0)
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=(
+            r"^cloud_roasts INSERT revoke not effective: "
+            r"no-op DML unexpectedly succeeded$"
+        ),
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert allowed_probe in _commands(connection)
+    assert not any(
+        command.startswith("SELECT COUNT(*) FROM app.cloud_roasts")
+        for command in _commands(connection)
+    )
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+
+
+def _assert_no_verification_body(connection: FakeConnection) -> None:
+    body_prefixes = ("PUT ", "CALL ")
+    assert not any(
+        command.startswith(body_prefixes) for command in _commands(connection)
+    )
+
+
+def _assert_no_agent_table_delete(connection: FakeConnection) -> None:
+    deny_probes = {
+        command
+        for _, privilege, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
+        if privilege == "DELETE"
+    }
+    assert not any(
+        command.startswith("DELETE FROM app.") and command not in deny_probes
+        for command in _commands(connection)
+    )
+
+
+def _assert_table_self_heal_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+    detect_query: str,
+    recovery_delete: tuple[str, tuple[object, ...]],
+    detect_count: int = 2,
+    **cursor_options: object,
+) -> FakeConnection:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(**cursor_options)
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed[0] == recovery_delete
+    assert sum(command == detect_query for command in _commands(connection)) == detect_count
+    _assert_no_agent_table_delete(connection)
+    assert any(command.startswith("PUT ") for command in _commands(connection))
+    assert (
+        "CALL app.load_roast_telemetry(%s, %s)",
+        (
+            load_telemetry_verify_live.TEST_RUN_ID,
+            load_telemetry_verify_live.TEST_ROAST_ID,
+        ),
+    ) in connection.fake_cursor.executed
+    return connection
+
+
+def _assert_table_collision_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     message: str,
+    detect_query: str,
+    recovery_delete: tuple[str, tuple[object, ...]],
+    detect_count: int = 2,
     **cursor_options: object,
 ) -> FakeConnection:
     _patch_expected_helper(monkeypatch)
@@ -1400,75 +1596,538 @@ def _assert_preflight_collision(
             load_telemetry_verify_live.FIXTURE_PATH,
             "ROASTPILOT_DEV",
         )
-    mutation_prefixes = ("PUT ", "INSERT ", "UPDATE ", "DELETE ", "REMOVE ", "CALL ")
-    probe_commands = {
-        command
-        for _, _, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
-    }
-    assert not any(
-        command.startswith(mutation_prefixes) and command not in probe_commands
-        for command in _commands(connection)
-    )
     assert connection.seed_connection is not None
-    assert connection.seed_connection.fake_cursor.executed == []
+    assert connection.seed_connection.fake_cursor.executed == [recovery_delete]
+    assert sum(command == detect_query for command in _commands(connection)) == detect_count
+    _assert_no_agent_table_delete(connection)
+    _assert_no_verification_body(connection)
     return connection
 
 
-def test_sentinel_cloud_roast_collision_aborts_before_mutation(
+def test_cloud_roast_synthetic_orphan_is_self_healed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection = _assert_preflight_collision(
+    gate_a_ids = (
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_self_heal_proceeds(
+        monkeypatch,
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        (
+            "DELETE FROM app.cloud_roasts "
+            "WHERE (id = %s AND idempotency_key = %s) "
+            "OR id IN (%s, %s, %s)",
+            (
+                load_telemetry_verify_live.TEST_ROAST_ID,
+                load_telemetry_verify_live.TEST_RUN_ID,
+                *gate_a_ids,
+            ),
+        ),
+        detect_count=1,
+        cloud_preflight_counts=(0, 1, 0),
+    )
+
+
+def test_telemetry_synthetic_orphan_is_self_healed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.SENTINEL_ROAST_ID,
+        load_telemetry_verify_live.MISSING_ROAST_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_self_heal_proceeds(
+        monkeypatch,
+        "SELECT COUNT(*) FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        (
+            "DELETE FROM app.roast_telemetry "
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            ids,
+        ),
+        telemetry_preflight_counts=(1, 0),
+    )
+
+
+def test_artifact_synthetic_orphan_is_self_healed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_self_heal_proceeds(
+        monkeypatch,
+        "SELECT COUNT(*) FROM app.roast_artifacts "
+        "WHERE roast_id IN (%s, %s, %s, %s)",
+        (
+            "DELETE FROM app.roast_artifacts "
+            "WHERE roast_id IN (%s, %s, %s, %s)",
+            ids,
+        ),
+        artifact_preflight_counts=(1, 0),
+    )
+
+
+def test_reference_summary_synthetic_orphan_is_self_healed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    params = (
+        load_telemetry_verify_live.BEAN_ORIGIN,
+        load_telemetry_verify_live.ROAST_LEVEL,
+    )
+    _assert_table_self_heal_proceeds(
+        monkeypatch,
+        "SELECT COUNT(*) FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            "DELETE FROM app.reference_roast_summaries "
+            "WHERE bean_origin = %s AND roast_level = %s",
+            params,
+        ),
+        summary_preflight_counts=(1, 0),
+    )
+
+
+def test_preflight_self_heal_deletes_children_before_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        telemetry_preflight_counts=(1, 0),
+        artifact_preflight_counts=(1, 0),
+        cloud_preflight_counts=(0, 1, 0),
+        summary_preflight_counts=(1, 0),
+    )
+
+    assert _verify_load(
+        connection, load_telemetry_verify_live.FIXTURE_PATH, "ROASTPILOT_DEV"
+    ) == 1
+    assert connection.seed_connection is not None
+    assert [command.split()[2] for command in _commands(connection.seed_connection)[:4]] == [
+        "app.roast_telemetry",
+        "app.roast_artifacts",
+        "app.cloud_roasts",
+        "app.reference_roast_summaries",
+    ]
+    _assert_no_agent_table_delete(connection)
+
+
+def test_stage_fixture_orphan_is_self_healed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    stage_prefix = (
+        f"@app.roast_artifacts/{load_telemetry_verify_live.TEST_RUN_ID}/"
+    )
+    connection = FakeConnection(
+        stage_preflight_reads=((f"{stage_prefix}roast.jsonl",), ())
+    )
+
+    assert _verify_load(
+        connection,
+        load_telemetry_verify_live.FIXTURE_PATH,
+        "ROASTPILOT_DEV",
+    ) == 1
+
+    list_statement = (f"LIST {stage_prefix}", None)
+    remove_statement = (f"REMOVE {stage_prefix}", None)
+    assert connection.fake_cursor.executed.count(list_statement) == 2
+    first_list = connection.fake_cursor.executed.index(list_statement)
+    first_remove = connection.fake_cursor.executed.index(remove_statement)
+    second_list = connection.fake_cursor.executed.index(list_statement, first_list + 1)
+    assert first_list < first_remove < second_list
+    assert any(command.startswith("PUT ") for command in _commands(connection))
+    assert connection.seed_connection is not None
+    assert not any(
+        command.startswith(("LIST ", "REMOVE "))
+        for command in _commands(connection.seed_connection)
+    )
+    _assert_no_agent_table_delete(connection)
+
+
+def test_unhealable_cloud_collision_aborts_before_any_self_heal_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        cloud_preflight_counts=(1, 0),
+        telemetry_preflight_counts=(1,),
+        artifact_preflight_counts=(1,),
+        summary_preflight_counts=(1,),
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier roast keys are already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    unhealable_probe = next(
+        statement
+        for statement in connection.fake_cursor.executed
+        if "IS NOT TRUE" in statement[0]
+    )
+    assert unhealable_probe[1] is not None
+    assert load_telemetry_verify_live.SENTINEL_ROAST_ID in unhealable_probe[1]
+    assert any(command.startswith("LIST ") for command in _commands(connection))
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+    _assert_no_agent_table_delete(connection)
+    assert not any(command.startswith("REMOVE ") for command in _commands(connection))
+    _assert_no_verification_body(connection)
+
+
+def test_null_id_reserved_key_cloud_row_aborts_before_any_self_heal_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    malformed_cloud_rows = ((None, load_telemetry_verify_live.TEST_RUN_ID),)
+    connection = FakeConnection(
+        cloud_unhealable_rows=malformed_cloud_rows,
+        telemetry_preflight_counts=(1, 0),
+        artifact_preflight_counts=(1, 0),
+        summary_preflight_counts=(1, 0),
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier roast keys are already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    unhealable_probe = next(
+        statement
+        for statement in connection.fake_cursor.executed
+        if "IS NOT TRUE" in statement[0]
+    )
+    assert connection.fake_cursor.cloud_unhealable_rows == malformed_cloud_rows
+    assert unhealable_probe[1] is not None
+    assert load_telemetry_verify_live.TEST_RUN_ID in unhealable_probe[1]
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+    _assert_no_agent_table_delete(connection)
+    assert not any(command.startswith("REMOVE ") for command in _commands(connection))
+    _assert_no_verification_body(connection)
+
+
+def test_cloud_recheck_residue_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate_a_ids = (
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier roast keys are already owned$",
-        cloud_preflight_count=1,
+        "SELECT COUNT(*) FROM app.cloud_roasts "
+        "WHERE id IN (%s, %s, %s, %s, %s, %s) "
+        "OR idempotency_key IN (%s, %s, %s, %s, %s) "
+        "OR public_slug IN (%s, %s, %s, %s, %s)",
+        (
+            "DELETE FROM app.cloud_roasts "
+            "WHERE (id = %s AND idempotency_key = %s) "
+            "OR id IN (%s, %s, %s)",
+            (
+                load_telemetry_verify_live.TEST_ROAST_ID,
+                load_telemetry_verify_live.TEST_RUN_ID,
+                *gate_a_ids,
+            ),
+        ),
+        detect_count=1,
+        cloud_preflight_counts=(0, 1, 1),
     )
-    cloud_query = next(
-        executed
-        for executed in connection.fake_cursor.executed
-        if executed[0].startswith("SELECT COUNT(*) FROM app.cloud_roasts")
-    )
-    assert cloud_query[1] is not None
-    assert load_telemetry_verify_live.SENTINEL_ROAST_ID in cloud_query[1]
 
 
-def test_telemetry_row_collision_aborts_before_mutation(
+def test_non_synthetic_telemetry_collision_still_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _assert_preflight_collision(
+    ids = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.SENTINEL_ROAST_ID,
+        load_telemetry_verify_live.MISSING_ROAST_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier row keys are already owned$",
-        telemetry_preflight_count=1,
+        "SELECT COUNT(*) FROM app.roast_telemetry "
+        "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        (
+            "DELETE FROM app.roast_telemetry "
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+            ids,
+        ),
+        telemetry_preflight_counts=(1, 1),
     )
 
 
-def test_artifact_row_collision_aborts_before_mutation(
+def test_non_synthetic_artifact_collision_still_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _assert_preflight_collision(
+    ids = (
+        load_telemetry_verify_live.TEST_ROAST_ID,
+        load_telemetry_verify_live.MIXED_CONSENT_ROAST_ID,
+        load_telemetry_verify_live.OPTED_OUT_ROAST_ID,
+        load_telemetry_verify_live.CONSENT_FLIP_ROAST_ID,
+    )
+    _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier artifact key is already owned$",
-        artifact_preflight_count=1,
+        "SELECT COUNT(*) FROM app.roast_artifacts "
+        "WHERE roast_id IN (%s, %s, %s, %s)",
+        (
+            "DELETE FROM app.roast_artifacts "
+            "WHERE roast_id IN (%s, %s, %s, %s)",
+            ids,
+        ),
+        artifact_preflight_counts=(1, 1),
     )
 
 
-def test_reference_summary_collision_aborts_before_mutation(
+def test_non_synthetic_summary_collision_still_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _assert_preflight_collision(
+    params = (
+        load_telemetry_verify_live.BEAN_ORIGIN,
+        load_telemetry_verify_live.ROAST_LEVEL,
+    )
+    _assert_table_collision_fails_closed(
         monkeypatch,
         r"^telemetry verifier summary key is already owned$",
-        summary_preflight_count=1,
+        "SELECT COUNT(*) FROM app.reference_roast_summaries "
+        "WHERE bean_origin = %s AND roast_level = %s",
+        (
+            "DELETE FROM app.reference_roast_summaries "
+            "WHERE bean_origin = %s AND roast_level = %s",
+            params,
+        ),
+        summary_preflight_counts=(1, 1),
     )
 
 
-def test_stage_prefix_collision_aborts_before_mutation(
+@pytest.mark.parametrize(
+    "stage_suffix",
+    ["foreign/roast.jsonl", "foreign.jsonl"],
+    ids=["nested-fixture", "wrong-root-file"],
+)
+def test_unhealable_stage_collision_aborts_before_any_self_heal_write(
+    monkeypatch: pytest.MonkeyPatch,
+    stage_suffix: str,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        cloud_preflight_counts=(0, 1),
+        telemetry_preflight_counts=(1,),
+        artifact_preflight_counts=(1,),
+        summary_preflight_counts=(1,),
+        stage_preflight_rows=(
+            f"owned-prefix/{load_telemetry_verify_live.TEST_RUN_ID}/{stage_suffix}",
+        ),
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier stage prefix is already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    assert not any(command.startswith("REMOVE ") for command in _commands(connection))
+    _assert_no_agent_table_delete(connection)
+    _assert_no_verification_body(connection)
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+
+
+def test_repeated_stage_marker_aborts_without_remove_or_seed_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _assert_preflight_collision(
-        monkeypatch,
-        r"^telemetry verifier stage prefix is already owned$",
-        stage_preflight_rows=("existing/roast.jsonl",),
+    _patch_expected_helper(monkeypatch)
+    marker = f"{load_telemetry_verify_live.TEST_RUN_ID}/"
+    connection = FakeConnection(
+        telemetry_preflight_counts=(1, 0),
+        artifact_preflight_counts=(1, 0),
+        summary_preflight_counts=(1, 0),
+        stage_preflight_rows=(f"@app.roast_artifacts/{marker}{marker}roast.jsonl",),
     )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier stage prefix is already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert not any(command.startswith("REMOVE ") for command in _commands(connection))
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
+    _assert_no_verification_body(connection)
+
+
+def test_multiple_fixture_stage_rows_fail_closed_without_remove(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        stage_preflight_rows=("first/roast.jsonl", "second/roast.jsonl")
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier stage prefix is already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    assert not any(command.startswith("REMOVE ") for command in _commands(connection))
+    _assert_no_verification_body(connection)
+
+
+def test_stage_recheck_must_be_empty_after_remove(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    stage_prefix = f"owned-prefix/{load_telemetry_verify_live.TEST_RUN_ID}/"
+    connection = FakeConnection(
+        stage_preflight_reads=(
+            (f"{stage_prefix}roast.jsonl",),
+            (f"{stage_prefix}roast.jsonl",),
+        )
+    )
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier stage prefix is already owned$",
+    ):
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+    assert sum(command.startswith("LIST ") for command in _commands(connection)) == 2
+    assert sum(command.startswith("REMOVE ") for command in _commands(connection)) == 1
+    _assert_no_verification_body(connection)
+
+
+@pytest.mark.parametrize(
+    ("count_option", "counts", "fail_on", "message", "expected_delete"),
+    [
+        (
+            "cloud_preflight_counts",
+            (0, 1),
+            "DELETE FROM app.cloud_roasts",
+            "telemetry verifier roast keys are already owned",
+            "DELETE FROM app.cloud_roasts "
+            "WHERE (id = %s AND idempotency_key = %s) OR id IN (%s, %s, %s)",
+        ),
+        (
+            "telemetry_preflight_counts",
+            (1,),
+            "DELETE FROM app.roast_telemetry",
+            "telemetry verifier row keys are already owned",
+            "DELETE FROM app.roast_telemetry "
+            "WHERE roast_id IN (%s, %s, %s, %s, %s, %s)",
+        ),
+        (
+            "artifact_preflight_counts",
+            (1,),
+            "DELETE FROM app.roast_artifacts",
+            "telemetry verifier artifact key is already owned",
+            "DELETE FROM app.roast_artifacts "
+            "WHERE roast_id IN (%s, %s, %s, %s)",
+        ),
+        (
+            "summary_preflight_counts",
+            (1,),
+            "DELETE FROM app.reference_roast_summaries",
+            "telemetry verifier summary key is already owned",
+            "DELETE FROM app.reference_roast_summaries "
+            "WHERE bean_origin = %s AND roast_level = %s",
+        ),
+    ],
+)
+def test_table_self_heal_delete_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    count_option: str,
+    counts: tuple[object, ...],
+    fail_on: str,
+    message: str,
+    expected_delete: str,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(**{count_option: counts, "fail_on": fail_on})
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=rf"^{message}$",
+    ) as raised:
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert connection.seed_connection is not None
+    assert _commands(connection.seed_connection) == [expected_delete]
+    _assert_no_agent_table_delete(connection)
+    _assert_no_verification_body(connection)
+
+
+def test_stage_self_heal_remove_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_expected_helper(monkeypatch)
+    connection = FakeConnection(
+        stage_preflight_rows=(
+            f"owned-prefix/{load_telemetry_verify_live.TEST_RUN_ID}/roast.jsonl",
+        ),
+        fail_on="REMOVE ",
+    )
+
+    with pytest.raises(
+        load_telemetry_verify_live.TelemetryVerifyError,
+        match=r"^telemetry verifier stage prefix is already owned$",
+    ) as raised:
+        _verify_load(
+            connection,
+            load_telemetry_verify_live.FIXTURE_PATH,
+            "ROASTPILOT_DEV",
+        )
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert sum(command.startswith("LIST ") for command in _commands(connection)) == 1
+    assert sum(command.startswith("REMOVE ") for command in _commands(connection)) == 1
+    _assert_no_verification_body(connection)
+    assert connection.seed_connection is not None
+    assert connection.seed_connection.fake_cursor.executed == []
 
 
 def test_row_count_mismatch_is_detected(monkeypatch: pytest.MonkeyPatch) -> None:
