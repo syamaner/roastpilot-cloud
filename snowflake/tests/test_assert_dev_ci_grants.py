@@ -89,6 +89,7 @@ _LIVE_UPSERT_ROAST_SIGNATURE = "ROASTPILOT_DEV.APP.UPSERT_ROAST(VARCHAR, VARCHAR
 _LIVE_AGENT_SELECT_ONLY_TABLES = (
     "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
     "ROASTPILOT_DEV.APP.ROAST_TELEMETRY",
+    "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
     "ROASTPILOT_DEV.APP.TASTING_REVIEWS",
     "ROASTPILOT_DEV.APP.REFERENCE_ROAST_SUMMARIES",
 )
@@ -115,10 +116,6 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
             *(
                 ("SELECT", "TABLE", table_name)
                 for table_name in _LIVE_AGENT_SELECT_ONLY_TABLES
-            ),
-            *(
-                (privilege, "TABLE", _LIVE_ROAST_ARTIFACTS)
-                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
             ),
             ("READ", "STAGE", _LIVE_ROAST_ARTIFACTS),
             ("WRITE", "STAGE", _LIVE_ROAST_ARTIFACTS),
@@ -996,7 +993,7 @@ class TestApplicationRoleManifest:
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
-        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 16)],
+        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 13)],
     )
     def test_d345f_capture_with_shared_app_warehouse_is_compliant(
         self, role_name: str, row_count: int
@@ -1098,13 +1095,27 @@ class TestApplicationRoleManifest:
         assert all(row["grant_option"] == "false" for row in rows)
         assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
 
-    def test_agent_stray_dml_on_a_select_only_table_is_an_extra_grant(self) -> None:
+    def test_agent_artifact_fixture_is_select_only_and_compliant(self) -> None:
+        rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
+        artifact_table_rows = [
+            row
+            for row in rows
+            if row["granted_on"] == "TABLE" and row["name"] == _LIVE_ROAST_ARTIFACTS
+        ]
+
+        assert [row["privilege"] for row in artifact_table_rows] == ["SELECT"]
+        assert self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows) == []
+
+    @pytest.mark.parametrize("privilege", ["INSERT", "UPDATE", "DELETE"])
+    def test_agent_still_live_artifact_dml_is_an_extra_grant(
+        self, privilege: str
+    ) -> None:
         rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
         rows.append(
             {
-                "privilege": "INSERT",
+                "privilege": privilege,
                 "granted_on": "TABLE",
-                "name": "ROASTPILOT_DEV.APP.CLOUD_ROASTS",
+                "name": _LIVE_ROAST_ARTIFACTS,
                 "grantee_name": assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
                 "grant_option": "false",
             }
@@ -1115,7 +1126,7 @@ class TestApplicationRoleManifest:
         )
 
         assert violations == [
-            "extra grant: INSERT on TABLE ROASTPILOT_DEV.APP.CLOUD_ROASTS to "
+            f"extra grant: {privilege} on TABLE ROASTPILOT_DEV.APP.ROAST_ARTIFACTS to "
             "ROASTPILOT_AGENT (grant_option='false')"
         ]
 
@@ -1182,7 +1193,7 @@ class TestApplicationRoleManifest:
         }
         assert live_core == offline_core
 
-    def test_agent_table_privileges_follow_narrowed_manifest_exactly(
+    def test_removing_artifact_table_from_manifest_flags_live_select(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         manifest_module = assert_dev_ci_grants.check_grant_manifest
@@ -1194,28 +1205,22 @@ class TestApplicationRoleManifest:
             and grant.object_type == "TABLE"
             and grant.object_name == "app.roast_artifacts"
         )
-        narrowed = type(target)(
-            frozenset({"SELECT", "INSERT", "UPDATE"}),
-            target.object_type,
-            target.object_name,
-            target.role_name,
-        )
         monkeypatch.setattr(
             manifest_module,
             "EXPECTED_MANIFEST",
-            frozenset((original_manifest - {target}) | {narrowed}),
+            frozenset(original_manifest - {target}),
         )
 
         expected = assert_dev_ci_grants.expected_role_grants(_DEV_DB)[
             assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE
         ]
-        deleted_privilege = (
-            "DELETE",
+        artifact_select = (
+            "SELECT",
             "TABLE",
             "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS",
             assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
         )
-        assert deleted_privilege not in expected
+        assert artifact_select not in expected
 
         captured_rows = _app_role_rows(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE)
         violations = assert_dev_ci_grants.find_role_manifest_violations(
@@ -1226,28 +1231,9 @@ class TestApplicationRoleManifest:
             assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
         )
         assert violations == [
-            "extra grant: DELETE on TABLE ROASTPILOT_DEV.APP.ROAST_ARTIFACTS to "
+            "extra grant: SELECT on TABLE ROASTPILOT_DEV.APP.ROAST_ARTIFACTS to "
             "ROASTPILOT_AGENT (grant_option='false')"
         ]
-
-        narrowed_rows = [
-            row
-            for row in captured_rows
-            if not (
-                row["privilege"] == "DELETE"
-                and row["name"] == "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"
-            )
-        ]
-        assert (
-            assert_dev_ci_grants.find_role_manifest_violations(
-                assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE,
-                narrowed_rows,
-                expected,
-                _DEV_DB,
-                assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
-            )
-            == []
-        )
 
     def test_old_lowercase_unqualified_object_shape_is_still_missing(self) -> None:
         rows = _app_role_rows(assert_dev_ci_grants.PUBLIC_WEB_ROLE)
@@ -1826,12 +1812,12 @@ class TestApplicationRoleManifest:
             row
             for row in rows
             if row["name"] == "ROASTPILOT_DEV.APP.ROAST_ARTIFACTS"
-            and row["privilege"] == "DELETE"
+            and row["privilege"] == "SELECT"
         )
         target["privilege"] = "TRUNCATE"
         violations = self._violations(assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, rows)
         assert any("extra grant" in violation and "TRUNCATE" in violation for violation in violations)
-        assert any("missing manifest grant" in violation and "DELETE" in violation for violation in violations)
+        assert any("missing manifest grant" in violation and "SELECT" in violation for violation in violations)
 
     @pytest.mark.parametrize("grant_option", ["true", True])
     def test_grant_option_elevation_fails_closed(self, grant_option: object) -> None:

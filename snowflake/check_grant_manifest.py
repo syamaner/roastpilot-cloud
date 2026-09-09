@@ -89,6 +89,7 @@ _UPSERT_ROAST_SIGNATURE = "app.upsert_roast(string, string)"
 _AGENT_SELECT_ONLY_TABLES = (
     "app.cloud_roasts",
     "app.roast_telemetry",
+    "app.roast_artifacts",
     "app.tasting_reviews",
     "app.reference_roast_summaries",
 )
@@ -103,12 +104,6 @@ EXPECTED_MANIFEST = frozenset(
         *(
             _grant("SELECT", "TABLE", table, "ROASTPILOT_AGENT")
             for table in _AGENT_SELECT_ONLY_TABLES
-        ),
-        _grant(
-            "SELECT,INSERT,UPDATE,DELETE",
-            "TABLE",
-            "app.roast_artifacts",
-            "ROASTPILOT_AGENT",
         ),
         _grant("READ,WRITE", "STAGE", "app.roast_artifacts", "ROASTPILOT_AGENT"),
         _grant("USAGE", "FILE FORMAT", "app.roast_jsonl_format", "ROASTPILOT_AGENT"),

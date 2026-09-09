@@ -24,7 +24,7 @@
 -- the owner's other privileges unreachable. UPSERT_ROAST is owner-rights so it
 -- can invoke the ungranted RECOMPUTE_REFERENCE_SUMMARY while its closed guards
 -- bound that authority.
--- The four table revokes enforce the #446 write boundary: agent writes to
+-- The five table revokes enforce the #446 write boundary: agent writes to
 -- those tables now flow only through owner-rights procedures.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so this
@@ -37,7 +37,7 @@ grant usage on procedure app.submit_review(string, string, int, smallint, smalli
 
 grant select on table app.cloud_roasts to role ROASTPILOT_AGENT;
 grant select on table app.roast_telemetry to role ROASTPILOT_AGENT;
-grant select, insert, update, delete on table app.roast_artifacts to role ROASTPILOT_AGENT;
+grant select on table app.roast_artifacts to role ROASTPILOT_AGENT;
 grant select on table app.tasting_reviews to role ROASTPILOT_AGENT;
 grant select on table app.reference_roast_summaries to role ROASTPILOT_AGENT;
 grant read, write on stage app.roast_artifacts to role ROASTPILOT_AGENT;
@@ -49,3 +49,4 @@ revoke insert, update, delete on table app.cloud_roasts from role ROASTPILOT_AGE
 revoke insert, update, delete on table app.roast_telemetry from role ROASTPILOT_AGENT;
 revoke insert, update, delete on table app.tasting_reviews from role ROASTPILOT_AGENT;
 revoke insert, update, delete on table app.reference_roast_summaries from role ROASTPILOT_AGENT;
+revoke insert, update, delete on table app.roast_artifacts from role ROASTPILOT_AGENT;

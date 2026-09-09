@@ -493,7 +493,8 @@ def test_t_header_states_owner_rights_consent_enforcement() -> None:
     assert "sole reachable SQL comment sequence in the unquoted stage path" in normalized
     assert "direct telemetry DML bypass still exists" in normalized
     assert "separate #446 follow-up revoke PR" in normalized
-    assert "retains stage WRITE and artifact-table DML" in normalized
+    assert "retains stage WRITE" in normalized
+    assert "its direct artifact-table DML is revoked" in normalized
     assert (
         "dynamic object selection would break this injection-free safety property"
         in normalized
