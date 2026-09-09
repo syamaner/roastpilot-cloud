@@ -38,13 +38,16 @@
 -- atomically re-checks consent committed before that statement starts, closing
 -- that check-then-write gap. Under read-committed it does not serialize against
 -- a concurrent uncommitted UPSERT_ROAST opt-out, so that cross-procedure race is
--- a documented residual for the separate #446 follow-up revoke PR, where this
--- predicate becomes the sole write boundary. Today the agent's direct telemetry
--- DML bypass still exists, while ROAST_BY_SLUG and recompute independently gate
--- reads on consent.
--- The agent retains stage WRITE (its direct artifact-table DML is revoked per
--- the #446 artifact-table revoke), so requirement (b)'s stage-file half is not
--- fully closed here.
+-- a documented residual. The #446 Slice A revoke has landed and was
+-- live-verified: the agent's direct telemetry DML is revoked (SELECT-only), so
+-- Guard 3 plus the consent-conditioned INSERT are now the sole write boundary,
+-- while ROAST_BY_SLUG and recompute independently gate reads on consent.
+-- The agent retains stage WRITE; its direct telemetry DML is revoked per #446
+-- Slice A, and its direct artifact-table DML is revoked per the #446
+-- artifact-table revoke. Requirement (b)'s stage-file half remains open:
+-- staged exports survive opt-out. No stage-file purge exists today; #341 is
+-- deferred and wait-to-implement under D-341-B, and its eventual
+-- directory-prefix REMOVE is scoped to deletion time rather than opt-out.
 --
 -- The two recompute call sites cover distinct changes and both are required:
 -- UPSERT_ROAST's recompute covers metadata/membership change, including the

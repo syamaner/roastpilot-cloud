@@ -72,21 +72,26 @@
 -- The telemetry purge is only a transactional best-effort revocation on this
 -- upsert path, not an enforcement boundary: it removes the previously published
 -- curve at the instant of the upsert. It does not close the revocation-replay
--- case either: load_roast_telemetry's Guard 3 is defence-in-depth only, and the
--- agent holds direct insert on app.roast_telemetry, so nothing prevents the purged
--- rows from being re-inserted from the still-staged export. With the current
--- signatures, the telemetry load necessarily runs after this procedure returns
--- on a first sync, so the purge does not cover a first-sync opt-out. On replay,
--- the caller has the preserved roast id and can load telemetry before or after
--- this procedure. plan.md section 5 specifies telemetry-first, and #430 owns the
--- unresolved replay ordering. Procedure-level enforcement is impossible while
--- the agent role holds direct telemetry-table DML; #419 owns that enforcement
--- contract.
+-- case by itself. The direct re-insert path is closed: #446 Slice A revoked the
+-- agent's INSERT/UPDATE/DELETE on app.roast_telemetry and the revoke was
+-- live-verified, leaving the agent SELECT-only. Re-publication can occur only
+-- through the owner-rights load_roast_telemetry procedure, whose Guard 3 and
+-- consent-conditioned INSERT re-check consent. The staged export still survives
+-- because the agent retains stage WRITE, but any load from it is consent-gated.
+-- With the current signatures, the telemetry load necessarily runs after this
+-- procedure returns on a first sync, so the purge does not cover a first-sync
+-- opt-out. On replay, the caller has the preserved roast id and can load
+-- telemetry before or after this procedure. plan.md section 5 specifies
+-- telemetry-first, and #430 owns the unresolved replay ordering. The #419
+-- procedure-level enforcement contract is now in place: the owner-rights
+-- load_roast_telemetry procedure and the live-verified #446 Slice A revoke form
+-- the enforcement boundary.
 -- The artifact-table-DML half of (b) is closed by the #446 revoke (agent holds
 -- SELECT only). The stage-file half remains open (deferred per D-446-N): staged
 -- files survive an opt-out because the agent holds stage WRITE independently
--- (#317), and #341's directory-prefix REMOVE runs at deletion time rather than
--- opt-out.
+-- (#317). No stage-file purge exists today; #341 is deferred and
+-- wait-to-implement under D-341-B, and its eventual directory-prefix REMOVE is
+-- scoped to deletion time rather than opt-out.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
