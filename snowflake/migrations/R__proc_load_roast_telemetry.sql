@@ -42,8 +42,9 @@
 -- predicate becomes the sole write boundary. Today the agent's direct telemetry
 -- DML bypass still exists, while ROAST_BY_SLUG and recompute independently gate
 -- reads on consent.
--- The agent also retains stage WRITE and artifact-table DML, so #446 requirement
--- (b) is not fully closed here.
+-- The agent retains stage WRITE (its direct artifact-table DML is revoked per
+-- the #446 artifact-table revoke), so requirement (b)'s stage-file half is not
+-- fully closed here.
 --
 -- The two recompute call sites cover distinct changes and both are required:
 -- UPSERT_ROAST's recompute covers metadata/membership change, including the

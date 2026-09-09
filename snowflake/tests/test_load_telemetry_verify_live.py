@@ -620,7 +620,7 @@ def test_insufficient_privilege_detection_rejects_unrelated_errors() -> None:
     )
 
 
-def test_agent_dml_revoke_probe_passes_only_after_all_12_attempts_are_denied() -> None:
+def test_agent_dml_revoke_probe_passes_only_after_all_15_attempts_are_denied() -> None:
     cursor = _DenyProbeCursor(RuntimeError("Insufficient privileges"))
 
     load_telemetry_verify_live.verify_agent_dml_revoked(cursor)
@@ -630,7 +630,7 @@ def test_agent_dml_revoke_probe_passes_only_after_all_12_attempts_are_denied() -
         for _, _, command in load_telemetry_verify_live.REVOKED_AGENT_DML_PROBES
     ]
     assert cursor.executed == expected_commands
-    assert len(cursor.executed) == 12
+    assert len(cursor.executed) == 15
     assert all("WHERE FALSE" in command for command in cursor.executed)
 
 
@@ -643,6 +643,7 @@ def test_agent_dml_revoke_probe_matrix_and_columns_are_independently_pinned() ->
         for table in (
             "cloud_roasts",
             "roast_telemetry",
+            "roast_artifacts",
             "tasting_reviews",
             "reference_roast_summaries",
         )
@@ -651,6 +652,7 @@ def test_agent_dml_revoke_probe_matrix_and_columns_are_independently_pinned() ->
     expected_columns = {
         "cloud_roasts": "idempotency_key",
         "roast_telemetry": "roast_id",
+        "roast_artifacts": "roast_id",
         "tasting_reviews": "roast_id",
         "reference_roast_summaries": "bean_origin",
     }
@@ -661,8 +663,8 @@ def test_agent_dml_revoke_probe_matrix_and_columns_are_independently_pinned() ->
 
 
 def test_agent_dml_revoke_probe_fails_loudly_if_an_attempt_succeeds() -> None:
-    table = "tasting_reviews"
-    privilege = "UPDATE"
+    table = "roast_artifacts"
+    privilege = "INSERT"
     command = next(
         probe_command
         for probe_table, probe_privilege, probe_command in (
@@ -676,7 +678,7 @@ def test_agent_dml_revoke_probe_fails_loudly_if_an_attempt_succeeds() -> None:
 
     with pytest.raises(
         load_telemetry_verify_live.TelemetryVerifyError,
-        match=r"^tasting_reviews UPDATE revoke not effective: no-op DML unexpectedly succeeded$",
+        match=r"^roast_artifacts INSERT revoke not effective: no-op DML unexpectedly succeeded$",
     ):
         load_telemetry_verify_live.verify_agent_dml_revoked(cursor)
 
@@ -1095,7 +1097,7 @@ def test_happy_path_executes_exact_statement_sequence(
             load_telemetry_verify_live.ROAST_LEVEL,
         ),
     )
-    assert agent_statements[:26] == [
+    assert agent_statements[:29] == [
         ("USE SECONDARY ROLES NONE", None),
         ("SELECT CURRENT_DATABASE()", None),
         ("SELECT CURRENT_ROLE()", None),

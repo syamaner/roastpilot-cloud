@@ -64,11 +64,11 @@
 -- datetime.fromisoformat rejects.
 -- Per #419, the empty-manifest guard rejects an opted-out roast that declares a
 -- non-empty artifact manifest (contributed_to_learning = false and
--- artifact_count <> 0) before any write. This is a path-local raise on this
--- upsert path, not an enforcement boundary for the artifact-row half of
--- requirement (b): the agent role holds direct artifact-table DML independently.
--- contributed_to_learning = true is deliberately unconstrained and may also have
--- an empty manifest.
+-- artifact_count <> 0) before any write. The artifact-row half of requirement
+-- (b) is now enforced by the #446 revoke of the agent's direct artifact-table
+-- DML (the agent holds SELECT only); this guard remains defence-in-depth on the
+-- upsert path. contributed_to_learning = true is deliberately unconstrained and
+-- may also have an empty manifest.
 -- The telemetry purge is only a transactional best-effort revocation on this
 -- upsert path, not an enforcement boundary: it removes the previously published
 -- curve at the instant of the upsert. It does not close the revocation-replay
@@ -82,9 +82,11 @@
 -- unresolved replay ordering. Procedure-level enforcement is impossible while
 -- the agent role holds direct telemetry-table DML; #419 owns that enforcement
 -- contract.
--- Both halves of (b) remain open. The stage-file half is also open because staged
--- files survive an opt-out: the agent holds stage WRITE independently (#317), and
--- #341's directory-prefix REMOVE runs at deletion time rather than opt-out.
+-- The artifact-table-DML half of (b) is closed by the #446 revoke (agent holds
+-- SELECT only). The stage-file half remains open (deferred per D-446-N): staged
+-- files survive an opt-out because the agent holds stage WRITE independently
+-- (#317), and #341's directory-prefix REMOVE runs at deletion time rather than
+-- opt-out.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.

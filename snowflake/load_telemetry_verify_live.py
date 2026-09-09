@@ -80,6 +80,7 @@ SUMMARY = {
 _REVOKED_AGENT_DML_COLUMNS = (
     ("cloud_roasts", "idempotency_key"),
     ("roast_telemetry", "roast_id"),
+    ("roast_artifacts", "roast_id"),
     ("tasting_reviews", "roast_id"),
     ("reference_roast_summaries", "bean_origin"),
 )

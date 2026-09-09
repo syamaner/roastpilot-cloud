@@ -29,7 +29,7 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert revokes == check_grant_manifest.EXPECTED_REVOKES
     assert check_grant_manifest.main() == 0
     assert capsys.readouterr().out == (
-        "grant/revoke manifest matches exactly (12 grants, 4 revokes)\n"
+        "grant/revoke manifest matches exactly (12 grants, 5 revokes)\n"
     )
 
 
@@ -138,7 +138,7 @@ def test_t5_agent_table_and_internal_stage_privileges_are_exact(rendered_sql: st
     assert {grant.object_name: grant.privileges for grant in table_grants} == {
         "app.cloud_roasts": {"SELECT"},
         "app.roast_telemetry": {"SELECT"},
-        "app.roast_artifacts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
+        "app.roast_artifacts": {"SELECT"},
         "app.tasting_reviews": {"SELECT"},
         "app.reference_roast_summaries": {"SELECT"},
     }
@@ -150,7 +150,8 @@ def test_t5_boundary_revokes_are_the_exact_closed_set(rendered_sql: str) -> None
     _, revokes, violations = check_grant_manifest.parse_rendered_sql(rendered_sql)
     assert violations == []
     assert revokes == check_grant_manifest.EXPECTED_REVOKES
-    assert len(revokes) == 4
+    assert len(revokes) == 5
+    assert any(revoke.object_name == "app.roast_artifacts" for revoke in revokes)
     assert all(
         revoke.object_type == "TABLE"
         and revoke.privileges == {"INSERT", "UPDATE", "DELETE"}
@@ -206,26 +207,46 @@ def test_t5_grant_and_revoke_formatters_render_stable_exact_diagnostics() -> Non
 
 def test_t5_drop_one_revoke_is_a_named_missing_revoke(rendered_sql: str) -> None:
     required = (
-        "revoke insert, update, delete on table app.cloud_roasts "
-        "from role ROASTPILOT_AGENT;"
+        "revoke insert, update, delete on table app.roast_artifacts "
+        "from role ROASTPILOT_AGENT"
     )
     violations = check_grant_manifest.manifest_violations(
         rendered_sql.replace(required, "")
     )
     assert sum(item.startswith("missing revoke:") for item in violations) == 1
-    assert any("missing revoke:" in item and "app.cloud_roasts" in item for item in violations)
+    assert any("missing revoke:" in item and "app.roast_artifacts" in item for item in violations)
 
 
-@pytest.mark.parametrize("table", ["secret", "roast_artifacts"])
-def test_t5_fifth_or_artifact_revoke_is_a_named_extra_revoke(
-    rendered_sql: str, table: str
-) -> None:
+def test_t5_sixth_revoke_is_a_named_extra_revoke(rendered_sql: str) -> None:
     violations = check_grant_manifest.manifest_violations(
         rendered_sql
-        + f"\nREVOKE INSERT, UPDATE, DELETE ON TABLE app.{table} "
+        + "\nREVOKE INSERT, UPDATE, DELETE ON TABLE app.secret "
         "FROM ROLE ROASTPILOT_AGENT;"
     )
-    assert any("extra revoke:" in item and f"app.{table}" in item for item in violations)
+    assert any("extra revoke:" in item and "app.secret" in item for item in violations)
+
+
+def test_t5_restoring_artifact_table_dml_is_a_named_extra_grant(
+    rendered_sql: str,
+) -> None:
+    narrowed = "grant select on table app.roast_artifacts to role ROASTPILOT_AGENT;"
+    restored = (
+        "grant select, insert, update, delete on table app.roast_artifacts "
+        "to role ROASTPILOT_AGENT;"
+    )
+
+    violations = check_grant_manifest.manifest_violations(
+        rendered_sql.replace(narrowed, restored)
+    )
+
+    assert any(
+        item.startswith("extra grant:")
+        and "app.roast_artifacts" in item
+        and "INSERT" in item
+        and "UPDATE" in item
+        and "DELETE" in item
+        for item in violations
+    )
 
 
 @pytest.mark.parametrize("privileges", ["SELECT", "ALL"])
@@ -323,12 +344,12 @@ def test_t5_malformed_revoke_does_not_skip_later_statement() -> None:
     assert violations == ["unrecognized revoke statement: REVOKE"]
 
 
-def test_t5_narrow_grants_without_revokes_report_four_additive_holes(
+def test_t5_narrow_grants_without_revokes_report_five_additive_holes(
     rendered_sql: str,
 ) -> None:
     without_revokes = re.sub(r"(?im)^revoke\b[^;\n]+;?(?:\n|$)", "", rendered_sql)
     violations = check_grant_manifest.manifest_violations(without_revokes)
-    assert sum(item.startswith("missing revoke:") for item in violations) == 4
+    assert sum(item.startswith("missing revoke:") for item in violations) == 5
     assert not any(item.startswith("missing grant:") for item in violations)
     assert not any(item.startswith("extra grant:") for item in violations)
 
