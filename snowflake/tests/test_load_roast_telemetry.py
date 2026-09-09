@@ -491,8 +491,8 @@ def test_t_header_states_owner_rights_consent_enforcement() -> None:
     assert "both interpolants are grammar-validated by Guards 1 and 2" in normalized
     assert "Guard 2 also rejects `--`" in normalized
     assert "sole reachable SQL comment sequence in the unquoted stage path" in normalized
-    assert "direct telemetry DML bypass still exists" in normalized
-    assert "separate #446 follow-up revoke PR" in normalized
+    assert "the agent's direct telemetry DML is revoked (SELECT-only)" in normalized
+    assert "are now the sole write boundary" in normalized
     assert "retains stage WRITE" in normalized
     assert "its direct artifact-table DML is revoked" in normalized
     assert (
