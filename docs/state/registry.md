@@ -129,10 +129,14 @@ comment + test-assertion text only, correcting three proc-header claims that sti
 agent held direct telemetry-table DML after Slice A revoked it (agent is SELECT-only; the
 owner-rights `load_roast_telemetry` proc + Guard 3 + the consent-conditioned INSERT are the
 write boundary). **#479** (live-verify the duplicate-idempotency_key + zero-match `-20014`
-binding sub-cases) is **CLOSED** as accept-residual — #477's live-green mismatch probe already
-proves the same pre-transaction Guard 4 fails closed on both arms of the `<> 1` comparator; the
-board-reviewed reference impl `860413b` is on record if the clause is ever wanted covered
-literally. Remaining C3: **#341** (gated by **D-341-B**), the only open C3 item.
+binding sub-cases) is **CLOSED** as accept-residual — #477's live-green probe exercises Guard 4's
+mismatch arm (check (b)) and check (a) at count==1, so the count>1 (duplicate) and count==0
+(zero-match) arms of check (a) are **not** discharged live; they stay proven by the offline proc
+tests + 0-survivor mutation, and the pre-transaction guard is structurally shared, so the
+confidentiality/integrity boundary is closed while a dedicated live probe for those two arms is
+the accepted low-value residual (the board-reviewed reference impl `860413b` is on record if it
+is ever wanted covered literally). Remaining C3: **#341** (gated by **D-341-B**), the only open
+C3 item.
 **#469** (live-verifier abort-on-orphan fragility) is **code-merged** — both live verifiers
 (`upsert_roast_verify_live.py` [PR #471](https://github.com/syamaner/roastpilot-cloud/pull/471),
 squash `c0c69e1`; `load_telemetry_verify_live.py`
