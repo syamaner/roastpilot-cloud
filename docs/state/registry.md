@@ -93,14 +93,17 @@ re-plumbed upsert/presigned/load verifiers. **D-446-J** (Gate B) accepts the
 read-committed consent-race residual as the read-side gate stays the public boundary;
 **D-446-K** replaced the pre-deploy transition allowance with a one-time manual revoke;
 **D-446-M** added the seed role's SELECT (Snowflake needs SELECT to evaluate a
-DELETE/UPDATE `WHERE`). #446 stays **OPEN** only for **requirement (b)**. The **#430
-interlock is now RESOLVED** (the run/roast binding is code-complete and live-verified, see
+DELETE/UPDATE `WHERE`). **#446 is CLOSED — requirement (b) is fully resolved.** The **#430
+interlock is RESOLVED** (the run/roast binding is code-complete and live-verified, see
 #430 below), so requirement (b) was unblocked and **split** (**D-446-N**): **Half 1**
-(revoke the agent's direct `roast_artifacts` **table** DML, keep SELECT) is **MERGED**
-([#480](https://github.com/syamaner/roastpilot-cloud/pull/480), squash `085fdfd`; live #11
-deploy pending under **D-446-K** manual-revoke-first); **Half 2** (revoke stage `WRITE`) is
-**deferred** as a separate architecture decision (availability-loss with no security gain —
-no owner-rights PUT path exists; the agent still retains stage WRITE).
+(revoke the agent's direct `roast_artifacts` **table** DML, keep SELECT) is **MERGED +
+live-verified** ([#480](https://github.com/syamaner/roastpilot-cloud/pull/480), squash
+`085fdfd`; the **D-446-K** manual revoke was run by the operator via the Snowflake web UI,
+then the #11 deploy + agent-verify ran green and the artifact-table deny-probe discharged);
+**Half 2** (revoke stage `WRITE`) was **decided as Option A — accept-and-document**
+(**D-446-P**): the stage `WRITE` is retained (availability-loss with no security gain — no
+owner-rights PUT path exists; the residual staged export is inert non-PII with no public
+read path, its lifecycle owned by deletion / #341), and **#482 is CLOSED**.
 **#431 is CLOSED** — the write-side free-text value guard in `upsert_roast` that rejects
 raw IP / Fahrenheit values in seven guarded free-text fields (six projected to
 `roast_by_slug` plus `operator_notes`, guarded storage-only per **D-431-C** since the
@@ -120,10 +123,16 @@ paths, sanitised `connection.close()`), with the presigned verifier folded as Un
 (**D-435-A**). **#458** (two mutation-scope completeness follow-ups carried over from
 #455 PR-2) is **CLOSED** (PR #461, squash `0a0ab58`). **#430 is DONE + live-verified** —
 both its Decisions (recompute ordering + the run/roast binding) shipped and discharged
-live (see #430 below). Remaining C3: **#341** (gated by **D-341-B**) and **#446**'s
-**requirement-(b) Half 2** (revoke the agent's stage `WRITE`, deferred per **D-446-N** as a
-separate architecture decision) — its Option B write-boundary revoke is done + live-verified
-for telemetry (Slice A) and merged for the `roast_artifacts` table DML (Half 1, #480) above.
+live (see #430 below). **#483** (post-Slice-A telemetry-DML threat-model comment sweep) is
+**MERGED** ([#484](https://github.com/syamaner/roastpilot-cloud/pull/484), squash `276a0dc`):
+comment + test-assertion text only, correcting three proc-header claims that still asserted the
+agent held direct telemetry-table DML after Slice A revoked it (agent is SELECT-only; the
+owner-rights `load_roast_telemetry` proc + Guard 3 + the consent-conditioned INSERT are the
+write boundary). **#479** (live-verify the duplicate-idempotency_key + zero-match `-20014`
+binding sub-cases) is **CLOSED** as accept-residual — #477's live-green mismatch probe already
+proves the same pre-transaction Guard 4 fails closed on both arms of the `<> 1` comparator; the
+board-reviewed reference impl `860413b` is on record if the clause is ever wanted covered
+literally. Remaining C3: **#341** (gated by **D-341-B**), the only open C3 item.
 **#469** (live-verifier abort-on-orphan fragility) is **code-merged** — both live verifiers
 (`upsert_roast_verify_live.py` [PR #471](https://github.com/syamaner/roastpilot-cloud/pull/471),
 squash `c0c69e1`; `load_telemetry_verify_live.py`
@@ -141,7 +150,7 @@ no non-`TEST_RUN_ID` artifact paths). **#469 is CLOSED, live-verified** — its
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L313) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L317) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
