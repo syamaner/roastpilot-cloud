@@ -44,10 +44,14 @@
 -- while ROAST_BY_SLUG and recompute independently gate reads on consent.
 -- The agent retains stage WRITE; its direct telemetry DML is revoked per #446
 -- Slice A, and its direct artifact-table DML is revoked per the #446
--- artifact-table revoke. Requirement (b)'s stage-file half remains open:
--- staged exports survive opt-out. No stage-file purge exists today; #341 is
--- deferred and wait-to-implement under D-341-B, and its eventual
--- directory-prefix REMOVE is scoped to deletion time rather than opt-out.
+-- artifact-table revoke. D-446-N split requirement (b); its stage-file half is
+-- an accepted residual per D-446-P. Stage WRITE is retained by design because
+-- revoking it is availability-loss with no security gain: no owner-rights PUT
+-- path exists, and the connector PUTs as the agent. Opted-out staged exports
+-- linger as inert non-PII with no public read path (roast_artifacts is in
+-- neither secure view). Their purge lifecycle is owned by deletion / #341,
+-- which is deferred and wait-to-implement under D-341-B; its eventual
+-- directory-prefix REMOVE is scoped to deletion time, not opt-out.
 --
 -- The two recompute call sites cover distinct changes and both are required:
 -- UPSERT_ROAST's recompute covers metadata/membership change, including the
