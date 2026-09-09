@@ -36,7 +36,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 status (5 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
+**C3 status (9 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
 `dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
 human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
@@ -93,8 +93,14 @@ re-plumbed upsert/presigned/load verifiers. **D-446-J** (Gate B) accepts the
 read-committed consent-race residual as the read-side gate stays the public boundary;
 **D-446-K** replaced the pre-deploy transition allowance with a one-time manual revoke;
 **D-446-M** added the seed role's SELECT (Snowflake needs SELECT to evaluate a
-DELETE/UPDATE `WHERE`). #446 stays **OPEN** only for **requirement (b)** — the agent
-retains stage WRITE + `roast_artifacts` DML (**#430-interlocked**).
+DELETE/UPDATE `WHERE`). #446 stays **OPEN** only for **requirement (b)**. The **#430
+interlock is now RESOLVED** (the run/roast binding is code-complete and live-verified, see
+#430 below), so requirement (b) was unblocked and **split** (**D-446-N**): **Half 1**
+(revoke the agent's direct `roast_artifacts` **table** DML, keep SELECT) is **MERGED**
+([#480](https://github.com/syamaner/roastpilot-cloud/pull/480), squash `085fdfd`; live #11
+deploy pending under **D-446-K** manual-revoke-first); **Half 2** (revoke stage `WRITE`) is
+**deferred** as a separate architecture decision (availability-loss with no security gain —
+no owner-rights PUT path exists; the agent still retains stage WRITE).
 **#431 is CLOSED** — the write-side free-text value guard in `upsert_roast` that rejects
 raw IP / Fahrenheit values in seven guarded free-text fields (six projected to
 `roast_by_slug` plus `operator_notes`, guarded storage-only per **D-431-C** since the
@@ -112,10 +118,12 @@ D-417-E cleanup-reporting shape ported to both live verifiers (sanitised static 
 messages, a single `_print_failure` channel on both the body-failed and body-succeeded
 paths, sanitised `connection.close()`), with the presigned verifier folded as Unit 2
 (**D-435-A**). **#458** (two mutation-scope completeness follow-ups carried over from
-#455 PR-2) is **CLOSED** (PR #461, squash `0a0ab58`). Remaining C3: the offline defect
-**#430** (**D-430-A SUSPENDED**), **#341** (gated by **D-341-B**), and **#446**'s
-remaining **requirement-(b)** scope (agent stage WRITE + `roast_artifacts` DML,
-#430-interlocked) — its Option B write-boundary revoke (Slice A) is now done + live-verified above.
+#455 PR-2) is **CLOSED** (PR #461, squash `0a0ab58`). **#430 is DONE + live-verified** —
+both its Decisions (recompute ordering + the run/roast binding) shipped and discharged
+live (see #430 below). Remaining C3: **#341** (gated by **D-341-B**) and **#446**'s
+**requirement-(b) Half 2** (revoke the agent's stage `WRITE`, deferred per **D-446-N** as a
+separate architecture decision) — its Option B write-boundary revoke is done + live-verified
+for telemetry (Slice A) and merged for the `roast_artifacts` table DML (Half 1, #480) above.
 **#469** (live-verifier abort-on-orphan fragility) is **code-merged** — both live verifiers
 (`upsert_roast_verify_live.py` [PR #471](https://github.com/syamaner/roastpilot-cloud/pull/471),
 squash `c0c69e1`; `load_telemetry_verify_live.py`
@@ -128,12 +136,12 @@ children-before-parent (table DELETEs on the `ROASTPILOT_VERIFY_SEED` seed curso
 the agent cursor) with fail-closed re-checks. Its offline self-heal acceptance is met; three
 shape-proof residuals (count-only ownership admitting a reserved-id row of an unexpected shape) are
 accepted as reserved-id-unreachable per **D-469-C** (the verifier creates no `tasting_reviews` rows and
-no non-`TEST_RUN_ID` artifact paths). #469 stays **OPEN** for the operator-gated live discharge via
-`dev-snowflake-agent-verify.yml`.
+no non-`TEST_RUN_ID` artifact paths). **#469 is CLOSED, live-verified** — its
+`dev-snowflake-agent-verify.yml` discharge ran green (completed via #475/#476, main `a468a68`).
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L303) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L313) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
@@ -319,11 +327,20 @@ then had defects found by review — the decisions and their current status live
 the issues; this row is a pointer, deliberately not a restatement.**
 
 - [#430](https://github.com/syamaner/roastpilot-cloud/issues/430) (recompute runs
-  before telemetry exists). **D-430-A chose Option A and is now SUSPENDED**: it is
-  unimplementable as written, because `load_roast_telemetry` is `EXECUTE AS CALLER`
-  and `ROASTPILOT_AGENT` has no grant on `recompute_reference_summary`, and it also
-  reopens the group-change case `upsert_roast`'s two-group recompute handles today.
-  Needs a fresh decision round. Unbuilt.
+  before telemetry exists) is **DONE + live-verified**. **D-430-B** re-scoped #430 to own
+  both the recompute ordering AND the run/roast binding, and restored Option A now that
+  #446 Slice A made `load_roast_telemetry` `EXECUTE AS OWNER` (so it reaches the ungranted
+  `recompute_reference_summary`; `upsert_roast`'s two-group recompute still covers the
+  group-change case). **Decision 2** (recompute after the telemetry load) merged via #470;
+  **Decision 3** (the run/roast binding guard, fail-closed `-20014` on global run-key
+  uniqueness plus the roast match) merged via #472, where the executing `codex review`
+  caught a fail-open the read-only lenses passed (`idempotency_key` uniqueness is not
+  enforced); the offline-invisible live checks merged via #477. **D-430-C** pinned the
+  connector contract (`p_run_id` = the roast's `idempotency_key`, plan §5). Live discharge
+  ran green (`#11` deploy + `dev-snowflake-agent-verify`
+  [run 34278116888](https://github.com/syamaner/roastpilot-cloud/actions/runs/34278116888)):
+  recompute isolation and the `-20014` binding probe both verified on ROASTPILOT_DEV. This
+  unblocks **#446 requirement (b)**.
 - [#431](https://github.com/syamaner/roastpilot-cloud/issues/431) (unvalidated
   `summary` reaching the public view). **D-431-A is amended in scope**: a closed key
   grammar does not stop free text inside an admitted key, and `roaster_driver` /
