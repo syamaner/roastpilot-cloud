@@ -87,11 +87,15 @@
 -- load_roast_telemetry procedure and the live-verified #446 Slice A revoke form
 -- the enforcement boundary.
 -- The artifact-table-DML half of (b) is closed by the #446 revoke (agent holds
--- SELECT only). The stage-file half remains open (deferred per D-446-N): staged
--- files survive an opt-out because the agent holds stage WRITE independently
--- (#317). No stage-file purge exists today; #341 is deferred and
--- wait-to-implement under D-341-B, and its eventual directory-prefix REMOVE is
--- scoped to deletion time rather than opt-out.
+-- SELECT only). D-446-N split requirement (b) into table-DML and stage-file
+-- halves; the stage-file half is an accepted residual per D-446-P. The agent's
+-- stage WRITE is deliberately retained: revoking it is availability-loss with
+-- no security gain because no owner-rights PUT path exists and the connector
+-- PUTs as the agent. An opted-out roast's staged telemetry therefore lingers as
+-- inert non-PII with no public read path (roast_artifacts is in neither secure
+-- view). Its purge lifecycle is owned by deletion / #341, which is deferred and
+-- wait-to-implement under D-341-B; its eventual directory-prefix REMOVE is
+-- scoped to deletion time, not opt-out.
 --
 -- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
 -- created_at.
