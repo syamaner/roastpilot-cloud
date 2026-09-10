@@ -159,8 +159,13 @@ no non-`TEST_RUN_ID` artifact paths). **#469 is CLOSED, live-verified** — its
 `dev-snowflake-agent-verify.yml` discharge ran green (completed via #475/#476, main `a468a68`).
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
-predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L321) are the
+predates these closures but still carries genuinely-current constraints, so
+it is not wholesale archived. **#437 is now CLOSED** — the writable-DEV-key ref
+boundary was found already configured (the `dev-snowflake-ci` Environment enforces
+a protected-branches-only deployment-branch policy plus a required reviewer, and
+`main` is the sole protected branch) and is now codified + regression-pinned via
+[#489](https://github.com/syamaner/roastpilot-cloud/pull/489) (D-437-A keep-protected-only,
+D-437-B operator merge). The issues and the plan-repo ledger (through L325) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
@@ -272,24 +277,35 @@ check before the Environment ever releases the credential. The guard would be
 mutable by precisely the thing it constrains. The Environment's deployment-branch
 policy is the right mechanism, being configured in repository settings rather than
 in the branch, which is also what Rigour Calibration means by preferring a
-base-controlled platform constraint. `dev-snowflake-contract.yml` today has neither
-form. That gap is
-**not** confined to the new agent job, and this entry's first draft was wrong to
-imply it was: the deploy workflow's checkout is unpinned, so a feature-ref dispatch
-installs dependencies from the branch's `requirements.txt` and runs the branch's
+base-controlled platform constraint. The deploy workflow's checkout is also
+unpinned, so were a feature ref able to reach the Environment it would install
+dependencies from the branch's `requirements.txt` and run the branch's
 own `assert_dev_ci_grants.py` and `with_connection_env.py` while holding the
-writable `SNOWFLAKE_DEV_PRIVATE_KEY`. It executes mutable repository code against a
-live credential exactly as the agent job would, and the Environment gate does not
-close it, because approving a dispatch is not reading the diff of the ref it will
-run. The existing path now has an owner in
-[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). Its criteria
-deliberately allow either the platform-level guard or a recorded justified
-residual, per the operator's decision on 3 Sep to settle the branch-dispatch
-trade-off at implementation time with real usage evidence rather than by guess.
-**The residual option is not a default and cannot be taken silently:** it needs an
-explicit operator decision recorded on the issue, and until one or the other lands
-the exposure stays open, so #437 does not close on the strength of the capability
-merely being convenient. The general **cross-environment** role-assignment audit
+writable `SNOWFLAKE_DEV_PRIVATE_KEY`, executing mutable repository code against a
+live credential exactly as the agent job would; the required-reviewer **approval**
+would not catch that, because approving a dispatch is not reading the diff of the
+ref it will run — which is why an in-workflow `github.ref` check is the wrong
+instrument and the deployment-branch policy is the right one. **#437's investigation
+(10 Sep) found that base-controlled guard already in place** — so this exposure is
+closed for any non-`main` ref (detail below), correcting this entry's earlier draft
+which assumed no such guard existed. That path was owned by
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437), now **CLOSED via
+[#489](https://github.com/syamaner/roastpilot-cloud/pull/489)** (10 Sep, D-437-A + D-437-B).
+The branch-dispatch trade-off was settled with real evidence rather than by guess: a
+live check found the platform-level guard the amended criteria asked for **already
+configured** — the `dev-snowflake-ci` Environment enforces a **protected-branches-only**
+deployment-branch policy plus a required reviewer, and `main` is the sole protected
+branch, so a non-`main` feature-ref dispatch is denied the Environment's secrets before
+any branch-controlled code runs. Operator decision **D-437-A** kept protected-branches-only
+as the deliberate control (not a main-pin allowlist, not a release allowlist; pre-merge
+non-`main` dispatch is not a capability retained) and codified it: #489 documents the
+boundary + two accepted residuals in the workflow header and adds `tests/factory`
+fail-closed regression pins (the writable-key job keeps declaring
+`environment: dev-snowflake-ci`, the trigger stays `workflow_dispatch`-only, no in-workflow
+`github.ref`/`github.head_ref` logic). The settings-side policy is operator-owned and is
+**not** asserted from the offline base — accepted residual, alongside the residual that a
+future branch gaining branch protection would inherit writable-key access automatically.
+The general **cross-environment** role-assignment audit
 stays with [#358](https://github.com/syamaner/roastpilot-cloud/issues/358), but
 **D-433-D is amended**: #358 is C7-gated and not yet realisable, so assigning the
 audit there alone would leave the new principal's scope unverified for as long as
@@ -532,14 +548,21 @@ discipline #310's fold-half took three post-merge connector rounds. The live
 #11 gate is **available since 22 Aug 2026** (run 32600848432) and live proc
 validation is **post-merge in practice**. Correcting a claim this row previously
 made: that is a **convention, not a mechanism**. `dev-snowflake-contract.yml` has
-no `github.ref` test, so `workflow_dispatch` can select any ref, and the checkout
-is unpinned — a feature-ref dispatch would install dependencies from the branch
-and run the branch's own gate scripts with the writable key. The
-`dev-snowflake-ci` Environment gate makes a run supervised, not reviewed, and does
-not reject a feature-branch dispatch. What was learned on #313 is that we *run* it
-post-merge, not that anything enforces it. Making that a mechanism, or recording it
-as a justified residual, is
-[#437](https://github.com/syamaner/roastpilot-cloud/issues/437). Two **F1** tails remain in
+no `github.ref` test, and the checkout is unpinned — so were a non-`main` feature
+ref able to reach the Environment it would install dependencies from the branch
+and run the branch's own gate scripts with the writable key. The required-reviewer
+gate makes such a run supervised, not reviewed (approval does not read the ref's
+diff); the **deployment-branch policy**, however, *does* reject a non-`main`
+feature-branch dispatch by denying it the Environment's secrets — the
+base-controlled guard #437 found already in place. What was learned on #313 is
+that we *run* it post-merge. Making that a mechanism, or recording it
+as a justified residual, was
+[#437](https://github.com/syamaner/roastpilot-cloud/issues/437), now **CLOSED via
+[#489](https://github.com/syamaner/roastpilot-cloud/pull/489)** — the mechanism turned out
+to already exist (the `dev-snowflake-ci` Environment's protected-branches-only
+deployment-branch policy + required reviewer *does* deny a non-`main` feature-ref dispatch
+the writable key; `main` is the sole protected branch), and D-437-A kept it and codified it
+(see the #437 block above). Two **F1** tails remain in
 progress (they do not block C2 delivery):
 F1-S6 9h operator-driven activation ([#9](https://github.com/syamaner/roastpilot-cloud/issues/9))
 and F1-S11 live-provider eval ([#14](https://github.com/syamaner/roastpilot-cloud/issues/14),
@@ -651,7 +674,7 @@ the base DDL (C2-S1, #307) lands before its dependents.
 | C2-S10 Summary-variant field-mapping contract test | [#315](https://github.com/syamaner/roastpilot-cloud/issues/315) | **Done — merged via [#353](https://github.com/syamaner/roastpilot-cloud/pull/353); CLOSED.** A Vitest contract test pinning the six `summary` VARIANT fields the recompute proc reads against the real M1-export fixture, + absence assertions (no FC/drop temp in summary → sourced from telemetry; no synthesised `bean_origin`/`roast_level`; the `metrics` decoy not the source), each with a deep-clone mutation check. Grounded on the real fixture + `R__proc_recompute_summary.sql`, not plan.md. **Zero post-open review rounds** (the tighter-first-cut-spec antidote to #312): schema-migration-reviewer CONFIRMED-SOUND, qa NEEDS-WORK→both mutation-proven gaps folded pre-open (dead malformed-ISO check; untested/too-weak `^` anchor → un-anchored), codex-review P2 (bind-to-proc consumer-drift) accept-and-documented as out-of-scope (**D-315-A**, pr-triage-concurred — the proc is #310's, the AC covers source-shape drift), connector clean verdict. |
 | C2-S8 `data_quality_violations` view | [#316](https://github.com/syamaner/roastpilot-cloud/issues/316) | **View delivered + AC-10 live-deploy-validated — merged via [#354](https://github.com/syamaner/roastpilot-cloud/pull/354); AC-10 PASSED on ROASTPILOT_DEV (run 32751084213, `Applying R__data_quality_view.sql … scripts_applied=1`, pre/post grant audit clean, boundary held).** A repeatable view (`R__data_quality_view.sql`) = nine UNION-ALL branches surfacing the **four** declarative would-be constraints (score/operator_rating 1–5, five sliders 0–100, visibility enum, duplicate idempotency_key), mirroring `rules.ts` so it stays empty on the seed; projects only non-PII metadata (`table_name, row_identity, field, rule`), granted to nobody (no `copy grants` → re-apply resets owner-only, fail-closed). Offline oracle+SQL-parity contract test. **Full gauntlet:** schema-migration-reviewer CONFIRMED-SOUND ×2, privacy-auditor PASS, qa (parity-tautology fold), codex-review CLEAN, connector clean. **D-316-C** fenced four scope-expansions (temp-aggregate/IP-retention/orphan-FK/dup-slug) as out-of-scope (the #312 balloon trap; pr-triage D23-concurred). **D-316-B** slider/operator_rating flagged only when non-null (mirrors rules.ts + the nullable seed). **D-316-A discharged (via [#356](https://github.com/syamaner/roastpilot-cloud/issues/356)):** the live \"zero rows on **seeded** DEV\" assertion passed 26 Aug — `data_quality_violations = 0` non-vacuous on live-seeded ROASTPILOT_DEV (1230 rows, via #356/#367). |
 | C2-S7 residual (D-317-C) — live app-role grant audit (PUBLIC_WEB + ROASTPILOT_AGENT) | [#345](https://github.com/syamaner/roastpilot-cloud/issues/345) | **Done — merged via [#357](https://github.com/syamaner/roastpilot-cloud/pull/357) (squash `87af0f6`); AC-10 live-validated on ROASTPILOT_DEV (run 32840781328, operator-approved gate): both pre- and post-deploy assert "PUBLIC_WEB/ROASTPILOT_AGENT exactly match their manifests with zero future grants visible" against the cleaned grant state (DEV_CI_WH revoked, ROASTPILOT_WH restored, schema USAGE granted per D-345-E/F/G).** Extends the live grant audit from the PUBLIC boundary (#11) to the two application roles: DEV.APP object exact-match + a shared-warehouse allowlist (`{ROASTPILOT_WH}`, the D106 account-level shared warehouse) + a PUBLIC_WEB cross-env guard (owned-DB family `{ROASTPILOT_DEV, ROASTPILOT_PREVIEW, ROASTPILOT}` + name-exact + priv-exact + grant_option fail-closed). **The cross-family `codex review` floor was load-bearing** — it caught ~7 real fail-opens the mandatory Claude lens passed each round, including the D106 misframing that started the arc from an orchestrator error (calling the shared `ROASTPILOT_WH` grant "drift"); corrected against factory.md D106 (D-345-D/E). The arc converged where the connector never posts a clean 👍 (it re-derives the `MANAGE GRANTS`-forbidden completeness limit + the #358 agent cross-env gap as permanent residuals every round): `pr-triage` (D23) reframed the never-clean-connector as mechanical thread-resolution + an operator merge-call (Codex is advisory-not-required), and the operator approved the merge over the three dispositioned residuals. Decisions D-345-A…G. **Residual: [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)** (per-env app-role cross-env audit — the DEV gate is blind to prod/preview object escalation; C7-gated). **KEY: the grants-ownership-boundary lesson extends to provisioning *decisions* — check factory.md D106 before advising revoke/keep on any grant; the cross-family codex lens is the load-bearing control on grant boundaries.** |
-| C2-S2 Account-role provisioning runbook | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308) | **Closed.** The D106-class account-role provisioning it covered is no longer tracked as an open C2 residual. Open C2 residuals: **#341** (DELETE_ROAST stage-file REMOVE — its C3 `stage_path` dependency is **met**, #417 Unit 1 landed it in `d15471d`, and D-341-A settles the mechanism, but the story is **GATED AGAIN by D-341-B**: the `idempotency_key` the destructive prefix derives from is agent-writable, so the UUID grammar gives containment but not provenance and `delete_roast(A)` could silently remove roast B's staged files. Stays `wait-to-implement` until an immutable or proven roast-to-run association, or a privilege boundary, exists — see the C2 section above), **#358** (per-env app-role cross-env grant audit, D-345 residual, C7-gated). Done since last sync: **[#356](https://github.com/syamaner/roastpilot-cloud/issues/356)** (D-312-J live-seed-load adapter — done 26 Aug: operator-unblocked live seed of `ROASTPILOT_DEV` (1230 rows) + read-only validation passed, `data_quality_violations = 0` non-vacuous + 12 temp-aggregate groups matched → discharges the #316 D-316-A live-seeded-empty assertion **and** the #310 temp-aggregate behavioural residual; U1/U2/U3/emit [#360](https://github.com/syamaner/roastpilot-cloud/pull/360)/[#361](https://github.com/syamaner/roastpilot-cloud/pull/361)/[#362](https://github.com/syamaner/roastpilot-cloud/pull/362)/[#363](https://github.com/syamaner/roastpilot-cloud/pull/363) + the D-356-H live-bug fix [#367](https://github.com/syamaner/roastpilot-cloud/pull/367)), **[#337](https://github.com/syamaner/roastpilot-cloud/issues/337)** (AGENTS.md PUBLIC-grant wording reconciliation → two-layer D-11-B..E, PR #366, D-337-A/B). #11 live DEV-CI gate available (post-merge **by convention, not by mechanism** — see the C2 section above and [#437](https://github.com/syamaner/roastpilot-cloud/issues/437)). |
+| C2-S2 Account-role provisioning runbook | [#308](https://github.com/syamaner/roastpilot-cloud/issues/308) | **Closed.** The D106-class account-role provisioning it covered is no longer tracked as an open C2 residual. Open C2 residuals: **#341** (DELETE_ROAST stage-file REMOVE — its C3 `stage_path` dependency is **met**, #417 Unit 1 landed it in `d15471d`, and D-341-A settles the mechanism, but the story is **GATED AGAIN by D-341-B**: the `idempotency_key` the destructive prefix derives from is agent-writable, so the UUID grammar gives containment but not provenance and `delete_roast(A)` could silently remove roast B's staged files. Stays `wait-to-implement` until an immutable or proven roast-to-run association, or a privilege boundary, exists — see the C2 section above), **#358** (per-env app-role cross-env grant audit, D-345 residual, C7-gated). Done since last sync: **[#356](https://github.com/syamaner/roastpilot-cloud/issues/356)** (D-312-J live-seed-load adapter — done 26 Aug: operator-unblocked live seed of `ROASTPILOT_DEV` (1230 rows) + read-only validation passed, `data_quality_violations = 0` non-vacuous + 12 temp-aggregate groups matched → discharges the #316 D-316-A live-seeded-empty assertion **and** the #310 temp-aggregate behavioural residual; U1/U2/U3/emit [#360](https://github.com/syamaner/roastpilot-cloud/pull/360)/[#361](https://github.com/syamaner/roastpilot-cloud/pull/361)/[#362](https://github.com/syamaner/roastpilot-cloud/pull/362)/[#363](https://github.com/syamaner/roastpilot-cloud/pull/363) + the D-356-H live-bug fix [#367](https://github.com/syamaner/roastpilot-cloud/pull/367)), **[#337](https://github.com/syamaner/roastpilot-cloud/issues/337)** (AGENTS.md PUBLIC-grant wording reconciliation → two-layer D-11-B..E, PR #366, D-337-A/B). #11 live DEV-CI gate available; that it is *run* post-merge is **operator convention, not a mechanism** (nothing forces the run to be post-merge — see the C2 section above). Distinct axis: *which* refs may obtain the writable key is now a mechanism — the `dev-snowflake-ci` protected-branches-only Environment policy — codified under [#437](https://github.com/syamaner/roastpilot-cloud/issues/437) (**CLOSED via #489**). |
 
 This registry is authoritative for current delivery status. Verify GitHub
 issue, project, label, and PR fields against it before and after each
