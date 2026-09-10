@@ -1,7 +1,8 @@
 """Offline token/region checks for C2-S6 DELETE_ROAST (issue #314).
 
 Parses migration text like the neighboring procedure suite and reuses its
-line-comment stripper. Hard ceiling: <=250 lines.
+line-comment stripper. Keep one module per procedure under test and each test
+single-purpose.
 """
 from __future__ import annotations
 
