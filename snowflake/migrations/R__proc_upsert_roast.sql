@@ -22,12 +22,14 @@
 -- artifact-directory key by construction. Its lowercase UUID grammar is stricter
 -- than LOAD_ROAST_TELEMETRY's run-id grammar by design. Under D-341-A, #341
 -- requires DELETE_ROAST to construct the destructive directory prefix solely
--- from that run id and independently guard the derived run id with the same exact
--- lowercase UUID grammar. The strict grammar here keeps stored run ids inside
--- the grammar that DELETE_ROAST's independent guard will accept. A weaker grammar
--- here would admit run ids that guard rejects, leaving those roasts undeletable
--- with their staged files in place. It would not widen what REMOVE can target
--- unless both guards were weakened.
+-- from the stored idempotency key and independently guard it with its own
+-- containment grammar: 1-64 characters from [0-9a-zA-Z_-], with no double
+-- hyphen. That grammar is broader than upsert's stricter lowercase-UUID grammar,
+-- so the strict grammar here is a subset that DELETE_ROAST's containment guard
+-- always accepts. A weaker grammar here could admit keys with characters outside
+-- [0-9a-zA-Z_-], more than 64 characters, or a double hyphen, leaving those
+-- roasts undeletable with their staged files in place. It would not widen what
+-- REMOVE can target unless both guards were weakened.
 --
 -- The payload is a closed 13-key grammar. Guard failures raise a static message
 -- so roast metadata is never echoed into logs by those guards. Unvalidated
@@ -111,7 +113,7 @@
 -- A shrinking artifact_kinds replay can leave dropped files without surviving
 -- manifest rows, which per-row stage_path iteration cannot see. D-341-A requires
 -- #341 to read idempotency_key from cloud_roasts, fail closed unless the derived
--- run id matches the exact lowercase-UUID grammar, and issue one directory-scoped
+-- run id matches its containment grammar, and issue one directory-scoped
 -- REMOVE of @app.roast_artifacts/<run_id>/. Its guard validates the derived run
 -- id rather than the stored path, and the procedure constructs the prefix itself
 -- without interpolating a stored stage_path value.
