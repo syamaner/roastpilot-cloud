@@ -135,8 +135,14 @@ mismatch arm (check (b)) and check (a) at count==1, so the count>1 (duplicate) a
 tests + 0-survivor mutation, and the pre-transaction guard is structurally shared, so the
 confidentiality/integrity boundary is closed while a dedicated live probe for those two arms is
 the accepted low-value residual (the board-reviewed reference impl `860413b` is on record if it
-is ever wanted covered literally). Remaining C3: **#341** (gated by **D-341-B**), the only open
-C3 item.
+is ever wanted covered literally). **#486** (proc-header D-446-N→D-446-P reconciliation, the
+Codex-connector Finding-2 surfaced on #485) is **MERGED**
+([#487](https://github.com/syamaner/roastpilot-cloud/pull/487), squash `aa37394`): a comment-only
+reword of the two stage-file-half proc headers (`R__proc_upsert_roast.sql`,
+`R__proc_load_roast_telemetry.sql`) from "remains open (deferred per D-446-N)" to "accepted
+residual per D-446-P" (stage WRITE retained by design; opted-out staged telemetry inert non-PII
+with no public read path; purge owned by deletion / #341) — no grant/guard/SQL-logic change.
+Remaining C3: **#341** (gated by **D-341-B**), the only open C3 item.
 **#469** (live-verifier abort-on-orphan fragility) is **code-merged** — both live verifiers
 (`upsert_roast_verify_live.py` [PR #471](https://github.com/syamaner/roastpilot-cloud/pull/471),
 squash `c0c69e1`; `load_telemetry_verify_live.py`
@@ -154,7 +160,7 @@ no non-`TEST_RUN_ID` artifact paths). **#469 is CLOSED, live-verified** — its
 Where a clause in the
 detailed narrative below conflicts with this block, **this block wins**; that narrative
 predates these closures but still carries genuinely-current constraints (e.g. #437), so
-it is not wholesale archived. The issues and the plan-repo ledger (through L317) are the
+it is not wholesale archived. The issues and the plan-repo ledger (through L321) are the
 source of truth.
 
 **C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
