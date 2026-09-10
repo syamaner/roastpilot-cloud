@@ -36,7 +36,38 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 status (9 Sep 2026): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
+**C3 Sync is COMPLETE (10 Sep 2026). The active epic is now C4 (public page).**
+Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
+Verification tiers (precise — do not conflate them):
+- **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
+  `load_roast_telemetry` write path (verifiers ran, rows verified), the
+  presigned-URL SNOWFLAKE_SSE download check (#418, bytes verified), and the grant
+  boundaries (#446 — live grant audit + the agent-DML deny-probe).
+- **Deploy-validated on DEV only** (proc deployed + grant audit clean, but no live
+  behaviour CALL/assertion): `delete_roast`'s row cascade (#342, run 32649254129,
+  `scripts_applied=1`).
+- **Delivered, NOT yet live-verified** (documented residuals, none blocks C4): (a)
+  the two secure views (`roast_by_slug` / `reviews_by_roast`) — grants live-audited
+  and definitions offline-tested, but no live `SELECT` runs against them until C4's
+  public page reads them; and (b) `delete_roast`'s stage-file `REMOVE` — proc +
+  offline proof merged, AC-5 LIVE verification pending #495.
+
+**Do not read this block as proof the secure-view read behaviour, the row-cascade
+delete, or the stage-file deletion has run live.** The last C3 item, that
+`delete_roast` stage-file `REMOVE` ([#341](https://github.com/syamaner/roastpilot-cloud/issues/341),
+C2-S6b), merged its **proc half** via
+[#494](https://github.com/syamaner/roastpilot-cloud/pull/494) (`27ae7af`, files-first
+REMOVE, D-341-A..J); #341 stays open only tracking its **AC-5 live verifier**, split to
+follow-up [#495](https://github.com/syamaner/roastpilot-cloud/issues/495) (D-341-J).
+**Carried residuals (do not block C4):** #495 (delete_roast live verifier / AC-5 + the
+codex P3 doc reconciliations + the `only_mutate` verify_live-parity decision) and
+[#358](https://github.com/syamaner/roastpilot-cloud/issues/358) (per-env app-role
+cross-env grant audit, C7-gated). **C4 has no issues filed yet** — kickoff runs
+`to-issues` against plan.md's C4 section (the `/r/[slug]` SSR+ISR page, telemetry
+curve view, OG image), PM-reviewed, per factory.md §7/§11. C4 is the path to the
+public review UI (C5).
+
+**C3 story history (retained for reference): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
 `dev-snowflake-agent-verify.yml` (#440 + the Azure-stage egress fix #441),
 human-gated on the `dev-snowflake-agent` Environment (`main`-only deployment-branch
@@ -165,10 +196,10 @@ boundary was found already configured (the `dev-snowflake-ci` Environment enforc
 a protected-branches-only deployment-branch policy plus a required reviewer, and
 `main` is the sole protected branch) and is now codified + regression-pinned via
 [#489](https://github.com/syamaner/roastpilot-cloud/pull/489) (D-437-A keep-protected-only,
-D-437-B operator merge). The issues and the plan-repo ledger (through L325) are the
+D-437-B operator merge). The issues and the plan-repo ledger (through L327) are the
 source of truth.
 
-**C3 Sync, active.** Kicked off 1 Sep 2026. Milestone
+**C3 Sync, COMPLETE (10 Sep 2026 — see the Active-epic block above; active epic is now C4).** Kicked off 1 Sep 2026. Milestone
 [C3 Sync](https://github.com/syamaner/roastpilot-cloud/milestone/4) (#4),
 decomposed at kickoff via `to-issues` (never bulk-up-front) into
 [#416](https://github.com/syamaner/roastpilot-cloud/issues/416),
