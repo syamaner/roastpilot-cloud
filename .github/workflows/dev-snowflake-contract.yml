@@ -10,6 +10,12 @@ name: DEV Snowflake Contract Check
 # writable Snowflake credential (SNOWFLAKE_DEV_PRIVATE_KEY). Every control
 # below exists specifically because of that, not as generic hardening:
 #
+# D-437-A REF BOUNDARY:
+# The ref boundary for this writable-DEV-key workflow is the `dev-snowflake-ci` Environment's protected-branches-only deployment-branch policy plus a required reviewer; it is a base-controlled/platform control, not an in-workflow ref check.
+# `main` is the only protected branch in the repository today, so protected-branches-only is effectively main-only.
+# Accepted residual per D-437-A: a future branch gaining branch protection would inherit access to the writable key automatically, because the protected-branches category is broader than a main pin.
+# Accepted residual per D-437-A: the deployment-branch policy is operator-owned repository settings and is not asserted from this offline CI test base; this test pins only the code-visible surface.
+#
 # 1. `environment: dev-snowflake-ci` (below) is the REAL gate — a GitHub
 #    Environment with a required reviewer (the operator), provisioned
 #    directly in repo settings, not in this file. A job declaring this
