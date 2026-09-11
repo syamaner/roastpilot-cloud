@@ -33,6 +33,30 @@ weak spec faithfully, and the cost lands post-open as review rounds.
   and lines — retrieval is ranked, not exhaustive, and its results are claims,
   not evidence. Every citation in the contract is a `file:line` the implementer
   can re-verify.
+- **Ground every re-derived value and every required output in the
+  authoritative source, never the fixture or the issue AC alone.** When the
+  story re-computes a value that a Snowflake procedure or peer component also
+  produces — the same number stored or shown two ways — locate that
+  implementation and cite it `file:line`, then **compare its semantics**
+  (`ORDER BY`, tie-breaks, null handling) against the rule `plan.md` states.
+  When they agree, match them in the spec and its tests. When the
+  implementation and the plan **disagree** on those semantics, `ESCALATE` — the
+  plan wins (AGENTS.md), so a stale or wrong implementation is an operator
+  decision, never a value to copy silently. Deriving from the fixture shape or
+  prose reasoning alone silently diverges and surfaces only post-implementation
+  as a correctness fold.
+- **Take the required output/field set from `plan.md`, the source of truth,
+  distinguishing a deliberate slice from an accidental omission.** The GitHub
+  issue's acceptance criteria can under-transcribe the plan. A field the issue
+  deliberately slices to a sibling story, or records as an explicit out-of-scope
+  exclusion, is out of scope — do not widen the PR to pull it back in. A field
+  the plan requires that the issue omits **without** recording such an exclusion
+  or dependency is a plan-vs-issue divergence: `ESCALATE` it (name the plan
+  requirement and the gap) rather than silently adding it to the contract, which
+  would let the planner decide scope, or silently dropping it, which is the
+  under-spec this rule exists to prevent. Because `plan.md` lives in a separate
+  repo that can move, pin every plan citation to the plan-repo commit SHA, not
+  only a path and line.
 - Run the Rigour Calibration direction test (AGENTS.md) on the story: name the
   failure direction of every guard the change touches. Unknown forms fail
   closed.
