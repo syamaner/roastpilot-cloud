@@ -35,17 +35,27 @@ weak spec faithfully, and the cost lands post-open as review rounds.
   can re-verify.
 - **Ground every re-derived value and every required output in the
   authoritative source, never the fixture or the issue AC alone.** When the
-  story re-computes a value that a Snowflake procedure, another component, or a
-  peer validator also produces — the same number stored or shown two ways —
-  locate that implementation, cite it `file:line`, and match its exact
-  semantics in the spec and its tests: `ORDER BY`, tie-breaks, and null
-  handling included. Deriving from the fixture shape or from prose reasoning
-  silently diverges from the authority and surfaces only post-implementation as
-  a correctness fold. And take the required output/field set from `plan.md`,
-  the source of truth (AGENTS.md: "the plan repo wins"), not from the GitHub
-  issue's acceptance criteria, which can under-transcribe it — a required
-  output the AC omits is still in scope, and a plan-vs-issue divergence is an
-  `ESCALATE`, not a silent choice.
+  story re-computes a value that a Snowflake procedure or peer component also
+  produces — the same number stored or shown two ways — locate that
+  implementation and cite it `file:line`, then **compare its semantics**
+  (`ORDER BY`, tie-breaks, null handling) against the rule `plan.md` states.
+  When they agree, match them in the spec and its tests. When the
+  implementation and the plan **disagree** on those semantics, `ESCALATE` — the
+  plan wins (AGENTS.md), so a stale or wrong implementation is an operator
+  decision, never a value to copy silently. Deriving from the fixture shape or
+  prose reasoning alone silently diverges and surfaces only post-implementation
+  as a correctness fold.
+- **Take the required output/field set from `plan.md`, the source of truth,
+  distinguishing an accidental omission from a deliberate slice.** The GitHub
+  issue's acceptance criteria can under-transcribe the plan. A field the plan
+  requires that the issue omits **without** recording it as an explicit
+  out-of-scope exclusion or sibling-story dependency is an accidental omission
+  and is still in scope; a field the issue deliberately slices to a sibling
+  story is out of scope — do not widen the PR to pull it back in. A genuine
+  plan-vs-issue divergence (the plan requires something the issue neither
+  includes nor deliberately excludes) is an `ESCALATE`, not a silent choice.
+  Because `plan.md` lives in a separate repo that can move, pin every plan
+  citation to the plan-repo commit SHA, not only a path and line.
 - Run the Rigour Calibration direction test (AGENTS.md) on the story: name the
   failure direction of every guard the change touches. Unknown forms fail
   closed.
