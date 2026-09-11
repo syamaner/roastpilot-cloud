@@ -276,7 +276,8 @@ export function firstCrackTempC(
     ) {
       continue;
     }
-    const distance = Math.abs(sample.elapsed_s - firstCrackElapsed);
+    const distance =
+      Math.round(Math.abs(sample.elapsed_s - firstCrackElapsed) * 1e6) / 1e6;
     if (
       nearest === null ||
       distance < nearest.distance ||

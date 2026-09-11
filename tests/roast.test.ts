@@ -413,11 +413,13 @@ describe("typed roast reads", () => {
     expect(firstCrackTempC(curve, summary)).toBe(203);
   });
 
-  it("26. returns null when a non-empty curve has no valid sample", () => {
+  it("26. returns null when a curve is empty or has no valid sample", () => {
+    const summary = loadSummary(1);
+    expect(firstCrackTempC([], summary)).toBeNull();
     expect(
       firstCrackTempC(
         [sample(1180.402, null), sample(null, 202)],
-        loadSummary(1),
+        summary,
       ),
     ).toBeNull();
   });
@@ -468,5 +470,34 @@ describe("typed roast reads", () => {
     await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
       RoastSchemaError,
     );
+  });
+
+  it("32. resolves millisecond-resolution float ties to the earlier sample regardless of order", () => {
+    const summary = loadSummary(1);
+    const earlier = sample(1180.399, 200);
+    const later = sample(1180.405, 210);
+
+    expect(firstCrackTempC([earlier, later], summary)).toBe(200);
+    expect(firstCrackTempC([later, earlier], summary)).toBe(200);
+  });
+
+  it("33. rejects a same-count roast projection with a disallowed column name", async () => {
+    const columns = [...ROAST_COLUMNS];
+    columns[9] = "VISIBILITY";
+    executeMock.mockResolvedValue(apiResult(columns, [roastRow()]));
+
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
+
+  it("34. rejects a same-count review projection with a disallowed column name", async () => {
+    const columns = [...REVIEW_COLUMNS];
+    columns[10] = "HASHED_IP";
+    executeMock.mockResolvedValue(apiResult(columns, [reviewRows()[0]]));
+
+    await expect(
+      getReviewsByRoast("ethiopia-natural"),
+    ).rejects.toBeInstanceOf(RoastSchemaError);
   });
 });
