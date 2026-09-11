@@ -46,16 +46,17 @@ weak spec faithfully, and the cost lands post-open as review rounds.
   prose reasoning alone silently diverges and surfaces only post-implementation
   as a correctness fold.
 - **Take the required output/field set from `plan.md`, the source of truth,
-  distinguishing an accidental omission from a deliberate slice.** The GitHub
-  issue's acceptance criteria can under-transcribe the plan. A field the plan
-  requires that the issue omits **without** recording it as an explicit
-  out-of-scope exclusion or sibling-story dependency is an accidental omission
-  and is still in scope; a field the issue deliberately slices to a sibling
-  story is out of scope — do not widen the PR to pull it back in. A genuine
-  plan-vs-issue divergence (the plan requires something the issue neither
-  includes nor deliberately excludes) is an `ESCALATE`, not a silent choice.
-  Because `plan.md` lives in a separate repo that can move, pin every plan
-  citation to the plan-repo commit SHA, not only a path and line.
+  distinguishing a deliberate slice from an accidental omission.** The GitHub
+  issue's acceptance criteria can under-transcribe the plan. A field the issue
+  deliberately slices to a sibling story, or records as an explicit out-of-scope
+  exclusion, is out of scope — do not widen the PR to pull it back in. A field
+  the plan requires that the issue omits **without** recording such an exclusion
+  or dependency is a plan-vs-issue divergence: `ESCALATE` it (name the plan
+  requirement and the gap) rather than silently adding it to the contract, which
+  would let the planner decide scope, or silently dropping it, which is the
+  under-spec this rule exists to prevent. Because `plan.md` lives in a separate
+  repo that can move, pin every plan citation to the plan-repo commit SHA, not
+  only a path and line.
 - Run the Rigour Calibration direction test (AGENTS.md) on the story: name the
   failure direction of every guard the change touches. Unknown forms fail
   closed.
