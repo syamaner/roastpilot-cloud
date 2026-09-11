@@ -255,6 +255,7 @@ export function firstCrackTempC(
   curve: CurveSample[] | null,
   summary: RoastSummary,
 ): number | null {
+  const EPSILON = 1e-9;
   if (curve === null || curve.length === 0) return null;
 
   const firstCrackElapsed =
@@ -276,12 +277,12 @@ export function firstCrackTempC(
     ) {
       continue;
     }
-    const distance =
-      Math.round(Math.abs(sample.elapsed_s - firstCrackElapsed) * 1e6) / 1e6;
+    const distance = Math.abs(sample.elapsed_s - firstCrackElapsed);
     if (
       nearest === null ||
-      distance < nearest.distance ||
-      (distance === nearest.distance && sample.elapsed_s < nearest.elapsed)
+      distance < nearest.distance - EPSILON ||
+      (Math.abs(distance - nearest.distance) <= EPSILON &&
+        sample.elapsed_s < nearest.elapsed)
     ) {
       nearest = {
         elapsed: sample.elapsed_s,

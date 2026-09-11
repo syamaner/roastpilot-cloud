@@ -481,7 +481,24 @@ describe("typed roast reads", () => {
     expect(firstCrackTempC([later, earlier], summary)).toBe(200);
   });
 
-  it("33. rejects a same-count roast projection with a disallowed column name", async () => {
+  it("33. preserves raw-distance ordering below microsecond precision", () => {
+    const summary = {
+      ...loadSummary(1),
+      started_at_utc: "2026-01-01T00:00:00Z",
+      first_crack_at_utc: "2026-01-01T00:00:10Z",
+    };
+    const earlierButFarther = sample(9.9999994, 200);
+    const laterButCloser = sample(10.00000051, 210);
+
+    expect(
+      firstCrackTempC([earlierButFarther, laterButCloser], summary),
+    ).toBe(210);
+    expect(
+      firstCrackTempC([laterButCloser, earlierButFarther], summary),
+    ).toBe(210);
+  });
+
+  it("34. rejects a same-count roast projection with a disallowed column name", async () => {
     const columns = [...ROAST_COLUMNS];
     columns[9] = "VISIBILITY";
     executeMock.mockResolvedValue(apiResult(columns, [roastRow()]));
@@ -491,7 +508,7 @@ describe("typed roast reads", () => {
     );
   });
 
-  it("34. rejects a same-count review projection with a disallowed column name", async () => {
+  it("35. rejects a same-count review projection with a disallowed column name", async () => {
     const columns = [...REVIEW_COLUMNS];
     columns[10] = "HASHED_IP";
     executeMock.mockResolvedValue(apiResult(columns, [reviewRows()[0]]));
