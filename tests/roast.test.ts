@@ -554,4 +554,19 @@ describe("typed roast reads", () => {
       ),
     ).toBeNull();
   });
+
+  it("39. preserves a legitimate zero-degree nearest temperature", () => {
+    const summary = loadSummary(1);
+    const elapsed =
+      (Date.parse(summary.first_crack_at_utc) -
+        Date.parse(summary.started_at_utc)) /
+      1_000;
+
+    expect(
+      firstCrackTempC(
+        [sample(elapsed, 0), sample(elapsed + 0.5, 208)],
+        summary,
+      ),
+    ).toBe(0);
+  });
 });

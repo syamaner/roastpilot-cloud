@@ -274,6 +274,10 @@ function nearestSampleTempC(
     temperature: number | null;
     distance: number;
   } | null = null;
+  // Accepted non-security residual: elapsed_s is assumed effectively unique per
+  // roast but is not constrained. Exact duplicates with different temperatures
+  // follow secure-view array order here, unlike the procedure's temperature
+  // tiebreaker; duplicate elapsed_s represents malformed telemetry ingest.
   for (const sample of curve) {
     if (
       typeof sample.elapsed_s !== "number" ||
