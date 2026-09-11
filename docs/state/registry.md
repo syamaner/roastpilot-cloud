@@ -50,11 +50,17 @@ Verification tiers (precise — do not conflate them):
   the two secure views (`roast_by_slug` / `reviews_by_roast`) — grants live-audited
   and definitions offline-tested, but no live `SELECT` runs against them until C4's
   public page reads them; and (b) `delete_roast`'s stage-file `REMOVE` — proc +
-  offline proof merged; AC-5 LIVE verification **deferred (D-495-C)**: no
-  CI-available principal can call the owner-only `delete_roast` (the agent has
-  procedure USAGE only on `load_roast_telemetry`/`upsert_roast`; the seed role
-  none) and it has no production caller yet, so live verification waits for a
-  real caller — tracked on #341.
+  offline proof merged; AC-5 LIVE verification **deferred by choice (D-495-C/D)**.
+  Feasibility note (corrected per the Codex connector on #498): the data-plane
+  roles cannot call it (`ROASTPILOT_AGENT` has procedure USAGE only on
+  `load_roast_telemetry`/`upsert_roast`; the seed role none), but the **owner/
+  deploy role** (`SNOWFLAKE_DEV_ROLE`, human-gated) owns the `execute as owner`
+  `delete_roast` in the non-managed-access `APP` schema and **can call it without
+  a grant** — so live AC-5 is *feasible now*, not infeasible. It is deferred
+  because `delete_roast` has **no production caller yet** and verifying the
+  owner-rights behaviour before the real caller / authorisation path exists is
+  low-value. Tracked on #341; a deploy-role verifier remains an available future
+  work item.
 
 **Do not read this block as proof the secure-view read behaviour, the row-cascade
 delete, or the stage-file deletion has run live.** The last C3 item, that
@@ -62,14 +68,15 @@ delete, or the stage-file deletion has run live.** The last C3 item, that
 C2-S6b), merged its **proc half** via
 [#494](https://github.com/syamaner/roastpilot-cloud/pull/494) (`27ae7af`, files-first
 REMOVE, D-341-A..J); #341 stays open tracking its **AC-5 live verifier**, now
-**deferred (D-495-C)** pending a real `delete_roast` caller.
+**deferred by choice (D-495-C/D)** pending a real `delete_roast` caller.
 [#495](https://github.com/syamaner/roastpilot-cloud/issues/495) is **CLOSED**: its
 codex-P3 doc reconciliations landed via [#497](https://github.com/syamaner/roastpilot-cloud/pull/497)
 (`70bc75e`, comment-only — the stale "exact lowercase-UUID grammar" comments reworded
 to the D-341-E containment grammar), and its live-verifier / `only_mutate`-parity scope
-was folded into the #341 AC-5 deferral (the pre-open board found the verifier
-infeasible as specced — the agent lacks USAGE on the owner-only `delete_roast`; the
-reference design + folds are recorded on #495).
+was folded into the #341 AC-5 deferral (the pre-open board found the **agent-run**
+verifier infeasible — `ROASTPILOT_AGENT` lacks USAGE on the owner-only `delete_roast`;
+the owner/deploy role can call it, so the deferral is by choice per the feasibility note
+above, not infeasibility; the reference design + folds are recorded on #495).
 **Carried residuals (do not block C4):** the deferred `delete_roast` AC-5 live verifier
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-env app-role cross-env grant audit, C7-gated). **C4 has no issues filed yet** — kickoff runs
