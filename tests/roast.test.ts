@@ -385,4 +385,88 @@ describe("typed roast reads", () => {
       /node:crypto|snowflakecomputing|api\/v2\/statements|fetch\(/,
     );
   });
+
+  it("24. rejects a null summary cell", async () => {
+    const row = [...roastRow()];
+    row[8] = null;
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [row]));
+
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
+
+  it("25. skips curve samples without a usable elapsed time or temperature", () => {
+    const summary = loadSummary(1);
+    const elapsed =
+      (Date.parse(summary.first_crack_at_utc) -
+        Date.parse(summary.started_at_utc)) /
+      1_000;
+    const curve = [
+      sample(elapsed, null),
+      sample(null, 199),
+      sample(Number.NaN, 200),
+      sample(elapsed, Number.NaN),
+      sample(elapsed + 1, 203),
+    ];
+
+    expect(firstCrackTempC(curve, summary)).toBe(203);
+  });
+
+  it("26. returns null when a non-empty curve has no valid sample", () => {
+    expect(
+      firstCrackTempC(
+        [sample(1180.402, null), sample(null, 202)],
+        loadSummary(1),
+      ),
+    ).toBeNull();
+  });
+
+  it("27. rejects a roast row whose cell count does not match its columns", async () => {
+    executeMock.mockResolvedValue(
+      apiResult(ROAST_COLUMNS, [roastRow().slice(0, 9)]),
+    );
+
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
+
+  it("28. rejects a review row whose cell count does not match its columns", async () => {
+    executeMock.mockResolvedValue(
+      apiResult(REVIEW_COLUMNS, [reviewRows()[0].slice(0, 10)]),
+    );
+
+    await expect(
+      getReviewsByRoast("ethiopia-natural"),
+    ).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it("29. rejects a roast scalar that cannot be coerced to its schema type", async () => {
+    const row = [...roastRow()];
+    row[3] = "not-a-number";
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [row]));
+
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
+
+  it("30. rejects a review scalar that cannot be coerced to its schema type", async () => {
+    const row = [...reviewRows()[0]];
+    row[2] = "";
+    executeMock.mockResolvedValue(apiResult(REVIEW_COLUMNS, [row]));
+
+    await expect(
+      getReviewsByRoast("ethiopia-natural"),
+    ).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it("31. rejects inconsistent transport row-count metadata", async () => {
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [], 1));
+
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
 });

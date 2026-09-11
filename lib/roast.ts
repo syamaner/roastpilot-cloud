@@ -216,6 +216,8 @@ function parseRoastRow(row: ReadonlyArray<string | null>): Roast {
     (Date.parse(summary.first_crack_at_utc) -
       Date.parse(summary.beans_added_at_utc)) /
     1_000;
+  // Unreachable after RoastSummarySchema validates both ISO timestamps.
+  /* v8 ignore next */
   if (!Number.isFinite(firstCrackSeconds)) throw schemaError();
 
   return {
@@ -259,6 +261,8 @@ export function firstCrackTempC(
     (Date.parse(summary.first_crack_at_utc) -
       Date.parse(summary.started_at_utc)) /
     1_000;
+  // Unreachable after RoastSummarySchema validates both ISO timestamps.
+  /* v8 ignore next */
   if (!Number.isFinite(firstCrackElapsed)) return null;
 
   let nearest: { elapsed: number; temperature: number; distance: number } | null =
