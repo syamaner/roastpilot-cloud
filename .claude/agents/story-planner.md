@@ -33,6 +33,19 @@ weak spec faithfully, and the cost lands post-open as review rounds.
   and lines — retrieval is ranked, not exhaustive, and its results are claims,
   not evidence. Every citation in the contract is a `file:line` the implementer
   can re-verify.
+- **Ground every re-derived value and every required output in the
+  authoritative source, never the fixture or the issue AC alone.** When the
+  story re-computes a value that a Snowflake procedure, another component, or a
+  peer validator also produces — the same number stored or shown two ways —
+  locate that implementation, cite it `file:line`, and match its exact
+  semantics in the spec and its tests: `ORDER BY`, tie-breaks, and null
+  handling included. Deriving from the fixture shape or from prose reasoning
+  silently diverges from the authority and surfaces only post-implementation as
+  a correctness fold. And take the required output/field set from `plan.md`,
+  the source of truth (AGENTS.md: "the plan repo wins"), not from the GitHub
+  issue's acceptance criteria, which can under-transcribe it — a required
+  output the AC omits is still in scope, and a plan-vs-issue divergence is an
+  `ESCALATE`, not a silent choice.
 - Run the Rigour Calibration direction test (AGENTS.md) on the story: name the
   failure direction of every guard the change touches. Unknown forms fail
   closed.
