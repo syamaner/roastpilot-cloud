@@ -7,6 +7,7 @@ import {
   type SqlApiResult,
 } from "../lib/sqlapi";
 import {
+  dropTempC,
   firstCrackTempC,
   getReviewsByRoast,
   getRoastBySlug,
@@ -149,6 +150,7 @@ describe("typed roast reads", () => {
     expect(roast?.stats).toMatchObject({
       totalRoastSeconds: 637.106,
       developmentTimePercent: 15.003,
+      dropTempC: 201.5,
     });
     expect(roast?.stats.firstCrackSeconds).toBeCloseTo(541.519, 3);
   });
@@ -243,7 +245,7 @@ describe("typed roast reads", () => {
 
     await expect(getRoastBySlug("ethiopia-natural")).resolves.toMatchObject({
       curve: null,
-      stats: { firstCrackTempC: null },
+      stats: { firstCrackTempC: null, dropTempC: null },
     });
   });
 
@@ -396,7 +398,7 @@ describe("typed roast reads", () => {
     );
   });
 
-  it("25. skips curve samples without a usable elapsed time or temperature", () => {
+  it("25. returns null when the nearest FC row has a null temperature", () => {
     const summary = loadSummary(1);
     const elapsed =
       (Date.parse(summary.first_crack_at_utc) -
@@ -406,19 +408,20 @@ describe("typed roast reads", () => {
       sample(elapsed, null),
       sample(null, 199),
       sample(Number.NaN, 200),
-      sample(elapsed, Number.NaN),
       sample(elapsed + 1, 203),
     ];
 
-    expect(firstCrackTempC(curve, summary)).toBe(203);
+    // R__proc_recompute_summary.sql ranks by elapsed time before reading temp.
+    expect(firstCrackTempC(curve, summary)).toBeNull();
   });
 
   it("26. returns null when a curve is empty or has no valid sample", () => {
     const summary = loadSummary(1);
     expect(firstCrackTempC([], summary)).toBeNull();
+    expect(dropTempC([], summary)).toBeNull();
     expect(
       firstCrackTempC(
-        [sample(1180.402, null), sample(null, 202)],
+        [sample(null, 202), sample(Number.NaN, null)],
         summary,
       ),
     ).toBeNull();
@@ -516,5 +519,39 @@ describe("typed roast reads", () => {
     await expect(
       getReviewsByRoast("ethiopia-natural"),
     ).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it("36. derives drop temperature from the nearest session-start-relative sample", () => {
+    const summary = loadSummary(1);
+    const elapsed =
+      (Date.parse(summary.beans_dropped_at_utc) -
+        Date.parse(summary.started_at_utc)) /
+      1_000;
+
+    expect(
+      dropTempC(
+        [sample(elapsed - 10, 190), sample(elapsed + 0.2, 206)],
+        summary,
+      ),
+    ).toBe(206);
+  });
+
+  it("37. returns null drop temperature for a null curve", () => {
+    expect(dropTempC(null, loadSummary(1))).toBeNull();
+  });
+
+  it("38. returns null when the nearest drop row has a null temperature", () => {
+    const summary = loadSummary(1);
+    const elapsed =
+      (Date.parse(summary.beans_dropped_at_utc) -
+        Date.parse(summary.started_at_utc)) /
+      1_000;
+
+    expect(
+      dropTempC(
+        [sample(elapsed, null), sample(elapsed + 0.5, 208)],
+        summary,
+      ),
+    ).toBeNull();
   });
 });

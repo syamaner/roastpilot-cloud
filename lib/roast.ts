@@ -2,7 +2,9 @@
  * Typed reads from PUBLIC_WEB's two secure views.
  *
  * D-C4-2 deliberately uses two clocks: headline times start when beans are
- * charged, while the curve's elapsed seconds start when the session starts.
+ * charged, while curve temperatures use the telemetry row nearest each event
+ * on the session-start clock. The winning row's bean temperature is returned
+ * including null; drop temperature is anchored to beans_dropped_at_utc.
  */
 
 import { z } from "zod";
@@ -116,6 +118,7 @@ export interface RoastStats {
   firstCrackSeconds: number;
   developmentTimePercent: number;
   firstCrackTempC: number | null;
+  dropTempC: number | null;
 }
 
 export interface Roast {
@@ -227,6 +230,7 @@ function parseRoastRow(row: ReadonlyArray<string | null>): Roast {
       firstCrackSeconds,
       developmentTimePercent: summary.development_time_percent,
       firstCrackTempC: firstCrackTempC(curve, summary),
+      dropTempC: dropTempC(curve, summary),
     },
   };
 }
@@ -250,34 +254,34 @@ function parseReviewRow(row: ReadonlyArray<string | null>): Review {
   return parsed.data;
 }
 
-/** Returns the nearest valid curve temperature on the session-start clock. */
-export function firstCrackTempC(
+function nearestSampleTempC(
   curve: CurveSample[] | null,
   summary: RoastSummary,
+  eventKey: "first_crack_at_utc" | "beans_dropped_at_utc",
 ): number | null {
   const EPSILON = 1e-9;
   if (curve === null || curve.length === 0) return null;
 
-  const firstCrackElapsed =
-    (Date.parse(summary.first_crack_at_utc) -
-      Date.parse(summary.started_at_utc)) /
+  const eventElapsed =
+    (Date.parse(summary[eventKey]) - Date.parse(summary.started_at_utc)) /
     1_000;
   // Unreachable after RoastSummarySchema validates both ISO timestamps.
   /* v8 ignore next */
-  if (!Number.isFinite(firstCrackElapsed)) return null;
+  if (!Number.isFinite(eventElapsed)) return null;
 
-  let nearest: { elapsed: number; temperature: number; distance: number } | null =
-    null;
+  let nearest: {
+    elapsed: number;
+    temperature: number | null;
+    distance: number;
+  } | null = null;
   for (const sample of curve) {
     if (
       typeof sample.elapsed_s !== "number" ||
-      !Number.isFinite(sample.elapsed_s) ||
-      typeof sample.bean_temp_c !== "number" ||
-      !Number.isFinite(sample.bean_temp_c)
+      !Number.isFinite(sample.elapsed_s)
     ) {
       continue;
     }
-    const distance = Math.abs(sample.elapsed_s - firstCrackElapsed);
+    const distance = Math.abs(sample.elapsed_s - eventElapsed);
     if (
       nearest === null ||
       distance < nearest.distance - EPSILON ||
@@ -292,6 +296,22 @@ export function firstCrackTempC(
     }
   }
   return nearest?.temperature ?? null;
+}
+
+/** Returns the nearest telemetry row's temperature at first crack. */
+export function firstCrackTempC(
+  curve: CurveSample[] | null,
+  summary: RoastSummary,
+): number | null {
+  return nearestSampleTempC(curve, summary, "first_crack_at_utc");
+}
+
+/** Returns the nearest telemetry row's temperature at drop. */
+export function dropTempC(
+  curve: CurveSample[] | null,
+  summary: RoastSummary,
+): number | null {
+  return nearestSampleTempC(curve, summary, "beans_dropped_at_utc");
 }
 
 function slugBinding(slug: string) {
