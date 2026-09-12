@@ -36,8 +36,8 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 Sync is COMPLETE (10 Sep 2026). The active epic is C4 (public page); C4-S1/S2/S3
-are MERGED (12 Sep 2026) — see the C4 progress block below. NEXT: C4-S4 (#502, RoastCurve).**
+**C3 Sync is COMPLETE (10 Sep 2026). The active epic is C4 (public page); C4-S1–S4
+are MERGED (12 Sep 2026) — see the C4 progress block below. NEXT: C4-S5 (#503, OG image), the last C4 story.**
 Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
 Verification tiers (precise — do not conflate them):
 - **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
@@ -92,7 +92,7 @@ above, not infeasibility; the reference design + folds are recorded on #495).
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-env app-role cross-env grant audit, C7-gated).
 
-### C4 progress (public page) — S1/S2/S3 MERGED
+### C4 progress (public page) — S1–S4 MERGED
 
 C4 was decomposed via `to-issues` into five stories:
 [#499](https://github.com/syamaner/roastpilot-cloud/issues/499) (S1, SQL API client),
@@ -124,11 +124,44 @@ C4 was decomposed via `to-issues` into five stories:
   **Live-verified** end-to-end on the Vercel preview as `PUBLIC_WEB` (see the verification tier
   above). Fast-follow noted on #501: env-configurable `E2E_ROAST_SLUG` (the preview e2e's
   happy-path slug is a manual seed, not generator output; non-gating).
+- **S4 [#502] MERGED** ([#511](https://github.com/syamaner/roastpilot-cloud/pull/511),
+  `4030a52`): `components/RoastCurve.tsx` — server-rendered inline-SVG five-series chart
+  replacing the S3 `CurveSlot` placeholder. Bean/env temp + RoR as linear Celsius series,
+  heat/fan as **step-after** lines on a fixed 0–100 percent scale, a legend with colour
+  swatches, Celsius + elapsed-seconds axes; null/empty/no-finite-elapsed curves render a
+  "Curve not shared" placeholder. Every SVG coordinate flows through finite-filtered
+  `scaleX`/`scaleY` + `roundSvg`; the **temperature/rate (Y) domains derive from drawable
+  (≥2-point) segments only** (an isolated point no longer stretches those axes; the X/elapsed
+  axis still spans every finite-elapsed row, which is intended);
+  empty scales suppress their numeric labels; scrollable min-width plot + `currentColor` axes
+  for phone/dark-mode legibility. Pure server component, **route stays `● SSG`** (build-proven,
+  not `ƒ Dynamic`). Reviewed by a 5-lens pre-open board (privacy-auditor, qa, boundary-pass,
+  CI-integrity, contract-conformance) + the executing local `codex review`; post-open Codex
+  connector **CLEAN on the final head `7f16ab0`** (bot 👍 + "no major issues" comment), both
+  inline threads (heat light-mode contrast → `#c2410c`; domain-from-drawn-points) folded and
+  resolved; `pr-triage` MERGEABLE. **Decisions D-C4-11** (operator autonomous-to-merge grant
+  for #502) and **D-C4-12** (RoR data-population deferred — `ror_c_per_min` is null across real
+  telemetry today (`R__proc_load_roast_telemetry.sql`, `scripts/seed/generate.ts`), so the RoR
+  series draws nothing on real pages; the in-scope misleading-empty-axis suppression was folded,
+  the upstream population deferred to **[#512](https://github.com/syamaner/roastpilot-cloud/issues/512)**,
+  data-pipeline). NB: #502's decisions are **D-C4-11/-12** — D-C4-9/-10 were already taken by
+  #501 above; earlier #502/#511 comments that said "D-C4-9/-10" are the same two, renumbered.
+  Not live-verified (no `contributed_to_learning=true` telemetry seed exists yet — operator
+  action; the null-curve placeholder and every edge path are covered offline).
 
 **Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
 are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
-NULL) is seeded. **NEXT: C4-S4 ([#502], RoastCurve)** — needs a telemetry seed for a live curve;
-then **S5 ([#503], OG image)**. C4 is the path to the public review UI (C5).
+NULL) is seeded. **NEXT: C4-S5 ([#503], OG image)** — the last C4 story. A
+`contributed_to_learning=true` telemetry seed would unlock a live **four-series** check
+(bean/env temp + heat/fan step lines); the **fifth series (RoR) also needs #512 first** —
+`ror_c_per_min` is inserted NULL across the current pipeline (`R__proc_load_roast_telemetry.sql`,
+`scripts/seed/generate.ts`) **regardless** of the contributed flag, so a contributing seed alone
+cannot render RoR (operator action, not a blocker). C4 is the path to the public review UI (C5).
+**Carried C4 follow-ups (non-blocking):**
+[#505](https://github.com/syamaner/roastpilot-cloud/issues/505) (reviews pagination UX, C5),
+[#507](https://github.com/syamaner/roastpilot-cloud/issues/507) (C5 route Zod + proc guards),
+[#512](https://github.com/syamaner/roastpilot-cloud/issues/512) (populate RoR upstream), and the
+#501 `E2E_ROAST_SLUG` e2e fast-follow.
 
 **C3 story history (retained for reference): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
