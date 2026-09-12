@@ -23,6 +23,10 @@ vi.mock("@/lib/roast", () => ({
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
 
+vi.mock("@/lib/roast-cache", async () => import("../lib/roast-cache"));
+
+vi.mock("@/lib/roast-format", async () => import("../lib/roast-format"));
+
 vi.mock("next/cache", () => ({
   unstable_cache: vi.fn((read: (slug: string) => unknown) => read),
 }));
@@ -151,11 +155,13 @@ describe("public roast page control flow", () => {
   it("T-anon-source: has no authentication or request-scoped API in the anonymous path", () => {
     const paths = [
       "app/r/[slug]/page.tsx",
+      "app/r/[slug]/opengraph-image.tsx",
       "app/r/[slug]/not-found.tsx",
       "components/RoastHeadline.tsx",
       "components/ReviewsList.tsx",
       "components/RoastCurve.tsx",
       "lib/format.ts",
+      "lib/roast-format.ts",
     ];
     const source = paths
       .map((path) => readFileSync(join(process.cwd(), path), "utf8"))
