@@ -37,10 +37,13 @@ const REVIEW_COLUMNS = [
   "created_at",
 ] as const;
 
+/** The D-C5-4 cap keeps the reviews read inside lib/sqlapi.ts's single-partition transport guard; tie-broken ordering makes the returned set deterministic up to identical rows. Pinned in a test. */
+export const REVIEWS_LIMIT = 50;
+
 const ROAST_STATEMENT =
   "select public_slug,bean_origin,bean_varietal,bean_weight_g,profile_name,roast_level,roasted_at_utc,created_at,summary,curve from roast_by_slug where public_slug = :1";
 const REVIEWS_STATEMENT =
-  "select public_slug,reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,created_at from reviews_by_roast where public_slug = :1 order by created_at desc";
+  `select public_slug,reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,created_at from reviews_by_roast where public_slug = :1 order by created_at desc, reviewer_name, score, aroma, acidity, sweetness, body, aftertaste, brew_method, notes limit ${REVIEWS_LIMIT}`;
 
 const isoTimestamp = z.iso.datetime({ offset: true });
 const numberCell = z
