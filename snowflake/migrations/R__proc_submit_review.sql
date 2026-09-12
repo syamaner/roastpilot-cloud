@@ -43,6 +43,8 @@ $$
 declare
   slug_not_resolved exception (-20001, 'Public slug did not resolve uniquely');
   invalid_submitted_hash exception (-20002, 'Submitted hash must be 64 hexadecimal characters');
+  invalid_score exception (-20017, 'Score must be an integer between 1 and 5');
+  invalid_slider exception (-20018, 'Slider values must be between 0 and 100');
   v_count int;
   v_bean_origin string;
   v_roast_level string;
@@ -50,6 +52,18 @@ begin
   if (p_submitted_ip_hash is not null
       and not regexp_like(p_submitted_ip_hash, '^[0-9a-fA-F]{64}$')) then
     raise invalid_submitted_hash;
+  end if;
+
+  if (p_score is null or p_score < 1 or p_score > 5) then
+    raise invalid_score;
+  end if;
+
+  if ((p_aroma      is not null and (p_aroma      < 0 or p_aroma      > 100))
+   or (p_acidity    is not null and (p_acidity    < 0 or p_acidity    > 100))
+   or (p_sweetness  is not null and (p_sweetness  < 0 or p_sweetness  > 100))
+   or (p_body       is not null and (p_body       < 0 or p_body       > 100))
+   or (p_aftertaste is not null and (p_aftertaste < 0 or p_aftertaste > 100))) then
+    raise invalid_slider;
   end if;
 
   select count(*) into :v_count

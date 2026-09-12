@@ -159,6 +159,37 @@ def test_t_hash_shape_guard_raises_declared_exception():
     )
 
 
+def test_t_score_guard_is_exact_and_precedes_transaction():
+    declaration = re.search(r"invalid_score\s+exception\s*\(\s*-20017\s*,", STRIPPED, re.IGNORECASE)
+    guard = re.search(
+        r"if\s*\(\s*p_score\s+is\s+null\s+or\s+p_score\s*<\s*1\s+or\s+"
+        r"p_score\s*>\s*5\s*\)\s*then\s*raise\s+invalid_score\s*;",
+        STRIPPED,
+        re.IGNORECASE | re.DOTALL,
+    )
+    transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.IGNORECASE)
+    assert declaration and guard and transaction and guard.start() < transaction.start()
+    guard_region = STRIPPED[guard.start() : transaction.start()]
+    assert "\\" not in guard_region and "is not true" not in guard_region.lower()
+
+
+def test_t_slider_guard_is_exact_safe_and_precedes_transaction():
+    declaration = re.search(r"invalid_slider\s+exception\s*\(\s*-20018\s*,", STRIPPED, re.IGNORECASE)
+    guard_start = re.search(r"if\s*\(\s*\(\s*p_aroma\b", STRIPPED, re.IGNORECASE)
+    guard_end = re.search(r"select\s+count\s*\(", STRIPPED, re.IGNORECASE)
+    transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.IGNORECASE)
+    assert declaration and guard_start and guard_end and transaction and guard_start.start() < transaction.start()
+    guard = STRIPPED[guard_start.start() : guard_end.start()]
+    for name in ("aroma", "acidity", "sweetness", "body", "aftertaste"):
+        assert re.search(
+            rf"p_{name}\s+is\s+not\s+null\s+and\s*\(\s*p_{name}\s*<\s*0\s+or\s+"
+            rf"p_{name}\s*>\s*100\s*\)",
+            guard,
+            re.IGNORECASE,
+        )
+    assert re.search(r"raise\s+invalid_slider\s*;", guard, re.IGNORECASE)
+
+
 def test_t_slug_filter_excludes_private_in_both_lookups_and_insert():
     matches = re.findall(r"visibility\s*<>\s*'private'", STRIPPED, re.IGNORECASE)
     assert len(matches) == 3
