@@ -4,24 +4,21 @@ import {
   formatSeconds,
 } from "../lib/format";
 import type { Roast } from "@/lib/roast";
+import { beanLabel, roastDateLabel } from "../lib/roast-format";
 
 export function RoastHeadline({ roast }: { roast: Roast }) {
-  const bean = [roast.bean_origin, roast.bean_varietal]
-    .filter((part): part is string => part !== null)
-    .join(" · ");
+  const roastDate = roastDateLabel(roast);
 
   return (
     <header>
-      <h1>{bean === "" ? "Roast" : bean}</h1>
+      <h1>{beanLabel(roast)}</h1>
       {roast.roast_level === null ? null : (
         <p>Roast level: {roast.roast_level}</p>
       )}
-      {roast.roasted_at_utc === null ? null : (
+      {roastDate === null ? null : (
         <p>
           Roast date:{" "}
-          <time dateTime={roast.roasted_at_utc}>
-            {roast.roasted_at_utc.slice(0, 10)}
-          </time>
+          <time dateTime={roastDate}>{roastDate}</time>
         </p>
       )}
       <dl>

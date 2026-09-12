@@ -12,7 +12,7 @@ function roastFixture(overrides: Partial<Roast> = {}): Roast {
     bean_weight_g: 250,
     profile_name: "Filter 01",
     roast_level: "light",
-    roasted_at_utc: "2026-06-07T12:19:47.297516+00:00",
+    roasted_at_utc: "1780834787.000000000 1440",
     created_at: "2026-06-07T12:25:50.249395+00:00",
     summary: {
       started_at_utc: "2026-06-07T12:00:00+00:00",
@@ -44,7 +44,10 @@ describe("RoastHeadline", () => {
 
     expect(markup).toContain("Ethiopia Guji · 74110");
     expect(markup).toContain("Roast level: light");
-    expect(markup).toContain("2026-06-07");
+    expect(markup).toContain(
+      '<time dateTime="2026-06-07">2026-06-07</time>',
+    );
+    expect(markup).not.toContain("1780834787.000000000 1440");
     expect(markup).toContain("Total roast time");
     expect(markup).toContain("10:37");
     expect(markup).toContain("First crack time");
