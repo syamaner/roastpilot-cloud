@@ -36,8 +36,10 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 Sync is COMPLETE (10 Sep 2026). The active epic is C4 (public page); C4-S1–S4
-are MERGED (12 Sep 2026) — see the C4 progress block below. NEXT: C4-S5 (#503, OG image), the last C4 story.**
+**C3 Sync is COMPLETE (10 Sep 2026). C4 (public page) is COMPLETE — all five stories
+C4-S1–S5 are MERGED (12 Sep 2026); see the C4 progress block below. NEXT epic: C5
+(no-account taster reviews — the public review form + `SUBMIT_REVIEW` wiring; the
+`GET /r/[slug]` read half shipped in C4).**
 Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
 Verification tiers (precise — do not conflate them):
 - **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
@@ -92,7 +94,7 @@ above, not infeasibility; the reference design + folds are recorded on #495).
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-env app-role cross-env grant audit, C7-gated).
 
-### C4 progress (public page) — S1–S4 MERGED
+### C4 progress (public page) — COMPLETE, S1–S5 MERGED
 
 C4 was decomposed via `to-issues` into five stories:
 [#499](https://github.com/syamaner/roastpilot-cloud/issues/499) (S1, SQL API client),
@@ -148,20 +150,48 @@ C4 was decomposed via `to-issues` into five stories:
   #501 above; earlier #502/#511 comments that said "D-C4-9/-10" are the same two, renumbered.
   Not live-verified (no `contributed_to_learning=true` telemetry seed exists yet — operator
   action; the null-curve placeholder and every edge path are covered offline).
+- **S5 [#503] MERGED** ([#514](https://github.com/syamaner/roastpilot-cloud/pull/514),
+  `07425ac`): `app/r/[slug]/opengraph-image.tsx` + `generateMetadata` in `page.tsx` — OG/Twitter
+  metadata and a `next/og` generated preview image (bean name, roast date, aggregate rating,
+  minimal mini-curve) over the same typed read layer, with **private/unknown-slug parity to the
+  404** (byte-identical minimal metadata; a brand-only non-revealing placeholder image; no
+  warehouse hit on a malformed slug; read errors propagate to 500). Shared `lib/roast-format.ts`
+  (`beanLabel`/`roastDateLabel`/`aggregateRating`/grapheme-safe `truncateLabel`) + `lib/roast-cache.ts`;
+  RoastHeadline refactored onto the shared grammar (class sweep); the OG mini-curve segments at
+  null gaps like `RoastCurve`; **route stays `● SSG`** (build-proven). **Decisions D-C4-13**
+  (operator auto-drive-to-merge grant, incl. this registry sync), **D-C4-14** (built-in `next/og`,
+  no `@vercel/og` dep → dependency-review does not fire), **D-C4-15** (aggregate rating = mean of
+  `score`, `.toFixed(1)`, "No ratings yet" for empty — display-only, no authoritative proc),
+  **D-C4-16** (bundle the SIL-OFL Geist font + constrain labels to its cmap to CLOSE the `next/og`
+  remote-fallback-font egress that would otherwise send bean-label text to Google Fonts/jsDelivr;
+  + overflow-safe SVG scaling + grapheme-safe truncation), **D-C4-17** (parse Snowflake's SQL-API
+  epoch timestamp serialization in `roastDateLabel` — a **live-verification** fix that also corrected
+  the pre-existing S3 headline epoch-date). Reviewed by a 5-lens pre-open board + privacy/boundary
+  re-passes + **nine executing `codex review` passes** (the executing lens caught the SSG/Satori/
+  egress/null-gap defects the read-only board missed, and **live verification caught the epoch-date
+  bug no lens caught**); Codex connector **CLEAN on the final head `88cd88b`** (bot 👍 + "Didn't find
+  any major issues", head-matched), both font-loader inline threads folded (lazy `fileURLToPath`
+  loader, no eager module-scope font read — memoized on first request) and resolved; `pr-triage`
+  MERGEABLE. **Live-verified** on the
+  Vercel preview as `PUBLIC_WEB`: `og:description` = "2026-06-07 · No ratings yet", OG image
+  `200 image/png`, unknown-slug minimal metadata. Accepted documented residual: a pathological
+  wide-unbroken-glyph title may clip without a visible ellipsis (zero-instance; the image still
+  renders a valid PNG).
 
 **Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
 are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
-NULL) is seeded. **NEXT: C4-S5 ([#503], OG image)** — the last C4 story. A
-`contributed_to_learning=true` telemetry seed would unlock a live **four-series** check
-(bean/env temp + heat/fan step lines); the **fifth series (RoR) also needs #512 first** —
-`ror_c_per_min` is inserted NULL across the current pipeline (`R__proc_load_roast_telemetry.sql`,
-`scripts/seed/generate.ts`) **regardless** of the contributed flag, so a contributing seed alone
-cannot render RoR (operator action, not a blocker). C4 is the path to the public review UI (C5).
-**Carried C4 follow-ups (non-blocking):**
+NULL) is seeded. **C4 is COMPLETE; the NEXT epic is C5** (no-account taster reviews — the public
+review form + `SUBMIT_REVIEW` wiring). A `contributed_to_learning=true` telemetry seed would unlock
+a live **four-series** curve check (bean/env temp + heat/fan step lines); the **fifth series (RoR)
+also needs #512 first** — `ror_c_per_min` is inserted NULL across the current pipeline
+(`R__proc_load_roast_telemetry.sql`, `scripts/seed/generate.ts`) **regardless** of the contributed
+flag, so a contributing seed alone cannot render RoR (operator action, not a blocker).
+**Carried C4 follow-ups (non-blocking, carried into C5):**
 [#505](https://github.com/syamaner/roastpilot-cloud/issues/505) (reviews pagination UX, C5),
 [#507](https://github.com/syamaner/roastpilot-cloud/issues/507) (C5 route Zod + proc guards),
-[#512](https://github.com/syamaner/roastpilot-cloud/issues/512) (populate RoR upstream), and the
-#501 `E2E_ROAST_SLUG` e2e fast-follow.
+[#512](https://github.com/syamaner/roastpilot-cloud/issues/512) (populate RoR upstream), the
+#501 `E2E_ROAST_SLUG` e2e fast-follow, and the C4-S5 wide-unbroken-glyph OG-title clipping
+residual (accepted, zero-instance).
 
 **C3 story history (retained for reference): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
