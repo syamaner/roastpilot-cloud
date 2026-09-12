@@ -11,6 +11,7 @@ import {
   firstCrackTempC,
   getReviewsByRoast,
   getRoastBySlug,
+  REVIEWS_LIMIT,
   RoastSchemaError,
   type CurveSample,
   type RoastSummary,
@@ -201,7 +202,55 @@ describe("typed roast reads", () => {
     await getReviewsByRoast("ethiopia-natural");
 
     expect(executeMock.mock.calls[0][0]).toMatch(
-      /order by created_at desc/i,
+      /order by created_at desc,/i,
+    );
+  });
+
+  it("T-bound-applied: limits the reviews query to 50 rows", async () => {
+    executeMock.mockResolvedValue(apiResult(REVIEW_COLUMNS, []));
+
+    await getReviewsByRoast("ethiopia-natural");
+
+    expect(executeMock.mock.calls[0][0]).toMatch(/limit\s+50/i);
+  });
+
+  it("T-order-then-bound: applies the cap after newest-first ordering", async () => {
+    executeMock.mockResolvedValue(apiResult(REVIEW_COLUMNS, []));
+
+    await getReviewsByRoast("ethiopia-natural");
+
+    expect(executeMock.mock.calls[0][0]).toMatch(
+      /order by created_at desc,[^;]*\blimit\s+50/i,
+    );
+  });
+
+  it("T-tiebreak-deterministic: orders ties by every projected value", async () => {
+    executeMock.mockResolvedValue(apiResult(REVIEW_COLUMNS, []));
+
+    await getReviewsByRoast("ethiopia-natural");
+
+    expect(executeMock.mock.calls[0][0]).toMatch(
+      /order by created_at desc,\s*reviewer_name,\s*score,\s*aroma,\s*acidity,\s*sweetness,\s*body,\s*aftertaste,\s*brew_method,\s*notes\s+limit/i,
+    );
+  });
+
+  it("T-const-pin: pins the reviews limit", () => {
+    expect(REVIEWS_LIMIT).toBe(50);
+  });
+
+  it("T-not-oldest: maps every mocked review in transport order", async () => {
+    const rows = Array.from({ length: REVIEWS_LIMIT + 1 }, (_, index) => {
+      const row = [...reviewRows()[0]];
+      row[1] = `Reviewer ${index}`;
+      return row;
+    });
+    executeMock.mockResolvedValue(apiResult(REVIEW_COLUMNS, rows));
+
+    const reviews = await getReviewsByRoast("ethiopia-natural");
+
+    expect(reviews).toHaveLength(rows.length);
+    expect(reviews.map((review) => review.reviewer_name)).toEqual(
+      rows.map((row) => row[1]),
     );
   });
 
