@@ -154,7 +154,7 @@ describe("public roast page control flow", () => {
       "app/r/[slug]/not-found.tsx",
       "components/RoastHeadline.tsx",
       "components/ReviewsList.tsx",
-      "components/CurveSlot.tsx",
+      "components/RoastCurve.tsx",
       "lib/format.ts",
     ];
     const source = paths

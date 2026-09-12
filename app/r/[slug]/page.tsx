@@ -2,7 +2,7 @@ import { getReviewsByRoast, getRoastBySlug } from "@/lib/roast";
 import { isValidSlug } from "@/lib/slug";
 import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
-import { CurveSlot } from "../../../components/CurveSlot";
+import RoastCurve from "../../../components/RoastCurve";
 import { ReviewsList } from "../../../components/ReviewsList";
 import { RoastHeadline } from "../../../components/RoastHeadline";
 
@@ -42,7 +42,7 @@ export default async function Page({
   return (
     <main>
       <RoastHeadline roast={roast} />
-      <CurveSlot curve={roast.curve} />
+      <RoastCurve curve={roast.curve} />
       <ReviewsList reviews={reviews} />
     </main>
   );
