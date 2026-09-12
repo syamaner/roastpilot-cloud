@@ -36,20 +36,29 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 Sync is COMPLETE (10 Sep 2026). The active epic is now C4 (public page).**
+**C3 Sync is COMPLETE (10 Sep 2026). The active epic is C4 (public page); C4-S1/S2/S3
+are MERGED (12 Sep 2026) — see the C4 progress block below. NEXT: C4-S4 (#502, RoastCurve).**
 Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
 Verification tiers (precise — do not conflate them):
 - **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
   `load_roast_telemetry` write path (verifiers ran, rows verified), the
-  presigned-URL SNOWFLAKE_SSE download check (#418, bytes verified), and the grant
-  boundaries (#446 — live grant audit + the agent-DML deny-probe).
+  presigned-URL SNOWFLAKE_SSE download check (#418, bytes verified), the grant
+  boundaries (#446 — live grant audit + the agent-DML deny-probe), and — as of
+  C4-S3 (#509) — the **two secure views read live as `PUBLIC_WEB`**. Evidence tier
+  note: this was verified **in-session via `vercel curl`** against the #509 Vercel
+  preview (which reads `ROASTPILOT_DEV` through the `SNOWFLAKE_WEB_*` creds), an
+  operator/session attestation — **not** a reproducible CI verifier job, and #509's
+  own merge gate was the mocked render tests. In that run the deployed
+  `/r/demoroastseedone234` rendered `roast_by_slug` + `reviews_by_roast` through the
+  real SQL API (headline stats, null-curve temps as "—", empty-reviews state), and an
+  unknown well-formed slug returned a **live 0-row `roast_by_slug` read → 404**. (A
+  malformed slug 404s via the **pre-query `isValidSlug` local reject** — indistinguishable
+  from the missing case, but a local reject, not itself a live secure-view query.)
 - **Deploy-validated on DEV only** (proc deployed + grant audit clean, but no live
   behaviour CALL/assertion): `delete_roast`'s row cascade (#342, run 32649254129,
   `scripts_applied=1`).
-- **Delivered, NOT yet live-verified** (documented residuals, none blocks C4): (a)
-  the two secure views (`roast_by_slug` / `reviews_by_roast`) — grants live-audited
-  and definitions offline-tested, but no live `SELECT` runs against them until C4's
-  public page reads them; and (b) `delete_roast`'s stage-file `REMOVE` — proc +
+- **Delivered, NOT yet live-verified** (documented residual, does not block C4):
+  `delete_roast`'s stage-file `REMOVE` — proc +
   offline proof merged; AC-5 LIVE verification **deferred by choice (D-495-C/D)**.
   Feasibility note (corrected per the Codex connector on #498): the data-plane
   roles cannot call it (`ROASTPILOT_AGENT` has procedure USAGE only on
@@ -62,8 +71,10 @@ Verification tiers (precise — do not conflate them):
   low-value. Tracked on #341; a deploy-role verifier remains an available future
   work item.
 
-**Do not read this block as proof the secure-view read behaviour, the row-cascade
-delete, or the stage-file deletion has run live.** The last C3 item, that
+**The secure-view read behaviour HAS now run live as of C4-S3 (#509)** — see the
+"Live behaviour run" tier above and its evidence note. **Do not read this block as
+proof the row-cascade delete or the stage-file deletion has run live** — those two
+remain not-yet-live (deploy-validated / deferred, respectively). The last C3 item, that
 `delete_roast` stage-file `REMOVE` ([#341](https://github.com/syamaner/roastpilot-cloud/issues/341),
 C2-S6b), merged its **proc half** via
 [#494](https://github.com/syamaner/roastpilot-cloud/pull/494) (`27ae7af`, files-first
@@ -79,10 +90,45 @@ the owner/deploy role can call it, so the deferral is by choice per the feasibil
 above, not infeasibility; the reference design + folds are recorded on #495).
 **Carried residuals (do not block C4):** the deferred `delete_roast` AC-5 live verifier
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
-(per-env app-role cross-env grant audit, C7-gated). **C4 has no issues filed yet** — kickoff runs
-`to-issues` against plan.md's C4 section (the `/r/[slug]` SSR+ISR page, telemetry
-curve view, OG image), PM-reviewed, per factory.md §7/§11. C4 is the path to the
-public review UI (C5).
+(per-env app-role cross-env grant audit, C7-gated).
+
+### C4 progress (public page) — S1/S2/S3 MERGED
+
+C4 was decomposed via `to-issues` into five stories:
+[#499](https://github.com/syamaner/roastpilot-cloud/issues/499) (S1, SQL API client),
+[#500](https://github.com/syamaner/roastpilot-cloud/issues/500) (S2, typed read layer),
+[#501](https://github.com/syamaner/roastpilot-cloud/issues/501) (S3, `/r/[slug]` page),
+[#502](https://github.com/syamaner/roastpilot-cloud/issues/502) (S4, RoastCurve),
+[#503](https://github.com/syamaner/roastpilot-cloud/issues/503) (S5, OG image).
+
+- **S1 [#499] MERGED** ([#504](https://github.com/syamaner/roastpilot-cloud/pull/504),
+  `334f43f`): `lib/sqlapi.ts` — Snowflake SQL API client + key-pair JWT auth. `ROASTPILOT_WEB`
+  service principal provisioned (operator; `DEFAULT_SECONDARY_ROLES=[]`, `PUBLIC_WEB` only).
+- **S2 [#500] MERGED** ([#506](https://github.com/syamaner/roastpilot-cloud/pull/506),
+  `dae6b36`): `lib/roast.ts` — typed reads over the two secure views. **D-C4-2/-4/-5/-6** settled
+  the roast-timing derivation against the authoritative `R__proc_recompute_summary.sql`
+  (added `dropTempC`, nearest-row-incl-null semantics). `zod` promoted to a direct prod dep.
+  Follow-ups filed: [#505](https://github.com/syamaner/roastpilot-cloud/issues/505) (reviews
+  pagination UX, C5), [#507](https://github.com/syamaner/roastpilot-cloud/issues/507) (C5 route
+  Zod + proc guards).
+- **S3 [#501] MERGED** ([#509](https://github.com/syamaner/roastpilot-cloud/pull/509),
+  `6084b2b`): `app/r/[slug]/page.tsx` — the public roast page. Genuine ISR
+  (`generateStaticParams` + `unstable_cache`, build-proven `● SSG`), `notFound()` as the only
+  404 (private≡unknown, indistinguishable), fail-closed error propagation, Celsius-only headline,
+  reviewer first-token/Anonymous reviews + warm empty state (no hashed IP / `visibility` /
+  owner rendered; the reviewer's **first-name token IS displayed** as the deliberate public
+  reviewer identity per D-C4-7), typed `CurveSlot`
+  slot deferred to S4. **Decisions D-C4-7** (reviewer name = first whitespace token),
+  **D-C4-9** (ISR/slug/preview-e2e corrections from the executing `codex review`), **D-C4-10**
+  (accepted bounded public→private ISR-staleness residual; on-demand revalidation is C5).
+  **Live-verified** end-to-end on the Vercel preview as `PUBLIC_WEB` (see the verification tier
+  above). Fast-follow noted on #501: env-configurable `E2E_ROAST_SLUG` (the preview e2e's
+  happy-path slug is a manual seed, not generator output; non-gating).
+
+**Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
+are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
+NULL) is seeded. **NEXT: C4-S4 ([#502], RoastCurve)** — needs a telemetry seed for a live curve;
+then **S5 ([#503], OG image)**. C4 is the path to the public review UI (C5).
 
 **C3 story history (retained for reference): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
 and OPEN-6 [#433] are all CLOSED.** The repeatable live-verify vehicle now exists on `main`:
