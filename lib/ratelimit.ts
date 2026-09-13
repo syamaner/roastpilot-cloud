@@ -26,8 +26,8 @@ export function checkHoneypot(
 export async function checkRateLimit(
   clientIp: string,
 ): Promise<AbuseDecision> {
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const redisUrl = process.env.KV_REST_API_URL;
+  const redisToken = process.env.KV_REST_API_TOKEN;
   if (
     redisUrl === undefined ||
     redisUrl.trim() === "" ||
@@ -50,7 +50,7 @@ export async function checkRateLimit(
     const identifier = createHmac("sha256", pepper)
       .update("ratelimit:v1:" + normalized)
       .digest("hex");
-    const redis = Redis.fromEnv();
+    const redis = new Redis({ url: redisUrl, token: redisToken });
     const ratelimit = new Ratelimit({
       redis,
       limiter: Ratelimit.slidingWindow(5, "10 m"),
