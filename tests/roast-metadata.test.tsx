@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getReviewsByRoast, getRoastBySlug, type Review, type Roast } from "@/lib/roast";
+import {
+  getReviewsByRoast,
+  getRoastBySlug,
+  getRoastRatingBySlug,
+  type Roast,
+} from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
 import { unstable_cache } from "next/cache";
 import { generateMetadata } from "../app/r/[slug]/page";
@@ -7,6 +12,7 @@ import { generateMetadata } from "../app/r/[slug]/page";
 vi.mock("@/lib/roast", () => ({
   getRoastBySlug: vi.fn(),
   getReviewsByRoast: vi.fn(),
+  getRoastRatingBySlug: vi.fn(),
 }));
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
@@ -25,6 +31,7 @@ vi.mock("next/navigation", () => ({
 
 const roastMock = vi.mocked(getRoastBySlug);
 const reviewsMock = vi.mocked(getReviewsByRoast);
+const ratingMock = vi.mocked(getRoastRatingBySlug);
 const unstableCacheMock = vi.mocked(unstable_cache);
 
 const DEMO_SLUG = "demoroastseedone234";
@@ -61,22 +68,6 @@ function roastFixture(overrides: Partial<Roast> = {}): Roast {
   };
 }
 
-function review(score: number): Review {
-  return {
-    public_slug: DEMO_SLUG,
-    reviewer_name: null,
-    score,
-    aroma: null,
-    acidity: null,
-    sweetness: null,
-    body: null,
-    aftertaste: null,
-    brew_method: null,
-    notes: null,
-    created_at: "2026-06-08T12:00:00+00:00",
-  };
-}
-
 function metadataFor(slug: string) {
   return generateMetadata({ params: Promise.resolve({ slug }) });
 }
@@ -84,12 +75,13 @@ function metadataFor(slug: string) {
 beforeEach(() => {
   roastMock.mockReset();
   reviewsMock.mockReset();
+  ratingMock.mockReset();
 });
 
 describe("roast OpenGraph metadata", () => {
-  it("builds full OpenGraph and Twitter metadata from the shared cached reads", async () => {
+  it("T9. builds full metadata from the SQL aggregate", async () => {
     roastMock.mockResolvedValue(roastFixture());
-    reviewsMock.mockResolvedValue([review(5), review(4)]);
+    ratingMock.mockResolvedValue({ averageScore: 4.5, reviewCount: 2 });
 
     const metadata = await metadataFor(DEMO_SLUG);
 
@@ -107,17 +99,28 @@ describe("roast OpenGraph metadata", () => {
       },
     });
     expect(roastMock).toHaveBeenCalledWith(DEMO_SLUG);
-    expect(reviewsMock).toHaveBeenCalledWith(DEMO_SLUG);
-    expect(unstableCacheMock).toHaveBeenCalledTimes(2);
+    expect(ratingMock).toHaveBeenCalledWith(DEMO_SLUG);
+    expect(reviewsMock).not.toHaveBeenCalled();
+    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
     expect(unstableCacheMock.mock.calls.map((call) => call[1])).toEqual([
       ["roast-by-slug"],
       ["reviews-by-roast"],
+      ["roast-rating-by-slug"],
     ]);
   });
 
-  it("uses the no-ratings treatment and omits a missing date", async () => {
+  it("T10. rounds an all-review aggregate with more than 50 reviews", async () => {
+    roastMock.mockResolvedValue(roastFixture());
+    ratingMock.mockResolvedValue({ averageScore: 4.23, reviewCount: 128 });
+
+    const metadata = await metadataFor(DEMO_SLUG);
+
+    expect(metadata.description).toContain("4.2 / 5");
+  });
+
+  it("T11. uses the no-ratings treatment and never renders a zero rating", async () => {
     roastMock.mockResolvedValue(roastFixture({ roasted_at_utc: null }));
-    reviewsMock.mockResolvedValue([]);
+    ratingMock.mockResolvedValue({ averageScore: null, reviewCount: 0 });
 
     const metadata = await metadataFor(DEMO_SLUG);
 
@@ -125,7 +128,7 @@ describe("roast OpenGraph metadata", () => {
     expect(JSON.stringify(metadata)).not.toContain("0.0");
   });
 
-  it("returns byte-identical minimal metadata for private and unknown slugs", async () => {
+  it("T12. avoids rating reads for missing roasts and all reads for invalid slugs", async () => {
     roastMock.mockResolvedValue(null);
 
     const privateMetadata = await metadataFor(PRIVATE_SLUG);
@@ -137,21 +140,23 @@ describe("roast OpenGraph metadata", () => {
     expect(roastMock).toHaveBeenNthCalledWith(1, PRIVATE_SLUG);
     expect(roastMock).toHaveBeenNthCalledWith(2, UNKNOWN_SLUG);
     expect(reviewsMock).not.toHaveBeenCalled();
-  });
+    expect(ratingMock).not.toHaveBeenCalled();
 
-  it("returns minimal metadata for an invalid slug without reading", async () => {
+    roastMock.mockClear();
     await expect(metadataFor("!!!")).resolves.toEqual({
       title: "RoastPilot Cloud",
     });
     expect(roastMock).not.toHaveBeenCalled();
     expect(reviewsMock).not.toHaveBeenCalled();
+    expect(ratingMock).not.toHaveBeenCalled();
   });
 
-  it("propagates read errors instead of laundering them into metadata", async () => {
+  it("T13. propagates roast read errors without reading the rating", async () => {
     const error = new SqlApiError("not_found", "bounded read failure");
     roastMock.mockRejectedValue(error);
 
     await expect(metadataFor(DEMO_SLUG)).rejects.toBe(error);
     expect(reviewsMock).not.toHaveBeenCalled();
+    expect(ratingMock).not.toHaveBeenCalled();
   });
 });

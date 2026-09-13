@@ -141,7 +141,7 @@ describe("public roast page control flow", () => {
     expect(markup).not.toMatch(/°\s*F|null|NaN/);
     expect(revalidate).toBe(300);
     expect(generateStaticParams()).toEqual([]);
-    expect(unstableCacheMock).toHaveBeenCalledTimes(2);
+    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
   });
 
   it("T-invalid-slug: rejects a malformed slug before querying Snowflake", async () => {

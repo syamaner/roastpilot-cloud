@@ -11,6 +11,7 @@ import {
   firstCrackTempC,
   getReviewsByRoast,
   getRoastBySlug,
+  getRoastRatingBySlug,
   REVIEWS_LIMIT,
   RoastSchemaError,
   type CurveSample,
@@ -47,6 +48,7 @@ const REVIEW_COLUMNS = [
   "NOTES",
   "CREATED_AT",
 ];
+const RATING_COLUMNS = ["REVIEW_COUNT", "AVERAGE_SCORE"];
 
 type FixtureSummary = RoastSummary & Record<string, unknown>;
 const executeMock = vi.mocked(executeStatement);
@@ -140,6 +142,111 @@ beforeEach(() => {
 });
 
 describe("typed roast reads", () => {
+  it("T1. maps the aggregate count and average from string cells", async () => {
+    executeMock.mockResolvedValue(
+      apiResult(RATING_COLUMNS, [["128", "4.234567"]]),
+    );
+
+    await expect(getRoastRatingBySlug("ethiopia-natural")).resolves.toEqual({
+      reviewCount: 128,
+      averageScore: 4.234567,
+    });
+    expect(executeMock.mock.calls[0][1]?.["1"]).toEqual({
+      type: "TEXT",
+      value: "ethiopia-natural",
+    });
+  });
+
+  it("T2. maps the empty aggregate to a zero count and null average", async () => {
+    executeMock.mockResolvedValue(apiResult(RATING_COLUMNS, [["0", null]]));
+
+    await expect(getRoastRatingBySlug("no-reviews")).resolves.toEqual({
+      reviewCount: 0,
+      averageScore: null,
+    });
+  });
+
+  it("T3. uses the authoritative unbounded secure-view aggregate", async () => {
+    executeMock.mockResolvedValue(apiResult(RATING_COLUMNS, [["0", null]]));
+
+    await getRoastRatingBySlug("ethiopia-natural");
+
+    const statement = executeMock.mock.calls[0][0];
+    expect(statement).toMatch(/avg\(score\)/i);
+    expect(statement).toMatch(/count\(\*\)/i);
+    expect(statement).toMatch(/from reviews_by_roast/i);
+    expect(statement).toMatch(/where public_slug = :1/i);
+    expect(statement).not.toMatch(/\blimit\b/i);
+    expect(statement).not.toMatch(/tasting_reviews/i);
+  });
+
+  it.each([
+    [["TOTAL", "AVERAGE_SCORE"]],
+    [["REVIEW_COUNT", "MEAN_SCORE"]],
+    [["REVIEW_COUNT", "AVERAGE_SCORE", "VISIBILITY"]],
+  ])("T4. rejects wrong, renamed, or extra aggregate columns: %j", async (columns) => {
+    executeMock.mockResolvedValue(apiResult(columns, [["5", "4.5"]]));
+
+    await expect(
+      getRoastRatingBySlug("ethiopia-natural"),
+    ).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it("T5. rejects zero rows, multiple rows, and inconsistent row-count metadata", async () => {
+    executeMock
+      .mockResolvedValueOnce(apiResult(RATING_COLUMNS, []))
+      .mockResolvedValueOnce(
+        apiResult(RATING_COLUMNS, [["1", "4"], ["1", "5"]]),
+      )
+      .mockResolvedValueOnce(apiResult(RATING_COLUMNS, [["1", "4"]], 2));
+
+    await expect(getRoastRatingBySlug("zero")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+    await expect(getRoastRatingBySlug("two")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+    await expect(getRoastRatingBySlug("mismatch")).rejects.toBeInstanceOf(
+      RoastSchemaError,
+    );
+  });
+
+  it.each(["abc", "", "NaN", "Infinity"])(
+    "T6. rejects malformed average cell %j",
+    async (average) => {
+      executeMock.mockResolvedValue(apiResult(RATING_COLUMNS, [["5", average]]));
+
+      await expect(
+        getRoastRatingBySlug("ethiopia-natural"),
+      ).rejects.toBeInstanceOf(RoastSchemaError);
+    },
+  );
+
+  it.each(["", "-1", "2.5", "x"])(
+    "T7. rejects malformed count cell %j",
+    async (count) => {
+      executeMock.mockResolvedValue(apiResult(RATING_COLUMNS, [[count, "4.5"]]));
+
+      await expect(
+        getRoastRatingBySlug("ethiopia-natural"),
+      ).rejects.toBeInstanceOf(RoastSchemaError);
+    },
+  );
+
+  it.each([
+    ["0", "4.5"],
+    ["5", null],
+  ])(
+    "T8. rejects inconsistent count/average pair [%j, %j]",
+    async (count, average) => {
+      executeMock.mockResolvedValue(apiResult(RATING_COLUMNS, [[count, average]]));
+
+      await expect(
+        getRoastRatingBySlug("ethiopia-natural"),
+      ).rejects.toBeInstanceOf(RoastSchemaError);
+    },
+  );
+
   it("1. maps the session-1 fixture into a typed roast and charge-relative stats", async () => {
     executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRow()]));
 

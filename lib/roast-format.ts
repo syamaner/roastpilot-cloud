@@ -1,4 +1,4 @@
-import type { Review, Roast } from "@/lib/roast";
+import type { Roast } from "@/lib/roast";
 
 export function beanLabel(
   roast: Pick<Roast, "bean_origin" | "bean_varietal">,
@@ -25,12 +25,6 @@ export function roastDateLabel(
     : new Date(Number.parseFloat(value) * 1000);
 
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
-}
-
-export function aggregateRating(reviews: Review[]): number | null {
-  if (reviews.length === 0) return null;
-  return reviews.reduce((total, review) => total + review.score, 0) /
-    reviews.length;
 }
 
 export function truncateLabel(label: string, max = 48): string {
