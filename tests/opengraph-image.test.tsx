@@ -1,14 +1,18 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getReviewsByRoast, getRoastBySlug, type Review, type Roast } from "@/lib/roast";
+import {
+  getRoastBySlug,
+  getRoastRatingBySlug,
+  type Roast,
+} from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
 
 const imageResponseMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/roast", () => ({
   getRoastBySlug: vi.fn(),
-  getReviewsByRoast: vi.fn(),
+  getRoastRatingBySlug: vi.fn(),
 }));
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
@@ -42,7 +46,7 @@ import Image, {
 } from "../app/r/[slug]/opengraph-image";
 
 const roastMock = vi.mocked(getRoastBySlug);
-const reviewsMock = vi.mocked(getReviewsByRoast);
+const ratingMock = vi.mocked(getRoastRatingBySlug);
 
 const DEMO_SLUG = "demoroastseedone234";
 const UNKNOWN_SLUG = "unknownroastseed123";
@@ -95,22 +99,6 @@ function roastFixture(overrides: Partial<Roast> = {}): Roast {
   };
 }
 
-function review(score: number): Review {
-  return {
-    public_slug: DEMO_SLUG,
-    reviewer_name: null,
-    score,
-    aroma: null,
-    acidity: null,
-    sweetness: null,
-    body: null,
-    aftertaste: null,
-    brew_method: null,
-    notes: null,
-    created_at: "2026-06-08T12:00:00+00:00",
-  };
-}
-
 function expectGeistFontOptions(options: unknown): void {
   expect(options).toMatchObject({
     ...size,
@@ -158,12 +146,12 @@ async function renderWithBundledGeist(
 
 beforeEach(() => {
   roastMock.mockReset();
-  reviewsMock.mockReset();
+  ratingMock.mockReset();
   imageResponseMock.mockClear();
 });
 
 describe("roast OpenGraph image", () => {
-  it("renders bean, date, aggregate rating, and the finite bean-temperature curve", () => {
+  it("T14. renders bean, date, SQL aggregate rating, and the finite bean-temperature curve", () => {
     const roast = roastFixture({
       curve: [
         ...(roastFixture().curve ?? []),
@@ -178,7 +166,7 @@ describe("roast OpenGraph image", () => {
       ],
     });
     const markup = renderToStaticMarkup(
-      roastImageElement(roast, [review(5), review(4)]),
+      roastImageElement(roast, 4.5),
     );
 
     expect(markup).toContain("Ethiopia Guji · 74110");
@@ -194,7 +182,7 @@ describe("roast OpenGraph image", () => {
     const longOrigin = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(46);
     const longRoast = roastFixture({ bean_origin: longOrigin });
     const markup = renderToStaticMarkup(
-      roastImageElement(longRoast, [review(5), review(4)]),
+      roastImageElement(longRoast, 4.5),
     );
 
     expect(markup).toContain(
@@ -216,7 +204,7 @@ describe("roast OpenGraph image", () => {
     expect(markup).not.toContain("-webkit-line-clamp");
 
     const bytes = await renderWithBundledGeist(
-      roastImageElement(longRoast, [review(5), review(4)]),
+      roastImageElement(longRoast, 4.5),
     );
     expect(bytes.byteLength).toBeGreaterThan(20_000);
 
@@ -224,10 +212,10 @@ describe("roast OpenGraph image", () => {
       bean_origin: "W".repeat(48),
       bean_varietal: null,
     });
-    const wideMarkup = renderToStaticMarkup(roastImageElement(wideRoast, []));
+    const wideMarkup = renderToStaticMarkup(roastImageElement(wideRoast, null));
     expect(wideMarkup).toContain("W".repeat(48));
     const wideBytes = await renderWithBundledGeist(
-      roastImageElement(wideRoast, []),
+      roastImageElement(wideRoast, null),
     );
     expect(wideBytes.byteLength).toBeGreaterThan(20_000);
   });
@@ -237,7 +225,7 @@ describe("roast OpenGraph image", () => {
       bean_origin: "浅煎りエチオピア",
       bean_varietal: null,
     });
-    const markup = renderToStaticMarkup(roastImageElement(roast, []));
+    const markup = renderToStaticMarkup(roastImageElement(roast, null));
     const outboundUrls: string[] = [];
     const originalFetch = globalThis.fetch;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -259,7 +247,9 @@ describe("roast OpenGraph image", () => {
     try {
       expect(markup).toContain("????????");
       expect(markup).not.toContain("浅煎りエチオピア");
-      const bytes = await renderWithBundledGeist(roastImageElement(roast, []));
+      const bytes = await renderWithBundledGeist(
+        roastImageElement(roast, null),
+      );
       expect(bytes.byteLength).toBeGreaterThan(20_000);
       expect(outboundUrls).toEqual([]);
     } finally {
@@ -312,7 +302,7 @@ describe("roast OpenGraph image", () => {
         },
       ],
     });
-    const markup = renderToStaticMarkup(roastImageElement(roast, []));
+    const markup = renderToStaticMarkup(roastImageElement(roast, null));
 
     expect(markup.match(/<polyline/g)).toHaveLength(2);
     expect(markup).toContain("100.0 °C");
@@ -327,7 +317,7 @@ describe("roast OpenGraph image", () => {
 
     expect(roastMock).toHaveBeenNthCalledWith(1, PRIVATE_SLUG);
     expect(roastMock).toHaveBeenNthCalledWith(2, UNKNOWN_SLUG);
-    expect(reviewsMock).not.toHaveBeenCalled();
+    expect(ratingMock).not.toHaveBeenCalled();
     expect(imageResponseMock).toHaveBeenCalledTimes(2);
     for (const call of imageResponseMock.mock.calls) {
       expectGeistFontOptions(call[1]);
@@ -349,7 +339,7 @@ describe("roast OpenGraph image", () => {
     await Image({ params: Promise.resolve({ slug: "!!!" }) });
 
     expect(roastMock).not.toHaveBeenCalled();
-    expect(reviewsMock).not.toHaveBeenCalled();
+    expect(ratingMock).not.toHaveBeenCalled();
     expect(imageResponseMock).toHaveBeenCalledOnce();
     expectGeistFontOptions(imageResponseMock.mock.calls[0][1]);
   });
@@ -364,16 +354,22 @@ describe("roast OpenGraph image", () => {
     expect(imageResponseMock).not.toHaveBeenCalled();
   });
 
-  it("reads reviews through the shared cache for a visible roast", async () => {
+  it("T16. reads the rating through the shared cache only for a visible roast", async () => {
     roastMock.mockResolvedValue(roastFixture());
-    reviewsMock.mockResolvedValue([review(3)]);
+    ratingMock.mockResolvedValue({ averageScore: 3, reviewCount: 1 });
 
     await Image({ params: Promise.resolve({ slug: DEMO_SLUG }) });
 
-    expect(reviewsMock).toHaveBeenCalledWith(DEMO_SLUG);
+    expect(ratingMock).toHaveBeenCalledWith(DEMO_SLUG);
     const markup = renderToStaticMarkup(imageResponseMock.mock.calls[0][0]);
     expect(markup).toContain("3.0 / 5");
     expectGeistFontOptions(imageResponseMock.mock.calls[0][1]);
+
+    const source = readFileSync(
+      new URL("../app/r/[slug]/opengraph-image.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/roastImageElement\(null, null\)/g)).toHaveLength(2);
   });
 
   it("keeps overflow-scale coordinates finite", () => {
@@ -399,7 +395,7 @@ describe("roast OpenGraph image", () => {
             },
           ],
         }),
-        [],
+        null,
       ),
     );
 
@@ -407,7 +403,7 @@ describe("roast OpenGraph image", () => {
     expect(markup).not.toContain("NaN");
   });
 
-  it("renders no-ratings text and one degenerate, fully finite segment", () => {
+  it("T15. renders no-ratings text and one degenerate, fully finite segment", () => {
     const roast = roastFixture({
       roasted_at_utc: null,
       curve: [
@@ -429,7 +425,7 @@ describe("roast OpenGraph image", () => {
         },
       ],
     });
-    const markup = renderToStaticMarkup(roastImageElement(roast, []));
+    const markup = renderToStaticMarkup(roastImageElement(roast, null));
 
     expect(markup).toContain("No ratings yet");
     expect(markup).not.toContain("0.0 / 5");
@@ -442,10 +438,10 @@ describe("roast OpenGraph image", () => {
 
   it("omits the curve for null or wholly non-finite curve data", () => {
     const nullMarkup = renderToStaticMarkup(
-      roastImageElement(roastFixture({ curve: null }), []),
+      roastImageElement(roastFixture({ curve: null }), null),
     );
     const emptyMarkup = renderToStaticMarkup(
-      roastImageElement(roastFixture({ curve: [] }), []),
+      roastImageElement(roastFixture({ curve: [] }), null),
     );
     const nonFiniteMarkup = renderToStaticMarkup(
       roastImageElement(
@@ -461,7 +457,7 @@ describe("roast OpenGraph image", () => {
             },
           ],
         }),
-        [],
+        null,
       ),
     );
     const isolatedRunsMarkup = renderToStaticMarkup(
@@ -494,7 +490,7 @@ describe("roast OpenGraph image", () => {
             },
           ],
         }),
-        [],
+        null,
       ),
     );
 
@@ -524,8 +520,10 @@ describe("roast OpenGraph image", () => {
     expect(source).not.toMatch(/\bemoji\s*:/);
   });
 
-  it("contains no Fahrenheit label or conversion", () => {
-    const markup = renderToStaticMarkup(roastImageElement(roastFixture(), []));
+  it("T17. contains no Fahrenheit label or conversion", () => {
+    const markup = renderToStaticMarkup(
+      roastImageElement(roastFixture(), null),
+    );
     const sources = [
       readFileSync(
         new URL("../app/r/[slug]/opengraph-image.tsx", import.meta.url),

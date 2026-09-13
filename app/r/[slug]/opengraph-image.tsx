@@ -2,11 +2,13 @@ import type { ReactElement } from "react";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ImageResponse } from "next/og";
-import { cachedReviewsByRoast, cachedRoastBySlug } from "@/lib/roast-cache";
-import { formatCelsius } from "@/lib/format";
-import type { Review, Roast } from "@/lib/roast";
 import {
-  aggregateRating,
+  cachedRoastBySlug,
+  cachedRoastRatingBySlug,
+} from "@/lib/roast-cache";
+import { formatCelsius } from "@/lib/format";
+import type { Roast } from "@/lib/roast";
+import {
   beanLabel,
   roastDateLabel,
   truncateLabel,
@@ -229,7 +231,7 @@ function polylinePoints(points: CurvePoint[], domain: CurveDomain): string {
 
 export function roastImageElement(
   roast: Roast | null,
-  reviews: Review[],
+  averageScore: number | null,
 ): ReactElement {
   if (roast === null) {
     return (
@@ -251,7 +253,7 @@ export function roastImageElement(
   }
 
   const date = roastDateLabel(roast);
-  const rating = aggregateRating(reviews);
+  const rating = averageScore;
   const segments = drawableCurveSegments(roast);
   const drawablePoints = segments.flatMap((segment) => segment);
   const domain = segments.length === 0 ? null : curveDomain(drawablePoints);
@@ -358,14 +360,14 @@ export default async function Image({
   };
 
   if (!isValidSlug(slug)) {
-    return new ImageResponse(roastImageElement(null, []), imageOptions);
+    return new ImageResponse(roastImageElement(null, null), imageOptions);
   }
 
   const roast = await cachedRoastBySlug(slug);
   if (roast === null) {
-    return new ImageResponse(roastImageElement(null, []), imageOptions);
+    return new ImageResponse(roastImageElement(null, null), imageOptions);
   }
 
-  const reviews = await cachedReviewsByRoast(slug);
-  return new ImageResponse(roastImageElement(roast, reviews), imageOptions);
+  const { averageScore } = await cachedRoastRatingBySlug(slug);
+  return new ImageResponse(roastImageElement(roast, averageScore), imageOptions);
 }

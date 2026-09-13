@@ -1,27 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Review } from "@/lib/roast";
 import {
-  aggregateRating,
   beanLabel,
   roastDateLabel,
   truncateLabel,
 } from "../lib/roast-format";
-
-function review(score: number): Review {
-  return {
-    public_slug: "demoroastseedone234",
-    reviewer_name: null,
-    score,
-    aroma: null,
-    acidity: null,
-    sweetness: null,
-    body: null,
-    aftertaste: null,
-    brew_method: null,
-    notes: null,
-    created_at: "2026-06-08T12:00:00+00:00",
-  };
-}
 
 describe("roast formatting", () => {
   it("formats every nullable bean-label combination", () => {
@@ -61,12 +43,6 @@ describe("roast formatting", () => {
     expect(roastDateLabel({ roasted_at_utc: "1780834787junk" })).toBeNull();
     expect(roastDateLabel({ roasted_at_utc: "123oops" })).toBeNull();
     expect(roastDateLabel({ roasted_at_utc: "2026-13-45" })).toBeNull();
-  });
-
-  it("returns the arithmetic mean or null for an empty review set", () => {
-    expect(aggregateRating([review(5), review(4)])).toBe(4.5);
-    expect(aggregateRating([review(3)])).toBe(3);
-    expect(aggregateRating([])).toBeNull();
   });
 
   it("leaves bounded labels unchanged and truncates longer labels deterministically", () => {

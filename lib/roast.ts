@@ -37,6 +37,8 @@ const REVIEW_COLUMNS = [
   "created_at",
 ] as const;
 
+const RATING_COLUMNS = ["review_count", "average_score"] as const;
+
 /** The D-C5-4 cap keeps the reviews read inside lib/sqlapi.ts's single-partition transport guard; tie-broken ordering makes the returned set deterministic up to identical rows. Pinned in a test. */
 export const REVIEWS_LIMIT = 50;
 
@@ -44,6 +46,8 @@ const ROAST_STATEMENT =
   "select public_slug,bean_origin,bean_varietal,bean_weight_g,profile_name,roast_level,roasted_at_utc,created_at,summary,curve from roast_by_slug where public_slug = :1";
 const REVIEWS_STATEMENT =
   `select public_slug,reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,created_at from reviews_by_roast where public_slug = :1 order by created_at desc, reviewer_name, score, aroma, acidity, sweetness, body, aftertaste, brew_method, notes limit ${REVIEWS_LIMIT}`;
+const RATING_STATEMENT =
+  "select count(*) as review_count, avg(score) as average_score from reviews_by_roast where public_slug = :1";
 
 const isoTimestamp = z.iso.datetime({ offset: true });
 const numberCell = z
@@ -52,6 +56,7 @@ const numberCell = z
   .transform(Number)
   .pipe(z.number().finite());
 const nullableNumberCell = numberCell.nullable();
+const reviewCountCell = numberCell.pipe(z.number().int().nonnegative());
 
 export const CurveSampleSchema = z.strictObject({
   elapsed_s: z.number().finite().nullable(),
@@ -150,6 +155,11 @@ export interface Review {
   brew_method: string | null;
   notes: string | null;
   created_at: string;
+}
+
+export interface RoastRating {
+  reviewCount: number;
+  averageScore: number | null;
 }
 
 /** A bounded validation failure that never exposes result-cell contents. */
@@ -340,4 +350,28 @@ export async function getReviewsByRoast(slug: string): Promise<Review[]> {
   assertRowCount(result);
   if (result.rowCount === 0) return [];
   return result.rows.map(parseReviewRow);
+}
+
+export async function getRoastRatingBySlug(
+  slug: string,
+): Promise<RoastRating> {
+  const result = await executeStatement(RATING_STATEMENT, slugBinding(slug));
+  assertColumns(result, RATING_COLUMNS);
+  assertRowCount(result);
+  if (result.rowCount !== 1) throw schemaError();
+
+  const parsed = z
+    .strictObject({
+      reviewCount: reviewCountCell,
+      averageScore: nullableNumberCell,
+    })
+    .safeParse({
+      reviewCount: result.rows[0][0],
+      averageScore: result.rows[0][1],
+    });
+  if (!parsed.success) throw schemaError();
+  if ((parsed.data.reviewCount === 0) !== (parsed.data.averageScore === null)) {
+    throw schemaError();
+  }
+  return parsed.data;
 }

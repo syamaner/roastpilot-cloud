@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { cachedReviewsByRoast, cachedRoastBySlug } from "@/lib/roast-cache";
 import {
-  aggregateRating,
-  beanLabel,
-  roastDateLabel,
-} from "@/lib/roast-format";
+  cachedReviewsByRoast,
+  cachedRoastBySlug,
+  cachedRoastRatingBySlug,
+} from "@/lib/roast-cache";
+import { beanLabel, roastDateLabel } from "@/lib/roast-format";
 import { isValidSlug } from "@/lib/slug";
 import { notFound } from "next/navigation";
 import RoastCurve from "../../../components/RoastCurve";
@@ -26,8 +26,8 @@ export async function generateMetadata({
   const roast = await cachedRoastBySlug(slug);
   if (roast === null) return MINIMAL_METADATA;
 
-  const reviews = await cachedReviewsByRoast(slug);
-  const rating = aggregateRating(reviews);
+  const { averageScore } = await cachedRoastRatingBySlug(slug);
+  const rating = averageScore;
   const roastDate = roastDateLabel(roast);
   const ratingText =
     rating === null ? "No ratings yet" : `${rating.toFixed(1)} / 5`;
