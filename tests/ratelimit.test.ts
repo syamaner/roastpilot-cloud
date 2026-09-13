@@ -2,16 +2,22 @@ import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const upstash = vi.hoisted(() => ({
-  fromEnv: vi.fn(),
+  redisConstructor: vi.fn(),
   limit: vi.fn(),
   construct: vi.fn(),
   slidingWindow: vi.fn(() => ({ kind: "sliding-window" })),
   executeStatement: vi.fn(),
 }));
 
-vi.mock("@upstash/redis", () => ({
-  Redis: { fromEnv: upstash.fromEnv },
-}));
+vi.mock("@upstash/redis", () => {
+  class MockRedis {
+    constructor(options: unknown) {
+      upstash.redisConstructor(options);
+    }
+  }
+
+  return { Redis: MockRedis };
+});
 
 vi.mock("@upstash/ratelimit", () => {
   class MockRatelimit {
@@ -66,7 +72,7 @@ describe("checkHoneypot", () => {
       allowed: false,
       reason: "honeypot",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
     expect(upstash.limit).not.toHaveBeenCalled();
   });
 
@@ -80,10 +86,9 @@ describe("checkHoneypot", () => {
 
 describe("checkRateLimit", () => {
   beforeEach(() => {
-    process.env.UPSTASH_REDIS_REST_URL = TEST_URL;
-    process.env.UPSTASH_REDIS_REST_TOKEN = TEST_TOKEN;
+    process.env.KV_REST_API_URL = TEST_URL;
+    process.env.KV_REST_API_TOKEN = TEST_TOKEN;
     process.env.REVIEW_IP_HASH_PEPPER = TEST_PEPPER;
-    upstash.fromEnv.mockReturnValue({ redis: true });
     upstash.limit.mockResolvedValue(limitResult(true));
     upstash.executeStatement.mockResolvedValue({
       columns: [{ name: "SUBMIT_REVIEW", type: "TEXT" }],
@@ -95,8 +100,8 @@ describe("checkRateLimit", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
-    delete process.env.UPSTASH_REDIS_REST_URL;
-    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.KV_REST_API_URL;
+    delete process.env.KV_REST_API_TOKEN;
     delete process.env.REVIEW_IP_HASH_PEPPER;
   });
 
@@ -110,10 +115,13 @@ describe("checkRateLimit", () => {
     upstash.limit.mockResolvedValue(genuineAllow);
 
     await expect(checkRateLimit(TEST_IP)).resolves.toEqual({ allowed: true });
-    expect(upstash.fromEnv).toHaveBeenCalledWith();
+    expect(upstash.redisConstructor).toHaveBeenCalledWith({
+      url: TEST_URL,
+      token: TEST_TOKEN,
+    });
     expect(upstash.slidingWindow).toHaveBeenCalledWith(5, "10 m");
     expect(upstash.construct).toHaveBeenCalledWith({
-      redis: { redis: true },
+      redis: expect.anything(),
       limiter: { kind: "sliding-window" },
       prefix: "rl:review",
     });
@@ -135,7 +143,7 @@ describe("checkRateLimit", () => {
       event: "ratelimit_fail_closed",
       reason: "invalid_client_ip",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
     expect(upstash.limit).not.toHaveBeenCalled();
   });
 
@@ -219,34 +227,55 @@ describe("checkRateLimit", () => {
   });
 
   it("T8 fails closed before client construction when the URL is absent", async () => {
-    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.KV_REST_API_URL;
 
     await expect(checkRateLimit(TEST_IP)).resolves.toEqual({
       allowed: false,
       reason: "fail_closed",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
   });
 
   it("T9 fails closed when the token is absent", async () => {
-    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.KV_REST_API_TOKEN;
 
     await expect(checkRateLimit(TEST_IP)).resolves.toEqual({
       allowed: false,
       reason: "fail_closed",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
   });
 
   it("T10 fails closed when the token is blank", async () => {
-    process.env.UPSTASH_REDIS_REST_TOKEN = "   ";
+    process.env.KV_REST_API_TOKEN = "   ";
 
     await expect(checkRateLimit(TEST_IP)).resolves.toEqual({
       allowed: false,
       reason: "fail_closed",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["blank URL", " ", TEST_TOKEN],
+    ["undefined token", TEST_URL, undefined],
+  ])(
+    "fails closed before Redis construction for %s KV config",
+    async (_case, url, token) => {
+      process.env.KV_REST_API_URL = url;
+      if (token === undefined) {
+        delete process.env.KV_REST_API_TOKEN;
+      } else {
+        process.env.KV_REST_API_TOKEN = token;
+      }
+
+      await expect(checkRateLimit(TEST_IP)).resolves.toEqual({
+        allowed: false,
+        reason: "fail_closed",
+      });
+      expect(upstash.redisConstructor).not.toHaveBeenCalled();
+    },
+  );
 
   it("T11 fails closed when the pepper is absent", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -256,7 +285,7 @@ describe("checkRateLimit", () => {
       allowed: false,
       reason: "fail_closed",
     });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledOnce();
     expect(JSON.parse(String(error.mock.calls[0]?.[0]))).toEqual({
       event: "ratelimit_fail_closed",
@@ -265,7 +294,7 @@ describe("checkRateLimit", () => {
   });
 
   it("T12 fails closed when client or limiter construction throws", async () => {
-    upstash.fromEnv.mockImplementationOnce(() => {
+    upstash.redisConstructor.mockImplementationOnce(() => {
       throw new Error("client construction failed");
     });
     await expect(checkRateLimit(TEST_IP)).resolves.toEqual({
@@ -298,9 +327,9 @@ describe("checkRateLimit", () => {
       .update("ratelimit:v1:" + rawIp.trim().toLowerCase())
       .digest("hex");
 
-    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.KV_REST_API_URL;
     await checkRateLimit(rawIp);
-    process.env.UPSTASH_REDIS_REST_URL = TEST_URL;
+    process.env.KV_REST_API_URL = TEST_URL;
     delete process.env.REVIEW_IP_HASH_PEPPER;
     await checkRateLimit(rawIp);
     process.env.REVIEW_IP_HASH_PEPPER = TEST_PEPPER;
@@ -376,7 +405,7 @@ describe("checkRateLimit", () => {
     await expect(
       checkRateLimit(null as unknown as string),
     ).resolves.toEqual({ allowed: false, reason: "fail_closed" });
-    expect(upstash.fromEnv).not.toHaveBeenCalled();
+    expect(upstash.redisConstructor).not.toHaveBeenCalled();
   });
 
   it("guards an absent pending promise", async () => {
@@ -387,14 +416,14 @@ describe("checkRateLimit", () => {
 
   it("fails closed when the URL or pepper is blank", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    process.env.UPSTASH_REDIS_REST_URL = " ";
+    process.env.KV_REST_API_URL = " ";
     await expect(checkRateLimit(TEST_IP)).resolves.toMatchObject({
       allowed: false,
       reason: "fail_closed",
     });
 
     error.mockClear();
-    process.env.UPSTASH_REDIS_REST_URL = TEST_URL;
+    process.env.KV_REST_API_URL = TEST_URL;
     process.env.REVIEW_IP_HASH_PEPPER = " ";
     await expect(checkRateLimit(TEST_IP)).resolves.toMatchObject({
       allowed: false,
