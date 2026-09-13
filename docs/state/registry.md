@@ -37,9 +37,10 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 ## Active epic
 
 **C3 Sync is COMPLETE (10 Sep 2026). C4 (public page) is COMPLETE — all five stories
-C4-S1–S5 are MERGED (12 Sep 2026); see the C4 progress block below. NEXT epic: C5
+C4-S1–S5 are MERGED (12 Sep 2026); see the C4 progress block below. ACTIVE epic: C5
 (no-account taster reviews — the public review form + `SUBMIT_REVIEW` wiring; the
-`GET /r/[slug]` read half shipped in C4).**
+`GET /r/[slug]` read half shipped in C4). C5 is 4-of-7 stories MERGED (13 Sep 2026);
+see the C5 progress block below.**
 Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
 Verification tiers (precise — do not conflate them):
 - **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
@@ -93,6 +94,44 @@ above, not infeasibility; the reference design + folds are recorded on #495).
 **Carried residuals (do not block C4):** the deferred `delete_roast` AC-5 live verifier
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-env app-role cross-env grant audit, C7-gated).
+
+### C5 progress (taster reviews) — 4-of-7 MERGED
+
+C5 was decomposed via `to-issues` into seven stories (all `epic:C5`,
+conventional/interactive — the factory is disabled, D-ToS-1). Kickoff decisions
+**D-C5-1..8** are recorded on the issues + plan-repo ledger (L340–L345). Dependency
+order: S1/S2/S7 independent; S3→S2; S4 needs Upstash; S5→S2/S3/S4; S6→S5.
+
+- **S7 [#522] MERGED** ([#523](https://github.com/syamaner/roastpilot-cloud/pull/523),
+  `8b79092`): reviews read bound to `LIMIT 50` with a deterministic tie-break over all
+  projected columns. Connector's aggregate-bound P2 deferred to **#525** (zero-instance).
+- **S2 [#517] MERGED** ([#524](https://github.com/syamaner/roastpilot-cloud/pull/524),
+  `c26ef0e`): `lib/review-schema.ts` — Zod `strictObject` (score 1–5 required, sliders 0–100
+  nullable+optional no-default, no coercion, honeypot literal `""`, bounded brewMethod).
+  **D-C5-2**: route-Zod + proc-guards, no agent-Pydantic parity (reviews are web-only).
+- **S3 [#518] MERGED** ([#527](https://github.com/syamaner/roastpilot-cloud/pull/527),
+  `88adde4`): `lib/review-submit.ts` — SQL API `SUBMIT_REVIEW` write path + server-side
+  **HMAC-SHA-256(ip, `REVIEW_IP_HASH_PEPPER`)** IP hashing, fail-closed if the pepper is unset
+  (**D-C5-6**). Inert until S5 wires it; live CALL round-trip is an S5-time item.
+- **S1 [#516] MERGED** ([#526](https://github.com/syamaner/roastpilot-cloud/pull/526),
+  `fc02369`): `SUBMIT_REVIEW` proc defense-in-depth range guards (codes `-20017`/`-20018`,
+  is-null disjunct, backslash-free, before `begin transaction`). Merged under operator grant
+  **D-C5-8**: the sandbox live-verification is accepted as sufficient to land the migration
+  **text** (the authentic `ROASTPILOT_DEV.APP` deploy via `ROASTPILOT_DEV_CI_ROLE` / the #11
+  Environment remains a **separate later operator step** — the text is inert until deployed);
+  **accept-rounding** is the coercion answer (the stored-data invariant holds under every
+  coercion mode). pr-triage MERGEABLE; connector CLEAN on `6329ccd`.
+
+**Remaining C5 (all operator-gated):**
+- **[#519 S4](https://github.com/syamaner/roastpilot-cloud/issues/519)** per-IP rate limit +
+  honeypot — blocked on **Upstash-via-Marketplace provisioning** (D-C5-1, dashboard OAuth);
+- **[#520 S5](https://github.com/syamaner/roastpilot-cloud/issues/520)** POST route handler
+  (deps S2✓/S3✓/S4) → **[#521 S6](https://github.com/syamaner/roastpilot-cloud/issues/521)**
+  review form UI (deps S5);
+- **[#525](https://github.com/syamaner/roastpilot-cloud/issues/525)** aggregate rating over
+  ALL reviews (SQL AVG) — before the write path can exceed 50 reviews/roast (zero-instance now);
+- the real **S1 DEV.APP deploy** (guards go live) via `ROASTPILOT_DEV_CI_ROLE` / #11; and the
+  already-set `REVIEW_IP_HASH_PEPPER` in Vercel Preview+Prod (done, L344).
 
 ### C4 progress (public page) — COMPLETE, S1–S5 MERGED
 
