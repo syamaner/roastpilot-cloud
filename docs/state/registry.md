@@ -36,11 +36,30 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**C3 Sync is COMPLETE (10 Sep 2026). C4 (public page) is COMPLETE — all five stories
-C4-S1–S5 are MERGED (12 Sep 2026); see the C4 progress block below. ACTIVE epic: C5
-(no-account taster reviews — the public review form + `SUBMIT_REVIEW` wiring; the
-`GET /r/[slug]` read half shipped in C4). C5 is 4-of-7 stories MERGED (13 Sep 2026);
-see the C5 progress block below.**
+**C3, C4, and C5 are all COMPLETE. NEXT epic: C6 References (aggregation proc +
+agent-side `prepare_roast` query, D13; deps C3).**
+C3 Sync COMPLETE (10 Sep 2026); C4 public page COMPLETE (12 Sep 2026, C4-S1–S5).
+**C5 (no-account taster reviews) is COMPLETE (14 Sep 2026): 7 of 7 stories plus the
+#525 aggregate follow-up are MERGED** — S7 #522, S2 #517, S3 #518, S1 #516, S4 #519,
+S5 #520 (`POST /api/r/[slug]/reviews`), S6 #521 (the review form UI), plus #525
+(unbounded average rating). The public review write path (form to proc to row) and the
+read/rate-limit path are now delivered. See the C5 progress block below.
+Every `epic:C3`/`epic:C4`/`epic:C5` issue is closed.
+
+**C5 server write/read path live-verified (14 Sep 2026, operator/session attestation):**
+via `vc curl` on the #532 Vercel Preview (commit `8054288`, Preview-scope
+`SNOWFLAKE_WEB_*`/`KV_REST_API_*`/`REVIEW_IP_HASH_PEPPER`) against real
+`ROASTPILOT_DEV.APP` and seed roast `demoroastseedone234` — a `POST` returned
+`{"ok":true}` (route + `SUBMIT_REVIEW` proc write), the Upstash limiter admitted 5
+then returned **429** on the 6th (S4/#519, not fail-open, KV wiring correct), the
+secure view then rendered the 5 rows, and the OG aggregate updated to `4.2 / 5`
+(#525). **Scope:** `vc curl` posts directly to the HTTP route, so it exercises the
+route → limiter → proc → row → secure-view read path, **not** the S6 browser
+`ReviewForm` (client-side payload build + optimistic UI), which is covered by the
+component + Playwright tests, not this live run. Evidence tier: **in-session `vc curl`
+attestation, not a reproducible CI verifier job** (same tier as the C4-S3 #509
+read-verify). Left 5 taster reviews in `DEV.APP` (append-only; purge at operator
+discretion). Full note on #519 / #525.
 Every `epic:C3` issue is closed and the cloud-plane sync scope is delivered.
 Verification tiers (precise — do not conflate them):
 - **Live behaviour run on `ROASTPILOT_DEV`:** the `upsert_roast` and
@@ -95,16 +114,20 @@ above, not infeasibility; the reference design + folds are recorded on #495).
 (tracked on #341) and [#358](https://github.com/syamaner/roastpilot-cloud/issues/358)
 (per-env app-role cross-env grant audit, C7-gated).
 
-### C5 progress (taster reviews) — 4-of-7 MERGED
+### C5 progress (taster reviews) — COMPLETE, 7-of-7 + #525 MERGED
 
 C5 was decomposed via `to-issues` into seven stories (all `epic:C5`,
-conventional/interactive — the factory is disabled, D-ToS-1). Kickoff decisions
-**D-C5-1..8** are recorded on the issues + plan-repo ledger (L340–L345). Dependency
-order: S1/S2/S7 independent; S3→S2; S4 needs Upstash; S5→S2/S3/S4; S6→S5.
+conventional/interactive — the factory is disabled, D-ToS-1). Decisions
+**D-C5-1..16** are recorded on the issues + plan-repo ledger (L340–L354). Dependency
+order: S1/S2/S7 independent; S3→S2; S4 needs Upstash; S5→S2/S3/S4; S6→S5. All seven
+stories plus the #525 aggregate follow-up are MERGED (14 Sep 2026); the server
+**route-to-database path is live-verified** on `ROASTPILOT_DEV.APP` (the browser form
+flow is test-covered, not part of the live run — see the Active-epic block above and
+the #519 / #525 attestation).
 
 - **S7 [#522] MERGED** ([#523](https://github.com/syamaner/roastpilot-cloud/pull/523),
   `8b79092`): reviews read bound to `LIMIT 50` with a deterministic tie-break over all
-  projected columns. Connector's aggregate-bound P2 deferred to **#525** (zero-instance).
+  projected columns. Connector's aggregate-bound P2 deferred to **#525** (since MERGED, `4d49628`).
 - **S2 [#517] MERGED** ([#524](https://github.com/syamaner/roastpilot-cloud/pull/524),
   `c26ef0e`): `lib/review-schema.ts` — Zod `strictObject` (score 1–5 required, sliders 0–100
   nullable+optional no-default, no coercion, honeypot literal `""`, bounded brewMethod).
@@ -112,26 +135,32 @@ order: S1/S2/S7 independent; S3→S2; S4 needs Upstash; S5→S2/S3/S4; S6→S5.
 - **S3 [#518] MERGED** ([#527](https://github.com/syamaner/roastpilot-cloud/pull/527),
   `88adde4`): `lib/review-submit.ts` — SQL API `SUBMIT_REVIEW` write path + server-side
   **HMAC-SHA-256(ip, `REVIEW_IP_HASH_PEPPER`)** IP hashing, fail-closed if the pepper is unset
-  (**D-C5-6**). Inert until S5 wires it; live CALL round-trip is an S5-time item.
+  (**D-C5-6**). Wired by S5; the live CALL round-trip is now verified (14 Sep, see below).
 - **S1 [#516] MERGED** ([#526](https://github.com/syamaner/roastpilot-cloud/pull/526),
   `fc02369`): `SUBMIT_REVIEW` proc defense-in-depth range guards (codes `-20017`/`-20018`,
   is-null disjunct, backslash-free, before `begin transaction`). Merged under operator grant
-  **D-C5-8**: the sandbox live-verification is accepted as sufficient to land the migration
-  **text** (the authentic `ROASTPILOT_DEV.APP` deploy via `ROASTPILOT_DEV_CI_ROLE` / the #11
-  Environment remains a **separate later operator step** — the text is inert until deployed);
-  **accept-rounding** is the coercion answer (the stored-data invariant holds under every
-  coercion mode). pr-triage MERGEABLE; connector CLEAN on `6329ccd`.
+  **D-C5-8**: at merge, the sandbox live-verification was accepted as sufficient to land the
+  migration **text**, with the authentic `ROASTPILOT_DEV.APP` deploy (via `ROASTPILOT_DEV_CI_ROLE`
+  / the #11 Environment) held as a separate later operator step. **That deploy has since been done
+  (D-C5-12, 13 Sep, run 34778048168 green) — the guards are now live on `DEV.APP`**, so the
+  once-inert text is deployed. **accept-rounding** is the coercion answer (the stored-data
+  invariant holds under every coercion mode). pr-triage MERGEABLE; connector CLEAN on `6329ccd`.
 
-**Remaining C5 (all operator-gated):**
-- **[#519 S4](https://github.com/syamaner/roastpilot-cloud/issues/519)** per-IP rate limit +
-  honeypot — blocked on **Upstash-via-Marketplace provisioning** (D-C5-1, dashboard OAuth);
-- **[#520 S5](https://github.com/syamaner/roastpilot-cloud/issues/520)** POST route handler
-  (deps S2✓/S3✓/S4) → **[#521 S6](https://github.com/syamaner/roastpilot-cloud/issues/521)**
-  review form UI (deps S5);
-- **[#525](https://github.com/syamaner/roastpilot-cloud/issues/525)** aggregate rating over
-  ALL reviews (SQL AVG) — before the write path can exceed 50 reviews/roast (zero-instance now);
-- the real **S1 DEV.APP deploy** (guards go live) via `ROASTPILOT_DEV_CI_ROLE` / #11; and the
-  already-set `REVIEW_IP_HASH_PEPPER` in Vercel Preview+Prod (done, L344).
+**The rest of C5 — now all MERGED (14 Sep 2026):**
+- **S4 [#519] MERGED** ([#530](https://github.com/syamaner/roastpilot-cloud/pull/530),
+  `06d6b07`): per-IP Upstash sliding-window rate limit (5/10 min) + honeypot, fail-closed;
+  Upstash provisioned (D-C5-1, `upstash-kv-cobalt-clock`; the integration injects
+  `KV_REST_API_*`, D-C5-13).
+- **S5 [#520] MERGED** ([#531](https://github.com/syamaner/roastpilot-cloud/pull/531),
+  `d5cde4e`): the `POST /api/r/[slug]/reviews` route handler (content-type gate, honeypot,
+  Zod, rate-limit, submit, revalidate) + spoof-resistant `lib/client-ip.ts`.
+- **S6 [#521] MERGED** ([#532](https://github.com/syamaner/roastpilot-cloud/pull/532),
+  `a050bae`): the review form UI (StarRating / FlavorSliders / ReviewForm + optimistic
+  ReviewSection); adds a scoped DOM test env (D-C5-16).
+- **[#525] MERGED** ([#529](https://github.com/syamaner/roastpilot-cloud/pull/529),
+  `4d49628`): aggregate rating over ALL reviews (SQL AVG), independent of the bounded list.
+- The real **S1 `DEV.APP` deploy** is DONE (D-C5-12, run 34778048168 — guards live); the
+  `REVIEW_IP_HASH_PEPPER` is set in Vercel Preview+Prod (L344).
 
 ### C4 progress (public page) — COMPLETE, S1–S5 MERGED
 
@@ -219,17 +248,19 @@ C4 was decomposed via `to-issues` into five stories:
 
 **Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
 are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
-NULL) is seeded. **C4 is COMPLETE; the NEXT epic is C5** (no-account taster reviews — the public
-review form + `SUBMIT_REVIEW` wiring). A `contributed_to_learning=true` telemetry seed would unlock
+NULL) is seeded. **C4 and C5 are COMPLETE; the NEXT epic is C6 References** (see the Active-epic
+block above). A `contributed_to_learning=true` telemetry seed would unlock
 a live **four-series** curve check (bean/env temp + heat/fan step lines); the **fifth series (RoR)
 also needs #512 first** — `ror_c_per_min` is inserted NULL across the current pipeline
 (`R__proc_load_roast_telemetry.sql`, `scripts/seed/generate.ts`) **regardless** of the contributed
 flag, so a contributing seed alone cannot render RoR (operator action, not a blocker).
-**Carried C4 follow-ups (non-blocking, carried into C5):**
-[#505](https://github.com/syamaner/roastpilot-cloud/issues/505) (reviews pagination UX, C5),
-[#507](https://github.com/syamaner/roastpilot-cloud/issues/507) (C5 route Zod + proc guards),
-[#512](https://github.com/syamaner/roastpilot-cloud/issues/512) (populate RoR upstream), the
-#501 `E2E_ROAST_SLUG` e2e fast-follow, and the C4-S5 wide-unbroken-glyph OG-title clipping
+**C4 follow-ups — dispositions:**
+[#505](https://github.com/syamaner/roastpilot-cloud/issues/505) (reviews pagination UX) and
+[#507](https://github.com/syamaner/roastpilot-cloud/issues/507) (route Zod + proc guards) are
+both **CLOSED-as-superseded**, folded into the C5 batch (#505 → S7 #522; #507 → S2 #517 +
+S1 #516). Still open / non-issue:
+[#512](https://github.com/syamaner/roastpilot-cloud/issues/512) (populate RoR upstream — OPEN),
+the #501 `E2E_ROAST_SLUG` e2e fast-follow, and the C4-S5 wide-unbroken-glyph OG-title clipping
 residual (accepted, zero-instance).
 
 **C3 story history (retained for reference): C3-S1 [#416], C3-S2 [#417], C3-S3 [#418], C3-S4 [#419],
