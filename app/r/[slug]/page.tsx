@@ -8,7 +8,7 @@ import { beanLabel, roastDateLabel } from "@/lib/roast-format";
 import { isValidSlug } from "@/lib/slug";
 import { notFound } from "next/navigation";
 import RoastCurve from "../../../components/RoastCurve";
-import { ReviewsList } from "../../../components/ReviewsList";
+import { ReviewSection } from "../../../components/ReviewSection";
 import { RoastHeadline } from "../../../components/RoastHeadline";
 
 export const revalidate = 300;
@@ -66,7 +66,7 @@ export default async function Page({
     <main>
       <RoastHeadline roast={roast} />
       <RoastCurve curve={roast.curve} />
-      <ReviewsList reviews={reviews} />
+      <ReviewSection slug={slug} reviews={reviews} />
     </main>
   );
 }

@@ -160,6 +160,11 @@ describe("public roast page control flow", () => {
       "components/RoastHeadline.tsx",
       "components/ReviewsList.tsx",
       "components/RoastCurve.tsx",
+      "components/StarRating.tsx",
+      "components/FlavorSliders.tsx",
+      "components/ReviewForm.tsx",
+      "components/ReviewSection.tsx",
+      "components/review-form-logic.ts",
       "lib/format.ts",
       "lib/roast-format.ts",
     ];
@@ -172,5 +177,9 @@ describe("public roast page control flow", () => {
     expect(source).not.toMatch(/cookies\s*\(/);
     expect(source).not.toMatch(/\bheaders\s*\(/);
     expect(source).not.toMatch(/\bsession\b/i);
+    expect(source).not.toMatch(/localStorage/);
+    expect(source).not.toMatch(/sessionStorage/);
+    expect(source).not.toMatch(/document\.cookie/);
+    expect(source).not.toMatch(/indexedDB/);
   });
 });
