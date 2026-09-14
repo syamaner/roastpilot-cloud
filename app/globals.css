@@ -1,8 +1,96 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@layer base {
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
+}
+
+@theme inline {
+  --color-background: var(--rp-bg);
+  --color-surface: var(--rp-surface);
+  --color-surface-muted: var(--rp-surface-muted);
+  --color-surface-subtle: var(--rp-surface-subtle);
+  --color-primary: var(--rp-primary);
+  --color-primary-strong: var(--rp-primary-strong);
+  --color-primary-strong-hover: var(--rp-primary-strong-hover);
+  --color-on-primary: var(--rp-on-primary);
+  --color-foreground: var(--rp-foreground);
+  --color-foreground-muted: var(--rp-foreground-muted);
+  --color-border: var(--rp-border);
+  --color-ring: var(--rp-ring);
+  --radius-card: var(--rp-radius-card);
+  --radius-control: var(--rp-radius-control);
+  --radius-input: var(--rp-radius-input);
+}
+
 :root {
   color-scheme: light dark;
+  --rp-bg: #fffbeb;
+  --rp-bg-gradient-to: #fff7ed;
+  --rp-surface: #ffffff;
+  --rp-surface-muted: #fef3c7;
+  --rp-surface-subtle: #fffbeb;
+  --rp-foreground: #111827;
+  --rp-foreground-muted: #6b7280;
+  --rp-primary: #f59e0b;
+  --rp-primary-strong: #d97706;
+  --rp-primary-strong-hover: #b45309;
+  --rp-on-primary: #ffffff;
+  --rp-ring: #fbbf24;
+  --rp-border: #e5e7eb;
+}
+
+html {
+  --rp-radius-card: 1.5rem;
+  --rp-radius-control: 1rem;
+  --rp-radius-input: 0.75rem;
+  --rp-container: 28rem;
+  --rp-shell-padding: 1.5rem;
+  --rp-section-gap: 1.5rem;
+  --rp-card-padding: 1.5rem;
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
+  background: var(--rp-bg);
+  background-image: linear-gradient(
+    to bottom,
+    var(--rp-bg),
+    var(--rp-bg-gradient-to)
+  );
+  color: var(--rp-foreground);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rp-bg: #1c1917;
+    --rp-bg-gradient-to: #292524;
+    --rp-surface: #292524;
+    --rp-surface-muted: #44403c;
+    --rp-surface-subtle: #292524;
+    --rp-foreground: #fafaf9;
+    --rp-foreground-muted: #a8a29e;
+    --rp-primary: #fbbf24;
+    --rp-primary-strong: #f59e0b;
+    --rp-primary-strong-hover: #fbbf24;
+    --rp-on-primary: #1c1917;
+    --rp-ring: #fcd34d;
+    --rp-border: #44403c;
+  }
+
+  body {
+    background: var(--rp-bg);
+    background-image: linear-gradient(
+      to bottom,
+      var(--rp-bg),
+      var(--rp-bg-gradient-to)
+    );
+  }
 }
