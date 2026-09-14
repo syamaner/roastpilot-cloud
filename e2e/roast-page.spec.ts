@@ -33,4 +33,19 @@ test.describe("public roast page", () => {
     expect(response?.status()).toBe(404);
     await expect(page.getByText("Not found", { exact: true })).toBeVisible();
   });
+
+  test("submits a review and displays it without a reload", async ({ page }) => {
+    await page.goto("/r/demoroastseedone234");
+    const notes = `Optimistic review ${Date.now()}`;
+
+    await page.getByRole("radio", { name: "5 out of 5 stars" }).click();
+    await page.getByLabel("Tasting notes (optional)").fill(notes);
+    await page.getByRole("button", { name: "Submit review" }).click();
+
+    await expect(page.getByRole("status")).toContainText(
+      "your tasting was saved",
+    );
+    await expect(page.getByTestId("review-row").first()).toContainText(notes);
+    await expect(page.locator("body")).not.toContainText(/°\s*F/);
+  });
 });
