@@ -19,6 +19,7 @@
   --color-primary-strong: var(--rp-primary-strong);
   --color-primary-strong-hover: var(--rp-primary-strong-hover);
   --color-on-primary: var(--rp-on-primary);
+  --color-on-amber: var(--rp-on-amber);
   --color-foreground: var(--rp-foreground);
   --color-foreground-muted: var(--rp-foreground-muted);
   --color-border: var(--rp-border);
@@ -41,6 +42,7 @@
   --rp-primary-strong: #d97706;
   --rp-primary-strong-hover: #b45309;
   --rp-on-primary: #ffffff;
+  --rp-on-amber: #1c1917;
   --rp-ring: #fbbf24;
   --rp-border: #e5e7eb;
   --rp-series-bean: sienna;
@@ -86,6 +88,7 @@ body {
     --rp-primary-strong: #f59e0b;
     --rp-primary-strong-hover: #fbbf24;
     --rp-on-primary: #1c1917;
+    --rp-on-amber: #1c1917;
     --rp-ring: #fcd34d;
     --rp-border: #44403c;
     --rp-series-bean: #d98a5c;

@@ -42,6 +42,7 @@ const themeTokenNames = [
   "--rp-primary-strong",
   "--rp-primary-strong-hover",
   "--rp-on-primary",
+  "--rp-on-amber",
   "--rp-ring",
   "--rp-border",
   "--rp-series-bean",
@@ -50,6 +51,7 @@ const themeTokenNames = [
   "--rp-series-heat",
   "--rp-series-fan",
 ].sort();
+const constantThemeTokens = new Set(["--rp-on-amber"]);
 const semanticAliases = [
   "background",
   "surface",
@@ -59,6 +61,7 @@ const semanticAliases = [
   "primary-strong",
   "primary-strong-hover",
   "on-primary",
+  "on-amber",
   "foreground",
   "foreground-muted",
   "border",
@@ -124,15 +127,21 @@ beforeEach(() => {
 });
 
 describe("theme and layout shell", () => {
-  it("T-1 defines a different dark value for every theme token", () => {
+  it("T-1 defines dark values for every theme token and keeps constant roles stable", () => {
     const { light, dark } = themeBlocks();
 
     expect(globalsCss).toMatch(/@media\s*\(prefers-color-scheme:\s*dark\)/);
     for (const [name, lightValue] of light) {
       expect(dark.get(name), `${name} is missing from the dark theme`).toBeDefined();
-      expect(dark.get(name), `${name} must differ in the dark theme`).not.toBe(
-        lightValue,
-      );
+      if (constantThemeTokens.has(name)) {
+        expect(dark.get(name), `${name} must stay constant across themes`).toBe(
+          lightValue,
+        );
+      } else {
+        expect(dark.get(name), `${name} must differ in the dark theme`).not.toBe(
+          lightValue,
+        );
+      }
     }
   });
 

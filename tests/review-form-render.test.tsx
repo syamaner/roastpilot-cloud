@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { FlavorSliders } from "../components/FlavorSliders";
 import { ReviewForm } from "../components/ReviewForm";
@@ -67,7 +68,123 @@ describe("review form semantic rendering", () => {
     expect(honeypot).toMatch(/position:absolute;left:-9999px/i);
     expect(markup).not.toMatch(/display\s*:\s*none/i);
     expect(markup).not.toMatch(/<input[^>]*\shidden(?:=|\s|>)/i);
-    expect(markup).not.toMatch(/class=/);
+    expect(honeypot).not.toMatch(/class=/);
+  });
+
+  it("T-brew-freetext: keeps brew method as bounded free text", () => {
+    const markup = renderToStaticMarkup(
+      <ReviewForm slug={SLUG} onSubmitted={vi.fn()} />,
+    );
+    const brewMethod = markup.match(
+      /<input(?=[^>]*id="brew-method")[^>]*>/i,
+    )?.[0];
+
+    expect(brewMethod).toBeDefined();
+    expect(brewMethod).toMatch(/maxlength="40"/i);
+    expect(markup).not.toMatch(/<select|<datalist|<option/i);
+  });
+
+  it("T-token-source-guard: uses token roles and only honeypot inline styles", () => {
+    const sources = ["ReviewForm.tsx", "StarRating.tsx", "FlavorSliders.tsx"].map(
+      (file) =>
+        readFileSync(new URL(`../components/${file}`, import.meta.url), "utf8"),
+    );
+    const source = sources.join("\n");
+
+    expect(source).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
+    expect(source).not.toMatch(/\b(?:amber|orange|gray|stone)-[0-9]{2,3}\b/);
+    expect(source.match(/style=\{\{/g)).toHaveLength(2);
+    expect(sources[1]).not.toContain("style={{");
+    expect(sources[2]).not.toContain("style={{");
+  });
+
+  it("T-themed-render: renders control groups as token-backed cards", () => {
+    const markup = renderToStaticMarkup(
+      <ReviewForm slug={SLUG} onSubmitted={vi.fn()} />,
+    );
+    const surfaceCards = markup.match(
+      /class="(?=[^"]*\brounded-card\b)(?=[^"]*\bbg-surface\b)[^"]*"/g,
+    );
+
+    expect(surfaceCards).toHaveLength(5);
+  });
+
+  it("T-contrast-roles: uses accessible foreground roles for interactive text", () => {
+    const formMarkup = renderToStaticMarkup(
+      <ReviewForm slug={SLUG} onSubmitted={vi.fn()} />,
+    );
+    const submit = formMarkup.match(
+      /<button(?=[^>]*type="submit")[^>]*>/i,
+    )?.[0];
+    const clearButtons = formMarkup.match(
+      /<button[^>]*>Clear [^<]+ \(Not rated\)<\/button>/g,
+    );
+    const starMarkup = renderToStaticMarkup(
+      <StarRating value={3} onChange={vi.fn()} />,
+    );
+    const stars = starMarkup.match(
+      /<button(?=[^>]*role="radio")[^>]*>/g,
+    );
+
+    expect(submit).toContain("text-on-amber");
+    expect(submit).not.toContain("text-foreground");
+    expect(submit).not.toContain("text-[var(--rp-on-primary)]");
+    expect(submit).toContain("hover:bg-primary");
+    expect(submit).not.toContain("hover:bg-[var(--rp-primary-strong-hover)]");
+    expect(clearButtons).toHaveLength(5);
+    for (const clearButton of clearButtons ?? []) {
+      expect(clearButton).toContain("text-foreground-muted");
+      expect(clearButton).not.toContain("text-primary-strong");
+    }
+    expect(stars).toHaveLength(5);
+    for (const unselectedStar of stars?.slice(3) ?? []) {
+      expect(unselectedStar).toContain("text-foreground-muted");
+      expect(unselectedStar).not.toContain("text-border");
+    }
+    expect(starMarkup.match(/>★<\/span>/g)).toHaveLength(3);
+    expect(starMarkup.match(/>☆<\/span>/g)).toHaveLength(2);
+  });
+
+  it("T-control-boundaries: keeps fields, sliders, and stars visible and responsive", () => {
+    const formMarkup = renderToStaticMarkup(
+      <ReviewForm slug={SLUG} onSubmitted={vi.fn()} />,
+    );
+    const textControls = ["reviewer-name", "brew-method", "review-notes"].map(
+      (id) => formMarkup.match(new RegExp(`<(?:input|textarea)(?=[^>]*id="${id}")[^>]*>`, "i"))?.[0],
+    );
+    const sliders = formMarkup.match(/<input(?=[^>]*type="range")[^>]*>/g);
+    const starMarkup = renderToStaticMarkup(
+      <StarRating value={3} onChange={vi.fn()} />,
+    );
+    const starGroup = starMarkup.match(
+      /<div(?=[^>]*role="radiogroup")[^>]*>/,
+    )?.[0];
+    const stars = starMarkup.match(
+      /<button(?=[^>]*role="radio")[^>]*>/g,
+    );
+
+    expect(textControls).not.toContain(undefined);
+    for (const control of textControls) {
+      expect(control).toContain("border-foreground-muted");
+      expect(control).not.toContain("border-border");
+    }
+    expect(sliders).toHaveLength(5);
+    for (const slider of sliders ?? []) {
+      expect(slider).toContain("bg-foreground-muted");
+      expect(slider).not.toContain("bg-[var(--rp-surface-muted)]");
+      expect(slider).toContain("::-moz-range-thumb]:border-2");
+      expect(slider).toContain("::-moz-range-thumb]:border-surface");
+      expect(slider).toContain("::-webkit-slider-thumb]:border-2");
+      expect(slider).toContain("::-webkit-slider-thumb]:border-surface");
+    }
+    expect(starGroup).toContain("gap-1");
+    expect(starGroup).toContain("sm:gap-2");
+    expect(stars).toHaveLength(5);
+    for (const star of stars ?? []) {
+      expect(star).toContain("text-3xl");
+      expect(star).toContain("sm:text-4xl");
+      expect(star).not.toMatch(/(?:^|\s)text-4xl(?:\s|$)/);
+    }
   });
 
   it("T-no-fahrenheit: exposes no temperature field or Fahrenheit copy", () => {

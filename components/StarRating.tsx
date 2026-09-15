@@ -37,7 +37,12 @@ export function StarRating({ value, onChange }: StarRatingProps) {
   }
 
   return (
-    <div role="radiogroup" aria-label="Overall score" aria-required="true">
+    <div
+      className="flex max-w-full justify-center gap-1 sm:gap-2"
+      role="radiogroup"
+      aria-label="Overall score"
+      aria-required="true"
+    >
       {RATINGS.map((rating) => (
         <button
           ref={(button) => {
@@ -51,8 +56,15 @@ export function StarRating({ value, onChange }: StarRatingProps) {
           tabIndex={value === rating || (value === null && rating === 1) ? 0 : -1}
           onClick={() => onChange(rating)}
           onKeyDown={(event) => handleKeyDown(event, rating)}
+          className={`min-w-0 cursor-pointer border-0 bg-transparent p-1 text-3xl leading-none transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-primary-strong focus:ring-offset-2 focus:ring-offset-surface sm:text-4xl ${
+            value !== null && rating <= value
+              ? "text-primary-strong"
+              : "text-foreground-muted"
+          }`}
         >
-          {rating} {rating === 1 ? "star" : "stars"}
+          <span aria-hidden="true">
+            {value !== null && rating <= value ? "★" : "☆"}
+          </span>
         </button>
       ))}
     </div>
