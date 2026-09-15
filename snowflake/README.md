@@ -264,8 +264,9 @@ effect, rather than trusting it happened: it runs `SHOW USERS LIKE
 verifiably empty (`[]`), fail-closed on any representation it doesn't
 recognize.
 
-Per the factory security model (`factory.md` §8: agent jobs hold no
-Snowflake secrets), this workflow is **`workflow_dispatch`-only** and its
+Per the CI security model (documented in the retained `factory.md` §8: no
+unattended job holds Snowflake secrets), this workflow is
+**`workflow_dispatch`-only** and its
 job declares `environment: dev-snowflake-ci` — a GitHub Environment with a
 required reviewer, so the credential is never active until a human
 explicitly approves that specific run. `SNOWFLAKE_DEV_PRIVATE_KEY` is
@@ -274,8 +275,9 @@ a repository secret — no other workflow in this repo can read it, and the
 required-reviewer gate on that environment is a real credential boundary,
 not just a UI speed bump. It also runs with `step-security/harden-runner`'s
 egress LOCKED to a fixed allowlist (GitHub, PyPI, Snowflake) rather than
-the audit-only mode the rest of this factory's jobs use, since a live
-credential is genuinely at stake here.
+a looser egress posture, because a live credential is genuinely at
+stake here, as it also is in the sibling `dev-snowflake-agent-verify.yml`, which
+locks egress to a fixed allowlist the same way.
 
 The job has a 20-minute `timeout-minutes`; the deploy step inside it has
 its OWN, shorter 10-minute timeout. That gap is deliberate and budgeted
@@ -363,5 +365,6 @@ This story is the schemachange bootstrap only: the tool, its config, a
 minimal namespace migration, and offline CI validation. It does **not**
 create `cloud_roasts` / `roast_telemetry` / `roast_artifacts` /
 `tasting_reviews` / `reference_roast_summaries`, roles, grants, secure views,
-or stored procedures — all of that is C2 (factory-built, human-merged, per
-`factory.md`).
+or stored procedures — all of that is C2 (human-merged; some early C2 stories
+built factory-first before the now-decommissioned factory was stopped, see the
+retained `factory.md`).
