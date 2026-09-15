@@ -126,7 +126,10 @@ export default function RoastCurve({
 
   if (curve === null || curve.length === 0 || elapsed.length === 0) {
     return (
-      <section aria-label="Roast curve">
+      <section
+        aria-label="Roast curve"
+        className="rounded-card border border-border bg-surface p-6 text-foreground shadow-sm"
+      >
         <p>Curve not shared</p>
       </section>
     );
@@ -182,7 +185,10 @@ export default function RoastCurve({
   ];
 
   return (
-    <section aria-label="Roast curve">
+    <section
+      aria-label="Roast curve"
+      className="rounded-card border border-border bg-surface p-6 text-foreground shadow-sm"
+    >
       <div data-testid="roast-curve-scroll" style={{ overflowX: "auto" }}>
         <svg
           role="img"
@@ -223,7 +229,7 @@ export default function RoastCurve({
             data-testid="series-bean"
             d={beanPath}
             fill="none"
-            stroke="sienna"
+            style={{ stroke: "var(--rp-series-bean)" }}
             strokeWidth="2.5"
           />
         )}
@@ -232,7 +238,7 @@ export default function RoastCurve({
             data-testid="series-env"
             d={envPath}
             fill="none"
-            stroke="steelblue"
+            style={{ stroke: "var(--rp-series-env)" }}
             strokeWidth="2.5"
           />
         )}
@@ -241,7 +247,7 @@ export default function RoastCurve({
             data-testid="series-ror"
             d={ratePath}
             fill="none"
-            stroke="mediumpurple"
+            style={{ stroke: "var(--rp-series-ror)" }}
             strokeWidth="2.5"
           />
         )}
@@ -250,7 +256,7 @@ export default function RoastCurve({
             data-testid="series-heat"
             d={heatPath}
             fill="none"
-            stroke="#c2410c"
+            style={{ stroke: "var(--rp-series-heat)" }}
             strokeWidth="2.5"
           />
         )}
@@ -259,7 +265,7 @@ export default function RoastCurve({
             data-testid="series-fan"
             d={fanPath}
             fill="none"
-            stroke="teal"
+            style={{ stroke: "var(--rp-series-fan)" }}
             strokeWidth="2.5"
           />
         )}
@@ -346,13 +352,16 @@ export default function RoastCurve({
         </text>
         </svg>
       </div>
-      <ul aria-label="Roast curve legend">
+      <ul
+        aria-label="Roast curve legend"
+        className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-foreground-muted"
+      >
         <li>
           <span
             aria-hidden="true"
             data-testid="legend-swatch-bean"
             style={{
-              backgroundColor: "sienna",
+              backgroundColor: "var(--rp-series-bean)",
               display: "inline-block",
               height: "0.75rem",
               marginRight: "0.375rem",
@@ -366,7 +375,7 @@ export default function RoastCurve({
             aria-hidden="true"
             data-testid="legend-swatch-env"
             style={{
-              backgroundColor: "steelblue",
+              backgroundColor: "var(--rp-series-env)",
               display: "inline-block",
               height: "0.75rem",
               marginRight: "0.375rem",
@@ -380,7 +389,7 @@ export default function RoastCurve({
             aria-hidden="true"
             data-testid="legend-swatch-ror"
             style={{
-              backgroundColor: "mediumpurple",
+              backgroundColor: "var(--rp-series-ror)",
               display: "inline-block",
               height: "0.75rem",
               marginRight: "0.375rem",
@@ -394,7 +403,7 @@ export default function RoastCurve({
             aria-hidden="true"
             data-testid="legend-swatch-heat"
             style={{
-              backgroundColor: "#c2410c",
+              backgroundColor: "var(--rp-series-heat)",
               display: "inline-block",
               height: "0.75rem",
               marginRight: "0.375rem",
@@ -408,7 +417,7 @@ export default function RoastCurve({
             aria-hidden="true"
             data-testid="legend-swatch-fan"
             style={{
-              backgroundColor: "teal",
+              backgroundColor: "var(--rp-series-fan)",
               display: "inline-block",
               height: "0.75rem",
               marginRight: "0.375rem",

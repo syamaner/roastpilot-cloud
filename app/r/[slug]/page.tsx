@@ -63,7 +63,7 @@ export default async function Page({
   const reviews = await cachedReviewsByRoast(slug);
 
   return (
-    <main>
+    <main className="space-y-6 py-6">
       <RoastHeadline roast={roast} />
       <RoastCurve curve={roast.curve} />
       <ReviewSection slug={slug} reviews={reviews} />

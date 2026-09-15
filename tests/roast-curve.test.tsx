@@ -67,10 +67,12 @@ describe("RoastCurve", () => {
     const markup = renderCurve(fullFixture());
     const textElements = markup.match(/<text\b[^>]*>/g) ?? [];
     const legend = markup.match(
-      /<ul aria-label="Roast curve legend">([\s\S]*?)<\/ul>/,
+      /<ul aria-label="Roast curve legend"[^>]*>([\s\S]*?)<\/ul>/,
     )?.[1] ?? "";
 
-    expect(markup).toMatch(/^<section aria-label="Roast curve">/);
+    expect(markup).toMatch(/^<section aria-label="Roast curve"[^>]*>/);
+    expect(markup).toContain("text-foreground");
+    expect(markup.match(/^<section[^>]*>/)?.[0]).toContain("shadow-sm");
     expect(markup).toMatch(
       /<div[^>]*data-testid="roast-curve-scroll"[^>]*style="[^"]*overflow-x:auto/,
     );
@@ -91,26 +93,22 @@ describe("RoastCurve", () => {
 
   it("renders a matching colour swatch for every legend series", () => {
     const markup = renderCurve(fullFixture());
-    const swatches = [
-      ["bean", "sienna"],
-      ["env", "steelblue"],
-      ["ror", "mediumpurple"],
-      ["heat", "#c2410c"],
-      ["fan", "teal"],
-    ];
+    const seriesKeys = ["bean", "env", "ror", "heat", "fan"];
 
-    for (const [series, colour] of swatches) {
+    for (const series of seriesKeys) {
       expect(markup).toMatch(
         new RegExp(
-          `data-testid="legend-swatch-${series}"[^>]*background-color:${colour}`,
+          `data-testid="legend-swatch-${series}"[^>]*background-color:var\\(--rp-series-${series}\\)`,
+        ),
+      );
+      expect(markup).toMatch(
+        new RegExp(
+          `data-testid="series-${series}"[^>]*style="stroke:var\\(--rp-series-${series}\\)"`,
         ),
       );
     }
-    expect(markup).toMatch(
-      /data-testid="series-ror"[^>]*stroke="mediumpurple"/,
-    );
-    expect(markup).toMatch(
-      /data-testid="series-heat"[^>]*stroke="#c2410c"/,
+    expect(markup).not.toMatch(
+      /stroke="(?:sienna|steelblue|mediumpurple|#c2410c|teal)"/,
     );
   });
 
@@ -163,10 +161,13 @@ describe("RoastCurve", () => {
 
   it("T-null-curve-placeholder: fails closed without an SVG", () => {
     const markup = renderCurve(null);
+    const placeholderCard = markup.match(/^<section[^>]*>/)?.[0] ?? "";
 
-    expect(markup).toBe(
-      '<section aria-label="Roast curve"><p>Curve not shared</p></section>',
-    );
+    expect(markup).toContain('aria-label="Roast curve"');
+    expect(markup).toContain("Curve not shared");
+    expect(placeholderCard).toContain("rounded-card");
+    expect(placeholderCard).toContain("bg-surface");
+    expect(placeholderCard).toContain("shadow-sm");
     expect(markup).not.toContain("<svg");
     expect(markup).not.toMatch(/NaN|null|°\s*F/);
   });
