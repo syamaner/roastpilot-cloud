@@ -27,9 +27,12 @@ orchestrator + Codex + human merge).
 > and no revival. #413 and #438 are **closed**, not open. The executable
 > workflows under `.github/**` are dead-but-not-yet-deleted (cleanup follow-up).
 > If a section below reads as current/pending, this notice overrides it.
-> **`AGENTS.md` still carries factory-first framing and needs the same
-> reconciliation in a separate follow-up PR** (it is out of this docs PR's file
-> scope). The historical detail in this section is retained for the record.
+> **`AGENTS.md` was reconciled to current-model-first framing in #542** (the
+> follow-up PR this notice anticipated); its factory sections are now marked
+> historical, with the still-live guardrails reframed and retained. A matching
+> plan-repo reconciliation (`factory.md`, D155's F2 auto-merge authorization)
+> remains an open follow-up. The historical detail in this section is retained
+> for the record.
 
 The autonomous CI factory is **off**, and headless Claude in CI is **retired**.
 Anthropic consumer Pro/Max OAuth tokens (`CLAUDE_CODE_OAUTH_TOKEN`) are

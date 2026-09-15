@@ -1,12 +1,33 @@
 # AGENTS.md — roastpilot-cloud
 
-Project rules for coding agents (factory or interactive) working in this
-repository. Source of truth for anything beyond this file: the plan repo,
+Project rules for agents working through the repository's interactive delivery
+model. Source of truth for anything beyond this file: the plan repo,
 `~/git/roastpilot-plan/roastpilot-cloud/`
 ([`plan.md`](https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/plan.md),
 [`factory.md`](https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md)).
 If this file and the plan repo disagree, the plan repo wins — file a
 correction, don't silently follow the stale copy.
+
+> **Operating model (current — 15 Sep 2026).** All builds run through
+> interactive Claude Code on the operator's laptop. Claude Code is the
+> PM/orchestrator under topology v2 and never implements; Codex-MCP is the
+> default delegated implementer (D145), with a Claude implementer as fallback;
+> Claude sub-agents provide the cross-family safety-review floor; and a human
+> merges. The autonomous CI factory is **DECOMMISSIONED** permanently, removed
+> on ToS grounds; this supersedes D-ToS-1's former disabled/paused and
+> metered-key-revival framing. Factory sections below are historical reference
+> for retained-but-dormant machinery. Rules within them that still govern
+> current work — including protected-path `factory-security-reviewer` routing,
+> D23 independent triage, and the Codex-connector merge wait — remain in force
+> as explicitly reframed. Registry #541 carries the matching banner, and
+> [`docs/state/registry.md`](docs/state/registry.md) is the authoritative
+> decommission record.
+> This decommission is operator-ratified (15 Sep 2026) and authoritative here;
+> where the plan repo still reads factory-first or paused (`factory.md`, and
+> D155's F2 auto-merge authorization), it is stale on this point and superseded
+> — per the precedence rule above, that is a correction to file, not a stale
+> copy to follow. A matching plan-repo reconciliation is a separate tracked
+> follow-up.
 
 ## Architecture Invariants
 
@@ -137,26 +158,25 @@ point at which row of that table proves it.
 
 ## Factory Context
 
-**Current status (31 Aug 2026, operator decision D-ToS-1):** The autonomous CI
-factory is **disabled**. Headless Claude in CI is retired on ToS grounds because
-Anthropic consumer OAuth tokens are not permitted for CI automation, so triage,
-story planner, implement, owner command intake, and the CI review lenses are
-gated off and do not run. Until a metered `anthropic_api_key` revival is funded,
-C2, C3, and all subsequent work ships through the compliant model: the
-interactive orchestrator (Claude Code) and its review sub-agents, Codex as
-implementer and the official GitHub code-review connector, and a human merge.
-See [`docs/state/registry.md`](docs/state/registry.md), "Factory status", for
-the full picture; the factory narrative below remains reference for a possible
-metered-key revival.
+**Current status (15 Sep 2026):** The autonomous CI factory is
+**DECOMMISSIONED** permanently. Headless Claude in CI was removed on ToS grounds
+because Anthropic consumer OAuth tokens are not permitted for CI automation;
+there is no metered-key revival path. This supersedes operator decision
+D-ToS-1's former disabled/paused framing. Its triage, story-planner,
+implementation, owner-command-intake, publisher, and CI review-lens paths are
+retained in-tree as dormant machinery and do not run. The current compliant
+model is the interactive Claude Code PM/orchestrator, Codex-MCP as default
+implementer (Claude fallback), Claude cross-family review sub-agents, and human
+merge. See [`docs/state/registry.md`](docs/state/registry.md), "Factory status",
+for the authoritative decommission record.
 
-C1 (this repo's scaffold) and F1 (the factory itself) are built
-conventionally — an interactive agent, this file, a human at the keyboard.
-**C2 onward is factory-first** (`factory.md`): issues are triaged and
-implemented by agents on GitHub Actions, and this `AGENTS.md` is what the
-implementing agent reads for stack rules, gates, and review routing, the same
-way any Claude Code session would. **Merging is always human** — the factory
-ends at "PR open, CI green, reviews in"; nothing in this repo auto-merges
-(factory.md §2, §9).
+C1 and F1 built the scaffold and factory machinery conventionally. Some early
+C2 stories shipped factory-first through the autonomous GitHub Actions pipeline
+before it was stopped; C-UI and all work after the decommission ship through
+the compliant local interactive model. The remainder of this section
+records the historical factory design and the readiness/envelope contract of
+the retained dormant apparatus; it does not describe a current execution path.
+**Merging is always human** remains a live rule.
 
 **Decomposition (`to-issues`, F1-S5) runs at each epic's kickoff, never
 bulk-up-front.** C2's stories don't exist until someone runs the
@@ -245,6 +265,11 @@ not authorize, retire, or schedule the separately held 120d-2 decision.
 
 Full policy: `factory.md` §9, identical to the agent repo's, no factory
 exception. The load-bearing points:
+
+The Codex-connector merge-wait rule below remains live for every current PR
+regardless of which delegated implementer authored it (Codex by default,
+Claude fallback); the factory-specific cases within it are retained as
+historical boundary documentation.
 
 - **Green CI is necessary but not sufficient.** Read every review comment
   before claiming mergeable — `gh pr checks` alone is not a merge signal.
@@ -354,10 +379,10 @@ exception. The load-bearing points:
   they describe different mechanisms. The once-on-final discipline governs the
   single automatic trigger at ready; only a later push needs a manual
   re-trigger, once, on its new final commit.
-- **`pr-triage` adjudicates independently of the author.** Under the factory,
-  the author is always an agent; it never self-triages its own PR's review
-  comments (D23). The lead (or the `pr-triage` sub-agent) decides what counts
-  as resolved.
+- **`pr-triage` adjudicates independently of the author.** Any delegated
+  implementer (Codex by default, Claude fallback) never self-triages its own
+  PR's review comments (D23). The operator (or the `pr-triage` sub-agent)
+  decides what counts as resolved.
 - **Coverage regressions must be sorted, not waved through** — add the test
   or tag a genuinely unreachable line, never lower a threshold.
 
@@ -394,7 +419,12 @@ exception. The load-bearing points:
   of #N` otherwise, so an unfinished issue isn't auto-closed.
 - No post-open lint/format churn — run the gates before opening.
 
-### Shift-left: fold runner-gate findings before the review roster fires (D103)
+### Historical factory shift-left: fold runner-gate findings before the review roster fires (D103)
+
+This subsection records the draft/ready behavior of the decommissioned
+factory-era runner roster. The ordinary CI checks named here still run where
+configured, but the publisher-fired and runner-fired review-lens narrative is
+historical and does not replace the current local orchestration model.
 
 The build's rework used to be dominated by review findings landing *after* a
 PR was marked ready, F1-S8 alone took **5 Codex rounds, ~15 real P1s, all
@@ -447,7 +477,7 @@ fallback path.)
 
 Wait for the verdict per the **Codex-wait rule in the Merge Policy** (its
 single source of truth) before treating the PR as reviewed; don't restate
-that rule here. **Factory-authored PRs** don't use the draft phase for this
+that rule here. **Historically, factory-authored PRs** didn't use the draft phase for this
 purpose: the read-only implementing agent can't drive an open→ready
 transition, so the privileged publisher opens the PR non-draft and the
 *same* review roster runs **post-open** by design (the App-identity wiring
@@ -527,9 +557,12 @@ inline.
   Zod/Pydantic validation rules → **`schema-migration-reviewer`**.
 - Any diff touching routes, components, stored procs, or anything handling
   reviewer data, IP addresses, visibility, or deletion → **`privacy-auditor`**.
-- Any diff touching the factory's own pipeline — the full protected surface,
-  spelled out here so routing is mechanical, not inferential (#163; #161's PR
-  body misread the parenthetical this replaces): anything under `.github/**`
+- Any diff touching the protected automation and instruction surface,
+  regardless of who authored it (a delegated implementer, the orchestrator's
+  own direct writes to a protected path such as `docs/state/registry.md`, or a
+  human hand-edit) — the full protected surface, spelled out here so routing is
+  mechanical, not inferential (#163; #161's PR body misread the parenthetical
+  this replaces): anything under `.github/**`
   (workflows AND composite actions), `scripts/factory/**`, any privileged glue /
   publisher script wherever it lives, CODEOWNERS, branch-protection config, the
   factory-integrity enforcement tests (`tests/factory/**`, #160 — a
@@ -547,9 +580,11 @@ inline.
   pipeline-self-modification invariant below names — keep the two in step; if
   one grows a path, so does the other.
   This is an adversarial red-team: its job is to produce a working exploit, not
-  to assess. The F1-S3 implement workflow shipped an EXPLOITABLE pipeline-guard
-  that only this lens caught, so a factory-pipeline diff without this pass is not
-  ready to merge.
+  to assess. A delegated implementer needs an explicit task-scoped grant to
+  touch this surface and the `factory-security-reviewer` pass before open. The
+  F1-S3 implement workflow shipped an EXPLOITABLE pipeline guard that only this
+  lens caught, so a protected-surface diff without this pass is not ready to
+  merge.
 - Any test-file diff over 600 lines, or a change whose acceptance criteria make
   test quality unusually load-bearing → **`qa`**. It verifies behavioral
   assertions, negative cases, acceptance-criterion coverage, and coverage
@@ -569,10 +604,11 @@ draft**. A reviewer seeing a per-symptom patch for a class-shaped finding should
 say so; N review rounds over one class is the failure mode this rule removes
 (the #64 sanitizer/bypass arc and the agent repo's #587 are the proof cases).
 
-**Pipeline self-modification (factory.md §13):** any **factory
-implementing-agent patch** — a manually-dispatched stage-1 run or an
-F1-stage-2 chained `ready-to-implement` run alike, i.e. anything the
-privileged publisher pushes on an agent's behalf — must never touch
+**Pipeline self-modification (factory.md §13, current delegated-work
+guardrail):** any **delegated implementer patch** (Codex by default, Claude
+fallback) must not touch the protected surface without an explicit
+task-scoped human grant and a mandatory pre-open `factory-security-reviewer`
+pass. That protected surface is
 `.github/**`, CODEOWNERS, branch-protection config, **the privileged
 glue/publisher scripts**, any recognized agent instruction/configuration
 basename at any depth (the complete `PROTECTED_BASENAMES` set: `.claude`,
@@ -584,20 +620,22 @@ the ALARM that mechanically enforces the pins/guards whose ASSETS this list
 already protects; leaving it writable let a patch gut an enforcement test as a
 "refactor" and disable the check, #160), the base-controlled CI gate scripts
 `snowflake/ci_change_classifier.py` and `snowflake/ci_gate_result.py`, or
-`docs/state/registry.md`. That diff
-is a review blocker on any such PR, full stop. The applied-tree guard, not a prompt instruction, enforces
-the repository paths. The registry may enter a factory PR only through trusted
-deterministic transition logic or a conventional human-directed amendment in
-that same PR; without one, the slice may not land because D135 is not waived.
-This does **not** ban these paths from changing in general: F1 itself (building
-the factory workflows and glue scripts) and any human-directed
-branch-protection or CI change are conventional, human-reviewed work and are
-expected to touch them. The invariant is "a factory implementing agent can't
-grant itself more pipeline power," not "pipeline files are frozen."
+`docs/state/registry.md`. An ungranted diff, or one without the required
+adversarial pass, is a review blocker. Retained factory guards continue to
+enforce their historical execution paths mechanically; prompt instruction
+alone is not a substitute for enforcement. The registry may enter delegated
+work only through trusted deterministic transition logic or an explicit
+human-directed amendment in that same PR; without one, the slice may not land
+because D135 is not waived. This does **not** ban these paths from changing in
+general: task-scoped, human-directed changes are expected when necessary. The
+invariant is "a delegated implementer can't grant itself more pipeline power,"
+not "pipeline files are frozen."
 
-## Reviewing a Factory-Authored PR
+## Historical Reference: Reviewing a Factory-Authored PR
 
-Applies to every PR the factory's publish job actually opened — the scope
+This section documents retained-but-dormant factory review machinery. It does
+not describe the current delivery path. Historically, it applied to every PR
+the factory's publish job actually opened — the scope
 key is **"did the privileged publisher open this PR"**, never a milestone
 like "C2 onward". C1/F1 story PRs are conventionally authored by a human or
 an interactive agent and reviewed like any interactive-agent PR, so this
@@ -614,7 +652,7 @@ everything in Code Review Rubric still applies in full.
 
 ### The roster
 
-The table below describes the roster as it lands once every F1-S4 sibling
+The table below is a historical record of the roster as it landed once every F1-S4 sibling
 PR merges (#35 Claude Code Review, #36 CodeQL, #37 dependency review, #39
 codecov, #40 the publisher-identity switch — all `Refs #7`). As of any one
 of those PRs landing alone, a row it names may not exist on `main` yet;
@@ -643,7 +681,7 @@ that was accurate at F1-S4's start but went stale within the same story;
 Codex's own review of #38 is what caught the drift, per its P2 "Remove
 stale Codex-not-installed guidance" finding.) The roster above runs WITH
 the Codex row live, not without it. The wait-for-verdict rule in **PR
-Merge Policy** above applies now, unconditionally, on every factory PR — it
+Merge Policy** above remains live for current PRs; historically it applied unconditionally on every factory PR — it
 was already copied verbatim from the agent repo's `AGENTS.md` at C1-S4 and
 is the single source of truth for that rule in this repo; do not create a
 second copy here.
@@ -656,16 +694,12 @@ looks trivially correct or clearly a false positive. A human, or the
 `pr-triage` sub-agent acting on the human's behalf, decides what counts as
 resolved, every single time.
 
-This is stricter than the interactive-agent operating model in the agent
-repo, where an engineer at least drives its own PR under a human's real-time
-oversight and can self-fix a lint nit without derailing anything. In the
-factory, the author is *always* an agent and nobody is watching the
-implement run in real time — so independent triage is the only thing that
-keeps a factory PR's review from being self-graded. It is also the direct
-answer to `factory.md` §13's headline finding: the automation that authors a
-PR must not also be the thing that decides the PR is fine. See `factory.md`
-§13 for the full incident (`#34`'s CI-stall / Codex-skip / CCR-skip failure
-mode) this rule is a structural fix for, not a courtesy.
+Under the current model, every implementation is still delegated (Codex by
+default, Claude fallback), so independent triage is the only thing that keeps
+an implementer's PR from being self-graded. The rule originated in the factory
+incident recorded in `factory.md` §13 (`#34`'s CI-stall / Codex-skip /
+CCR-skip failure mode), but its mechanism is general: the agent that authors a
+diff must not decide that its own review findings are resolved.
 
 ## Agent Topology and Model Selection
 
@@ -703,7 +737,7 @@ recorded in the plan repo.
 
 | Agent | Model | Fires on |
 |---|---|---|
-| `factory-security-reviewer` | `opus` | The factory's own pipeline — **the Code Review Rubric's routing list above is authoritative; see it for the full protected surface** (a pointer, not a second copy, so this cell cannot drift narrow of it, #163). Its job is to BREAK the pipeline, not assess it. |
+| `factory-security-reviewer` | `opus` | The protected automation and instruction surface — **the Code Review Rubric's routing list above is authoritative; see it for the full protected surface** (a pointer, not a second copy, so this cell cannot drift narrow of it, #163). Its job is to BREAK the pipeline, not assess it. |
 | `schema-migration-reviewer` | `opus` | `snowflake/migrations/**`, grants, secure views, and the Zod/Pydantic validation standing in for constraints Snowflake will not enforce. |
 | `privacy-auditor` | `sonnet` | routes, components, procs, reviewer data, IP addresses, visibility, deletion. |
 | `qa` | `sonnet` | test quality beyond coverage; run pre-open when test-file churn exceeds 600 lines. |
@@ -777,7 +811,7 @@ and draws on a **separate, weekly-capped subscription**.
   That floor is currently ENFORCED BY THE ORCHESTRATOR, which re-derives the
   reviewer set from the real diff's content (not only its paths) and adds the
   APPROPRIATE Claude domain reviewer — `factory-security-reviewer` for the
-  factory pipeline, `schema-migration-reviewer` for schema / grants / Zod-
+  protected automation and instruction surface, `schema-migration-reviewer` for schema / grants / Zod-
   Pydantic validation, `privacy-auditor` for the app's reviewer-data / PII /
   visibility / deletion surface — so a security-touching Codex-authored change
   gets a cross-family adversarial lens whose threat model actually fits it
