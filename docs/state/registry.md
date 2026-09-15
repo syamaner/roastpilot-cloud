@@ -3,7 +3,33 @@
 Pointer doc, not a narrative. Read this, then the active epic in the plan
 repo, then the GitHub issue, before starting any story.
 
-## Factory status — DISABLED (operator decision D-ToS-1, 31 Aug 2026)
+## Factory status — DECOMMISSIONED / REMOVED (operator, 15 Sep 2026 — supersedes the D-ToS-1 pause)
+
+**The autonomous CI factory is permanently stopped and treated as removed, not
+paused.** It is non-compliant (headless Anthropic consumer OAuth in CI is
+ToS-prohibited) and there is no planned revival: the earlier "machinery
+preserved, gated, revive with a metered key" framing below is **superseded** —
+do not treat it as a live revival path. All open factory (`epic:F1` / F-story)
+issues are **closed as won't-do** rather than implemented (#438, #413 closed 15
+Sep; F2 activation line abandoned). Physical deletion of the now-dead gated
+workflow machinery under `.github/**` (and the `FACTORY_PAUSED` /
+`CLAUDE_HEADLESS_ENABLED` var plumbing) is an available cleanup follow-up, not
+yet done. Work ships **only** via the compliant model below (interactive
+orchestrator + Codex + human merge).
+
+> **ARCHIVE BANNER — read this before any factory-flavoured instruction below.**
+> Everything factory-related elsewhere in this document is **historical record
+> only and superseded by this notice**: the F1/F2 story-status tables, the F2
+> spec-chain status, every "activation obligation", "pending operator step",
+> "next F2", "stays open", and `FACTORY_PAUSED` / `STORY_PLANNER_ENABLED` /
+> `CLAUDE_HEADLESS_ENABLED` reference, and the (now-corrected) "Build process"
+> section. **None of those are live work.** There is no cutover, no activation,
+> and no revival. #413 and #438 are **closed**, not open. The executable
+> workflows under `.github/**` are dead-but-not-yet-deleted (cleanup follow-up).
+> If a section below reads as current/pending, this notice overrides it.
+> **`AGENTS.md` still carries factory-first framing and needs the same
+> reconciliation in a separate follow-up PR** (it is out of this docs PR's file
+> scope). The historical detail in this section is retained for the record.
 
 The autonomous CI factory is **off**, and headless Claude in CI is **retired**.
 Anthropic consumer Pro/Max OAuth tokens (`CLAUDE_CODE_OAUTH_TOKEN`) are
@@ -35,6 +61,35 @@ a metered key is funded. Product features build fine on the compliant model.
 See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
+
+**No active/queued epic — roastpilot-cloud is QUIESCENT (15 Sep 2026).** C1–C6
+cloud scope and the C-UI taster-page design port are all COMPLETE; no
+ready-to-implement / queued stories and no open story PRs. A few **deferred
+backlog residuals remain open but unqueued and non-blocking** — #341
+(delete_roast AC-5 live-verifier, deferred D-495-C/D), #358 (per-env app-role
+grant audit, C7-gated), #420/#421 (denial-of-wallet / resource-monitor, C7),
+#512 (RoR population), #525 (aggregate-rating live-verify); none is scheduled
+work. The next planned cloud epic is **C7 Ops** (plan §11:
+key-pair provisioning/rotation, resource monitors, trial→on-demand warehouse
+cutover, backup/export + deploy runbooks) — operator-kicked, **not queued**.
+
+**C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
+public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
+`prefers-color-scheme`-only dark keeps SSG + anonymity), adapted to the shipped
+schema (D-UI-3: nullable sliders, free-text brew). S1 #535 (`a8ee878`), S2 #536
+(`d5b7b9b`), S3 #537 (`c416c5f`) all merged; decisions D-UI-1..6 (D-UI-6 =
+accessible-amber, all controls meet WCAG AA in both themes). Every `epic` UI
+issue closed; #534 tracker closed. Live on Vercel **Preview** (Preview-scope
+`SNOWFLAKE_WEB_*` + seed `demoroastseedone234`); **Production** promote pending
+prod-scope `SNOWFLAKE_WEB_*` (operator decision).
+
+**C6 References = DELIVERED-IN-C2 for the cloud plane (D-C6-1):** the recompute
+proc, write-path wiring, `reference_roast_summaries` table, and the agent read
+grant were front-loaded into C2; the remaining C6 work (agent-side
+`prepare_roast` query, D13) is **roastpilot-agent** repo work, not this repo.
+
+**Prior active-epic pointer (C3/C4/C5, retained for history; superseded by the
+quiescent state above):**
 
 **C3, C4, and C5 are all COMPLETE. NEXT epic: C6 References (aggregation proc +
 agent-side `prepare_roast` query, D13; deps C3).**
@@ -848,7 +903,7 @@ concurrency — also owns PR-2's overlapping-run TOCTOU), #374 (prompt/agent-def
 handling. **#376 RESOLVED** ([D154](https://github.com/syamaner/roastpilot-plan/blob/main/roastpilot-cloud/factory.md), 27 Aug): the 18 Aug C2-unpause ran outside D140's exact-`FACTORY_PAUSED=true` condition (operator oversight); a fresh `factory-security-reviewer` re-evaluation of all nine PR-triggered jobs under `FACTORY_PAUSED=false` returned **CONFIRMED-SOUND, no blocker**, and the residual acceptance was **re-based from the literal `FACTORY_PAUSED=true` value to supervised operation** (re-accepted, not re-paused) — see the F1-S7 row below. **Next F2:**
 B (two-mode triage — label via PAT/App, not the built-in `GITHUB_TOKEN`, or the
 downstream `issues:labeled` run is suppressed), C (owner `/approve`+`/respec`), then
-the C3 to-issues dogfood. **`FACTORY_PAUSED` is currently `true` under D-ToS-1** — it was set back to `true` on 31 Aug 2026, superseding the 18 Aug 2026 21:22Z change to `false` for C2 work. The 18 Aug value and the `remains exactly \`true\`` statements in the historical F1-S6 / F1-S11 rows below record earlier operating periods, not current state. The [Factory status](#factory-status--disabled-operator-decision-d-tos-1-31-aug-2026) block above is authoritative for current factory state; read the live variable as well before any activation act.
+the C3 to-issues dogfood. **HISTORICAL (superseded):** `FACTORY_PAUSED` and every activation reference in this F2 section are dead — the factory is **decommissioned**, there is no activation act, and this whole section is archived. The [Factory status decommission notice](#factory-status--decommissioned--removed-operator-15-sep-2026--supersedes-the-d-tos-1-pause) block at the top of this file is authoritative for current factory state.
 
 ## C1 story status — complete
 
@@ -917,13 +972,24 @@ itself factory work, PM-reviewed per-epic at kickoff.
 
 ## Build process
 
-- **C1 and F1**: conventional — an interactive agent or human, one PR per
-  planned review unit, same as the agent repo's operating model.
-- **C2 onward**: factory-first (`factory.md`) — issue-driven agent pipeline
-  (triage → implement → review); a human specs, clarifies, and always merges.
+**All work ships via the compliant model** (superseding the retired factory-first
+plan): the interactive orchestrator (Claude Code, an official interface) + the
+review sub-agents it spawns, **Codex** (implementer + the official GitHub
+code-review connector), and a **human merge**. This applies to every epic,
+including any future C7/C8 work — the "C2 onward is factory-first" rule below is
+**retired** along with the factory (see the decommission notice at the top).
 
-Full pipeline, security model, and label taxonomy:
-`roastpilot-plan/roastpilot-cloud/factory.md`.
+- **C1 and F1** were conventional — an interactive agent or human, one PR per
+  planned review unit. (F1 built the now-decommissioned factory; historical.)
+- ~~**C2 onward**: factory-first~~ — **RETIRED.** The issue-driven headless-agent
+  pipeline is decommissioned (non-compliant). **Any future epic ships via the
+  compliant model above.** (History, unchanged below: a few early C2 stories —
+  e.g. C2-S3 / C2-S4 — did ship through the factory before its decommission;
+  from the D-ToS-1 pause onward everything, C3–C6 and C-UI included, shipped via
+  the compliant model.)
+
+`factory.md` in the plan repo describes the decommissioned pipeline and is
+historical reference only.
 
 ## Working rules
 
