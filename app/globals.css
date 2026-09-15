@@ -43,6 +43,11 @@
   --rp-on-primary: #ffffff;
   --rp-ring: #fbbf24;
   --rp-border: #e5e7eb;
+  --rp-series-bean: sienna;
+  --rp-series-env: steelblue;
+  --rp-series-ror: mediumpurple;
+  --rp-series-heat: #c2410c;
+  --rp-series-fan: teal;
 }
 
 html {
@@ -83,6 +88,11 @@ body {
     --rp-on-primary: #1c1917;
     --rp-ring: #fcd34d;
     --rp-border: #44403c;
+    --rp-series-bean: #d98a5c;
+    --rp-series-env: #7fb3e0;
+    --rp-series-ror: #c4b0f0;
+    --rp-series-heat: #fb923c;
+    --rp-series-fan: #2dd4bf;
   }
 
   body {

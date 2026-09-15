@@ -43,6 +43,8 @@ describe("RoastHeadline", () => {
     const markup = renderHeadline(roastFixture());
 
     expect(markup).toContain("Ethiopia Guji · 74110");
+    expect(markup.match(/<h1(?:\s[^>]*)?>/g)).toHaveLength(1);
+    expect(markup).toContain('class="break-words text-2xl font-bold"');
     expect(markup).toContain("Roast level: light");
     expect(markup).toContain(
       '<time dateTime="2026-06-07">2026-06-07</time>',
@@ -56,6 +58,14 @@ describe("RoastHeadline", () => {
     expect(markup).toContain("205.3 °C");
     expect(markup).toContain("15.0 %");
     expect(markup.match(/Total roast time/g)).toHaveLength(1);
+
+    const header = markup.match(/<header[^>]*>/)?.[0] ?? "";
+    const stats = markup.match(/<dl[^>]*>/)?.[0] ?? "";
+    for (const card of [header, stats]) {
+      expect(card).toContain("bg-surface");
+      expect(card).toContain("rounded-card");
+      expect(card).toContain("shadow-sm");
+    }
   });
 
   it("T-zero-temp: preserves a real zero-degree first-crack temperature", () => {
@@ -79,7 +89,7 @@ describe("RoastHeadline", () => {
       }),
     );
 
-    expect(markup).toContain("<h1>Roast</h1>");
+    expect(markup).toMatch(/<h1[^>]*>Roast<\/h1>/);
     expect(markup).not.toMatch(/null/i);
     expect(markup).not.toContain("Roast level:");
     expect(markup).not.toContain("Roast date:");

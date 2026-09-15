@@ -64,7 +64,16 @@ describe("ReviewsList", () => {
 
     const markup = renderToStaticMarkup(<ReviewsList reviews={reviews} />);
 
+    expect(markup).toContain('<section aria-label="Taster reviews"');
+    expect(markup).toContain("<ol");
     expect(markup.match(/data-testid="review-row"/g)).toHaveLength(2);
+    const reviewCards = markup.match(/<li[^>]*data-testid="review-row"[^>]*>/g) ?? [];
+    expect(reviewCards).toHaveLength(2);
+    for (const card of reviewCards) {
+      expect(card).toContain("bg-surface");
+      expect(card).toContain("rounded-control");
+      expect(card).toContain("shadow-sm");
+    }
     expect(markup).toContain("Ari");
     expect(markup).toContain("Score: 5");
     expect(markup).toContain("Peach and jasmine");
@@ -105,6 +114,10 @@ describe("ReviewsList", () => {
     const markup = renderToStaticMarkup(<ReviewsList reviews={[]} />);
 
     expect(markup).toContain("Be the first to taste this roast");
+    const emptyCard = markup.match(/<p[^>]*>Be the first to taste/)?.[0] ?? "";
+    expect(emptyCard).toContain("bg-surface");
+    expect(emptyCard).toContain("rounded-control");
+    expect(emptyCard).toContain("shadow-sm");
     expect(markup).not.toContain("data-testid=\"review-row\"");
   });
 

@@ -14,7 +14,7 @@ export function ReviewSection({ slug, reviews }: ReviewSectionProps) {
   const [extraReviews, setExtraReviews] = useState<Review[]>([]);
 
   return (
-    <>
+    <div className="space-y-6">
       <ReviewsList reviews={[...extraReviews, ...reviews]} />
       <ReviewForm
         slug={slug}
@@ -22,6 +22,6 @@ export function ReviewSection({ slug, reviews }: ReviewSectionProps) {
           setExtraReviews((current) => [review, ...current])
         }
       />
-    </>
+    </div>
   );
 }

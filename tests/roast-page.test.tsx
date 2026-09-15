@@ -158,6 +158,7 @@ describe("public roast page control flow", () => {
       "app/r/[slug]/opengraph-image.tsx",
       "app/r/[slug]/not-found.tsx",
       "components/RoastHeadline.tsx",
+      "components/RoastThumbnail.tsx",
       "components/ReviewsList.tsx",
       "components/RoastCurve.tsx",
       "components/StarRating.tsx",

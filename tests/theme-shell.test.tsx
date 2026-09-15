@@ -44,6 +44,11 @@ const themeTokenNames = [
   "--rp-on-primary",
   "--rp-ring",
   "--rp-border",
+  "--rp-series-bean",
+  "--rp-series-env",
+  "--rp-series-ror",
+  "--rp-series-heat",
+  "--rp-series-fan",
 ].sort();
 const semanticAliases = [
   "background",
