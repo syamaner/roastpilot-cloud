@@ -65,16 +65,28 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**No active/queued epic — roastpilot-cloud is QUIESCENT (15 Sep 2026).** C1–C6
-cloud scope and the C-UI taster-page design port are all COMPLETE; no
-ready-to-implement / queued stories and no open story PRs. A few **deferred
-backlog residuals remain open but unqueued and non-blocking** — #341
-(delete_roast AC-5 live-verifier, deferred D-495-C/D), #358 (per-env app-role
-grant audit, C7-gated), #420/#421 (denial-of-wallet / resource-monitor, C7),
-#512 (RoR population), #525 (aggregate-rating live-verify); none is scheduled
-work. The next planned cloud epic is **C7 Ops** (plan §11:
-key-pair provisioning/rotation, resource monitors, trial→on-demand warehouse
-cutover, backup/export + deploy runbooks) — operator-kicked, **not queued**.
+**Active epic: C7 Ops — KICKED 15 Sep 2026 (`to-issues` batch filed; none `ready-*` yet).**
+C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
+decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
+filed** (all `needs-triage` + `epic:C7`, all conventional/interactive — the
+factory is decommissioned): **#545** S1 deploy runbook, **#546** S2 key-pair
+provisioning/rotation runbook, **#547** S3 resource-monitor verify script +
+STATEMENT_TIMEOUT hardening, **#548** S4 backup/export runbook, **#549** S5 edge
+denial-of-wallet (Basic BotID; WAF + Deep Analysis as documented Pro-tier),
+**#550** S6 trial→on-demand cutover runbook, **#551** S8 public taster bug-report
+path (`.github/**` → factory-security-reviewer), **#552** S7 (DEFERRED) scheduled
+backup export (depends #548). None is `ready-*` until `triage` / a human passes it
+against the filed issue. **Four C7 decisions recorded (plan-repo ledger L366):**
+D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
+smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
+monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
+= Basic BotID + C5 app limiter + honeypot (Deep Analysis / custom WAF = Pro-tier,
+not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
+**Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
+resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
+grant audit) remains a distinct C7-gated residual. Other open non-blocking
+residuals: #512 (RoR population), #525 (aggregate-rating live-verify). (#341
+delete_roast stage-file REMOVE is CLOSED — no longer an open residual.)
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
