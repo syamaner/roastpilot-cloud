@@ -14,7 +14,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="min-h-screen bg-background text-foreground">
+        <div className="mx-auto min-h-screen max-w-[var(--rp-container)] px-6">
+          {children}
+        </div>
+      </body>
     </html>
   );
 }
