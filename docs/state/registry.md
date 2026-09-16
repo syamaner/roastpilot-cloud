@@ -105,8 +105,9 @@ grant were front-loaded into C2; the remaining C6 work (agent-side
 **Prior active-epic pointer (C3/C4/C5, retained for history; superseded by the
 active C7 Ops state above):**
 
-**C3, C4, and C5 are all COMPLETE. NEXT epic: C6 References (aggregation proc +
-agent-side `prepare_roast` query, D13; deps C3).**
+**C3, C4, and C5 are all COMPLETE.** (Historical pointer: this block once named
+C6 References next; C6 was since delivered-in-C2 per D-C6-1, and **C7 Ops is now
+the active epic** — see the top Active-epic block.)
 C3 Sync COMPLETE (10 Sep 2026); C4 public page COMPLETE (12 Sep 2026, C4-S1–S5).
 **C5 (no-account taster reviews) is COMPLETE (14 Sep 2026): 7 of 7 stories plus the
 #525 aggregate follow-up are MERGED** — S7 #522, S2 #517, S3 #518, S1 #516, S4 #519,
@@ -317,8 +318,8 @@ C4 was decomposed via `to-issues` into five stories:
 
 **Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
 are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
-NULL) is seeded. **C4 and C5 are COMPLETE; the NEXT epic is C6 References** (see the Active-epic
-block above). A `contributed_to_learning=true` telemetry seed would unlock
+NULL) is seeded. **C4 and C5 are COMPLETE** (historical progress note; see the top Active-epic
+block for the current epic — now C7 Ops). A `contributed_to_learning=true` telemetry seed would unlock
 a live **four-series** curve check (bean/env temp + heat/fan step lines); the **fifth series (RoR)
 also needs #512 first** — `ror_c_per_min` is inserted NULL across the current pipeline
 (`R__proc_load_roast_telemetry.sql`, `scripts/seed/generate.ts`) **regardless** of the contributed
@@ -464,7 +465,7 @@ a protected-branches-only deployment-branch policy plus a required reviewer, and
 D-437-B operator merge). The issues and the plan-repo ledger (through L329) are the
 source of truth.
 
-**C3 Sync, COMPLETE (10 Sep 2026 — see the Active-epic block above; active epic is now C4).** Kicked off 1 Sep 2026. Milestone
+**C3 Sync, COMPLETE (10 Sep 2026 — historical progress note; see the top Active-epic block for the current epic, now C7 Ops).** Kicked off 1 Sep 2026. Milestone
 [C3 Sync](https://github.com/syamaner/roastpilot-cloud/milestone/4) (#4),
 decomposed at kickoff via `to-issues` (never bulk-up-front) into
 [#416](https://github.com/syamaner/roastpilot-cloud/issues/416),
@@ -990,7 +991,7 @@ itself factory work, PM-reviewed per-epic at kickoff.
 plan): the interactive orchestrator (Claude Code, an official interface) + the
 review sub-agents it spawns, **Codex** (implementer + the official GitHub
 code-review connector), and a **human merge**. This applies to every epic,
-including any future C7/C8 work — the "C2 onward is factory-first" rule below is
+including any current or future epic work (C7 Ops, C8) — the "C2 onward is factory-first" rule below is
 **retired** along with the factory (see the decommission notice at the top).
 
 - **C1 and F1** were conventional — an interactive agent or human, one PR per
