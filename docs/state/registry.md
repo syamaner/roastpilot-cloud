@@ -65,18 +65,20 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — KICKED 15 Sep 2026 (`to-issues` batch filed; none `ready-*` yet).**
+**Active epic: C7 Ops — KICKED 15 Sep 2026 (`to-issues` batch filed; S3/S5/S8 triaged ready + contracted).**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
-filed** (all `needs-triage` + `epic:C7`, all conventional/interactive — the
+filed** (`epic:C7`, all conventional/interactive — the
 factory is decommissioned): **#545** S1 deploy runbook, **#546** S2 key-pair
 provisioning/rotation runbook, **#547** S3 resource-monitor verify script +
 STATEMENT_TIMEOUT hardening, **#548** S4 backup/export runbook, **#549** S5 edge
 denial-of-wallet (Basic BotID; WAF + Deep Analysis as documented Pro-tier),
 **#550** S6 trial→on-demand cutover runbook, **#551** S8 public taster bug-report
 path (`.github/**` → factory-security-reviewer), **#552** S7 (DEFERRED) scheduled
-backup export (depends #548). None is `ready-*` until `triage` / a human passes it
-against the filed issue. **Four C7 decisions recorded (plan-repo ledger L366):**
+backup export (depends #548). **#547 (S3) / #549 (S5) / #551 (S8) are
+`ready-for-conventional-implementation`** with story-planner contracts posted on
+each issue (triaged 16 Sep); the four runbook stories (#545/#546/#548/#550) and
+#552 (S7 deferred) remain `needs-triage`. **Four C7 decisions recorded (plan-repo ledger L366):**
 D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
 smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
 monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
