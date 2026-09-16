@@ -4,7 +4,9 @@ Cloud data plane for [RoastPilot](https://github.com/syamaner/roastpilot-agent):
 roast sharing via unlisted links, no-account tasting reviews from friends,
 and reference-roast summaries fed back to the roasting advisor.
 
-**Status** (updated 15 Sep 2026): the repo is quiescent. The autonomous CI
+**Status** (updated 16 Sep 2026): epic **C7 Ops** is the active epic — kicked
+off, with its story batch filed and awaiting build (see the registry). The
+autonomous CI
 factory (C1's sibling epic F1, and the F2 spec chain) is **decommissioned**
 permanently on ToS grounds; its workflows remain in-tree as dormant machinery,
 and physically deleting them is an available cleanup follow-up. See

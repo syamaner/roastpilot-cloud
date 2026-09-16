@@ -65,16 +65,29 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**No active/queued epic — roastpilot-cloud is QUIESCENT (15 Sep 2026).** C1–C6
-cloud scope and the C-UI taster-page design port are all COMPLETE; no
-ready-to-implement / queued stories and no open story PRs. A few **deferred
-backlog residuals remain open but unqueued and non-blocking** — #341
-(delete_roast AC-5 live-verifier, deferred D-495-C/D), #358 (per-env app-role
-grant audit, C7-gated), #420/#421 (denial-of-wallet / resource-monitor, C7),
-#512 (RoR population), #525 (aggregate-rating live-verify); none is scheduled
-work. The next planned cloud epic is **C7 Ops** (plan §11:
-key-pair provisioning/rotation, resource monitors, trial→on-demand warehouse
-cutover, backup/export + deploy runbooks) — operator-kicked, **not queued**.
+**Active epic: C7 Ops — KICKED 15 Sep 2026 (`to-issues` batch filed; S3/S5/S8 triaged ready + contracted).**
+C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
+decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
+filed** (`epic:C7`, all conventional/interactive — the
+factory is decommissioned): **#545** S1 deploy runbook, **#546** S2 key-pair
+provisioning/rotation runbook, **#547** S3 resource-monitor verify script +
+STATEMENT_TIMEOUT hardening, **#548** S4 backup/export runbook, **#549** S5 edge
+denial-of-wallet (Basic BotID; WAF + Deep Analysis as documented Pro-tier),
+**#550** S6 trial→on-demand cutover runbook, **#551** S8 public taster bug-report
+path (`.github/**` → factory-security-reviewer), **#552** S7 (DEFERRED) scheduled
+backup export (depends #548). **#547 (S3) / #549 (S5) / #551 (S8) are
+`ready-for-conventional-implementation`** with story-planner contracts posted on
+each issue (triaged 16 Sep); the four runbook stories (#545/#546/#548/#550) and
+#552 (S7 deferred) remain `needs-triage`. **Four C7 decisions recorded (plan-repo ledger L366):**
+D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
+smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
+monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
+= Basic BotID + C5 app limiter + honeypot (Deep Analysis / custom WAF = Pro-tier,
+not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
+**Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
+resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
+grant audit) remains a distinct C7-gated residual. Other open non-blocking
+residuals: #512 (RoR population), #525 (aggregate-rating live-verify).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
@@ -92,10 +105,11 @@ grant were front-loaded into C2; the remaining C6 work (agent-side
 `prepare_roast` query, D13) is **roastpilot-agent** repo work, not this repo.
 
 **Prior active-epic pointer (C3/C4/C5, retained for history; superseded by the
-quiescent state above):**
+active C7 Ops state above):**
 
-**C3, C4, and C5 are all COMPLETE. NEXT epic: C6 References (aggregation proc +
-agent-side `prepare_roast` query, D13; deps C3).**
+**C3, C4, and C5 are all COMPLETE.** (Historical pointer: this block once named
+C6 References next; C6 was since delivered-in-C2 per D-C6-1, and **C7 Ops is now
+the active epic** — see the top Active-epic block.)
 C3 Sync COMPLETE (10 Sep 2026); C4 public page COMPLETE (12 Sep 2026, C4-S1–S5).
 **C5 (no-account taster reviews) is COMPLETE (14 Sep 2026): 7 of 7 stories plus the
 #525 aggregate follow-up are MERGED** — S7 #522, S2 #517, S3 #518, S1 #516, S4 #519,
@@ -306,8 +320,8 @@ C4 was decomposed via `to-issues` into five stories:
 
 **Operator prereqs for the C4 live path are DONE:** the 4 Vercel Preview `SNOWFLAKE_WEB_*` vars
 are set, and one unlisted DEV roast (`demoroastseedone234`, `contributed_to_learning=false` → curve
-NULL) is seeded. **C4 and C5 are COMPLETE; the NEXT epic is C6 References** (see the Active-epic
-block above). A `contributed_to_learning=true` telemetry seed would unlock
+NULL) is seeded. **C4 and C5 are COMPLETE** (historical progress note; see the top Active-epic
+block for the current epic — now C7 Ops). A `contributed_to_learning=true` telemetry seed would unlock
 a live **four-series** curve check (bean/env temp + heat/fan step lines); the **fifth series (RoR)
 also needs #512 first** — `ror_c_per_min` is inserted NULL across the current pipeline
 (`R__proc_load_roast_telemetry.sql`, `scripts/seed/generate.ts`) **regardless** of the contributed
@@ -453,7 +467,7 @@ a protected-branches-only deployment-branch policy plus a required reviewer, and
 D-437-B operator merge). The issues and the plan-repo ledger (through L329) are the
 source of truth.
 
-**C3 Sync, COMPLETE (10 Sep 2026 — see the Active-epic block above; active epic is now C4).** Kicked off 1 Sep 2026. Milestone
+**C3 Sync, COMPLETE (10 Sep 2026 — historical progress note; see the top Active-epic block for the current epic, now C7 Ops).** Kicked off 1 Sep 2026. Milestone
 [C3 Sync](https://github.com/syamaner/roastpilot-cloud/milestone/4) (#4),
 decomposed at kickoff via `to-issues` (never bulk-up-front) into
 [#416](https://github.com/syamaner/roastpilot-cloud/issues/416),
@@ -979,7 +993,7 @@ itself factory work, PM-reviewed per-epic at kickoff.
 plan): the interactive orchestrator (Claude Code, an official interface) + the
 review sub-agents it spawns, **Codex** (implementer + the official GitHub
 code-review connector), and a **human merge**. This applies to every epic,
-including any future C7/C8 work — the "C2 onward is factory-first" rule below is
+including any current or future epic work (C7 Ops, C8) — the "C2 onward is factory-first" rule below is
 **retired** along with the factory (see the decommission notice at the top).
 
 - **C1 and F1** were conventional — an interactive agent or human, one PR per
