@@ -103,7 +103,7 @@ grant were front-loaded into C2; the remaining C6 work (agent-side
 `prepare_roast` query, D13) is **roastpilot-agent** repo work, not this repo.
 
 **Prior active-epic pointer (C3/C4/C5, retained for history; superseded by the
-quiescent state above):**
+active C7 Ops state above):**
 
 **C3, C4, and C5 are all COMPLETE. NEXT epic: C6 References (aggregation proc +
 agent-side `prepare_roast` query, D13; deps C3).**
