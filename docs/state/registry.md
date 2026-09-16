@@ -85,8 +85,7 @@ not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
 **Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
 resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
 grant audit) remains a distinct C7-gated residual. Other open non-blocking
-residuals: #512 (RoR population), #525 (aggregate-rating live-verify). (#341
-delete_roast stage-file REMOVE is CLOSED — no longer an open residual.)
+residuals: #512 (RoR population), #525 (aggregate-rating live-verify).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
