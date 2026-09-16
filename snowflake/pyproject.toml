@@ -83,6 +83,7 @@ only_mutate = [
     "check_grant_manifest.py",
     "load_telemetry_verify_live.py",
     "presigned_url_verify_live.py",
+    "resource_monitor_verify_live.py",
     "seed_load_live.py",
     "seed_validate_live.py",
     "telemetry_expectation_oracle.py",
