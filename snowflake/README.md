@@ -309,6 +309,31 @@ migration.
 
 ## Testing the tooling itself
 
+### Manual resource monitor check (C7-S3)
+
+The shared `ROASTPILOT_WH` and `ROASTPILOT_MONITOR` are operator-provisioned.
+The read-only verifier checks the monitor's five-credit quota and 50% notify,
+100% suspend, and 110% immediate-suspend triggers; the warehouse's size,
+60-second auto-suspend, auto-resume, and binding to that monitor; and an
+effective `STATEMENT_TIMEOUT_IN_SECONDS` of exactly 300 seconds on
+`ROASTPILOT_WH`. This operator-ratified hardening closes the gap left by the
+172800-second account default. The verifier rejects any other timeout value.
+A missing or unrecognised result fails the check.
+
+Run this manually with a role that can see account resource monitors and the
+warehouse (for example `ACCOUNTADMIN`):
+
+```bash
+cd snowflake && SNOWFLAKE_ROLE=ACCOUNTADMIN python3 with_connection_env.py python3 resource_monitor_verify_live.py
+```
+
+The script only executes `USE SECONDARY ROLES NONE` and `SHOW` statements. It
+does not provision, change, or clean up Snowflake objects. The 110% trigger
+value is `[UNVERIFIED-OFFLINE]` until the first live dispatch; reconcile a
+live mismatch against the operator's configuration and plan §15 rather than
+silently changing the expected constant. See
+[`docs/runbooks/resource-monitor.md`](../docs/runbooks/resource-monitor.md).
+
 `with_connection_env.py` and `validate_migrations.py` have their own unit
 test suite under [`tests/`](./tests/) (pytest, never touches a real
 Snowflake connection or credential):
