@@ -67,7 +67,7 @@ def _exact_row(
     # SHOW ... LIKE treats _ as a wildcard. The returned name is identity.
     matches = [row for row in rows if identifiers_match(_name(row, column, source), expected)]
     if len(matches) != 1:
-        raise ResourceMonitorVerifyError(f"{source}: expected exactly one {expected} row, found {len(matches)}")
+        raise ResourceMonitorVerifyError(f"{source}: expected exactly one {expected} row, found {len(matches)} (verify the object exists and the current role has privilege to see it; SHOW returns only objects the role can access)")
     return matches[0]
 
 

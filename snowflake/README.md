@@ -320,12 +320,38 @@ effective `STATEMENT_TIMEOUT_IN_SECONDS` of exactly 300 seconds on
 172800-second account default. The verifier rejects any other timeout value.
 A missing or unrecognised result fails the check.
 
-Run this manually with a role that can see account resource monitors and the
-warehouse (for example `ACCOUNTADMIN`):
+Prerequisite: the simplest path is a connection whose user can assume
+`ACCOUNTADMIN`. The default `roastpilot` / `ROASTPILOT_CLI` service connection
+cannot: its available roles (`ROASTPILOT_ADMIN`, `PUBLIC`,
+`SNOWFLAKE_LEARNING_ROLE`) cannot see the resource monitor, so `SHOW RESOURCE
+MONITORS` returns zero rows and the check fails closed. For a least-privilege
+alternative, `ACCOUNTADMIN` can grant a custom role visibility into both
+objects:
+
+```sql
+GRANT MONITOR ON RESOURCE MONITOR ROASTPILOT_MONITOR TO ROLE <role>;
+GRANT MONITOR ON WAREHOUSE ROASTPILOT_WH TO ROLE <role>;
+GRANT USAGE ON WAREHOUSE ROASTPILOT_WH TO ROLE <role>;
+```
+
+The first grant lets `SHOW RESOURCE MONITORS` return the monitor; the second
+supports `SHOW WAREHOUSES` and `SHOW PARAMETERS ... IN WAREHOUSE`. The third
+allows the verifier to select `ROASTPILOT_WH` at connection time. This
+least-privilege grant set has not been live-verified in this repo because
+the CI/service credentials cannot see the monitor. The operator must confirm
+and adjust the exact minimal grants at the first `ACCOUNTADMIN` dispatch;
+the `ACCOUNTADMIN` path is the supported one. The default
+`SCHEMACHANGE_CONNECTION_NAME` is `roastpilot`. Substitute both placeholders:
 
 ```bash
-cd snowflake && SNOWFLAKE_ROLE=ACCOUNTADMIN python3 with_connection_env.py python3 resource_monitor_verify_live.py
+cd snowflake && SCHEMACHANGE_CONNECTION_NAME=<profile> SNOWFLAKE_ROLE=<role> python3 with_connection_env.py python3 resource_monitor_verify_live.py
 ```
+
+`<profile>` is a `snow` connection whose user can assume `<role>`; use
+`ACCOUNTADMIN` for the supported path, or the custom role granted `MONITOR ON
+RESOURCE MONITOR ROASTPILOT_MONITOR`, `MONITOR ON WAREHOUSE ROASTPILOT_WH`,
+and `USAGE ON WAREHOUSE ROASTPILOT_WH`.
+`SNOWFLAKE_ROLE` selects only the session role, not the connection user or key.
 
 The script only executes `USE SECONDARY ROLES NONE` and `SHOW` statements. It
 does not provision, change, or clean up Snowflake objects. The 110% trigger
