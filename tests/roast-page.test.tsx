@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getReviewsByRoast, getRoastBySlug, type Roast, type Review } from "@/lib/roast";
+import { getReviewsByRoast, getRoastBySlug, type Roast } from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
 import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
@@ -165,34 +165,19 @@ describe("public roast page control flow", () => {
     expect(markup.indexOf("Report a problem with this page")).toBeGreaterThan(
       markup.indexOf("Taster reviews"),
     );
-    expect(reportHref(markup)).toContain(TASTER_REPORT_URL);
+    expect(reportHref(markup)).toBe(TASTER_REPORT_URL);
     expect(markup).toMatch(/<a [^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
   });
 
-  it("T-link-slug: puts only the encoded slug in the dynamic URL segment", async () => {
-    const review: Review = {
-      public_slug: DEMO_SLUG,
-      reviewer_name: "Review Author",
-      score: 4,
-      aroma: null,
-      acidity: null,
-      sweetness: null,
-      body: null,
-      aftertaste: null,
-      brew_method: null,
-      notes: null,
-      created_at: "2026-09-17T00:00:00Z",
-    };
+  it("T-link-no-slug: leaves the roast's access slug out of the report URL", async () => {
     roastMock.mockResolvedValue(roastFixture());
-    reviewsMock.mockResolvedValue([review]);
 
     const href = reportHref(await renderPage(DEMO_SLUG));
 
-    expect(href).toBe(
-      `${TASTER_REPORT_URL}&title=${encodeURIComponent(`[taster] ${DEMO_SLUG}`)}`,
-    );
-    expect(href).not.toContain(review.reviewer_name);
-    expect(href).not.toContain(`score=${review.score}`);
+    expect(href).toBe(TASTER_REPORT_URL);
+    expect(href).not.toContain(DEMO_SLUG);
+    expect(href).not.toContain("title=");
+    expect(href).not.toContain("/r/");
   });
 
   it("T-no-request-api: keeps the link a request-independent server component", () => {
@@ -205,15 +190,12 @@ describe("public roast page control flow", () => {
     expect(source).not.toMatch(/\bonClick\b|\bformAction\b/);
   });
 
-  it("T-url-no-injection: encodes slug characters without adding URL parameters", () => {
-    const slug = 'bad&"< >';
-    const href = reportHref(renderToStaticMarkup(<ReportProblemLink slug={slug} />));
+  it("T-link-no-prefill: emits only the constant template URL", () => {
+    const href = reportHref(renderToStaticMarkup(<ReportProblemLink />));
 
-    expect(href).toBe(
-      `${TASTER_REPORT_URL}&title=${encodeURIComponent(`[taster] ${slug}`)}`,
-    );
-    expect(href).not.toMatch(/[<"\s]/);
-    expect(href.match(/&/g)).toHaveLength(1);
+    expect(href).toBe(TASTER_REPORT_URL);
+    expect(href).not.toContain("title=");
+    expect(href).not.toContain("/r/");
   });
 
   it("T-invalid-slug: rejects a malformed slug before querying Snowflake", async () => {

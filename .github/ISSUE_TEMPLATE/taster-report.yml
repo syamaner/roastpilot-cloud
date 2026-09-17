@@ -10,10 +10,10 @@ body:
   - type: input
     id: page
     attributes:
-      label: Which page?
-      description: Paste the /r/… URL or slug (public context only).
+      label: Where on the site did this happen?
+      description: "Describe the area in words (for example: a roast page, or the review form). Do NOT paste a private or unlisted link — unlisted roast links are secret."
     validations:
-      required: true
+      required: false
   - type: textarea
     id: what-happened
     attributes:

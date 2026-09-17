@@ -68,7 +68,7 @@ export default async function Page({
       <RoastHeadline roast={roast} />
       <RoastCurve curve={roast.curve} />
       <ReviewSection slug={slug} reviews={reviews} />
-      <ReportProblemLink slug={slug} />
+      <ReportProblemLink />
     </main>
   );
 }

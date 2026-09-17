@@ -56,11 +56,12 @@ describe("taster report issue form", () => {
       label: attributes.label,
       required: validations?.required,
     }))).toEqual([
-      { id: "page", label: "Which page?", required: true },
+      { id: "page", label: "Where on the site did this happen?", required: false },
       { id: "what-happened", label: "What went wrong?", required: true },
       { id: "expected", label: "What did you expect?", required: false },
     ]);
-    expect(template.body[1].attributes.description).toMatch(/\/r\/… URL or slug/);
+    expect(template.body[1].attributes.description).toMatch(/Do NOT paste a private or unlisted link/);
+    expect(template.body[1].attributes.description).not.toMatch(/\/r\/|slug/i);
   });
 
   it("T-template-no-pii: solicits no identifying or contact information", () => {
