@@ -1,0 +1,28 @@
+name: Taster report
+description: Public bug reports and feedback for the roast taster page
+title: "[taster] "
+labels: ["taster-report", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a PUBLIC repository. Do NOT include your name, email, IP address, or any personal detail. The roast page is anonymous; reports should carry only public context.
+  - type: input
+    id: page
+    attributes:
+      label: Where on the site did this happen?
+      description: "Describe the area in words (for example: a roast page, or the review form). Do NOT paste a private or unlisted link — unlisted roast links are secret."
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: false

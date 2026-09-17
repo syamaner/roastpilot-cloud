@@ -11,6 +11,7 @@ import Page, {
   generateStaticParams,
   revalidate,
 } from "../app/r/[slug]/page";
+import { ReportProblemLink } from "../components/ReportProblemLink";
 
 const notFoundSentinel = vi.hoisted(
   () => new Error("recognizable not-found sentinel"),
@@ -46,6 +47,14 @@ const DEMO_SLUG = "demoroastseedone234";
 const UNKNOWN_SLUG = "unknownroastseed123";
 const PRIVATE_SLUG = "privateroastseed123";
 const OUTAGE_SLUG = "outageroastseed1234";
+const TASTER_REPORT_URL =
+  "https://github.com/syamaner/roastpilot-cloud/issues/new?template=taster-report.yml";
+
+function reportHref(markup: string): string {
+  const encodedHref = markup.match(/<a href="([^"]+)"/)?.[1];
+  expect(encodedHref).toBeDefined();
+  return encodedHref!.replaceAll("&amp;", "&");
+}
 
 function roastFixture(overrides: Partial<Roast> = {}): Roast {
   return {
@@ -139,9 +148,54 @@ describe("public roast page control flow", () => {
     expect(markup).toContain('aria-label="Roast curve"');
     expect(markup).not.toContain("0.0 °C");
     expect(markup).not.toMatch(/°\s*F|null|NaN/);
+    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("T-ssg-flags: preserves ISR and on-demand static generation", () => {
     expect(revalidate).toBe(300);
     expect(generateStaticParams()).toEqual([]);
-    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("T-link-render: shows the report link after reviews", async () => {
+    roastMock.mockResolvedValue(roastFixture());
+
+    const markup = await renderPage(DEMO_SLUG);
+
+    expect(markup).toContain("Report a problem with this page");
+    expect(markup.indexOf("Report a problem with this page")).toBeGreaterThan(
+      markup.indexOf("Taster reviews"),
+    );
+    expect(reportHref(markup)).toBe(TASTER_REPORT_URL);
+    expect(markup).toMatch(/<a [^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  });
+
+  it("T-link-no-slug: leaves the roast's access slug out of the report URL", async () => {
+    roastMock.mockResolvedValue(roastFixture());
+
+    const href = reportHref(await renderPage(DEMO_SLUG));
+
+    expect(href).toBe(TASTER_REPORT_URL);
+    expect(href).not.toContain(DEMO_SLUG);
+    expect(href).not.toContain("title=");
+    expect(href).not.toContain("/r/");
+  });
+
+  it("T-no-request-api: keeps the link a request-independent server component", () => {
+    const source = readFileSync(
+      join(process.cwd(), "components/ReportProblemLink.tsx"),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\b(?:headers|cookies|fetch|useState|useEffect)\s*\(/);
+    expect(source).not.toMatch(/["']use client["']/);
+    expect(source).not.toMatch(/\bonClick\b|\bformAction\b/);
+  });
+
+  it("T-link-no-prefill: emits only the constant template URL", () => {
+    const href = reportHref(renderToStaticMarkup(<ReportProblemLink />));
+
+    expect(href).toBe(TASTER_REPORT_URL);
+    expect(href).not.toContain("title=");
+    expect(href).not.toContain("/r/");
   });
 
   it("T-invalid-slug: rejects a malformed slug before querying Snowflake", async () => {
@@ -165,6 +219,7 @@ describe("public roast page control flow", () => {
       "components/FlavorSliders.tsx",
       "components/ReviewForm.tsx",
       "components/ReviewSection.tsx",
+      "components/ReportProblemLink.tsx",
       "components/review-form-logic.ts",
       "lib/format.ts",
       "lib/roast-format.ts",

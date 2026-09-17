@@ -10,6 +10,7 @@ import { notFound } from "next/navigation";
 import RoastCurve from "../../../components/RoastCurve";
 import { ReviewSection } from "../../../components/ReviewSection";
 import { RoastHeadline } from "../../../components/RoastHeadline";
+import { ReportProblemLink } from "../../../components/ReportProblemLink";
 
 export const revalidate = 300;
 
@@ -67,6 +68,7 @@ export default async function Page({
       <RoastHeadline roast={roast} />
       <RoastCurve curve={roast.curve} />
       <ReviewSection slug={slug} reviews={reviews} />
+      <ReportProblemLink />
     </main>
   );
 }
