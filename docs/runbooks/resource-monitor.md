@@ -35,12 +35,38 @@ against the operator-provisioned object.
 
 ## Manual verification
 
-Run from the repository root with a configured Snowflake connection. Use a
-role with visibility into account resource monitors and the warehouse:
+Run from the repository root with a configured Snowflake connection. The
+simplest path is a connection whose user can assume `ACCOUNTADMIN`. The
+default `roastpilot` / `ROASTPILOT_CLI` service connection cannot: its
+available roles (`ROASTPILOT_ADMIN`, `PUBLIC`, `SNOWFLAKE_LEARNING_ROLE`)
+cannot see the resource monitor. For a least-privilege alternative,
+`ACCOUNTADMIN` can grant a custom role visibility into both objects:
+
+```sql
+GRANT MONITOR ON RESOURCE MONITOR ROASTPILOT_MONITOR TO ROLE <role>;
+GRANT MONITOR ON WAREHOUSE ROASTPILOT_WH TO ROLE <role>;
+GRANT USAGE ON WAREHOUSE ROASTPILOT_WH TO ROLE <role>;
+```
+
+The monitor grant lets `SHOW RESOURCE MONITORS` return the monitor; the
+warehouse `MONITOR` grant is for `SHOW WAREHOUSES` and `SHOW PARAMETERS ...
+IN WAREHOUSE`. The `USAGE` grant lets the verifier select `ROASTPILOT_WH`
+at connection time. This least-privilege grant set has not been live-verified
+in this repo because the CI/service credentials cannot see the monitor. The
+operator must confirm and adjust the exact minimal grants at the first
+`ACCOUNTADMIN` dispatch; the `ACCOUNTADMIN` path is the supported one.
+The default `SCHEMACHANGE_CONNECTION_NAME` is `roastpilot`. Substitute both
+placeholders:
 
 ```bash
-cd snowflake && SNOWFLAKE_ROLE=ACCOUNTADMIN python3 with_connection_env.py python3 resource_monitor_verify_live.py
+cd snowflake && SCHEMACHANGE_CONNECTION_NAME=<profile> SNOWFLAKE_ROLE=<role> python3 with_connection_env.py python3 resource_monitor_verify_live.py
 ```
+
+`<profile>` is a `snow` connection whose user can assume `<role>`; use
+`ACCOUNTADMIN` for the supported path, or the custom role granted `MONITOR ON
+RESOURCE MONITOR ROASTPILOT_MONITOR`, `MONITOR ON WAREHOUSE ROASTPILOT_WH`,
+and `USAGE ON WAREHOUSE ROASTPILOT_WH`.
+`SNOWFLAKE_ROLE` selects only the session role, not the connection user or key.
 
 The script reads `SHOW RESOURCE MONITORS`, `SHOW WAREHOUSES`, and `SHOW
 PARAMETERS` after disabling secondary roles for its session. It reports a
@@ -53,6 +79,12 @@ role, compare the expected state with plan §15 and D-C7-2, and reconcile the
 operator-provisioned configuration through the normal change process. Keep
 the verifier's constants aligned with the ratified expectation. Record the
 first live observation of the 110% trigger before treating it as confirmed.
+
+For the monitor, an "expected exactly one ... found 0" failure most often
+means the running role cannot see it: `SHOW RESOURCE MONITORS` returns zero
+rows without visibility into that object. Run under `ACCOUNTADMIN` or grant
+`MONITOR ON RESOURCE MONITOR ROASTPILOT_MONITOR` to the running role before
+concluding that the monitor is missing.
 
 Before raising the shared five-credit cap, move CI to its own warehouse and
 resource monitor as part of the future split below. Confirm CI no longer draws

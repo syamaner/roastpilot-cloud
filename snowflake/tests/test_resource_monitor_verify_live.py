@@ -215,7 +215,8 @@ def test_required_row_absent(query: str) -> None:
         WAREHOUSE_QUERY: "ROASTPILOT_WH",
         TIMEOUT_QUERY: "STATEMENT_TIMEOUT_IN_SECONDS",
     }[query]
-    assert str(exc.value) == f"{query}: expected exactly one {expected} row, found 0"
+    assert str(exc.value) == (f"{query}: expected exactly one {expected} row, found 0 "
+                              "(verify the object exists and the current role has privilege to see it; SHOW returns only objects the role can access)")
 
 
 @pytest.mark.parametrize("query", [MONITOR_QUERY, WAREHOUSE_QUERY, TIMEOUT_QUERY])
@@ -229,7 +230,8 @@ def test_exact_row_overmatch_rejected(query: str) -> None:
         WAREHOUSE_QUERY: "ROASTPILOT_WH",
         TIMEOUT_QUERY: "STATEMENT_TIMEOUT_IN_SECONDS",
     }[query]
-    assert str(exc.value) == f"{query}: expected exactly one {expected} row, found 2"
+    assert str(exc.value) == (f"{query}: expected exactly one {expected} row, found 2 "
+                              "(verify the object exists and the current role has privilege to see it; SHOW returns only objects the role can access)")
 
 
 @pytest.mark.parametrize("query", [MONITOR_QUERY, WAREHOUSE_QUERY, TIMEOUT_QUERY])
@@ -239,8 +241,13 @@ def test_byte_exact_name_post_filter(query: str) -> None:
     rows[query][0][name_column] = "ROASTPILOT0WH" if query == WAREHOUSE_QUERY else "lookalike"
     with pytest.raises(ResourceMonitorVerifyError) as exc:
         run(rows)
-    assert str(exc.value).startswith(f"{query}: expected exactly one ")
-    assert str(exc.value).endswith("row, found 0")
+    expected = {
+        MONITOR_QUERY: "ROASTPILOT_MONITOR",
+        WAREHOUSE_QUERY: "ROASTPILOT_WH",
+        TIMEOUT_QUERY: "STATEMENT_TIMEOUT_IN_SECONDS",
+    }[query]
+    assert str(exc.value) == (f"{query}: expected exactly one {expected} row, found 0 "
+                              "(verify the object exists and the current role has privilege to see it; SHOW returns only objects the role can access)")
 
 
 @pytest.mark.parametrize("query", [MONITOR_QUERY, WAREHOUSE_QUERY, TIMEOUT_QUERY])
