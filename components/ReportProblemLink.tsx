@@ -4,7 +4,7 @@ const TASTER_REPORT_URL =
 export function ReportProblemLink({ slug }: { slug: string }) {
   return (
     <a
-      href={`${TASTER_REPORT_URL}&title=${encodeURIComponent(slug)}`}
+      href={`${TASTER_REPORT_URL}&title=${encodeURIComponent(`[taster] ${slug}`)}`}
       target="_blank"
       rel="noopener noreferrer"
     >

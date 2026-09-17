@@ -47,7 +47,7 @@ const DEMO_SLUG = "demoroastseedone234";
 const UNKNOWN_SLUG = "unknownroastseed123";
 const PRIVATE_SLUG = "privateroastseed123";
 const OUTAGE_SLUG = "outageroastseed1234";
-const REPORT_URL =
+const TASTER_REPORT_URL =
   "https://github.com/syamaner/roastpilot-cloud/issues/new?template=taster-report.yml";
 
 function reportHref(markup: string): string {
@@ -165,7 +165,7 @@ describe("public roast page control flow", () => {
     expect(markup.indexOf("Report a problem with this page")).toBeGreaterThan(
       markup.indexOf("Taster reviews"),
     );
-    expect(reportHref(markup)).toContain(REPORT_URL);
+    expect(reportHref(markup)).toContain(TASTER_REPORT_URL);
     expect(markup).toMatch(/<a [^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
   });
 
@@ -188,7 +188,9 @@ describe("public roast page control flow", () => {
 
     const href = reportHref(await renderPage(DEMO_SLUG));
 
-    expect(href).toBe(`${REPORT_URL}&title=${encodeURIComponent(DEMO_SLUG)}`);
+    expect(href).toBe(
+      `${TASTER_REPORT_URL}&title=${encodeURIComponent(`[taster] ${DEMO_SLUG}`)}`,
+    );
     expect(href).not.toContain(review.reviewer_name);
     expect(href).not.toContain(`score=${review.score}`);
   });
@@ -207,7 +209,9 @@ describe("public roast page control flow", () => {
     const slug = 'bad&"< >';
     const href = reportHref(renderToStaticMarkup(<ReportProblemLink slug={slug} />));
 
-    expect(href).toBe(`${REPORT_URL}&title=${encodeURIComponent(slug)}`);
+    expect(href).toBe(
+      `${TASTER_REPORT_URL}&title=${encodeURIComponent(`[taster] ${slug}`)}`,
+    );
     expect(href).not.toMatch(/[<"\s]/);
     expect(href.match(/&/g)).toHaveLength(1);
   });
