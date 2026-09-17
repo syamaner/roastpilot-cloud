@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getReviewsByRoast, getRoastBySlug, type Roast } from "@/lib/roast";
+import { getReviewsByRoast, getRoastBySlug, type Roast, type Review } from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
 import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
@@ -11,6 +11,7 @@ import Page, {
   generateStaticParams,
   revalidate,
 } from "../app/r/[slug]/page";
+import { ReportProblemLink } from "../components/ReportProblemLink";
 
 const notFoundSentinel = vi.hoisted(
   () => new Error("recognizable not-found sentinel"),
@@ -46,6 +47,14 @@ const DEMO_SLUG = "demoroastseedone234";
 const UNKNOWN_SLUG = "unknownroastseed123";
 const PRIVATE_SLUG = "privateroastseed123";
 const OUTAGE_SLUG = "outageroastseed1234";
+const REPORT_URL =
+  "https://github.com/syamaner/roastpilot-cloud/issues/new?template=taster-report.yml";
+
+function reportHref(markup: string): string {
+  const encodedHref = markup.match(/<a href="([^"]+)"/)?.[1];
+  expect(encodedHref).toBeDefined();
+  return encodedHref!.replaceAll("&amp;", "&");
+}
 
 function roastFixture(overrides: Partial<Roast> = {}): Roast {
   return {
@@ -139,9 +148,68 @@ describe("public roast page control flow", () => {
     expect(markup).toContain('aria-label="Roast curve"');
     expect(markup).not.toContain("0.0 °C");
     expect(markup).not.toMatch(/°\s*F|null|NaN/);
+    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("T-ssg-flags: preserves ISR and on-demand static generation", () => {
     expect(revalidate).toBe(300);
     expect(generateStaticParams()).toEqual([]);
-    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("T-link-render: shows the report link after reviews", async () => {
+    roastMock.mockResolvedValue(roastFixture());
+
+    const markup = await renderPage(DEMO_SLUG);
+
+    expect(markup).toContain("Report a problem with this page");
+    expect(markup.indexOf("Report a problem with this page")).toBeGreaterThan(
+      markup.indexOf("Taster reviews"),
+    );
+    expect(reportHref(markup)).toContain(REPORT_URL);
+    expect(markup).toMatch(/<a [^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  });
+
+  it("T-link-slug: puts only the encoded slug in the dynamic URL segment", async () => {
+    const review: Review = {
+      public_slug: DEMO_SLUG,
+      reviewer_name: "Review Author",
+      score: 4,
+      aroma: null,
+      acidity: null,
+      sweetness: null,
+      body: null,
+      aftertaste: null,
+      brew_method: null,
+      notes: null,
+      created_at: "2026-09-17T00:00:00Z",
+    };
+    roastMock.mockResolvedValue(roastFixture());
+    reviewsMock.mockResolvedValue([review]);
+
+    const href = reportHref(await renderPage(DEMO_SLUG));
+
+    expect(href).toBe(`${REPORT_URL}&title=${encodeURIComponent(DEMO_SLUG)}`);
+    expect(href).not.toContain(review.reviewer_name);
+    expect(href).not.toContain(`score=${review.score}`);
+  });
+
+  it("T-no-request-api: keeps the link a request-independent server component", () => {
+    const source = readFileSync(
+      join(process.cwd(), "components/ReportProblemLink.tsx"),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\b(?:headers|cookies|fetch|useState|useEffect)\s*\(/);
+    expect(source).not.toMatch(/["']use client["']/);
+    expect(source).not.toMatch(/\bonClick\b|\bformAction\b/);
+  });
+
+  it("T-url-no-injection: encodes slug characters without adding URL parameters", () => {
+    const slug = 'bad&"< >';
+    const href = reportHref(renderToStaticMarkup(<ReportProblemLink slug={slug} />));
+
+    expect(href).toBe(`${REPORT_URL}&title=${encodeURIComponent(slug)}`);
+    expect(href).not.toMatch(/[<"\s]/);
+    expect(href.match(/&/g)).toHaveLength(1);
   });
 
   it("T-invalid-slug: rejects a malformed slug before querying Snowflake", async () => {
@@ -165,6 +233,7 @@ describe("public roast page control flow", () => {
       "components/FlavorSliders.tsx",
       "components/ReviewForm.tsx",
       "components/ReviewSection.tsx",
+      "components/ReportProblemLink.tsx",
       "components/review-form-logic.ts",
       "lib/format.ts",
       "lib/roast-format.ts",
