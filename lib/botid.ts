@@ -7,8 +7,12 @@ export type BotDecision =
 export async function verifyWriteRequest(): Promise<BotDecision> {
   try {
     const verdict = await checkBotId();
-    if (verdict.isBot === false) return { allowed: true };
-    if (verdict.isBot === true) return { allowed: false, reason: "bot" };
+    if (verdict.isBot === false && verdict.isVerifiedBot === false) {
+      return { allowed: true };
+    }
+    if (verdict.isBot === true || verdict.isVerifiedBot === true) {
+      return { allowed: false, reason: "bot" };
+    }
   } catch {
     // Detector failures must never admit a write to the warehouse.
   }

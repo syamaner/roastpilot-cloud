@@ -10,7 +10,7 @@ vi.mock("next/cache", () => ({
 }));
 
 vi.mock("botid/server", () => ({
-  checkBotId: vi.fn(async () => ({ isBot: false })),
+  checkBotId: vi.fn(async () => ({ isBot: false, isVerifiedBot: false })),
 }));
 
 vi.mock("../lib/review-submit", async (importOriginal) => {

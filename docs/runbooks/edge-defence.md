@@ -20,11 +20,12 @@ cookie or CAPTCHA is part of this path.
   `submitReview` through the Snowflake SQL API. A BotID denial is a generic
   403 without a retry header or cookie; it never resumes the warehouse.
 
-The client instrumentation attaches Basic BotID protection to POST review
-requests and passive classification to GET `/r/*`. There is no BotID check or
-blocking branch on the read renderer or Open Graph image. Humans and
-link-unfurl crawlers can therefore use the cached read path even when BotID is
-unavailable. This is the asymmetric Hobby decision in D-DoW-1 and D-C7-3.
+The client instrumentation protects only POST review requests. The read path
+is deliberately not wired to BotID client protection, so a BotID outage cannot
+make a cached read fail closed. There is no BotID check or blocking branch on
+the read renderer or Open Graph image. Humans and link-unfurl crawlers retain
+the cached read path; read enforcement remains a Pro-tier WAF step. This is
+the asymmetric Hobby decision in D-DoW-1 and D-C7-3.
 
 ## Verification and operations
 

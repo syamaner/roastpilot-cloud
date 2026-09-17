@@ -56,9 +56,23 @@ describe("BotID write decision", () => {
     expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
 
+  it("denies a verified crawler even when isBot is false", async () => {
+    mocks.checkBotId.mockResolvedValue({ isBot: false, isVerifiedBot: true });
+
+    expect(await verifyWriteRequest()).toEqual({ allowed: false, reason: "bot" });
+    const response = await submit();
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Forbidden" });
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(mocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(mocks.submitReview).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["throw", () => mocks.checkBotId.mockRejectedValue(new Error("secret detector failure"))],
     ["unknown", () => mocks.checkBotId.mockResolvedValue({ isBot: undefined })],
+    ["partial", () => mocks.checkBotId.mockResolvedValue({ isBot: false, isVerifiedBot: undefined })],
   ])("fails closed on %s without submitting or leaking the error", async (_name, arrange) => {
     arrange();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -78,8 +92,8 @@ describe("BotID write decision", () => {
     expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("secret detector failure");
   });
 
-  it("admits isBot:false through the limiter to a successful submission", async () => {
-    mocks.checkBotId.mockResolvedValue({ isBot: false });
+  it("admits a known-good human through the limiter to a successful submission", async () => {
+    mocks.checkBotId.mockResolvedValue({ isBot: false, isVerifiedBot: false });
 
     expect(await verifyWriteRequest()).toEqual({ allowed: true });
     const response = await submit();

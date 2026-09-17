@@ -180,6 +180,12 @@ describe("public roast page control flow", () => {
     expect(cacheSource).toContain("unstable_cache(");
   });
 
+  it("keeps BotID client protection off the read path", () => {
+    const source = readFileSync(join(process.cwd(), "instrumentation-client.ts"), "utf8");
+    expect(source).toContain('path: "/api/r/*/reviews", method: "POST"');
+    expect(source).not.toMatch(/path:\s*["']\/r\/\*/);
+  });
+
   it("T-link-render: shows the report link after reviews", async () => {
     roastMock.mockResolvedValue(roastFixture());
 
