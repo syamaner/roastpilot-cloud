@@ -19,7 +19,7 @@ The expected state is:
 | Monitor credit quota | 5 |
 | Notify trigger | includes 50% |
 | Suspend trigger | 100% |
-| Suspend immediate trigger | 110% (`[UNVERIFIED-OFFLINE]`) |
+| Suspend immediate trigger | 110% |
 | Warehouse size | X-Small |
 | Warehouse auto-suspend | 60 seconds |
 | Warehouse auto-resume | true |
@@ -29,9 +29,12 @@ The expected state is:
 The operator-ratified hardening sets `STATEMENT_TIMEOUT_IN_SECONDS = 300` on
 `ROASTPILOT_WH`. The 172800-second (2-day) account default is the
 denial-of-wallet gap this setting closes. The verifier rejects any effective
-timeout other than 300 seconds. The 110% immediate trigger is asserted by the
-story but does not appear in plan §15. The first live dispatch validates it
-against the operator-provisioned object.
+timeout other than 300 seconds. ACCOUNTADMIN Snowsight live validation on
+17 Sep 2026 confirmed the 110% immediate trigger on `ROASTPILOT_MONITOR`,
+although it does not appear in plan §15. SHOW returned percent-suffixed trigger
+values (`"50%"`, `"100%"`, `"110%"`) and comma-lists (`"50%,90%"`), uppercase
+`"MONTHLY"` frequency, and the `ROASTPILOT_WH` statement-timeout parameter at
+level `"WAREHOUSE"` with value 300.
 
 ## Manual verification
 
@@ -77,8 +80,8 @@ name is missing or malformed. A monitor that exists but is not assigned to
 If verification fails, inspect the live Snowflake setting with the operator
 role, compare the expected state with plan §15 and D-C7-2, and reconcile the
 operator-provisioned configuration through the normal change process. Keep
-the verifier's constants aligned with the ratified expectation. Record the
-first live observation of the 110% trigger before treating it as confirmed.
+the verifier's constants aligned with the ratified expectation, and re-run
+verification after any configuration change.
 
 For the monitor, an "expected exactly one ... found 0" failure most often
 means the running role cannot see it: `SHOW RESOURCE MONITORS` returns zero

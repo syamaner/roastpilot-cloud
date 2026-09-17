@@ -18,7 +18,7 @@ EXPECTED_CREDIT_QUOTA = 5
 EXPECTED_FREQUENCY = "MONTHLY"
 EXPECTED_NOTIFY_PCT = 50
 EXPECTED_SUSPEND_PCT = 100
-EXPECTED_SUSPEND_IMMEDIATE_PCT = 110  # [UNVERIFIED-OFFLINE] First live dispatch validates.
+EXPECTED_SUSPEND_IMMEDIATE_PCT = 110  # Validated live 17 Sep 2026: ROASTPILOT_MONITOR has a 110% suspend-immediate trigger.
 EXPECTED_WAREHOUSE = "ROASTPILOT_WH"
 EXPECTED_SIZE = "X-Small"
 EXPECTED_AUTO_SUSPEND = 60
@@ -86,7 +86,7 @@ def _number(value: object, source: str) -> Decimal:
 
 
 def _percentages(value: object, source: str) -> list[int]:
-    # [UNVERIFIED-OFFLINE] Confirm SHOW value formatting at first live dispatch.
+    # Validated live 17 Sep 2026: SHOW returns "50%", "100%", "110%" and comma-lists such as "50%,90%"; split/strip parsing works.
     if type(value) is int and value >= 0:
         return [value]
     if not isinstance(value, str):
@@ -116,7 +116,7 @@ def verify_live(connection: Connection) -> None:
     if quota != EXPECTED_CREDIT_QUOTA:
         raise ResourceMonitorVerifyError("monitor credit_quota differs from expected 5")
     frequency = _field(monitor, "frequency", "monitor")
-    # [UNVERIFIED-OFFLINE] First live dispatch confirms the returned casing.
+    # Validated live 17 Sep 2026: frequency returns uppercase "MONTHLY".
     if not isinstance(frequency, str) or frequency.strip().upper() != EXPECTED_FREQUENCY:
         raise ResourceMonitorVerifyError("monitor frequency differs from expected MONTHLY")
     notify = _percentages(_field(monitor, "notify_at", "monitor"), "monitor notify_at")
@@ -151,7 +151,7 @@ def verify_live(connection: Connection) -> None:
     if seconds != EXPECTED_STATEMENT_TIMEOUT:
         raise ResourceMonitorVerifyError("warehouse statement timeout differs from expected 300")
     level = _field(timeout, "level", "statement timeout")
-    # [UNVERIFIED-OFFLINE] First live dispatch confirms the returned casing.
+    # Validated live 17 Sep 2026: parameter level returns uppercase "WAREHOUSE".
     if not isinstance(level, str) or level.strip().upper() != EXPECTED_TIMEOUT_LEVEL:
         raise ResourceMonitorVerifyError("warehouse statement timeout is not set at warehouse level")
 

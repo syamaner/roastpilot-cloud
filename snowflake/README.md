@@ -354,10 +354,13 @@ and `USAGE ON WAREHOUSE ROASTPILOT_WH`.
 `SNOWFLAKE_ROLE` selects only the session role, not the connection user or key.
 
 The script only executes `USE SECONDARY ROLES NONE` and `SHOW` statements. It
-does not provision, change, or clean up Snowflake objects. The 110% trigger
-value is `[UNVERIFIED-OFFLINE]` until the first live dispatch; reconcile a
-live mismatch against the operator's configuration and plan §15 rather than
-silently changing the expected constant. See
+does not provision, change, or clean up Snowflake objects. ACCOUNTADMIN
+Snowsight live validation on 17 Sep 2026 confirmed the 110% suspend-immediate
+trigger on `ROASTPILOT_MONITOR`, percent-suffixed SHOW values (`"50%"`, `"100%"`,
+`"110%"`) and comma-lists (`"50%,90%"`), uppercase `"MONTHLY"` frequency, and
+the `ROASTPILOT_WH` statement-timeout parameter at level `"WAREHOUSE"` with
+value 300. Reconcile any later mismatch against the operator's configuration
+and plan §15 rather than silently changing the expected constant. See
 [`docs/runbooks/resource-monitor.md`](../docs/runbooks/resource-monitor.md).
 
 `with_connection_env.py` and `validate_migrations.py` have their own unit
