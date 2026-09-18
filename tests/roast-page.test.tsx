@@ -16,6 +16,9 @@ import { ReportProblemLink } from "../components/ReportProblemLink";
 const notFoundSentinel = vi.hoisted(
   () => new Error("recognizable not-found sentinel"),
 );
+const botIdCheck = vi.hoisted(() => vi.fn());
+
+vi.mock("botid/server", () => ({ checkBotId: botIdCheck }));
 
 vi.mock("@/lib/roast", () => ({
   getRoastBySlug: vi.fn(),
@@ -154,6 +157,33 @@ describe("public roast page control flow", () => {
   it("T-ssg-flags: preserves ISR and on-demand static generation", () => {
     expect(revalidate).toBe(300);
     expect(generateStaticParams()).toEqual([]);
+  });
+
+  it("renders a public read when BotID is unavailable without invoking enforcement", async () => {
+    botIdCheck.mockImplementation(() => { throw new Error("BotID unavailable"); });
+    roastMock.mockResolvedValue(roastFixture());
+
+    expect(await renderPage(DEMO_SLUG)).toContain("Ethiopia Guji");
+    expect(botIdCheck).not.toHaveBeenCalled();
+  });
+
+  it("keeps the read page and OG image free of request-scoped BotID enforcement", () => {
+    for (const path of ["app/r/[slug]/page.tsx", "app/r/[slug]/opengraph-image.tsx"]) {
+      const source = readFileSync(join(process.cwd(), path), "utf8");
+      expect(source).not.toMatch(/\bbotid\b|checkBotId|verifyWriteRequest/);
+      expect(source).not.toMatch(/\b(?:headers|cookies)\s*\(/);
+      expect(source).not.toMatch(/from\s+["']next\/headers["']/);
+    }
+    expect(revalidate).toBe(300);
+    expect(generateStaticParams()).toEqual([]);
+    const cacheSource = readFileSync(join(process.cwd(), "lib/roast-cache.ts"), "utf8");
+    expect(cacheSource).toContain("unstable_cache(");
+  });
+
+  it("keeps BotID client protection off the read path", () => {
+    const source = readFileSync(join(process.cwd(), "instrumentation-client.ts"), "utf8");
+    expect(source).toContain('path: "/api/r/*/reviews", method: "POST"');
+    expect(source).not.toMatch(/path:\s*["']\/r\/\*/);
   });
 
   it("T-link-render: shows the report link after reviews", async () => {

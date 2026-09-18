@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const routeMocks = vi.hoisted(() => ({
+  verifyWriteRequest: vi.fn(),
   checkRateLimit: vi.fn(),
   submitReview: vi.fn(),
   revalidatePath: vi.fn(),
+}));
+
+vi.mock("../lib/botid", () => ({
+  verifyWriteRequest: routeMocks.verifyWriteRequest,
 }));
 
 vi.mock("next/cache", () => ({
@@ -67,6 +72,7 @@ async function expectSanitized(response: Response, spies: ReturnType<typeof vi.s
 
 describe("POST /api/r/[slug]/reviews", () => {
   beforeEach(() => {
+    routeMocks.verifyWriteRequest.mockResolvedValue({ allowed: true });
     routeMocks.checkRateLimit.mockResolvedValue({ allowed: true });
     routeMocks.submitReview.mockResolvedValue({ reviewId: "review-id" });
   });
@@ -86,6 +92,7 @@ describe("POST /api/r/[slug]/reviews", () => {
     expect(body.fieldErrors.score).toBeDefined();
     expect(JSON.stringify(body)).not.toContain(rawSecret);
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).toHaveBeenCalledOnce();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expectAnonymous(response);
   });
@@ -96,6 +103,7 @@ describe("POST /api/r/[slug]/reviews", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Invalid request" });
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).not.toHaveBeenCalled();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expectAnonymous(response);
   });
@@ -112,6 +120,7 @@ describe("POST /api/r/[slug]/reviews", () => {
     expect(await response.json()).toEqual({ error: "Unsupported Media Type" });
     expect(request.bodyUsed).toBe(false);
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).not.toHaveBeenCalled();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
     expectAnonymous(response);
@@ -128,6 +137,7 @@ describe("POST /api/r/[slug]/reviews", () => {
     expect(await response.json()).toEqual({ error: "Unsupported Media Type" });
     expect(request.bodyUsed).toBe(false);
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).not.toHaveBeenCalled();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
     expectAnonymous(response);
@@ -138,6 +148,7 @@ describe("POST /api/r/[slug]/reviews", () => {
 
     expect(response.status).toBe(400);
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).toHaveBeenCalledOnce();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
     expectAnonymous(response);
@@ -151,6 +162,7 @@ describe("POST /api/r/[slug]/reviews", () => {
     const honeypotHeaders = [...honeypot.headers.entries()];
 
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).not.toHaveBeenCalled();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
     expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
 
@@ -225,7 +237,51 @@ describe("POST /api/r/[slug]/reviews", () => {
     expect(await response.json()).toEqual({ error: "Not found" });
     expect(request.bodyUsed).toBe(false);
     expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.verifyWriteRequest).not.toHaveBeenCalled();
     expect(routeMocks.submitReview).not.toHaveBeenCalled();
+    expectAnonymous(response);
+  });
+
+  it("denies a bot before validation, rate limiting, SQL, and revalidation", async () => {
+    routeMocks.verifyWriteRequest.mockResolvedValue({ allowed: false, reason: "bot" });
+    const response = await callPost(postJson({ score: 0 }));
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Forbidden" });
+    expect(response.headers.has("retry-after")).toBe(false);
+    expectAnonymous(response);
+    expect(routeMocks.verifyWriteRequest).toHaveBeenCalledOnce();
+    expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.submitReview).not.toHaveBeenCalled();
+    expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("denies a fail-closed detector decision before downstream work without leaking secrets", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    routeMocks.verifyWriteRequest.mockResolvedValue({ allowed: false, reason: "fail_closed" });
+    const response = await callPost(postJson({ score: 5, notes: SECRET_VALUES.join(" ") }));
+
+    expect(response.status).toBe(403);
+    expectAnonymous(response);
+    expect(response.headers.has("retry-after")).toBe(false);
+    await expectSanitized(response, [errorSpy, logSpy]);
+    expect(routeMocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(routeMocks.submitReview).not.toHaveBeenCalled();
+    expect(routeMocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("calls BotID before the limiter and submission on an admitted write", async () => {
+    const response = await callPost(postJson({ score: 5 }));
+
+    expect(response.status).toBe(200);
+    expect(routeMocks.verifyWriteRequest).toHaveBeenCalledOnce();
+    expect(routeMocks.verifyWriteRequest.mock.invocationCallOrder[0]).toBeLessThan(
+      routeMocks.checkRateLimit.mock.invocationCallOrder[0],
+    );
+    expect(routeMocks.checkRateLimit.mock.invocationCallOrder[0]).toBeLessThan(
+      routeMocks.submitReview.mock.invocationCallOrder[0],
+    );
     expectAnonymous(response);
   });
 

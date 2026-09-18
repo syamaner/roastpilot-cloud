@@ -9,6 +9,10 @@ vi.mock("next/cache", () => ({
   revalidatePath: routeMocks.revalidatePath,
 }));
 
+vi.mock("botid/server", () => ({
+  checkBotId: vi.fn(async () => ({ isBot: false, isVerifiedBot: false })),
+}));
+
 vi.mock("../lib/review-submit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/review-submit")>();
   return { ...actual, submitReview: routeMocks.submitReview };

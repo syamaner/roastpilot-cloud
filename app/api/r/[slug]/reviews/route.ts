@@ -1,5 +1,6 @@
 import { revalidatePath } from "next/cache";
 
+import { verifyWriteRequest } from "../../../../../lib/botid";
 import { extractClientIp } from "../../../../../lib/client-ip";
 import { checkHoneypot, checkRateLimit } from "../../../../../lib/ratelimit";
 import { ReviewSubmissionSchema } from "../../../../../lib/review-schema";
@@ -44,6 +45,11 @@ export async function POST(
   const honeypotDecision = checkHoneypot(website);
   if (!honeypotDecision.allowed && honeypotDecision.reason === "honeypot") {
     return successResponse();
+  }
+
+  const botDecision = await verifyWriteRequest();
+  if (!botDecision.allowed) {
+    return jsonError(403, "Forbidden");
   }
 
   const result = ReviewSubmissionSchema.safeParse(rawBody);

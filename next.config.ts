@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withBotId } from "botid/next/config";
 
 const nextConfig: NextConfig = {
   // Playwright's boot smoke spec (e2e/boot.spec.ts) drives the dev server
@@ -7,4 +8,4 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
 };
 
-export default nextConfig;
+export default withBotId(nextConfig);
