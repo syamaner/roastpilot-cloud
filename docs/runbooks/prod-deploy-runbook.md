@@ -1,0 +1,194 @@
+# Production deployment
+
+This runbook deploys the Vercel application and Snowflake schema to the
+production database, `ROASTPILOT`. It records the production process validated
+under C7-S1 (#545). It is repeatable guidance, not authorization to weaken the
+production grant boundary or the synthetic seed guard.
+
+## Context and decisions
+
+Production uses a separate `ROASTPILOT` database rather than DEV data
+(D-C7-5). The migrations are database-portable because their application
+objects use unqualified `app.*` names.
+
+The production web application uses the separate service user
+`ROASTPILOT_WEB_PROD`, with its own key-pair and the `PUBLIC_WEB` role
+(D-C7-6). Do not reuse the Preview or DEV web credential for production.
+`PUBLIC_WEB` is an account-level role, so its object grants must be checked
+carefully after every production deployment.
+
+For the first production deployment, `ACCOUNTADMIN` directly enables
+`ROASTPILOT_ADMIN` to create the schema by granting it `USAGE` and
+`CREATE SCHEMA` on `ROASTPILOT` (D-C7-7). The deployment then uses the existing
+`roastpilot` key-pair connection as `ROASTPILOT_ADMIN`. A dedicated production
+CI role and CI-gated deployment automation are deferred to a later hardening
+story.
+
+## P1: deploy the Snowflake schema
+
+Run these steps in order. The first and third require the operator's
+`ACCOUNTADMIN` access. The middle step runs through the existing
+`roastpilot` connection as `ROASTPILOT_ADMIN`.
+
+### P1a: enable the deployment role
+
+As `ACCOUNTADMIN`, grant the interim deployment role only the database
+privileges required for the schema deployment:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+GRANT USAGE, CREATE SCHEMA ON DATABASE ROASTPILOT TO ROLE ROASTPILOT_ADMIN;
+```
+
+### P1b: apply the migrations
+
+From `snowflake/`, with its Python virtual environment active, run:
+
+```bash
+SCHEMACHANGE_CONNECTION_NAME=roastpilot SNOWFLAKE_DATABASE=ROASTPILOT \
+  python3 with_connection_env.py schemachange deploy --schemachange-create-change-history-table
+```
+
+The validated first deployment applied 11 scripts. It created the `APP` and
+`METADATA` schemas, the application tables and procedures, both secure views,
+and the object grants contained in the migrations. Schemachange records its
+history in `ROASTPILOT.METADATA.CHANGE_HISTORY`.
+
+### P1c: grant the deliberately omitted prerequisites
+
+The migrations deliberately omit the containing database and schema `USAGE`
+grants. As `ACCOUNTADMIN`, grant those prerequisites to the two application
+roles:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+GRANT USAGE ON DATABASE ROASTPILOT     TO ROLE PUBLIC_WEB;
+GRANT USAGE ON SCHEMA ROASTPILOT.APP  TO ROLE PUBLIC_WEB;
+GRANT USAGE ON DATABASE ROASTPILOT     TO ROLE ROASTPILOT_AGENT;
+GRANT USAGE ON SCHEMA ROASTPILOT.APP  TO ROLE ROASTPILOT_AGENT;
+```
+
+Both roles already have `USAGE` on the shared `ROASTPILOT_WH` warehouse. Do
+not broaden these grants and never grant them to `PUBLIC`.
+
+## Verify the production grant boundary
+
+After P1, inspect the account-level role and filter the result to production
+objects:
+
+```sql
+SHOW GRANTS TO ROLE PUBLIC_WEB;
+```
+
+The production surface for `PUBLIC_WEB` must be exactly:
+
+| Privilege | Object |
+| --- | --- |
+| `USAGE` | database `ROASTPILOT` |
+| `USAGE` | schema `ROASTPILOT.APP` |
+| `USAGE` | warehouse `ROASTPILOT_WH` |
+| `SELECT` | secure view `ROASTPILOT.APP.ROAST_BY_SLUG` |
+| `SELECT` | secure view `ROASTPILOT.APP.REVIEWS_BY_ROAST` |
+| `USAGE` | procedure `ROASTPILOT.APP.SUBMIT_REVIEW` |
+
+There must be no access to a base table, no access to another procedure, and
+no grant to `PUBLIC`. Both secure views must continue to enforce
+`visibility <> 'private'` in their definitions.
+
+## P2: create the production web credential
+
+Generate a production-only, unencrypted PKCS8 key-pair in a secure operator
+environment:
+
+```bash
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out roastpilot_web_prod_key.p8 -nocrypt
+openssl rsa -in roastpilot_web_prod_key.p8 -pubout -out roastpilot_web_prod_key.pub
+```
+
+The value supplied as `RSA_PUBLIC_KEY` is the public key's single-line base64
+body, without the PEM header, footer or newlines. As `ACCOUNTADMIN`, create the
+service user and grant it only `PUBLIC_WEB`:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+CREATE USER ROASTPILOT_WEB_PROD
+  TYPE = SERVICE
+  DEFAULT_ROLE = PUBLIC_WEB
+  DEFAULT_WAREHOUSE = ROASTPILOT_WH
+  RSA_PUBLIC_KEY = '<single-line public key body>'
+  COMMENT = 'prod public web app; PUBLIC_WEB only (D-C7-6)';
+GRANT ROLE PUBLIC_WEB TO USER ROASTPILOT_WEB_PROD;
+```
+
+Do not put the private key in SQL, an issue, a pull request, chat or logs.
+
+## P3: configure the Vercel Production environment
+
+Set these `SNOWFLAKE_WEB_*` variables at Vercel's Production scope:
+
+| Variable | Production value |
+| --- | --- |
+| `SNOWFLAKE_WEB_ACCOUNT` | the production Snowflake account identifier |
+| `SNOWFLAKE_WEB_USER` | `ROASTPILOT_WEB_PROD` |
+| `SNOWFLAKE_WEB_PRIVATE_KEY` | contents of `roastpilot_web_prod_key.p8` |
+| `SNOWFLAKE_WEB_WAREHOUSE` | `ROASTPILOT_WH` |
+| `SNOWFLAKE_WEB_DATABASE` | `ROASTPILOT` |
+| `SNOWFLAKE_WEB_SCHEMA` | `APP` |
+| `SNOWFLAKE_WEB_PRIVATE_KEY_PASSPHRASE` | set only when the private key is encrypted |
+
+P2 creates an unencrypted key with `-nocrypt`, so omit
+`SNOWFLAKE_WEB_PRIVATE_KEY_PASSPHRASE` for that key. Add the private key from
+the operator's terminal so that it does not transit chat or logs:
+
+```bash
+vercel env add SNOWFLAKE_WEB_PRIVATE_KEY production < roastpilot_web_prod_key.p8
+```
+
+Redeploy Production after changing environment variables. Existing deployments
+do not acquire changed variables automatically.
+
+## P4: provide production roast data
+
+The synthetic seed toolkit deliberately refuses production targets.
+`scripts/seed/prod-guard.ts` limits `ALLOWED_SEED_DATABASES` to
+`ROASTPILOT_PREVIEW` and `ROASTPILOT_DEV`. Do not bypass or widen that guard.
+Production roasts normally arrive from the real agent.
+
+If a one-off demonstration roast is required before the agent path is
+available, the owner may deliberately insert it as `ROASTPILOT_ADMIN`. Copy a
+non-PII roast and its telemetry, assign a fresh slug and idempotency key, and
+set `contributed_to_learning = true` so that the curve renders. Treat this as
+an explicit production data operation, not as a seed-tool invocation.
+
+## P5: verify the live deployment
+
+Verify all of the following against the public production URL:
+
+- A read for a known production slug returns 200. Until production has a
+  roast, an unknown slug must return the graceful 404 page, never 500.
+- `ROASTPILOT.APP.DATA_QUALITY_VIOLATIONS` is empty.
+- A scripted review write is rejected by BotID. A `curl` POST returns 403.
+- A genuine browser submission passes BotID and completes successfully.
+
+The 404 check proves that Vercel can authenticate with the production
+key-pair, use the `PUBLIC_WEB` grants and reach Snowflake even when no roast
+matches the requested slug. The browser submission verifies the positive
+write path; the scripted POST verifies the fail-closed edge gate.
+
+## Ownership summary
+
+| Step | Owner and identity |
+| --- | --- |
+| P1a, grant database deployment privileges | Operator as `ACCOUNTADMIN` |
+| P1b, run schemachange | `roastpilot` key-pair connection as `ROASTPILOT_ADMIN` |
+| P1c, grant database and schema prerequisites | Operator as `ACCOUNTADMIN` |
+| P1 boundary verification | Operator with account grant visibility |
+| P2, create and authorize the service user | Operator as `ACCOUNTADMIN` |
+| P3, set Vercel Production variables and redeploy | Orchestrator and operator, with the operator supplying the private key at the CLI |
+| P4, optional one-off production data operation | Operator through `ROASTPILOT_ADMIN` |
+| P5, public URL and browser verification | Orchestrator |
+
+The `roastpilot` connection can deploy database-portable migrations and carry
+out the deliberate data operation through `ROASTPILOT_ADMIN`. It cannot
+replace the `ACCOUNTADMIN` steps that establish database access, prerequisite
+role grants or the service user.
