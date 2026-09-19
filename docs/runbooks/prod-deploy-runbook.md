@@ -54,6 +54,12 @@ The validated first deployment applied 11 scripts. It created the `APP` and
 and the object grants contained in the migrations. Schemachange records its
 history in `ROASTPILOT.METADATA.CHANGE_HISTORY`.
 
+Schema changes are forward-only. If a migration fails or applies only
+partially, add a corrective schemachange migration, merge it to `main`, and
+deploy it through the same process. Never repair production with an ad-hoc
+`ALTER` or a manual reversal. This keeps every schema change in the repository
+and follows the schemachange-only rule.
+
 ### P1c: grant the deliberately omitted prerequisites
 
 The migrations deliberately omit the containing database and schema `USAGE`
@@ -78,7 +84,13 @@ objects:
 
 ```sql
 SHOW GRANTS TO ROLE PUBLIC_WEB;
+SHOW FUTURE GRANTS TO ROLE PUBLIC_WEB;
 ```
+
+`SHOW FUTURE GRANTS TO ROLE PUBLIC_WEB` must return no rows. A future grant on
+this shared account-level role could make a later-created base table readable,
+even when the current-grants query is clean. An empty result is part of the
+grant-boundary invariant.
 
 The production surface for `PUBLIC_WEB` must be exactly:
 
@@ -144,21 +156,53 @@ the operator's terminal so that it does not transit chat or logs:
 vercel env add SNOWFLAKE_WEB_PRIVATE_KEY production < roastpilot_web_prod_key.p8
 ```
 
+The production write path also requires these variables alongside the
+`SNOWFLAKE_WEB_*` variables:
+
+| Variable | Production source |
+| --- | --- |
+| `KV_REST_API_URL` | Upstash Redis Marketplace integration |
+| `KV_REST_API_TOKEN` | Upstash Redis Marketplace integration |
+| `REVIEW_IP_HASH_PEPPER` | operator-set Production secret |
+
+The Upstash integration provisions `KV_REST_API_URL` and
+`KV_REST_API_TOKEN`, which are present at all scopes. Set
+`REVIEW_IP_HASH_PEPPER` specifically at Production scope, for example by
+generating a value with `openssl rand -hex 32`. All three variables must exist
+at Production scope. Without them, the IP hash cannot be computed or the rate
+limiter fails closed after BotID, so genuine reviews cannot be accepted.
+
 Redeploy Production after changing environment variables. Existing deployments
 do not acquire changed variables automatically.
+
+### Releases and rollback
+
+Deploy and promote the intended release to Production with
+`vercel deploy --prod`, or promote a validated preview deployment. To roll
+back, run `vercel rollback`, or use `vercel ls` to identify and promote a
+previous good deployment. After every release or rollback, re-verify BotID and
+the SSG read path before treating Production as healthy.
 
 ## P4: provide production roast data
 
 The synthetic seed toolkit deliberately refuses production targets.
 `scripts/seed/prod-guard.ts` limits `ALLOWED_SEED_DATABASES` to
 `ROASTPILOT_PREVIEW` and `ROASTPILOT_DEV`. Do not bypass or widen that guard.
-Production roasts normally arrive from the real agent.
+The preferred path for every production roast is the validated procedure path:
+the real agent uses `UPSERT_ROAST` and `LOAD_ROAST_TELEMETRY`. `UPSERT_ROAST`
+validates the payload and applies the idempotent `MERGE` that a direct table
+write would bypass.
 
 If a one-off demonstration roast is required before the agent path is
-available, the owner may deliberately insert it as `ROASTPILOT_ADMIN`. Copy a
-non-PII roast and its telemetry, assign a fresh slug and idempotency key, and
-set `contributed_to_learning = true` so that the curve renders. Treat this as
-an explicit production data operation, not as a seed-tool invocation.
+available, a direct owner insert as `ROASTPILOT_ADMIN` is an explicit exception.
+It may copy only a non-PII roast and telemetry rows that already satisfy every
+range, enum and visibility rule, such as an existing validated roast. Assign a
+fresh slug and idempotency key, and set `contributed_to_learning = true` so that
+the curve renders. Snowflake does not enforce the documented range and enum
+constraints, so the operator is responsible for pre-validating every copied
+value when bypassing the procedure guards. Treat this as an exceptional
+production data operation, not as a seed-tool invocation or the normal ingest
+path.
 
 ## P5: verify the live deployment
 
