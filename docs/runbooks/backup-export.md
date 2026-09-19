@@ -19,6 +19,21 @@ Do not create a stage or grant here. Record the source database, timestamp,
 query IDs, row counts, stage listing and checksums in a protected manifest;
 never put exported data in the repository.
 
+### Placeholder grammar
+
+`<approved_backup_stage>` must be the exact existing stage name verified in the
+ownership preflight, with one to three unquoted identifier segments matching
+`^[A-Za-z_][A-Za-z0-9_$]*$`. Before substitution, validate `<backup_id>` and
+every `idempotency_key`-derived `<run_id>` against
+`^[0-9a-zA-Z_-]{1,64}$`. Semicolons, quotes, whitespace and `/../` are forbidden.
+These values reach a multi-statement SnowSQL script and local paths, so unknown
+or non-matching input is an injection or traversal risk and must fail closed.
+
+Snowflake named-stage grammar requires bare `@stage/path` references; quoting
+the whole reference as a string is not valid named-stage syntax. The closed
+grammars above protect those sites. The local `file://` operands below are
+single-quoted, as Snowflake permits, but quoting does not replace validation.
+
 ## Export principal
 
 The expected owner role is `ROASTPILOT_ADMIN`. Exact ownership is
@@ -27,8 +42,14 @@ stage; stop if the owner is unknown or differs.
 
 ```sql
 USE ROLE ACCOUNTADMIN;
+SHOW SCHEMAS LIKE 'APP' IN DATABASE ROASTPILOT;
 SHOW OBJECTS IN SCHEMA ROASTPILOT.APP;
+SHOW STAGES IN SCHEMA ROASTPILOT.APP;
 ```
+
+Accept only the exact `APP` schema row, the five named table rows and the exact
+`ROAST_ARTIFACTS` stage row. All must show the expected owner before switching
+roles; stop if any owner differs, is missing or is unknown.
 
 Run as the verified owner, using `ROASTPILOT` below or deliberately replacing
 it with `ROASTPILOT_DEV` for a DEV rehearsal:
@@ -65,31 +86,48 @@ reviews. Snowflake does not enforce foreign keys. Stage files and
 
 ### Export all five base tables
 
-Run each unload from its base table. Parquet is the explicit export format;
-`HEADER=TRUE` preserves column names for the matching restore. `OVERWRITE=FALSE`
-and a new `<backup_id>` prevent replacement of an earlier backup.
+Parquet is the explicit format and carries column names in its schema;
+`MATCH_BY_COLUMN_NAME` uses those names during restore, so no inert `HEADER`
+option is set. A new `<backup_id>` and `OVERWRITE=FALSE` prevent replacement.
+
+For a non-quiesced table export, first pause stage writers and let in-flight
+stage/row operations finish. In the same SnowSQL session, select one timestamp
+once and apply it to every unload and count. Keep stage writers paused through
+the complete `LIST`/`GET` and checksum window because stages have no Time Travel.
 
 ```sql
+SET backup_snapshot_ts = CURRENT_TIMESTAMP();
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/
-  FROM app.cloud_roasts FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)
-  HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FROM (SELECT * FROM app.cloud_roasts AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/roast_telemetry/
-  FROM app.roast_telemetry FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)
-  HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FROM (SELECT * FROM app.roast_telemetry AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/roast_artifacts/
-  FROM app.roast_artifacts FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)
-  HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FROM (SELECT * FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
-  FROM app.tasting_reviews FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)
-  HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FROM (SELECT * FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/reference_roast_summaries/
-  FROM app.reference_roast_summaries FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)
-  HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FROM (SELECT * FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 ```
 
-Capture each `app.<base_table>` row count without intervening writes. Quiesce
-writers or use one operator-selected Time Travel point; consistency is
-`[VERIFY-LIVE]`.
+Capture counts at that same point and record `$backup_snapshot_ts`:
+
+```sql
+SELECT 'cloud_roasts' AS object_name, COUNT(*) AS row_count FROM app.cloud_roasts AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'roast_telemetry', COUNT(*) FROM app.roast_telemetry AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'roast_artifacts', COUNT(*) FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'tasting_reviews', COUNT(*) FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts);
+```
+
+Alternatively, quiesce all table and stage writers before the first current-state
+count and keep them paused until every `GET` and checksum finishes. Never mix
+independent current-state reads while writers run. Snapshot consistency and the
+quiescence boundary are `[VERIFY-LIVE]`.
 
 ### Export the internal artifact stage
 
@@ -100,7 +138,7 @@ compute checksums:
 ```sql
 LIST @app.roast_artifacts;
 GET @app.roast_artifacts/<run_id>/
-  file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/
+  'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/'
   PATTERN='.*';
 ```
 
@@ -147,7 +185,7 @@ rows. Because `GET` preserved stored bytes, use `AUTO_COMPRESS=FALSE`; another
 export method must explicitly match its compression.
 
 ```sql
-PUT file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*
+PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*'
   @app.roast_artifacts/<run_id>/
   AUTO_COMPRESS=FALSE OVERWRITE=FALSE;
 ```
@@ -189,17 +227,19 @@ trusting a stale aggregate.
 
 ## Verify
 
-All results here are `[VERIFY-LIVE]`. Compare all five table counts with the
-manifest. Confirm zero orphan `roast_id` values in `app.roast_telemetry`,
-`app.roast_artifacts` and `app.tasting_reviews` by left-joining each to
-`app.cloud_roasts`. Confirm every `app.roast_artifacts.stage_path` resolves
-under `@app.roast_artifacts` with its expected checksum.
+All results here are `[VERIFY-LIVE]`. Compare manifest counts only for the four
+loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
+and `app.tasting_reviews`. Confirm zero orphan `roast_id` values in the three
+child tables by left-joining each to `app.cloud_roasts`. Confirm every
+`app.roast_artifacts.stage_path` resolves under `@app.roast_artifacts` with its
+expected checksum.
 
 Confirm no retained `submitted_ip_hash` is 30 days old or older. Require zero
-owner-only data-quality violations. Compare the recomputed
-`app.reference_roast_summaries` keys and counts with a fresh derivation, not the
-snapshot. Keep the target isolated and stop if any count, orphan, stage mapping,
-checksum, purge or aggregate check is unknown or fails.
+owner-only data-quality violations. Validate `app.reference_roast_summaries`
+solely against a fresh derivation: recomputation must succeed for every present
+group. Never compare its row count with the exported snapshot, because an absent
+or zero-count old group can legitimately change that count. Keep the target
+isolated and stop if any check is unknown or fails.
 
 ## Ownership summary
 
