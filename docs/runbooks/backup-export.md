@@ -12,22 +12,26 @@ role, warehouse or grant and cannot weaken the grant boundary. See
 [Production deployment](prod-deploy-runbook.md) and
 [Key-pair rotation](key-rotation.md) for existing operator identities.
 
-Use an approved backup stage as `<approved_backup_stage>` and a unique,
-immutable `<backup_id>`. It must be outside the protected database and covered
-by the approved retention, encryption and access policy.
+Use an approved three-part backup stage as `<approved_backup_stage>` and a
+unique, immutable `<backup_id>`. The stage must be in a dedicated backup
+database outside the protected database and covered by the approved retention,
+encryption and access policy.
 Do not create a stage or grant here. Record the source database, timestamp,
 query IDs, row counts, stage listing and checksums in a protected manifest;
 never put exported data in the repository.
 
 ### Placeholder grammar
 
-`<approved_backup_stage>` must be the exact existing stage name verified in the
-ownership preflight, with one to three unquoted identifier segments matching
-`^[A-Za-z_][A-Za-z0-9_$]*$`. Before substitution, validate `<backup_id>` and
-every `idempotency_key`-derived `<run_id>` against
-`^[0-9a-zA-Z_-]{1,64}$`. Semicolons, quotes, whitespace and `/../` are forbidden.
-These values reach a multi-statement SnowSQL script and local paths, so unknown
-or non-matching input is an injection or traversal risk and must fail closed.
+`<approved_backup_stage>` must be the exact existing three-part name
+`<backup_db>.<schema>.<stage>`. Each unquoted segment must match
+`^[A-Za-z_][A-Za-z0-9_$]*$`, and `<backup_db>` must be neither `ROASTPILOT` nor
+`ROASTPILOT_DEV`. Before substitution, validate `<backup_id>` and every
+`idempotency_key`-derived `<run_id>` against `^[0-9a-zA-Z_-]{1,64}$`.
+Semicolons, quotes, whitespace, `/../`, and `--` are forbidden in those IDs and
+in every stage-name segment. Validate a later `<recovery_db>` as one unquoted
+identifier segment under the same identifier grammar. These values reach a
+multi-statement SnowSQL script and local paths; unknown or non-matching input
+is an injection or traversal risk and must fail closed.
 
 Snowflake named-stage grammar requires bare `@stage/path` references; quoting
 the whole reference as a string is not valid named-stage syntax. The closed
@@ -50,6 +54,20 @@ SHOW STAGES IN SCHEMA ROASTPILOT.APP;
 Accept only the exact `APP` schema row, the five named table rows and the exact
 `ROAST_ARTIFACTS` stage row. All must show the expected owner before switching
 roles; stop if any owner differs, is missing or is unknown.
+
+Separately verify the real three-part backup destination before unloading PII:
+
+```sql
+SHOW STAGES IN SCHEMA <backup_db>.<schema>;
+DESCRIBE STAGE <backup_db>.<schema>.<stage>;
+SHOW GRANTS ON STAGE <backup_db>.<schema>.<stage>;
+```
+
+Accept exactly the intended stage. Confirm its database is not `ROASTPILOT` or
+`ROASTPILOT_DEV`, and verify its owner, encryption configuration and access
+policy from these live results. Missing, ambiguous or unexpected state fails
+closed. This destination-stage check is distinct from the protected database's
+`@app.roast_artifacts` ownership check above.
 
 Run as the verified owner, using `ROASTPILOT` below or deliberately replacing
 it with `ROASTPILOT_DEV` for a DEV rehearsal:
@@ -107,7 +125,13 @@ COPY INTO @<approved_backup_stage>/<backup_id>/tables/roast_artifacts/
   FROM (SELECT * FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts))
   FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
-  FROM (SELECT * FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts))
+  FROM (
+    SELECT * REPLACE (
+      IFF(created_at <= DATEADD('day', -30, CURRENT_TIMESTAMP()),
+          NULL, submitted_ip_hash) AS submitted_ip_hash
+    )
+    FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
+  )
   FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/reference_roast_summaries/
   FROM (SELECT * FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts))
@@ -128,6 +152,13 @@ Alternatively, quiesce all table and stage writers before the first current-stat
 count and keep them paused until every `GET` and checksum finishes. Never mix
 independent current-state reads while writers run. Snapshot consistency and the
 quiescence boundary are `[VERIFY-LIVE]`.
+
+The review unload keeps a non-null hash only while it remains inside its
+original 30-day window; the exact live purge predicate is applied before bytes
+reach Parquet. Time passing can age a retained hash after export. Therefore any
+backup still holding a non-null hash must be deleted or re-scrubbed by that
+hash's original 30-day deadline. The backup retention, encryption and access
+policy must enforce that deadline; immutability does not override it.
 
 ### Export the internal artifact stage
 
@@ -163,6 +194,29 @@ backup is incomplete unless both are present and reconcile.
 Restore only into an empty target created by reviewed migrations. Verify its
 database and owner role live. Never use `PUBLIC_WEB` or `ROASTPILOT_AGENT`.
 Stop if identity, age, checksums, completeness or ownership is unknown.
+
+Immediately before any load, deliberately select the recovery database rather
+than inheriting the earlier source selection. `<recovery_db>` is the intended
+recovery target, not a default alias for the manifest's source database:
+
+```sql
+USE DATABASE <recovery_db>;
+USE SCHEMA APP;
+SELECT CURRENT_DATABASE(), CURRENT_SCHEMA();
+SELECT
+  (SELECT COUNT(*) FROM app.cloud_roasts) AS cloud_roasts,
+  (SELECT COUNT(*) FROM app.roast_telemetry) AS roast_telemetry,
+  (SELECT COUNT(*) FROM app.roast_artifacts) AS roast_artifacts,
+  (SELECT COUNT(*) FROM app.tasting_reviews) AS tasting_reviews,
+  (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries;
+```
+
+`CURRENT_DATABASE()` must exactly equal the deliberately chosen recovery
+target, and all five counts must be zero. Stop before `COPY` if the target is
+the live source, any table is non-empty, or identity is unknown. Reusing the
+source name is permissible only after the former source is unavailable, a
+fresh migration has recreated an empty schema, and the operator has explicitly
+approved that disaster-recovery target.
 
 Snowflake does not enforce foreign keys; an out-of-order restore can silently
 create orphans. Reverse the delete cascade: restore `app.cloud_roasts`, then
