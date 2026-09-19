@@ -77,17 +77,18 @@ then mark that migration complete, so the next deployment re-runs the failed
 migration before it can reach any later corrective migration.
 
 The failed migration itself must therefore be replayable before deployment
-resumes. Its DDL may already be idempotent, using forms such as
-`CREATE ... IF NOT EXISTS` or `CREATE OR REPLACE`, so that re-running it
-succeeds. Otherwise, the operator must first remove only the partially created
-objects, then re-run the same reviewed migration. Review and record that
-cleanup as recovery from the failed deployment. A later corrective migration
-alone cannot repair a deployment wedged on an earlier partial migration.
+resumes. Make it replayable through a reviewed repository change merged to
+`main`. This may use idempotent DDL, such as `CREATE ... IF NOT EXISTS` or
+`CREATE OR REPLACE`, or a schemachange-managed corrective step that runs as
+part of the replay. Then check out the reviewed `main` commit and re-run the
+deployment. A later migration alone cannot repair a deployment wedged on an
+earlier partial migration.
 
 Use new corrective schemachange migrations from `main` for subsequent schema
-evolution. Never use an ad-hoc `ALTER` or a manual reversal as a substitute for
-a migration. This keeps schema evolution in the repository and follows the
-schemachange-only rule.
+evolution. Removing partially created production objects by hand is not
+permitted. Never use an ad-hoc `ALTER` or a manual reversal as a substitute for
+a migration. Recovery and schema evolution must remain reproducible from the
+reviewed repository checkout under the schemachange-only rule.
 
 ### P1c: grant the deliberately omitted prerequisites
 
@@ -147,7 +148,7 @@ view was replaced or altered, so this live check is part of the boundary
 verification. An equivalent negative check as `PUBLIC_WEB`, proving that a
 known private roast is absent from both views, is also acceptable.
 
-## P2: create the production web credential
+## P2: provision the production web credential for the first deployment
 
 Generate a production-only, unencrypted PKCS8 key-pair in a secure operator
 environment:
@@ -173,6 +174,11 @@ GRANT ROLE PUBLIC_WEB TO USER ROASTPILOT_WEB_PROD;
 ```
 
 Do not put the private key in SQL, an issue, a pull request, chat or logs.
+This `CREATE USER` step is first-time provisioning and is not idempotent. On a
+subsequent deployment, verify the existing `ROASTPILOT_WEB_PROD` service
+principal and its `PUBLIC_WEB` role grant instead of trying to create it again.
+Rotate its key only when a key rotation is deliberately planned. Do not run
+`CREATE USER` during an ordinary redeployment.
 
 ## P3: configure the Vercel Production environment
 
@@ -223,11 +229,18 @@ Preview deployment carries Preview-scoped environment variables, including
 the DEV Snowflake credential and `ROASTPILOT_DEV`, so promotion would violate
 the production separation required by D-C7-5.
 
-To roll back, run `vercel rollback` to a previous good Production deployment,
-or use `vercel ls` to identify and promote only a deployment that was built for
-Production with Production-scoped variables. Never roll back or promote from a
-Preview deployment. After every release or rollback, re-verify BotID and the
-SSG read path before treating Production as healthy.
+An application rollback does not roll back Snowflake, whose schema remains
+forward-only. Before rolling back, confirm that the target application is
+compatible with the current production schema, including secure-view
+projections and procedure contracts. If it is not compatible, roll forward
+with a corrected application deployment or a reviewed forward schema
+correction.
+
+For a compatible target, run `vercel rollback` to a previous good Production
+deployment, or use `vercel ls` to identify and promote only a deployment that
+was built for Production with Production-scoped variables. Never roll back or
+promote from a Preview deployment. After every release or rollback, re-verify
+BotID and the SSG read path before treating Production as healthy.
 
 ## P4: provide production roast data
 
