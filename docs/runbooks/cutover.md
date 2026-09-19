@@ -1,16 +1,15 @@
 # Trial to on-demand billing cutover
 
-This runbook covers the operator-controlled transition from Snowflake trial
-credits to on-demand billing for the existing production account. It does not
-create, migrate, resize or re-provision any Snowflake or Vercel object.
+This runbook covers the operator-controlled transition from Snowflake trial credits
+to on-demand billing for the existing production account. It does not create,
+migrate, resize or re-provision any Snowflake or Vercel object.
 
 ## S0: Context and decisions
 
-The account is already in Azure UK South, on the Standard edition and using
-on-demand capacity. C1 through C7 ran against its 30-day trial allocation of
-approximately $400 in credits. Here, "cutover" means arranging continued
-on-demand billing when those trial credits expire. It is a billing transition,
-not an account, region, edition or warehouse-size migration.
+The account is already in Azure UK South, on the Standard edition and using on-demand
+capacity. C1 through C7 ran against its 30-day trial allocation of approximately $400
+in credits. Here, "cutover" means arranging continued on-demand billing when those
+trial credits expire. It is not an account, region, edition or warehouse-size migration.
 
 The existing production deployment remains the one documented in
 [Production deployment](prod-deploy-runbook.md). Its service-user and key-pair
@@ -50,9 +49,12 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
    SELECT CURRENT_REGION();
    ```
 
-   Compare the returned account identifier with the approved production
-   account record `[VERIFY-LIVE]`. Never copy that identifier into this public
-   repository. Stop if the account or region differs.
+   `CURRENT_ACCOUNT()` returns the account locator, not the organisation-account
+   identifier. Compare it for exact equality with a separately approved production
+   record explicitly stored as the account locator `[VERIFY-LIVE]`. Do not compare
+   it with an `<organisation>-<account_name>` or `<organisation>.<account_name>`
+   value, and do not accept a partial match. Never copy either identifier form into
+   this public repository. Stop if the exact locator or region differs.
 
 2. In Snowsight, open **Admin -> Accounts** and inspect the live account
    details `[VERIFY-LIVE]`. Confirm that the edition is Standard and that the
@@ -64,21 +66,6 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
    trial-credit balance, expiry state and payment-method readiness
    `[VERIFY-LIVE]`. Record the observation in the private operator log without
    copying an account identifier or payment details into the repository.
-
-4. Before trial credits are exhausted, enable or confirm on-demand billing and
-   a valid payment method in that Snowsight Billing surface `[VERIFY-LIVE]`.
-   Obtain the normal operator approval for the charge. Do not wait for the
-   account or warehouse to be suspended.
-
-5. Re-open the same Billing surface and verify that continued on-demand billing
-   is active `[VERIFY-LIVE]`. The same account, region, edition and warehouse
-   continue at expiry. No object is recreated and there is no downtime or
-   re-provisioning: credentials, roles, secure views, resource monitor and the
-   live taster at <https://roastpilot-cloud.vercel.app> remain in place.
-
-If payment readiness or continued billing cannot be proved, stop and escalate
-before the credits expire. Do not treat a successful Snowflake query as proof
-of future billing continuity.
 
 ## S3: Confirm existing cost controls
 
@@ -108,6 +95,24 @@ re-embed or modify the verifier during cutover. A mismatch or visibility error
 blocks the cutover until the live state is understood and reconciled through
 the normal change process.
 
+Do not enable on-demand billing until this S3 verification has passed in full.
+
+### Complete S2 after the S3 gate passes
+
+4. Only after S3 has passed, and before trial credits are exhausted, enable or confirm
+   on-demand billing and a valid payment method in the Snowsight Billing surface
+   `[VERIFY-LIVE]`. Obtain operator approval. Do not wait for suspension.
+
+5. Re-open the Billing surface and verify that continued on-demand billing is active
+   `[VERIFY-LIVE]`. Re-run the C7-S3 live verifier and require it to pass again,
+   confirming the monitor, warehouse binding and statement timeout remain in place.
+   The same account, region, edition and warehouse continue at expiry. No object is
+   recreated and there is no downtime or re-provisioning: credentials, roles, secure
+   views, resource monitor and <https://roastpilot-cloud.vercel.app> remain in place.
+
+If payment readiness, continued billing or either cost-control verification cannot be
+proved, stop before expiry. A successful query does not prove billing continuity.
+
 ## S4: Verify the production service-user and key-pair
 
 `ROASTPILOT_WEB_PROD` and its production key-pair already exist and are live.
@@ -122,12 +127,11 @@ USE ROLE ACCOUNTADMIN;
 SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 ```
 
-The result must contain exactly one row whose exact name is
-`ROASTPILOT_WEB_PROD`. Confirm that its `default_secondary_roles` column is
-empty, representing `DEFAULT_SECONDARY_ROLES = ()`. In Snowsight, open
-**Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** and confirm that key-pair
-authentication is configured `[VERIFY-LIVE]`; do not copy a fingerprint or any
-key material into the operator record.
+The result must contain exactly one row named `ROASTPILOT_WEB_PROD`. Confirm that its
+`default_secondary_roles` column is empty, representing
+`DEFAULT_SECONDARY_ROLES = ()`. In Snowsight, open **Admin -> Users & Roles ->
+ROASTPILOT_WEB_PROD** and confirm key-pair authentication is configured
+`[VERIFY-LIVE]`; do not copy a fingerprint or key material into the operator record.
 
 Use the verification detail in [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
 and leave all key-pair mechanics to [Snowflake key-pair provisioning and
