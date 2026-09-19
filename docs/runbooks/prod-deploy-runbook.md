@@ -42,7 +42,24 @@ GRANT USAGE, CREATE SCHEMA ON DATABASE ROASTPILOT TO ROLE ROASTPILOT_ADMIN;
 
 ### P1b: apply the migrations
 
-From `snowflake/`, with its Python virtual environment active, run:
+Before using the deployment credential, check out the reviewed release commit
+from `main` and verify that the working tree is clean and `HEAD` matches
+`origin/main`. From the repository root, run:
+
+```bash
+git fetch origin
+git switch --detach origin/main
+git status --short
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+```
+
+`git status --short` must produce no output and the final comparison must
+succeed. Confirm that `origin/main` is the reviewed release commit and stop if
+either check fails. The deployment command applies the migration files in the
+current checkout, so an old branch or an uncommitted edit would execute
+unreviewed DDL as `ROASTPILOT_ADMIN`.
+
+Then, from `snowflake/`, with its Python virtual environment active, run:
 
 ```bash
 SCHEMACHANGE_CONNECTION_NAME=roastpilot SNOWFLAKE_DATABASE=ROASTPILOT \
@@ -54,11 +71,23 @@ The validated first deployment applied 11 scripts. It created the `APP` and
 and the object grants contained in the migrations. Schemachange records its
 history in `ROASTPILOT.METADATA.CHANGE_HISTORY`.
 
-Schema changes are forward-only. If a migration fails or applies only
-partially, add a corrective schemachange migration, merge it to `main`, and
-deploy it through the same process. Never repair production with an ad-hoc
-`ALTER` or a manual reversal. This keeps every schema change in the repository
-and follows the schemachange-only rule.
+Schema changes are forward-only. Snowflake can auto-commit earlier DDL in a
+multi-statement migration before a later statement fails. Schemachange does not
+then mark that migration complete, so the next deployment re-runs the failed
+migration before it can reach any later corrective migration.
+
+The failed migration itself must therefore be replayable before deployment
+resumes. Its DDL may already be idempotent, using forms such as
+`CREATE ... IF NOT EXISTS` or `CREATE OR REPLACE`, so that re-running it
+succeeds. Otherwise, the operator must first remove only the partially created
+objects, then re-run the same reviewed migration. Review and record that
+cleanup as recovery from the failed deployment. A later corrective migration
+alone cannot repair a deployment wedged on an earlier partial migration.
+
+Use new corrective schemachange migrations from `main` for subsequent schema
+evolution. Never use an ad-hoc `ALTER` or a manual reversal as a substitute for
+a migration. This keeps schema evolution in the repository and follows the
+schemachange-only rule.
 
 ### P1c: grant the deliberately omitted prerequisites
 
@@ -104,8 +133,19 @@ The production surface for `PUBLIC_WEB` must be exactly:
 | `USAGE` | procedure `ROASTPILOT.APP.SUBMIT_REVIEW` |
 
 There must be no access to a base table, no access to another procedure, and
-no grant to `PUBLIC`. Both secure views must continue to enforce
-`visibility <> 'private'` in their definitions.
+no grant to `PUBLIC`. Grants do not prove that the secure-view definitions have
+not drifted. As an operator role that can inspect both views, run:
+
+```sql
+SELECT GET_DDL('VIEW', 'ROASTPILOT.APP.ROAST_BY_SLUG');
+SELECT GET_DDL('VIEW', 'ROASTPILOT.APP.REVIEWS_BY_ROAST');
+```
+
+Confirm that each live definition still enforces `visibility <> 'private'`.
+An unchanged repeatable migration is not reapplied merely because a deployed
+view was replaced or altered, so this live check is part of the boundary
+verification. An equivalent negative check as `PUBLIC_WEB`, proving that a
+known private roast is absent from both views, is also acceptable.
 
 ## P2: create the production web credential
 
@@ -177,11 +217,17 @@ do not acquire changed variables automatically.
 
 ### Releases and rollback
 
-Deploy and promote the intended release to Production with
-`vercel deploy --prod`, or promote a validated preview deployment. To roll
-back, run `vercel rollback`, or use `vercel ls` to identify and promote a
-previous good deployment. After every release or rollback, re-verify BotID and
-the SSG read path before treating Production as healthy.
+After the Production variables are set, create a Production-targeted build with
+`vercel deploy --prod`. Never promote a Preview deployment to Production. A
+Preview deployment carries Preview-scoped environment variables, including
+the DEV Snowflake credential and `ROASTPILOT_DEV`, so promotion would violate
+the production separation required by D-C7-5.
+
+To roll back, run `vercel rollback` to a previous good Production deployment,
+or use `vercel ls` to identify and promote only a deployment that was built for
+Production with Production-scoped variables. Never roll back or promote from a
+Preview deployment. After every release or rollback, re-verify BotID and the
+SSG read path before treating Production as healthy.
 
 ## P4: provide production roast data
 
@@ -197,27 +243,54 @@ If a one-off demonstration roast is required before the agent path is
 available, a direct owner insert as `ROASTPILOT_ADMIN` is an explicit exception.
 It may copy only a non-PII roast and telemetry rows that already satisfy every
 range, enum and visibility rule, such as an existing validated roast. Assign a
-fresh slug and idempotency key, and set `contributed_to_learning = true` so that
-the curve renders. Snowflake does not enforce the documented range and enum
-constraints, so the operator is responsible for pre-validating every copied
-value when bypassing the procedure guards. Treat this as an exceptional
-production data operation, not as a seed-tool invocation or the normal ingest
-path.
+fresh slug and idempotency key. Use only a source roast that already has
+`contributed_to_learning = true`, copy that value unchanged, and never override
+an opted-out roast's consent. If no opted-in source exists, do not fabricate
+consent or copy its telemetry.
+
+Snowflake does not enforce the documented range and enum constraints, so the
+operator is responsible for pre-validating every copied value when bypassing
+the procedure guards. A direct insert also bypasses the calls to
+`RECOMPUTE_REFERENCE_SUMMARY` made by `UPSERT_ROAST` and
+`LOAD_ROAST_TELEMETRY`. After all copied roast and telemetry rows are complete,
+run:
+
+```sql
+CALL ROASTPILOT.APP.RECOMPUTE_REFERENCE_SUMMARY(<bean_origin>, <roast_level>);
+```
+
+This refreshes `REFERENCE_ROAST_SUMMARIES` for the copied roast's bean-origin
+and roast-level group. The validated procedure path remains preferred. Treat a
+direct insert as an exceptional production data operation, not as a seed-tool
+invocation or the normal ingest path.
 
 ## P5: verify the live deployment
 
-Verify all of the following against the public production URL:
+First, as `ROASTPILOT_ADMIN`, run the owner-only data-quality check:
 
-- A read for a known production slug returns 200. Until production has a
-  roast, an unknown slug must return the graceful 404 page, never 500.
-- `ROASTPILOT.APP.DATA_QUALITY_VIOLATIONS` is empty.
+```sql
+SELECT count(*) FROM ROASTPILOT.APP.DATA_QUALITY_VIOLATIONS;
+```
+
+The query must return 0. `DATA_QUALITY_VIOLATIONS` is deliberately not granted
+to `PUBLIC_WEB`, so this is an operator check rather than a public-URL check.
+
+Then verify all of the following against the public production URL:
+
+- A read for a known production slug returns 200 when production has a roast.
+  For the unknown-slug probe, query a freshly generated, route-valid Base58
+  slug that meets the entropy floor and has never been requested before. It
+  must return the graceful 404 page, never 500.
 - A scripted review write is rejected by BotID. A `curl` POST returns 403.
 - A genuine browser submission passes BotID and completes successfully.
 
-The 404 check proves that Vercel can authenticate with the production
-key-pair, use the `PUBLIC_WEB` grants and reach Snowflake even when no roast
-matches the requested slug. The browser submission verifies the positive
-write path; the scripted POST verifies the fail-closed edge gate.
+A placeholder such as `missing` can fail route validation before Snowflake is
+queried. A previously requested valid slug can return a cached null for five
+minutes. Using a fresh, route-valid slug ensures that the 404 performs the
+production query and therefore proves that Vercel can authenticate with the
+production key-pair, use the `PUBLIC_WEB` grants and reach Snowflake. The
+browser submission verifies the positive write path; the scripted POST
+verifies the fail-closed edge gate.
 
 ## Ownership summary
 
@@ -230,6 +303,7 @@ write path; the scripted POST verifies the fail-closed edge gate.
 | P2, create and authorize the service user | Operator as `ACCOUNTADMIN` |
 | P3, set Vercel Production variables and redeploy | Orchestrator and operator, with the operator supplying the private key at the CLI |
 | P4, optional one-off production data operation | Operator through `ROASTPILOT_ADMIN` |
+| P5, owner-only data-quality check | Operator through `ROASTPILOT_ADMIN` |
 | P5, public URL and browser verification | Orchestrator |
 
 The `roastpilot` connection can deploy database-portable migrations and carry
