@@ -83,8 +83,12 @@ USE SCHEMA APP;
 views plus `app.submit_review`; both filter `visibility <> 'private'`, so a
 view-sourced export silently omits private roasts. Export every table from the
 `app.<base_table>` named below.
-`ROASTPILOT_AGENT` can read these tables and the stage, but its table writes are
-revoked: it is export-only and cannot perform the row restore.
+`ROASTPILOT_AGENT` can read the tables and stage for export, but its direct table
+`INSERT`, `UPDATE` and `DELETE` privileges are revoked, so it cannot perform the
+bulk-`COPY` row restore; use the verified owner role for backup and restore. It
+is not write-incapable generally: it retains stage `WRITE` and constrained
+writes through the owner-rights `app.upsert_roast` and
+`app.load_roast_telemetry` procedures.
 
 ## What is backed up
 
