@@ -93,24 +93,6 @@ re-embed or modify the verifier during cutover. A mismatch or visibility error
 blocks the cutover until the live state is understood and reconciled through
 the normal change process.
 
-Do not enable on-demand billing until this S3 verification has passed in full.
-
-### Complete S2 after the S3 gate passes
-
-4. Only after S3 has passed, and before trial credits are exhausted, enable or confirm
-   on-demand billing and a valid payment method in the Snowsight Billing surface
-   `[VERIFY-LIVE]`. Obtain operator approval. Do not wait for suspension.
-
-5. Re-open the Billing surface and verify that continued on-demand billing is active
-   `[VERIFY-LIVE]`. Re-run the C7-S3 live verifier and require it to pass again,
-   confirming the monitor, warehouse binding and statement timeout remain in place.
-   The same account, region, edition and warehouse continue at expiry. No object is
-   recreated and there is no downtime or re-provisioning: credentials, roles, secure
-   views, resource monitor and <https://roastpilot-cloud.vercel.app> remain in place.
-
-If payment readiness, continued billing or either cost-control verification cannot be
-proved, stop before expiry. A successful query does not prove billing continuity.
-
 ## S4: Verify the production service-user and key-pair
 
 `ROASTPILOT_WEB_PROD` and its production key-pair already exist and are live.
@@ -139,6 +121,22 @@ and leave all key-pair mechanics to [Snowflake key-pair provisioning and
 rotation](key-rotation.md). If a genuinely fresh environment ever lacks this
 credential, provision it per C7-S2 before go-live as a separate action, not as
 part of billing cutover.
+
+### Activate billing only after both checkpoints pass
+
+4. Only after BOTH the S3 cost-control verification and the S4 credential checkpoint
+   have passed, enable or confirm on-demand billing and a valid payment method before
+   trial credits expire `[VERIFY-LIVE]`. Obtain approval. Do not wait for suspension.
+
+5. Re-open the Billing surface and verify that continued on-demand billing is active
+   `[VERIFY-LIVE]`. Re-run the C7-S3 live verifier and require it to pass again,
+   confirming the monitor, warehouse binding and statement timeout remain in place.
+   The same account, region, edition and warehouse continue at expiry. No object is
+   recreated and there is no downtime or re-provisioning: credentials, roles, secure
+   views, resource monitor and <https://roastpilot-cloud.vercel.app> remain in place.
+
+If payment readiness, either checkpoint, continued billing or the post-activation cost
+check cannot be proved, stop. A successful query alone does not prove continuity.
 
 ## S5: Ownership summary
 
