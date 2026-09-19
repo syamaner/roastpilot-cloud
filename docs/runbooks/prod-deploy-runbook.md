@@ -30,6 +30,19 @@ Run these steps in order. The first and third require the operator's
 `ACCOUNTADMIN` access. The middle step runs through the existing
 `roastpilot` connection as `ROASTPILOT_ADMIN`.
 
+### P1 precondition: provision the production database
+
+The `ROASTPILOT` database must exist before P1a. As `ACCOUNTADMIN`, verify it
+and create it only if it is absent:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+SHOW DATABASES LIKE 'ROASTPILOT';
+CREATE DATABASE IF NOT EXISTS ROASTPILOT;
+```
+
+P1a's database grant fails if `ROASTPILOT` does not exist.
+
 ### P1a: enable the deployment role
 
 As `ACCOUNTADMIN`, grant the interim deployment role only the database
@@ -50,14 +63,33 @@ from `main` and verify that the working tree is clean and `HEAD` matches
 git fetch origin
 git switch --detach origin/main
 git status --short
+git status --ignored --short snowflake/migrations/
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 ```
 
-`git status --short` must produce no output and the final comparison must
-succeed. Confirm that `origin/main` is the reviewed release commit and stop if
-either check fails. The deployment command applies the migration files in the
-current checkout, so an old branch or an uncommitted edit would execute
-unreviewed DDL as `ROASTPILOT_ADMIN`.
+Both status commands must produce no output and the final comparison must
+succeed. The ignored-files check ensures that `snowflake/migrations/` contains
+only reviewed tracked files. Schemachange runs every migration SQL file it
+finds, including an ignored or untracked file left behind by a branch switch.
+Confirm that `origin/main` is the reviewed release commit and stop if any check
+fails. The deployment command applies the migration files in the current
+checkout, so an old branch or an uncommitted edit would execute unreviewed DDL
+as `ROASTPILOT_ADMIN`.
+
+`with_connection_env.py` allows ambient `SNOWFLAKE_*` variables to override
+the selected connection. Before deploying, remove stray identity overrides and
+confirm that none remain:
+
+```bash
+unset SNOWFLAKE_ROLE SNOWFLAKE_ACCOUNT SNOWFLAKE_WAREHOUSE SNOWFLAKE_USER
+env | grep -E '^SNOWFLAKE_(ROLE|ACCOUNT|WAREHOUSE|USER)='
+```
+
+The final command must produce no output. Alternatively, set every variable
+explicitly to the intended account, user, warehouse and
+`SNOWFLAKE_ROLE=ROASTPILOT_ADMIN`. The effective deployment identity must be
+the `roastpilot` connection as `ROASTPILOT_ADMIN`, not an ambient shell
+override.
 
 Then, from `snowflake/`, with its Python virtual environment active, run:
 
@@ -115,12 +147,19 @@ objects:
 ```sql
 SHOW GRANTS TO ROLE PUBLIC_WEB;
 SHOW FUTURE GRANTS TO ROLE PUBLIC_WEB;
+SHOW GRANTS TO ROLE PUBLIC;
+SHOW FUTURE GRANTS TO ROLE PUBLIC;
 ```
 
 `SHOW FUTURE GRANTS TO ROLE PUBLIC_WEB` must return no rows. A future grant on
 this shared account-level role could make a later-created base table readable,
 even when the current-grants query is clean. An empty result is part of the
 grant-boundary invariant.
+
+Filter both `PUBLIC` results to `ROASTPILOT` and the objects owned by this
+project. Neither query may contain a grant that reaches an object we own. This
+enforces the invariant that nothing we own is granted to `PUBLIC`, including
+through future grants.
 
 The production surface for `PUBLIC_WEB` must be exactly:
 
@@ -148,6 +187,18 @@ view was replaced or altered, so this live check is part of the boundary
 verification. An equivalent negative check as `PUBLIC_WEB`, proving that a
 known private roast is absent from both views, is also acceptable.
 
+After first-time P2 provisioning, and during each later boundary audit, verify
+the production web user as `ACCOUNTADMIN`:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
+```
+
+Confirm that the `default_secondary_roles` column is empty, representing
+`DEFAULT_SECONDARY_ROLES = ()`. Pinning the primary role in application code
+does not prevent secondary-role inheritance from broadening the session.
+
 ## P2: provision the production web credential for the first deployment
 
 Generate a production-only, unencrypted PKCS8 key-pair in a secure operator
@@ -167,6 +218,7 @@ USE ROLE ACCOUNTADMIN;
 CREATE USER ROASTPILOT_WEB_PROD
   TYPE = SERVICE
   DEFAULT_ROLE = PUBLIC_WEB
+  DEFAULT_SECONDARY_ROLES = ()
   DEFAULT_WAREHOUSE = ROASTPILOT_WH
   RSA_PUBLIC_KEY = '<single-line public key body>'
   COMMENT = 'prod public web app; PUBLIC_WEB only (D-C7-6)';
@@ -201,6 +253,11 @@ the operator's terminal so that it does not transit chat or logs:
 ```bash
 vercel env add SNOWFLAKE_WEB_PRIVATE_KEY production < roastpilot_web_prod_key.p8
 ```
+
+After confirming the upload, store the private key in the operator's approved
+secrets manager or credential escrow, then remove the plaintext
+`roastpilot_web_prod_key.p8` file from the working directory. It is a long-lived,
+unencrypted production credential and must not remain on disk there.
 
 The production write path also requires these variables alongside the
 `SNOWFLAKE_WEB_*` variables:
@@ -258,10 +315,12 @@ It may copy only a non-PII roast and telemetry rows that already satisfy every
 range, enum and visibility rule, such as an existing validated roast. Assign a
 fresh UUID to the copied `cloud_roasts.id`, then rewrite every copied
 `roast_telemetry.roast_id` to that new UUID. Also assign a fresh slug and
-idempotency key. Reusing the source ID is unsafe because Snowflake does not
-enforce the documented primary key and `DATA_QUALITY_VIOLATIONS` does not detect
-duplicate roast IDs. A duplicate can make joins ambiguous and break
-`DELETE_ROAST`.
+idempotency key. The slug must be a freshly generated, route-valid Base58 value
+that meets the entropy floor. An arbitrary label such as `demo-roast-1` fails
+route validation and returns 404. Reusing the source ID is unsafe because
+Snowflake does not enforce the documented primary key and
+`DATA_QUALITY_VIOLATIONS` does not detect duplicate roast IDs. A duplicate can
+make joins ambiguous and break `DELETE_ROAST`.
 
 Use only a source roast that already has `contributed_to_learning = true`, copy
 that value unchanged, and never override an opted-out roast's consent. If no
@@ -334,10 +393,11 @@ verifies the fail-closed edge gate.
 
 | Step | Owner and identity |
 | --- | --- |
+| P1 precondition, provision the production database if absent | Operator as `ACCOUNTADMIN` |
 | P1a, grant database deployment privileges | Operator as `ACCOUNTADMIN` |
 | P1b, run schemachange | `roastpilot` key-pair connection as `ROASTPILOT_ADMIN` |
 | P1c, grant database and schema prerequisites | Operator as `ACCOUNTADMIN` |
-| P1 boundary verification | Operator with account grant visibility |
+| P1 boundary and web-user verification | Operator as `ACCOUNTADMIN` |
 | P2, create and authorize the service user | Operator as `ACCOUNTADMIN` |
 | P3, set Vercel Production variables and redeploy | Orchestrator and operator, with the operator supplying the private key at the CLI |
 | P4, optional one-off production data operation | Operator through `ROASTPILOT_ADMIN` |
