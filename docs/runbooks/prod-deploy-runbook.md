@@ -256,10 +256,16 @@ If a one-off demonstration roast is required before the agent path is
 available, a direct owner insert as `ROASTPILOT_ADMIN` is an explicit exception.
 It may copy only a non-PII roast and telemetry rows that already satisfy every
 range, enum and visibility rule, such as an existing validated roast. Assign a
-fresh slug and idempotency key. Use only a source roast that already has
-`contributed_to_learning = true`, copy that value unchanged, and never override
-an opted-out roast's consent. If no opted-in source exists, do not fabricate
-consent or copy its telemetry.
+fresh UUID to the copied `cloud_roasts.id`, then rewrite every copied
+`roast_telemetry.roast_id` to that new UUID. Also assign a fresh slug and
+idempotency key. Reusing the source ID is unsafe because Snowflake does not
+enforce the documented primary key and `DATA_QUALITY_VIOLATIONS` does not detect
+duplicate roast IDs. A duplicate can make joins ambiguous and break
+`DELETE_ROAST`.
+
+Use only a source roast that already has `contributed_to_learning = true`, copy
+that value unchanged, and never override an opted-out roast's consent. If no
+opted-in source exists, do not fabricate consent or copy its telemetry.
 
 Snowflake does not enforce the documented range and enum constraints, so the
 operator is responsible for pre-validating every copied value when bypassing
@@ -291,11 +297,30 @@ to `PUBLIC_WEB`, so this is an operator check rather than a public-URL check.
 Then verify all of the following against the public production URL:
 
 - A read for a known production slug returns 200 when production has a roast.
-  For the unknown-slug probe, query a freshly generated, route-valid Base58
+  The slug must belong to a roast whose visibility is `unlisted` or `public`.
+  A `private` roast is correctly filtered by `ROAST_BY_SLUG` and returns 404.
+- For the unknown-slug probe, query a freshly generated, route-valid Base58
   slug that meets the entropy floor and has never been requested before. It
   must return the graceful 404 page, never 500.
-- A scripted review write is rejected by BotID. A `curl` POST returns 403.
-- A genuine browser submission passes BotID and completes successfully.
+- A scripted review write that reaches BotID is rejected with 403.
+- A genuine browser submission for the same non-private roast used in the 200
+  read check passes BotID and completes successfully.
+
+Use a route-valid Base58 slug, JSON content type, a parseable JSON body, and an
+empty or absent `website` honeypot field for the scripted BotID probe. This
+concrete request reaches BotID:
+
+```bash
+curl -i -X POST \
+  'https://roastpilot-cloud.vercel.app/api/r/23456789ABCDEFGHJK/reviews' \
+  -H 'Content-Type: application/json' \
+  --data '{"score":5,"website":""}'
+```
+
+It must return 403. A bad slug returns 404, a missing JSON content type returns
+415, malformed JSON returns 400, and a filled `website` field returns the
+honeypot's 200 response. All of those outcomes occur before BotID and therefore
+do not verify its scripted-write denial.
 
 A placeholder such as `missing` can fail route validation before Snowflake is
 queried. A previously requested valid slug can return a cached null for five
