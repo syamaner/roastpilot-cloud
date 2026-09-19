@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S3 + S8 delivered 17 Sep, S5 next).**
+**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S1/S2/S3/S5/S8 delivered, S4 + S6 the remaining buildable runbooks, S7 deferred).**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -75,16 +75,23 @@ STATEMENT_TIMEOUT hardening, **#548** S4 backup/export runbook, **#549** S5 edge
 denial-of-wallet (Basic BotID; WAF + Deep Analysis as documented Pro-tier),
 **#550** S6 trial→on-demand cutover runbook, **#551** S8 public taster bug-report
 path (`.github/**` → factory-security-reviewer), **#552** S7 (DEFERRED) scheduled
-backup export (depends #548). **#547 (S3) DONE + CLOSED** (resource-monitor
+backup export (depends #548). **#545 (S1) DONE + MERGED** (production deployment
+runbook, PR #560 → main `eb66ea4`). **#546 (S2) DONE + MERGED** (key-pair
+provisioning/rotation runbook, PR #561 → main `1214f09`; converged only after a
+long fold arc — 4 pre-open rounds + 2 post-open Codex-connector rounds, ~17 real
+findings all folded, the security-docs non-convergence pattern; the executing
+`codex review` and the connector caught operational defects the read-only board
+lenses did not). **#547 (S3) DONE + CLOSED** (resource-monitor
 live-verifier + STATEMENT_TIMEOUT hardening merged #554/#555/#556, live-validated
-under ACCOUNTADMIN 17 Sep). **#551 (S8) CODE DONE + MERGED** (taster issue-form
+under ACCOUNTADMIN 17 Sep). **#549 (S5) DONE + MERGED** (edge denial-of-wallet
+Basic BotID, PR #559 → main `4b6fbde`). **#551 (S8) CODE DONE + MERGED** (taster issue-form
 template + static report link on `/r/[slug]`, PR #557 `39e4761`; #551 kept open
 via Refs for the operator's close — the Codex connector caught a P1 the read-only
 board missed, an unlisted-roast slug being leaked into a public issue, folded by
-removing the slug from the report path). **#549 (S5) is
-`ready-for-conventional-implementation`** with a story-planner contract posted
-(the next buildable story); the four runbook stories (#545/#546/#548/#550) and
-#552 (S7 deferred) remain `needs-triage`. **Four C7 decisions recorded (plan-repo ledger L366):**
+removing the slug from the report path). **#548 (S4 backup/export) and #550 (S6
+cutover) are `ready-for-conventional-implementation`** (triaged 19 Sep, plan-repo
+ledger L384 — the remaining buildable runbooks). **#552 (S7 deferred) stays
+`needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
 D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
 smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
 monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
