@@ -25,8 +25,9 @@ never put exported data in the repository.
 `<approved_backup_stage>` must be the exact existing three-part name
 `<backup_db>.<schema>.<stage>`. Each unquoted segment must match
 `^[A-Za-z_][A-Za-z0-9_$]*$`, and `<backup_db>` must be neither `ROASTPILOT` nor
-`ROASTPILOT_DEV`. Before substitution, validate `<backup_id>` and every
-`idempotency_key`-derived `<run_id>` against `^[0-9a-zA-Z_-]{1,64}$`.
+`ROASTPILOT_DEV`. Before substitution, require `<backup_id>` and every
+`idempotency_key`-derived `<run_id>` to be 1–64 characters and match
+`^[0-9A-Za-z_]+(?:-[0-9A-Za-z_]+)*$`.
 Semicolons, quotes, whitespace, `/../`, and `--` are forbidden in those IDs and
 in every stage-name segment. Validate a later `<recovery_db>` as one unquoted
 identifier segment under the same identifier grammar. These values reach a
@@ -104,9 +105,11 @@ reviews. Snowflake does not enforce foreign keys. Stage files and
 
 ### Export all five base tables
 
-Parquet is the explicit format and carries column names in its schema;
-`MATCH_BY_COLUMN_NAME` uses those names during restore, so no inert `HEADER`
-option is set. A new `<backup_id>` and `OVERWRITE=FALSE` prevent replacement.
+Parquet is the explicit format. `HEADER=TRUE` is required on every unload so
+Snowflake writes source column names instead of generated `_col0`, `_col1`, …
+field names; the restore's `MATCH_BY_COLUMN_NAME` depends on those source names.
+The VARIANT/Parquet round-trip is `[VERIFY-LIVE]`. A new `<backup_id>` and
+`OVERWRITE=FALSE` prevent replacement.
 
 For a non-quiesced table export, first pause stage writers and let in-flight
 stage/row operations finish. In the same SnowSQL session, select one timestamp
@@ -117,13 +120,13 @@ the complete `LIST`/`GET` and checksum window because stages have no Time Travel
 SET backup_snapshot_ts = CURRENT_TIMESTAMP();
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/
   FROM (SELECT * FROM app.cloud_roasts AT(TIMESTAMP => $backup_snapshot_ts))
-  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/roast_telemetry/
   FROM (SELECT * FROM app.roast_telemetry AT(TIMESTAMP => $backup_snapshot_ts))
-  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/roast_artifacts/
   FROM (SELECT * FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts))
-  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
   FROM (
     SELECT * REPLACE (
@@ -132,10 +135,10 @@ COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
     )
     FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
   )
-  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/reference_roast_summaries/
   FROM (SELECT * FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts))
-  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 ```
 
 Capture counts at that same point and record `$backup_snapshot_ts`:
@@ -209,14 +212,18 @@ SELECT
   (SELECT COUNT(*) FROM app.roast_artifacts) AS roast_artifacts,
   (SELECT COUNT(*) FROM app.tasting_reviews) AS tasting_reviews,
   (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries;
+LIST @app.roast_artifacts;
 ```
 
 `CURRENT_DATABASE()` must exactly equal the deliberately chosen recovery
-target, and all five counts must be zero. Stop before `COPY` if the target is
-the live source, any table is non-empty, or identity is unknown. Reusing the
-source name is permissible only after the former source is unavailable, a
-fresh migration has recreated an empty schema, and the operator has explicitly
-approved that disaster-recovery target.
+target, all five counts must be zero, and `LIST @app.roast_artifacts;` must
+return zero files. A non-empty stage is persisted state from a prior or partial
+restore and must be cleaned through the approved recovery cleanup process before
+this preflight is repeated. Stop before `COPY` if the target is the live source,
+any table or stage is non-empty, or identity is unknown. Reusing the source name
+is permissible only after the former source is unavailable, a fresh migration
+has recreated an empty schema, and the operator has explicitly approved that
+disaster-recovery target.
 
 Snowflake does not enforce foreign keys; an out-of-order restore can silently
 create orphans. Reverse the delete cascade: restore `app.cloud_roasts`, then
