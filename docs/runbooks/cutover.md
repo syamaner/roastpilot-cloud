@@ -1,8 +1,7 @@
 # Trial to on-demand billing cutover
 
-This runbook covers the operator-controlled transition from Snowflake trial credits
-to on-demand billing for the existing production account. It does not create,
-migrate, resize or re-provision any Snowflake or Vercel object.
+This runbook covers the operator-controlled transition from Snowflake trial credits to
+on-demand billing. It does not create, migrate, resize or re-provision any object.
 
 ## S0: Context and decisions
 
@@ -18,10 +17,9 @@ rotation](key-rotation.md). The cost-control boundary remains the shared
 warehouse and monitor documented in [Resource monitor and shared
 warehouse](resource-monitor.md).
 
-Run the checks below as close as practical to the billing change, and complete
-the payment-method step before the remaining trial credits are exhausted.
-Unknown billing state, identity or configuration fails closed: stop the
-cutover and verify it through the named live administration surface.
+Run the checks close to the billing change, and complete the payment-method step before
+the trial credits are exhausted. Unknown billing state, identity or configuration fails
+closed: stop and verify it through the named live administration surface.
 
 ## S1: Target pin
 
@@ -127,11 +125,14 @@ USE ROLE ACCOUNTADMIN;
 SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 ```
 
-The result must contain exactly one row named `ROASTPILOT_WEB_PROD`. Confirm that its
-`default_secondary_roles` column is empty, representing
-`DEFAULT_SECONDARY_ROLES = ()`. In Snowsight, open **Admin -> Users & Roles ->
-ROASTPILOT_WEB_PROD** and confirm key-pair authentication is configured
-`[VERIFY-LIVE]`; do not copy a fingerprint or key material into the operator record.
+`LIKE` treats each `_` as a single-character wildcard. Accept the complete result only
+when it contains exactly one row and that row's `name` column byte-exactly equals
+`ROASTPILOT_WEB_PROD`. More than one row, zero rows, or any non-exact name means STOP:
+do not proceed with cutover. Only that single exact row may be checked, and its
+`default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
+In Snowsight, open **Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** and confirm
+key-pair authentication is configured `[VERIFY-LIVE]`; do not copy a fingerprint or
+key material into the operator record.
 
 Use the verification detail in [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
 and leave all key-pair mechanics to [Snowflake key-pair provisioning and
@@ -155,6 +156,5 @@ part of billing cutover.
 | Production database, service user and key-pair | Already provisioned / no action |
 | Vercel Production environment and live taster | Already provisioned / no action |
 
-The operator owns only the live verification and billing activation steps.
-This runbook authorises no new role, grant, warehouse, credential, database or
-application deployment.
+The operator owns only live verification and billing activation. This runbook authorises
+no new role, grant, warehouse, credential, database or application deployment.
