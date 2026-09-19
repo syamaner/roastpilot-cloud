@@ -5,8 +5,8 @@ the Snowflake roast data graph and its staged artifact files.
 
 ## Context and decisions
 
-Production is database `ROASTPILOT`; DEV is `ROASTPILOT_DEV`. Select the target
-explicitly and never overwrite one environment with the other. Automated
+Production is database `ROASTPILOT`; DEV is `ROASTPILOT_DEV`. Set `<source_db>`
+deliberately to the one being exported and never mix environments. Automated
 exports are deferred to #552. This procedure creates no workflow, principal,
 role, warehouse or grant and cannot weaken the grant boundary. See
 [Production deployment](prod-deploy-runbook.md) and
@@ -29,7 +29,8 @@ never put exported data in the repository.
 `idempotency_key`-derived `<run_id>` to be 1–64 characters and match
 `^[0-9A-Za-z_]+(?:-[0-9A-Za-z_]+)*$`.
 Semicolons, quotes, whitespace, `/../`, and `--` are forbidden in those IDs and
-in every stage-name segment. Validate a later `<recovery_db>` as one unquoted
+in every stage-name segment. `<source_db>` must be exactly `ROASTPILOT` or
+`ROASTPILOT_DEV`; validate it and a later `<recovery_db>` as one unquoted
 identifier segment under the same identifier grammar. These values reach a
 multi-statement SnowSQL script and local paths; unknown or non-matching input
 is an injection or traversal risk and must fail closed.
@@ -47,14 +48,14 @@ stage; stop if the owner is unknown or differs.
 
 ```sql
 USE ROLE ACCOUNTADMIN;
-SHOW SCHEMAS LIKE 'APP' IN DATABASE ROASTPILOT;
-SHOW OBJECTS IN SCHEMA ROASTPILOT.APP;
-SHOW STAGES IN SCHEMA ROASTPILOT.APP;
+SHOW SCHEMAS LIKE 'APP' IN DATABASE <source_db>;
+SHOW OBJECTS IN SCHEMA <source_db>.APP;
+SHOW STAGES IN SCHEMA <source_db>.APP;
 ```
 
-Accept only the exact `APP` schema row, the five named table rows and the exact
-`ROAST_ARTIFACTS` stage row. All must show the expected owner before switching
-roles; stop if any owner differs, is missing or is unknown.
+Accept only the exact `<source_db>.APP` schema row, the five named table rows
+and the exact `ROAST_ARTIFACTS` stage row. All must show the expected owner
+before switching roles; stop if any owner differs, is missing or is unknown.
 
 Separately verify the real three-part backup destination before unloading PII:
 
@@ -70,12 +71,11 @@ policy from these live results. Missing, ambiguous or unexpected state fails
 closed. This destination-stage check is distinct from the protected database's
 `@app.roast_artifacts` ownership check above.
 
-Run as the verified owner, using `ROASTPILOT` below or deliberately replacing
-it with `ROASTPILOT_DEV` for a DEV rehearsal:
+Run as the verified owner and select that same source database:
 
 ```sql
 USE ROLE ROASTPILOT_ADMIN;
-USE DATABASE ROASTPILOT;
+USE DATABASE <source_db>;
 USE SCHEMA APP;
 ```
 
@@ -116,6 +116,18 @@ stage/row operations finish. In the same SnowSQL session, select one timestamp
 once and apply it to every unload and count. Keep stage writers paused through
 the complete `LIST`/`GET` and checksum window because stages have no Time Travel.
 
+Before the first write, prove that both destinations are empty:
+
+```sql
+LIST @<approved_backup_stage>/<backup_id>/;
+```
+
+The `LIST` must return zero files. Stop if the prefix is non-empty: a reused or
+partial `<backup_id>` must be resolved before export. Also confirm that
+`file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/` is an
+empty, operator-controlled local directory, newly created if necessary, before
+any `GET`; stale local files must never be mixed into the new backup.
+
 ```sql
 SET backup_snapshot_ts = CURRENT_TIMESTAMP();
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/
@@ -150,6 +162,16 @@ UNION ALL SELECT 'roast_artifacts', COUNT(*) FROM app.roast_artifacts AT(TIMESTA
 UNION ALL SELECT 'tasting_reviews', COUNT(*) FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
 UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts);
 ```
+
+The protected manifest must also record source-snapshot VARIANT type/null
+profiles for `app.cloud_roasts.summary`, `app.roast_telemetry.raw`, and
+`app.reference_roast_summaries.key_patterns`, including non-null counts for the
+nested `summary` paths used by summary recomputation. Preserve per-row presence
+where needed to detect one row losing a value while another gains one. Record
+every source `(bean_origin, roast_level)` key and its derived aggregate values from
+`app.reference_roast_summaries` at `$backup_snapshot_ts`; exclude only identity
+and update-timestamp fields. These are recovery acceptance baselines, not a
+replacement for recomputation.
 
 Alternatively, quiesce all table and stage writers before the first current-state
 count and keep them paused until every `GET` and checksum finishes. Never mix
@@ -288,6 +310,36 @@ trusting a stale aggregate.
 
 ## Verify
 
+Before accepting recovery, validate the restored semi-structured values:
+
+```sql
+SELECT
+  COUNT(*) AS roast_count,
+  COUNT_IF(summary IS NULL) AS summary_null,
+  COUNT_IF(TYPEOF(summary) <> 'OBJECT') AS summary_not_object,
+  COUNT_IF(summary:started_at_utc IS NOT NULL) AS started_at_present,
+  COUNT_IF(summary:beans_added_at_utc IS NOT NULL) AS beans_added_present,
+  COUNT_IF(summary:first_crack_at_utc IS NOT NULL) AS first_crack_present,
+  COUNT_IF(summary:beans_dropped_at_utc IS NOT NULL) AS beans_dropped_present,
+  COUNT_IF(summary:development_time_percent IS NOT NULL) AS development_present,
+  COUNT_IF(summary:total_roast_seconds IS NOT NULL) AS total_seconds_present
+FROM app.cloud_roasts;
+SELECT
+  COUNT_IF(raw IS NULL) AS raw_null,
+  COUNT_IF(raw IS NOT NULL AND TYPEOF(raw) <> 'OBJECT') AS raw_not_object
+FROM app.roast_telemetry;
+SELECT
+  COUNT_IF(key_patterns IS NULL) AS key_patterns_null,
+  COUNT_IF(key_patterns IS NOT NULL AND TYPEOF(key_patterns) <> 'ARRAY') AS key_patterns_not_array
+FROM app.reference_roast_summaries;
+```
+
+`summary_null` and every unexpected-type count must be zero. The other null,
+nested-path and per-row presence results must equal the source-snapshot profiles
+in the protected manifest; an unexpected loss is a restore failure even when
+the procedure returned success. Apply the same comparison to any additional
+VARIANT shape recorded in the manifest.
+
 All results here are `[VERIFY-LIVE]`. Compare manifest counts only for the four
 loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
 and `app.tasting_reviews`. Confirm zero orphan `roast_id` values in the three
@@ -296,11 +348,23 @@ child tables by left-joining each to `app.cloud_roasts`. Confirm every
 expected checksum.
 
 Confirm no retained `submitted_ip_hash` is 30 days old or older. Require zero
-owner-only data-quality violations. Validate `app.reference_roast_summaries`
-solely against a fresh derivation: recomputation must succeed for every present
-group. Never compare its row count with the exported snapshot, because an absent
-or zero-count old group can legitimately change that count. Keep the target
-isolated and stop if any check is unknown or fails.
+owner-only data-quality violations. Recompute every present summary group, then
+compare these freshly derived keys and values with the manifest baseline:
+
+```sql
+SELECT bean_origin, roast_level, roast_count, review_count, avg_rating,
+       first_crack_temp_avg_c, first_crack_temp_stddev_c,
+       drop_temp_avg_c, drop_temp_stddev_c, development_percent_avg,
+       first_crack_time_avg_s, total_time_avg_s
+FROM app.reference_roast_summaries
+ORDER BY bean_origin, roast_level;
+```
+
+Never compare only the summary row count with the exported snapshot: an absent
+or zero-count old group can legitimately change it. Procedure success alone is
+not acceptance evidence; the VARIANT profiles and freshly derived aggregate
+values must match the manifest. Keep the target isolated and stop if any check
+is unknown or fails.
 
 ## Ownership summary
 
