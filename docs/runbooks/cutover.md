@@ -102,23 +102,23 @@ SELECT CURRENT_ACCOUNT();
 SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 ```
 
-Accept only when the session locator matches S2 and the complete `SHOW` has exactly one row.
-Its `name` must byte-exactly equal `ROASTPILOT_WEB_PROD`; `_` is a wildcard, so zero,
-multiple/non-exact rows mean STOP. Its `default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
+Accept only when the S2-matched session's complete `SHOW` has exactly one row whose `name`
+byte-exactly equals `ROASTPILOT_WEB_PROD`; zero/multiple/non-exact rows mean STOP, and its `default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
 
-The deployed `SNOWFLAKE_WEB_ACCOUNT` may use organisation-account form; `CURRENT_ACCOUNT()`
-is a locator. Prove both map to the same approved account `[VERIFY-LIVE]`, never byte-compare.
+The deployed `SNOWFLAKE_WEB_ACCOUNT` may use organisation-account form while `CURRENT_ACCOUNT()` is a locator; prove both map to the approved account `[VERIFY-LIVE]`, never byte-compare.
 
-Read Vercel Production's deployed `SNOWFLAKE_WEB_USER` `[VERIFY-LIVE]`; require byte-exact
-`ROASTPILOT_WEB_PROD` or STOP. Account match plus P5 does not identify the principal.
+Read Vercel Production's deployed values `[VERIFY-LIVE]`; require byte-exact
+`SNOWFLAKE_WEB_USER = ROASTPILOT_WEB_PROD`, `SNOWFLAKE_WEB_WAREHOUSE = ROASTPILOT_WH`, and
+`SNOWFLAKE_WEB_DATABASE = ROASTPILOT`, or STOP. P5 does not identify the principal or
+monitored warehouse: it can pass through any warehouse available to `PUBLIC_WEB`, while
+the monitor binds `ROASTPILOT_WH`. Missing database defaults to `ROASTPILOT_DEV`; a wrong value targets the wrong environment.
 
 Before cutover, both owning-runbook gates are REQUIRED for that approved account:
 
 - [Verify the production grant boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) must pass for the complete role set and least-privilege boundary.
 - [Verify the live deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) must pass for deployed user/key identity and live 404 reachability.
 
-If either gate did not pass against the approved account, STOP; do not repeat it here. A fresh
-environment uses [key-pair provisioning](key-rotation.md) separately before go-live.
+If either gate did not pass against the approved account, STOP; a fresh environment uses [key-pair provisioning](key-rotation.md) separately before go-live.
 
 ## S5: Ownership summary
 
@@ -132,6 +132,8 @@ environment uses [key-pair provisioning](key-rotation.md) separately before go-l
 | Bind the S4 SQL account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
 | Map the deployed SQL-API identifier to the approved account | Operator against Vercel Production and the approved account record |
 | Confirm deployed `SNOWFLAKE_WEB_USER` is byte-exact `ROASTPILOT_WEB_PROD` | Operator against Vercel Production |
+| Confirm deployed `SNOWFLAKE_WEB_WAREHOUSE` is byte-exact `ROASTPILOT_WH` | Operator against Vercel Production |
+| Confirm deployed `SNOWFLAKE_WEB_DATABASE` is byte-exact `ROASTPILOT` | Operator against Vercel Production |
 | Pass both required production grant-boundary and live-deployment verifications | Operator under the identities assigned by the production deployment runbook |
 | Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
 | Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
@@ -145,16 +147,14 @@ The operator owns verification and billing activation; this authorises no new ob
 
 ## S6: Activate billing only after all checkpoints pass
 
-1. Immediately before activation, use the Snowsight account selector or **Admin -> Account**
-   view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
+1. Immediately before activation, use the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
 
-2. Activate only after S2 and S3 pass for the approved account; S4's local check passes;
-   the deployed account resolves to it; deployed `SNOWFLAKE_WEB_USER` byte-exactly equals
-   `ROASTPILOT_WEB_PROD`; and both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) gates pass. Only then enable billing `[VERIFY-LIVE]`.
+2. Activate only after S2/S3 and S4 identity/account mapping pass for the approved account,
+   and `SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE` byte-match `ROASTPILOT_WEB_PROD`/`ROASTPILOT_WH`/`ROASTPILOT`. Both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) gates must pass. Only then enable billing `[VERIFY-LIVE]`.
 
-3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 identity/value checks,
-   proving controls remain in the approved account. The same account, region, edition
-   and warehouse continue with no recreation or downtime.
+3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 checks, proving controls
+   remain in the approved account with no recreation or downtime.
 
-STOP unless S2 identity, S3 locator/controls, S4 local identity/account mapping/deployed
-user, both delegated gates, payment readiness, continued billing and final S3 recheck pass.
+STOP unless S2 identity, S3 locator/controls, S4 identity/account mapping,
+`SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE` byte matches,
+both delegated gates, payment readiness, continued billing and final S3 recheck pass.
