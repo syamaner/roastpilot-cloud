@@ -105,7 +105,10 @@ monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
 = Basic BotID + C5 app limiter + honeypot (Deep Analysis / custom WAF = Pro-tier,
 not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
 **Prior deferred residuals folded into C7 scope:** #420/#421 (denial-of-wallet /
-resource-monitor) were covered by #547 + #549 and **#421 is now CLOSED** (20 Sep);
+resource-monitor) were covered by #547 + #549 and are **both now CLOSED** (20 Sep) —
+#420 (the DoW requirements record) discharged once its consuming epics C4/C5/C7 all
+delivered (edge BotID #559, C5 app limiter, resource-monitor #547, warehouse-shared
+D-C7-2); the durable requirement persists in plan.md §16;
 #358 (per-env app-role cross-env grant audit) remains a distinct C7-gated residual.
 Other open non-blocking residuals: #512 (RoR population), #525 (aggregate-rating
 live-verify). **Open `epic:C7` issues, full set (as of 20 Sep 2026):** the ONLY open
