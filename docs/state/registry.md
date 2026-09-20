@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S1/S2/S3/S4/S5/S6/S8 delivered; S7 deferred/needs-triage + the #565 grant-boundary follow-up are the only open C7 items).**
+**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; all stories S1–S8 delivered except S7 #552, deferred). Remaining C7 WORK = S7 (#552, deferred/needs-triage) + follow-up #565. Delivered stories whose umbrella issues stay OPEN only for the operator's administrative close: #545 (S1), #551 (S8), #421 (resource-monitor backstop, covered by #547/#549) — see the open-issue inventory below; do not read "delivered" as "issue closed".**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -109,7 +109,11 @@ grant audit) remains a distinct C7-gated residual. Other open non-blocking
 residuals: #512 (RoR population), #525 (aggregate-rating live-verify), **#565**
 (C7 follow-up from #550 — assert `ROASTPILOT_WEB_PROD` holds exactly
 `{PUBLIC_WEB}` via `SHOW GRANTS TO USER` in the prod-deploy runbook; docs-only,
-`needs-triage`).
+`needs-triage`). **Open `epic:C7` issues, full set (as of 20 Sep 2026):**
+remaining work — **#552** (S7 deferred), **#565** (grant-boundary follow-up);
+delivered, awaiting only the operator's administrative close — **#545** (S1,
+PR #560 merged), **#551** (S8, PR #557 merged), **#421** (resource-monitor
+backstop, covered by #547/#549).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
