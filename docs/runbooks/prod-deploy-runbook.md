@@ -199,6 +199,28 @@ Confirm that the `default_secondary_roles` column is empty, representing
 `DEFAULT_SECONDARY_ROLES = ()`. Pinning the primary role in application code
 does not prevent secondary-role inheritance from broadening the session.
 
+Then, in the same `ACCOUNTADMIN` session, enumerate every role granted to the
+user itself, not only its default role:
+
+```sql
+SHOW GRANTS TO USER ROASTPILOT_WEB_PROD;
+```
+
+The `role` column must name exactly one project role, `PUBLIC_WEB`, alongside the
+account-default `PUBLIC` membership if the account returns one (Snowflake
+accounts vary; a missing `PUBLIC` row is not a violation). Any other role row is
+a grant-boundary violation: STOP. An empty, malformed, or unreadable result,
+including any error or zero rows, is itself a STOP: it means the boundary is
+unverified, not clean. This is the only step that proves the set of roles
+granted to the user. The
+`SHOW GRANTS TO ROLE PUBLIC_WEB` audit above proves only what `PUBLIC_WEB` itself
+can reach, and `DEFAULT_SECONDARY_ROLES = ()` only prevents secondary roles from
+activating in a session; neither prevents a second role from being granted to
+the user. Because `PUBLIC_WEB` is a shared account-level role, a second granted
+role would let the deployed principal inherit that role's grants no matter how
+clean `PUBLIC_WEB`'s own surface is (D-C7-6). Do not remove this step as
+redundant with the role-surface audit; it defends a different boundary.
+
 ## P2: provision the production web credential for the first deployment
 
 Generate a production-only, unencrypted PKCS8 key-pair in a secure operator
