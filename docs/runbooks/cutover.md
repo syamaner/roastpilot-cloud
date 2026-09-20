@@ -91,9 +91,8 @@ or value failure blocks cutover until reconciled through the normal change proce
 
 ## S4: Verify the production service-user and key-pair
 
-`ROASTPILOT_WEB_PROD` and its key-pair already exist and are live under C7-S1 (#545)
-and C7-S2 (#546). Billing cutover is not the gate for creating prod credentials.
-Do not create, replace or rotate either credential during this procedure.
+`ROASTPILOT_WEB_PROD` and its key-pair already exist and are live under C7-S1/C7-S2 (#545/#546).
+Billing cutover is not their creation gate; do not create, replace or rotate them here.
 
 As `ACCOUNTADMIN`, verify the existing service user:
 
@@ -110,13 +109,16 @@ multiple/non-exact rows mean STOP. Its `default_secondary_roles` must be empty, 
 The deployed `SNOWFLAKE_WEB_ACCOUNT` may use organisation-account form; `CURRENT_ACCOUNT()`
 is a locator. Prove both map to the same approved account `[VERIFY-LIVE]`, never byte-compare.
 
+Read Vercel Production's deployed `SNOWFLAKE_WEB_USER` `[VERIFY-LIVE]`; require byte-exact
+`ROASTPILOT_WEB_PROD` or STOP. Account match plus P5 does not identify the principal.
+
 Before cutover, both owning-runbook gates are REQUIRED for that approved account:
 
 - [Verify the production grant boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) must pass for the complete role set and least-privilege boundary.
 - [Verify the live deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) must pass for deployed user/key identity and live 404 reachability.
 
-If either gate did not pass against the approved account, STOP; do not repeat it here.
-A fresh environment uses [key-pair provisioning](key-rotation.md) separately before go-live.
+If either gate did not pass against the approved account, STOP; do not repeat it here. A fresh
+environment uses [key-pair provisioning](key-rotation.md) separately before go-live.
 
 ## S5: Ownership summary
 
@@ -129,6 +131,7 @@ A fresh environment uses [key-pair provisioning](key-rotation.md) separately bef
 | Prove the S3 verifier account locator, then verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
 | Bind the S4 SQL account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
 | Map the deployed SQL-API identifier to the approved account | Operator against Vercel Production and the approved account record |
+| Confirm deployed `SNOWFLAKE_WEB_USER` is byte-exact `ROASTPILOT_WEB_PROD` | Operator against Vercel Production |
 | Pass both required production grant-boundary and live-deployment verifications | Operator under the identities assigned by the production deployment runbook |
 | Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
 | Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
@@ -138,23 +141,20 @@ A fresh environment uses [key-pair provisioning](key-rotation.md) separately bef
 | Production database, service user and key-pair | Already provisioned / no action |
 | Vercel Production environment and live taster | Already provisioned / no action |
 
-The operator owns only live verification and billing activation. This runbook authorises
-no new role, grant, warehouse, credential, database or application deployment.
+The operator owns verification and billing activation; this authorises no new object or grant.
 
 ## S6: Activate billing only after all checkpoints pass
 
 1. Immediately before activation, use the Snowsight account selector or **Admin -> Account**
    view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
 
-2. Activate only after S2 SQL = Snowsight = approved locator; S3's connection equals
-   it and passes; S4's local check passes; and the deployed SQL-API identifier resolves
-   to it. Both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment)
-   gates must pass for that account. Only then enable billing `[VERIFY-LIVE]`.
+2. Activate only after S2 and S3 pass for the approved account; S4's local check passes;
+   the deployed account resolves to it; deployed `SNOWFLAKE_WEB_USER` byte-exactly equals
+   `ROASTPILOT_WEB_PROD`; and both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) gates pass. Only then enable billing `[VERIFY-LIVE]`.
 
-3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 identity and value checks,
-   proving the controls remain in the approved account. The same account, region,
-   edition and warehouse continue at expiry. Nothing is recreated and there is no
-   downtime: credentials, roles, views, monitor and live taster remain in place.
+3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 identity/value checks,
+   proving controls remain in the approved account. The same account, region, edition
+   and warehouse continue with no recreation or downtime.
 
-STOP unless S2 identity, S3 locator/controls, S4 local identity and account mapping,
-both delegated gates, payment readiness, continued billing and final S3 recheck pass.
+STOP unless S2 identity, S3 locator/controls, S4 local identity/account mapping/deployed
+user, both delegated gates, payment readiness, continued billing and final S3 recheck pass.
