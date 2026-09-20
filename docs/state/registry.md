@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; all stories S1–S8 delivered except S7 #552, deferred). Remaining C7 WORK = S7 (#552, deferred/needs-triage) + follow-up #565. Delivered stories whose umbrella issues stay OPEN only for the operator's administrative close: #545 (S1), #551 (S8), #421 (resource-monitor backstop, covered by #547/#549) — see the open-issue inventory below; do not read "delivered" as "issue closed".**
+**Active epic: C7 Ops — SUBSTANTIALLY COMPLETE (KICKED 15 Sep 2026; all stories S1–S8 delivered, and every C7 issue CLOSED except S7 #552, which is deferred). The ONLY open C7 item is #552 (S7 automated/scheduled backup export, deferred/needs-triage). The #565 grant-boundary follow-up was delivered + closed (PR #567 → main `175764d`); the S1/S8/resource-monitor umbrella issues #545/#551/#421 were closed 20 Sep after their deliverables merged.**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -94,26 +94,25 @@ runbook, PR #563 → main `ac1c35d`; 5-round pre-open floor, Codex-connector �
 `2e21ac9`; 8-round pre-open + 3-round post-open, ~20 findings folded — the
 security-docs non-convergence pattern, same-class identity/least-privilege
 attestation residuals accept-and-documented per D-C7-S6-5 with operator-merge as
-the terminal gate; S6 also produced open follow-up **#565** — tighten the
-prod-deploy runbook grant boundary to assert `ROASTPILOT_WEB_PROD` holds exactly
-`{PUBLIC_WEB}` via `SHOW GRANTS TO USER`, `needs-triage`). **#552 (S7 deferred)
-stays `needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
+the terminal gate; S6 also produced follow-up **#565** — assert `ROASTPILOT_WEB_PROD`
+holds exactly `{PUBLIC_WEB}` via `SHOW GRANTS TO USER` in the prod-deploy runbook —
+**DELIVERED + CLOSED via PR #567 → main `175764d`** (Codex-MCP authored; schema-migration
+folds: explicit fail-closed on blank/malformed + PUBLIC tolerated present-or-absent)).
+**#552 (S7 deferred) stays `needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
 D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
 smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
 monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
 = Basic BotID + C5 app limiter + honeypot (Deep Analysis / custom WAF = Pro-tier,
 not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
-**Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
-resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
-grant audit) remains a distinct C7-gated residual. Other open non-blocking
-residuals: #512 (RoR population), #525 (aggregate-rating live-verify), **#565**
-(C7 follow-up from #550 — assert `ROASTPILOT_WEB_PROD` holds exactly
-`{PUBLIC_WEB}` via `SHOW GRANTS TO USER` in the prod-deploy runbook; docs-only,
-`needs-triage`). **Open `epic:C7` issues, full set (as of 20 Sep 2026):**
-remaining work — **#552** (S7 deferred), **#565** (grant-boundary follow-up);
-delivered, awaiting only the operator's administrative close — **#545** (S1,
-PR #560 merged), **#551** (S8, PR #557 merged), **#421** (resource-monitor
-backstop, covered by #547/#549).
+**Prior deferred residuals folded into C7 scope:** #420/#421 (denial-of-wallet /
+resource-monitor) were covered by #547 + #549 and **#421 is now CLOSED** (20 Sep);
+#358 (per-env app-role cross-env grant audit) remains a distinct C7-gated residual.
+Other open non-blocking residuals: #512 (RoR population), #525 (aggregate-rating
+live-verify). **Open `epic:C7` issues, full set (as of 20 Sep 2026):** the ONLY open
+C7 issue is **#552** (S7 automated/scheduled backup export, deferred/needs-triage).
+Every delivered story's issue is now CLOSED — S1 #545 (PR #560), S8 #551 (PR #557),
+resource-monitor #421 (#547), and the #565 grant-boundary follow-up (PR #567 → main
+`175764d`).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
