@@ -47,12 +47,10 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
    SELECT CURRENT_REGION();
    ```
 
-   `CURRENT_ACCOUNT()` returns the account locator, not the organisation-account
-   identifier. Compare it for exact equality with a separately approved production
-   record explicitly stored as the account locator `[VERIFY-LIVE]`. Do not compare
-   it with an `<organisation>-<account_name>` or `<organisation>.<account_name>`
-   value, and do not accept a partial match. Never copy either identifier form into
-   this public repository. Stop if the exact locator or region differs.
+   `CURRENT_ACCOUNT()` returns the locator, not the organisation-account identifier.
+   Compare it exactly with an approved production locator record `[VERIFY-LIVE]`, never
+   with `<organisation>-<account_name>`, `<organisation>.<account_name>` or a partial
+   match. Never copy an identifier here. Stop if the exact locator or region differs.
 
 2. In the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`,
    require the browser's account locator to exactly match both step 1 and the approved
@@ -66,10 +64,12 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
 
 ## S3: Confirm existing cost controls
 
-Run the C7-S3 live verifier exactly as documented in [Resource monitor and shared
-warehouse](resource-monitor.md#manual-verification). Use `ACCOUNTADMIN`, or an
-already-existing role that can see the account resource monitor. `ROASTPILOT_CLI` and
-`ROASTPILOT_ADMIN` cannot see it; do not mistake zero rows for a missing monitor.
+Run the C7-S3 verifier in [Resource monitor and shared warehouse](resource-monitor.md#manual-verification).
+Use `ACCOUNTADMIN` or a monitor-visible role; `ROASTPILOT_CLI` and `ROASTPILOT_ADMIN` cannot.
+
+Using its exact `<profile>`, role and effective overrides, have the verifier connection
+report `SELECT CURRENT_ACCOUNT();` `[VERIFY-LIVE]`. Require the exact S2 locator;
+unknown/mismatch means STOP, regardless of same-named objects.
 
 The verifier must pass with this unchanged state:
 
@@ -86,38 +86,38 @@ The verifier must pass with this unchanged state:
 | Bound resource monitor | `ROASTPILOT_MONITOR` |
 | Effective `STATEMENT_TIMEOUT_IN_SECONDS` | exactly 300 seconds |
 
-These are checks of existing controls, not instructions to alter them. Do not
-re-embed or modify the verifier during cutover. A mismatch or visibility error
-blocks the cutover until the live state is understood and reconciled through
-the normal change process.
+These checks do not alter controls or re-embed the verifier. Any identity, visibility
+or value failure blocks cutover until reconciled through the normal change process.
 
 ## S4: Verify the production service-user and key-pair
 
-`ROASTPILOT_WEB_PROD` and its production key-pair already exist and are live.
-They were provisioned under C7-S1 (#545), with their lifecycle documented under
-C7-S2 (#546). Billing cutover is not the gate for creating prod credentials.
+`ROASTPILOT_WEB_PROD` and its key-pair already exist and are live under C7-S1 (#545)
+and C7-S2 (#546). Billing cutover is not the gate for creating prod credentials.
 Do not create, replace or rotate either credential during this procedure.
 
 As `ACCOUNTADMIN`, verify the existing service user:
 
 ```sql
 USE ROLE ACCOUNTADMIN;
+SELECT CURRENT_ACCOUNT();
 SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 ```
 
-`LIKE` treats each `_` as a single-character wildcard. Accept the complete result only
-when it contains exactly one row and that row's `name` column byte-exactly equals
-`ROASTPILOT_WEB_PROD`. More than one row, zero rows, or any non-exact name means STOP:
-do not proceed with cutover. Only that single exact row may be checked, and its
+Accept only when this session's locator exactly matches S2 and the complete `SHOW`
+result has exactly one row whose `name` byte-exactly equals `ROASTPILOT_WEB_PROD`.
+`LIKE` treats `_` as a wildcard; zero, multiple or non-exact rows mean STOP. Only that row may be checked; its
 `default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
-In Snowsight, open **Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** and confirm
-key-pair authentication is configured `[VERIFY-LIVE]`; do not copy a fingerprint or
-key material into the operator record.
+With Snowsight reconfirmed on the approved locator, confirm key-pair authentication
+under **Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** `[VERIFY-LIVE]`; copy no key data.
 
-Use [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
-for verification detail and [Snowflake key-pair provisioning and rotation](key-rotation.md)
-for key mechanics. In a fresh environment, provision a missing credential per C7-S2
-before go-live as a separate action, never as part of billing cutover.
+Presence is not proof. First prove the deployed Production target's effective
+`SNOWFLAKE_WEB_ACCOUNT` resolves to the approved locator `[VERIFY-LIVE]`. Then run
+the fresh route-valid 404 probe in [Production deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment).
+Require its live-query 404 proving the deployed key and `PUBLIC_WEB`; otherwise STOP.
+
+See [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
+and [Snowflake key-pair provisioning and rotation](key-rotation.md). In a fresh
+environment, provision a missing credential per C7-S2 separately before go-live.
 
 ## S5: Ownership summary
 
@@ -127,8 +127,9 @@ before go-live as a separate action, never as part of billing cutover.
 | Confirm the Snowsight browser account exactly matches the approved production locator | Operator as `ACCOUNTADMIN` |
 | Confirm Standard edition and on-demand capacity | Operator as `ACCOUNTADMIN` |
 | Confirm trial balance, expiry and payment readiness | Operator as `ACCOUNTADMIN` |
-| Verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
-| Verify `ROASTPILOT_WEB_PROD` and key-pair presence | Operator as `ACCOUNTADMIN` |
+| Prove the S3 verifier account locator, then verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
+| Bind the S4 SQL/Snowsight account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
+| Bind the deployed Production account locator, then pass the route-valid 404 probe | Operator against Vercel Production and the live URL |
 | Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
 | Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
 | Verify continued billing and recheck cost controls | Operator as `ACCOUNTADMIN` |
@@ -142,19 +143,18 @@ no new role, grant, warehouse, credential, database or application deployment.
 
 ## S6: Activate billing only after all checkpoints pass
 
-1. Immediately before activation, use the Snowsight account selector or **Admin ->
-   Account** view `[VERIFY-LIVE]`. Its locator must exactly match the SQL-verified and
-   approved production locator from S2. STOP if identity cannot be proved exactly.
+1. Immediately before activation, use the Snowsight account selector or **Admin -> Account**
+   view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
 
-2. Only after the SQL and Snowsight accounts agree and BOTH S3 and S4 pass, enable or
-   confirm on-demand billing and a valid payment method before trial credits expire
-   `[VERIFY-LIVE]`. Obtain operator approval. Do not wait for suspension.
+2. Activate only after S2 SQL = Snowsight = approved locator; S3's connection equals
+   that locator and passes; and S4's SQL, Snowsight and deployed-target locators equal
+   it while the exact-user, secondary-role and functional 404 proofs all pass.
+   Then enable billing and a valid payment method before expiry `[VERIFY-LIVE]`.
 
-3. Re-open Billing and verify continued on-demand billing is active `[VERIFY-LIVE]`.
-   Re-run the C7-S3 verifier and require it to pass, proving the monitor, warehouse
-   binding and statement timeout remain in place. The same account, region, edition and
-   warehouse continue at expiry. No object is recreated and there is no downtime:
-   credentials, roles, views, monitor and the live taster remain in place.
+3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 identity and value checks,
+   proving the controls remain in the approved account. The same account, region,
+   edition and warehouse continue at expiry. Nothing is recreated and there is no
+   downtime: credentials, roles, views, monitor and live taster remain in place.
 
-If identity, payment readiness, either checkpoint, continued billing or the final cost
-check cannot be proved, stop. A successful query alone does not prove continuity.
+STOP unless S2 identity, S3 locator and controls, every S4 locator/identity/404 proof,
+payment readiness, continued billing and final S3 recheck pass; one query is insufficient.
