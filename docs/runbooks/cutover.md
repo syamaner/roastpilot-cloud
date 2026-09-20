@@ -103,21 +103,20 @@ SELECT CURRENT_ACCOUNT();
 SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 ```
 
-Accept only when this session's locator exactly matches S2 and the complete `SHOW`
-result has exactly one row whose `name` byte-exactly equals `ROASTPILOT_WEB_PROD`.
-`LIKE` treats `_` as a wildcard; zero, multiple or non-exact rows mean STOP. Only that row may be checked; its
-`default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
-With Snowsight reconfirmed on the approved locator, confirm key-pair authentication
-under **Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** `[VERIFY-LIVE]`; copy no key data.
+Accept only when the session locator matches S2 and the complete `SHOW` has exactly one row.
+Its `name` must byte-exactly equal `ROASTPILOT_WEB_PROD`; `_` is a wildcard, so zero,
+multiple/non-exact rows mean STOP. Its `default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
 
-Presence is not proof. First prove the deployed Production target's effective
-`SNOWFLAKE_WEB_ACCOUNT` resolves to the approved locator `[VERIFY-LIVE]`. Then run
-the fresh route-valid 404 probe in [Production deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment).
-Require its live-query 404 proving the deployed key and `PUBLIC_WEB`; otherwise STOP.
+The deployed `SNOWFLAKE_WEB_ACCOUNT` may use organisation-account form; `CURRENT_ACCOUNT()`
+is a locator. Prove both map to the same approved account `[VERIFY-LIVE]`, never byte-compare.
 
-See [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
-and [Snowflake key-pair provisioning and rotation](key-rotation.md). In a fresh
-environment, provision a missing credential per C7-S2 separately before go-live.
+Before cutover, both owning-runbook gates are REQUIRED for that approved account:
+
+- [Verify the production grant boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) must pass for the complete role set and least-privilege boundary.
+- [Verify the live deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) must pass for deployed user/key identity and live 404 reachability.
+
+If either gate did not pass against the approved account, STOP; do not repeat it here.
+A fresh environment uses [key-pair provisioning](key-rotation.md) separately before go-live.
 
 ## S5: Ownership summary
 
@@ -128,8 +127,9 @@ environment, provision a missing credential per C7-S2 separately before go-live.
 | Confirm Standard edition and on-demand capacity | Operator as `ACCOUNTADMIN` |
 | Confirm trial balance, expiry and payment readiness | Operator as `ACCOUNTADMIN` |
 | Prove the S3 verifier account locator, then verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
-| Bind the S4 SQL/Snowsight account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
-| Bind the deployed Production account locator, then pass the route-valid 404 probe | Operator against Vercel Production and the live URL |
+| Bind the S4 SQL account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
+| Map the deployed SQL-API identifier to the approved account | Operator against Vercel Production and the approved account record |
+| Pass both required production grant-boundary and live-deployment verifications | Operator under the identities assigned by the production deployment runbook |
 | Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
 | Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
 | Verify continued billing and recheck cost controls | Operator as `ACCOUNTADMIN` |
@@ -147,14 +147,14 @@ no new role, grant, warehouse, credential, database or application deployment.
    view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
 
 2. Activate only after S2 SQL = Snowsight = approved locator; S3's connection equals
-   that locator and passes; and S4's SQL, Snowsight and deployed-target locators equal
-   it while the exact-user, secondary-role and functional 404 proofs all pass.
-   Then enable billing and a valid payment method before expiry `[VERIFY-LIVE]`.
+   it and passes; S4's local check passes; and the deployed SQL-API identifier resolves
+   to it. Both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment)
+   gates must pass for that account. Only then enable billing `[VERIFY-LIVE]`.
 
 3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 identity and value checks,
    proving the controls remain in the approved account. The same account, region,
    edition and warehouse continue at expiry. Nothing is recreated and there is no
    downtime: credentials, roles, views, monitor and live taster remain in place.
 
-STOP unless S2 identity, S3 locator and controls, every S4 locator/identity/404 proof,
-payment readiness, continued billing and final S3 recheck pass; one query is insufficient.
+STOP unless S2 identity, S3 locator/controls, S4 local identity and account mapping,
+both delegated gates, payment readiness, continued billing and final S3 recheck pass.
