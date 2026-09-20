@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — SUBSTANTIALLY COMPLETE (KICKED 15 Sep 2026; all stories S1–S8 delivered, and every C7 issue CLOSED except S7 #552, which is deferred). The ONLY open C7 item is #552 (S7 automated/scheduled backup export, deferred/needs-triage). The #565 grant-boundary follow-up was delivered + closed (PR #567 → main `175764d`); the S1/S8/resource-monitor umbrella issues #545/#551/#421 were closed 20 Sep after their deliverables merged.**
+**Active epic: C7 Ops — SUBSTANTIALLY COMPLETE (KICKED 15 Sep 2026; all C7 stories delivered EXCEPT S7 #552, which is deferred and unbuilt, and every other C7 issue is CLOSED). S1–S6 and S8 are delivered; S7 (#552) is the ONLY open C7 item — automated/scheduled backup export, deferred/needs-triage, unbuilt. The #565 grant-boundary follow-up was delivered + closed (PR #567 → main `175764d`); the S1/S8/resource-monitor umbrella issues #545/#551/#421 were closed 20 Sep after their deliverables merged.**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -84,9 +84,9 @@ findings all folded, the security-docs non-convergence pattern; the executing
 lenses did not). **#547 (S3) DONE + CLOSED** (resource-monitor
 live-verifier + STATEMENT_TIMEOUT hardening merged #554/#555/#556, live-validated
 under ACCOUNTADMIN 17 Sep). **#549 (S5) DONE + MERGED** (edge denial-of-wallet
-Basic BotID, PR #559 → main `4b6fbde`). **#551 (S8) CODE DONE + MERGED** (taster issue-form
-template + static report link on `/r/[slug]`, PR #557 `39e4761`; #551 kept open
-via Refs for the operator's close — the Codex connector caught a P1 the read-only
+Basic BotID, PR #559 → main `4b6fbde`). **#551 (S8) DONE + CLOSED** (taster issue-form
+template + static report link on `/r/[slug]`, PR #557 `39e4761`; #551 closed 20 Sep
+after its deliverable merged — the Codex connector caught a P1 the read-only
 board missed, an unlisted-roast slug being leaked into a public issue, folded by
 removing the slug from the report path). **#548 (S4) DONE + MERGED** (backup/export
 runbook, PR #563 → main `ac1c35d`; 5-round pre-open floor, Codex-connector 👍 CLEAN).
