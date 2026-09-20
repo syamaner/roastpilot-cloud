@@ -5,10 +5,10 @@ on-demand billing. It does not create, migrate, resize or re-provision any objec
 
 ## S0: Context and decisions
 
-The account is already in Azure UK South, on the Standard edition and using on-demand
-capacity. C1 through C7 ran against its 30-day trial allocation of approximately $400
-in credits. Here, "cutover" means arranging continued on-demand billing when those
-trial credits expire. It is not an account, region, edition or warehouse-size migration.
+The account is already in Azure UK South on the Standard edition. C1 through C7 ran
+against its 30-day trial allocation of approximately $400 in credits. Here, "cutover"
+means moving billing to the On-Demand purchasing model, not Capacity, when trial credits
+expire. It is not an account, region, edition or warehouse-size migration.
 
 The existing production deployment remains the one documented in
 [Production deployment](prod-deploy-runbook.md). Its service-user and key-pair
@@ -48,28 +48,25 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
    ```
 
    `CURRENT_ACCOUNT()` returns the locator, not the organisation-account identifier.
-   Compare it exactly with an approved production locator record `[VERIFY-LIVE]`, never
-   with `<organisation>-<account_name>`, `<organisation>.<account_name>` or a partial
-   match. Never copy an identifier here. Stop if the exact locator or region differs.
+   Compare it exactly with the approved locator `[VERIFY-LIVE]`, never another form or
+   partial match. Never copy an identifier here. Stop if locator or region differs.
 
-2. In the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`,
-   require the browser's account locator to exactly match both step 1 and the approved
-   production locator. STOP otherwise. Confirm Standard edition and on-demand capacity
-   there `[VERIFY-LIVE]`; do not substitute an inferred column or fabricated query.
+2. In the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`, require
+   its locator to match step 1 and the approved locator or STOP. Confirm Standard, not
+   Enterprise, as the edition and On-Demand, not Capacity, as the target purchasing model.
 
 3. In Snowsight, open **Admin -> Cost Management -> Billing** and confirm the
-   trial-credit balance, expiry state and payment-method readiness
-   `[VERIFY-LIVE]`. Record the observation in the private operator log without
-   copying an account identifier or payment details into the repository.
+   current state `[VERIFY-LIVE]`: Trial is expected; On-Demand is valid after a prior
+   cutover. Record it, trial balance/expiry and payment readiness privately. Trial
+   does not block this runbook; an unknown or other state means STOP.
 
 ## S3: Confirm existing cost controls
 
 Run the C7-S3 verifier in [Resource monitor and shared warehouse](resource-monitor.md#manual-verification).
 Use `ACCOUNTADMIN` or a monitor-visible role; `ROASTPILOT_CLI` and `ROASTPILOT_ADMIN` cannot.
 
-Using its exact `<profile>`, role and effective overrides, have the verifier connection
-report `SELECT CURRENT_ACCOUNT();` `[VERIFY-LIVE]`. Require the exact S2 locator;
-unknown/mismatch means STOP, regardless of same-named objects.
+Using its exact `<profile>`, role and overrides, have the verifier connection report
+`SELECT CURRENT_ACCOUNT();` `[VERIFY-LIVE]`; require the S2 locator or STOP.
 
 The verifier must pass with this unchanged state:
 
@@ -86,8 +83,7 @@ The verifier must pass with this unchanged state:
 | Bound resource monitor | `ROASTPILOT_MONITOR` |
 | Effective `STATEMENT_TIMEOUT_IN_SECONDS` | exactly 300 seconds |
 
-These checks do not alter controls or re-embed the verifier. Any identity, visibility
-or value failure blocks cutover until reconciled through the normal change process.
+These checks alter nothing; any identity, visibility or value failure blocks cutover.
 
 ## S4: Verify the production service-user and key-pair
 
@@ -105,13 +101,15 @@ SHOW USERS LIKE 'ROASTPILOT_WEB_PROD';
 Accept only when the S2-matched session's complete `SHOW` has exactly one row whose `name`
 byte-exactly equals `ROASTPILOT_WEB_PROD`; zero/multiple/non-exact rows mean STOP, and its `default_secondary_roles` must be empty, representing `DEFAULT_SECONDARY_ROLES = ()`.
 
-The deployed `SNOWFLAKE_WEB_ACCOUNT` may use organisation-account form while `CURRENT_ACCOUNT()` is a locator; prove both map to the approved account `[VERIFY-LIVE]`, never byte-compare.
+Require deployed `SNOWFLAKE_WEB_ACCOUNT` to byte-match its approved SQL-API identifier
+record and prove it maps to the S2 locator `[VERIFY-LIVE]`; never compare unlike forms.
 
 Read Vercel Production's deployed values `[VERIFY-LIVE]`; require byte-exact
 `SNOWFLAKE_WEB_USER = ROASTPILOT_WEB_PROD`, `SNOWFLAKE_WEB_WAREHOUSE = ROASTPILOT_WH`, and
-`SNOWFLAKE_WEB_DATABASE = ROASTPILOT`, or STOP. P5 does not identify the principal or
-monitored warehouse: it can pass through any warehouse available to `PUBLIC_WEB`, while
-the monitor binds `ROASTPILOT_WH`. Missing database defaults to `ROASTPILOT_DEV`; a wrong value targets the wrong environment.
+`SNOWFLAKE_WEB_DATABASE = ROASTPILOT`, and `SNOWFLAKE_WEB_SCHEMA = APP`, or STOP. P5 does
+not identify the principal or monitored warehouse and can pass through compatible
+objects in another schema. The monitor binds `ROASTPILOT_WH`; database omission defaults
+to `ROASTPILOT_DEV`, and a wrong database or schema targets the wrong environment.
 
 Before cutover, both owning-runbook gates are REQUIRED for that approved account:
 
@@ -126,7 +124,7 @@ If either gate did not pass against the approved account, STOP; a fresh environm
 | --- | --- |
 | Confirm live account and `AZURE_UKSOUTH` region | Operator as `ACCOUNTADMIN` |
 | Confirm the Snowsight browser account exactly matches the approved production locator | Operator as `ACCOUNTADMIN` |
-| Confirm Standard edition and on-demand capacity | Operator as `ACCOUNTADMIN` |
+| Confirm Standard edition; record Trial/On-Demand state and On-Demand target | Operator as `ACCOUNTADMIN` |
 | Confirm trial balance, expiry and payment readiness | Operator as `ACCOUNTADMIN` |
 | Prove the S3 verifier account locator, then verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
 | Bind the S4 SQL account, then verify exact user identity and secondary roles | Operator as `ACCOUNTADMIN` |
@@ -134,10 +132,11 @@ If either gate did not pass against the approved account, STOP; a fresh environm
 | Confirm deployed `SNOWFLAKE_WEB_USER` is byte-exact `ROASTPILOT_WEB_PROD` | Operator against Vercel Production |
 | Confirm deployed `SNOWFLAKE_WEB_WAREHOUSE` is byte-exact `ROASTPILOT_WH` | Operator against Vercel Production |
 | Confirm deployed `SNOWFLAKE_WEB_DATABASE` is byte-exact `ROASTPILOT` | Operator against Vercel Production |
+| Confirm deployed `SNOWFLAKE_WEB_SCHEMA` is byte-exact `APP` | Operator against Vercel Production |
 | Pass both required production grant-boundary and live-deployment verifications | Operator under the identities assigned by the production deployment runbook |
 | Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
 | Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
-| Verify continued billing and recheck cost controls | Operator as `ACCOUNTADMIN` |
+| Verify On-Demand Standard result and recheck cost controls | Operator as `ACCOUNTADMIN` |
 | Region, edition and warehouse size | Already provisioned / no action |
 | Monitor and warehouse configuration | Already provisioned / no action |
 | Production database, service user and key-pair | Already provisioned / no action |
@@ -149,12 +148,13 @@ The operator owns verification and billing activation; this authorises no new ob
 
 1. Immediately before activation, use the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`; require the exact SQL-approved S2 locator or STOP.
 
-2. Activate only after S2/S3 and S4 identity/account mapping pass for the approved account,
-   and `SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE` byte-match `ROASTPILOT_WEB_PROD`/`ROASTPILOT_WH`/`ROASTPILOT`. Both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) gates must pass. Only then enable billing `[VERIFY-LIVE]`.
+2. Activate only after S2/S3 and S4 pass for the approved account, and deployed
+   `SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE`/
+   `SNOWFLAKE_WEB_SCHEMA` byte-match `ROASTPILOT_WEB_PROD`/`ROASTPILOT_WH`/`ROASTPILOT`/`APP`. Both [grant-boundary](prod-deploy-runbook.md#verify-the-production-grant-boundary) and [live-deployment](prod-deploy-runbook.md#p5-verify-the-live-deployment) gates must pass. Only then enable billing `[VERIFY-LIVE]`.
 
-3. Verify continued billing `[VERIFY-LIVE]` and repeat all S3 checks, proving controls
-   remain in the approved account with no recreation or downtime.
+3. After activation, verify purchasing is On-Demand, not Capacity, and the edition is
+   Standard, not Enterprise `[VERIFY-LIVE]`; repeat S3 with no recreation or downtime.
 
 STOP unless S2 identity, S3 locator/controls, S4 identity/account mapping,
-`SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE` byte matches,
+`SNOWFLAKE_WEB_USER`/`SNOWFLAKE_WEB_WAREHOUSE`/`SNOWFLAKE_WEB_DATABASE`/`SNOWFLAKE_WEB_SCHEMA` byte matches,
 both delegated gates, payment readiness, continued billing and final S3 recheck pass.
