@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S1/S2/S3/S5/S8 delivered, S4 + S6 the remaining buildable runbooks, S7 deferred).**
+**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; all stories S1–S8 delivered except S7 #552, deferred). Remaining C7 WORK = S7 (#552, deferred/needs-triage) + follow-up #565. Delivered stories whose umbrella issues stay OPEN only for the operator's administrative close: #545 (S1), #551 (S8), #421 (resource-monitor backstop, covered by #547/#549) — see the open-issue inventory below; do not read "delivered" as "issue closed".**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -88,10 +88,16 @@ Basic BotID, PR #559 → main `4b6fbde`). **#551 (S8) CODE DONE + MERGED** (tast
 template + static report link on `/r/[slug]`, PR #557 `39e4761`; #551 kept open
 via Refs for the operator's close — the Codex connector caught a P1 the read-only
 board missed, an unlisted-roast slug being leaked into a public issue, folded by
-removing the slug from the report path). **#548 (S4 backup/export) and #550 (S6
-cutover) are `ready-for-conventional-implementation`** (triaged 19 Sep, plan-repo
-ledger L384 — the remaining buildable runbooks). **#552 (S7 deferred) stays
-`needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
+removing the slug from the report path). **#548 (S4) DONE + MERGED** (backup/export
+runbook, PR #563 → main `ac1c35d`; 5-round pre-open floor, Codex-connector 👍 CLEAN).
+**#550 (S6) DONE + MERGED** (trial→on-demand cutover runbook, PR #564 → main
+`2e21ac9`; 8-round pre-open + 3-round post-open, ~20 findings folded — the
+security-docs non-convergence pattern, same-class identity/least-privilege
+attestation residuals accept-and-documented per D-C7-S6-5 with operator-merge as
+the terminal gate; S6 also produced open follow-up **#565** — tighten the
+prod-deploy runbook grant boundary to assert `ROASTPILOT_WEB_PROD` holds exactly
+`{PUBLIC_WEB}` via `SHOW GRANTS TO USER`, `needs-triage`). **#552 (S7 deferred)
+stays `needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
 D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
 smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
 monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
@@ -100,7 +106,14 @@ not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
 **Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
 resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
 grant audit) remains a distinct C7-gated residual. Other open non-blocking
-residuals: #512 (RoR population), #525 (aggregate-rating live-verify).
+residuals: #512 (RoR population), #525 (aggregate-rating live-verify), **#565**
+(C7 follow-up from #550 — assert `ROASTPILOT_WEB_PROD` holds exactly
+`{PUBLIC_WEB}` via `SHOW GRANTS TO USER` in the prod-deploy runbook; docs-only,
+`needs-triage`). **Open `epic:C7` issues, full set (as of 20 Sep 2026):**
+remaining work — **#552** (S7 deferred), **#565** (grant-boundary follow-up);
+delivered, awaiting only the operator's administrative close — **#545** (S1,
+PR #560 merged), **#551** (S8, PR #557 merged), **#421** (resource-monitor
+backstop, covered by #547/#549).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
