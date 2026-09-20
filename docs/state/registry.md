@@ -65,7 +65,7 @@ See the plan-repo ledger (D-ToS-1) for the full audit.
 
 ## Active epic
 
-**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S1/S2/S3/S4/S5/S6/S8 delivered, only S7 deferred/needs-triage remains).**
+**Active epic: C7 Ops — IN PROGRESS (KICKED 15 Sep 2026; S1/S2/S3/S4/S5/S6/S8 delivered; S7 deferred/needs-triage + the #565 grant-boundary follow-up are the only open C7 items).**
 C1–C6 cloud scope and the C-UI taster-page design port are all COMPLETE. C7 was
 decomposed via the `to-issues` skill against plan §11 + §15/§16 and **8 stories
 filed** (`epic:C7`, all conventional/interactive — the
@@ -94,8 +94,10 @@ runbook, PR #563 → main `ac1c35d`; 5-round pre-open floor, Codex-connector �
 `2e21ac9`; 8-round pre-open + 3-round post-open, ~20 findings folded — the
 security-docs non-convergence pattern, same-class identity/least-privilege
 attestation residuals accept-and-documented per D-C7-S6-5 with operator-merge as
-the terminal gate). **#552 (S7 deferred) stays `needs-triage`** (unbuilt; depends
-on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
+the terminal gate; S6 also produced open follow-up **#565** — tighten the
+prod-deploy runbook grant boundary to assert `ROASTPILOT_WEB_PROD` holds exactly
+`{PUBLIC_WEB}` via `SHOW GRANTS TO USER`, `needs-triage`). **#552 (S7 deferred)
+stays `needs-triage`** (unbuilt; depends on #548 proving out). **Four C7 decisions recorded (plan-repo ledger L366):**
 D-C7-1 cutover target = same region (Azure UK South), cheapest on-demand Standard,
 smallest XS; D-C7-2 D-DoW-2 resolved = **stay shared** (one warehouse + one
 monitor; split documented as a future runbook step, not built); D-C7-3 Hobby DoW
@@ -104,7 +106,10 @@ not adopted); D-C7-4 repo is public → taster GitHub-issue intake enabled.
 **Prior deferred residuals now folded into C7 scope:** #420/#421 (denial-of-wallet /
 resource-monitor) are covered by #547 + #549; #358 (per-env app-role cross-env
 grant audit) remains a distinct C7-gated residual. Other open non-blocking
-residuals: #512 (RoR population), #525 (aggregate-rating live-verify).
+residuals: #512 (RoR population), #525 (aggregate-rating live-verify), **#565**
+(C7 follow-up from #550 — assert `ROASTPILOT_WEB_PROD` holds exactly
+`{PUBLIC_WEB}` via `SHOW GRANTS TO USER` in the prod-deploy runbook; docs-only,
+`needs-triage`).
 
 **C-UI (taster-page visual design port, epic #534) COMPLETE (15 Sep 2026):** the
 public `/r/[slug]` page is now the warm themed design (light + dark, Tailwind v4,
