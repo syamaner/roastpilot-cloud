@@ -54,11 +54,10 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
    value, and do not accept a partial match. Never copy either identifier form into
    this public repository. Stop if the exact locator or region differs.
 
-2. In Snowsight, open **Admin -> Accounts** and inspect the live account
-   details `[VERIFY-LIVE]`. Confirm that the edition is Standard and that the
-   capacity/billing model is on-demand. There is no repository-approved SQL
-   query for those billing fields; do not substitute an inferred column or
-   fabricated query.
+2. In the Snowsight account selector or **Admin -> Account** view `[VERIFY-LIVE]`,
+   require the browser's account locator to exactly match both step 1 and the approved
+   production locator. STOP otherwise. Confirm Standard edition and on-demand capacity
+   there `[VERIFY-LIVE]`; do not substitute an inferred column or fabricated query.
 
 3. In Snowsight, open **Admin -> Cost Management -> Billing** and confirm the
    trial-credit balance, expiry state and payment-method readiness
@@ -67,11 +66,10 @@ Perform these numbered steps as the operator with `ACCOUNTADMIN` access.
 
 ## S3: Confirm existing cost controls
 
-Run the C7-S3 live verifier exactly as documented in [Resource monitor and
-shared warehouse](resource-monitor.md#manual-verification). Use
-`ACCOUNTADMIN`, or an already-existing role that can see the account resource
-monitor. `ROASTPILOT_CLI` and `ROASTPILOT_ADMIN` cannot see
-`ROASTPILOT_MONITOR`; do not mistake a zero-row result for a missing monitor.
+Run the C7-S3 live verifier exactly as documented in [Resource monitor and shared
+warehouse](resource-monitor.md#manual-verification). Use `ACCOUNTADMIN`, or an
+already-existing role that can see the account resource monitor. `ROASTPILOT_CLI` and
+`ROASTPILOT_ADMIN` cannot see it; do not mistake zero rows for a missing monitor.
 
 The verifier must pass with this unchanged state:
 
@@ -116,39 +114,24 @@ In Snowsight, open **Admin -> Users & Roles -> ROASTPILOT_WEB_PROD** and confirm
 key-pair authentication is configured `[VERIFY-LIVE]`; do not copy a fingerprint or
 key material into the operator record.
 
-Use the verification detail in [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
-and leave all key-pair mechanics to [Snowflake key-pair provisioning and
-rotation](key-rotation.md). If a genuinely fresh environment ever lacks this
-credential, provision it per C7-S2 before go-live as a separate action, not as
-part of billing cutover.
-
-### Activate billing only after both checkpoints pass
-
-4. Only after BOTH the S3 cost-control verification and the S4 credential checkpoint
-   have passed, enable or confirm on-demand billing and a valid payment method before
-   trial credits expire `[VERIFY-LIVE]`. Obtain approval. Do not wait for suspension.
-
-5. Re-open the Billing surface and verify that continued on-demand billing is active
-   `[VERIFY-LIVE]`. Re-run the C7-S3 live verifier and require it to pass again,
-   confirming the monitor, warehouse binding and statement timeout remain in place.
-   The same account, region, edition and warehouse continue at expiry. No object is
-   recreated and there is no downtime or re-provisioning: credentials, roles, secure
-   views, resource monitor and <https://roastpilot-cloud.vercel.app> remain in place.
-
-If payment readiness, either checkpoint, continued billing or the post-activation cost
-check cannot be proved, stop. A successful query alone does not prove continuity.
+Use [Production deployment](prod-deploy-runbook.md#verify-the-production-grant-boundary)
+for verification detail and [Snowflake key-pair provisioning and rotation](key-rotation.md)
+for key mechanics. In a fresh environment, provision a missing credential per C7-S2
+before go-live as a separate action, never as part of billing cutover.
 
 ## S5: Ownership summary
 
 | Cutover step | Owner and identity |
 | --- | --- |
 | Confirm live account and `AZURE_UKSOUTH` region | Operator as `ACCOUNTADMIN` |
+| Confirm the Snowsight browser account exactly matches the approved production locator | Operator as `ACCOUNTADMIN` |
 | Confirm Standard edition and on-demand capacity | Operator as `ACCOUNTADMIN` |
 | Confirm trial balance, expiry and payment readiness | Operator as `ACCOUNTADMIN` |
-| Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
-| Verify continued on-demand billing | Operator as `ACCOUNTADMIN` |
 | Verify `ROASTPILOT_MONITOR` and `ROASTPILOT_WH` | Operator as `ACCOUNTADMIN`, or an already-existing monitor-visible role |
 | Verify `ROASTPILOT_WEB_PROD` and key-pair presence | Operator as `ACCOUNTADMIN` |
+| Reconfirm the Snowsight browser account before activation | Operator as `ACCOUNTADMIN` |
+| Enable or confirm payment method before expiry | Operator as `ACCOUNTADMIN` |
+| Verify continued billing and recheck cost controls | Operator as `ACCOUNTADMIN` |
 | Region, edition and warehouse size | Already provisioned / no action |
 | Monitor and warehouse configuration | Already provisioned / no action |
 | Production database, service user and key-pair | Already provisioned / no action |
@@ -156,3 +139,22 @@ check cannot be proved, stop. A successful query alone does not prove continuity
 
 The operator owns only live verification and billing activation. This runbook authorises
 no new role, grant, warehouse, credential, database or application deployment.
+
+## S6: Activate billing only after all checkpoints pass
+
+1. Immediately before activation, use the Snowsight account selector or **Admin ->
+   Account** view `[VERIFY-LIVE]`. Its locator must exactly match the SQL-verified and
+   approved production locator from S2. STOP if identity cannot be proved exactly.
+
+2. Only after the SQL and Snowsight accounts agree and BOTH S3 and S4 pass, enable or
+   confirm on-demand billing and a valid payment method before trial credits expire
+   `[VERIFY-LIVE]`. Obtain operator approval. Do not wait for suspension.
+
+3. Re-open Billing and verify continued on-demand billing is active `[VERIFY-LIVE]`.
+   Re-run the C7-S3 verifier and require it to pass, proving the monitor, warehouse
+   binding and statement timeout remain in place. The same account, region, edition and
+   warehouse continue at expiry. No object is recreated and there is no downtime:
+   credentials, roles, views, monitor and the live taster remain in place.
+
+If identity, payment readiness, either checkpoint, continued billing or the final cost
+check cannot be proved, stop. A successful query alone does not prove continuity.
