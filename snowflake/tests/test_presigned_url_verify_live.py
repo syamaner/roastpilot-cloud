@@ -182,6 +182,17 @@ def _commands(connection: FakeConnection) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
+def deny_unexpected_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject unintended transport access in these offline contract tests."""
+    def unexpected_urlopen(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Unexpected HTTP in offline presigned URL verifier test.")
+
+    monkeypatch.setattr(
+        presigned_url_verify_live.urllib.request, "urlopen", unexpected_urlopen
+    )
+
+
+@pytest.fixture(autouse=True)
 def fixed_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     class FixedUuid:
         hex = TEST_RUN_ID
