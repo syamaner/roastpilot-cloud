@@ -21,6 +21,7 @@ const ROAST_COLUMNS = [
   "created_at",
   "summary",
   "curve",
+  "operator_rating",
 ] as const;
 
 const REVIEW_COLUMNS = [
@@ -43,7 +44,7 @@ const RATING_COLUMNS = ["review_count", "average_score"] as const;
 export const REVIEWS_LIMIT = 50;
 
 const ROAST_STATEMENT =
-  "select public_slug,bean_origin,bean_varietal,bean_weight_g,profile_name,roast_level,roasted_at_utc,created_at,summary,curve from roast_by_slug where public_slug = :1";
+  "select public_slug,bean_origin,bean_varietal,bean_weight_g,profile_name,roast_level,roasted_at_utc,created_at,summary,curve,operator_rating from roast_by_slug where public_slug = :1";
 const REVIEWS_STATEMENT =
   `select public_slug,reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,created_at from reviews_by_roast where public_slug = :1 order by created_at desc, reviewer_name, score, aroma, acidity, sweetness, body, aftertaste, brew_method, notes limit ${REVIEWS_LIMIT}`;
 const RATING_STATEMENT =
@@ -56,6 +57,7 @@ const numberCell = z
   .transform(Number)
   .pipe(z.number().finite());
 const nullableNumberCell = numberCell.nullable();
+const operatorRatingCell = z.enum(["1", "2", "3", "4", "5"]).transform(Number).nullable();
 const reviewCountCell = numberCell.pipe(z.number().int().nonnegative());
 
 export const CurveSampleSchema = z.strictObject({
@@ -76,13 +78,18 @@ export interface CurveSample {
   ror_c_per_min: number | null;
 }
 
-export const RoastSummarySchema = z.object({
+const summaryFields = {
   started_at_utc: isoTimestamp,
   first_crack_at_utc: isoTimestamp,
   beans_added_at_utc: isoTimestamp,
   beans_dropped_at_utc: isoTimestamp,
   total_roast_seconds: z.number().finite(),
   development_time_percent: z.number().finite(),
+};
+export const RoastSummarySchema = z.strictObject(summaryFields);
+const CuratedSummaryV1Schema = z.strictObject({
+  curated_version: z.literal(1),
+  ...summaryFields,
 });
 
 export interface RoastSummary {
@@ -105,6 +112,7 @@ export const RoastViewRowSchema = z.strictObject({
   created_at: z.string(),
   summary: RoastSummarySchema,
   curve: z.array(CurveSampleSchema).nullable(),
+  operator_rating: operatorRatingCell,
 });
 
 export const ReviewViewRowSchema = z.strictObject({
@@ -140,6 +148,7 @@ export interface Roast {
   created_at: string;
   summary: RoastSummary;
   curve: CurveSample[] | null;
+  operator_rating: number | null;
   stats: RoastStats;
 }
 
@@ -209,7 +218,15 @@ function parseRoastRow(row: ReadonlyArray<string | null>): Roast {
     throw schemaError();
   }
 
-  const summary = parseVariant(row[8], RoastSummarySchema);
+  const curated = parseVariant(row[8], CuratedSummaryV1Schema);
+  const summary: RoastSummary = {
+    started_at_utc: curated.started_at_utc,
+    first_crack_at_utc: curated.first_crack_at_utc,
+    beans_added_at_utc: curated.beans_added_at_utc,
+    beans_dropped_at_utc: curated.beans_dropped_at_utc,
+    total_roast_seconds: curated.total_roast_seconds,
+    development_time_percent: curated.development_time_percent,
+  };
   const curve =
     row[9] === null
       ? null
@@ -225,6 +242,7 @@ function parseRoastRow(row: ReadonlyArray<string | null>): Roast {
     created_at: row[7],
     summary,
     curve,
+    operator_rating: row[10],
   });
   if (!parsed.success) throw schemaError();
 

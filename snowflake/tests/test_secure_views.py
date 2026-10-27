@@ -16,7 +16,7 @@ MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__secure_views.sql"
 STRIPPED = strip_line_comments(MIGRATION_PATH.read_text(encoding="utf-8"))
 EXPECTED_SLUG_COLS = [
     "public_slug", "bean_origin", "bean_varietal", "bean_weight_g",
-    "profile_name", "roast_level", "roasted_at_utc", "created_at", "summary", "curve",
+    "profile_name", "roast_level", "roasted_at_utc", "created_at", "summary", "curve", "operator_rating",
 ]
 EXPECTED_REVIEW_COLS = [
     "public_slug", "reviewer_name", "score", "aroma", "acidity",
@@ -25,8 +25,8 @@ EXPECTED_REVIEW_COLS = [
 EXPECTED_CURVE_KEYS = [
     "elapsed_s", "bean_temp_c", "env_temp_c", "heat_percent", "fan_percent", "ror_c_per_min",
 ]
-FORBIDDEN_SLUG = {"owner_id", "visibility", "raw", "submitted_ip_hash"}
-FORBIDDEN_REVIEWS = {"owner_id", "submitted_ip_hash", "visibility"}
+FORBIDDEN_SLUG = {"owner_id", "visibility", "raw", "submitted_ip_hash", "operator_notes", "idempotency_key", "contributed_to_learning", "id", "updated_at"}
+FORBIDDEN_REVIEWS = {"owner_id", "submitted_ip_hash", "visibility", "operator_notes", "operator_rating", "id", "roast_id", "idempotency_key", "contributed_to_learning"}
 
 def _view_region(name: str) -> str:
     pattern = re.compile(
@@ -93,13 +93,13 @@ def test_scope_fence_no_grant_role_proc_table_stage():
 def test_roast_by_slug_has_visibility_private_filter():
     assert re.search(r"visibility\s*<>\s*'private'", SLUG_REGION, re.IGNORECASE)
 
-def test_roast_by_slug_curve_gated_on_contributed_to_learning():
+def test_roast_by_slug_curve_is_not_consent_gated():
     assert re.search(
-        r"case\s+when\s+r\.contributed_to_learning\s*=\s*true\s+then\s*\(\s*"
-        r"select\s+array_agg\s*\(.*?\)\s+within\s+group\s*\(\s*order\s+by\s+t\.elapsed_s\s*\)\s+"
-        r"from\s+roast_telemetry\s+t\s+where\s+t\.roast_id\s*=\s*r\.id\s*\)\s*end\s+as\s+curve",
+        r"\(\s*select\s+array_agg\s*\(.*?\)\s+within\s+group\s*\(\s*order\s+by\s+t\.elapsed_s\s*\)\s+"
+        r"from\s+roast_telemetry\s+t\s+where\s+t\.roast_id\s*=\s*r\.id\s*\)\s+as\s+curve",
         SLUG_REGION, re.IGNORECASE | re.DOTALL,
     )
+    assert re.search(r"end\s+as\s+curve", SLUG_REGION, re.IGNORECASE) is None
 
 def test_reviews_by_roast_has_visibility_private_filter():
     assert re.search(r"visibility\s*<>\s*'private'", REVIEWS_REGION, re.IGNORECASE)
@@ -122,7 +122,7 @@ def test_reviews_by_roast_projects_expected_and_no_forbidden_cols():
     assert cols == EXPECTED_REVIEW_COLS and not (set(cols) & FORBIDDEN_REVIEWS)
 
 def test_curve_object_construct_has_exactly_six_celsius_keys():
-    start = SLUG_REGION.lower().index("object_construct_keep_null(") + len("object_construct_keep_null(")
+    start = SLUG_REGION.lower().index("object_construct_keep_null(", SLUG_REGION.lower().index("array_agg(")) + len("object_construct_keep_null(")
     depth, i = 1, start
     while depth > 0:
         depth += {"(": 1, ")": -1}.get(SLUG_REGION[i], 0)

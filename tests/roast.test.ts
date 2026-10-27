@@ -34,6 +34,7 @@ const ROAST_COLUMNS = [
   "CREATED_AT",
   "SUMMARY",
   "CURVE",
+  "OPERATOR_RATING",
 ];
 const REVIEW_COLUMNS = [
   "PUBLIC_SLUG",
@@ -91,6 +92,7 @@ function apiResult(
 function roastRow(
   summary: unknown = loadSummary(1),
   curve: unknown = [sample(1180.402, 201.5)],
+  operatorRating: string | null = "4",
 ): ReadonlyArray<string | null> {
   return [
     "ethiopia-natural",
@@ -101,9 +103,32 @@ function roastRow(
     "light",
     "2026-06-07T12:19:47.297516+00:00",
     "2026-06-07T12:25:50.249395+00:00",
-    JSON.stringify(summary),
+    JSON.stringify(curated(summary)),
     curve === null ? null : JSON.stringify(curve),
+    operatorRating,
   ];
+}
+
+function curated(summary: unknown): Record<string, unknown> {
+  const source = summary as Record<string, unknown>;
+  const result: Record<string, unknown> = { curated_version: 1 };
+  for (const key of [
+    "started_at_utc", "first_crack_at_utc", "beans_added_at_utc",
+    "beans_dropped_at_utc", "total_roast_seconds", "development_time_percent",
+  ]) {
+    if (Object.hasOwn(source, key)) result[key] = source[key];
+  }
+  return result;
+}
+
+function roastRowCell(
+  cell: string | null,
+  operatorRating: string | null = "4",
+): ReadonlyArray<string | null> {
+  const row = [...roastRow()];
+  row[8] = cell;
+  row[10] = operatorRating;
+  return row;
 }
 
 function reviewRows(): ReadonlyArray<ReadonlyArray<string | null>> {
@@ -523,7 +548,7 @@ describe("typed roast reads", () => {
       statement.slice(0, statement.toLowerCase().indexOf(" from "))
         .replace(/^select /i, "")
         .split(",");
-    expect(selected(roastStatement)).toHaveLength(10);
+    expect(selected(roastStatement)).toHaveLength(11);
     expect(selected(reviewStatement)).toHaveLength(11);
     expect(roastStatement).not.toMatch(/visibility|owner|hashed|\braw\b|\bip\b/i);
     expect(reviewStatement).not.toMatch(/hashed|\bip\b/i);
@@ -724,5 +749,113 @@ describe("typed roast reads", () => {
         summary,
       ),
     ).toBe(0);
+  });
+});
+
+
+describe("C9-C1 curated projection v1", () => {
+  it("V-1 accepts curated v1", async () => {
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRow()]));
+    const roast = await getRoastBySlug("ethiopia-natural");
+    expect(Object.keys(roast!.summary).sort()).toEqual([
+      "beans_added_at_utc", "beans_dropped_at_utc", "development_time_percent",
+      "first_crack_at_utc", "started_at_utc", "total_roast_seconds",
+    ]);
+    expect(roast?.operator_rating).toBe(4);
+    expect(roast?.stats).toEqual({
+      totalRoastSeconds: 637.106,
+      firstCrackSeconds: 541.519,
+      developmentTimePercent: 15.003,
+      firstCrackTempC: 201.5,
+      dropTempC: 201.5,
+    });
+  });
+
+  it.each([2, 0, "1", null, 1.5, undefined])(
+    "V-2 rejects curated_version %j", async (version) => {
+      const cell = curated(loadSummary(1));
+      if (version === undefined) delete cell.curated_version;
+      else cell.curated_version = version;
+      executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(cell))]));
+      await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(RoastSchemaError);
+    },
+  );
+
+  it.each([
+    ["roaster_driver", "hottop"], ["session_id", "private-run"],
+    ["started_at_utc", undefined], ["started_at_utc", null],
+    ["started_at_utc", { private: "hottop" }], ["total_roast_seconds", null],
+  ])("V-3 rejects summary shape %s %j", async (key, value) => {
+    const cell = curated(loadSummary(1));
+    if (value === undefined) delete cell[key as string];
+    else cell[key as string] = value;
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(cell))]));
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it("V-4 rejects legacy wholesale summary", async () => {
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(loadSummary(1)), "4")]));
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  const corpus = [
+    ["2026-06-07T11:58:31.306365+00:00", true, "accept"],
+    ["2026-06-07T11:58:31Z", true, "accept"],
+    ["2026-06-07T11:58:31.1-05:30", true, "recorded only"],
+    ["2026-06-07T11:58:31.123456789+14:00", true, "recorded only"],
+    ["2026-13-45T25:61:61Z", true, "recorded only"],
+    ["2026-06-07T11:58:31.1234567890Z", false, "recorded only"],
+    ["2026-06-07T11:58:31", false, "reject"],
+    ["2026-06-07 11:58:31Z", false, "recorded only"],
+    ["2026-06-07T11:58Z", false, "recorded only"],
+    ["2026-06-07T11:58:31+0000", false, "recorded only"],
+    ["2026-06-07T11:58:31z", false, "recorded only"],
+    ["2026-06-07T11:58:31Z\n", false, "reject"],
+    [" 2026-06-07T11:58:31Z", false, "reject"],
+    ["2026-06-07T11:58:31.Z", false, "recorded only"],
+    ["2026-06-07T11:58:31Z<script>", false, "reject"],
+    ["", false, "reject"],
+    ["roaster_driver", false, "reject"],
+    ["2026-06-07T11:58:31+00:00; x", false, "recorded only"],
+  ] as const;
+  it.each(corpus)("V-5 timestamp corpus %j G=%j %s", async (value, grammar, assertion) => {
+    const cell = { ...curated(loadSummary(1)), started_at_utc: value };
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(cell))]));
+    const outcome = await getRoastBySlug("ethiopia-natural").then(
+      () => "accept", () => "reject",
+    );
+    console.info("O3 consumer", JSON.stringify({ value, grammar, assertion, outcome }));
+    if (assertion !== "recorded only") expect(outcome).toBe(assertion);
+  });
+
+  it.each(["1", "2", "3", "4", "5", null])(
+    "V-RATE-1 maps operator_rating %j", async (rating) => {
+      executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(curated(loadSummary(1))), rating)]));
+      const roast = await getRoastBySlug("ethiopia-natural");
+      expect(roast?.operator_rating).toBe(rating === null ? null : Number(rating));
+    },
+  );
+
+  it.each(["0", "6", "4.0", " 4", "4\n", "", "-1", "abc"])(
+    "V-RATE-2 rejects operator_rating %j", async (rating) => {
+      executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(JSON.stringify(curated(loadSummary(1))), rating)]));
+      await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(RoastSchemaError);
+    },
+  );
+
+  it("V-COLS rejects legacy 10-column projection", async () => {
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS.slice(0, 10), [roastRow().slice(0, 10)]));
+    await expect(getRoastBySlug("ethiopia-natural")).rejects.toBeInstanceOf(RoastSchemaError);
+  });
+
+  it.each([
+    [JSON.stringify({ ...curated(loadSummary(1)), roaster_driver: "hottop" }), "4"],
+    [JSON.stringify(curated(loadSummary(1))), "abc"],
+  ])("V-ERR contentless %j %j", async (cell, rating) => {
+    executeMock.mockResolvedValue(apiResult(ROAST_COLUMNS, [roastRowCell(cell, rating)]));
+    const error = await getRoastBySlug("ethiopia-natural").catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(RoastSchemaError);
+    expect((error as Error).message).toBe("Roast read data did not match the expected schema.");
+    expect((error as Error).message).not.toMatch(/hottop|abc/);
   });
 });

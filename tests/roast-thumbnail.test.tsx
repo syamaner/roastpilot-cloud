@@ -14,6 +14,7 @@ const roast: Roast = {
   roast_level: "light",
   roasted_at_utc: "2026-06-07T12:19:47.297516+00:00",
   created_at: "2026-06-07T12:25:50.249395+00:00",
+  operator_rating: null,
   summary: {
     started_at_utc: "2026-06-07T12:00:00+00:00",
     first_crack_at_utc: "2026-06-07T12:09:01.519+00:00",
