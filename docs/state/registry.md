@@ -1009,6 +1009,58 @@ This registry is authoritative for current delivery status. Verify GitHub
 issue, project, label, and PR fields against it before and after each
 transition, and reconcile any discrepancy under D135.
 
+## C9 Cloud sync server (D220): delivery-unit state (planning only)
+
+This block records the D220 software delivery plan inside the existing C9
+Cloud sync server epic. C9-C0 through C9-C4 are delivery units, not the original
+Cloud epics C1 Scaffold through C4 Public page. The C9 epic dependency remains
+C2 Schema. The build route is interactive (D98 superseded).
+
+The authoritative ordered plan and activation gates are pinned in
+[Plan §11](https://github.com/syamaner/roastpilot-plan/blob/3e33bb140fe600740ea00b85046f2e4aef4ccc9c/cloud-sync-plan.md#11-ordered-per-repository-pr-plan-b7),
+[Plan §12](https://github.com/syamaner/roastpilot-plan/blob/3e33bb140fe600740ea00b85046f2e4aef4ccc9c/cloud-sync-plan.md#12-activation-gates-b8),
+and the [Cloud decisions](https://github.com/syamaner/roastpilot-plan/blob/3e33bb140fe600740ea00b85046f2e4aef4ccc9c/roastpilot-cloud/plan.md#1-decisions-this-drill-down).
+P0 merged in Plan PR #82 at that Plan pin. Agent A0 was delivered in Agent
+PR #1065, merged at `5e9bb83a7c31d5287844c29ec4efc29c11e25bb6`.
+
+| Unit | Scope | Depends on | Predicted reviewers | Status |
+|---|---|---|---|---|
+| C9-C0 | C9 epic or state docs | P0 | Sufficient independent docs review; product audit only for suspected drift | This PR; documentation/state only |
+| C9-C1 | Curated projections and schema: private operator-note field, consent, tombstones, version | C9-C0 | Security, schema-migration, privacy | Not started |
+| C9-C2 | Write ordering, acknowledgement and idempotency; cover or disable every accepted path | C9-C1 | Security; schema-migration and privacy if fields change | Not started |
+| C9-C3 | Reviews HTTP GET/ETag/pagination within the two-view boundary | C9-C1 | Security | Not started |
+| C9-C4 | Offline verifier and qualification procedure, delivery only | C9-C2 | Security, qa | Not started |
+
+These predicted reviewers are lenses, not a fixed role roster. Re-derive routing
+from each actual diff under the AGENTS.md Code Review Rubric; add applicable
+reviewers and never silently remove a predicted lens. Each later unit needs its
+own PR, a fresh main and Plan binding, a full current issue snapshot, and a
+ratified planner contract before implementation delegation.
+
+Cloud contracts precede any activated client. Agent E15-E1 waits for the C9-C1
+contract, E15-E3 for the C9-C2 contract, and E15-E7 for C9-C3. Cloud #576 and
+Agent #955 remain OPEN until all approved software scope is delivered and
+independently audited. This C0 entry delivers documentation/state only.
+
+| Gate | Meaning | State |
+|---|---|---|
+| G1 | Authorised synthetic DEV concurrency, role and procedure qualification. | operator-only; not performed |
+| G2 | Deployed-caller and data compatibility checks. | operator-only; not performed |
+| G3 | Target packaging and resource evidence. | operator-only; not performed |
+| G4 | Credential provisioning. | operator-only; not performed |
+| G5 | Deployment. | operator-only; not performed |
+| G6 | Feature activation. | operator-only; not performed |
+
+Documents, mocks and software delivery cannot satisfy them.
+The feature stays off until G1-G6 are met.
+Unqualified server consistency fails closed, with no client-only fallback.
+This software delivery does not establish runtime or live-cloud qualification,
+upload, deployment, credential, hardware or feature-activation completion.
+
+Delivery follows the current interactive model, with human merge. The factory
+remains decommissioned. This planning record grants no pipeline powers and
+changes no activation authority.
+
 ## Epic order
 
 C1 Scaffold → F1 Factory → C2 Schema → C3 Sync → C4 Public page → C5 Reviews
