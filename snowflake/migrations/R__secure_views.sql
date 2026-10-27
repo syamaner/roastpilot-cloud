@@ -17,20 +17,11 @@
 -- before the first create.
 use schema app;
 
--- AC-1/AC-2/AC-5/AC-9-NEG: exactly the 10 enumerated columns, in order.
--- `summary` is projected wholesale (D-311-B) -- the FC/drop-temp headline
--- stats derive from it plus `curve` at the C4 page layer, not here. `curve`
--- is an ordered array_agg(object_construct_keep_null(...)) over
--- roast_telemetry, carrying exactly the 6 Celsius keys even when a sensor
--- value is NULL; `raw` is deliberately excluded.
--- Per #446 / D-446-A, an outer CASE gates `curve` at read on
--- `contributed_to_learning = true`, yielding an explicit NULL curve for an
--- opted-out roast even when telemetry rows arrived via a path that bypasses
--- the load proc, and mirroring the aggregation read-filter.
--- `cloud_roasts.summary` is deliberately not gated here; that separate
--- D-417-D-adjacent product question is deferred and flagged on #446.
--- The row-owner column and `visibility` itself are deliberately not
--- projected (AC-7-NEG) -- visibility only gates the filter below.
+-- D220 curated summary v1 exposes only the closed timing/statistics shape.
+-- The owner's integer operator rating is appended after the curve.
+-- Consent is independent of public visibility: S8/R4 supersede D-446-A.
+-- The ordered curve keeps its six Celsius keys, including null sensors.
+-- Visibility still excludes private roasts; internal metadata stays private.
 create or replace secure view roast_by_slug copy grants as
 select
   r.public_slug,
@@ -41,23 +32,30 @@ select
   r.roast_level,
   r.roasted_at_utc,
   r.created_at,
-  r.summary,
-  case
-    when r.contributed_to_learning = true then (
-      select array_agg(
-        object_construct_keep_null(
-          'elapsed_s', t.elapsed_s,
-          'bean_temp_c', t.bean_temp_c,
-          'env_temp_c', t.env_temp_c,
-          'heat_percent', t.heat_percent,
-          'fan_percent', t.fan_percent,
-          'ror_c_per_min', t.ror_c_per_min
-        )
-      ) within group (order by t.elapsed_s)
-      from roast_telemetry t
-      where t.roast_id = r.id
-    )
-  end as curve
+  object_construct_keep_null(
+    'curated_version', 1,
+    'started_at_utc', case when typeof(r.summary:started_at_utc) = 'VARCHAR' and regexp_like(r.summary:started_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:started_at_utc::string else null end,
+    'first_crack_at_utc', case when typeof(r.summary:first_crack_at_utc) = 'VARCHAR' and regexp_like(r.summary:first_crack_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:first_crack_at_utc::string else null end,
+    'beans_added_at_utc', case when typeof(r.summary:beans_added_at_utc) = 'VARCHAR' and regexp_like(r.summary:beans_added_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:beans_added_at_utc::string else null end,
+    'beans_dropped_at_utc', case when typeof(r.summary:beans_dropped_at_utc) = 'VARCHAR' and regexp_like(r.summary:beans_dropped_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:beans_dropped_at_utc::string else null end,
+    'total_roast_seconds', case when typeof(r.summary:total_roast_seconds) in ('INTEGER', 'DECIMAL', 'DOUBLE') then r.summary:total_roast_seconds else null end,
+    'development_time_percent', case when typeof(r.summary:development_time_percent) in ('INTEGER', 'DECIMAL', 'DOUBLE') then r.summary:development_time_percent else null end
+  ) as summary,
+  (
+    select array_agg(
+      object_construct_keep_null(
+        'elapsed_s', t.elapsed_s,
+        'bean_temp_c', t.bean_temp_c,
+        'env_temp_c', t.env_temp_c,
+        'heat_percent', t.heat_percent,
+        'fan_percent', t.fan_percent,
+        'ror_c_per_min', t.ror_c_per_min
+      )
+    ) within group (order by t.elapsed_s)
+    from roast_telemetry t
+    where t.roast_id = r.id
+  ) as curve,
+  r.operator_rating
 from cloud_roasts r
 where r.visibility <> 'private';
 
