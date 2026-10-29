@@ -34,7 +34,7 @@
     "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
-    "happy-dom": "^20.14.5",
+    "happy-dom": "^21.0.4",
     "import-meta-resolve": "4.2.0",
     "markdown-it": "14.3.0",
     "tailwindcss": "^4.3.3",
