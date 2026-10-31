@@ -121,7 +121,7 @@ def test_no_correlated_min_by_scalar_subquery():
 
 
 def test_null_grouping_key_guard_precedes_merge():
-    pre_merge = _region(r"\$\$\s*\n\s*begin", r"merge\s+into")
+    pre_merge = _region(r"\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;", r"merge\s+into")
     assert re.search(
         r"if\s*\(\s*bean_origin\s+is\s+null\s+or\s+roast_level\s+is\s+null\s*\)\s*then"
         r".*?return\s+'skipped:\s*null\s+grouping\s+key'\s*;.*?end\s+if\s*;",
@@ -191,12 +191,12 @@ def test_merge_source_has_no_group_by():
 
 
 def test_copy_grants_present_on_procedure():
-    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;")
     assert re.search(r"\bcopy\s+grants\b", header, re.IGNORECASE)
 
 
 def test_copy_grants_follows_arguments_and_precedes_returns():
-    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;")
     arguments_end = re.search(r"\(\s*bean_origin\s+string\s*,\s*roast_level\s+string\s*\)", header, re.IGNORECASE)
     copy_grants = re.search(r"\bcopy\s+grants\b", header, re.IGNORECASE)
     returns = re.search(r"\breturns\s+string\b", header, re.IGNORECASE)
@@ -205,12 +205,12 @@ def test_copy_grants_follows_arguments_and_precedes_returns():
 
 
 def test_procedure_body_is_dollar_quote_delimited():
-    assert re.search(r"\bas\b\s*\n\s*\$\$\s*\n\s*begin\b", STRIPPED, re.IGNORECASE)
+    assert re.search(r"\bas\b\s*\n\s*\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;", STRIPPED, re.IGNORECASE)
     assert re.search(r"\bend\s*;\s*\n\s*\$\$\s*;\s*$", STRIPPED, re.IGNORECASE)
 
 
 def test_execute_as_owner_present():
-    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*begin")
+    header = _region(r"create\s+or\s+replace\s+procedure", r"\bas\b\s*\n\s*\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;")
     assert re.search(r"\bexecute\s+as\s+owner\b", header, re.IGNORECASE)
 
 
@@ -242,3 +242,11 @@ from test_sync_coordination import has, sql
 
 def test_rec_c2_consent_filter_retained():
     has(sql('R__proc_recompute_summary.sql'),'and r.contributed_to_learning = true')
+
+
+def test_c2_recompute_entry_frame_rejects_malformed_or_missing_entry():
+    pattern = r"\$\$\s*\n\s*declare\s+v_enter_seq\s+number\(38,0\)\s*;\s*begin\s+call\s+app\.cloud_sync_enter\(\)\s+into\s+:v_enter_seq\s*;"
+    valid = "$$\ndeclare\n v_enter_seq number(38,0);\nbegin\n call app.cloud_sync_enter() into :v_enter_seq;"
+    assert re.search(pattern, valid, re.I)
+    for invalid in [valid.replace("declare", ""), valid.replace("v_enter_seq number", "wrong_seq number"), valid.replace("call app.cloud_sync_enter() into :v_enter_seq;", ""), valid.replace("begin", "return 'early'; begin")]:
+        assert re.search(pattern, invalid, re.I) is None

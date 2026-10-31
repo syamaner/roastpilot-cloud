@@ -603,7 +603,6 @@ def test_t_dynamic_sql_interpolates_only_validated_parameters() -> None:
         "p_run_id",
         "p_run_id",
         "p_roast_id",
-        "p_roast_id",
         "p_run_id",
         "p_run_id",
         "p_roast_id",
@@ -661,11 +660,6 @@ def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
         "and (select count(*) from app.cloud_roasts "
         f"where id = '{ROAST_ID}') = 1"
     )
-    requires_exactly_one_opted_in_match = (
-        "and (select count(*) from app.cloud_roasts "
-        f"where id = '{ROAST_ID}' "
-        "and coalesce(contributed_to_learning, false) = true) = 1"
-    )
     requires_globally_unique_run = (
         "and (select count(*) from app.cloud_roasts "
         f"where idempotency_key = '{RUN_ID}') = 1"
@@ -675,7 +669,7 @@ def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
         f"where idempotency_key = '{RUN_ID}' and id = '{ROAST_ID}') = 1"
     )
     assert requires_exactly_one_match in dynamic_sql
-    assert requires_exactly_one_opted_in_match in dynamic_sql
+    assert "contributed_to_learning" not in dynamic_sql.lower()
     assert requires_globally_unique_run in dynamic_sql
     assert requires_run_owned_by_target in dynamic_sql
 

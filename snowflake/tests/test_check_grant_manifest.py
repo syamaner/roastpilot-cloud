@@ -29,7 +29,7 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert revokes == check_grant_manifest.EXPECTED_REVOKES
     assert check_grant_manifest.main() == 0
     assert capsys.readouterr().out == (
-        "grant/revoke manifest matches exactly (12 grants, 5 revokes)\n"
+        "grant/revoke manifest matches exactly (13 grants, 5 revokes)\n"
     )
 
 

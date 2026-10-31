@@ -218,7 +218,10 @@ SELECT 'cloud_roasts' AS object_name, COUNT(*) AS row_count FROM app.cloud_roast
 UNION ALL SELECT 'roast_telemetry', COUNT(*) FROM app.roast_telemetry AT(TIMESTAMP => $backup_snapshot_ts)
 UNION ALL SELECT 'roast_artifacts', COUNT(*) FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts)
 UNION ALL SELECT 'tasting_reviews', COUNT(*) FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
-UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts);
+UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_sync_coordination', COUNT(*) FROM app.cloud_sync_coordination AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_roast_tombstones', COUNT(*) FROM app.cloud_roast_tombstones AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_roast_field_revisions', COUNT(*) FROM app.cloud_roast_field_revisions AT(TIMESTAMP => $backup_snapshot_ts);
 ```
 
 The protected manifest must also record source-snapshot VARIANT type/null

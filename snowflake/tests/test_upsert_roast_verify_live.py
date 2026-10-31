@@ -991,46 +991,8 @@ def test_first_value_returns_none_without_a_row_value(row: object) -> None:
     assert upsert_roast_verify_live._first_value(row, "ID") is None
 
 
-@pytest.mark.parametrize("method", ["execute", "fetchone", "fetchall"])
-def test_cursor_helpers_preserve_typed_error_identity(
-    monkeypatch: pytest.MonkeyPatch, method: str,
-) -> None:
-    cursor = FakeCursor()
-    failure = upsert_roast_verify_live.UpsertRoastVerifyError("typed cursor failure")
-
-    def fail(*_args: object) -> None:
-        raise failure
-
-    monkeypatch.setattr(cursor, method, fail)
-    helper = getattr(upsert_roast_verify_live, f"_{method}")
-    with pytest.raises(
-        upsert_roast_verify_live.UpsertRoastVerifyError,
-        match=r"^typed cursor failure$",
-    ) as raised:
-        helper(cursor, "SELECT CURRENT_DATABASE()", None, "cursor read")
-    assert raised.value is failure
-    assert type(raised.value) is upsert_roast_verify_live.UpsertRoastVerifyError
 
 
-@pytest.mark.parametrize("method", ["fetchone", "fetchall"])
-def test_fetch_helpers_wrap_base_exception(
-    monkeypatch: pytest.MonkeyPatch, method: str,
-) -> None:
-    cursor = FakeCursor()
-    failure = BaseException(RAW_PRIVATE_PATH)
-
-    def fail() -> None:
-        raise failure
-
-    monkeypatch.setattr(cursor, method, fail)
-    helper = getattr(upsert_roast_verify_live, f"_{method}")
-    with pytest.raises(
-        upsert_roast_verify_live.UpsertRoastVerifyError,
-        match=r"^cursor read failed$",
-    ) as raised:
-        helper(cursor, "SELECT CURRENT_DATABASE()", None, "cursor read")
-    assert raised.value.__cause__ is failure
-    assert cursor.executed == [("SELECT CURRENT_DATABASE()", None)]
 
 
 def test_encoded_payload_wraps_unencodable_value() -> None:

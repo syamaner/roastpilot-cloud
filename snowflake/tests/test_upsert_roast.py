@@ -350,7 +350,8 @@ def test_t22_new_group_call_is_unconditional_and_callee_owns_null_noop() -> None
         transaction,
     )
     prefix = transaction[: new_call.start()]
-    assert re.search(r"if\s*\([^;]*v_new_(?:bean_origin|roast_level)", prefix, re.I) is None
+    conditions = re.findall(r"\b(?:if|elseif)\s*\(([^;]*?)\)\s*then\b", prefix, re.I | re.S)
+    assert not any(re.search(r"\bv_new_(?:bean_origin|roast_level)\b", condition, re.I) for condition in conditions)
     assert re.search(
         r"if\s*\(\s*bean_origin\s+is\s+null\s+or\s+roast_level\s+is\s+null\s*\)",
         RECOMPUTE_MIGRATION,
@@ -568,7 +569,7 @@ def test_t36c_data_quality_view_flags_duplicate_public_slug_exactly() -> None:
         r"any_value\s*\(\s*id\s*\)\s+as\s+row_identity\s*,\s*"
         r"'public_slug'\s+as\s+field\s*,\s*"
         r"'duplicate public_slug'\s+as\s+rule\s+from\s+cloud_roasts\s+"
-        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*;"
+        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*(?=union\s+all\b)"
     )
     assert len(re.findall(pattern, view, re.I | re.DOTALL)) == 1
 

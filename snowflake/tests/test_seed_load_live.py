@@ -462,11 +462,16 @@ def test_t9_cloud_roasts_merge_keeps_identity_stable_across_two_loads():
     payload = artifact()
     seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     first = dict(connection.cloud_by_key)
+    first_children = copy.deepcopy(connection.children)
     with pytest.raises(seed_load_live.SeedLoadError, match="seed target state"):
         seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     assert connection.cloud_by_key == first
     assert len([x for x in commands(connection) if x.startswith('INSERT INTO APP.cloud_roasts')]) == 1
-    assert not any('WHEN MATCHED' in x for x in commands(connection))
+    identity_and_child_writes = [x for x in commands(connection) if re.search(r"(?:INSERT INTO|MERGE INTO|UPDATE|DELETE FROM) APP\.(?:cloud_roasts|roast_telemetry|roast_artifacts|tasting_reviews|cloud_roast_field_revisions)\b", x, re.I)]
+    assert not any(re.search(r"\bMERGE\b|\bUPDATE\b|\bDELETE\b", x, re.I) for x in identity_and_child_writes)
+    assert connection.children == first_children
+    summary_merges = [i for i, x in enumerate(commands(connection)) if x.startswith("MERGE INTO APP.reference_roast_summaries")]
+    assert summary_merges and commands(connection).index("CALL APP.cloud_sync_enter()") < min(summary_merges)
     assert commands(connection)[-1] == 'ROLLBACK' 
 
 
