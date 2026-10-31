@@ -378,8 +378,41 @@ describe("data_quality_violations oracle", () => {
 });
 
 describe("data_quality_violations SQL/oracle parity", () => {
-  it("contains exactly ten branches joined by nine UNION ALL operators", () => {
-    expect(SQL.match(/\bunion\s+all\b/gi)).toHaveLength(9);
+  it("contains exactly twenty-one branches joined by twenty UNION ALL operators", () => {
+    expect(SQL.match(/\bunion\s+all\b/gi)).toHaveLength(20);
+  });
+
+  it("binds the eleven C2 coordination, tombstone and revision branches", () => {
+    const branches = SQL_BODY.split(/\bunion\s+all\b/i).slice(10).map(
+      (branch) => branch.replace(/\s+/g, " ").trim().toLowerCase(),
+    );
+    expect(branches).toHaveLength(11);
+    const rules = [
+      "live roast matches tombstone",
+      "duplicate tombstone idempotency_key",
+      "duplicate tombstone public_slug",
+      "duplicate tombstone cloud_roast_id",
+      "coordination row set not exactly one lock row",
+      "coordination write_seq out of range",
+      "field revision rows not exactly three known fields",
+      "unknown field or orphan revision",
+      "revision value out of range",
+      "accepted_write_seq above coordination write_seq",
+      "tombstone sequence invalid",
+    ];
+    rules.forEach((rule, index) => expect(branches[index]).toContain(`'${rule}' as rule`));
+    expect(branches[0]).toContain("t.idempotency_key = r.idempotency_key or t.public_slug = r.public_slug or t.cloud_roast_id = r.id");
+    expect(branches[1]).toContain("group by idempotency_key having count(*) > 1");
+    expect(branches[2]).toContain("group by public_slug having count(*) > 1");
+    expect(branches[3]).toContain("where cloud_roast_id is not null group by cloud_roast_id having count(*) > 1");
+    expect(branches[4]).toContain("having count(*) <> 1 or coalesce(count_if(lock_name = 'cloud_sync_writer'), 0) <> 1");
+    expect(branches[5]).toContain("where write_seq < 0 or write_seq > 9007199254740991");
+    expect(branches[6]).toContain("count(f.field_name) <> 3");
+    expect(branches[6]).toContain("count(distinct case when f.field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then f.field_name end) <> 3");
+    expect(branches[7]).toContain("field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning') or not exists (select 1 from cloud_roasts r where r.id = cloud_roast_id)");
+    expect(branches[8]).toContain("accepted_revision < 0 or accepted_revision > 9007199254740991 or accepted_write_seq < 0");
+    expect(branches[9]).toContain("accepted_write_seq > (select max(write_seq) from cloud_sync_coordination where lock_name = 'cloud_sync_writer')");
+    expect(branches[10]).toContain("deletion_write_seq is not null and (deletion_write_seq < 0 or deletion_write_seq > (select max(write_seq) from cloud_sync_coordination where lock_name = 'cloud_sync_writer'))");
   });
 
   it("binds the score branch labels, source, and predicate", () => {

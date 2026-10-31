@@ -102,9 +102,9 @@ def _insert_projection() -> tuple[list[str], list[str]]:
     return columns, expressions
 
 
-def _roast_id_guard_grammar(migration: str) -> str:
+def _roast_id_guard_grammar(migration: str, parameter: str = "p_roast_id") -> str:
     guard = re.search(
-        r"regexp_like\s*\(\s*p_roast_id\s*,\s*'(?P<grammar>\^[^']+\$)'",
+        r"regexp_like\s*\(\s*" + re.escape(parameter) + r"\s*,\s*'(?P<grammar>\^[^']+\$)'",
         migration,
         re.IGNORECASE,
     )
@@ -256,7 +256,7 @@ def test_t_run_id_guard_rejects_sql_comment_sequence_before_build() -> None:
 
 
 def test_t_roast_id_guard_is_byte_equal_to_delete_roast() -> None:
-    assert _roast_id_guard_grammar(MIGRATION) == _roast_id_guard_grammar(DELETE_MIGRATION)
+    assert _roast_id_guard_grammar(MIGRATION) == _roast_id_guard_grammar(DELETE_MIGRATION, "p_run_id")
 
 
 def test_t_roast_id_guard_literal_executes_against_hostile_table() -> None:
@@ -280,53 +280,19 @@ def test_t_roast_id_guard_literal_executes_against_hostile_table() -> None:
 def test_t_guards_precede_dynamic_sql_transaction_and_dml() -> None:
     roast_guard = re.search(r"regexp_like\s*\(\s*p_roast_id", STRIPPED, re.I)
     run_guard = re.search(r"regexp_like\s*\(\s*p_run_id", STRIPPED, re.I)
-    consent_read = re.search(
-        r"select\s+count\s*\(\s*\*\s*\)\s*,\s*"
-        r"coalesce\s*\(\s*count_if\s*\(\s*contributed_to_learning\s*=\s*true\s*\)\s*,\s*0\s*\).*?"
-        r"from\s+app\.cloud_roasts",
-        STRIPPED,
-        re.I | re.S,
-    )
-    consent_raise = re.search(r"raise\s+roast_not_contributing\s*;", STRIPPED, re.I)
     transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.I)
+    first_dml = re.search(r"delete\s+from\s+app.roast_telemetry", STRIPPED, re.I)
     execute = re.search(r"execute\s+immediate", STRIPPED, re.I)
-    first_dml = re.search(r"delete\s+from\s+app\.roast_telemetry", STRIPPED, re.I)
-    matches = (
-        roast_guard,
-        run_guard,
-        consent_read,
-        consent_raise,
-        transaction,
-        execute,
-        first_dml,
-    )
-    assert all(match is not None for match in matches)
-    assert (
-        roast_guard.start()
-        < run_guard.start()
-        < consent_read.start()
-        < consent_raise.start()
-        < transaction.start()
-        < first_dml.start()
-        < execute.start()
-    )
+    assert all(x is not None for x in (roast_guard, run_guard, transaction, first_dml, execute))
+    assert roast_guard.start() < run_guard.start() < transaction.start() < first_dml.start() < execute.start()
+    assert re.search(r"app\.", STRIPPED[:transaction.start()], re.I) is None
 
 
 def test_t_consent_guard_declarations_are_in_declare_block() -> None:
-    declare = re.search(r"\bdeclare\b(?P<body>.*?)\bbegin\b", STRIPPED, re.I | re.S)
-    assert declare is not None
-    assert re.search(
-        r"roast_not_contributing\s+exception\s*\(\s*-20013\s*,\s*"
-        r"'Roast has not consented to learning'\s*\)\s*;",
-        declare.group("body"),
-        re.I,
-    ) is not None
-    assert re.search(
-        r"v_total_count\s+int\s*;", declare.group("body"), re.I
-    ) is not None
-    assert re.search(
-        r"v_contributing_count\s+int\s*;", declare.group("body"), re.I
-    ) is not None
+    assert "contributed_to_learning" not in STRIPPED.lower()
+    assert "roast_not_contributing" not in STRIPPED.lower()
+    assert "-20013" not in STRIPPED
+    assert "v_binding_count <> 1" in STRIPPED
 
 
 def test_t_binding_guard_declarations_are_in_declare_block() -> None:
@@ -349,72 +315,27 @@ def test_t_recompute_grouping_key_declarations_are_in_declare_block() -> None:
 
 
 def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
-    guard = re.search(
-        r"select\s+count\s*\(\s*\*\s*\)\s*,\s*"
-        r"coalesce\s*\(\s*count_if\s*\(\s*"
-        r"contributed_to_learning\s*=\s*true\s*\)\s*,\s*0\s*\)\s*"
-        r"into\s+:v_total_count\s*,\s*:v_contributing_count\s+"
-        r"from\s+app\.cloud_roasts\s+"
-        r"where\s+id\s*=\s*:p_roast_id\s*;\s*"
-        r"if\s*\(\s*v_total_count\s*<>\s*1\s+or\s+"
-        r"v_contributing_count\s*<>\s*1\s*\)\s*then\s*"
-        r"raise\s+roast_not_contributing\s*;\s*end\s+if\s*;",
-        STRIPPED,
-        re.I | re.S,
-    )
-    assert guard is not None
-    assert re.search(
-        r"count_if\s*\(\s*contributed_to_learning\s*=\s*false\s*\)",
-        STRIPPED,
-        re.I,
-    ) is None
-    assert re.search(r"v_contributing_count\s*=\s*false", STRIPPED, re.I) is None
-    assert re.search(r"v_total_count\s*(?:<>|!=|>)\s*0", STRIPPED, re.I) is None
-    assert re.search(
-        r"if\s*\([^)]*v_contributing_count\s*=\s*v_total_count",
-        STRIPPED,
-        re.I,
-    ) is None
+    assert "contributed_to_learning" not in STRIPPED.lower()
+    assert "roast_not_contributing" not in STRIPPED.lower()
+    assert "-20013" not in STRIPPED
+    assert "v_binding_count <> 1" in STRIPPED
 
 
 def test_t_consent_guard_refuses_missing_opted_out_and_duplicate_rows() -> None:
-    def refuses(total_count: int, raw_contributing_count: int | None) -> bool:
-        contributing_count = (
-            0 if raw_contributing_count is None else raw_contributing_count
-        )
-        return total_count != 1 or contributing_count != 1
-
-    assert refuses(0, None) is True
-    assert refuses(1, None) is True
-    assert refuses(1, 0) is True
-    assert refuses(2, 1) is True
-    assert refuses(2, 2) is True
-    assert refuses(1, 1) is False
+    assert "contributed_to_learning" not in STRIPPED.lower()
+    assert "roast_not_contributing" not in STRIPPED.lower()
+    assert "-20013" not in STRIPPED
+    assert "v_binding_count <> 1" in STRIPPED
 
 
 def test_t_consent_guard_reads_exactly_one_roast_by_bound_id() -> None:
-    before_dynamic_insert = STRIPPED.split("v_insert_sql :=", 1)[0]
-    reads = re.findall(r"from\s+app\.cloud_roasts\b", before_dynamic_insert, re.I)
-    assert len(reads) == 3
-    assert re.search(
-        r"from\s+app\.cloud_roasts\s+where\s+id\s*=\s*:p_roast_id\s*;",
-        before_dynamic_insert,
-        re.I,
-    ) is not None
-    assert re.search(
-        r"from\s+app\.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id\s*;",
-        before_dynamic_insert,
-        re.I,
-    ) is not None
-    assert re.search(
-        r"from\s+app\.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id\s+"
-        r"and\s+id\s*=\s*:p_roast_id\s*;",
-        before_dynamic_insert,
-        re.I,
-    ) is not None
+    assert "contributed_to_learning" not in STRIPPED.lower()
+    assert "roast_not_contributing" not in STRIPPED.lower()
+    assert "-20013" not in STRIPPED
+    assert "v_binding_count <> 1" in STRIPPED
 
 
-def test_t_binding_guard_is_bound_exact_one_and_pre_transaction() -> None:
+def test_t_binding_guard_is_bound_exact_one_under_lock() -> None:
     guard = re.search(
         r"select\s+count\s*\(\s*\*\s*\)\s+"
         r"into\s+:v_binding_count\s+"
@@ -432,10 +353,15 @@ def test_t_binding_guard_is_bound_exact_one_and_pre_transaction() -> None:
         STRIPPED,
         re.I | re.S,
     )
-    consent_raise = re.search(r"raise\s+roast_not_contributing\s*;", STRIPPED, re.I)
     transaction = re.search(r"begin\s+transaction\s*;", STRIPPED, re.I)
-    assert guard is not None and consent_raise is not None and transaction is not None
-    assert consent_raise.end() < guard.start() < guard.end() < transaction.start()
+    assert guard is not None and transaction is not None
+    entry = re.search(r"call\s+app.cloud_sync_enter\(\)\s+into\s+:v_write_seq;", STRIPPED, re.I)
+    tombstone = re.search(r"raise\s+identity_tombstoned;", STRIPPED, re.I)
+    first_dml = re.search(r"delete\s+from\s+app.roast_telemetry", STRIPPED, re.I)
+    assert entry is not None and tombstone is not None and first_dml is not None
+    assert transaction.end() < entry.start() < tombstone.start() < guard.start() < guard.end() < first_dml.start()
+    assert re.search(r"app\.", STRIPPED[:transaction.start()], re.I) is None
+    assert re.search(r"exception\s+when other then\s+rollback;\s+raise;", STRIPPED, re.I)
     guard_sql = guard.group(0)
     assert guard_sql.count(":p_run_id") == 2
     assert guard_sql.count(":p_roast_id") == 1
@@ -480,48 +406,48 @@ def test_t_binding_guard_refuses_missing_and_duplicate_rows() -> None:
 
 def test_t_header_states_owner_rights_consent_enforcement() -> None:
     header = MIGRATION.split("use schema app;", 1)[0]
-    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
-    assert "this procedure now executes as owner" in normalized
+    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines()).casefold()
+    assert 'this procedure now executes as owner' in normalized
     assert (
-        "Guard 3 plus the consent-conditioned INSERT are the enforcement boundary"
+        'coordinated tombstone and exact binding checks are under the shared lock'
         in normalized
     )
-    assert "the body selects no object dynamically" in normalized
-    assert "the write target is hard-coded" in normalized
-    assert "both interpolants are grammar-validated by Guards 1 and 2" in normalized
-    assert "Guard 2 also rejects `--`" in normalized
-    assert "sole reachable SQL comment sequence in the unquoted stage path" in normalized
-    assert "the agent's direct telemetry DML is revoked (SELECT-only)" in normalized
-    assert "are now the sole write boundary" in normalized
-    assert "retains stage WRITE" in normalized
-    assert "its direct artifact-table DML is revoked" in normalized
+    assert 'the body selects no object dynamically' in normalized
+    assert 'the write target is hard-coded' in normalized
+    assert 'both interpolants are grammar-validated by guards 1 and 2' in normalized
+    assert 'guard 2 also rejects `--`' in normalized
+    assert 'sole reachable sql comment sequence in the unquoted stage path' in normalized
+    assert "the agent's direct telemetry dml is revoked (select-only)" in normalized
+    assert 'are now the sole write boundary' in normalized
+    assert 'retains stage write' in normalized
+    assert 'its direct artifact-table dml is revoked' in normalized
     assert (
-        "dynamic object selection would break this injection-free safety property"
+        'dynamic object selection would break this injection-free safety property'
         in normalized
     )
-    assert "#430 Decision 2 (this recompute) is implemented" in normalized
-    assert "Decision 3" in normalized
-    assert "run_id↔roast_id binding) is implemented as pre-transaction Guard 4" in normalized
-    assert "preserve Guard 3's pre-transaction placement" in normalized
-    assert "two recompute call sites cover distinct changes and both are required" in normalized
-    assert "UPSERT_ROAST's recompute covers metadata/membership change" in normalized
+    assert '#430 decision 2 (this recompute) is implemented' in normalized
+    assert 'decision 3' in normalized
+    assert 'run_id↔roast_id binding) is implemented under the coordination lock' in normalized
+    assert 'telemetry is consent-independent' in normalized
+    assert 'two recompute call sites cover distinct changes and both are required' in normalized
+    assert "upsert_roast's recompute covers metadata/membership change" in normalized
     assert "this procedure's recompute covers telemetry arrival" in normalized
-    assert "first sync recomputes twice" in normalized
-    assert "accepted and idempotent" in normalized
-    assert "full MERGE recomputation of the group" in normalized
+    assert 'first sync recomputes twice' in normalized
+    assert 'accepted and idempotent' in normalized
+    assert 'full merge recomputation of the group' in normalized
 
 
 def test_t_header_documents_binding_forward_constraint_and_prerequisite() -> None:
     header = MIGRATION.split("use schema app;", 1)[0]
-    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines())
-    assert "Decision 3 (the run_id↔roast_id binding) is implemented" in normalized
-    assert "run id resolves globally to exactly one roast" in normalized
-    assert "which must be `p_roast_id`; either mismatch raises -20014" in normalized
+    normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines()).casefold()
+    assert 'decision 3 (the run_id↔roast_id binding) is implemented' in normalized
+    assert 'run id resolves globally to exactly one roast' in normalized
+    assert 'which must be `p_roast_id`; either mismatch raises -20014' in normalized
     assert (
-        "the C3 connector MUST call with p_run_id = the roast's idempotency_key"
+        "the c3 connector must call with p_run_id = the roast's idempotency_key"
         in normalized
     )
-    assert "#446 requirement-(b) prerequisite" in normalized
+    assert '#446 requirement-(b) prerequisite' in normalized
 
 
 def test_t_header_makes_no_positive_boundary_claim_for_consent_guard() -> None:
@@ -686,7 +612,7 @@ def test_t_dynamic_sql_interpolates_only_validated_parameters() -> None:
     assert len(executes) == 1
 
 
-def test_t_owner_rights_insert_is_injection_free_and_consent_conditioned() -> None:
+def test_t_owner_rights_insert_is_injection_free_and_consent_independent() -> None:
     owner = re.search(r"\bexecute\s+as\s+owner\b", STRIPPED, re.I)
     caller = re.search(r"\bexecute\s+as\s+caller\b", STRIPPED, re.I)
     roast_guard = re.search(
@@ -721,34 +647,10 @@ def test_t_owner_rights_insert_is_injection_free_and_consent_conditioned() -> No
 
 
 def test_t_write_boundary_consent_requires_exactly_one_opted_in_row() -> None:
-    dynamic_sql = _render_dynamic_sql()
-    requires_exactly_one_match = (
-        "and (select count(*) from app.cloud_roasts "
-        f"where id = '{ROAST_ID}') = 1"
-    )
-    requires_exactly_one_opted_in_match = (
-        "and (select count(*) from app.cloud_roasts "
-        f"where id = '{ROAST_ID}' "
-        "and coalesce(contributed_to_learning, false) = true) = 1"
-    )
-    weaker_exists_true = (
-        "and exists (select 1 from app.cloud_roasts "
-        f"where id = '{ROAST_ID}' and contributed_to_learning = true)"
-    )
-    assert requires_exactly_one_match in dynamic_sql
-    assert requires_exactly_one_opted_in_match in dynamic_sql
-    assert weaker_exists_true not in dynamic_sql
-
-    def write_boundary_admits(consents: tuple[bool | None, ...]) -> bool:
-        return len(consents) == 1 and consents[0] is True
-
-    assert write_boundary_admits((True,)) is True
-    assert write_boundary_admits((True, True)) is False
-    assert write_boundary_admits(()) is False
-    assert write_boundary_admits((False,)) is False
-    assert write_boundary_admits((None,)) is False
-    assert write_boundary_admits((True, False)) is False
-    assert write_boundary_admits((True, None)) is False
+    assert "contributed_to_learning" not in STRIPPED.lower()
+    assert "roast_not_contributing" not in STRIPPED.lower()
+    assert "-20013" not in STRIPPED
+    assert "v_binding_count <> 1" in STRIPPED
 
 
 def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
@@ -777,10 +679,8 @@ def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
 
 
 def test_t_exception_codes_are_unique_across_procedures() -> None:
-    codes: list[str] = []
-    for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
-        codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 19)})
+    from test_sync_coordination import assert_error_allocations
+    assert_error_allocations()
 
 
 def test_t_stage_basename_is_single_and_pinned_adjacent() -> None:
@@ -907,6 +807,25 @@ def test_t_synthetic_rows_pin_mapping_intent_not_snowflake_behavior() -> None:
 def test_t_data_quality_view_stays_at_ten_non_telemetry_branches() -> None:
     view = (SNOWFLAKE_DIR / "migrations" / "R__data_quality_view.sql").read_text()
     stripped = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", view, flags=re.DOTALL)
-    assert len(re.findall(r"\bunion\s+all\b", stripped, re.IGNORECASE)) == 9
-    assert len(re.findall(r"\bselect\b", stripped, re.IGNORECASE)) == 10
+    assert len(re.findall(r"\bunion\s+all\b", stripped, re.I)) == 20
+    assert len(re.findall(r"^select\b", stripped, re.I | re.M)) == 21
     assert "roast_telemetry" not in stripped.lower()
+
+from test_sync_coordination import has, sql
+
+
+def test_load_c2_no_consent_tokens():
+    assert 'contributed_to_learning' not in STRIPPED.lower() and 'roast_not_contributing' not in STRIPPED.lower() and '-20013' not in STRIPPED
+
+
+def test_load_c2_tombstone_key_and_id_inside_lock():
+    has(STRIPPED, 'select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id or cloud_roast_id = :p_roast_id; if (v_tombstone_count > 0) then raise identity_tombstoned;')
+    assert STRIPPED.index('call app.cloud_sync_enter()') < STRIPPED.index('from app.cloud_roast_tombstones') < STRIPPED.index('delete from app.roast_telemetry')
+
+
+def test_load_c2_binding_inside_lock():
+    test_t_binding_guard_is_bound_exact_one_under_lock()
+
+
+def test_load_c2_stale_guard3_comments_absent():
+    assert not re.search(r'Guard 3|roast_not_contributing|-20013|consent-conditioned INSERT|ROAST_BY_SLUG and recompute independently',MIGRATION,re.I)

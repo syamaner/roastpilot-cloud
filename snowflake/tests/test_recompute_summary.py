@@ -236,3 +236,9 @@ def test_only_one_contribution_source():
 
 def test_validate_migrations_passes():
     assert validate_migrations.main() == 0
+
+from test_sync_coordination import has, sql
+
+
+def test_rec_c2_consent_filter_retained():
+    has(sql('R__proc_recompute_summary.sql'),'and r.contributed_to_learning = true')

@@ -81,12 +81,19 @@ class FakeCursor:
         self.executed.append((command, normalized))
         if self.fail_on is not None and self.fail_on(command):
             raise RuntimeError("scripted write failure")
-        if command.startswith("MERGE INTO APP.cloud_roasts"):
+        if command.startswith("INSERT INTO APP.cloud_roasts"):
             self.cloud_by_key.setdefault(normalized[1], normalized[0])
         return self
 
     def fetchone(self):
-        return (self.database,)
+        command = self.executed[-1][0]
+        if command == "SELECT CURRENT_DATABASE()":
+            return (self.database,)
+        if command == "CALL APP.cloud_sync_enter()":
+            return (1,)
+        if command.startswith("SELECT COUNT(*) FROM APP.cloud_roasts "):
+            return (len(self.cloud_by_key),)
+        return (0,)
 
     def fetchall(self):
         if self.persisted_rows is not None:
@@ -173,7 +180,7 @@ def test_t6_successful_operator_wrapper_passes_target_and_closes(tmp_path: Path)
 
 
 @pytest.mark.parametrize("marker", [
-    "MERGE INTO APP.cloud_roasts",
+    "INSERT INTO APP.cloud_roasts",
     "INSERT INTO APP.roast_telemetry",
     "INSERT INTO APP.roast_artifacts",
     "INSERT INTO APP.tasting_reviews",
@@ -435,7 +442,7 @@ class StatefulCursor(FakeCursor):
     def execute(self, command: str, params=None):
         super().execute(command, params)
         values = tuple(params) if params is not None else ()
-        if command.startswith("MERGE INTO APP.cloud_roasts"):
+        if command.startswith("INSERT INTO APP.cloud_roasts"):
             self.connection.cloud_by_key.setdefault(values[1], values[0])
         for table in self.connection.children:
             if command.startswith(f"DELETE FROM APP.{table}"):
@@ -455,17 +462,12 @@ def test_t9_cloud_roasts_merge_keeps_identity_stable_across_two_loads():
     payload = artifact()
     seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     first = dict(connection.cloud_by_key)
-    seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
+    with pytest.raises(seed_load_live.SeedLoadError, match="seed target state"):
+        seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     assert connection.cloud_by_key == first
-    cloud_statements = [command for command in commands(connection)
-                        if command.startswith("MERGE INTO APP.cloud_roasts")]
-    assert len(cloud_statements) == 2
-    assert all("ON target.idempotency_key = source.idempotency_key" in command
-               and "WHEN MATCHED THEN UPDATE" in command for command in cloud_statements)
-    update_region = cloud_statements[0].split("WHEN MATCHED THEN UPDATE SET", 1)[1].split(
-        "WHEN NOT MATCHED", 1,
-    )[0]
-    assert not re.search(r"(?:^|,)\s*(?:id|idempotency_key)\s*=", update_region)
+    assert len([x for x in commands(connection) if x.startswith('INSERT INTO APP.cloud_roasts')]) == 1
+    assert not any('WHEN MATCHED' in x for x in commands(connection))
+    assert commands(connection)[-1] == 'ROLLBACK' 
 
 
 def test_t9_persisted_id_mismatch_rolls_back_before_child_writes():
@@ -477,7 +479,7 @@ def test_t9_persisted_id_mismatch_rolls_back_before_child_writes():
         seed_load_live.load_seed(connection, artifact(), "ROASTPILOT_DEV", NOW)
     recorded = commands(connection)
     assert not any(command.startswith("DELETE FROM APP.") for command in recorded)
-    assert not any(command.startswith("INSERT INTO APP.") for command in recorded)
+    assert not any(command.startswith("INSERT INTO APP." + table) for command in recorded for table in ("roast_telemetry", "roast_artifacts", "tasting_reviews", "cloud_roast_field_revisions"))
     assert recorded[-1] == "ROLLBACK"
     assert "COMMIT" not in recorded
 
@@ -493,7 +495,8 @@ def test_t9_matching_persisted_id_allows_child_writes():
     )
     assert identity_select.endswith("WHERE idempotency_key IN (%s)")
     assert identity_params == ("seed-1",)
-    assert any(command.startswith("DELETE FROM APP.") for command in recorded)
+    assert any(command.startswith("INSERT INTO APP.roast_telemetry") for command in recorded)
+    assert not any(command.startswith("DELETE FROM APP.") for command in recorded)
     assert recorded[-1] == "COMMIT"
 
 
@@ -502,16 +505,15 @@ def test_t10_children_are_scoped_delete_then_insert_and_reload_counts_match():
     payload = artifact()
     seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     first_counts = {table: len(rows) for table, rows in connection.children.items()}
-    seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
+    with pytest.raises(seed_load_live.SeedLoadError):
+        seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
     assert {table: len(rows) for table, rows in connection.children.items()} == first_counts
-    roast_id = payload["tables"][0]["rows"][0]["id"]  # type: ignore[index]
+    roast_id = payload['tables'][0]['rows'][0]['id']
     for table in connection.children:
-        table_commands = [(command, params) for command, params in connection.fake_cursor.executed
-                          if f"APP.{table}" in command]
-        assert table_commands[0][0] == f"DELETE FROM APP.{table} WHERE roast_id IN (%s)"
-        assert table_commands[0][1] == (roast_id,)
-        assert table_commands[1][0].startswith(f"INSERT INTO APP.{table}")
-        assert "TRUNCATE" not in " ".join(command for command, _ in table_commands).upper()
+        selected = [(command, params) for command, params in connection.fake_cursor.executed if f'APP.{table}' in command]
+        assert selected[0] == (f'SELECT COUNT(*) FROM APP.{table} WHERE roast_id IN (%s)', (roast_id,))
+        assert selected[1][0].startswith(f'INSERT INTO APP.{table}')
+        assert not any(re.search(r'\bDELETE\b|\bTRUNCATE\b', command) for command, _ in selected)
 
 
 def test_t10_child_delete_binds_every_seeded_roast_id():
@@ -519,6 +521,7 @@ def test_t10_child_delete_binds_every_seeded_roast_id():
     second_roast = copy.deepcopy(payload["tables"][0]["rows"][0])  # type: ignore[index]
     second_roast["id"] = "00000000-0000-0000-0000-000000000002"
     second_roast["idempotency_key"] = "seed-2"
+    second_roast["public_slug"] = "223456789ABCDEFGHJKLMNP"
     payload["tables"][0]["rows"].append(second_roast)  # type: ignore[index]
     connection = FakeConnection()
     seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
@@ -527,7 +530,7 @@ def test_t10_child_delete_binds_every_seeded_roast_id():
         "00000000-0000-0000-0000-000000000002",
     )
     deletes = [(command, params) for command, params in connection.fake_cursor.executed
-               if command.startswith("DELETE FROM APP.")]
+               if command.startswith("SELECT COUNT(*) FROM APP.") and any("APP." + table + " " in command for table in ("roast_telemetry", "roast_artifacts", "tasting_reviews"))]
     identity_select, identity_params = next(
         (command, params) for command, params in connection.fake_cursor.executed
         if command.startswith("SELECT idempotency_key, id")
@@ -628,3 +631,131 @@ def test_operator_env_helper_requires_a_nonempty_value(monkeypatch):
     monkeypatch.delenv("SEED_TEST_ENV")
     with pytest.raises(seed_load_live.SeedLoadError):
         seed_load_live._required_env("SEED_TEST_ENV")
+
+
+class C2Cursor(FakeCursor):
+    def __init__(self, *, entry=1, invalid_table=None, count=1):
+        super().__init__()
+        self.entry = entry
+        self.invalid_table = invalid_table
+        self.count = count
+
+    def fetchone(self):
+        command = self.executed[-1][0]
+        if command == 'CALL APP.cloud_sync_enter()':
+            return (self.entry,)
+        if self.invalid_table and command.startswith('SELECT COUNT(*) FROM APP.' + self.invalid_table + ' '):
+            return (self.count,)
+        return super().fetchone()
+
+
+def c2_connection(**kwargs):
+    connection = FakeConnection()
+    connection.fake_cursor = C2Cursor(**kwargs)
+    return connection
+
+
+@pytest.mark.parametrize('field', ['id','idempotency_key','public_slug'])
+def test_seed_c2_duplicate_input_refused_before_sql(field):
+    source = Path(seed_load_live.__file__).read_text()
+    assert re.search(r'for field in \("id", "idempotency_key", "public_slug"\):\s+values = \[row.get\(field\).*?if any\(value in values\[:index\] for index, value in enumerate\(values\)\):\s+raise SeedLoadError\("seeded identities must be distinct"\)', source, re.S)
+    data = artifact()
+    row = copy.deepcopy(data['tables'][0]['rows'][0])
+    row.update(id='00000000-0000-0000-0000-000000000002', idempotency_key='second', public_slug='223456789ABCDEFGHJKLMNP')
+    row[field] = data['tables'][0]['rows'][0][field]
+    data['tables'][0]['rows'].append(row)
+    connection = FakeConnection()
+    with pytest.raises(seed_load_live.SeedLoadError):
+        seed_load_live.load_seed(connection,data,'ROASTPILOT_DEV',NOW)
+    assert commands(connection) == []
+
+
+def test_seed_c2_enter_first_after_begin():
+    # Structural assertion catches omission before a fake result can become a runtime error.
+    text=Path(seed_load_live.__file__).read_text()
+    assert re.search(r'cursor.execute\("BEGIN"\)\s+cursor.execute\("CALL APP.cloud_sync_enter\(\)"\)',text)
+    connection=FakeConnection()
+    seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    assert commands(connection)[2:4] == ['BEGIN','CALL APP.cloud_sync_enter()']
+
+
+@pytest.mark.parametrize('value',[None,True,-1,'1'])
+def test_seed_c2_enter_invalid_result_refused(value):
+    connection=c2_connection(entry=value)
+    with pytest.raises(seed_load_live.SeedLoadError,match='invalid coordinated write sequence'):
+        seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    assert commands(connection)[-1] == 'ROLLBACK' and 'COMMIT' not in commands(connection)
+    assert not any(WRITE_RE.search(x) for x in commands(connection))
+
+
+def _assert_existing_refused(table):
+    connection=c2_connection(invalid_table=table)
+    with pytest.raises(seed_load_live.SeedLoadError,match='seed target state'):
+        seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    assert commands(connection)[-1] == 'ROLLBACK' and 'COMMIT' not in commands(connection)
+    assert not any(WRITE_RE.search(x) for x in commands(connection))
+
+
+def test_seed_c2_existing_cloud_identity_refused():
+    _assert_existing_refused('cloud_roasts')
+
+
+def test_seed_c2_tombstone_identity_refused():
+    _assert_existing_refused('cloud_roast_tombstones')
+
+
+def test_seed_c2_existing_field_state_refused():
+    _assert_existing_refused('cloud_roast_field_revisions')
+
+
+@pytest.mark.parametrize('table',['roast_telemetry','roast_artifacts','tasting_reviews'])
+def test_seed_c2_existing_child_rows_refused(table):
+    _assert_existing_refused(table)
+
+
+def test_seed_c2_insert_only_no_merge_no_delete():
+    assert seed_load_live.CLOUD_ROAST_INSERT.startswith('INSERT INTO APP.cloud_roasts')
+    assert not re.search(r'\bMERGE\b|WHEN MATCHED|\bDELETE\b',seed_load_live.CLOUD_ROAST_INSERT,re.I)
+    connection=FakeConnection()
+    seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    assert not any(re.search(r'\bDELETE\b|\bTRUNCATE\b',x,re.I) for x in commands(connection))
+
+
+def test_seed_c2_three_baseline_revisions_per_roast():
+    connection=FakeConnection()
+    seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    inserts=[(command,params) for command,params in connection.fake_cursor.executed if command.startswith('INSERT INTO APP.cloud_roast_field_revisions')]
+    assert len(inserts)==3
+    assert [p for _,p in inserts]==[(artifact()['tables'][0]['rows'][0]['id'],name,1) for name in ['operator_rating','operator_notes','contributed_to_learning']]
+    assert all('accepted_revision, accepted_write_seq) SELECT %s, %s, 0, %s' in c for c,_ in inserts)
+
+
+@pytest.mark.parametrize('table',['cloud_roasts','cloud_roast_tombstones','cloud_roast_field_revisions','roast_telemetry','roast_artifacts','tasting_reviews'])
+@pytest.mark.parametrize('count',[None,True,-1,1,'0',0.0])
+def test_seed_c2_refusal_rolls_back_no_commit(table,count):
+    connection=c2_connection(invalid_table=table,count=count)
+    with pytest.raises(seed_load_live.SeedLoadError):
+        seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    assert commands(connection)[-1]=='ROLLBACK' and 'COMMIT' not in commands(connection)
+
+
+def test_seed_c2_exact_statement_sequence():
+    connection=FakeConnection()
+    seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
+    recorded=commands(connection)
+    expected=['USE SECONDARY ROLES NONE','SELECT CURRENT_DATABASE()','BEGIN','CALL APP.cloud_sync_enter()']
+    expected += ['SELECT COUNT(*) FROM APP.'+table+' '+suffix for table,suffix in [
+        ('cloud_roasts','WHERE id IN (%s) OR idempotency_key IN (%s) OR public_slug IN (%s)'),
+        ('cloud_roast_tombstones','WHERE cloud_roast_id IN (%s) OR idempotency_key IN (%s) OR public_slug IN (%s)'),
+        ('cloud_roast_field_revisions','WHERE cloud_roast_id IN (%s)'),
+        ('roast_telemetry','WHERE roast_id IN (%s)'),('roast_artifacts','WHERE roast_id IN (%s)'),('tasting_reviews','WHERE roast_id IN (%s)')]]
+    assert recorded[:10]==expected
+    assert recorded[10].startswith('INSERT INTO APP.cloud_roasts')
+    assert recorded[11]=='SELECT idempotency_key, id FROM APP.cloud_roasts WHERE idempotency_key IN (%s)'
+    assert [c.splitlines()[0] for c in recorded[12:15]]==['INSERT INTO APP.roast_telemetry','INSERT INTO APP.roast_artifacts','INSERT INTO APP.tasting_reviews']
+    assert all(c.startswith('INSERT INTO APP.cloud_roast_field_revisions') for c in recorded[15:18])
+    assert all(c.startswith('MERGE INTO APP.reference_roast_summaries') for c in recorded[18:30])
+    assert recorded[30:42]==['CALL APP.recompute_reference_summary(%s, %s)']*12
+    assert recorded[42:]==['COMMIT']
+    ids=(artifact()['tables'][0]['rows'][0]['id'],)
+    assert connection.fake_cursor.executed[4][1]==ids+('seed-1',)+('123456789ABCDEFGHJKLMNP',)
