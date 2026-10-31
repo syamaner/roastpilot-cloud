@@ -114,6 +114,7 @@ EXPECTED_MANIFEST = frozenset(
             "ROASTPILOT_AGENT",
         ),
         _grant("USAGE", "PROCEDURE", _UPSERT_ROAST_SIGNATURE, "ROASTPILOT_AGENT"),
+        _grant("USAGE", "PROCEDURE", "app.delete_roast(string, string)", "ROASTPILOT_AGENT"),
     }
 )
 

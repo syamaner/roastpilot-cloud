@@ -116,4 +116,60 @@ select
   'duplicate public_slug' as rule
 from cloud_roasts
 group by public_slug
-having count(*) > 1;
+having count(*) > 1
+
+union all
+
+select 'cloud_roasts' as table_name, r.id as row_identity, 'tombstone' as field, 'live roast matches tombstone' as rule
+from cloud_roasts r where exists (select 1 from cloud_roast_tombstones t where t.idempotency_key = r.idempotency_key or t.public_slug = r.public_slug or t.cloud_roast_id = r.id)
+
+union all
+
+select 'cloud_roast_tombstones' as table_name, idempotency_key as row_identity, 'idempotency_key' as field, 'duplicate tombstone idempotency_key' as rule
+from cloud_roast_tombstones group by idempotency_key having count(*) > 1
+
+union all
+
+select 'cloud_roast_tombstones' as table_name, any_value(idempotency_key) as row_identity, 'public_slug' as field, 'duplicate tombstone public_slug' as rule
+from cloud_roast_tombstones group by public_slug having count(*) > 1
+
+union all
+
+select 'cloud_roast_tombstones' as table_name, any_value(idempotency_key) as row_identity, 'cloud_roast_id' as field, 'duplicate tombstone cloud_roast_id' as rule
+from cloud_roast_tombstones where cloud_roast_id is not null group by cloud_roast_id having count(*) > 1
+
+union all
+
+select 'cloud_sync_coordination' as table_name, 'cloud_sync_writer' as row_identity, 'lock_name' as field, 'coordination row set not exactly one lock row' as rule
+from cloud_sync_coordination having count(*) <> 1 or coalesce(count_if(lock_name = 'cloud_sync_writer'), 0) <> 1
+
+union all
+
+select 'cloud_sync_coordination' as table_name, lock_name as row_identity, 'write_seq' as field, 'coordination write_seq out of range' as rule
+from cloud_sync_coordination where write_seq < 0 or write_seq > 9007199254740991
+
+union all
+
+select 'cloud_roasts' as table_name, r.id as row_identity, 'field_revisions' as field, 'field revision rows not exactly three known fields' as rule
+from cloud_roasts r left join cloud_roast_field_revisions f on f.cloud_roast_id = r.id group by r.id
+having count(f.field_name) <> 3 or count(distinct case when f.field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then f.field_name end) <> 3
+
+union all
+
+select 'cloud_roast_field_revisions' as table_name, cloud_roast_id as row_identity, field_name as field, 'unknown field or orphan revision' as rule
+from cloud_roast_field_revisions where field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning') or not exists (select 1 from cloud_roasts r where r.id = cloud_roast_id)
+
+union all
+
+select 'cloud_roast_field_revisions' as table_name, cloud_roast_id as row_identity, field_name as field, 'revision value out of range' as rule
+from cloud_roast_field_revisions where accepted_revision < 0 or accepted_revision > 9007199254740991 or accepted_write_seq < 0
+
+union all
+
+select 'cloud_roast_field_revisions' as table_name, cloud_roast_id as row_identity, field_name as field, 'accepted_write_seq above coordination write_seq' as rule
+from cloud_roast_field_revisions where accepted_write_seq > (select max(write_seq) from cloud_sync_coordination where lock_name = 'cloud_sync_writer')
+
+union all
+
+select 'cloud_roast_tombstones' as table_name, idempotency_key as row_identity, 'deletion_write_seq' as field, 'tombstone sequence invalid' as rule
+from cloud_roast_tombstones where deletion_write_seq is not null and (deletion_write_seq < 0 or deletion_write_seq > (select max(write_seq) from cloud_sync_coordination where lock_name = 'cloud_sync_writer'));
