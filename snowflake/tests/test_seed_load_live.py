@@ -764,3 +764,137 @@ def test_seed_c2_exact_statement_sequence():
     assert recorded[42:]==['COMMIT']
     ids=(artifact()['tables'][0]['rows'][0]['id'],)
     assert connection.fake_cursor.executed[4][1]==ids+('seed-1',)+('123456789ABCDEFGHJKLMNP',)
+
+
+class RetainedSeedInt(int):
+    pass
+
+
+class RetainedSeedResponseCursor(FakeCursor):
+    def __init__(self, *, entry_row=(0,), count_row=(0,), invalid_table=None, expected_preconditions=None):
+        super().__init__()
+        self.entry_row = entry_row
+        self.count_row = count_row
+        self.invalid_table = invalid_table
+        self.expected_preconditions = expected_preconditions
+        self.precondition_index = 0
+
+    def execute(self, command, params=None):
+        if self.expected_preconditions is not None and command.startswith('SELECT COUNT(*) FROM APP.'):
+            observed = (command, tuple(params) if params is not None else None)
+            assert self.precondition_index < len(self.expected_preconditions)
+            assert observed == self.expected_preconditions[self.precondition_index]
+            self.precondition_index += 1
+        return super().execute(command, params)
+
+    def fetchone(self):
+        command = self.executed[-1][0]
+        if command == 'CALL APP.cloud_sync_enter()':
+            return self.entry_row
+        if self.invalid_table and command.startswith('SELECT COUNT(*) FROM APP.' + self.invalid_table + ' '):
+            return self.count_row
+        return super().fetchone()
+
+
+class RetainedSeedResponseConnection(FakeConnection):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.fake_cursor = RetainedSeedResponseCursor(**kwargs)
+        self.cursor_calls = 0
+
+    def cursor(self):
+        self.cursor_calls += 1
+        return self.fake_cursor
+
+
+class RetainedCountRow:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+@pytest.mark.parametrize('row', [(0,), [0], range(1)])
+def test_c2_retained_zero_count_accepts_only_valid_single_cell_zero(row):
+    assert seed_load_live._require_zero_count(RetainedCountRow(row)) is None
+
+
+@pytest.mark.parametrize('row', [None, 0, (), [], (0, 0), {}, {'COUNT(*)': 0}, '0', b'0', (True,), (False,), (-1,), (1,), ('0',), (0.0,), (RetainedSeedInt(0),)])
+def test_c2_retained_zero_count_malformed_or_nonzero_has_exact_error(row):
+    with pytest.raises(seed_load_live.SeedLoadError) as raised:
+        seed_load_live._require_zero_count(RetainedCountRow(row))
+    assert str(raised.value) == 'seed target state is not empty for these identities'
+
+
+@pytest.mark.parametrize('table', ['cloud_roasts', 'cloud_roast_tombstones', 'cloud_roast_field_revisions', 'roast_telemetry', 'roast_artifacts', 'tasting_reviews'])
+@pytest.mark.parametrize('row', [(), (0, 0), {}, {'COUNT(*)': 0}, '0', b'0', (True,), (-1,), ('0',), (RetainedSeedInt(0),)])
+def test_c2_retained_count_shape_refusal_rolls_back_without_write(table, row):
+    connection = RetainedSeedResponseConnection(invalid_table=table, count_row=row)
+    with pytest.raises(seed_load_live.SeedLoadError) as raised:
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert str(raised.value) == 'seed target state is not empty for these identities'
+    assert commands(connection)[-1] == 'ROLLBACK'
+    assert 'COMMIT' not in commands(connection)
+    assert not any(WRITE_RE.search(command) for command in commands(connection))
+
+
+@pytest.mark.parametrize(('row', 'sequence'), [((0,), 0), ([0], 0), ((1,), 1), ([7], 7)])
+def test_c2_retained_entry_zero_and_positive_have_exact_revision_sequence(row, sequence):
+    connection = RetainedSeedResponseConnection(entry_row=row)
+    seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    statement = 'INSERT INTO APP.cloud_roast_field_revisions (cloud_roast_id, field_name, accepted_revision, accepted_write_seq) SELECT %s, %s, 0, %s'
+    revision_writes = [(query, params) for query, params in connection.fake_cursor.executed if query.startswith('INSERT INTO APP.cloud_roast_field_revisions')]
+    assert revision_writes == [(statement, ('00000000-0000-0000-0000-000000000001', name, sequence)) for name in ['operator_rating', 'operator_notes', 'contributed_to_learning']]
+    assert commands(connection)[-1] == 'COMMIT'
+    assert 'ROLLBACK' not in commands(connection)
+
+
+@pytest.mark.parametrize('row', [None, 0, (), [], (0, 0), {}, {'WRITE_SEQ': 0}, '0', b'0', (True,), (False,), (-1,), ('0',), (0.0,), (RetainedSeedInt(0),)])
+def test_c2_retained_entry_malformed_shape_or_type_exact_error_no_write(row):
+    connection = RetainedSeedResponseConnection(entry_row=row)
+    with pytest.raises(seed_load_live.SeedLoadError) as raised:
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert str(raised.value) == 'invalid coordinated write sequence'
+    assert commands(connection) == ['USE SECONDARY ROLES NONE', 'SELECT CURRENT_DATABASE()', 'BEGIN', 'CALL APP.cloud_sync_enter()', 'ROLLBACK']
+    assert not any(WRITE_RE.search(command) for command in commands(connection))
+
+
+@pytest.mark.parametrize('field', ['id', 'idempotency_key', 'public_slug'])
+def test_c2_retained_duplicate_identity_exact_message_before_cursor(field):
+    data = artifact()
+    duplicate = copy.deepcopy(data['tables'][0]['rows'][0])
+    duplicate.update(id='00000000-0000-0000-0000-000000000002', idempotency_key='seed-2', public_slug='223456789ABCDEFGHJKLMNP')
+    duplicate[field] = data['tables'][0]['rows'][0][field]
+    data['tables'][0]['rows'].append(duplicate)
+    connection = RetainedSeedResponseConnection()
+    with pytest.raises(seed_load_live.SeedLoadError) as raised:
+        seed_load_live.load_seed(connection, data, 'ROASTPILOT_DEV', NOW)
+    expected = 'seeded cloud_roast ids must be distinct' if field == 'id' else 'seeded identities must be distinct'
+    assert str(raised.value) == expected
+    assert connection.cursor_calls == 0
+    assert commands(connection) == []
+
+
+def test_c2_retained_every_maintenance_precondition_has_exact_sql_and_bindings():
+    ids = ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002')
+    keys = ('seed-1', 'seed-2')
+    slugs = ('123456789ABCDEFGHJKLMNP', '223456789ABCDEFGHJKLMNP')
+    expected = [
+        ('SELECT COUNT(*) FROM APP.cloud_roasts WHERE id IN (%s, %s) OR idempotency_key IN (%s, %s) OR public_slug IN (%s, %s)', ids + keys + slugs),
+        ('SELECT COUNT(*) FROM APP.cloud_roast_tombstones WHERE cloud_roast_id IN (%s, %s) OR idempotency_key IN (%s, %s) OR public_slug IN (%s, %s)', ids + keys + slugs),
+        ('SELECT COUNT(*) FROM APP.cloud_roast_field_revisions WHERE cloud_roast_id IN (%s, %s)', ids),
+        ('SELECT COUNT(*) FROM APP.roast_telemetry WHERE roast_id IN (%s, %s)', ids),
+        ('SELECT COUNT(*) FROM APP.roast_artifacts WHERE roast_id IN (%s, %s)', ids),
+        ('SELECT COUNT(*) FROM APP.tasting_reviews WHERE roast_id IN (%s, %s)', ids),
+    ]
+    data = artifact()
+    second = copy.deepcopy(data['tables'][0]['rows'][0])
+    second.update(id=ids[1], idempotency_key=keys[1], public_slug=slugs[1])
+    data['tables'][0]['rows'].append(second)
+    connection = RetainedSeedResponseConnection(expected_preconditions=expected)
+    seed_load_live.load_seed(connection, data, 'ROASTPILOT_DEV', NOW)
+    assert connection.fake_cursor.precondition_index == 6
+    assert connection.fake_cursor.executed[4:10] == expected
+    assert commands(connection)[2:4] == ['BEGIN', 'CALL APP.cloud_sync_enter()']
+    assert commands(connection)[-1] == 'COMMIT'

@@ -691,3 +691,96 @@ def test_lt_c2_dml_probe_refuses_untouched_cursor():
     with pytest.raises(load_telemetry_verify_live.TelemetryVerifyError,match='superseded by the C9-C2'):
         load_telemetry_verify_live.verify_agent_dml_revoked(argument)
     assert argument.calls==[]
+
+
+@pytest.mark.parametrize('relative', ['roast.jsonl', 'nested/roast.jsonl'])
+def test_c2_retained_fixture_uri_exact_confined_result(tmp_path, monkeypatch, relative):
+    root = tmp_path / 'fixtures'
+    fixture = root / relative
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('{}\n')
+    monkeypatch.setattr(load_telemetry_verify_live, 'FIXTURES_DIR', root.resolve())
+    assert load_telemetry_verify_live._validated_fixture_uri(fixture) == fixture.resolve().as_uri()
+
+
+def test_c2_retained_fixture_uri_outside_root_rejected(tmp_path, monkeypatch):
+    root = tmp_path / 'fixtures'
+    root.mkdir()
+    outside = tmp_path / 'outside.jsonl'
+    outside.write_text('{}\n')
+    monkeypatch.setattr(load_telemetry_verify_live, 'FIXTURES_DIR', root.resolve())
+    with pytest.raises(load_telemetry_verify_live.TelemetryVerifyError) as raised:
+        load_telemetry_verify_live._validated_fixture_uri(outside)
+    assert str(raised.value) == f'rejected telemetry fixture path: {outside}'
+
+
+def test_c2_retained_fixture_uri_quote_inside_root_rejected(tmp_path, monkeypatch):
+    root = tmp_path / 'fixtures'
+    root.mkdir()
+    quoted = root / "roast'quoted.jsonl"
+    quoted.write_text('{}\n')
+    monkeypatch.setattr(load_telemetry_verify_live, 'FIXTURES_DIR', root.resolve())
+    assert quoted.resolve().is_relative_to(root.resolve())
+    with pytest.raises(load_telemetry_verify_live.TelemetryVerifyError) as raised:
+        load_telemetry_verify_live._validated_fixture_uri(quoted)
+    assert str(raised.value) == f'rejected telemetry fixture path: {quoted}'
+
+
+def test_c2_retained_cleanup_empty_has_no_effect():
+    failure = load_telemetry_verify_live.TelemetryVerifyError('outer')
+    load_telemetry_verify_live._attach_cleanup_failures(failure, [])
+    assert str(failure) == 'outer'
+    assert failure.cleanup_failures == []
+    assert getattr(failure, '__notes__', []) == []
+
+
+def test_c2_retained_cleanup_messages_and_notes_preserve_order():
+    failure = load_telemetry_verify_live.TelemetryVerifyError('outer')
+    errors = [load_telemetry_verify_live.TelemetryVerifyError('first'), load_telemetry_verify_live.TelemetryVerifyError('second')]
+    load_telemetry_verify_live._attach_cleanup_failures(failure, errors)
+    expected = ['cleanup failed for run id 41900000-0000-0000-0000-000000000001: first', 'cleanup failed for run id 41900000-0000-0000-0000-000000000001: second']
+    assert failure.cleanup_failures == expected
+    assert failure.__notes__ == expected
+    assert str(failure) == 'outer'
+
+
+def test_c2_retained_print_failure_exact_order_and_sanitised_cause(capsys):
+    failure = load_telemetry_verify_live.TelemetryVerifyError('outer')
+    failure.__cause__ = FakeProgrammingError('RAW-CAUSE-MESSAGE-SENTINEL', errno=0, sqlstate='Ab1Z9')
+    load_telemetry_verify_live._attach_cleanup_failures(failure, [load_telemetry_verify_live.TelemetryVerifyError('first'), load_telemetry_verify_live.TelemetryVerifyError('second')])
+    load_telemetry_verify_live._print_failure(failure)
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert captured.err == ('telemetry verification failed: outer\nroot cause: FakeProgrammingError errno=0 sqlstate=Ab1Z9\ncleanup failed for run id 41900000-0000-0000-0000-000000000001: first\ncleanup failed for run id 41900000-0000-0000-0000-000000000001: second\n')
+    assert 'RAW-CAUSE-MESSAGE-SENTINEL' not in captured.err
+
+
+def test_c2_retained_print_failure_without_cause_or_cleanup(capsys):
+    load_telemetry_verify_live._print_failure(load_telemetry_verify_live.TelemetryVerifyError('only outer'))
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert captured.err == 'telemetry verification failed: only outer\n'
+
+
+@pytest.mark.parametrize('number', [-999999999, -1, 0, 1, 999999999])
+def test_c2_retained_sanitised_cause_keeps_exact_in_range_int(number):
+    cause = FakeProgrammingError('RAW-CAUSE-SENTINEL', errno=number, sqlstate='Ab1Z9')
+    assert load_telemetry_verify_live._sanitised_cause(cause) == f'FakeProgrammingError errno={number} sqlstate=Ab1Z9'
+
+
+@pytest.mark.parametrize('number', [-1000000001, -1000000000, 1000000000, 1000000001, False, True, None, '0', 0.0, Decimal('0'), SecretFormattingInt(0)])
+def test_c2_retained_sanitised_cause_omits_nonprimitive_or_out_of_range_errno(number):
+    cause = FakeProgrammingError('RAW-CAUSE-SENTINEL', errno=number, sqlstate='Ab1Z9')
+    assert load_telemetry_verify_live._sanitised_cause(cause) == 'FakeProgrammingError sqlstate=Ab1Z9'
+
+
+@pytest.mark.parametrize('state', ['00000', 'ABCDE', 'aB12Z', '42s02', 'zzzzz', 'Z9a0B'])
+def test_c2_retained_sanitised_cause_keeps_exact_alphanumeric_sqlstate(state):
+    cause = FakeProgrammingError('RAW-CAUSE-SENTINEL', errno=0, sqlstate=state)
+    assert load_telemetry_verify_live._sanitised_cause(cause) == f'FakeProgrammingError errno=0 sqlstate={state}'
+
+
+@pytest.mark.parametrize('state', ['', '1234', '123456', 'AB-12', 'Ab_12', 'AB\n12', 'ABCDE\n', ' ABCD', None, False, 12345, SecretFormattingStr('Ab12Z')])
+def test_c2_retained_sanitised_cause_omits_malformed_sqlstate(state):
+    cause = FakeProgrammingError('RAW-CAUSE-SENTINEL', errno=0, sqlstate=state)
+    assert load_telemetry_verify_live._sanitised_cause(cause) == 'FakeProgrammingError errno=0'
