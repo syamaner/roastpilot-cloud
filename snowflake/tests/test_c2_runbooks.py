@@ -3,11 +3,30 @@ from pathlib import Path
 import re
 
 import pytest
-ROOT=Path(__file__).resolve().parents[2]
-BACKUP=(ROOT/'docs/runbooks/backup-export.md').read_text()
+def runbook_checkout_root(test_file: Path) -> Path:
+    """Resolve only the two admitted absolute test-file layouts."""
+    if not test_file.is_absolute() or '..' in test_file.parts:
+        raise ValueError('runbook test path must use an admitted absolute layout')
+    if test_file.parts[-4:] == ('snowflake', 'mutants', 'tests', 'test_c2_runbooks.py'):
+        return test_file.parents[3]
+    if test_file.parts[-3:] == ('snowflake', 'tests', 'test_c2_runbooks.py'):
+        return test_file.parents[2]
+    raise ValueError('unknown runbook test layout')
+
+
+def load_runbook_documents(test_file: Path) -> tuple[str, str, str]:
+    """Read exactly the three static docs from the admitted checkout root."""
+    root = runbook_checkout_root(test_file) / 'docs' / 'runbooks'
+    return (
+        (root / 'backup-export.md').read_text(encoding='utf-8'),
+        (root / 'prod-deploy-runbook.md').read_text(encoding='utf-8'),
+        (root / 'key-rotation.md').read_text(encoding='utf-8'),
+    )
+
+
+ROOT=runbook_checkout_root(Path(__file__))
+BACKUP, PROD, KEY=load_runbook_documents(Path(__file__))
 BOUNDARY=BACKUP.split('## C9-C2 coordinated backup boundary',1)[1].split('## Export procedure',1)[0]
-PROD=(ROOT/'docs/runbooks/prod-deploy-runbook.md').read_text()
-KEY=(ROOT/'docs/runbooks/key-rotation.md').read_text()
 
 
 EXPECTED_CAPTURE_TABLES = (
@@ -101,3 +120,64 @@ def test_rb_key_rotation_no_retired_verifier_instruction():
     assert '`upsert_roast_verify_live.py` is retired by C9-C2 and refuses' in KEY
     assert 'python3 snowflake/upsert_roast_verify_live.py --target' not in KEY
     assert 'no replacement\nlive write instrument exists until C9-C4' in KEY
+
+
+def fixture_runbook_checkout(tmp_path):
+    checkout = tmp_path / 'checkout'
+    docs = checkout / 'docs' / 'runbooks'
+    docs.mkdir(parents=True)
+    for name, content in [('backup-export.md', 'backup source'), ('prod-deploy-runbook.md', 'prod source'), ('key-rotation.md', 'key source')]:
+        (docs / name).write_text(content, encoding='utf-8')
+    return checkout
+
+
+def fixture_test_path(checkout, layout):
+    tail = 'snowflake/tests/test_c2_runbooks.py' if layout == 'native' else 'snowflake/mutants/tests/test_c2_runbooks.py'
+    path = checkout / tail
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+@pytest.mark.parametrize('layout', ['native', 'copied'])
+def test_rb_input_layout_reads_same_checkout_documents(tmp_path, layout):
+    checkout = fixture_runbook_checkout(tmp_path)
+    path = fixture_test_path(checkout, layout)
+    assert runbook_checkout_root(path) == checkout
+    assert load_runbook_documents(path) == ('backup source', 'prod source', 'key source')
+
+
+@pytest.mark.parametrize('layout', ['native', 'copied'])
+@pytest.mark.parametrize('missing', ['backup-export.md', 'prod-deploy-runbook.md', 'key-rotation.md'])
+def test_rb_input_layout_missing_document_fails(tmp_path, layout, missing):
+    checkout = fixture_runbook_checkout(tmp_path)
+    path = fixture_test_path(checkout, layout)
+    (checkout / 'docs' / 'runbooks' / missing).unlink()
+    with pytest.raises(FileNotFoundError):
+        load_runbook_documents(path)
+
+
+@pytest.mark.parametrize('tail', ['tests/test_c2_runbooks.py', 'snowflake/other/tests/test_c2_runbooks.py', 'snowflake/mutants/other/tests/test_c2_runbooks.py', 'snowflake/tests/other.py', 'snowflake/tests/../tests/test_c2_runbooks.py'])
+def test_rb_input_layout_unknown_absolute_rejected(tmp_path, tail):
+    with pytest.raises(ValueError):
+        load_runbook_documents(tmp_path / tail)
+
+
+def test_rb_input_layout_relative_rejected():
+    with pytest.raises(ValueError):
+        load_runbook_documents(Path('snowflake/tests/test_c2_runbooks.py'))
+
+
+@pytest.mark.parametrize('layout', ['native', 'copied'])
+@pytest.mark.parametrize('shadow_tail', ['snowflake/docs/runbooks', 'snowflake/mutants/docs/runbooks'])
+def test_rb_input_layout_never_falls_back_to_shadow_docs(tmp_path, layout, shadow_tail):
+    checkout = fixture_runbook_checkout(tmp_path)
+    path = fixture_test_path(checkout, layout)
+    shadow = checkout / shadow_tail
+    shadow.mkdir(parents=True, exist_ok=True)
+    for name in ['backup-export.md', 'prod-deploy-runbook.md', 'key-rotation.md']:
+        (shadow / name).write_text('shadow source', encoding='utf-8')
+    assert load_runbook_documents(path) == ('backup source', 'prod source', 'key source')
+    (checkout / 'docs/runbooks/backup-export.md').unlink()
+    with pytest.raises(FileNotFoundError):
+        load_runbook_documents(path)
