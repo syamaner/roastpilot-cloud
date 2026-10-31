@@ -3,6 +3,7 @@
 -- Private stage bytes may return indefinitely; G1 runtime semantics unqualified.
 use schema app;
 create or replace procedure delete_roast(p_run_id string, p_public_slug string)
+copy grants
 returns variant
 language sql
 execute as owner

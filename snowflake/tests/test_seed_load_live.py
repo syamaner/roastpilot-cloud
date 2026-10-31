@@ -1,6 +1,8 @@
 """Contract tests for the operator-run live seed loader (issue #356 U2)."""
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import copy
 import json
 import re
@@ -87,6 +89,8 @@ class FakeCursor:
 
     def fetchone(self):
         command = self.executed[-1][0]
+        if command == "SELECT CURRENT_TRANSACTION()":
+            return (None,)
         if command == "SELECT CURRENT_DATABASE()":
             return (self.database,)
         if command == "CALL APP.cloud_sync_enter()":
@@ -117,12 +121,12 @@ def commands(connection: FakeConnection) -> list[str]:
     return [command for command, _ in connection.fake_cursor.executed]
 
 
-def test_t4_secondary_roles_is_the_first_statement():
+def test_t4_idle_probe_then_secondary_roles_before_every_write():
     connection = FakeConnection()
     seed_load_live.load_seed(connection, artifact(), "ROASTPILOT_DEV", NOW)
-    assert commands(connection)[0] == "USE SECONDARY ROLES NONE"
+    assert commands(connection)[:2] == ['SELECT CURRENT_TRANSACTION()', 'USE SECONDARY ROLES NONE']
     first_write = next(index for index, command in enumerate(commands(connection)) if WRITE_RE.search(command))
-    assert commands(connection).index("USE SECONDARY ROLES NONE") < first_write
+    assert position(commands(connection), 'USE SECONDARY ROLES NONE') < first_write
 
 
 def test_t5_physical_database_mismatch_aborts_before_every_write():
@@ -131,7 +135,7 @@ def test_t5_physical_database_mismatch_aborts_before_every_write():
         seed_load_live.load_seed(connection, artifact(), "ROASTPILOT_DEV", NOW)
     assert not any(WRITE_RE.search(command) for command in commands(connection))
     assert commands(connection) == [
-        "USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()", "ROLLBACK",
+        "SELECT CURRENT_TRANSACTION()", "USE SECONDARY ROLES NONE", "SELECT CURRENT_DATABASE()",
     ]
 
 
@@ -457,7 +461,7 @@ class StatefulCursor(FakeCursor):
         return self
 
 
-def test_t9_cloud_roasts_merge_keeps_identity_stable_across_two_loads():
+def test_t9_insert_only_seed_refuses_second_load_without_changing_identity_or_children():
     connection = StatefulConnection()
     payload = artifact()
     seed_load_live.load_seed(connection, payload, "ROASTPILOT_DEV", NOW)
@@ -471,8 +475,8 @@ def test_t9_cloud_roasts_merge_keeps_identity_stable_across_two_loads():
     assert not any(re.search(r"\bMERGE\b|\bUPDATE\b|\bDELETE\b", x, re.I) for x in identity_and_child_writes)
     assert connection.children == first_children
     summary_merges = [i for i, x in enumerate(commands(connection)) if x.startswith("MERGE INTO APP.reference_roast_summaries")]
-    assert summary_merges and commands(connection).index("CALL APP.cloud_sync_enter()") < min(summary_merges)
-    assert commands(connection)[-1] == 'ROLLBACK' 
+    assert summary_merges and position(commands(connection), 'CALL APP.cloud_sync_enter()') < min(summary_merges)
+    assert commands(connection)[-1] == 'ROLLBACK'
 
 
 def test_t9_persisted_id_mismatch_rolls_back_before_child_writes():
@@ -561,7 +565,7 @@ def test_t11_recomputes_each_of_twelve_loaded_groups_after_all_five_loads():
     last_load = max(index for index, (command, _) in enumerate(recorded)
                     if WRITE_RE.search(command))
     assert min(index for index, _ in calls) > last_load
-    assert max(index for index, _ in calls) < commands(connection).index("COMMIT")
+    assert max(index for index, _ in calls) < position(commands(connection), 'COMMIT')
 
 
 def _unknown_top(payload):
@@ -678,10 +682,10 @@ def test_seed_c2_duplicate_input_refused_before_sql(field):
 def test_seed_c2_enter_first_after_begin():
     # Structural assertion catches omission before a fake result can become a runtime error.
     text=Path(seed_load_live.__file__).read_text()
-    assert re.search(r'cursor.execute\("BEGIN"\)\s+cursor.execute\("CALL APP.cloud_sync_enter\(\)"\)',text)
+    assert re.search(r'cursor.execute\("BEGIN"\)\s+try:\s+cursor.execute\("CALL APP.cloud_sync_enter\(\)"\)',text)
     connection=FakeConnection()
     seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
-    assert commands(connection)[2:4] == ['BEGIN','CALL APP.cloud_sync_enter()']
+    assert commands(connection)[3:5] == ['BEGIN','CALL APP.cloud_sync_enter()']
 
 
 @pytest.mark.parametrize('value',[None,True,-1,'1'])
@@ -748,22 +752,22 @@ def test_seed_c2_exact_statement_sequence():
     connection=FakeConnection()
     seed_load_live.load_seed(connection,artifact(),'ROASTPILOT_DEV',NOW)
     recorded=commands(connection)
-    expected=['USE SECONDARY ROLES NONE','SELECT CURRENT_DATABASE()','BEGIN','CALL APP.cloud_sync_enter()']
+    expected=['SELECT CURRENT_TRANSACTION()','USE SECONDARY ROLES NONE','SELECT CURRENT_DATABASE()','BEGIN','CALL APP.cloud_sync_enter()']
     expected += ['SELECT COUNT(*) FROM APP.'+table+' '+suffix for table,suffix in [
         ('cloud_roasts','WHERE id IN (%s) OR idempotency_key IN (%s) OR public_slug IN (%s)'),
         ('cloud_roast_tombstones','WHERE cloud_roast_id IN (%s) OR idempotency_key IN (%s) OR public_slug IN (%s)'),
         ('cloud_roast_field_revisions','WHERE cloud_roast_id IN (%s)'),
         ('roast_telemetry','WHERE roast_id IN (%s)'),('roast_artifacts','WHERE roast_id IN (%s)'),('tasting_reviews','WHERE roast_id IN (%s)')]]
-    assert recorded[:10]==expected
-    assert recorded[10].startswith('INSERT INTO APP.cloud_roasts')
-    assert recorded[11]=='SELECT idempotency_key, id FROM APP.cloud_roasts WHERE idempotency_key IN (%s)'
-    assert [c.splitlines()[0] for c in recorded[12:15]]==['INSERT INTO APP.roast_telemetry','INSERT INTO APP.roast_artifacts','INSERT INTO APP.tasting_reviews']
-    assert all(c.startswith('INSERT INTO APP.cloud_roast_field_revisions') for c in recorded[15:18])
-    assert all(c.startswith('MERGE INTO APP.reference_roast_summaries') for c in recorded[18:30])
-    assert recorded[30:42]==['CALL APP.recompute_reference_summary(%s, %s)']*12
-    assert recorded[42:]==['COMMIT']
+    assert recorded[:11]==expected
+    assert recorded[11].startswith('INSERT INTO APP.cloud_roasts')
+    assert recorded[12]=='SELECT idempotency_key, id FROM APP.cloud_roasts WHERE idempotency_key IN (%s)'
+    assert [c.splitlines()[0] for c in recorded[13:16]]==['INSERT INTO APP.roast_telemetry','INSERT INTO APP.roast_artifacts','INSERT INTO APP.tasting_reviews']
+    assert all(c.startswith('INSERT INTO APP.cloud_roast_field_revisions') for c in recorded[16:19])
+    assert all(c.startswith('MERGE INTO APP.reference_roast_summaries') for c in recorded[19:31])
+    assert recorded[31:43]==['CALL APP.recompute_reference_summary(%s, %s)']*12
+    assert recorded[43:]==['COMMIT']
     ids=(artifact()['tables'][0]['rows'][0]['id'],)
-    assert connection.fake_cursor.executed[4][1]==ids+('seed-1',)+('123456789ABCDEFGHJKLMNP',)
+    assert connection.fake_cursor.executed[5][1]==ids+('seed-1',)+('123456789ABCDEFGHJKLMNP',)
 
 
 class RetainedSeedInt(int):
@@ -856,7 +860,7 @@ def test_c2_retained_entry_malformed_shape_or_type_exact_error_no_write(row):
     with pytest.raises(seed_load_live.SeedLoadError) as raised:
         seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
     assert str(raised.value) == 'invalid coordinated write sequence'
-    assert commands(connection) == ['USE SECONDARY ROLES NONE', 'SELECT CURRENT_DATABASE()', 'BEGIN', 'CALL APP.cloud_sync_enter()', 'ROLLBACK']
+    assert commands(connection) == ['SELECT CURRENT_TRANSACTION()', 'USE SECONDARY ROLES NONE', 'SELECT CURRENT_DATABASE()', 'BEGIN', 'CALL APP.cloud_sync_enter()', 'ROLLBACK']
     assert not any(WRITE_RE.search(command) for command in commands(connection))
 
 
@@ -895,6 +899,99 @@ def test_c2_retained_every_maintenance_precondition_has_exact_sql_and_bindings()
     connection = RetainedSeedResponseConnection(expected_preconditions=expected)
     seed_load_live.load_seed(connection, data, 'ROASTPILOT_DEV', NOW)
     assert connection.fake_cursor.precondition_index == 6
-    assert connection.fake_cursor.executed[4:10] == expected
-    assert commands(connection)[2:4] == ['BEGIN', 'CALL APP.cloud_sync_enter()']
+    assert connection.fake_cursor.executed[5:11] == expected
+    assert commands(connection)[3:5] == ['BEGIN', 'CALL APP.cloud_sync_enter()']
     assert commands(connection)[-1] == 'COMMIT'
+
+
+class IdleProbeCursor(FakeCursor):
+    def __init__(self, row=(None,), error=None):
+        super().__init__()
+        self.probe_row = row
+        self.probe_error = error
+
+    def fetchone(self):
+        if self.executed[-1][0] == 'SELECT CURRENT_TRANSACTION()':
+            if self.probe_error is not None:
+                raise self.probe_error
+            return self.probe_row
+        return super().fetchone()
+
+
+def idle_probe_connection(row=(None,), error=None):
+    connection = FakeConnection()
+    connection.fake_cursor = IdleProbeCursor(row, error)
+    # Sentinel for pre-existing caller work; load_seed has no authority over it.
+    connection.caller_work = ['uncommitted caller insert']
+    return connection
+
+
+def assert_caller_transaction_untouched(connection):
+    assert commands(connection) == ['SELECT CURRENT_TRANSACTION()']
+    assert connection.caller_work == ['uncommitted caller insert']
+    assert connection.closed is False
+    assert 'BEGIN' not in commands(connection)
+    assert 'COMMIT' not in commands(connection) and 'ROLLBACK' not in commands(connection)
+    assert not any(WRITE_RE.search(command) for command in commands(connection))
+
+
+@pytest.mark.parametrize('row', [(73,), ['caller-txn'], (False,), (0,)])
+def test_seed_c2_existing_transaction_refused_without_rollback_commit_write_or_close(row):
+    connection = idle_probe_connection(row)
+    with pytest.raises(seed_load_live.SeedLoadError, match='already has a caller transaction'):
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert_caller_transaction_untouched(connection)
+
+
+@pytest.mark.parametrize('row', [None, (), [], (None, None), [None, 73], {'CURRENT_TRANSACTION()': None}, 'NULL', b'NULL', 0])
+def test_seed_c2_unknown_transaction_probe_shape_refused_without_ownership(row):
+    connection = idle_probe_connection(row)
+    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert_caller_transaction_untouched(connection)
+
+
+def test_seed_c2_two_cell_transaction_probe_refused_without_ownership():
+    connection = idle_probe_connection((None, 73))
+    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert_caller_transaction_untouched(connection)
+
+
+@pytest.mark.parametrize('failure_site', ['execute', 'fetchone'])
+def test_seed_c2_failed_transaction_probe_refused_without_ownership(failure_site):
+    connection = idle_probe_connection(error=RuntimeError('probe unavailable') if failure_site == 'fetchone' else None)
+    if failure_site == 'execute':
+        connection.fake_cursor.fail_on = lambda command: command == 'SELECT CURRENT_TRANSACTION()'
+    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert_caller_transaction_untouched(connection)
+
+
+@pytest.mark.parametrize('row', [(None,), [None]])
+def test_seed_c2_idle_exact_single_cell_null_then_owns_transaction(row):
+    connection = idle_probe_connection(row)
+    seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert commands(connection)[:5] == ['SELECT CURRENT_TRANSACTION()', 'USE SECONDARY ROLES NONE', 'SELECT CURRENT_DATABASE()', 'BEGIN', 'CALL APP.cloud_sync_enter()']
+    assert commands(connection)[-1] == 'COMMIT'
+    assert 'ROLLBACK' not in commands(connection)
+    assert connection.caller_work == ['uncommitted caller insert']
+
+
+def test_seed_c2_begin_failure_does_not_claim_or_rollback_transaction():
+    connection = FakeConnection(fail_on=lambda command: command == 'BEGIN')
+    with pytest.raises(RuntimeError, match='scripted write failure'):
+        seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
+    assert commands(connection) == ['SELECT CURRENT_TRANSACTION()', 'USE SECONDARY ROLES NONE', 'SELECT CURRENT_DATABASE()', 'BEGIN']
+    assert 'COMMIT' not in commands(connection) and 'ROLLBACK' not in commands(connection)
+    assert connection.closed is False
+
+
+def test_seed_c2_factory_pins_existing_autocommit_default():
+    import ast
+    module = ast.parse(Path(seed_load_live.__file__).read_text())
+    connect = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == '_connect')
+    calls = [node for node in ast.walk(connect) if isinstance(node, ast.Call) and ast.unparse(node.func) == 'snowflake.connector.connect']
+    assert len(calls) == 1
+    flags = [keyword.value for keyword in calls[0].keywords if keyword.arg == 'autocommit']
+    assert len(flags) == 1 and isinstance(flags[0], ast.Constant) and flags[0].value is True

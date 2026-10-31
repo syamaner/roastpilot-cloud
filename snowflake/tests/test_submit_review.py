@@ -6,6 +6,8 @@ lines.
 """
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import re
 import sys
 from pathlib import Path
@@ -260,7 +262,7 @@ from test_sync_coordination import has, sql
 
 def test_sub_c2_slug_resolution_inside_lock():
     text = sql('R__proc_submit_review.sql')
-    assert text.index('call app.cloud_sync_enter()') < text.index('from app.cloud_roasts') < text.index('insert into app.tasting_reviews')
+    assert position(text, 'call app.cloud_sync_enter()') < position(text, 'from app.cloud_roasts') < position(text, 'insert into app.tasting_reviews')
 
 
 def test_sub_c2_tombstone_maps_to_20001():

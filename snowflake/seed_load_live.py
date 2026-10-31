@@ -223,6 +223,19 @@ def _require_zero_count(cursor: Cursor) -> None:
         raise SeedLoadError("seed target state is not empty for these identities")
 
 
+def _require_idle_connection(cursor: Cursor) -> None:
+    """Refuse unknown or existing caller transactions without taking ownership."""
+    try:
+        cursor.execute("SELECT CURRENT_TRANSACTION()")
+        row = cursor.fetchone()
+    except Exception as exc:
+        raise SeedLoadError("seed connection transaction state is unknown") from exc
+    if not isinstance(row, Sequence) or isinstance(row, (str, bytes)) or len(row) != 1:
+        raise SeedLoadError("seed connection transaction state is unknown")
+    if row[0] is not None:
+        raise SeedLoadError("seed connection already has a caller transaction")
+
+
 def load_seed(
     connection: Connection,
     artifact: object,
@@ -236,13 +249,14 @@ def load_seed(
         if any(value in values[:index] for index, value in enumerate(values)):
             raise SeedLoadError("seeded identities must be distinct")
     cursor = connection.cursor()
-    try:
-        cursor.execute("USE SECONDARY ROLES NONE")
-        cursor.execute("SELECT CURRENT_DATABASE()")
-        if _current_database(cursor) != expected_target:
-            raise SeedLoadError("connected database does not match target")  # pragma: no mutate
+    _require_idle_connection(cursor)
+    cursor.execute("USE SECONDARY ROLES NONE")
+    cursor.execute("SELECT CURRENT_DATABASE()")
+    if _current_database(cursor) != expected_target:
+        raise SeedLoadError("connected database does not match target")  # pragma: no mutate
 
-        cursor.execute("BEGIN")
+    cursor.execute("BEGIN")
+    try:
         cursor.execute("CALL APP.cloud_sync_enter()")
         enter_row = cursor.fetchone()
         write_seq = enter_row[0] if isinstance(enter_row, Sequence) and not isinstance(enter_row, (str, bytes)) and len(enter_row) == 1 else None
@@ -353,6 +367,7 @@ def _connect(target: str) -> Connection:  # pragma: no cover; pragma: no mutate 
         role=_required_env("SNOWFLAKE_ROLE"),
         warehouse=_required_env("SNOWFLAKE_WAREHOUSE"),
         database=target,
+        autocommit=True,
         private_key=private_key,
     )
 

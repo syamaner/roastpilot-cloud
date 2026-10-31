@@ -81,22 +81,37 @@ begin
     and array_contains('patch_version'::variant, object_keys(v_payload))
     and array_contains('fields'::variant, object_keys(v_payload));
   if (v_is_patch) then
-    if (typeof(v_payload:patch_version) <> 'INTEGER' or v_payload:patch_version::number <> 1
-        or typeof(v_payload:fields) <> 'OBJECT'
-        or array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3) then
+    if (typeof(v_payload:patch_version) <> 'INTEGER') then
+      raise invalid_payload;
+    end if;
+    if (v_payload:patch_version::number <> 1) then
+      raise invalid_payload;
+    end if;
+    if (typeof(v_payload:fields) <> 'OBJECT') then
+      raise invalid_payload;
+    end if;
+    if (array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3) then
       raise invalid_payload;
     end if;
     v_fields := object_keys(v_payload:fields);
     for v_index in 0 to array_size(v_fields) - 1 do
       v_field_name := get(v_fields, v_index)::string;
       v_entry := get(v_payload:fields, v_field_name);
-      if (v_field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning')
-          or typeof(v_entry) <> 'OBJECT'
-          or array_size(object_keys(v_entry)) <> 2
+      if (v_field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning')) then
+        raise invalid_payload;
+      end if;
+      if (typeof(v_entry) <> 'OBJECT') then
+        raise invalid_payload;
+      end if;
+      if (array_size(object_keys(v_entry)) <> 2
           or not array_contains('revision'::variant, object_keys(v_entry))
-          or not array_contains('value'::variant, object_keys(v_entry))
-          or typeof(v_entry:revision) <> 'INTEGER'
-          or v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991) then
+          or not array_contains('value'::variant, object_keys(v_entry))) then
+        raise invalid_payload;
+      end if;
+      if (typeof(v_entry:revision) <> 'INTEGER') then
+        raise invalid_payload;
+      end if;
+      if (v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991) then
         raise invalid_payload;
       end if;
     end for;
@@ -290,14 +305,21 @@ begin
           v_current := coalesce(v_current, parse_json('null'));
           v_value_valid := false;
           if (v_field_name = 'operator_rating') then
-            v_value_valid := typeof(v_value) = 'NULL_VALUE' or (typeof(v_value) = 'INTEGER' and v_value::number between 1 and 5);
+            if (typeof(v_value) = 'NULL_VALUE') then
+              v_value_valid := true;
+            elseif (typeof(v_value) = 'INTEGER') then
+              v_value_valid := v_value::number between 1 and 5;
+            end if;
           elseif (v_field_name = 'operator_notes') then
-            v_value_valid := typeof(v_value) in ('VARCHAR', 'NULL_VALUE');
-            if (v_entry:value::string is not null
-      and (regexp_count(v_entry:value::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
-           or regexp_count(v_entry:value::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
-           or regexp_count(v_entry:value::string, '(°[ ]?[Ff])|℉') > 0)) then
-              v_value_valid := false;
+            if (typeof(v_value) = 'NULL_VALUE') then
+              v_value_valid := true;
+            elseif (typeof(v_value) = 'VARCHAR') then
+              v_value_valid := true;
+              if (regexp_count(v_entry:value::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+                  or regexp_count(v_entry:value::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+                  or regexp_count(v_entry:value::string, '(°[ ]?[Ff])|℉') > 0) then
+                v_value_valid := false;
+              end if;
             end if;
           elseif (v_field_name = 'contributed_to_learning') then
             v_value_valid := typeof(v_value) = 'BOOLEAN';

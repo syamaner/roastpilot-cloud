@@ -6,6 +6,8 @@ literals. They do not emulate Snowflake; runtime semantics remain live-gated.
 
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import json
 import re
 from collections import Counter
@@ -195,19 +197,27 @@ def test_t03_single_merge_has_exact_idempotency_on_clause() -> None:
     "immutable",
     ["id", "idempotency_key", "owner_id", "public_slug", "visibility", "created_at"],
 )
-def test_t04_matched_update_excludes_each_immutable_column(immutable: str) -> None:
-    assert re.search(r"when\s+matched\s+then", _merge(), re.I) is None
+def test_t04_create_binds_each_immutable_column(immutable: str) -> None:
+    expected = {
+        'id': 'uuid_string() as id', 'idempotency_key': ':p_run_id as idempotency_key',
+        'owner_id': 'null::string as owner_id', 'public_slug': ':v_public_slug as public_slug',
+        'visibility': ':v_visibility as visibility', 'created_at': 'current_timestamp() as created_at',
+    }
+    has(_merge(), expected[immutable])
     assert re.search(r"\b(?:insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
 
 
-def test_t05_matched_update_refreshes_updated_at() -> None:
-    assert re.search(r"when\s+matched\s+then", _merge(), re.I) is None
-    assert re.search(r"\b(?:insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
+def test_t05_applied_patch_refreshes_updated_at() -> None:
+    has(STRIPPED, 'if (v_any_applied) then update app.cloud_roasts set updated_at = current_timestamp() where id = :v_id; end if;')
 
 
-def test_t05b_matched_update_contains_only_payload_columns_or_updated_at() -> None:
-    assert re.search(r"when\s+matched\s+then", _merge(), re.I) is None
-    assert re.search(r"\b(?:insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
+def test_t05b_patch_updates_only_three_mutable_fields_and_timestamp() -> None:
+    updates = re.findall(r'update\s+app\.cloud_roasts\s+set\s+(.*?)\s+where\s+id\s*=\s*:v_id\s*;', STRIPPED, re.I | re.S)
+    assert updates == [
+        "operator_rating = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::int)",
+        "operator_notes = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::string)",
+        'contributed_to_learning = :v_value::boolean', 'updated_at = current_timestamp()',
+    ]
 
 
 def test_t06_insert_has_all_17_columns_and_explicit_generators() -> None:
@@ -493,18 +503,14 @@ def test_t32a_empty_artifact_manifest_is_allowed_for_both_learning_states() -> N
     assert STRIPPED.count(expected_guard) == 1
 
 
-def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
+def test_t32b_artifact_manifest_grammar_is_independent_of_consent() -> None:
     assert re.search(r"v_payload:contributed_to_learning::boolean\s*=\s*false", STRIPPED, re.I) is None
-    assert re.search(r"delete\s+from\s+app.roast_telemetry", STRIPPED, re.I) is None
-    assert "v_invalid_artifact_type_count <> 0" in STRIPPED
-    assert "v_unknown_artifact_count <> 0" in STRIPPED
+    has(STRIPPED, "if (v_distinct_artifact_count <> v_artifact_count or v_invalid_artifact_type_count <> 0 or v_unknown_artifact_count <> 0) then raise invalid_payload; end if;")
 
 
-def test_t32c_artifact_guard_and_telemetry_purge_share_exact_opt_out_rule() -> None:
-    assert re.search(r"v_payload:contributed_to_learning::boolean\s*=\s*false", STRIPPED, re.I) is None
+def test_t32c_create_artifacts_bind_validated_run_id_without_optout_purge() -> None:
     assert re.search(r"delete\s+from\s+app.roast_telemetry", STRIPPED, re.I) is None
-    assert "v_invalid_artifact_type_count <> 0" in STRIPPED
-    assert "v_unknown_artifact_count <> 0" in STRIPPED
+    has(STRIPPED, "select uuid_string(), :v_id, artifact.value::string, '@app.roast_artifacts/' || :p_run_id || '/' || case artifact.value::string when 'jsonl' then 'roast.jsonl' when 'csv' then 'roast.csv' when 'summary' then 'summary.json' end, null, current_timestamp() from table(flatten(input => :v_artifact_kinds)) artifact;")
 
 
 def test_t33_uuid_guard_literal_is_byte_equal_across_three_procedures() -> None:
@@ -674,8 +680,8 @@ def test_t40_value_guard_precedes_transaction() -> None:
     is not executed offline; RE2 equivalence and three-valued logic remain
     live-gate residuals.
     """
-    guard_offset = STRIPPED.index(_value_guard())
-    raise_offset = STRIPPED.index("raise invalid_payload;", guard_offset)
+    guard_offset = position(STRIPPED, _value_guard())
+    raise_offset = position(STRIPPED, 'raise invalid_payload;', guard_offset)
     transaction_offset = _match(r"begin\s+transaction\s*;").start()
     assert raise_offset < transaction_offset
 
@@ -841,8 +847,7 @@ from test_sync_coordination import has, sql
 
 
 def test_ups_c2_create_tombstone_before_existence():
-    assert STRIPPED.index("idempotency_key = :p_run_id or public_slug = :v_public_slug") < STRIPPED.index("select count(*) into :v_existing_count")
-    has(STRIPPED, "if (v_tombstone_count > 0) then raise identity_tombstoned;")
+    has(STRIPPED, "else select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id or public_slug = :v_public_slug; if (v_tombstone_count > 0) then raise identity_tombstoned; end if; end if; select count(*) into :v_existing_count from app.cloud_roasts where idempotency_key = :p_run_id;")
 
 
 def test_ups_c2_merge_has_no_matched_branch():
@@ -856,7 +861,7 @@ def test_ups_c2_create_inserts_three_baseline_revisions():
 
 def test_ups_c2_replay_fsv_no_write():
     has(STRIPPED, "if (v_existing_count = 1) then")
-    assert STRIPPED.index('from app.cloud_roast_field_revisions where cloud_roast_id = :v_id') < STRIPPED.index('if (v_is_patch) then', STRIPPED.index('from app.cloud_roast_field_revisions'))
+    assert position(STRIPPED, 'from app.cloud_roast_field_revisions where cloud_roast_id = :v_id') < position(STRIPPED, 'if (v_is_patch) then', position(STRIPPED, 'from app.cloud_roast_field_revisions'))
     assert re.search(r"\b(insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
 
 
@@ -874,19 +879,18 @@ def test_ups_c2_no_optout_manifest_guard():
 
 def test_patch_c2_envelope_grammar():
     has(STRIPPED, "v_is_patch := array_size(object_keys(v_payload)) = 2 and array_contains('patch_version'::variant, object_keys(v_payload)) and array_contains('fields'::variant, object_keys(v_payload));")
-    has(STRIPPED, "typeof(v_payload:patch_version) <> 'INTEGER' or v_payload:patch_version::number <> 1")
-    has(STRIPPED, "typeof(v_payload:fields) <> 'OBJECT' or array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3")
-    has(STRIPPED, "array_size(object_keys(v_entry)) <> 2 or not array_contains('revision'::variant, object_keys(v_entry)) or not array_contains('value'::variant, object_keys(v_entry))")
+    has(STRIPPED, "if (v_is_patch) then if (typeof(v_payload:patch_version) <> 'INTEGER') then raise invalid_payload; end if; if (v_payload:patch_version::number <> 1) then raise invalid_payload; end if; if (typeof(v_payload:fields) <> 'OBJECT') then raise invalid_payload; end if; if (array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3) then raise invalid_payload; end if;")
+    has(STRIPPED, "v_entry := get(v_payload:fields, v_field_name); if (v_field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning')) then raise invalid_payload; end if; if (typeof(v_entry) <> 'OBJECT') then raise invalid_payload; end if; if (array_size(object_keys(v_entry)) <> 2 or not array_contains('revision'::variant, object_keys(v_entry)) or not array_contains('value'::variant, object_keys(v_entry))) then raise invalid_payload; end if;")
 
 
 def test_patch_c2_revision_integer_and_bound():
-    has(STRIPPED, "typeof(v_entry:revision) <> 'INTEGER' or v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991")
+    has(STRIPPED, "if (typeof(v_entry:revision) <> 'INTEGER') then raise invalid_payload; end if; if (v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991) then raise invalid_payload; end if;")
 
 
 def test_patch_c2_outcome_order():
     has(STRIPPED, "if (not v_value_valid) then v_outcome := 'rejected_value'; elseif (v_request_revision > v_stored_revision) then")
     has(STRIPPED, "elseif (v_request_revision = v_stored_revision and v_value is not distinct from v_current) then v_outcome := 'already_applied'; elseif (v_request_revision = v_stored_revision) then v_outcome := 'revision_conflict'; else v_outcome := 'stale';")
-    assert STRIPPED.index("v_outcome := 'applied'") < STRIPPED.index("v_outcome := 'already_applied'")
+    assert position(STRIPPED, "v_outcome := 'applied'") < position(STRIPPED, "v_outcome := 'already_applied'")
 
 
 def test_patch_c2_consent_not_clearable():
@@ -922,3 +926,26 @@ def test_patch_c2_consent_apply_recomputes():
 
 def test_ups_c2_stale_comments_absent():
     assert not re.search(r'projected wholesale|available to PUBLIC_WEB through|consent-conditioned INSERT|read-side consent gate', MIGRATION,re.I)
+
+
+def test_patch_c2_rating_value_grammar():
+    # O3: null clears; only INTEGER1..5 converts. Numeric strings/other types stay false.
+    has(STRIPPED, "v_value_valid := false; if (v_field_name = 'operator_rating') then if (typeof(v_value) = 'NULL_VALUE') then v_value_valid := true; elseif (typeof(v_value) = 'INTEGER') then v_value_valid := v_value::number between 1 and 5; end if; elseif (v_field_name = 'operator_notes') then")
+
+
+def test_patch_c2_notes_value_grammar_and_typed_content():
+    # Empty VARCHAR is accepted by this branch; JSON null clears; no other type converts.
+    has(STRIPPED, """elseif (v_field_name = 'operator_notes') then
+      if (typeof(v_value) = 'NULL_VALUE') then v_value_valid := true;
+      elseif (typeof(v_value) = 'VARCHAR') then v_value_valid := true;
+        if (regexp_count(v_entry:value::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+          or regexp_count(v_entry:value::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+          or regexp_count(v_entry:value::string, '(°[ ]?[Ff])|℉') > 0) then v_value_valid := false; end if;
+      end if;
+      elseif (v_field_name = 'contributed_to_learning') then v_value_valid := typeof(v_value) = 'BOOLEAN'; end if;""")
+
+
+def test_patch_c2_omission_visits_only_present_entries_and_keeps_independent_outcomes():
+    has(STRIPPED, 'v_fields := object_keys(v_payload:fields); for v_index in 0 to array_size(v_fields) - 1 do v_field_name := get(v_fields, v_index)::string; v_entry := get(v_payload:fields, v_field_name);')
+    has(STRIPPED, "v_outcomes := object_insert(v_outcomes, v_field_name, object_construct('outcome', v_outcome, 'accepted_revision', v_stored_revision)); end for;")
+    has(STRIPPED, "if (not v_value_valid) then v_outcome := 'rejected_value'; elseif (v_request_revision > v_stored_revision) then")

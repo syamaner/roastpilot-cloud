@@ -7,13 +7,13 @@ import pytest
 M = Path(__file__).resolve().parent.parent / 'migrations'
 
 def clean(text):
-    return re.sub(r"'(?:''|[^'])*'|--[^\n]*|/\*.*?\*/", lambda m: '' if m[0].startswith(('--','/*')) else m[0], text, flags=re.S)
+    return re.sub('\'(?:\'\'|[^\'])*\'|"(?:""|[^"])*"|--[^\\n]*|/\\*.*?\\*/', lambda m: '' if m[0].startswith(('--','/*')) else m[0], text, flags=re.S)
 
 def sql(name):
     return clean((M / name).read_text())
 
 def tokens(text):
-    return [x if x.startswith("'") else x.lower() for x in re.findall(r"'(?:''|[^'])*'|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|<>|>=|<=|:=|[^\s]", clean(text))]
+    return [x if x.startswith(("'", '"')) else x.lower() for x in re.findall('\'(?:\'\'|[^\'])*\'|"(?:""|[^"])*"|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|<>|>=|<=|:=|[^\\s]', clean(text))]
 
 def has(text, expected):
     expected_tokens = tokens(expected)
@@ -105,10 +105,12 @@ def test_coord10_acquire_literal_single_site():
 def test_coord11_writer_frame_every_writer():
     for name in WRITERS:
         text=sql('R__proc_'+name+'.sql')
-        before, after=re.split(r'begin\s+transaction\s*;',text,maxsplit=1,flags=re.I)
+        parts=re.split(r'begin\s+transaction\s*;',text,maxsplit=1,flags=re.I)
+        assert len(parts) == 2
+        before, after=parts
         has(before,'select current_transaction() into :v_outer_txn;')
         has(before,'if (v_outer_txn is not null) then raise writer_in_open_transaction; end if;')
-        assert tokens(after)[:tokens(after).index(';')+1]==tokens('call app.cloud_sync_enter() into :v_write_seq;')
+        assert tokens(after)[:position(tokens(after), ';')+1]==tokens('call app.cloud_sync_enter() into :v_write_seq;')
 
 def test_coord12_no_app_reference_before_begin():
     for name in WRITERS:
@@ -117,8 +119,10 @@ def test_coord12_no_app_reference_before_begin():
 
 def test_coord13_recompute_enters_first_no_txn_control():
     text=sql('R__proc_recompute_summary.sql')
-    body=re.split(r'\bbegin\b',text,maxsplit=1,flags=re.I)[1]
-    assert tokens(body)[:tokens(body).index(';')+1]==tokens('call app.cloud_sync_enter() into :v_enter_seq;')
+    parts=re.split(r'\bbegin\b',text,maxsplit=1,flags=re.I)
+    assert len(parts) == 2
+    body=parts[1]
+    assert tokens(body)[:position(tokens(body), ';')+1]==tokens('call app.cloud_sync_enter() into :v_enter_seq;')
     assert not re.search(r'begin\s+transaction|\bcommit\s*;|\brollback\s*;',text,re.I)
 
 def test_coord14_error_codes_unique_static_20013_retired():
@@ -159,3 +163,36 @@ def test_lexer_missing_tombstone_operand_still_rejected():
     for supplied in (absent, clean(absent)):
         with pytest.raises(AssertionError):
             has(supplied, expected)
+
+
+def position(text, anchor, start=0):
+    """Assert the required anchor before comparing source/list positions."""
+    assert anchor in text[start:], f"required position anchor missing: {anchor!r}"
+    return text.index(anchor, start)
+
+
+def test_position_missing_anchor_is_assertion_not_lookup_error():
+    with pytest.raises(AssertionError, match='required position anchor missing'):
+        position('select 1;', 'raise invalid_payload;')
+    with pytest.raises(AssertionError, match='required position anchor missing'):
+        position(['BEGIN'], 'COMMIT')
+
+
+def test_lexer_preserves_complete_double_quoted_identifiers():
+    raw = "SELECT \"key\", \"va  lue\", \"level\", \"a\"\"--/*b\"; -- real\n/* real */ SELECT 'it''s';"
+    expected = "SELECT \"key\", \"va  lue\", \"level\", \"a\"\"--/*b\"; \n SELECT 'it''s';"
+    assert clean(raw) == expected
+    assert clean(clean(raw)) == expected
+    assert tokens(raw) == ['select', '"key"', ',', '"va  lue"', ',', '"level"', ',', '"a""--/*b"', ';', 'select', "'it''s'", ';']
+
+
+@pytest.mark.parametrize('column', ['key', 'value', 'level'])
+def test_lexer_quoted_column_case_is_significant(column):
+    fixed = "count_if(\"key\" = 'READ_CONSISTENCY_MODE' and \"value\" = 'GLOBAL' and \"level\" = 'ACCOUNT')"
+    with pytest.raises(AssertionError):
+        has(fixed.replace('"' + column + '"', '"' + column.upper() + '"'), fixed)
+
+
+def test_lexer_missing_guard_with_quoted_comment_marker_rejected():
+    with pytest.raises(AssertionError):
+        has('select "-- /* ""quoted"" name"; -- raise invalid_payload;\n', 'raise invalid_payload;')

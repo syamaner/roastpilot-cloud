@@ -160,10 +160,13 @@ field names; the restore's `MATCH_BY_COLUMN_NAME` depends on those source names.
 The VARIANT/Parquet round-trip is `[VERIFY-LIVE]`. A new `<backup_id>` and
 `OVERWRITE=FALSE` prevent replacement.
 
-For a non-quiesced table export, first pause stage writers and let in-flight
-stage/row operations finish. In the same SnowSQL session, select one timestamp
-once and apply it to every unload and count. Keep stage writers paused through
-the complete `LIST`/`GET` and checksum window because stages have no Time Travel.
+For this coordinated table export, first pause stage writers and let in-flight
+stage/row operations finish. In the same SnowSQL session, acquire the shared
+gate and record S0 before selecting the single snapshot timestamp below. Keep
+that transaction open through all eight unloads, counts, profiles and S1. Keep
+stage writers paused through the complete `LIST`/`GET` and checksum window
+because stages have no Time Travel. Quiescence alone never replaces the table
+transaction boundary.
 
 Before the first write, prove that both destinations are empty:
 
@@ -178,6 +181,11 @@ empty, operator-controlled local directory, newly created if necessary, before
 any `GET`; stale local files must never be mixed into the new backup.
 
 ```sql
+BEGIN;
+CALL app.cloud_sync_enter();
+SET backup_s0_txn = (SELECT CURRENT_TRANSACTION());
+SET backup_s0_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');
+SELECT $backup_s0_txn AS transaction_id, $backup_s0_seq AS write_seq, 'S0' AS boundary;
 SET backup_snapshot_ts = CURRENT_TIMESTAMP();
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/
   FROM (SELECT * FROM app.cloud_roasts AT(TIMESTAMP => $backup_snapshot_ts))
@@ -234,10 +242,27 @@ every source `(bean_origin, roast_level)` key and its derived aggregate values f
 and update-timestamp fields. These are recovery acceptance baselines, not a
 replacement for recomputation.
 
-Alternatively, quiesce all table and stage writers before the first current-state
-count and keep them paused until every `GET` and checksum finishes. Never mix
-independent current-state reads while writers run. Snapshot consistency and the
-quiescence boundary are `[VERIFY-LIVE]`.
+Finish every source profile above within this same transaction and snapshot,
+then record S1 and evaluate the capture boundary:
+
+```sql
+SET backup_s1_txn = (SELECT CURRENT_TRANSACTION());
+SET backup_s1_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');
+SELECT $backup_s1_txn AS transaction_id, $backup_s1_seq AS write_seq, 'S1' AS boundary;
+SELECT IFF($backup_s0_txn IS NOT NULL AND $backup_s1_txn IS NOT NULL
+           AND $backup_s0_seq IS NOT NULL AND $backup_s1_seq IS NOT NULL
+           AND $backup_s0_txn = $backup_s1_txn AND $backup_s0_seq = $backup_s1_seq,
+           'ACCEPT', 'REJECT') AS capture_boundary_decision;
+```
+
+The operator must observe exactly one `ACCEPT` decision and retain both complete
+S0/S1 rows. An error, missing/unknown value, missing decision, `REJECT` or unequal
+transaction/sequence rejects the capture: run `ROLLBACK;` and do not accept its
+exports. Otherwise run `COMMIT;` only now, after recording S1. Do not continue on
+an indeterminate command result. G1 must qualify SET/unload transaction continuity,
+these commands and the complete snapshot boundary; offline text is not runtime
+support. Keeping all table and stage writers paused is additional discipline,
+never an alternative to BEGIN/entry/S0/snapshot/reads/S1/equality/COMMIT.
 
 The review unload keeps a non-null hash only while it remains inside its
 original 30-day window; the exact live purge predicate is applied before bytes

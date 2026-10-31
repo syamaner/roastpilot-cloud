@@ -1,4 +1,6 @@
 """C9-C2 runbook requirements; no live execution."""
+
+from test_sync_coordination import position
 from pathlib import Path
 import re
 
@@ -26,6 +28,8 @@ def load_runbook_documents(test_file: Path) -> tuple[str, str, str]:
 
 ROOT=runbook_checkout_root(Path(__file__))
 BACKUP, PROD, KEY=load_runbook_documents(Path(__file__))
+assert '## C9-C2 coordinated backup boundary' in BACKUP
+assert '## Export procedure' in BACKUP
 BOUNDARY=BACKUP.split('## C9-C2 coordinated backup boundary',1)[1].split('## Export procedure',1)[0]
 
 
@@ -45,15 +49,19 @@ def assert_capture_inventory(document):
     assert tuple(destinations) == EXPECTED_CAPTURE_TABLES
     assert tuple(sources) == EXPECTED_CAPTURE_TABLES
     assert len(re.findall(r'COPY INTO', exports)) == 8
-    counts = document.split('Capture counts at that same point and record `$backup_snapshot_ts`:', 1)[1].split('```sql\n', 1)[1].split('```', 1)[0]
+    assert 'Capture counts at that same point and record `$backup_snapshot_ts`:' in document
+    count_tail = document.split('Capture counts at that same point and record `$backup_snapshot_ts`:', 1)[1]
+    assert '```sql\n' in count_tail
+    counts = count_tail.split('```sql\n', 1)[1].split('```', 1)[0]
     pairs = re.findall(r"SELECT '([a-z_]+)'(?: AS object_name)?, COUNT\(\*\)(?: AS row_count)? FROM app\.([a-z_]+) AT\(TIMESTAMP => \$backup_snapshot_ts\)", counts)
     assert tuple(label for label, _ in pairs) == EXPECTED_CAPTURE_TABLES
     assert tuple(table for _, table in pairs) == EXPECTED_CAPTURE_TABLES
     assert counts.count('COUNT(*)') == 8
     assert len(re.findall(r'\bSELECT\b', counts)) == 8
+    assert '## C9-C2 coordinated backup boundary' in document and '## Export procedure' in document
     boundary = document.split('## C9-C2 coordinated backup boundary', 1)[1].split('## Export procedure', 1)[0]
     normalized = ' '.join(boundary.split())
-    assert normalized.index('as S0') < normalized.index('same transaction across all eight table exports, counts and source profiles') < normalized.index('as S1')
+    assert position(normalized, 'as S0') < position(normalized, 'same transaction across all eight table exports, counts and source profiles') < position(normalized, 'as S1')
     assert '**both transaction identifiers and both write_seq values must be equal**' in boundary
 
 
@@ -88,6 +96,7 @@ def test_rb_capture_seq_and_txn_boundary():
     assert 'current_transaction()' in BOUNDARY and 'write_seq' in BOUNDARY and 'S0' in BOUNDARY and 'S1' in BOUNDARY
     assert '**both transaction identifiers and both write_seq values must be equal**' in BOUNDARY
     assert 'rejects the capture' in BOUNDARY and 'ROLLBACK' in BOUNDARY
+    assert_concrete_capture_boundary(BACKUP)
 
 
 def test_rb_restore_empty_target_conditions():
@@ -181,3 +190,58 @@ def test_rb_input_layout_never_falls_back_to_shadow_docs(tmp_path, layout, shado
     (checkout / 'docs/runbooks/backup-export.md').unlink()
     with pytest.raises(FileNotFoundError):
         load_runbook_documents(path)
+
+
+def assert_concrete_capture_boundary(document):
+    start = '### Export all eight base tables'
+    end = '### Export the internal artifact stage'
+    assert start in document and end in document
+    capture = document.split(start, 1)[1].split(end, 1)[0]
+    anchors = [
+        'BEGIN;\nCALL app.cloud_sync_enter();',
+        'SET backup_s0_txn = (SELECT CURRENT_TRANSACTION());',
+        "SET backup_s0_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');",
+        "SELECT $backup_s0_txn AS transaction_id, $backup_s0_seq AS write_seq, 'S0' AS boundary;",
+        'SET backup_snapshot_ts = CURRENT_TIMESTAMP();',
+        'COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/',
+        'Capture counts at that same point and record `$backup_snapshot_ts`:',
+        'source-snapshot VARIANT type/null',
+        'SET backup_s1_txn = (SELECT CURRENT_TRANSACTION());',
+        "SET backup_s1_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');",
+        "SELECT $backup_s1_txn AS transaction_id, $backup_s1_seq AS write_seq, 'S1' AS boundary;",
+        'SELECT IFF($backup_s0_txn IS NOT NULL AND $backup_s1_txn IS NOT NULL',
+        "'ACCEPT', 'REJECT') AS capture_boundary_decision;",
+        'run `ROLLBACK;`', 'run `COMMIT;`',
+    ]
+    assert all(anchor in capture for anchor in anchors)
+    positions = [position(capture, anchor) for anchor in anchors]
+    assert positions == sorted(positions) and len(set(positions)) == len(anchors)
+    assert capture.count('CALL app.cloud_sync_enter();') == 1
+    assert 'AND $backup_s0_seq IS NOT NULL AND $backup_s1_seq IS NOT NULL' in capture
+    assert 'AND $backup_s0_txn = $backup_s1_txn AND $backup_s0_seq = $backup_s1_seq' in capture
+    assert 'G1 must qualify SET/unload transaction continuity' in capture
+    assert 'never an alternative to BEGIN/entry/S0/snapshot/reads/S1/equality/COMMIT' in capture
+
+
+@pytest.mark.parametrize('defect', ['missing_begin', 'missing_enter', 'missing_s0', 'early_snapshot', 'missing_s1', 'early_s1', 'missing_equality'])
+def test_rb_concrete_capture_boundary_rejects_missing_or_reordered_parts(defect):
+    snapshot = 'SET backup_snapshot_ts = CURRENT_TIMESTAMP();'
+    begin_enter = 'BEGIN;\nCALL app.cloud_sync_enter();'
+    s0 = "SELECT $backup_s0_txn AS transaction_id, $backup_s0_seq AS write_seq, 'S0' AS boundary;"
+    s1 = 'SET backup_s1_txn = (SELECT CURRENT_TRANSACTION());'
+    replacements = {
+        'missing_begin': ('BEGIN;\nCALL', 'CALL'),
+        'missing_enter': ('CALL app.cloud_sync_enter();', ''),
+        'missing_s0': (s0, ''),
+        'early_snapshot': (begin_enter, snapshot + '\n' + begin_enter),
+        'missing_s1': (s1, ''),
+        'early_s1': (begin_enter, s1 + '\n' + begin_enter),
+        'missing_equality': ('AND $backup_s0_txn = $backup_s1_txn AND $backup_s0_seq = $backup_s1_seq', ''),
+    }
+    old, new = replacements[defect]
+    bad = BACKUP.replace(old, new)
+    if defect == 'early_snapshot':
+        bad = bad.replace(s0 + '\n' + snapshot, s0)
+    assert bad != BACKUP
+    with pytest.raises(AssertionError):
+        assert_concrete_capture_boundary(bad)

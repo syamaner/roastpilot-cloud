@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import json
 import operator
 import re
@@ -290,11 +292,10 @@ def test_t_guards_precede_dynamic_sql_transaction_and_dml() -> None:
     assert re.search(r"app\.", STRIPPED[:transaction.start()], re.I) is None
 
 
-def test_t_consent_guard_declarations_are_in_declare_block() -> None:
-    assert "contributed_to_learning" not in STRIPPED.lower()
-    assert "roast_not_contributing" not in STRIPPED.lower()
-    assert "-20013" not in STRIPPED
-    assert "v_binding_count <> 1" in STRIPPED
+def test_t_retired_consent_exception_and_tokens_are_absent() -> None:
+    assert 'contributed_to_learning' not in STRIPPED.lower()
+    assert 'roast_not_contributing' not in STRIPPED.lower()
+    assert '-20013' not in STRIPPED
 
 
 def test_t_binding_guard_declarations_are_in_declare_block() -> None:
@@ -316,25 +317,16 @@ def test_t_recompute_grouping_key_declarations_are_in_declare_block() -> None:
     assert re.search(r"v_roast_level\s+string\s*;", declare.group("body"), re.I)
 
 
-def test_t_consent_guard_predicate_is_fail_closed_byte_shape() -> None:
-    assert "contributed_to_learning" not in STRIPPED.lower()
-    assert "roast_not_contributing" not in STRIPPED.lower()
-    assert "-20013" not in STRIPPED
-    assert "v_binding_count <> 1" in STRIPPED
+def test_t_binding_refusal_is_exact_and_precedes_telemetry_delete() -> None:
+    has(STRIPPED, 'if (v_binding_count <> 1) then raise run_roast_mismatch; end if; delete from app.roast_telemetry where roast_id = :p_roast_id;')
 
 
-def test_t_consent_guard_refuses_missing_opted_out_and_duplicate_rows() -> None:
-    assert "contributed_to_learning" not in STRIPPED.lower()
-    assert "roast_not_contributing" not in STRIPPED.lower()
-    assert "-20013" not in STRIPPED
-    assert "v_binding_count <> 1" in STRIPPED
+def test_t_binding_count_uses_both_exact_request_identities() -> None:
+    has(STRIPPED, 'select count(*) into :v_binding_count from app.cloud_roasts where idempotency_key = :p_run_id and id = :p_roast_id;')
 
 
-def test_t_consent_guard_reads_exactly_one_roast_by_bound_id() -> None:
-    assert "contributed_to_learning" not in STRIPPED.lower()
-    assert "roast_not_contributing" not in STRIPPED.lower()
-    assert "-20013" not in STRIPPED
-    assert "v_binding_count <> 1" in STRIPPED
+def test_t_binding_count_is_after_tombstone_refusal_under_entry() -> None:
+    has(STRIPPED, 'if (v_tombstone_count > 0) then raise identity_tombstoned; end if; select count(*) into :v_binding_count from app.cloud_roasts where idempotency_key = :p_run_id; if (v_binding_count <> 1) then raise run_roast_mismatch; end if; select count(*) into :v_binding_count from app.cloud_roasts where idempotency_key = :p_run_id and id = :p_roast_id;')
 
 
 def test_t_binding_guard_is_bound_exact_one_under_lock() -> None:
@@ -406,7 +398,7 @@ def test_t_binding_guard_refuses_missing_and_duplicate_rows() -> None:
     assert binding_refuses(1, required_count) is False
 
 
-def test_t_header_states_owner_rights_consent_enforcement() -> None:
+def test_t_header_states_owner_rights_coordinated_binding_and_consent_independence() -> None:
     header = MIGRATION.split("use schema app;", 1)[0]
     normalized = " ".join(line.removeprefix("--").strip() for line in header.splitlines()).casefold()
     assert 'this procedure now executes as owner' in normalized
@@ -647,11 +639,12 @@ def test_t_owner_rights_insert_is_injection_free_and_consent_independent() -> No
     assert insert_targets == ["app.roast_telemetry"]
 
 
-def test_t_write_boundary_consent_requires_exactly_one_opted_in_row() -> None:
-    assert "contributed_to_learning" not in STRIPPED.lower()
-    assert "roast_not_contributing" not in STRIPPED.lower()
-    assert "-20013" not in STRIPPED
-    assert "v_binding_count <> 1" in STRIPPED
+def test_t_write_boundary_revalidates_three_unique_identity_counts() -> None:
+    dynamic_sql = _render_dynamic_sql()
+    assert dynamic_sql.count("(select count(*) from app.cloud_roasts ") == 3
+    assert "and (select count(*) from app.cloud_roasts " + f"where id = '{ROAST_ID}') = 1" in dynamic_sql
+    assert "and (select count(*) from app.cloud_roasts " + f"where idempotency_key = '{RUN_ID}') = 1" in dynamic_sql
+    assert "and (select count(*) from app.cloud_roasts " + f"where idempotency_key = '{RUN_ID}' and id = '{ROAST_ID}') = 1" in dynamic_sql
 
 
 def test_t_write_boundary_also_requires_exact_run_roast_binding() -> None:
@@ -800,7 +793,7 @@ def test_t_synthetic_rows_pin_mapping_intent_not_snowflake_behavior() -> None:
     assert map_source_row(event, ROAST_ID) is None
 
 
-def test_t_data_quality_view_stays_at_ten_non_telemetry_branches() -> None:
+def test_t_data_quality_view_has_twenty_one_non_telemetry_branches() -> None:
     view = (SNOWFLAKE_DIR / "migrations" / "R__data_quality_view.sql").read_text()
     stripped = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", view, flags=re.DOTALL)
     assert len(re.findall(r"\bunion\s+all\b", stripped, re.I)) == 20
@@ -816,7 +809,7 @@ def test_load_c2_no_consent_tokens():
 
 def test_load_c2_tombstone_key_and_id_inside_lock():
     has(STRIPPED, 'select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id or cloud_roast_id = :p_roast_id; if (v_tombstone_count > 0) then raise identity_tombstoned;')
-    assert STRIPPED.index('call app.cloud_sync_enter()') < STRIPPED.index('from app.cloud_roast_tombstones') < STRIPPED.index('delete from app.roast_telemetry')
+    assert position(STRIPPED, 'call app.cloud_sync_enter()') < position(STRIPPED, 'from app.cloud_roast_tombstones') < position(STRIPPED, 'delete from app.roast_telemetry')
 
 
 def test_load_c2_binding_inside_lock():

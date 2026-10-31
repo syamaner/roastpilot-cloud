@@ -6,6 +6,8 @@ single-purpose.
 """
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import re
 import sys
 from pathlib import Path
@@ -41,7 +43,7 @@ def _transaction() -> tuple[re.Match[str], re.Match[str], str]:
 
 
 def test_t_sig_exact_signature_and_procedure_attributes():
-    has(SQL, 'create or replace procedure delete_roast(p_run_id string, p_public_slug string) returns variant language sql execute as owner')
+    has(SQL, 'create or replace procedure delete_roast(p_run_id string, p_public_slug string) copy grants returns variant language sql execute as owner')
 
 
 def test_t_one_object_only_one_procedure_and_no_grants():
@@ -85,20 +87,20 @@ def test_t_stage_remove_is_the_only_dynamic_sql():
     has(SQL, "execute immediate 'remove @app.roast_artifacts/' || :v_captured_key || '/';")
 
 
-def test_t_recompute_once_after_four_deletes_inside_transaction():
+def test_t_recompute_once_after_five_deletes_inside_transaction():
     assert len(re.findall(r'call\s+app.recompute_reference_summary', SQL, re.I)) == 1
     assert len(re.findall(r'delete\s+from', SQL, re.I)) == 5
-    assert SQL.lower().index('delete from app.cloud_roast_field_revisions') < SQL.lower().index('delete from app.cloud_roasts') < SQL.lower().index('call app.recompute_reference_summary') < SQL.lower().index('commit;')
+    assert position(SQL.lower(), 'delete from app.cloud_roast_field_revisions') < position(SQL.lower(), 'delete from app.cloud_roasts') < position(SQL.lower(), 'call app.recompute_reference_summary') < position(SQL.lower(), 'commit;')
 
 
 def test_t_grouping_capture_precedes_parent_delete():
     has(SQL, 'select id, public_slug, idempotency_key, bean_origin, roast_level into :v_id, :v_slug, :v_captured_key, :v_bean_origin, :v_roast_level from app.cloud_roasts where idempotency_key = :p_run_id;')
-    assert SQL.index('into :v_id, :v_slug') < SQL.index('delete from app.cloud_roasts')
+    assert position(SQL, 'into :v_id, :v_slug') < position(SQL, 'delete from app.cloud_roasts')
 
 
 def test_t_txn_structure_wraps_deletes_and_recompute_with_rollback_reraise():
     has(SQL, 'exception when other then rollback; raise;')
-    assert SQL.index('begin transaction;') < SQL.index('delete from app.tasting_reviews') < SQL.index('commit;') < SQL.index('execute immediate')
+    assert position(SQL, 'begin transaction;') < position(SQL, 'delete from app.tasting_reviews') < position(SQL, 'commit;') < position(SQL, 'execute immediate')
 
 
 def test_t_no_cascade_clause():
@@ -123,35 +125,37 @@ def test_t_render_validate_migrations_passes():
 
 def test_t_shape_guard_declared_and_raised_before_transaction():
     has(SQL, "delete_identity_mismatch exception (-20025, 'Run id and public slug do not identify one roast or tombstone');")
-    assert SQL.index('raise delete_identity_mismatch;') < SQL.index('begin transaction;')
+    assert position(SQL, 'raise delete_identity_mismatch;') < position(SQL, 'begin transaction;')
 
 
-def test_t_noop_after_existence_select_before_transaction_and_without_raise():
+def test_t_never_created_branch_tombstones_without_fabricated_identity():
     has(SQL, "v_id := null; v_captured_key := p_run_id; insert into app.cloud_roast_tombstones (cloud_roast_id, idempotency_key, public_slug, deletion_write_seq) values (NULL, :v_captured_key, :p_public_slug, :v_write_seq); v_deletion := 'tombstoned_without_row';")
     assert 'no-op: roast not found' not in SQL
 
 
-def test_t_ambiguous_id_guard_after_select_before_transaction():
+def test_t_ambiguous_id_guard_after_entry_before_delete():
     has(SQL, 'if (v_n > 1) then raise ambiguous_idempotency_key; end if;')
-    assert SQL.index('call app.cloud_sync_enter()') < SQL.index('if (v_n > 1)') < SQL.index('delete from app.cloud_roasts')
+    assert position(SQL, 'call app.cloud_sync_enter()') < position(SQL, 'if (v_n > 1)') < position(SQL, 'delete from app.cloud_roasts')
 
 
-def test_t_key_capture_reads_idempotency_key_into_local_before_transaction():
-    assert SQL.index('call app.cloud_sync_enter()') < SQL.index('into :v_id, :v_slug, :v_captured_key') < SQL.index('commit;')
+def test_t_key_capture_reads_idempotency_key_under_lock():
+    assert position(SQL, 'call app.cloud_sync_enter()') < position(SQL, 'into :v_id, :v_slug, :v_captured_key') < position(SQL, 'commit;')
     has(SQL, 'if (v_captured_key is null or v_captured_key is distinct from p_run_id) then raise delete_identity_mismatch; end if;')
 
 
 def test_t_key_guard_matches_telemetry_containment_grammar_before_transaction():
-    grammar = re.search(r"regexp_like\(p_run_id, '([^']+)'\)", SQL)[1]
+    match = re.search(r"regexp_like\(p_run_id, '([^']+)'\)", SQL)
+    assert match is not None
+    grammar = match[1]
     assert grammar == UUID_GRAMMAR
-    assert SQL.index('regexp_like(p_run_id') < SQL.index('begin transaction;')
+    assert position(SQL, 'regexp_like(p_run_id') < position(SQL, 'begin transaction;')
     assert re.fullmatch(grammar, '01234567-89ab-cdef-0123-456789abcdef')
 
 
 def test_t_key_uniqueness_guard_fails_closed_before_remove():
     has(SQL, 'if (v_n > 1) then raise ambiguous_idempotency_key; end if;')
     has(SQL, 'if (v_slug is distinct from p_public_slug or v_ls <> 1 or v_t_i > 0) then raise delete_identity_mismatch; end if;')
-    assert SQL.index('if (v_captured_key is null') < SQL.index('execute immediate')
+    assert position(SQL, 'if (v_captured_key is null') < position(SQL, 'execute immediate')
 
 
 def test_t_key_grammar_rejects_malformed_stage_prefix_inputs():
@@ -170,9 +174,9 @@ def test_t_remove_present_once_and_built_only_from_validated_key():
     assert 'stage_path' not in SQL.lower()
 
 
-def test_t_remove_is_after_all_key_guards_before_transaction():
-    assert SQL.index('if (v_captured_key is null') < SQL.index('commit;') < SQL.index('execute immediate')
-    assert 'from app.' not in SQL[SQL.index('commit;'):]
+def test_t_remove_is_after_validated_key_and_commit():
+    assert position(SQL, 'if (v_captured_key is null') < position(SQL, 'commit;') < position(SQL, 'execute immediate')
+    assert 'from app.' not in SQL[position(SQL, 'commit;'):]
 
 
 def test_t_no_stage_path_interpolation_and_single_remove():
@@ -190,7 +194,7 @@ def test_del_c2_signature_and_pre_lock_grammars():
     test_t_sig_exact_signature_and_procedure_attributes()
     has(SQL, "regexp_like(p_public_slug, '^[1-9A-HJ-NP-Za-km-z]{17,64}$')")
     has(SQL, "regexp_like(p_run_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')")
-    assert 'app.' not in SQL[:SQL.index('begin transaction;')]
+    assert 'app.' not in SQL[:position(SQL, 'begin transaction;')]
 
 
 def test_del_c2_branch_table():
@@ -202,7 +206,7 @@ def test_del_c2_branch_table():
 
 def test_del_c2_tombstone_insert_before_cascade():
     has(SQL,'insert into app.cloud_roast_tombstones (cloud_roast_id, idempotency_key, public_slug, deletion_write_seq) values (:v_id, :v_captured_key, :v_slug, :v_write_seq);')
-    assert SQL.index('values (:v_id, :v_captured_key, :v_slug, :v_write_seq)') < SQL.index('delete from app.tasting_reviews')
+    assert position(SQL, 'values (:v_id, :v_captured_key, :v_slug, :v_write_seq)') < position(SQL, 'delete from app.tasting_reviews')
 
 
 def test_del_c2_null_id_only_without_row():
@@ -216,21 +220,25 @@ def test_del_c2_no_row_slug_collision_refused():
 
 def test_del_c2_cascade_includes_field_revisions():
     has(SQL,'delete from app.cloud_roast_field_revisions where cloud_roast_id = :v_id;')
-    assert SQL.index('delete from app.cloud_roast_field_revisions') < SQL.index('delete from app.cloud_roasts')
+    assert position(SQL, 'delete from app.cloud_roast_field_revisions') < position(SQL, 'delete from app.cloud_roasts')
 
 
 def test_del_c2_remove_after_commit_from_captured_key():
-    assert SQL.index('commit;') < SQL.index('execute immediate')
+    assert position(SQL, 'commit;') < position(SQL, 'execute immediate')
     has(SQL,"execute immediate 'remove @app.roast_artifacts/' || :v_captured_key || '/';")
-    assert 'from app.' not in SQL[SQL.index('commit;'):]
+    assert 'from app.' not in SQL[position(SQL, 'commit;'):]
 
 
 def test_del_c2_every_branch_runs_remove():
     has(SQL,"commit; exception when other then rollback; raise; end; begin execute immediate 'remove @app.roast_artifacts/' || :v_captured_key || '/'; exception when other then v_stage_removal := 'failed'; end;")
-    assert 'return ' not in SQL[:SQL.index('execute immediate')].lower()
+    assert 'return ' not in SQL[:position(SQL, 'execute immediate')].lower()
     assert all("v_deletion := '"+x+"'" in SQL for x in ['deleted','tombstoned_without_row','already_tombstoned'])
 
 
 def test_del_c2_return_shape_cache_pending():
     has(SQL,"return object_construct_keep_null('cloud_roast_id', v_id, 'deletion', v_deletion, 'deletion_write_seq', v_deletion_write_seq, 'stage_removal', v_stage_removal, 'cache_invalidation', 'pending');")
     assert "'complete'" not in SQL
+
+
+def test_del_c2_copy_grants_preserves_controlled_signature():
+    has(SQL, 'create or replace procedure delete_roast(p_run_id string, p_public_slug string) copy grants returns variant language sql execute as owner')
