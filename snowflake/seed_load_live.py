@@ -147,33 +147,11 @@ def _params(row: Mapping[str, object], columns: Sequence[str]) -> tuple[object, 
                  else row.get(column) for column in columns)
 
 
-CLOUD_ROAST_MERGE = """MERGE INTO APP.cloud_roasts AS target
-USING (SELECT %s AS id, %s AS idempotency_key, %s AS owner_id, %s AS public_slug,
-              %s AS visibility, %s AS bean_origin, %s AS bean_varietal,
-              %s AS bean_weight_g, %s AS profile_name, %s AS roast_level,
-              PARSE_JSON(%s) AS summary, %s AS operator_rating, %s AS operator_notes,
-              %s AS contributed_to_learning, %s AS roasted_at_utc, %s AS created_at,
-              %s AS updated_at) AS source
-ON target.idempotency_key = source.idempotency_key
-WHEN MATCHED THEN UPDATE SET owner_id = source.owner_id, public_slug = source.public_slug,
-  visibility = source.visibility, bean_origin = source.bean_origin,
-  bean_varietal = source.bean_varietal, bean_weight_g = source.bean_weight_g,
-  profile_name = source.profile_name, roast_level = source.roast_level,
-  summary = source.summary, operator_rating = source.operator_rating,
-  operator_notes = source.operator_notes,
-  contributed_to_learning = source.contributed_to_learning,
-  roasted_at_utc = source.roasted_at_utc, created_at = source.created_at,
-  updated_at = source.updated_at
-WHEN NOT MATCHED THEN INSERT
+CLOUD_ROAST_INSERT = """INSERT INTO APP.cloud_roasts
   (id, idempotency_key, owner_id, public_slug, visibility, bean_origin, bean_varietal,
    bean_weight_g, profile_name, roast_level, summary, operator_rating, operator_notes,
    contributed_to_learning, roasted_at_utc, created_at, updated_at)
-VALUES
-  (source.id, source.idempotency_key, source.owner_id, source.public_slug,
-   source.visibility, source.bean_origin, source.bean_varietal, source.bean_weight_g,
-   source.profile_name, source.roast_level, source.summary, source.operator_rating,
-   source.operator_notes, source.contributed_to_learning, source.roasted_at_utc,
-   source.created_at, source.updated_at)"""
+SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s, %s, %s"""
 
 ROAST_TELEMETRY_INSERT = """INSERT INTO APP.roast_telemetry
   (roast_id, elapsed_s, bean_temp_c, env_temp_c, heat_percent, fan_percent,
@@ -237,6 +215,14 @@ def _current_database(cursor: Cursor) -> object:
     return None
 
 
+def _require_zero_count(cursor: Cursor) -> None:
+    """Refuse a nonzero or malformed maintenance precondition count."""
+    row = cursor.fetchone()
+    value = row[0] if isinstance(row, Sequence) and not isinstance(row, (str, bytes)) and len(row) == 1 else None
+    if type(value) is not int or value != 0:
+        raise SeedLoadError("seed target state is not empty for these identities")
+
+
 def load_seed(
     connection: Connection,
     artifact: object,
@@ -245,6 +231,10 @@ def load_seed(
 ) -> dict[str, int]:
     """Load a validated artifact using one injectable connection transaction."""
     tables = validate_artifact(artifact, expected_target, now)
+    for field in ("id", "idempotency_key", "public_slug"):
+        values = [row.get(field) for row in tables["cloud_roasts"]]
+        if any(value in values[:index] for index, value in enumerate(values)):
+            raise SeedLoadError("seeded identities must be distinct")
     cursor = connection.cursor()
     try:
         cursor.execute("USE SECONDARY ROLES NONE")
@@ -253,8 +243,29 @@ def load_seed(
             raise SeedLoadError("connected database does not match target")  # pragma: no mutate
 
         cursor.execute("BEGIN")
+        cursor.execute("CALL APP.cloud_sync_enter()")
+        enter_row = cursor.fetchone()
+        write_seq = enter_row[0] if isinstance(enter_row, Sequence) and not isinstance(enter_row, (str, bytes)) and len(enter_row) == 1 else None
+        if type(write_seq) is not int or write_seq < 0:
+            raise SeedLoadError("invalid coordinated write sequence")
+        roast_ids = tuple(row["id"] for row in tables["cloud_roasts"])
+        keys = tuple(row.get("idempotency_key") for row in tables["cloud_roasts"])
+        slugs = tuple(row.get("public_slug") for row in tables["cloud_roasts"])
+        placeholders = ", ".join(["%s"] * len(roast_ids))
+        for table in ("cloud_roasts", "cloud_roast_tombstones"):
+            cursor.execute(
+                f"SELECT COUNT(*) FROM APP.{table} WHERE id IN ({placeholders}) OR idempotency_key IN ({placeholders}) OR public_slug IN ({placeholders})" if table == "cloud_roasts" else
+                f"SELECT COUNT(*) FROM APP.{table} WHERE cloud_roast_id IN ({placeholders}) OR idempotency_key IN ({placeholders}) OR public_slug IN ({placeholders})",
+                roast_ids + keys + slugs,
+            )
+            _require_zero_count(cursor)
+        cursor.execute(f"SELECT COUNT(*) FROM APP.cloud_roast_field_revisions WHERE cloud_roast_id IN ({placeholders})", roast_ids)
+        _require_zero_count(cursor)
+        for table in ("roast_telemetry", "roast_artifacts", "tasting_reviews"):
+            cursor.execute(f"SELECT COUNT(*) FROM APP.{table} WHERE roast_id IN ({placeholders})", roast_ids)
+            _require_zero_count(cursor)
         for row in tables["cloud_roasts"]:
-            cursor.execute(CLOUD_ROAST_MERGE, _params(row, COLUMNS["cloud_roasts"]))
+            cursor.execute(CLOUD_ROAST_INSERT, _params(row, COLUMNS["cloud_roasts"]))
 
         idempotency_keys = tuple(row.get("idempotency_key") for row in tables["cloud_roasts"])
         key_placeholders = ", ".join(["%s"] * len(idempotency_keys))
@@ -268,15 +279,16 @@ def load_seed(
                for row in tables["cloud_roasts"]):
             raise SeedLoadError("persisted cloud_roast id does not match artifact")  # pragma: no mutate
 
-        roast_ids = tuple(row["id"] for row in tables["cloud_roasts"])
-        delete_placeholders = ", ".join(["%s"] * len(roast_ids))
         for table in ("roast_telemetry", "roast_artifacts", "tasting_reviews"):
-            cursor.execute(
-                f"DELETE FROM APP.{table} WHERE roast_id IN ({delete_placeholders})",
-                roast_ids,
-            )
             for row in tables[table]:
                 cursor.execute(CHILD_INSERTS[table], _params(row, COLUMNS[table]))
+
+        for row in tables["cloud_roasts"]:
+            for field in ("operator_rating", "operator_notes", "contributed_to_learning"):
+                cursor.execute(
+                    "INSERT INTO APP.cloud_roast_field_revisions (cloud_roast_id, field_name, accepted_revision, accepted_write_seq) SELECT %s, %s, 0, %s",
+                    (row["id"], field, write_seq),
+                )
 
         loaded_groups: list[tuple[object, object]] = []
         for row in tables["reference_roast_summaries"]:

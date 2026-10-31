@@ -105,9 +105,54 @@ The row graph is `app.cloud_roasts` parent to telemetry, artifact rows and
 reviews. Snowflake does not enforce foreign keys. Stage files and
 `app.roast_artifacts` rows are a separate pair to capture and restore together.
 
+## C9-C2 coordinated backup boundary (operator-only, unqualified)
+
+All eight table exports below use one coordinated capture. These instructions
+replace independent/quiescence-only capture as sufficient evidence. No live
+capture or restore is authorised by software delivery; G1 must qualify unloads
+inside the transaction, SHOW/SQLID membership and every command below.
+
+Before capturing tables: `BEGIN; CALL app.cloud_sync_enter();` then record
+`current_transaction()` and coordination `write_seq` as S0. Keep that same
+transaction across all eight table exports, counts and source profiles. After
+those reads, record both values again as S1. The S0/S1 equality clause is exact:
+**both transaction identifiers and both write_seq values must be equal**.
+Any difference, NULL or unknown value rejects the capture: an admitted writer
+committed or an unload committed implicitly. Reject and ROLLBACK; otherwise
+COMMIT after recording S1. Whether unloads are supported in that transaction is
+unproven until G1; inability to preserve the boundary rejects the capture.
+Stages remain separate and require the existing quiescence/checksum discipline.
+
+For restore, select a freshly migrated target, then `BEGIN; CALL app.cloud_sync_enter();`
+before preconditions or data reads. All seven data tables must contain zero rows:
+cloud_roasts, roast_telemetry, roast_artifacts, tasting_reviews,
+reference_roast_summaries, cloud_roast_tombstones and cloud_roast_field_revisions.
+The coordination table must have exactly one row named `cloud_sync_writer`.
+Never load the captured coordination row. Restore identities/tombstones and
+field revisions consistently with the parent/child ordering below. Do not PUT
+stage files for tombstoned identities. Stage upload and transactional DML are
+separate; an upload is not an acknowledgement or erasure guarantee.
+
+Before accepting restore, set the coordination floor under that SAME target
+transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
+The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALESCE(MAX(deletion_write_seq),0))`
+over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
+must return 0 before COMMIT; any nonzero result, failed count or error means
+ROLLBACK. Reconciliation is itself coordinated before accepting or reconnecting
+any writer, never an unlocked source-side shortcut: obtain current source
+tombstones and revisions through the same source capture protocol, and under
+the coordinated target transaction merge newer tombstones, cascading/excluding
+their matching roasts, reviews, telemetry, artifacts and field revisions.
+Raise the sequence floor again and require zero data-quality violations.
+Any source accepted_write_seq above captured S1 or any revision differing from
+the capture makes restore **unreconciled**: STOP; only the operator decides.
+If source history is unreachable, record "post-capture deletion/ack state unverified";
+writers remain disconnected without an explicit operator decision. Never accept
+unknown post-capture deletion/ack state as ordinary recovery success.
+
 ## Export procedure
 
-### Export all five base tables
+### Export all eight base tables
 
 Parquet is the explicit format. `HEADER=TRUE` is required on every unload so
 Snowflake writes source column names instead of generated `_col0`, `_col1`, …
@@ -154,6 +199,15 @@ COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
   FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/reference_roast_summaries/
   FROM (SELECT * FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_sync_coordination/
+  FROM (SELECT * FROM app.cloud_sync_coordination AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roast_tombstones/
+  FROM (SELECT * FROM app.cloud_roast_tombstones AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roast_field_revisions/
+  FROM (SELECT * FROM app.cloud_roast_field_revisions AT(TIMESTAMP => $backup_snapshot_ts))
   FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 ```
 
@@ -232,17 +286,21 @@ recovery target, not a default alias for the manifest's source database:
 USE DATABASE <recovery_db>;
 USE SCHEMA APP;
 SELECT CURRENT_DATABASE(), CURRENT_SCHEMA();
+BEGIN; CALL app.cloud_sync_enter();
 SELECT
   (SELECT COUNT(*) FROM app.cloud_roasts) AS cloud_roasts,
   (SELECT COUNT(*) FROM app.roast_telemetry) AS roast_telemetry,
   (SELECT COUNT(*) FROM app.roast_artifacts) AS roast_artifacts,
   (SELECT COUNT(*) FROM app.tasting_reviews) AS tasting_reviews,
-  (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries;
+  (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries,
+  (SELECT COUNT(*) FROM app.cloud_roast_tombstones) AS cloud_roast_tombstones,
+  (SELECT COUNT(*) FROM app.cloud_roast_field_revisions) AS cloud_roast_field_revisions,
+  (SELECT COUNT(*) FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer') AS named_coordination_rows;
 LIST @app.roast_artifacts;
 ```
 
 `CURRENT_DATABASE()` must exactly equal the deliberately chosen recovery
-target, all five counts must be zero, and `LIST @app.roast_artifacts;` must
+target, all seven data-table counts must be zero, with exactly one named coordination row, and `LIST @app.roast_artifacts;` must
 return zero files. A non-empty stage is persisted state from a prior or partial
 restore and must be cleaned through the approved recovery cleanup process before
 this preflight is repeated. Stop before `COPY` if the target is the live source,
@@ -279,6 +337,14 @@ PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id
 
 `PUT` also requires SnowSQL or a file-transfer-capable connector, not Snowsight.
 Confirm each name, size and checksum `[VERIFY-LIVE]` before its row is loaded.
+
+### Restore tombstones and field revisions
+
+Load the captured cloud_roast_tombstones and cloud_roast_field_revisions as
+part of this same coordinated target transaction. Exclude any captured live
+identity covered by a tombstone; its dependent rows must also be excluded.
+Never load the captured coordination row or reconnect a writer before the
+reconciliation, floor and zero-quality checks above have been accepted.
 
 ### Restore artifact rows and reviews
 
