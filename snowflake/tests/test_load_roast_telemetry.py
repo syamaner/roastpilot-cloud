@@ -9,6 +9,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from test_sync_coordination import clean
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from telemetry_expectation_oracle import map_source_row, fixture_expected_rows  # noqa: E402
@@ -17,7 +19,7 @@ from telemetry_expectation_oracle import map_source_row, fixture_expected_rows  
 SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
 MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__proc_load_roast_telemetry.sql"
 MIGRATION = MIGRATION_PATH.read_text(encoding="utf-8")
-STRIPPED = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", MIGRATION, flags=re.DOTALL)
+STRIPPED = clean(MIGRATION)
 DELETE_MIGRATION = (
     SNOWFLAKE_DIR / "migrations" / "R__proc_delete_roast.sql"
 ).read_text(encoding="utf-8")

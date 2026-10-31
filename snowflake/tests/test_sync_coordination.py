@@ -2,6 +2,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 M = Path(__file__).resolve().parent.parent / 'migrations'
 
 def clean(text):
@@ -128,3 +130,32 @@ def test_coord15_every_writer_rollback_reraise():
 
 ENTER_ORACLE = 'use schema app;\ncreate or replace procedure cloud_sync_enter()\nreturns number(38,0)\nlanguage sql\nexecute as owner\nas\n$$\ndeclare\n  coordination_lock_unavailable exception (-20019, \'Cloud sync coordination lock did not resolve uniquely\');\n  coordination_requires_transaction exception (-20022, \'Coordinated write requires an active transaction\');\n  read_consistency_unverified exception (-20026, \'Account read consistency is not verified GLOBAL\');\n  transaction_scope_changed exception (-20027, \'Coordinated transaction changed during entry\');\n  v_txn_before string;\n  v_txn_after string;\n  v_show_qid string;\n  v_rows integer;\n  v_exact integer;\n  v_write_seq number(38,0);\nbegin\n  select current_transaction() into :v_txn_before;\n  if (v_txn_before is null) then\n    raise coordination_requires_transaction;\n  end if;\n  update app.cloud_sync_coordination set write_seq = write_seq + 1 where lock_name = \'cloud_sync_writer\';\n  if (sqlrowcount <> 1) then\n    raise coordination_lock_unavailable;\n  end if;\n  begin\n    show parameters like \'READ_CONSISTENCY_MODE\' in account;\n    v_show_qid := sqlid;\n    select count(*), count_if("key" = \'READ_CONSISTENCY_MODE\' and "value" = \'GLOBAL\' and "level" = \'ACCOUNT\')\n      into :v_rows, :v_exact\n      from table(result_scan(:v_show_qid));\n  exception\n    when other then\n      raise read_consistency_unverified;\n  end;\n  if (coalesce(v_rows, 0) <> 1 or coalesce(v_exact, 0) <> 1) then\n    raise read_consistency_unverified;\n  end if;\n  select current_transaction() into :v_txn_after;\n  if (v_txn_after is null or v_txn_after <> v_txn_before) then\n    raise transaction_scope_changed;\n  end if;\n  select write_seq into :v_write_seq from app.cloud_sync_coordination where lock_name = \'cloud_sync_writer\';\n  if (v_write_seq is null or v_write_seq < 0 or v_write_seq > 9007199254740991) then\n    raise coordination_lock_unavailable;\n  end if;\n  return v_write_seq;\nend;\n$$;\n'
 V140_ORACLE = "use schema app;\ncreate table cloud_sync_coordination (lock_name string not null, write_seq number(38,0) not null);\ninsert into cloud_sync_coordination (lock_name, write_seq) values ('cloud_sync_writer', 0);\nalter table cloud_roast_tombstones add column deletion_write_seq number(38,0);\nalter table cloud_roast_tombstones alter column cloud_roast_id drop not null;\ncreate table cloud_roast_field_revisions (cloud_roast_id string not null, field_name string not null, accepted_revision number(38,0) not null, accepted_write_seq number(38,0) not null);\ninsert into cloud_roast_field_revisions (cloud_roast_id, field_name, accepted_revision, accepted_write_seq) select r.id, f.column1, 0, 0 from cloud_roasts r cross join (values ('operator_rating'), ('operator_notes'), ('contributed_to_learning')) f;\ndrop procedure if exists delete_roast(string);"
+
+
+def test_lexer_preserves_literal_comment_markers_and_doubled_quotes():
+    raw = "select '--', '/*literal*/', 'it''s -- /* text */'; -- actual line\n/* actual block */ select 1;"
+    expected = "select '--', '/*literal*/', 'it''s -- /* text */'; \n select 1;"
+    assert clean(raw) == expected
+    assert clean(clean(raw)) == expected
+    assert tokens(raw) == ["select", "'--'", ",", "'/*literal*/'", ",", "'it''s -- /* text */'", ";", "select", "1", ";"]
+
+
+def test_lexer_comments_cannot_supply_guard_tokens():
+    guard = "where idempotency_key = :p_run_id or cloud_roast_id = :p_roast_id;"
+    with pytest.raises(AssertionError):
+        has("select 1; -- " + guard + "\n/* " + guard + " */", guard)
+
+
+def test_lexer_literal_markers_do_not_hide_following_tombstone_guard():
+    guard = "where idempotency_key = :p_run_id or cloud_roast_id = :p_roast_id;"
+    raw = "if (contains(p_run_id, '--')) then raise invalid_run_id; end if; " + guard
+    has(raw, guard)
+    has(clean(raw), guard)
+
+
+def test_lexer_missing_tombstone_operand_still_rejected():
+    expected = "where idempotency_key = :p_run_id or cloud_roast_id = :p_roast_id;"
+    absent = "if (contains(p_run_id, '--')) then raise invalid_run_id; end if; where idempotency_key = :p_run_id; -- or cloud_roast_id = :p_roast_id\n"
+    for supplied in (absent, clean(absent)):
+        with pytest.raises(AssertionError):
+            has(supplied, expected)

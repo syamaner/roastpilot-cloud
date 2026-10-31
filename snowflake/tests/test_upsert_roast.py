@@ -11,6 +11,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from test_sync_coordination import clean
+
 import pytest
 
 import test_load_roast_telemetry as telemetry_contract
@@ -19,7 +21,7 @@ import test_load_roast_telemetry as telemetry_contract
 SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
 MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__proc_upsert_roast.sql"
 MIGRATION = MIGRATION_PATH.read_text(encoding="utf-8")
-STRIPPED = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", MIGRATION, flags=re.DOTALL)
+STRIPPED = clean(MIGRATION)
 DELETE_MIGRATION = (
     SNOWFLAKE_DIR / "migrations" / "R__proc_delete_roast.sql"
 ).read_text(encoding="utf-8")
