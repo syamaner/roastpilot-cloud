@@ -19,6 +19,24 @@ const SQL = readFileSync(
 );
 const SQL_BODY = SQL.slice(SQL.search(/create\s+or\s+replace\s+view/i));
 
+function assertNoPrivateValueReferences(sqlBody: string): void {
+  const metadataContexts = [
+    "count(distinct case when f.field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then f.field_name end) <> 3",
+    "from cloud_roast_field_revisions where field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning') or not exists (select 1 from cloud_roasts r where r.id = cloud_roast_id)",
+  ];
+  let remaining = sqlBody;
+  for (const context of metadataContexts) {
+    expect(remaining.split(context)).toHaveLength(2);
+    remaining = remaining.replace(
+      context,
+      context.replace("'operator_notes'", "'metadata_field'"),
+    );
+  }
+  expect(remaining).not.toMatch(
+    /reviewer_name|submitted_ip_hash|notes|\bsummary\b|\braw\b/i,
+  );
+}
+
 const SLIDER_FIELDS = [
   "aroma",
   "acidity",
@@ -462,8 +480,40 @@ describe("data_quality_violations SQL/oracle parity", () => {
   });
 
   it("never references reviewer PII in the SQL body", () => {
-    expect(SQL_BODY).not.toMatch(
-      /reviewer_name|submitted_ip_hash|notes|\bsummary\b|\braw\b/i,
-    );
+    assertNoPrivateValueReferences(SQL_BODY);
+  });
+});
+
+
+describe("diagnostic metadata privacy boundary", () => {
+  // Independent fixed contexts, not extracted from the candidate SQL.
+  const metadataOnly = "having count(distinct case when f.field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then f.field_name end) <> 3;\nfrom cloud_roast_field_revisions where field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning') or not exists (select 1 from cloud_roasts r where r.id = cloud_roast_id);";
+
+  it("accepts only the two fixed metadata-name slots", () => {
+    assertNoPrivateValueReferences(metadataOnly);
+  });
+
+  it.each([
+    "operator_notes",
+    "r.operator_notes",
+    '\"operator_notes\"',
+    'r.\"operator_notes\"',
+    "'operator_notes'",
+    "reviewer_name",
+    "submitted_ip_hash",
+    "notes",
+    "summary",
+    "raw",
+  ])("rejects the additional private reference %s", (reference) => {
+    expect(() => assertNoPrivateValueReferences(
+      metadataOnly + "\nselect " + reference + " from cloud_roasts;",
+    )).toThrow();
+  });
+
+  it("rejects missing or duplicated metadata slots", () => {
+    expect(() => assertNoPrivateValueReferences(
+      metadataOnly.replace("'operator_notes'", "'unknown_field'"),
+    )).toThrow();
+    expect(() => assertNoPrivateValueReferences(metadataOnly + metadataOnly)).toThrow();
   });
 });
