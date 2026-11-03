@@ -99,6 +99,24 @@ def test_rb_capture_seq_and_txn_boundary():
     assert_concrete_capture_boundary(BACKUP)
 
 
+def test_rb_capture_attempt_uses_fresh_session_and_rejects_uncertain_commands():
+    capture = ' '.join(BACKUP.split('### Export all eight base tables', 1)[1]
+                       .split('### Export the internal artifact stage', 1)[0].split())
+    assert 'Start a fresh, dedicated SnowSQL session for each coordinated capture attempt, including retries.' in capture
+    assert 'Any failed or indeterminate command rejects the capture' in capture
+    assert 'A failed or indeterminate commit also rejects the capture.' in capture
+
+
+def test_rb_rejected_and_partial_backup_prefixes_keep_original_hash_deadline():
+    capture = ' '.join(BACKUP.split('### Export all eight base tables', 1)[1]
+                       .split('### Export the internal artifact stage', 1)[0].split())
+    assert (
+        'Rollback does not remove unloaded files. Apply the same original 30-day review-hash '
+        'deadline to rejected or partial backup prefixes and delete or re-scrub their files '
+        'by that deadline.'
+    ) in capture
+
+
 def test_rb_restore_empty_target_conditions():
     assert 'All seven data tables must contain zero rows' in BOUNDARY
     assert 'exactly one row named `cloud_sync_writer`' in BOUNDARY

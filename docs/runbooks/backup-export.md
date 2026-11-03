@@ -161,8 +161,9 @@ The VARIANT/Parquet round-trip is `[VERIFY-LIVE]`. A new `<backup_id>` and
 `OVERWRITE=FALSE` prevent replacement.
 
 For this coordinated table export, first pause stage writers and let in-flight
-stage/row operations finish. In the same SnowSQL session, acquire the shared
-gate and record S0 before selecting the single snapshot timestamp below. Keep
+stage/row operations finish. Start a fresh, dedicated SnowSQL session for each
+coordinated capture attempt, including retries. In that session, acquire the
+shared gate and record S0 before selecting the single snapshot timestamp below. Keep
 that transaction open through all eight unloads, counts, profiles and S1. Keep
 stage writers paused through the complete `LIST`/`GET` and checksum window
 because stages have no Time Travel. Quiescence alone never replaces the table
@@ -256,10 +257,12 @@ SELECT IFF($backup_s0_txn IS NOT NULL AND $backup_s1_txn IS NOT NULL
 ```
 
 The operator must observe exactly one `ACCEPT` decision and retain both complete
-S0/S1 rows. An error, missing/unknown value, missing decision, `REJECT` or unequal
-transaction/sequence rejects the capture: run `ROLLBACK;` and do not accept its
-exports. Otherwise run `COMMIT;` only now, after recording S1. Do not continue on
-an indeterminate command result. G1 must qualify SET/unload transaction continuity,
+S0/S1 rows. Any failed or indeterminate command rejects the capture, as does a
+missing or unknown value, missing decision, `REJECT` or unequal transaction or
+sequence. On rejection, run `ROLLBACK;` and do not accept its exports. Otherwise
+run `COMMIT;` only after recording S1 and confirming all earlier commands succeeded.
+A failed or indeterminate commit also rejects the capture.
+G1 must qualify SET/unload transaction continuity,
 these commands and the complete snapshot boundary; offline text is not runtime
 support. Keeping all table and stage writers paused is additional discipline,
 never an alternative to BEGIN/entry/S0/snapshot/reads/S1/equality/COMMIT.
@@ -268,8 +271,11 @@ The review unload keeps a non-null hash only while it remains inside its
 original 30-day window; the exact live purge predicate is applied before bytes
 reach Parquet. Time passing can age a retained hash after export. Therefore any
 backup still holding a non-null hash must be deleted or re-scrubbed by that
-hash's original 30-day deadline. The backup retention, encryption and access
-policy must enforce that deadline; immutability does not override it.
+hash's original 30-day deadline. Rollback does not remove unloaded files. Apply
+the same original 30-day review-hash deadline to rejected or partial backup
+prefixes and delete or re-scrub their files by that deadline. The backup
+retention, encryption and access policy must enforce that deadline; immutability
+does not override it.
 
 ### Export the internal artifact stage
 
