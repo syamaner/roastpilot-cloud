@@ -938,7 +938,7 @@ def assert_caller_transaction_untouched(connection):
 @pytest.mark.parametrize('row', [(73,), ['caller-txn'], (False,), (0,)])
 def test_seed_c2_existing_transaction_refused_without_rollback_commit_write_or_close(row):
     connection = idle_probe_connection(row)
-    with pytest.raises(seed_load_live.SeedLoadError, match='already has a caller transaction'):
+    with pytest.raises(seed_load_live.SeedLoadError, match=r'\Aseed connection already has a caller transaction\Z'):
         seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
     assert_caller_transaction_untouched(connection)
 
@@ -946,14 +946,14 @@ def test_seed_c2_existing_transaction_refused_without_rollback_commit_write_or_c
 @pytest.mark.parametrize('row', [None, (), [], (None, None), [None, 73], {'CURRENT_TRANSACTION()': None}, 'NULL', b'NULL', 0])
 def test_seed_c2_unknown_transaction_probe_shape_refused_without_ownership(row):
     connection = idle_probe_connection(row)
-    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+    with pytest.raises(seed_load_live.SeedLoadError, match=r'\Aseed connection transaction state is unknown\Z'):
         seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
     assert_caller_transaction_untouched(connection)
 
 
 def test_seed_c2_two_cell_transaction_probe_refused_without_ownership():
     connection = idle_probe_connection((None, 73))
-    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+    with pytest.raises(seed_load_live.SeedLoadError, match=r'\Aseed connection transaction state is unknown\Z'):
         seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
     assert_caller_transaction_untouched(connection)
 
@@ -963,7 +963,7 @@ def test_seed_c2_failed_transaction_probe_refused_without_ownership(failure_site
     connection = idle_probe_connection(error=RuntimeError('probe unavailable') if failure_site == 'fetchone' else None)
     if failure_site == 'execute':
         connection.fake_cursor.fail_on = lambda command: command == 'SELECT CURRENT_TRANSACTION()'
-    with pytest.raises(seed_load_live.SeedLoadError, match='transaction state is unknown'):
+    with pytest.raises(seed_load_live.SeedLoadError, match=r'\Aseed connection transaction state is unknown\Z'):
         seed_load_live.load_seed(connection, artifact(), 'ROASTPILOT_DEV', NOW)
     assert_caller_transaction_untouched(connection)
 
