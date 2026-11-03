@@ -263,3 +263,22 @@ def test_rb_concrete_capture_boundary_rejects_missing_or_reordered_parts(defect)
     assert bad != BACKUP
     with pytest.raises(AssertionError):
         assert_concrete_capture_boundary(bad)
+
+
+def test_rb_fresh_capture_session_reselects_and_verifies_context_before_begin():
+    capture = BACKUP.split('### Export all eight base tables', 1)[1].split(
+        '### Export the internal artifact stage', 1
+    )[0]
+    begin = 'BEGIN;\nCALL app.cloud_sync_enter();'
+    assert begin in capture
+    before_begin = ' '.join(capture.split(begin, 1)[0].split())
+    assert (
+        'including retries. In every fresh session, reselect the documented owner role '
+        '`ROASTPILOT_ADMIN`, the explicitly selected source database `<source_db>` and '
+        'the `APP` schema.'
+    ) in before_begin
+    assert (
+        'Before any capture command or `BEGIN`, verify those exact values with '
+        '`CURRENT_ROLE()`, `CURRENT_DATABASE()` and `CURRENT_SCHEMA()`. '
+        'Stop on a mismatch or any missing or uncertain result.'
+    ) in before_begin

@@ -162,8 +162,13 @@ The VARIANT/Parquet round-trip is `[VERIFY-LIVE]`. A new `<backup_id>` and
 
 For this coordinated table export, first pause stage writers and let in-flight
 stage/row operations finish. Start a fresh, dedicated SnowSQL session for each
-coordinated capture attempt, including retries. In that session, acquire the
-shared gate and record S0 before selecting the single snapshot timestamp below. Keep
+coordinated capture attempt, including retries. In every fresh session, reselect
+the documented owner role `ROASTPILOT_ADMIN`, the explicitly selected source
+database `<source_db>` and the `APP` schema. Before any capture command or
+`BEGIN`, verify those exact values with `CURRENT_ROLE()`, `CURRENT_DATABASE()`
+and `CURRENT_SCHEMA()`. Stop on a mismatch or any missing or uncertain result.
+In the verified session, acquire the shared gate and record S0 before selecting
+the single snapshot timestamp below. Keep
 that transaction open through all eight unloads, counts, profiles and S1. Keep
 stage writers paused through the complete `LIST`/`GET` and checksum window
 because stages have no Time Travel. Quiescence alone never replaces the table
