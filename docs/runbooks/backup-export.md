@@ -133,17 +133,27 @@ field revisions consistently with the parent/child ordering below. Do not PUT
 stage files for tombstoned identities. Stage upload and transactional DML are
 separate; an upload is not an acknowledgement or erasure guarantee.
 
-Before accepting restore, set the coordination floor under that SAME target
+Reconciliation is itself coordinated before accepting or reconnecting any
+writer, never an unlocked source-side shortcut: obtain current source tombstones
+and revisions through the same source capture protocol, and under the coordinated
+target transaction merge newer tombstones, cascading/excluding their matching
+roasts, reviews, telemetry, artifacts and field revisions.
+
+After loading and applying the required tombstone and revision reconciliation,
+rebuild summaries in that same coordinated target transaction. Do not load the
+captured derived rows. Clear the derived rows from `app.reference_roast_summaries`,
+query each distinct non-null `(bean_origin, roast_level)` group in the reconciled
+`app.cloud_roasts`, and invoke `app.recompute_reference_summary` once per group
+with bound connector parameters. Any failed or indeterminate rebuild rejects
+recovery: roll back under the existing recovery rules and keep writers disconnected.
+
+After rebuilding, set the final coordination floor under that SAME target
 transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
 The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALESCE(MAX(deletion_write_seq),0))`
 over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
 must return 0 before COMMIT; any nonzero result, failed count or error means
-ROLLBACK. Reconciliation is itself coordinated before accepting or reconnecting
-any writer, never an unlocked source-side shortcut: obtain current source
-tombstones and revisions through the same source capture protocol, and under
-the coordinated target transaction merge newer tombstones, cascading/excluding
-their matching roasts, reviews, telemetry, artifacts and field revisions.
-Raise the sequence floor again and require zero data-quality violations.
+ROLLBACK.
+
 Any source accepted_write_seq above captured S1 or any revision differing from
 the capture makes restore **unreconciled**: STOP; only the operator decides.
 If source history is unreachable, record "post-capture deletion/ack state unverified";
@@ -409,14 +419,6 @@ WHERE submitted_ip_hash IS NOT NULL
 If backup age or retention horizon is unknown, fail closed: set every non-null
 `submitted_ip_hash` in restored `app.tasting_reviews` to `NULL`.
 
-### Recompute the derived table
-
-Do not load the exported `app.reference_roast_summaries` snapshot normally.
-Clear target rows, query distinct non-null `(bean_origin, roast_level)` pairs
-from `app.cloud_roasts`, then invoke `app.recompute_reference_summary` once per
-pair with bound connector parameters. This rebuilds the table instead of
-trusting a stale aggregate.
-
 ## Verify
 
 Before accepting recovery, validate the restored semi-structured values:
@@ -457,8 +459,8 @@ child tables by left-joining each to `app.cloud_roasts`. Confirm every
 expected checksum.
 
 Confirm no retained `submitted_ip_hash` is 30 days old or older. Require zero
-owner-only data-quality violations. Recompute every present summary group, then
-compare these freshly derived keys and values with the manifest baseline:
+owner-only data-quality violations. Read the rebuilt summary rows and compare
+their keys and values with the manifest baseline. This verification is read-only:
 
 ```sql
 SELECT bean_origin, roast_level, roast_count, review_count, avg_rating,

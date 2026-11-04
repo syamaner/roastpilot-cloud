@@ -129,7 +129,7 @@ def test_rb_restore_no_lock_row_load_and_seq_floor():
 
 
 def test_rb_restore_reconciliation_fail_closed():
-    for term in ['unreconciled','post-capture deletion/ack state unverified','writers remain disconnected','coordinated target transaction','source capture protocol','reviews, telemetry, artifacts and field revisions','Raise the sequence floor again']:
+    for term in ['unreconciled','post-capture deletion/ack state unverified','writers remain disconnected','coordinated target transaction','source capture protocol','reviews, telemetry, artifacts and field revisions','set the final coordination floor']:
         assert term in BOUNDARY
 
 
@@ -282,3 +282,31 @@ def test_rb_fresh_capture_session_reselects_and_verifies_context_before_begin():
         '`CURRENT_ROLE()`, `CURRENT_DATABASE()` and `CURRENT_SCHEMA()`. '
         'Stop on a mismatch or any missing or uncertain result.'
     ) in before_begin
+
+
+def test_rb_restore_rebuilds_reconciled_summaries_before_read_only_verification():
+    restore = ' '.join(BOUNDARY.split('For restore,', 1)[1].split())
+    steps = (
+        'After loading and applying the required tombstone and revision reconciliation',
+        'rebuild summaries in that same coordinated target transaction',
+        'Do not load the captured derived rows.',
+        'Clear the derived rows from `app.reference_roast_summaries`',
+        'each distinct non-null `(bean_origin, roast_level)` group in the reconciled',
+        '`app.recompute_reference_summary` once per group with bound connector parameters',
+        'set the final coordination floor',
+        'SELECT COUNT(*) FROM app.data_quality_violations',
+        'must return 0 before COMMIT',
+    )
+    offsets = [position(restore, step) for step in steps]
+    assert offsets == sorted(offsets)
+    assert (
+        'Any failed or indeterminate rebuild rejects recovery: roll back under '
+        'the existing recovery rules and keep writers disconnected.'
+    ) in restore
+    verify = BACKUP.split('## Verify\n', 1)[1].split('## Ownership summary', 1)[0]
+    assert (
+        'Read the rebuilt summary rows and compare their keys and values with the '
+        'manifest baseline. This verification is read-only:'
+    ) in ' '.join(verify.split())
+    assert 'FROM app.reference_roast_summaries' in verify
+    assert not re.search(r'\brecompute\b|\brecompute_reference_summary\b', verify, re.IGNORECASE)
