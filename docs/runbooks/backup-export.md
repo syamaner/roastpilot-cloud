@@ -133,11 +133,27 @@ field revisions consistently with the parent/child ordering below. Do not PUT
 stage files for tombstoned identities. Stage upload and transactional DML are
 separate; an upload is not an acknowledgement or erasure guarantee.
 
+Before reconciliation, set the preliminary coordination floor under that SAME
+target transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
+The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALESCE(MAX(deletion_write_seq),0))`
+over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
+must return 0 before proceeding to reconciliation. Any nonzero result, failed
+count or error means ROLLBACK.
+
 Reconciliation is itself coordinated before accepting or reconnecting any
 writer, never an unlocked source-side shortcut: obtain current source tombstones
 and revisions through the same source capture protocol, and under the coordinated
 target transaction merge newer tombstones, cascading/excluding their matching
 roasts, reviews, telemetry, artifacts and field revisions.
+
+Any source accepted_write_seq above captured S1 or any revision differing from
+the capture makes restore **unreconciled**: STOP; only the operator decides.
+If source history is unreachable, record "post-capture deletion/ack state unverified";
+writers remain disconnected without an explicit operator decision. Never accept
+unknown post-capture deletion/ack state as ordinary recovery success.
+
+Resolve reconciliation eligibility before rebuilding summaries. Proceed only
+after the required reconciliation and the eligibility decision are complete.
 
 After loading and applying the required tombstone and revision reconciliation,
 rebuild summaries in that same coordinated target transaction. Do not load the
@@ -153,12 +169,6 @@ The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALE
 over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
 must return 0 before COMMIT; any nonzero result, failed count or error means
 ROLLBACK.
-
-Any source accepted_write_seq above captured S1 or any revision differing from
-the capture makes restore **unreconciled**: STOP; only the operator decides.
-If source history is unreachable, record "post-capture deletion/ack state unverified";
-writers remain disconnected without an explicit operator decision. Never accept
-unknown post-capture deletion/ack state as ordinary recovery success.
 
 ## Export procedure
 

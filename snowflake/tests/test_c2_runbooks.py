@@ -287,6 +287,16 @@ def test_rb_fresh_capture_session_reselects_and_verifies_context_before_begin():
 def test_rb_restore_rebuilds_reconciled_summaries_before_read_only_verification():
     restore = ' '.join(BOUNDARY.split('For restore,', 1)[1].split())
     steps = (
+        'set the preliminary coordination floor',
+        'SELECT COUNT(*) FROM app.data_quality_violations',
+        'must return 0 before proceeding to reconciliation',
+        'Reconciliation is itself coordinated',
+        'makes restore **unreconciled**: STOP',
+        'If source history is unreachable',
+        'writers remain disconnected without an explicit operator decision',
+        'Never accept unknown post-capture deletion/ack state as ordinary recovery success.',
+        'Resolve reconciliation eligibility before rebuilding summaries.',
+        'after the required reconciliation and the eligibility decision are complete.',
         'After loading and applying the required tombstone and revision reconciliation',
         'rebuild summaries in that same coordinated target transaction',
         'Do not load the captured derived rows.',
@@ -297,8 +307,9 @@ def test_rb_restore_rebuilds_reconciled_summaries_before_read_only_verification(
         'SELECT COUNT(*) FROM app.data_quality_violations',
         'must return 0 before COMMIT',
     )
-    offsets = [position(restore, step) for step in steps]
-    assert offsets == sorted(offsets)
+    offset = 0
+    for step in steps:
+        offset = position(restore, step, offset) + len(step)
     assert (
         'Any failed or indeterminate rebuild rejects recovery: roll back under '
         'the existing recovery rules and keep writers disconnected.'
