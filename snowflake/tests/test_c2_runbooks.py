@@ -441,3 +441,117 @@ def test_rb_verify_compares_all_results_to_reconciliation_acceptance_baseline():
     ):
         assert required in verify
     assert 'must match the reconciliation acceptance baseline' in verify
+
+
+
+def test_rb_control_metadata_copy_preserves_captured_values():
+    start = '### Load tombstones and field revisions'
+    end = '### Reconcile the complete graph before files'
+    assert start in BACKUP and end in BACKUP
+    loads = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for table in ('cloud_roast_tombstones', 'cloud_roast_field_revisions'):
+        expected = (
+            'COPY INTO app.' + table
+            + ' FROM @<approved_backup_stage>/<backup_id>/tables/' + table + '/ '
+            + 'FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE '
+            + 'ON_ERROR=ABORT_STATEMENT PURGE=FALSE;'
+        )
+        assert loads.count(expected) == 1
+    assert 'without initialising or resetting accepted revisions or write sequences' in loads
+    assert 'SAME isolated, uncommitted, coordinated target transaction' in loads
+    assert 'Never load the captured coordination row.' in loads
+    assert 'COPY INTO app.cloud_sync_coordination' not in loads
+    assert 'G1 must still qualify both commands and transaction continuity' in loads
+
+
+def test_rb_control_baseline_preserves_all_tombstone_fields_and_nulls():
+    start = '### Derive a separate reconciliation acceptance baseline'
+    end = '### Compare exact control state before files'
+    assert start in BACKUP and end in BACKUP
+    baseline = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'preserve every captured tombstone and include every eligible authoritative tombstone',
+        'Bind all four fields exactly: `cloud_roast_id`, `idempotency_key`, `public_slug`, `deletion_write_seq`.',
+        'Preserve legitimate NULL cloud IDs and legacy NULL deletion sequences exactly',
+        'never invent an ID or coerce a legacy NULL sequence to zero',
+        'derive expected results from restored-target query results',
+        'Derive all expected rows and counts only from the immutable captured inputs and verified eligible reconciliation evidence.',
+        'These TWO counts do not replace the FOUR loaded data-table counts or exact control-state comparisons.',
+    ):
+        assert required in baseline
+
+
+def test_rb_control_baseline_preserves_captured_revision_values():
+    start = '### Derive a separate reconciliation acceptance baseline'
+    end = '### Compare exact control state before files'
+    assert start in BACKUP and end in BACKUP
+    baseline = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'Exact retained per-field revision rows for every surviving restored roast',
+        '`cloud_roast_id`, `field_name`, `accepted_revision`, `accepted_write_seq`',
+        'from the captured state under the unchanged eligibility rules',
+        'Exclude revision rows only for identities removed by the accepted deletion reconciliation.',
+        'Preserve the exact captured acknowledgement values',
+        'do not fabricate revision-zero rows, restore newer edits/acknowledgements or infer values from the target',
+    ):
+        assert required in baseline
+
+
+def test_rb_control_comparison_is_complete_null_safe_and_not_count_only():
+    start = '### Compare exact control state before files'
+    end = '### Upload and verify only retained artifact files'
+    assert start in BACKUP and end in BACKUP
+    comparison = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'compare BOTH complete target protocol-metadata tables with the independently expected rows and every field value',
+        'Require null-safe equality and no missing, extra, duplicate or mismatched row.',
+        'NULL matches only an expected NULL',
+        'an unexpected NULL or a NULL-to-value change rejects recovery',
+        'Count equality or a zero-quality result alone is insufficient.',
+        'without filtering or DISTINCT that could hide missing, extra or duplicate control state',
+        'SELECT cloud_roast_id, idempotency_key, public_slug, deletion_write_seq FROM app.cloud_roast_tombstones;',
+        'SELECT cloud_roast_id, field_name, accepted_revision, accepted_write_seq FROM app.cloud_roast_field_revisions;',
+        'actual target state for comparison, never the source of expected state',
+        'check both supplementary protocol-table counts',
+        'Any unknown, failed or indeterminate comparison rejects recovery and keeps writers disconnected.',
+    ):
+        assert required in comparison
+
+
+def test_rb_control_verification_before_put_commit_and_after_restore():
+    start = '## Restore and disaster recovery'
+    end = '## Verify'
+    assert start in BACKUP and end in BACKUP
+    restore = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    steps = (
+        'COPY INTO app.cloud_roast_tombstones',
+        'COPY INTO app.cloud_roast_field_revisions',
+        '### Reconcile the complete graph before files',
+        '### Derive a separate reconciliation acceptance baseline',
+        '### Compare exact control state before files',
+        'Exact control-state verification must succeed BEFORE any PUT',
+        "PUT 'file:///secure/roastpilot-backups/",
+        '### Rebuild and finish the coordinated target transaction',
+        'Only after full file verification, rebuild summaries',
+        'Then repeat the exact control-state comparison against the same protected expected rows.',
+        'Only after it succeeds, apply the final coordination floor and zero-quality check before COMMIT',
+    )
+    offset = 0
+    for step in steps:
+        offset = position(restore, step, offset) + len(step)
+    assert 'Before COMMIT, roll back target rows under the existing rules' in restore
+    assert 'after COMMIT, keep the target isolated and unaccepted' in restore
+    verify = ' '.join(BACKUP.split('## Verify', 1)[1].split('## Ownership summary', 1)[0].split())
+    assert 'Repeat both complete protocol-metadata table comparisons and their supplementary counts in this read-only post-restore verification.' in verify
+    assert 'same protected expected tombstone and retained revision rows' in verify
+    assert 'Null-safe exact equality must again reject every missing, extra, duplicate or mismatched row and unexpected NULL/value change.' in verify
+
+
+def test_rb_control_state_failure_examples_reject_valid_shapes():
+    start = '### Compare exact control state before files'
+    end = '### Upload and verify only retained artifact files'
+    assert start in BACKUP and end in BACKUP
+    comparison = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    assert 'A target missing even one captured permanent tombstone must be rejected even when all FOUR data-table counts and data quality pass.' in comparison
+    assert 'A target with three structurally valid revision rows but lower or different `accepted_revision` or `accepted_write_seq` must be rejected despite passing shape checks.' in comparison
+    assert 'Missing, extra or duplicate control rows and unexpected NULL/value changes reject recovery.' in comparison
