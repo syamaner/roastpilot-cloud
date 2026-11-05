@@ -132,6 +132,9 @@ Never load the captured coordination row. Restore identities/tombstones and
 field revisions consistently with the parent/child ordering below. Do not PUT
 stage files for tombstoned identities. Stage upload and transactional DML are
 separate; an upload is not an acknowledgement or erasure guarantee.
+Load all target rows provisionally in that same isolated, uncommitted
+coordinated transaction before reconciliation; do not expose them or
+reconnect a writer. The detailed restore order below governs file uploads.
 
 Before reconciliation, set the preliminary coordination floor under that SAME
 target transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
@@ -154,6 +157,12 @@ unknown post-capture deletion/ack state as ordinary recovery success.
 
 Resolve reconciliation eligibility before rebuilding summaries. Proceed only
 after the required reconciliation and the eligibility decision are complete.
+Before any target-stage PUT, derive the separate protected reconciliation
+acceptance baseline and retained-artifact inventory from captured inputs and
+accepted reconciliation evidence, as specified below. Upload only that
+retained inventory and verify every file and the complete allowed target-stage
+inventory before rebuilding summaries. Unknown source history, bad files or
+unprovable expectations reject recovery; no PUT on unknown eligibility.
 
 After loading and applying the required tombstone and revision reconciliation,
 rebuild summaries in that same coordinated target transaction. Do not load the
@@ -371,11 +380,16 @@ has recreated an empty schema, and the operator has explicitly approved that
 disaster-recovery target.
 
 Snowflake does not enforce foreign keys; an out-of-order restore can silently
-create orphans. Reverse the delete cascade: restore `app.cloud_roasts`, then
-`app.roast_telemetry`, stage files, `app.roast_artifacts` rows, and finally
-`app.tasting_reviews`.
+create orphans. Load the parent before its children: `app.cloud_roasts`, then
+`app.roast_telemetry`, `app.roast_artifacts` rows and `app.tasting_reviews`, with
+tombstones and field revisions loaded consistently in that same transaction.
+All COPY templates below are provisional row loads inside the same isolated,
+uncommitted coordinated target transaction. They are not recovery acceptance:
+do not expose the rows or reconnect any writer. Stage upload and file checks
+follow the complete row loads and deletion reconciliation, not artifact-row
+insertion. This supersedes the earlier stage-before-artifact-row ordering.
 
-### Restore the parent, telemetry and stage files
+### Load provisional parent and telemetry rows
 
 ```sql
 COPY INTO app.cloud_roasts
@@ -386,28 +400,7 @@ COPY INTO app.roast_telemetry
   FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE ON_ERROR=ABORT_STATEMENT PURGE=FALSE;
 ```
 
-Upload every checksummed run directory to its original prefix before artifact
-rows. Because `GET` preserved stored bytes, use `AUTO_COMPRESS=FALSE`; another
-export method must explicitly match its compression.
-
-```sql
-PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*'
-  @app.roast_artifacts/<run_id>/
-  AUTO_COMPRESS=FALSE OVERWRITE=FALSE;
-```
-
-`PUT` also requires SnowSQL or a file-transfer-capable connector, not Snowsight.
-Confirm each name, size and checksum `[VERIFY-LIVE]` before its row is loaded.
-
-### Restore tombstones and field revisions
-
-Load the captured cloud_roast_tombstones and cloud_roast_field_revisions as
-part of this same coordinated target transaction. Exclude any captured live
-identity covered by a tombstone; its dependent rows must also be excluded.
-Never load the captured coordination row or reconnect a writer before the
-reconciliation, floor and zero-quality checks above have been accepted.
-
-### Restore artifact rows and reviews
+### Load provisional artifact rows and reviews
 
 ```sql
 COPY INTO app.roast_artifacts
@@ -430,6 +423,122 @@ WHERE submitted_ip_hash IS NOT NULL
 
 If backup age or retention horizon is unknown, fail closed: set every non-null
 `submitted_ip_hash` in restored `app.tasting_reviews` to `NULL`.
+
+### Load tombstones and field revisions
+
+Load the captured cloud_roast_tombstones and cloud_roast_field_revisions as
+part of this same coordinated target transaction. Never load the captured
+coordination row. All row loads must be complete before the next step; do not
+PUT files or reconnect writers at this point. Captured and newer tombstones
+must exclude every matching loaded parent, child and revision row before any
+PUT or acceptance, using the existing validated identity and cascade rules.
+
+### Reconcile the complete graph before files
+
+Apply the preliminary coordination floor and zero-quality check from the
+coordinated boundary above, then perform its current-source tombstone/revision
+reconciliation under the same coordinated target transaction. Obtain the
+current source evidence through the same source capture protocol. Apply the
+existing validated identity and cascade/exclusion rules to the complete loaded
+graph, including captured and newer tombstones. Resolve reconciliation
+eligibility before any PUT. A changed or newer source acknowledgement/revision,
+ambiguous identity, unknown or unreachable source deletion state means STOP:
+no PUT and no ordinary recovery success. Preserve the existing operator-only
+decision boundary; this does not authorise restoring newer edits.
+
+### Derive a separate reconciliation acceptance baseline
+
+Preserve the original protected capture manifest and exports unchanged as
+evidence. Derive and protect a separate reconciliation acceptance baseline
+independently from those captured inputs and the verified, eligible deletion
+reconciliation evidence. Record the original manifest identity and the accepted
+reconciliation evidence with this baseline, including the retained identities
+and their captured file names, sizes and checksums. Never derive expected
+results from restored-target query results, or rewrite the original manifest
+to match the target. Unknown or unprovable expectations reject recovery.
+
+Filter the captured parent and child rows using the existing validated identity
+and cascade rules. Count each matching captured identity once; repeated
+tombstones must not double-count it, and a tombstone matching no captured row
+must not subtract any row. Do not decrement counts by the number of tombstones.
+Apply the matching parent exclusion to its captured telemetry, artifact, review
+and field-revision rows. Ambiguous identity is a STOP, never a guessed match.
+This describes the existing deletion reconciliation, not a new filtered-Parquet
+input mechanism or reconciliation algorithm.
+
+The independent baseline must contain:
+
+- Expected counts for all four loaded tables: `app.cloud_roasts`,
+  `app.roast_telemetry`, `app.roast_artifacts` and `app.tasting_reviews`, computed
+  from the retained captured rows rather than tombstone counts.
+- Expected VARIANT null/type/presence profiles, including the captured nested
+  summary paths and per-row presence for retained identities. Derive the
+  expected rebuilt `key_patterns` profile under the unchanged summary rules.
+- Expected reference-summary keys and every aggregate value after the permitted
+  deletions. Derive them independently from the retained captured roast,
+  telemetry and review rows using the unchanged aggregation semantics and the
+  independent `contributed_to_learning = true` filter. Retained opted-out rows
+  still count in loaded tables but never contribute to those aggregates. Keep
+  the existing grouping, time anchors, telemetry selection/tie rules and null
+  semantics; include the expected rebuilt `key_patterns` values. No restored
+  summary output is an oracle for itself.
+- The retained-artifact inventory: only captured files belonging to surviving,
+  non-tombstoned artifact identities, bound to the existing validated run keys,
+  relative names, sizes and checksums. Derive this inventory from the protected
+  captured graph and accepted reconciliation evidence, not the target listing.
+
+With unchanged reconciliation, retain the original applicable expectations.
+For example, if two contributing captured roasts share a group and a valid
+deletion matches one of them, the expected roast count is one in the derived
+acceptance baseline; the original capture evidence still records two. Derive
+the remaining profiles, children and aggregate values from the surviving
+captured rows; never merely subtract one from every count or reuse an average
+that included the deleted roast.
+
+### Upload and verify only retained artifact files
+
+Only after eligibility and the independent baseline/retained-artifact inventory
+are complete, upload the expected retained, checksummed captured files to their
+original validated prefixes. Do not PUT stage files for tombstoned identities.
+The wildcard template below is permitted only when every local file it selects
+is in that retained-artifact inventory; otherwise STOP without uploading it.
+Because `GET` preserved stored bytes, use `AUTO_COMPRESS=FALSE`; another export
+method must explicitly match its compression.
+
+```sql
+PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*'
+  @app.roast_artifacts/<run_id>/
+  AUTO_COMPRESS=FALSE OVERWRITE=FALSE;
+```
+
+`PUT` requires SnowSQL or a file-transfer-capable connector, not Snowsight.
+Verify each retained file's name, size and checksum and the complete permitted
+target-stage inventory against the independently derived retained-artifact
+inventory `[VERIFY-LIVE]` before rebuilding summaries. Missing, unexpected,
+tombstoned, unmatched or unverified files reject recovery. A provisional
+metadata row is not evidence that its file exists or is correct. Do not excuse
+an unexpected target file just because every expected file was found.
+
+Stage effects do not roll back. If disallowed or unverified files were already
+uploaded, STOP and keep the target isolated under the existing separately
+authorised recovery cleanup and empty-target preflight rules. This selects no
+automatic REMOVE, new cleanup recipe, actor or privilege. A point-in-time
+listing does not prove permanent prefix emptiness or atomic erasure. The D223
+residual is limited to later appliance uploads under its existing permission;
+it never excuses preventable operator restore uploads.
+
+### Rebuild and finish the coordinated target transaction
+
+Only after full file verification, rebuild summaries using the transactional
+DELETE and existing procedure in the coordinated boundary above, then apply
+the final coordination floor and zero-quality check before COMMIT. No captured
+coordination-row load or implicit-commit operation is permitted. Any failed or
+indeterminate command, bad file, unknown check or inability to maintain this
+same transaction rejects recovery: roll back target rows and keep writers
+disconnected. Stage files do not roll back with those rows. A failed
+post-commit verification keeps the target isolated and unaccepted. G1 must
+still qualify every command and the complete runtime sequence; G1–G6 remain
+operator-only and unperformed, with the feature OFF.
 
 ## Verify
 
@@ -458,21 +567,26 @@ FROM app.reference_roast_summaries;
 ```
 
 `summary_null` and every unexpected-type count must be zero. The other null,
-nested-path and per-row presence results must equal the source-snapshot profiles
-in the protected manifest; an unexpected loss is a restore failure even when
-the procedure returned success. Apply the same comparison to any additional
-VARIANT shape recorded in the manifest.
+nested-path and per-row presence results must equal the retained-row profiles
+in the separately protected reconciliation acceptance baseline; an unexpected
+loss is a restore failure even when the procedure returned success. Apply the
+same comparison to every additional captured VARIANT shape, adjusted only by
+the accepted matching deletion reconciliation.
 
-All results here are `[VERIFY-LIVE]`. Compare manifest counts only for the four
-loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
+All results here are `[VERIFY-LIVE]`. Compare the reconciliation acceptance
+baseline counts only for the four loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
 and `app.tasting_reviews`. Confirm zero orphan `roast_id` values in the three
 child tables by left-joining each to `app.cloud_roasts`. Confirm every
 `app.roast_artifacts.stage_path` resolves under `@app.roast_artifacts` with its
-expected checksum.
+expected checksum. Compare the complete target-stage listing to the
+independently derived retained-artifact inventory. No missing, unexpected or
+tombstoned file is acceptable. A point-in-time match does not promise permanent
+prefix emptiness.
 
 Confirm no retained `submitted_ip_hash` is 30 days old or older. Require zero
 owner-only data-quality violations. Read the rebuilt summary rows and compare
-their keys and values with the manifest baseline. This verification is read-only:
+their keys and values with the reconciliation acceptance baseline. This
+verification is read-only:
 
 ```sql
 SELECT bean_origin, roast_level, roast_count, review_count, avg_rating,
@@ -486,7 +600,7 @@ ORDER BY bean_origin, roast_level;
 Never compare only the summary row count with the exported snapshot: an absent
 or zero-count old group can legitimately change it. Procedure success alone is
 not acceptance evidence; the VARIANT profiles and freshly derived aggregate
-values must match the manifest. Keep the target isolated and stop if any check
+values must match the reconciliation acceptance baseline. Keep the target isolated and stop if any check
 is unknown or fails.
 
 ## Ownership summary
@@ -499,7 +613,7 @@ is unknown or fails.
 | Protect the backup and manifest | Backup operator in the approved encrypted store |
 | Apply migrations to an empty recovery target | Deployment operator through `ROASTPILOT_ADMIN` |
 | Restore table rows in order | Operator through verified `ROASTPILOT_ADMIN` ownership |
-| `PUT` stage files before artifact rows | Operator through verified owner role using SnowSQL or connector |
+| `PUT` retained stage files after provisional row reconciliation | Operator through verified owner role using SnowSQL or connector |
 | Re-purge restored IP hashes | Operator through verified `ROASTPILOT_ADMIN` ownership |
 | Recompute summaries and complete live verification | Operator through verified `ROASTPILOT_ADMIN` ownership |
 

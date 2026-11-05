@@ -320,7 +320,124 @@ def test_rb_restore_rebuilds_reconciled_summaries_before_read_only_verification(
     verify = BACKUP.split('## Verify\n', 1)[1].split('## Ownership summary', 1)[0]
     assert (
         'Read the rebuilt summary rows and compare their keys and values with the '
-        'manifest baseline. This verification is read-only:'
+        'reconciliation acceptance baseline. This verification is read-only:'
     ) in ' '.join(verify.split())
     assert 'FROM app.reference_roast_summaries' in verify
     assert not re.search(r'\brecompute\b|\brecompute_reference_summary\b', verify, re.IGNORECASE)
+
+
+def test_rb_restore_provisional_rows_reconcile_before_files_and_commit():
+    restore = ' '.join(BACKUP.split('## Restore and disaster recovery', 1)[1]
+                       .split('## Verify', 1)[0].split())
+    steps = (
+        'All COPY templates below are provisional row loads',
+        'COPY INTO app.cloud_roasts',
+        'COPY INTO app.roast_telemetry',
+        'COPY INTO app.roast_artifacts',
+        'COPY INTO app.tasting_reviews',
+        '### Load tombstones and field revisions',
+        '### Reconcile the complete graph before files',
+        'Apply the preliminary coordination floor and zero-quality check',
+        'Resolve reconciliation eligibility before any PUT.',
+        '### Derive a separate reconciliation acceptance baseline',
+        '### Upload and verify only retained artifact files',
+        "PUT 'file:///secure/roastpilot-backups/",
+        "Verify each retained file's name, size and checksum",
+        '### Rebuild and finish the coordinated target transaction',
+        'Only after full file verification, rebuild summaries',
+        'final coordination floor and zero-quality check before COMMIT',
+    )
+    offset = 0
+    for step in steps:
+        offset = position(restore, step, offset) + len(step)
+    assert 'uncommitted coordinated target transaction' in restore
+    assert 'do not expose the rows or reconnect any writer' in restore
+    assert 'All row loads must be complete before the next step' in restore
+    assert 'no PUT and no ordinary recovery success' in restore
+    assert 'roll back target rows and keep writers disconnected' in restore
+    assert 'A failed post-commit verification keeps the target isolated and unaccepted.' in restore
+
+
+def test_rb_reconciliation_acceptance_baseline_has_independent_provenance():
+    baseline = ' '.join(BACKUP.split(
+        '### Derive a separate reconciliation acceptance baseline', 1
+    )[1].split('### Upload and verify only retained artifact files', 1)[0].split())
+    for required in (
+        'Preserve the original protected capture manifest and exports unchanged',
+        'Derive and protect a separate reconciliation acceptance baseline independently',
+        'verified, eligible deletion reconciliation evidence',
+        'Record the original manifest identity and the accepted reconciliation evidence',
+        'Never derive expected results from restored-target query results',
+        'or rewrite the original manifest to match the target',
+        'Unknown or unprovable expectations reject recovery.',
+        'No restored summary output is an oracle for itself.',
+    ):
+        assert required in baseline
+
+
+def test_rb_reconciliation_baseline_filters_matching_rows_and_preserves_profiles():
+    baseline = ' '.join(BACKUP.split(
+        '### Derive a separate reconciliation acceptance baseline', 1
+    )[1].split('### Upload and verify only retained artifact files', 1)[0].split())
+    for required in (
+        'existing validated identity and cascade rules',
+        'Count each matching captured identity once',
+        'repeated tombstones must not double-count it',
+        'a tombstone matching no captured row must not subtract any row',
+        'Do not decrement counts by the number of tombstones.',
+        'telemetry, artifact, review and field-revision rows',
+        'Ambiguous identity is a STOP',
+        'Expected VARIANT null/type/presence profiles',
+        'per-row presence for retained identities',
+        'Expected reference-summary keys and every aggregate value',
+        '`contributed_to_learning = true` filter',
+        'Retained opted-out rows still count in loaded tables',
+        'existing grouping, time anchors, telemetry selection/tie rules and null semantics',
+        'expected rebuilt `key_patterns` values',
+        'With unchanged reconciliation, retain the original applicable expectations.',
+        'the expected roast count is one in the derived acceptance baseline',
+        'the original capture evidence still records two',
+    ):
+        assert required in baseline
+    for table in ('cloud_roasts', 'roast_telemetry', 'roast_artifacts', 'tasting_reviews'):
+        assert '`app.' + table + '`' in baseline
+
+
+def test_rb_restore_file_inventory_rejects_missing_unexpected_and_tombstoned_files():
+    files = ' '.join(BACKUP.split(
+        '### Upload and verify only retained artifact files', 1
+    )[1].split('### Rebuild and finish the coordinated target transaction', 1)[0].split())
+    for required in (
+        'Only after eligibility and the independent baseline/retained-artifact inventory are complete',
+        'Do not PUT stage files for tombstoned identities.',
+        'every local file it selects is in that retained-artifact inventory',
+        'otherwise STOP without uploading it',
+        "Verify each retained file's name, size and checksum and the complete permitted target-stage inventory",
+        'against the independently derived retained-artifact inventory',
+        'Missing, unexpected, tombstoned, unmatched or unverified files reject recovery.',
+        'A provisional metadata row is not evidence that its file exists or is correct.',
+        'Stage effects do not roll back.',
+        'If disallowed or unverified files were already uploaded, STOP and keep the target isolated',
+        'existing separately authorised recovery cleanup and empty-target preflight rules',
+        'no automatic REMOVE, new cleanup recipe, actor or privilege',
+        'does not prove permanent prefix emptiness or atomic erasure',
+        'it never excuses preventable operator restore uploads',
+    ):
+        assert required in files
+
+
+def test_rb_verify_compares_all_results_to_reconciliation_acceptance_baseline():
+    verify = ' '.join(BACKUP.split('## Verify', 1)[1]
+                      .split('## Ownership summary', 1)[0].split())
+    for required in (
+        'reconciliation acceptance baseline',
+        'null, nested-path and per-row presence results must equal',
+        'Compare the reconciliation acceptance baseline counts only for the four loaded tables',
+        'compare their keys and values with the reconciliation acceptance baseline',
+        'complete target-stage listing to the independently derived retained-artifact inventory',
+        'No missing, unexpected or tombstoned file is acceptable.',
+        'This verification is read-only',
+        'Keep the target isolated and stop if any check is unknown or fails.',
+    ):
+        assert required in verify
+    assert 'must match the reconciliation acceptance baseline' in verify
