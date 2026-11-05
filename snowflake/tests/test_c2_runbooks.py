@@ -300,7 +300,10 @@ def test_rb_restore_rebuilds_reconciled_summaries_before_read_only_verification(
         'After loading and applying the required tombstone and revision reconciliation',
         'rebuild summaries in that same coordinated target transaction',
         'Do not load the captured derived rows.',
-        'Clear the derived rows from `app.reference_roast_summaries`',
+        'Execute `DELETE FROM app.reference_roast_summaries` inside '
+        'that same target transaction.',
+        'Do not use `TRUNCATE` or any implicit-commit operation inside '
+        'this coordinated restore boundary.',
         'each distinct non-null `(bean_origin, roast_level)` group in the reconciled',
         '`app.recompute_reference_summary` once per group with bound connector parameters',
         'set the final coordination floor',

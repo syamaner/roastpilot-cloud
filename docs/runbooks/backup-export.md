@@ -157,8 +157,10 @@ after the required reconciliation and the eligibility decision are complete.
 
 After loading and applying the required tombstone and revision reconciliation,
 rebuild summaries in that same coordinated target transaction. Do not load the
-captured derived rows. Clear the derived rows from `app.reference_roast_summaries`,
-query each distinct non-null `(bean_origin, roast_level)` group in the reconciled
+captured derived rows. Execute `DELETE FROM app.reference_roast_summaries` inside
+that same target transaction. Do not use `TRUNCATE` or any implicit-commit
+operation inside this coordinated restore boundary. Query each distinct non-null
+`(bean_origin, roast_level)` group in the reconciled
 `app.cloud_roasts`, and invoke `app.recompute_reference_summary` once per group
 with bound connector parameters. Any failed or indeterminate rebuild rejects
 recovery: roll back under the existing recovery rules and keep writers disconnected.
