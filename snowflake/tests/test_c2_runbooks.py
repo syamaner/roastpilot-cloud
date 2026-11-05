@@ -474,7 +474,7 @@ def test_rb_control_baseline_preserves_all_tombstone_fields_and_nulls():
         'Bind all four fields exactly: `cloud_roast_id`, `idempotency_key`, `public_slug`, `deletion_write_seq`.',
         'Preserve legitimate NULL cloud IDs and legacy NULL deletion sequences exactly',
         'never invent an ID or coerce a legacy NULL sequence to zero',
-        'derive expected results from restored-target query results',
+        'Never derive expected results from restored-target query results',
         'Derive all expected rows and counts only from the immutable captured inputs and verified eligible reconciliation evidence.',
         'These TWO counts do not replace the FOUR loaded data-table counts or exact control-state comparisons.',
     ):
@@ -555,3 +555,112 @@ def test_rb_control_state_failure_examples_reject_valid_shapes():
     assert 'A target missing even one captured permanent tombstone must be rejected even when all FOUR data-table counts and data quality pass.' in comparison
     assert 'A target with three structurally valid revision rows but lower or different `accepted_revision` or `accepted_write_seq` must be rejected despite passing shape checks.' in comparison
     assert 'Missing, extra or duplicate control rows and unexpected NULL/value changes reject recovery.' in comparison
+
+
+
+def test_rb_captured_inputs_match_original_manifest_before_adjusted_baseline():
+    start = '### Bind captured inputs to original evidence'
+    end = '### Load provisional parent and telemetry rows'
+    assert start in BACKUP and end in BACKUP
+    inputs = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'Before deriving any reconciliation acceptance baseline',
+        'complete captured table-file inventory and each file checksum',
+        'protected immutable original capture manifest',
+        'Reconstruct the complete captured row sets and require the original recorded row counts for ALL EIGHT captured tables',
+        'original capture counts, before accepted deletions adjust any later expectations, not target counts',
+        'Missing or extra files, checksum mismatch, missing or extra rows, conflicting evidence',
+        'any unknown, failed or indeterminate check rejects recovery',
+        'Do not alter the original manifest, exports, original counts or capture procedure to make an incomplete backup pass.',
+    ):
+        assert required in inputs
+    for table in EXPECTED_CAPTURE_TABLES:
+        assert '`' + table + '`' in inputs
+    restore = BACKUP.split('## Restore and disaster recovery', 1)[1]
+    assert position(restore, start) < position(restore, end)
+    assert position(restore, start) < position(restore, '### Derive a separate reconciliation acceptance baseline')
+
+
+def test_rb_incomplete_captured_control_evidence_rejects_before_derivation():
+    start = '### Bind captured inputs to original evidence'
+    end = '### Load provisional parent and telemetry rows'
+    assert start in BACKUP and end in BACKUP
+    inputs = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    assert 'Explicitly include the complete captured tombstone and field-revision row sets.' in inputs
+    assert 'An incomplete captured tombstone or field-revision row set must be rejected against the original manifest counts and file evidence before adjusted baseline derivation.' in inputs
+
+
+def test_rb_value_baseline_binds_captured_identity_nulls_and_private_values():
+    start = '### Derive a separate reconciliation acceptance baseline'
+    end = '### Compare exact control state before files'
+    assert start in BACKUP and end in BACKUP
+    baseline = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'Exact captured `operator_rating`, `operator_notes` and `contributed_to_learning` values',
+        'for every surviving retained roast, bound to its captured `id`, `idempotency_key` and `public_slug`',
+        'Exclude ONLY identities removed by the existing accepted deletion reconciliation.',
+        'Preserve explicit SQL NULL in nullable ratings and private notes exactly',
+        'preserve the consent boolean exactly',
+        'Never initialise or reset these values or revisions, infer expected values from the target, or restore newer edits/acknowledgements.',
+        'protected and operator-only',
+        'never put private note content or other roast data into public logs, repository fixtures, PRs or new public projections',
+        'Never derive expected results from restored-target query results',
+    ):
+        assert required in baseline
+
+
+def test_rb_target_value_observation_requires_exact_independent_complete_rows():
+    start = '#### Compare retained roast values with acknowledgements'
+    end = '### Upload and verify only retained artifact files'
+    assert start in BACKUP and end in BACKUP
+    comparison = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    for required in (
+        'Observe the complete target roast identity/value rows read-only',
+        'alongside the complete tombstone and field-revision comparisons',
+        'SELECT id, idempotency_key, public_slug, operator_rating, operator_notes, contributed_to_learning FROM app.cloud_roasts;',
+        'Require null-safe exact complete row/value equality against the independently expected retained captured roast rows',
+        'no missing, extra, duplicate, identity, field-value or NULL mismatch',
+        'Bind each value to its captured `id`, `idempotency_key` and `public_slug`',
+        'preserve legitimate explicit SQL NULL ratings/notes and the consent boolean exactly',
+        'it never defines expected values',
+        'Do not change data or reset revisions to make verification pass.',
+        'private note results must not be copied into public logs, repository fixtures, PRs or public projections',
+    ):
+        assert required in comparison
+
+
+def test_rb_value_comparison_precedes_put_commit_and_repeats_read_only():
+    start = '## Restore and disaster recovery'
+    end = '## Verify'
+    assert start in BACKUP and end in BACKUP
+    restore = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    steps = (
+        '### Bind captured inputs to original evidence',
+        '### Derive a separate reconciliation acceptance baseline',
+        'Exact captured `operator_rating`, `operator_notes` and `contributed_to_learning` values',
+        '#### Compare retained roast values with acknowledgements',
+        'tombstone/revision verification BEFORE any PUT',
+        "PUT 'file:///secure/roastpilot-backups/",
+        '### Rebuild and finish the coordinated target transaction',
+        'Repeat the null-safe exact retained roast identity/value comparison alongside those control-state checks against the same independent captured-value expectations.',
+        'Only after it succeeds, apply the final coordination floor and zero-quality check before COMMIT',
+    )
+    offset = 0
+    for step in steps:
+        offset = position(restore, step, offset) + len(step)
+    assert 'before COMMIT roll back target rows; after COMMIT keep the target isolated and unaccepted, with writers disconnected' in restore
+    verify = ' '.join(BACKUP.split('## Verify', 1)[1].split('## Ownership summary', 1)[0].split())
+    assert 'Repeat the exact retained roast identity/value comparison read-only alongside the tombstone/revision comparisons after restore.' in verify
+    assert 'Use the same independent protected captured-value expectations' in verify
+    assert 'reject every missing, extra, duplicate, identity, value or NULL mismatch' in verify
+
+
+def test_rb_wrong_value_rejected_despite_correct_acknowledgements_and_counts():
+    start = '#### Compare retained roast values with acknowledgements'
+    end = '### Upload and verify only retained artifact files'
+    assert start in BACKUP and end in BACKUP
+    comparison = ' '.join(BACKUP.split(start, 1)[1].split(end, 1)[0].split())
+    assert 'A target with the correct captured revision rows but a different or missing `operator_rating`, `operator_notes` or `contributed_to_learning` value must be rejected, even when counts, shapes, tombstones and revision comparisons pass.' in comparison
+    assert 'a lost nullable rating/private note represented by an unexpected NULL' in comparison
+    assert 'Matching acknowledgement numbers, counts, valid field types, VARIANT profiles or aggregates alone is insufficient.' in comparison
+    assert 'The FOUR data-table count comparisons and TWO supplementary protocol-table counts are all required; none replaces the exact state comparisons.' in comparison

@@ -181,6 +181,8 @@ After rebuilding, repeat the exact control-state comparison against the same
 protected expected tombstone and retained revision rows. It must succeed before
 final acceptance/COMMIT; any unknown, failed or indeterminate comparison rejects
 recovery and keeps writers disconnected under the existing rollback rules.
+The exact retained roast identity/value comparison must also succeed alongside
+that repeated tombstone/revision verification before final acceptance/COMMIT.
 
 After rebuilding, set the final coordination floor under that SAME target
 transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
@@ -387,6 +389,28 @@ is permissible only after the former source is unavailable, a fresh migration
 has recreated an empty schema, and the operator has explicitly approved that
 disaster-recovery target.
 
+### Bind captured inputs to original evidence
+
+Before deriving any reconciliation acceptance baseline, verify the complete
+captured table-file inventory and each file checksum against the protected
+immutable original capture manifest. Reconstruct the complete captured row
+sets and require the original recorded row counts for ALL EIGHT captured
+tables: `cloud_roasts`, `roast_telemetry`, `roast_artifacts`, `tasting_reviews`,
+`reference_roast_summaries`, `cloud_sync_coordination`, `cloud_roast_tombstones`
+and `cloud_roast_field_revisions`. Explicitly include the complete captured
+tombstone and field-revision row sets. This uses original capture counts,
+before accepted deletions adjust any later expectations, not target counts.
+
+Missing or extra files, checksum mismatch, missing or extra rows, conflicting
+evidence, or any unknown, failed or indeterminate check rejects recovery.
+An incomplete captured tombstone or field-revision row set must be rejected
+against the original manifest counts and file evidence before adjusted
+baseline derivation. Do not alter the original manifest, exports, original
+counts or capture procedure to make an incomplete backup pass. Keep the
+existing capture boundary and source-history eligibility checks. These are
+protected operator-only input checks, not a new capture or reconciliation
+algorithm; no captured private data belongs in public logs or fixtures.
+
 Snowflake does not enforce foreign keys; an out-of-order restore can silently
 create orphans. Load the parent before its children: `app.cloud_roasts`, then
 `app.roast_telemetry`, `app.roast_artifacts` rows and `app.tasting_reviews`, with
@@ -472,6 +496,9 @@ decision boundary; this does not authorise restoring newer edits.
 
 ### Derive a separate reconciliation acceptance baseline
 
+Derive adjusted expectations only after the complete captured-input checks
+against the immutable original manifest above have succeeded.
+
 Preserve the original protected capture manifest and exports unchanged as
 evidence. Derive and protect a separate reconciliation acceptance baseline
 independently from those captured inputs and the verified, eligible deletion
@@ -492,6 +519,16 @@ input mechanism or reconciliation algorithm.
 
 The independent baseline must contain:
 
+- Exact captured `operator_rating`, `operator_notes` and
+  `contributed_to_learning` values for every surviving retained roast, bound to
+  its captured `id`, `idempotency_key` and `public_slug`. Exclude ONLY identities
+  removed by the existing accepted deletion reconciliation. Preserve explicit
+  SQL NULL in nullable ratings and private notes exactly; preserve the consent
+  boolean exactly. Never initialise or reset these values or revisions, infer
+  expected values from the target, or restore newer edits/acknowledgements.
+  Keep the existing identity and reconciliation rules. This baseline is
+  protected and operator-only: never put private note content or other roast
+  data into public logs, repository fixtures, PRs or new public projections.
 - Complete expected permanent tombstone rows after the existing validated
   reconciliation: preserve every captured tombstone and include every eligible
   authoritative tombstone admitted by those rules. Bind all four fields exactly:
@@ -562,6 +599,45 @@ and `app.cloud_roast_field_revisions` against the same protected expected rows;
 also check both supplementary protocol-table counts. Do not reset or repair
 unexpected target values to make the comparison pass.
 
+#### Compare retained roast values with acknowledgements
+
+Observe the complete target roast identity/value rows read-only, alongside
+the complete tombstone and field-revision comparisons. Run this observation
+only in the protected operator workflow; its private note results must not be
+copied into public logs, repository fixtures, PRs or public projections:
+
+```sql
+SELECT id, idempotency_key, public_slug, operator_rating, operator_notes,
+       contributed_to_learning
+FROM app.cloud_roasts;
+```
+
+Require null-safe exact complete row/value equality against the independently
+expected retained captured roast rows: no missing, extra, duplicate, identity,
+field-value or NULL mismatch. Bind each value to its captured `id`,
+`idempotency_key` and `public_slug`; preserve legitimate explicit SQL NULL
+ratings/notes and the consent boolean exactly. The query observes actual
+target state only; it never defines expected values. Do not change data or
+reset revisions to make verification pass.
+
+The exact retained roast identity/value comparison must succeed alongside
+tombstone/revision verification BEFORE any PUT, again before final
+acceptance/COMMIT, and in read-only post-restore verification. Matching
+acknowledgement numbers, counts, valid field types, VARIANT profiles or
+aggregates alone is insufficient. The FOUR data-table count comparisons and
+TWO supplementary protocol-table counts are all required; none replaces the
+exact state comparisons. Any unknown, failed or indeterminate value check
+rejects recovery: before COMMIT roll back target rows; after COMMIT keep the
+target isolated and unaccepted, with writers disconnected. Stage effects
+remain separate and nontransactional, with no new REMOVE or cleanup authority.
+
+A target with the correct captured revision rows but a different or missing
+`operator_rating`, `operator_notes` or `contributed_to_learning` value must be
+rejected, even when counts, shapes, tombstones and revision comparisons pass.
+This includes a lost nullable rating/private note represented by an unexpected
+NULL. No new SQL comparison algorithm or Snowflake runtime qualification is
+selected by these requirements.
+
 Exact control-state verification must succeed BEFORE any PUT, again before
 final acceptance/COMMIT, and in read-only post-restore verification. Any unknown,
 failed or indeterminate comparison rejects recovery and keeps writers
@@ -614,6 +690,9 @@ it never excuses preventable operator restore uploads.
 Only after full file verification, rebuild summaries using the transactional
 DELETE and existing procedure in the coordinated boundary above. Then repeat
 the exact control-state comparison against the same protected expected rows.
+Repeat the null-safe exact retained roast identity/value comparison alongside
+those control-state checks against the same independent captured-value
+expectations.
 Only after it succeeds, apply
 the final coordination floor and zero-quality check before COMMIT. No captured
 coordination-row load or implicit-commit operation is permitted. Any failed or
@@ -634,6 +713,15 @@ missing, extra, duplicate or mismatched row and unexpected NULL/value change.
 An unknown, failed or indeterminate result keeps recovery unaccepted and the
 target isolated with writers disconnected. The four data-table counts below
 remain required and cannot substitute for these complete control-state checks.
+
+Repeat the exact retained roast identity/value comparison read-only alongside
+the tombstone/revision comparisons after restore. Use the same independent
+protected captured-value expectations and reject every missing, extra,
+duplicate, identity, value or NULL mismatch. Do not reset values or revisions
+to pass. Unknown, failed or indeterminate checks leave recovery unaccepted,
+the target isolated and writers disconnected. The four data-table and two
+supplementary protocol-table counts remain required; none replaces exact
+value and acknowledgement state verification.
 
 Before accepting recovery, validate the restored semi-structured values:
 
