@@ -328,21 +328,23 @@ The synthetic seed toolkit deliberately refuses production targets.
 `ROASTPILOT_PREVIEW` and `ROASTPILOT_DEV`. Do not bypass or widen that guard.
 The preferred path for every production roast is the validated procedure path:
 the real agent uses `UPSERT_ROAST` and `LOAD_ROAST_TELEMETRY`. `UPSERT_ROAST`
-validates the payload and applies the idempotent `MERGE` that a direct table
-write would bypass.
+validates the create payload and inserts only a new identity; a create replay
+returns the stored pair without updating fields or replacing artifacts.
 
 If a one-off demonstration roast is required before the agent path is
-available, a direct owner insert as `ROASTPILOT_ADMIN` is an explicit exception.
-It may copy only a non-PII roast and telemetry rows that already satisfy every
-range, enum and visibility rule, such as an existing validated roast. Assign a
-fresh UUID to the copied `cloud_roasts.id`, then rewrite every copied
-`roast_telemetry.roast_id` to that new UUID. Also assign a fresh slug and
-idempotency key. The slug must be a freshly generated, route-valid Base58 value
-that meets the entropy floor. An arbitrary label such as `demo-roast-1` fails
-route validation and returns 404. Reusing the source ID is unsafe because
-Snowflake does not enforce the documented primary key and
-`DATA_QUALITY_VIOLATIONS` does not detect duplicate roast IDs. A duplicate can
-make joins ambiguous and break `DELETE_ROAST`.
+available, the owner template must participate in coordination, not bypass it.
+Use `BEGIN; CALL app.cloud_sync_enter();` and retain the returned write_seq.
+Require zero COUNT(*) results in cloud_roasts and cloud_roast_tombstones for
+the new id, key and slug before INSERT. INSERT only a fresh roast, then INSERT
+three cloud_roast_field_revisions rows (operator_rating, operator_notes,
+contributed_to_learning) at revision 0 with that returned write_seq; INSERT its
+telemetry; CALL app.recompute_reference_summary for its group; COMMIT.
+Any nonzero precondition or error requires ROLLBACK, never a MERGE/update.
+Use only already validated non-PII/range/enum/visibility-conforming source rows.
+Assign a fresh UUID id and idempotency key, rewrite every child roast_id and
+use a fresh route-valid Base58 slug meeting the entropy floor. No copied or
+arbitrary demo slug is permitted. This owner template and its runtime checks
+remain G1/operator-qualified; no live call or deployment is performed here.
 
 Use only a source roast that already has `contributed_to_learning = true`, copy
 that value unchanged, and never override an opted-out roast's consent. If no

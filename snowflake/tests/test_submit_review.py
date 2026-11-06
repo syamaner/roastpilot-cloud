@@ -6,6 +6,8 @@ lines.
 """
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import re
 import sys
 from pathlib import Path
@@ -216,7 +218,14 @@ def test_t_atomic_write_trio_wrapped_in_transaction():
     commit = re.search(r"\bcommit\s*;", STRIPPED, re.IGNORECASE)
     assert invalid_raise and slug_raise and transaction and commit
     assert invalid_raise.start() < transaction.start()
-    assert slug_raise.start() < transaction.start()
+    entry = re.search(r"call\s+app.cloud_sync_enter\(\)\s+into\s+:v_write_seq;", STRIPPED, re.I)
+    tombstone = re.search(r"select\s+count\(\*\)\s+into\s+:v_count\s+from\s+app.cloud_roast_tombstones\s+where\s+public_slug\s*=\s*:p_public_slug;\s*if\s*\(v_count\s*>\s*0\)\s*then\s*raise\s+slug_not_resolved;", STRIPPED, re.I)
+    count_guard = re.search(r"select\s+count\(\*\)\s+into\s+:v_count\s+from\s+app.cloud_roasts\s+where\s+public_slug\s*=\s*:p_public_slug\s+and\s+visibility\s*<>\s*'private';\s*if\s*\(v_count\s*<>\s*1\)\s*then\s*raise\s+slug_not_resolved;", STRIPPED, re.I)
+    unique_read = re.search(r"select\s+bean_origin,\s*roast_level", STRIPPED, re.I)
+    assert entry and tombstone and count_guard and unique_read
+    assert transaction.end() < entry.start() < tombstone.start() < count_guard.start() < unique_read.start() < commit.start()
+    assert STRIPPED[transaction.end():entry.start()].strip() == ""
+    assert re.search(r'app\.', STRIPPED[:transaction.start()], re.I) is None
 
     write_trio = STRIPPED[transaction.end() : commit.start()]
     insert = re.search(r"insert\s+into\s+app\.tasting_reviews\b", write_trio, re.IGNORECASE)
@@ -247,3 +256,21 @@ def test_t_insert_revalidates_visibility_atomically():
 
 def test_t_purge_no_delete_from_tasting_reviews():
     assert re.search(r"delete\s+from\s+(?:app\.)?tasting_reviews\b", STRIPPED, re.IGNORECASE) is None
+
+from test_sync_coordination import has, sql
+
+
+def test_sub_c2_slug_resolution_inside_lock():
+    text = sql('R__proc_submit_review.sql')
+    assert position(text, 'call app.cloud_sync_enter()') < position(text, 'from app.cloud_roasts') < position(text, 'insert into app.tasting_reviews')
+
+
+def test_sub_c2_tombstone_maps_to_20001():
+    has(sql('R__proc_submit_review.sql'),'select count(*) into :v_count from app.cloud_roast_tombstones where public_slug = :p_public_slug; if (v_count > 0) then raise slug_not_resolved;')
+
+
+def test_sub_c2_signature_and_return_unchanged():
+    text=sql('R__proc_submit_review.sql')
+    has(text,'returns string language sql execute as owner')
+    has(text,'return v_review_id;')
+    assert re.search(r'procedure submit_review\s*\((.*?)\)',text,re.S)[1].count(',') == 10

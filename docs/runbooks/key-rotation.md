@@ -261,19 +261,10 @@ dispatch of `dev-snowflake-agent-verify.yml`. It supplies both the agent and
 seed secrets from the `dev-snowflake-agent` GitHub Environment and converts
 them to temporary files before running the verifier.
 
-A local run requires the intended `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`,
-`SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, and `SNOWFLAKE_PRIVATE_KEY_FILE` agent
-configuration. It additionally requires `SNOWFLAKE_SEED_PRIVATE_KEY_FILE` for
-the fixed `ROASTPILOT_SEED_CI` principal, plus
-`SNOWFLAKE_SEED_PRIVATE_KEY_PASSPHRASE` when that seed key is encrypted:
-
-```bash
-python3 snowflake/upsert_roast_verify_live.py --target ROASTPILOT_DEV
-```
-
-The script always calls `connect_seed` and opens that seed connection. An
-agent-only local configuration therefore fails before it can complete the
-rotated-agent verification.
+`upsert_roast_verify_live.py` is retired by C9-C2 and refuses; no replacement
+live write instrument exists until C9-C4. Do not provision or invoke a seed
+credential to bypass this refusal. Key rotation remains operator-only and
+requires the separately qualified C9-C4 instrument before write acceptance.
 
 For web key-pair authentication, select the deployment belonging to the
 principal being rotated and use a freshly generated, route-valid Base58 slug

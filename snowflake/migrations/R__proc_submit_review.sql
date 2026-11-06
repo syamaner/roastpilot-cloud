@@ -13,7 +13,7 @@
 -- Fahrenheit value or conversion anywhere in this procedure.
 -- Both guards raise before any write; insert, recompute, and purge form one
 -- all-or-nothing transaction that rolls back and re-raises on any failure.
--- The pre-transaction slug check is a fast fail only: the INSERT revalidates
+-- The coordinated slug check is under the lock; the INSERT revalidates
 -- non-private visibility atomically and requires exactly one affected row.
 --
 -- The deploy connection sets no default schema (snowflake/README.md), so
@@ -45,6 +45,9 @@ declare
   invalid_submitted_hash exception (-20002, 'Submitted hash must be 64 hexadecimal characters');
   invalid_score exception (-20017, 'Score must be an integer between 1 and 5');
   invalid_slider exception (-20018, 'Slider values must be between 0 and 100');
+  writer_in_open_transaction exception (-20021, 'Writer must not run inside an open caller transaction');
+  v_outer_txn string;
+  v_write_seq number(38,0);
   v_count int;
   v_bean_origin string;
   v_roast_level string;
@@ -66,6 +69,19 @@ begin
     raise invalid_slider;
   end if;
 
+  let v_review_id string := uuid_string();
+
+  select current_transaction() into :v_outer_txn;
+  if (v_outer_txn is not null) then
+    raise writer_in_open_transaction;
+  end if;
+  begin
+    begin transaction;
+      call app.cloud_sync_enter() into :v_write_seq;
+    select count(*) into :v_count from app.cloud_roast_tombstones where public_slug = :p_public_slug;
+    if (v_count > 0) then
+      raise slug_not_resolved;
+    end if;
   select count(*) into :v_count
   from app.cloud_roasts
   where public_slug = :p_public_slug
@@ -80,11 +96,6 @@ begin
   from app.cloud_roasts
   where public_slug = :p_public_slug
     and visibility <> 'private';
-
-  let v_review_id string := uuid_string();
-
-  begin
-    begin transaction;
     insert into app.tasting_reviews (
       id, roast_id, reviewer_name, score, aroma, acidity, sweetness, body,
       aftertaste, brew_method, notes, submitted_ip_hash

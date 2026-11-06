@@ -105,9 +105,95 @@ The row graph is `app.cloud_roasts` parent to telemetry, artifact rows and
 reviews. Snowflake does not enforce foreign keys. Stage files and
 `app.roast_artifacts` rows are a separate pair to capture and restore together.
 
+## C9-C2 coordinated backup boundary (operator-only, unqualified)
+
+All eight table exports below use one coordinated capture. These instructions
+replace independent/quiescence-only capture as sufficient evidence. No live
+capture or restore is authorised by software delivery; G1 must qualify unloads
+inside the transaction, SHOW/SQLID membership and every command below.
+
+Before capturing tables: `BEGIN; CALL app.cloud_sync_enter();` then record
+`current_transaction()` and coordination `write_seq` as S0. Keep that same
+transaction across all eight table exports, counts and source profiles. After
+those reads, record both values again as S1. The S0/S1 equality clause is exact:
+**both transaction identifiers and both write_seq values must be equal**.
+Any difference, NULL or unknown value rejects the capture: an admitted writer
+committed or an unload committed implicitly. Reject and ROLLBACK; otherwise
+COMMIT after recording S1. Whether unloads are supported in that transaction is
+unproven until G1; inability to preserve the boundary rejects the capture.
+Stages remain separate and require the existing quiescence/checksum discipline.
+
+For restore, select a freshly migrated target, then `BEGIN; CALL app.cloud_sync_enter();`
+before preconditions or data reads. All seven data tables must contain zero rows:
+cloud_roasts, roast_telemetry, roast_artifacts, tasting_reviews,
+reference_roast_summaries, cloud_roast_tombstones and cloud_roast_field_revisions.
+The coordination table must have exactly one row named `cloud_sync_writer`.
+Never load the captured coordination row. Restore identities/tombstones and
+field revisions consistently with the parent/child ordering below. Do not PUT
+stage files for tombstoned identities. Stage upload and transactional DML are
+separate; an upload is not an acknowledgement or erasure guarantee.
+Load all target rows provisionally in that same isolated, uncommitted
+coordinated transaction before reconciliation; do not expose them or
+reconnect a writer. The detailed restore order below governs file uploads.
+
+Before reconciliation, set the preliminary coordination floor under that SAME
+target transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
+The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALESCE(MAX(deletion_write_seq),0))`
+over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
+must return 0 before proceeding to reconciliation. Any nonzero result, failed
+count or error means ROLLBACK.
+
+Reconciliation is itself coordinated before accepting or reconnecting any
+writer, never an unlocked source-side shortcut: obtain current source tombstones
+and revisions through the same source capture protocol, and under the coordinated
+target transaction merge newer tombstones, cascading/excluding their matching
+roasts, reviews, telemetry, artifacts and field revisions.
+
+Any source accepted_write_seq above captured S1 or any revision differing from
+the capture makes restore **unreconciled**: STOP; only the operator decides.
+If source history is unreachable, record "post-capture deletion/ack state unverified";
+writers remain disconnected without an explicit operator decision. Never accept
+unknown post-capture deletion/ack state as ordinary recovery success.
+
+Resolve reconciliation eligibility before rebuilding summaries. Proceed only
+after the required reconciliation and the eligibility decision are complete.
+Before any target-stage PUT, derive the separate protected reconciliation
+acceptance baseline and retained-artifact inventory from captured inputs and
+accepted reconciliation evidence, as specified below. Upload only that
+retained inventory and verify every file and the complete allowed target-stage
+inventory before rebuilding summaries. Exact comparison of both complete
+protocol-metadata tables to the independent expected state is also required
+before any PUT, again before final acceptance/COMMIT and after restore.
+Unknown source history, bad files or
+unprovable expectations reject recovery; no PUT on unknown eligibility.
+
+After loading and applying the required tombstone and revision reconciliation,
+rebuild summaries in that same coordinated target transaction. Do not load the
+captured derived rows. Execute `DELETE FROM app.reference_roast_summaries` inside
+that same target transaction. Do not use `TRUNCATE` or any implicit-commit
+operation inside this coordinated restore boundary. Query each distinct non-null
+`(bean_origin, roast_level)` group in the reconciled
+`app.cloud_roasts`, and invoke `app.recompute_reference_summary` once per group
+with bound connector parameters. Any failed or indeterminate rebuild rejects
+recovery: roll back under the existing recovery rules and keep writers disconnected.
+
+After rebuilding, repeat the exact control-state comparison against the same
+protected expected tombstone and retained revision rows. It must succeed before
+final acceptance/COMMIT; any unknown, failed or indeterminate comparison rejects
+recovery and keeps writers disconnected under the existing rollback rules.
+The exact retained roast identity/value comparison must also succeed alongside
+that repeated tombstone/revision verification before final acceptance/COMMIT.
+
+After rebuilding, set the final coordination floor under that SAME target
+transaction: `UPDATE app.cloud_sync_coordination SET write_seq = GREATEST(write_seq, <floor>) WHERE lock_name = 'cloud_sync_writer'`.
+The floor is `GREATEST(<captured S1>, COALESCE(MAX(accepted_write_seq),0), COALESCE(MAX(deletion_write_seq),0))`
+over restored revision/tombstone state. Then `SELECT COUNT(*) FROM app.data_quality_violations`
+must return 0 before COMMIT; any nonzero result, failed count or error means
+ROLLBACK.
+
 ## Export procedure
 
-### Export all five base tables
+### Export all eight base tables
 
 Parquet is the explicit format. `HEADER=TRUE` is required on every unload so
 Snowflake writes source column names instead of generated `_col0`, `_col1`, …
@@ -115,10 +201,19 @@ field names; the restore's `MATCH_BY_COLUMN_NAME` depends on those source names.
 The VARIANT/Parquet round-trip is `[VERIFY-LIVE]`. A new `<backup_id>` and
 `OVERWRITE=FALSE` prevent replacement.
 
-For a non-quiesced table export, first pause stage writers and let in-flight
-stage/row operations finish. In the same SnowSQL session, select one timestamp
-once and apply it to every unload and count. Keep stage writers paused through
-the complete `LIST`/`GET` and checksum window because stages have no Time Travel.
+For this coordinated table export, first pause stage writers and let in-flight
+stage/row operations finish. Start a fresh, dedicated SnowSQL session for each
+coordinated capture attempt, including retries. In every fresh session, reselect
+the documented owner role `ROASTPILOT_ADMIN`, the explicitly selected source
+database `<source_db>` and the `APP` schema. Before any capture command or
+`BEGIN`, verify those exact values with `CURRENT_ROLE()`, `CURRENT_DATABASE()`
+and `CURRENT_SCHEMA()`. Stop on a mismatch or any missing or uncertain result.
+In the verified session, acquire the shared gate and record S0 before selecting
+the single snapshot timestamp below. Keep
+that transaction open through all eight unloads, counts, profiles and S1. Keep
+stage writers paused through the complete `LIST`/`GET` and checksum window
+because stages have no Time Travel. Quiescence alone never replaces the table
+transaction boundary.
 
 Before the first write, prove that both destinations are empty:
 
@@ -133,6 +228,11 @@ empty, operator-controlled local directory, newly created if necessary, before
 any `GET`; stale local files must never be mixed into the new backup.
 
 ```sql
+BEGIN;
+CALL app.cloud_sync_enter();
+SET backup_s0_txn = (SELECT CURRENT_TRANSACTION());
+SET backup_s0_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');
+SELECT $backup_s0_txn AS transaction_id, $backup_s0_seq AS write_seq, 'S0' AS boundary;
 SET backup_snapshot_ts = CURRENT_TIMESTAMP();
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roasts/
   FROM (SELECT * FROM app.cloud_roasts AT(TIMESTAMP => $backup_snapshot_ts))
@@ -155,6 +255,15 @@ COPY INTO @<approved_backup_stage>/<backup_id>/tables/tasting_reviews/
 COPY INTO @<approved_backup_stage>/<backup_id>/tables/reference_roast_summaries/
   FROM (SELECT * FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts))
   FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_sync_coordination/
+  FROM (SELECT * FROM app.cloud_sync_coordination AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roast_tombstones/
+  FROM (SELECT * FROM app.cloud_roast_tombstones AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
+COPY INTO @<approved_backup_stage>/<backup_id>/tables/cloud_roast_field_revisions/
+  FROM (SELECT * FROM app.cloud_roast_field_revisions AT(TIMESTAMP => $backup_snapshot_ts))
+  FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY) HEADER=TRUE OVERWRITE=FALSE DETAILED_OUTPUT=TRUE;
 ```
 
 Capture counts at that same point and record `$backup_snapshot_ts`:
@@ -164,7 +273,10 @@ SELECT 'cloud_roasts' AS object_name, COUNT(*) AS row_count FROM app.cloud_roast
 UNION ALL SELECT 'roast_telemetry', COUNT(*) FROM app.roast_telemetry AT(TIMESTAMP => $backup_snapshot_ts)
 UNION ALL SELECT 'roast_artifacts', COUNT(*) FROM app.roast_artifacts AT(TIMESTAMP => $backup_snapshot_ts)
 UNION ALL SELECT 'tasting_reviews', COUNT(*) FROM app.tasting_reviews AT(TIMESTAMP => $backup_snapshot_ts)
-UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts);
+UNION ALL SELECT 'reference_roast_summaries', COUNT(*) FROM app.reference_roast_summaries AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_sync_coordination', COUNT(*) FROM app.cloud_sync_coordination AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_roast_tombstones', COUNT(*) FROM app.cloud_roast_tombstones AT(TIMESTAMP => $backup_snapshot_ts)
+UNION ALL SELECT 'cloud_roast_field_revisions', COUNT(*) FROM app.cloud_roast_field_revisions AT(TIMESTAMP => $backup_snapshot_ts);
 ```
 
 The protected manifest must also record source-snapshot VARIANT type/null
@@ -177,17 +289,39 @@ every source `(bean_origin, roast_level)` key and its derived aggregate values f
 and update-timestamp fields. These are recovery acceptance baselines, not a
 replacement for recomputation.
 
-Alternatively, quiesce all table and stage writers before the first current-state
-count and keep them paused until every `GET` and checksum finishes. Never mix
-independent current-state reads while writers run. Snapshot consistency and the
-quiescence boundary are `[VERIFY-LIVE]`.
+Finish every source profile above within this same transaction and snapshot,
+then record S1 and evaluate the capture boundary:
+
+```sql
+SET backup_s1_txn = (SELECT CURRENT_TRANSACTION());
+SET backup_s1_seq = (SELECT write_seq FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer');
+SELECT $backup_s1_txn AS transaction_id, $backup_s1_seq AS write_seq, 'S1' AS boundary;
+SELECT IFF($backup_s0_txn IS NOT NULL AND $backup_s1_txn IS NOT NULL
+           AND $backup_s0_seq IS NOT NULL AND $backup_s1_seq IS NOT NULL
+           AND $backup_s0_txn = $backup_s1_txn AND $backup_s0_seq = $backup_s1_seq,
+           'ACCEPT', 'REJECT') AS capture_boundary_decision;
+```
+
+The operator must observe exactly one `ACCEPT` decision and retain both complete
+S0/S1 rows. Any failed or indeterminate command rejects the capture, as does a
+missing or unknown value, missing decision, `REJECT` or unequal transaction or
+sequence. On rejection, run `ROLLBACK;` and do not accept its exports. Otherwise
+run `COMMIT;` only after recording S1 and confirming all earlier commands succeeded.
+A failed or indeterminate commit also rejects the capture.
+G1 must qualify SET/unload transaction continuity,
+these commands and the complete snapshot boundary; offline text is not runtime
+support. Keeping all table and stage writers paused is additional discipline,
+never an alternative to BEGIN/entry/S0/snapshot/reads/S1/equality/COMMIT.
 
 The review unload keeps a non-null hash only while it remains inside its
 original 30-day window; the exact live purge predicate is applied before bytes
 reach Parquet. Time passing can age a retained hash after export. Therefore any
 backup still holding a non-null hash must be deleted or re-scrubbed by that
-hash's original 30-day deadline. The backup retention, encryption and access
-policy must enforce that deadline; immutability does not override it.
+hash's original 30-day deadline. Rollback does not remove unloaded files. Apply
+the same original 30-day review-hash deadline to rejected or partial backup
+prefixes and delete or re-scrub their files by that deadline. The backup
+retention, encryption and access policy must enforce that deadline; immutability
+does not override it.
 
 ### Export the internal artifact stage
 
@@ -232,17 +366,21 @@ recovery target, not a default alias for the manifest's source database:
 USE DATABASE <recovery_db>;
 USE SCHEMA APP;
 SELECT CURRENT_DATABASE(), CURRENT_SCHEMA();
+BEGIN; CALL app.cloud_sync_enter();
 SELECT
   (SELECT COUNT(*) FROM app.cloud_roasts) AS cloud_roasts,
   (SELECT COUNT(*) FROM app.roast_telemetry) AS roast_telemetry,
   (SELECT COUNT(*) FROM app.roast_artifacts) AS roast_artifacts,
   (SELECT COUNT(*) FROM app.tasting_reviews) AS tasting_reviews,
-  (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries;
+  (SELECT COUNT(*) FROM app.reference_roast_summaries) AS reference_roast_summaries,
+  (SELECT COUNT(*) FROM app.cloud_roast_tombstones) AS cloud_roast_tombstones,
+  (SELECT COUNT(*) FROM app.cloud_roast_field_revisions) AS cloud_roast_field_revisions,
+  (SELECT COUNT(*) FROM app.cloud_sync_coordination WHERE lock_name = 'cloud_sync_writer') AS named_coordination_rows;
 LIST @app.roast_artifacts;
 ```
 
 `CURRENT_DATABASE()` must exactly equal the deliberately chosen recovery
-target, all five counts must be zero, and `LIST @app.roast_artifacts;` must
+target, all seven data-table counts must be zero, with exactly one named coordination row, and `LIST @app.roast_artifacts;` must
 return zero files. A non-empty stage is persisted state from a prior or partial
 restore and must be cleaned through the approved recovery cleanup process before
 this preflight is repeated. Stop before `COPY` if the target is the live source,
@@ -251,12 +389,39 @@ is permissible only after the former source is unavailable, a fresh migration
 has recreated an empty schema, and the operator has explicitly approved that
 disaster-recovery target.
 
-Snowflake does not enforce foreign keys; an out-of-order restore can silently
-create orphans. Reverse the delete cascade: restore `app.cloud_roasts`, then
-`app.roast_telemetry`, stage files, `app.roast_artifacts` rows, and finally
-`app.tasting_reviews`.
+### Bind captured inputs to original evidence
 
-### Restore the parent, telemetry and stage files
+Before deriving any reconciliation acceptance baseline, verify the complete
+captured table-file inventory and each file checksum against the protected
+immutable original capture manifest. Reconstruct the complete captured row
+sets and require the original recorded row counts for ALL EIGHT captured
+tables: `cloud_roasts`, `roast_telemetry`, `roast_artifacts`, `tasting_reviews`,
+`reference_roast_summaries`, `cloud_sync_coordination`, `cloud_roast_tombstones`
+and `cloud_roast_field_revisions`. Explicitly include the complete captured
+tombstone and field-revision row sets. This uses original capture counts,
+before accepted deletions adjust any later expectations, not target counts.
+
+Missing or extra files, checksum mismatch, missing or extra rows, conflicting
+evidence, or any unknown, failed or indeterminate check rejects recovery.
+An incomplete captured tombstone or field-revision row set must be rejected
+against the original manifest counts and file evidence before adjusted
+baseline derivation. Do not alter the original manifest, exports, original
+counts or capture procedure to make an incomplete backup pass. Keep the
+existing capture boundary and source-history eligibility checks. These are
+protected operator-only input checks, not a new capture or reconciliation
+algorithm; no captured private data belongs in public logs or fixtures.
+
+Snowflake does not enforce foreign keys; an out-of-order restore can silently
+create orphans. Load the parent before its children: `app.cloud_roasts`, then
+`app.roast_telemetry`, `app.roast_artifacts` rows and `app.tasting_reviews`, with
+tombstones and field revisions loaded consistently in that same transaction.
+All COPY templates below are provisional row loads inside the same isolated,
+uncommitted coordinated target transaction. They are not recovery acceptance:
+do not expose the rows or reconnect any writer. Stage upload and file checks
+follow the complete row loads and deletion reconciliation, not artifact-row
+insertion. This supersedes the earlier stage-before-artifact-row ordering.
+
+### Load provisional parent and telemetry rows
 
 ```sql
 COPY INTO app.cloud_roasts
@@ -267,20 +432,7 @@ COPY INTO app.roast_telemetry
   FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE ON_ERROR=ABORT_STATEMENT PURGE=FALSE;
 ```
 
-Upload every checksummed run directory to its original prefix before artifact
-rows. Because `GET` preserved stored bytes, use `AUTO_COMPRESS=FALSE`; another
-export method must explicitly match its compression.
-
-```sql
-PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*'
-  @app.roast_artifacts/<run_id>/
-  AUTO_COMPRESS=FALSE OVERWRITE=FALSE;
-```
-
-`PUT` also requires SnowSQL or a file-transfer-capable connector, not Snowsight.
-Confirm each name, size and checksum `[VERIFY-LIVE]` before its row is loaded.
-
-### Restore artifact rows and reviews
+### Load provisional artifact rows and reviews
 
 ```sql
 COPY INTO app.roast_artifacts
@@ -304,15 +456,272 @@ WHERE submitted_ip_hash IS NOT NULL
 If backup age or retention horizon is unknown, fail closed: set every non-null
 `submitted_ip_hash` in restored `app.tasting_reviews` to `NULL`.
 
-### Recompute the derived table
+### Load tombstones and field revisions
 
-Do not load the exported `app.reference_roast_summaries` snapshot normally.
-Clear target rows, query distinct non-null `(bean_origin, roast_level)` pairs
-from `app.cloud_roasts`, then invoke `app.recompute_reference_summary` once per
-pair with bound connector parameters. This rebuilds the table instead of
-trusting a stale aggregate.
+Load the captured cloud_roast_tombstones and cloud_roast_field_revisions as
+part of this same coordinated target transaction. Never load the captured
+coordination row. All row loads must be complete before the next step; do not
+PUT files or reconnect writers at this point. Captured and newer tombstones
+must exclude every matching loaded parent, child and revision row before any
+PUT or acceptance, using the existing validated identity and cascade rules.
+
+Load the captured values without initialising or resetting accepted revisions
+or write sequences. These two COPY templates are provisional loads in the SAME
+isolated, uncommitted, coordinated target transaction:
+
+```sql
+COPY INTO app.cloud_roast_tombstones
+  FROM @<approved_backup_stage>/<backup_id>/tables/cloud_roast_tombstones/
+  FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE ON_ERROR=ABORT_STATEMENT PURGE=FALSE;
+COPY INTO app.cloud_roast_field_revisions
+  FROM @<approved_backup_stage>/<backup_id>/tables/cloud_roast_field_revisions/
+  FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE ON_ERROR=ABORT_STATEMENT PURGE=FALSE;
+```
+
+Never load the captured coordination row. G1 must still qualify both commands
+and transaction continuity; the templates are not live execution evidence.
+
+### Reconcile the complete graph before files
+
+Apply the preliminary coordination floor and zero-quality check from the
+coordinated boundary above, then perform its current-source tombstone/revision
+reconciliation under the same coordinated target transaction. Obtain the
+current source evidence through the same source capture protocol. Apply the
+existing validated identity and cascade/exclusion rules to the complete loaded
+graph, including captured and newer tombstones. Resolve reconciliation
+eligibility before any PUT. A changed or newer source acknowledgement/revision,
+ambiguous identity, unknown or unreachable source deletion state means STOP:
+no PUT and no ordinary recovery success. Preserve the existing operator-only
+decision boundary; this does not authorise restoring newer edits.
+
+### Derive a separate reconciliation acceptance baseline
+
+Derive adjusted expectations only after the complete captured-input checks
+against the immutable original manifest above have succeeded.
+
+Preserve the original protected capture manifest and exports unchanged as
+evidence. Derive and protect a separate reconciliation acceptance baseline
+independently from those captured inputs and the verified, eligible deletion
+reconciliation evidence. Record the original manifest identity and the accepted
+reconciliation evidence with this baseline, including the retained identities
+and their captured file names, sizes and checksums. Never derive expected
+results from restored-target query results, or rewrite the original manifest
+to match the target. Unknown or unprovable expectations reject recovery.
+
+Filter the captured parent and child rows using the existing validated identity
+and cascade rules. Count each matching captured identity once; repeated
+tombstones must not double-count it, and a tombstone matching no captured row
+must not subtract any row. Do not decrement counts by the number of tombstones.
+Apply the matching parent exclusion to its captured telemetry, artifact, review
+and field-revision rows. Ambiguous identity is a STOP, never a guessed match.
+This describes the existing deletion reconciliation, not a new filtered-Parquet
+input mechanism or reconciliation algorithm.
+
+The independent baseline must contain:
+
+- Exact captured `operator_rating`, `operator_notes` and
+  `contributed_to_learning` values for every surviving retained roast, bound to
+  its captured `id`, `idempotency_key` and `public_slug`. Exclude ONLY identities
+  removed by the existing accepted deletion reconciliation. Preserve explicit
+  SQL NULL in nullable ratings and private notes exactly; preserve the consent
+  boolean exactly. Never initialise or reset these values or revisions, infer
+  expected values from the target, or restore newer edits/acknowledgements.
+  Keep the existing identity and reconciliation rules. This baseline is
+  protected and operator-only: never put private note content or other roast
+  data into public logs, repository fixtures, PRs or new public projections.
+- Complete expected permanent tombstone rows after the existing validated
+  reconciliation: preserve every captured tombstone and include every eligible
+  authoritative tombstone admitted by those rules. Bind all four fields exactly:
+  `cloud_roast_id`, `idempotency_key`, `public_slug`, `deletion_write_seq`.
+  Preserve legitimate NULL cloud IDs and legacy NULL deletion sequences exactly;
+  never invent an ID or coerce a legacy NULL sequence to zero.
+- Exact retained per-field revision rows for every surviving restored roast:
+  `cloud_roast_id`, `field_name`, `accepted_revision`, `accepted_write_seq`, from
+  the captured state under the unchanged eligibility rules. Exclude revision
+  rows only for identities removed by the accepted deletion reconciliation.
+  Preserve the exact captured acknowledgement values; do not fabricate
+  revision-zero rows, restore newer edits/acknowledgements or infer values from
+  the target.
+- Expected counts for `app.cloud_roast_tombstones` and
+  `app.cloud_roast_field_revisions` as supplementary protocol-metadata checks.
+  These TWO counts do not replace the FOUR loaded data-table counts or exact
+  control-state comparisons. Derive all expected rows and counts only from the
+  immutable captured inputs and verified eligible reconciliation evidence.
+- Expected counts for all four loaded tables: `app.cloud_roasts`,
+  `app.roast_telemetry`, `app.roast_artifacts` and `app.tasting_reviews`, computed
+  from the retained captured rows rather than tombstone counts.
+- Expected VARIANT null/type/presence profiles, including the captured nested
+  summary paths and per-row presence for retained identities. Derive the
+  expected rebuilt `key_patterns` profile under the unchanged summary rules.
+- Expected reference-summary keys and every aggregate value after the permitted
+  deletions. Derive them independently from the retained captured roast,
+  telemetry and review rows using the unchanged aggregation semantics and the
+  independent `contributed_to_learning = true` filter. Retained opted-out rows
+  still count in loaded tables but never contribute to those aggregates. Keep
+  the existing grouping, time anchors, telemetry selection/tie rules and null
+  semantics; include the expected rebuilt `key_patterns` values. No restored
+  summary output is an oracle for itself.
+- The retained-artifact inventory: only captured files belonging to surviving,
+  non-tombstoned artifact identities, bound to the existing validated run keys,
+  relative names, sizes and checksums. Derive this inventory from the protected
+  captured graph and accepted reconciliation evidence, not the target listing.
+
+With unchanged reconciliation, retain the original applicable expectations.
+For example, if two contributing captured roasts share a group and a valid
+deletion matches one of them, the expected roast count is one in the derived
+acceptance baseline; the original capture evidence still records two. Derive
+the remaining profiles, children and aggregate values from the surviving
+captured rows; never merely subtract one from every count or reuse an average
+that included the deleted roast.
+
+### Compare exact control state before files
+
+After all provisional loads, coordinated reconciliation/eligibility and
+independent baseline derivation, compare BOTH complete target protocol-metadata
+tables with the independently expected rows and every field value. Require
+null-safe equality and no missing, extra, duplicate or mismatched row. NULL
+matches only an expected NULL; an unexpected NULL or a NULL-to-value change
+rejects recovery. Count equality or a zero-quality result alone is insufficient.
+
+Read the complete target rows, without filtering or DISTINCT that could hide
+missing, extra or duplicate control state:
+
+```sql
+SELECT cloud_roast_id, idempotency_key, public_slug, deletion_write_seq
+FROM app.cloud_roast_tombstones;
+SELECT cloud_roast_id, field_name, accepted_revision, accepted_write_seq
+FROM app.cloud_roast_field_revisions;
+```
+
+The observations above are only actual target state for comparison, never the
+source of expected state. Compare the complete target `app.cloud_roast_tombstones`
+and `app.cloud_roast_field_revisions` against the same protected expected rows;
+also check both supplementary protocol-table counts. Do not reset or repair
+unexpected target values to make the comparison pass.
+
+#### Compare retained roast values with acknowledgements
+
+Observe the complete target roast identity/value rows read-only, alongside
+the complete tombstone and field-revision comparisons. Run this observation
+only in the protected operator workflow; its private note results must not be
+copied into public logs, repository fixtures, PRs or public projections:
+
+```sql
+SELECT id, idempotency_key, public_slug, operator_rating, operator_notes,
+       contributed_to_learning
+FROM app.cloud_roasts;
+```
+
+Require null-safe exact complete row/value equality against the independently
+expected retained captured roast rows: no missing, extra, duplicate, identity,
+field-value or NULL mismatch. Bind each value to its captured `id`,
+`idempotency_key` and `public_slug`; preserve legitimate explicit SQL NULL
+ratings/notes and the consent boolean exactly. The query observes actual
+target state only; it never defines expected values. Do not change data or
+reset revisions to make verification pass.
+
+The exact retained roast identity/value comparison must succeed alongside
+tombstone/revision verification BEFORE any PUT, again before final
+acceptance/COMMIT, and in read-only post-restore verification. Matching
+acknowledgement numbers, counts, valid field types, VARIANT profiles or
+aggregates alone is insufficient. The FOUR data-table count comparisons and
+TWO supplementary protocol-table counts are all required; none replaces the
+exact state comparisons. Any unknown, failed or indeterminate value check
+rejects recovery: before COMMIT roll back target rows; after COMMIT keep the
+target isolated and unaccepted, with writers disconnected. Stage effects
+remain separate and nontransactional, with no new REMOVE or cleanup authority.
+
+A target with the correct captured revision rows but a different or missing
+`operator_rating`, `operator_notes` or `contributed_to_learning` value must be
+rejected, even when counts, shapes, tombstones and revision comparisons pass.
+This includes a lost nullable rating/private note represented by an unexpected
+NULL. No new SQL comparison algorithm or Snowflake runtime qualification is
+selected by these requirements.
+
+Exact control-state verification must succeed BEFORE any PUT, again before
+final acceptance/COMMIT, and in read-only post-restore verification. Any unknown,
+failed or indeterminate comparison rejects recovery and keeps writers
+disconnected. Before COMMIT, roll back target rows under the existing rules;
+after COMMIT, keep the target isolated and unaccepted. Existing source-history
+and changed-revision STOP conditions remain unchanged.
+
+A target missing even one captured permanent tombstone must be rejected even
+when all FOUR data-table counts and data quality pass. A target with three
+structurally valid revision rows but lower or different `accepted_revision` or
+`accepted_write_seq` must be rejected despite passing shape checks. Missing,
+extra or duplicate control rows and unexpected NULL/value changes reject
+recovery. This verifies the existing state; it chooses no new reconciliation
+or cleanup algorithm and makes no Snowflake runtime claim.
+
+### Upload and verify only retained artifact files
+
+Only after eligibility and the independent baseline/retained-artifact inventory
+are complete, upload the expected retained, checksummed captured files to their
+original validated prefixes. Do not PUT stage files for tombstoned identities.
+The wildcard template below is permitted only when every local file it selects
+is in that retained-artifact inventory; otherwise STOP without uploading it.
+Because `GET` preserved stored bytes, use `AUTO_COMPRESS=FALSE`; another export
+method must explicitly match its compression.
+
+```sql
+PUT 'file:///secure/roastpilot-backups/<backup_id>/stage/roast_artifacts/<run_id>/*'
+  @app.roast_artifacts/<run_id>/
+  AUTO_COMPRESS=FALSE OVERWRITE=FALSE;
+```
+
+`PUT` requires SnowSQL or a file-transfer-capable connector, not Snowsight.
+Verify each retained file's name, size and checksum and the complete permitted
+target-stage inventory against the independently derived retained-artifact
+inventory `[VERIFY-LIVE]` before rebuilding summaries. Missing, unexpected,
+tombstoned, unmatched or unverified files reject recovery. A provisional
+metadata row is not evidence that its file exists or is correct. Do not excuse
+an unexpected target file just because every expected file was found.
+
+Stage effects do not roll back. If disallowed or unverified files were already
+uploaded, STOP and keep the target isolated under the existing separately
+authorised recovery cleanup and empty-target preflight rules. This selects no
+automatic REMOVE, new cleanup recipe, actor or privilege. A point-in-time
+listing does not prove permanent prefix emptiness or atomic erasure. The D223
+residual is limited to later appliance uploads under its existing permission;
+it never excuses preventable operator restore uploads.
+
+### Rebuild and finish the coordinated target transaction
+
+Only after full file verification, rebuild summaries using the transactional
+DELETE and existing procedure in the coordinated boundary above. Then repeat
+the exact control-state comparison against the same protected expected rows.
+Repeat the null-safe exact retained roast identity/value comparison alongside
+those control-state checks against the same independent captured-value
+expectations.
+Only after it succeeds, apply
+the final coordination floor and zero-quality check before COMMIT. No captured
+coordination-row load or implicit-commit operation is permitted. Any failed or
+indeterminate command, bad file, unknown check or inability to maintain this
+same transaction rejects recovery: roll back target rows and keep writers
+disconnected. Stage files do not roll back with those rows. A failed
+post-commit verification keeps the target isolated and unaccepted. G1 must
+still qualify every command and the complete runtime sequence; G1–G6 remain
+operator-only and unperformed, with the feature OFF.
 
 ## Verify
+
+Repeat both complete protocol-metadata table comparisons and their
+supplementary counts in this read-only post-restore verification. Use the
+same protected expected tombstone and retained revision rows, never values
+inferred from the target. Null-safe exact equality must again reject every
+missing, extra, duplicate or mismatched row and unexpected NULL/value change.
+An unknown, failed or indeterminate result keeps recovery unaccepted and the
+target isolated with writers disconnected. The four data-table counts below
+remain required and cannot substitute for these complete control-state checks.
+
+Repeat the exact retained roast identity/value comparison read-only alongside
+the tombstone/revision comparisons after restore. Use the same independent
+protected captured-value expectations and reject every missing, extra,
+duplicate, identity, value or NULL mismatch. Do not reset values or revisions
+to pass. Unknown, failed or indeterminate checks leave recovery unaccepted,
+the target isolated and writers disconnected. The four data-table and two
+supplementary protocol-table counts remain required; none replaces exact
+value and acknowledgement state verification.
 
 Before accepting recovery, validate the restored semi-structured values:
 
@@ -339,21 +748,26 @@ FROM app.reference_roast_summaries;
 ```
 
 `summary_null` and every unexpected-type count must be zero. The other null,
-nested-path and per-row presence results must equal the source-snapshot profiles
-in the protected manifest; an unexpected loss is a restore failure even when
-the procedure returned success. Apply the same comparison to any additional
-VARIANT shape recorded in the manifest.
+nested-path and per-row presence results must equal the retained-row profiles
+in the separately protected reconciliation acceptance baseline; an unexpected
+loss is a restore failure even when the procedure returned success. Apply the
+same comparison to every additional captured VARIANT shape, adjusted only by
+the accepted matching deletion reconciliation.
 
-All results here are `[VERIFY-LIVE]`. Compare manifest counts only for the four
-loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
+All results here are `[VERIFY-LIVE]`. Compare the reconciliation acceptance
+baseline counts only for the four loaded tables: `app.cloud_roasts`, `app.roast_telemetry`, `app.roast_artifacts`
 and `app.tasting_reviews`. Confirm zero orphan `roast_id` values in the three
 child tables by left-joining each to `app.cloud_roasts`. Confirm every
 `app.roast_artifacts.stage_path` resolves under `@app.roast_artifacts` with its
-expected checksum.
+expected checksum. Compare the complete target-stage listing to the
+independently derived retained-artifact inventory. No missing, unexpected or
+tombstoned file is acceptable. A point-in-time match does not promise permanent
+prefix emptiness.
 
 Confirm no retained `submitted_ip_hash` is 30 days old or older. Require zero
-owner-only data-quality violations. Recompute every present summary group, then
-compare these freshly derived keys and values with the manifest baseline:
+owner-only data-quality violations. Read the rebuilt summary rows and compare
+their keys and values with the reconciliation acceptance baseline. This
+verification is read-only:
 
 ```sql
 SELECT bean_origin, roast_level, roast_count, review_count, avg_rating,
@@ -367,7 +781,7 @@ ORDER BY bean_origin, roast_level;
 Never compare only the summary row count with the exported snapshot: an absent
 or zero-count old group can legitimately change it. Procedure success alone is
 not acceptance evidence; the VARIANT profiles and freshly derived aggregate
-values must match the manifest. Keep the target isolated and stop if any check
+values must match the reconciliation acceptance baseline. Keep the target isolated and stop if any check
 is unknown or fails.
 
 ## Ownership summary
@@ -380,7 +794,7 @@ is unknown or fails.
 | Protect the backup and manifest | Backup operator in the approved encrypted store |
 | Apply migrations to an empty recovery target | Deployment operator through `ROASTPILOT_ADMIN` |
 | Restore table rows in order | Operator through verified `ROASTPILOT_ADMIN` ownership |
-| `PUT` stage files before artifact rows | Operator through verified owner role using SnowSQL or connector |
+| `PUT` retained stage files after provisional row reconciliation | Operator through verified owner role using SnowSQL or connector |
 | Re-purge restored IP hashes | Operator through verified `ROASTPILOT_ADMIN` ownership |
 | Recompute summaries and complete live verification | Operator through verified `ROASTPILOT_ADMIN` ownership |
 

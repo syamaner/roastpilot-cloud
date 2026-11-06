@@ -1,118 +1,115 @@
--- C2-S6 DELETE_ROAST proc (issue #314): delete one roast and its dependent
--- rows, then recompute its former reference-summary group.
---
--- Scope fence: this file creates exactly one object -- the procedure below.
--- It contains zero GRANT statements and creates no other object.
--- The input is the internal roast id, not a public slug. Deliberately no
--- visibility filter applies: this owner-executed revocation path must delete
--- private roasts too.
---
--- The row cascade deletes reviews, telemetry, artifact rows, and the roast, then
--- recomputes the affected summary inside one all-or-nothing transaction. A UUID
--- guard rejects malformed input before any work; an ambiguous id fails closed.
--- The pre-transaction count is a fast path, while SQLROWCOUNT authoritatively
--- requires exactly one parent delete inside the transaction. A well-formed absent
--- id is an idempotent no-op.
---
--- D-314-I deferred stage-file removal to #341 until the C3 connector fixed its
--- path contract. D-341-A settles #341's mechanism: it reads idempotency_key from cloud_roasts,
--- validates it with load_roast_telemetry's containment grammar (1-64 alphanumeric,
--- underscore, or hyphen characters, with no double hyphen), and fails closed on
--- NULL, blank, or any mismatch. It issues one directory-scoped
--- REMOVE of @app.roast_artifacts/<run_id>/, constructed in-procedure, without
--- ever interpolating a stored artifact-path column value into REMOVE.
--- A key shared across roasts fails closed before REMOVE, so neither roast's
--- directory can be removed through an ambiguous containment boundary.
--- Files are removed first, so a committed row deletion implies its staged files
--- were already removed; a REMOVE failure starts no row work and is fully retryable.
--- If REMOVE succeeds and the later cascade rolls back, a still-present roast can
--- momentarily lack its files; re-running safely completes deletion because REMOVE
--- is idempotent on an empty prefix. This is not a deletion-completeness violation.
--- A delete racing a concurrent upload can still orphan it (ratified residual).
--- The prefix derives from idempotency_key; reassess the uniqueness guard when
--- R__proc_upsert_roast.sql's concurrent-MERGE snapshot-visibility residual closes.
--- All temperatures are Celsius; this procedure contains no Fahrenheit value or
--- conversion.
---
--- The deploy connection sets no default schema (snowflake/README.md), so this
--- migration explicitly selects APP before creating the procedure.
+-- C9-C2 controlled deletion: durable identity/order tombstone before cascade.
+-- Stage removal is point-in-time, after commit; cache revalidation stays pending.
+-- Private stage bytes may return indefinitely; G1 runtime semantics unqualified.
 use schema app;
-
-create or replace procedure delete_roast(p_roast_id string)
+create or replace procedure delete_roast(p_run_id string, p_public_slug string)
 copy grants
-returns string
+returns variant
 language sql
 execute as owner
 as
 $$
 declare
-  invalid_roast_id exception (-20003, 'Roast id must be a UUID');
   ambiguous_roast_id exception (-20004, 'Roast id matched more than one row');
-  invalid_idempotency_key exception (-20015, 'Stored idempotency key contains disallowed characters');
-  nonunique_idempotency_key exception (-20016, 'Idempotency key is not unique; refusing destructive stage removal');
-  v_count int;
-  v_key_count int;
+  ambiguous_idempotency_key exception (-20010, 'Idempotency key did not resolve uniquely');
+  writer_in_open_transaction exception (-20021, 'Writer must not run inside an open caller transaction');
+  delete_identity_mismatch exception (-20025, 'Run id and public slug do not identify one roast or tombstone');
+  v_outer_txn string;
+  v_write_seq number(38,0);
+  v_deletion_write_seq number(38,0);
+  v_n int;
+  v_ls int;
+  v_t_k int;
+  v_t_s int;
+  v_t_ks int;
+  v_t_i int;
+  v_id string;
+  v_slug string;
+  v_captured_key string;
   v_bean_origin string;
   v_roast_level string;
-  v_idempotency_key string;
-  v_remove_sql string;
+  v_deletion string;
+  v_stage_removal string default 'removed';
 begin
-  -- Guard 1 (D-314-C): UUID shape on the input id, before any work.
-  if (p_roast_id is null
-      or not regexp_like(p_roast_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')) then
-    raise invalid_roast_id;
+  if (p_run_id is null
+      or not regexp_like(p_run_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')) then
+    raise delete_identity_mismatch;
   end if;
-
-  -- Existence + grouping capture (one aggregate row).
-  select count(*), any_value(bean_origin), any_value(roast_level), any_value(idempotency_key)
-    into :v_count, :v_bean_origin, :v_roast_level, :v_idempotency_key
-    from app.cloud_roasts where id = :p_roast_id;
-
-  if (v_count = 0) then
-    return 'no-op: roast not found';
+  if (p_public_slug is null
+      or not regexp_like(p_public_slug, '^[1-9A-HJ-NP-Za-km-z]{17,64}$')) then
+    raise delete_identity_mismatch;
   end if;
-
-  if (v_count > 1) then
-    raise ambiguous_roast_id;
+  select current_transaction() into :v_outer_txn;
+  if (v_outer_txn is not null) then
+    raise writer_in_open_transaction;
   end if;
-
-  if (v_idempotency_key is null
-      or not regexp_like(v_idempotency_key, '^[0-9a-zA-Z_-]{1,64}$')) then
-    raise invalid_idempotency_key;
-  end if;
-  if (contains(v_idempotency_key, '--')) then
-    raise invalid_idempotency_key;
-  end if;
-
-  select count(*)
-    into :v_key_count
-    from app.cloud_roasts
-    where idempotency_key = :v_idempotency_key;
-  if (v_key_count <> 1) then
-    raise nonunique_idempotency_key;
-  end if;
-
-  v_remove_sql := 'remove @app.roast_artifacts/' || v_idempotency_key || '/';
-  execute immediate :v_remove_sql;
-
-  -- All-or-nothing DML: children then parent, recompute inside the transaction.
   begin
     begin transaction;
-      delete from app.tasting_reviews where roast_id = :p_roast_id;
-      delete from app.roast_telemetry where roast_id = :p_roast_id;
-      delete from app.roast_artifacts where roast_id = :p_roast_id;
-      delete from app.cloud_roasts     where id       = :p_roast_id;
-      if (sqlrowcount <> 1) then
-        raise ambiguous_roast_id;
+      call app.cloud_sync_enter() into :v_write_seq;
+      select count(*) into :v_t_k from app.cloud_roast_tombstones where idempotency_key = :p_run_id;
+      select count(*) into :v_t_s from app.cloud_roast_tombstones where public_slug = :p_public_slug;
+      select count(*) into :v_t_ks from app.cloud_roast_tombstones where idempotency_key = :p_run_id and public_slug = :p_public_slug;
+      select count(*) into :v_n from app.cloud_roasts where idempotency_key = :p_run_id;
+      if (v_n > 1) then
+        raise ambiguous_idempotency_key;
       end if;
-      call app.recompute_reference_summary(:v_bean_origin, :v_roast_level);
+      select count(*) into :v_ls from app.cloud_roasts where public_slug = :p_public_slug;
+      if (v_t_k = 0 and v_t_s = 0 and v_n = 1) then
+        select id, public_slug, idempotency_key, bean_origin, roast_level
+          into :v_id, :v_slug, :v_captured_key, :v_bean_origin, :v_roast_level
+          from app.cloud_roasts where idempotency_key = :p_run_id;
+        select count(*) into :v_t_i from app.cloud_roast_tombstones where cloud_roast_id = :v_id;
+        if (v_slug is distinct from p_public_slug or v_ls <> 1 or v_t_i > 0) then
+          raise delete_identity_mismatch;
+        end if;
+        insert into app.cloud_roast_tombstones (cloud_roast_id, idempotency_key, public_slug, deletion_write_seq)
+          values (:v_id, :v_captured_key, :v_slug, :v_write_seq);
+        delete from app.tasting_reviews where roast_id = :v_id;
+        delete from app.roast_telemetry where roast_id = :v_id;
+        delete from app.roast_artifacts where roast_id = :v_id;
+        delete from app.cloud_roast_field_revisions where cloud_roast_id = :v_id;
+        delete from app.cloud_roasts where id = :v_id;
+        if (sqlrowcount <> 1) then
+          raise ambiguous_roast_id;
+        end if;
+        call app.recompute_reference_summary(:v_bean_origin, :v_roast_level);
+        v_deletion := 'deleted';
+        v_deletion_write_seq := v_write_seq;
+      elseif (v_t_k = 0 and v_t_s = 0 and v_n = 0) then
+        if (v_ls >= 1) then
+          raise delete_identity_mismatch;
+        end if;
+        v_id := null;
+        v_captured_key := p_run_id;
+        insert into app.cloud_roast_tombstones (cloud_roast_id, idempotency_key, public_slug, deletion_write_seq)
+          values (NULL, :v_captured_key, :p_public_slug, :v_write_seq);
+        v_deletion := 'tombstoned_without_row';
+        v_deletion_write_seq := v_write_seq;
+      elseif (v_t_k = 1 and v_t_s = 1 and v_t_ks = 1 and v_n = 0 and v_ls = 0) then
+        select cloud_roast_id, idempotency_key, deletion_write_seq
+          into :v_id, :v_captured_key, :v_deletion_write_seq
+          from app.cloud_roast_tombstones where idempotency_key = :p_run_id and public_slug = :p_public_slug;
+        v_deletion := 'already_tombstoned';
+      else
+        raise delete_identity_mismatch;
+      end if;
+      if (v_captured_key is null or v_captured_key is distinct from p_run_id) then
+        raise delete_identity_mismatch;
+      end if;
     commit;
   exception
     when other then
       rollback;
       raise;
   end;
-
-  return 'deleted';
+  begin
+    execute immediate 'remove @app.roast_artifacts/' || :v_captured_key || '/';
+  exception
+    when other then
+      v_stage_removal := 'failed';
+  end;
+  return object_construct_keep_null('cloud_roast_id', v_id, 'deletion', v_deletion,
+    'deletion_write_seq', v_deletion_write_seq, 'stage_removal', v_stage_removal,
+    'cache_invalidation', 'pending');
 end;
 $$;

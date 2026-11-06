@@ -34,7 +34,10 @@ language sql
 execute as owner
 as
 $$
+declare
+  v_enter_seq number(38,0);
 begin
+  call app.cloud_sync_enter() into :v_enter_seq;
   if (bean_origin is null or roast_level is null) then
     return 'skipped: null grouping key';
   end if;

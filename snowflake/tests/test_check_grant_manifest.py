@@ -29,7 +29,7 @@ def test_t1_real_rendered_migration_equals_expected_manifest_and_main_passes(
     assert revokes == check_grant_manifest.EXPECTED_REVOKES
     assert check_grant_manifest.main() == 0
     assert capsys.readouterr().out == (
-        "grant/revoke manifest matches exactly (12 grants, 5 revokes)\n"
+        "grant/revoke manifest matches exactly (13 grants, 5 revokes)\n"
     )
 
 
@@ -616,10 +616,12 @@ def test_t20_manifest_grows_from_nine_by_exactly_the_three_ratified_rows() -> No
             "ROASTPILOT_AGENT",
         ),
     }
-    previous_manifest = check_grant_manifest.EXPECTED_MANIFEST - additions
-    assert len(check_grant_manifest.EXPECTED_MANIFEST) == 12
+    controlled_delete = check_grant_manifest._grant("USAGE", "PROCEDURE", "app.delete_roast(string, string)", "ROASTPILOT_AGENT")
+    legacy_manifest = check_grant_manifest.EXPECTED_MANIFEST - {controlled_delete}
+    previous_manifest = legacy_manifest - additions
+    assert len(legacy_manifest) == 12
     assert len(previous_manifest) == 9
-    assert check_grant_manifest.EXPECTED_MANIFEST - previous_manifest == additions
+    assert legacy_manifest - previous_manifest == additions
 
 
 @pytest.mark.parametrize(
@@ -712,3 +714,15 @@ def test_main_returns_1_and_reports_render_failure(monkeypatch, capsys) -> None:
 
     assert check_grant_manifest.main() == 1
     assert "error: boom" in capsys.readouterr().err
+
+from test_sync_coordination import has, sql
+
+
+def test_t21_manifest_adds_only_controlled_delete():
+    grant=check_grant_manifest._grant('USAGE','PROCEDURE','app.delete_roast(string, string)','ROASTPILOT_AGENT')
+    assert len(check_grant_manifest.EXPECTED_MANIFEST)==13 and grant in check_grant_manifest.EXPECTED_MANIFEST
+    has(sql('R__z_roles_grants.sql'),'grant usage on procedure app.delete_roast(string, string) to role ROASTPILOT_AGENT;')
+
+
+def test_t22_no_grant_on_c2_objects():
+    assert not re.search(r'grant[^;]*(cloud_sync_enter|cloud_sync_coordination|cloud_roast_field_revisions|cloud_roast_tombstones)',sql('R__z_roles_grants.sql'),re.I)

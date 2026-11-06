@@ -1,129 +1,4 @@
--- C3-S2 UPSERT_ROAST proc (issue #417): validate and upsert one agent roast,
--- replace its artifact manifest, and recompute affected reference summaries.
--- On a first sync, recompute_reference_summary runs before the current sync's
--- replacement telemetry is loaded because upsert_roast mints and returns the
--- roast id required by load_roast_telemetry. Its aggregates therefore exclude
--- this roast's telemetry. On replay, the caller already has the preserved roast
--- id and can order load_roast_telemetry before or after this procedure. Under
--- upsert-first ordering, replay aggregates for a contributing roast with both
--- bean_origin and roast_level populated combine the previous sync's telemetry
--- with the current sync's metadata. plan.md section 5 places telemetry before
--- the upsert, which is not executable on a first sync with the current signatures.
--- #430 owns the unresolved replay ordering.
---
--- Scope fence: this file creates exactly one object -- the procedure below.
--- It contains zero GRANT statements and creates no other object. The procedure
--- uses only static SQL. Under execute-as-owner the closed input guards are the
--- authorization boundary, so no caller value is ever interpolated into SQL.
---
--- Both arguments deliberately remain STRING. The live grant audit has confirmed
--- type aliases only for STRING, INT, and SMALLINT, and its bare lookup would fail
--- closed on an unconfirmed signature type. The run id is both idempotency key and
--- artifact-directory key by construction. Its lowercase UUID grammar is stricter
--- than LOAD_ROAST_TELEMETRY's run-id grammar by design. Under D-341-A, #341
--- requires DELETE_ROAST to construct the destructive directory prefix solely
--- from the stored idempotency key and independently guard it with its own
--- containment grammar: 1-64 characters from [0-9a-zA-Z_-], with no double
--- hyphen. That grammar is broader than upsert's stricter lowercase-UUID grammar,
--- so the strict grammar here is a subset that DELETE_ROAST's containment guard
--- always accepts. A weaker grammar here could admit keys with characters outside
--- [0-9a-zA-Z_-], more than 64 characters, or a double hyphen, leaving those
--- roasts undeletable with their staged files in place. It would not widen what
--- REMOVE can target unless both guards were weakened.
---
--- The payload is a closed 13-key grammar. Guard failures raise a static message
--- so roast metadata is never echoed into logs by those guards. Unvalidated
--- summary contents can still reach recompute_reference_summary casts, whose
--- Snowflake-generated errors can quote caller text and propagate unmodified
--- through the bare exception handler to the caller and query history.
--- Offline guard tests use Python re, while Snowflake REGEXP_LIKE uses RE2; exact
--- equivalence remains live-gate-only.
--- The summary VARIANT is validated only as a JSON object, with no validation of
--- its contents, and is projected wholesale into the roast_by_slug secure view.
--- For a roast whose visibility is not private, a raw IP address or a Fahrenheit
--- value in the agent's export is therefore available to PUBLIC_WEB through the
--- public read surface.
--- For a contributing roast with both bean_origin and roast_level populated,
--- recompute_reference_summary also reads the stored contents, casts their timing
--- values, and averages them into the shared reference_roast_summaries row for
--- the roast's (bean_origin, roast_level) group.
--- The procedure type-narrows the other twelve payload keys despite direct
--- cloud_roasts DML, but bean_origin, bean_varietal, profile_name, and roast_level
--- remain content-unvalidated projected free text. For summary itself it adds only
--- the top-level OBJECT check; #431's enforcement scope includes those free-text
--- keys and summary. The exposure is currently zero-instance because
--- roastpilot-agent has no cloud_sync module. Before a real caller ships, #431
--- requires enforcement. A curated view projection or a scan-only remedy does not
--- cover the aggregate path because it is a write-side read of the stored VARIANT;
--- only closed write-boundary validation covers both consumers. D-312-M is only a
--- possible precedent for the scan; by-construction does not transfer because
--- summary originates in the agent's export.
--- The cloud roasted_at_utc trailing-offset grammar is deliberately narrower than
--- seed_validate_live.py's trailing-offset grammar: numeric offsets must be
--- colon-separated, and the connector must emit either that form or uppercase Z.
--- This is not a general grammar comparison: the regex prefix is unconstrained,
--- and try_to_timestamp_tz may accept date spellings that seed_validate_live.py's
--- datetime.fromisoformat rejects.
--- Per #419, the empty-manifest guard rejects an opted-out roast that declares a
--- non-empty artifact manifest (contributed_to_learning = false and
--- artifact_count <> 0) before any write. The artifact-row half of requirement
--- (b) is now enforced by the #446 revoke of the agent's direct artifact-table
--- DML (the agent holds SELECT only); this guard remains defence-in-depth on the
--- upsert path. contributed_to_learning = true is deliberately unconstrained and
--- may also have an empty manifest.
--- The telemetry purge is only a transactional best-effort revocation on this
--- upsert path, not an enforcement boundary: it removes the previously published
--- curve at the instant of the upsert. It does not close the revocation-replay
--- case by itself. The direct re-insert path is closed: #446 Slice A revoked the
--- agent's INSERT/UPDATE/DELETE on app.roast_telemetry and the revoke was
--- live-verified, leaving the agent SELECT-only. Re-publication can occur only
--- through the owner-rights load_roast_telemetry procedure, whose Guard 3 and
--- consent-conditioned INSERT re-check consent. The staged export still survives
--- because the agent retains stage WRITE, but any load from it is consent-gated.
--- With the current signatures, the telemetry load necessarily runs after this
--- procedure returns on a first sync, so the purge does not cover a first-sync
--- opt-out. On replay, the caller has the preserved roast id and can load
--- telemetry before or after this procedure. plan.md section 5 specifies
--- telemetry-first, and #430 owns the unresolved replay ordering. The #419
--- procedure-level enforcement contract is now in place: the owner-rights
--- load_roast_telemetry procedure and the live-verified #446 Slice A revoke form
--- the enforcement boundary.
--- The artifact-table-DML half of (b) is closed by the #446 revoke (agent holds
--- SELECT only). D-446-N split requirement (b) into table-DML and stage-file
--- halves; the stage-file half is an accepted residual per D-446-P. The agent's
--- stage WRITE is deliberately retained: revoking it is availability-loss with
--- no security gain because no owner-rights PUT path exists and the connector
--- PUTs as the agent. An opted-out roast's staged telemetry therefore lingers as
--- inert non-PII with no public read path (roast_artifacts is in neither secure
--- view). Its purge lifecycle is owned by deletion / #341, which is deferred and
--- wait-to-implement under D-341-B; its eventual directory-prefix REMOVE is
--- scoped to deletion time, not opt-out.
---
--- Replays preserve id, idempotency_key, owner_id, public_slug, visibility, and
--- created_at.
--- A divergent public_slug is deliberately tolerated because server-side slug
--- rotation (C4 regenerate_slug, including duplicate repair) is legitimate and
--- preserving the stored slug is correct. A divergent visibility is rejected:
--- silently preserving it could make a caller believe a revocation to private
--- succeeded. The actual visibility-update path remains deferred to C4.
--- Artifact replacement is idempotent over (roast_id, kind, stage_path) triples,
--- not artifact row ids, which are regenerated on replay. Paths are constructed
--- as @app.roast_artifacts/<run_id>/<basename> from a closed kind map. The agent
--- connector must PUT the exact lowercase basenames with AUTO_COMPRESS=FALSE.
--- A shrinking artifact_kinds replay can leave dropped files without surviving
--- manifest rows, which per-row stage_path iteration cannot see. D-341-A requires
--- #341 to read idempotency_key from cloud_roasts, fail closed unless the derived
--- run id matches its containment grammar, and issue one directory-scoped
--- REMOVE of @app.roast_artifacts/<run_id>/. Its guard validates the derived run
--- id rather than the stored path, and the procedure constructs the prefix itself
--- without interpolating a stored stage_path value.
--- The post-MERGE count guards catch pre-existing duplicate idempotency keys and
--- public slugs and fail closed. They close sequential/replay cases, but concurrent
--- MERGE snapshot visibility remains unverified in both directions until a live
--- gate proves it; neither guard is claimed to close that concurrency residual.
---
--- The deploy connection sets no default schema (snowflake/README.md), so this
--- migration explicitly selects APP before creating the procedure.
+-- C9-C2: create is insert-only; per-field patches acknowledge ordered intent.
 use schema app;
 
 create or replace procedure upsert_roast(p_run_id string, p_payload string)
@@ -139,6 +14,29 @@ declare
   ambiguous_idempotency_key exception (-20010, 'Idempotency key did not resolve uniquely');
   duplicate_public_slug exception (-20011, 'Public slug is not unique across roasts');
   visibility_change_not_supported exception (-20012, 'Visibility changes are not supported by upsert_roast');
+  writer_in_open_transaction exception (-20021, 'Writer must not run inside an open caller transaction');
+  v_outer_txn string;
+  v_write_seq number(38,0);
+  identity_tombstoned exception (-20020, 'Roast identity is tombstoned');
+  field_state_invalid exception (-20023, 'Field revision state is invalid');
+  roast_not_found exception (-20024, 'Roast does not exist for this run id');
+  v_state_count int;
+  v_state_known int;
+  v_state_invalid int;
+  v_tombstone_count int;
+  v_is_patch boolean;
+  v_fields array;
+  v_field_name string;
+  v_entry variant;
+  v_value variant;
+  v_current variant;
+  v_request_revision number(38,0);
+  v_stored_revision number(38,0);
+  v_outcome string;
+  v_outcomes object default object_construct();
+  v_value_valid boolean;
+  v_any_applied boolean default false;
+  v_consent_applied boolean default false;
   v_payload variant;
   v_artifact_kinds array;
   v_artifact_count int;
@@ -179,6 +77,45 @@ begin
   if (v_payload is null or typeof(v_payload) <> 'OBJECT') then
     raise invalid_payload;
   end if;
+  v_is_patch := array_size(object_keys(v_payload)) = 2
+    and array_contains('patch_version'::variant, object_keys(v_payload))
+    and array_contains('fields'::variant, object_keys(v_payload));
+  if (v_is_patch) then
+    if (typeof(v_payload:patch_version) <> 'INTEGER') then
+      raise invalid_payload;
+    end if;
+    if (v_payload:patch_version::number <> 1) then
+      raise invalid_payload;
+    end if;
+    if (typeof(v_payload:fields) <> 'OBJECT') then
+      raise invalid_payload;
+    end if;
+    if (array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3) then
+      raise invalid_payload;
+    end if;
+    v_fields := object_keys(v_payload:fields);
+    for v_index in 0 to array_size(v_fields) - 1 do
+      v_field_name := get(v_fields, v_index)::string;
+      v_entry := get(v_payload:fields, v_field_name);
+      if (v_field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning')) then
+        raise invalid_payload;
+      end if;
+      if (typeof(v_entry) <> 'OBJECT') then
+        raise invalid_payload;
+      end if;
+      if (array_size(object_keys(v_entry)) <> 2
+          or not array_contains('revision'::variant, object_keys(v_entry))
+          or not array_contains('value'::variant, object_keys(v_entry))) then
+        raise invalid_payload;
+      end if;
+      if (typeof(v_entry:revision) <> 'INTEGER') then
+        raise invalid_payload;
+      end if;
+      if (v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991) then
+        raise invalid_payload;
+      end if;
+    end for;
+  else
   if (array_size(object_keys(v_payload)) <> 13
       or not array_contains('public_slug'::variant, object_keys(v_payload))
       or not array_contains('visibility'::variant, object_keys(v_payload))
@@ -263,10 +200,6 @@ begin
       or v_unknown_artifact_count <> 0) then
     raise invalid_payload;
   end if;
-  if (v_payload:contributed_to_learning::boolean = false
-      and v_artifact_count <> 0) then
-    raise invalid_payload;
-  end if;
 
   -- #431 / D-431-D: enforce raw-IP-never-stored and Celsius-only on free text
   -- projected to roast_by_slug; operator_notes proactively enforces storage too.
@@ -315,13 +248,115 @@ begin
   v_contributed_to_learning := v_payload:contributed_to_learning::boolean;
   v_roasted_at_utc := v_payload:roasted_at_utc::timestamp_tz;
 
+  end if;
+  select current_transaction() into :v_outer_txn;
+  if (v_outer_txn is not null) then
+    raise writer_in_open_transaction;
+  end if;
   begin
     begin transaction;
-      -- Capture the old group in the same transaction snapshot as the MERGE.
-      select count(*), any_value(bean_origin), any_value(roast_level)
-        into :v_existing_count, :v_old_bean_origin, :v_old_roast_level
-        from app.cloud_roasts where idempotency_key = :p_run_id;
-
+      call app.cloud_sync_enter() into :v_write_seq;
+      if (v_is_patch) then
+        select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id;
+        if (v_tombstone_count > 0) then
+          raise identity_tombstoned;
+        end if;
+      else
+        select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id or public_slug = :v_public_slug;
+        if (v_tombstone_count > 0) then
+          raise identity_tombstoned;
+        end if;
+      end if;
+      select count(*) into :v_existing_count from app.cloud_roasts where idempotency_key = :p_run_id;
+      if (v_existing_count > 1) then
+        raise ambiguous_idempotency_key;
+      end if;
+      if (v_is_patch and v_existing_count = 0) then
+        raise roast_not_found;
+      end if;
+      if (v_existing_count = 1) then
+        select id, public_slug, visibility, bean_origin, roast_level
+          into :v_id, :v_slug, :v_stored_visibility, :v_new_bean_origin, :v_new_roast_level
+          from app.cloud_roasts where idempotency_key = :p_run_id;
+        select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where cloud_roast_id = :v_id or public_slug = :v_slug;
+        if (v_tombstone_count > 0) then
+          raise identity_tombstoned;
+        end if;
+      select count(*), count(distinct case when field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then field_name end),
+             count_if(accepted_revision < 0 or accepted_revision > 9007199254740991 or accepted_write_seq < 0)
+        into :v_state_count, :v_state_known, :v_state_invalid
+        from app.cloud_roast_field_revisions where cloud_roast_id = :v_id;
+      if (v_state_count <> 3 or v_state_known <> 3 or coalesce(v_state_invalid, 0) <> 0) then
+        raise field_state_invalid;
+      end if;
+      end if;
+      if (v_is_patch) then
+        for v_index in 0 to array_size(v_fields) - 1 do
+          v_field_name := get(v_fields, v_index)::string;
+          v_entry := get(v_payload:fields, v_field_name);
+          v_value := v_entry:value;
+          v_request_revision := v_entry:revision::number;
+          select accepted_revision into :v_stored_revision from app.cloud_roast_field_revisions
+            where cloud_roast_id = :v_id and field_name = :v_field_name;
+          select case :v_field_name when 'operator_rating' then to_variant(operator_rating)
+                 when 'operator_notes' then to_variant(operator_notes)
+                 when 'contributed_to_learning' then to_variant(contributed_to_learning) end
+            into :v_current from app.cloud_roasts where id = :v_id;
+          v_current := coalesce(v_current, parse_json('null'));
+          v_value_valid := false;
+          if (v_field_name = 'operator_rating') then
+            if (typeof(v_value) = 'NULL_VALUE') then
+              v_value_valid := true;
+            elseif (typeof(v_value) = 'INTEGER') then
+              v_value_valid := v_value::number between 1 and 5;
+            end if;
+          elseif (v_field_name = 'operator_notes') then
+            if (typeof(v_value) = 'NULL_VALUE') then
+              v_value_valid := true;
+            elseif (typeof(v_value) = 'VARCHAR') then
+              v_value_valid := true;
+              if (regexp_count(v_entry:value::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+                  or regexp_count(v_entry:value::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+                  or regexp_count(v_entry:value::string, '(°[ ]?[Ff])|℉') > 0) then
+                v_value_valid := false;
+              end if;
+            end if;
+          elseif (v_field_name = 'contributed_to_learning') then
+            v_value_valid := typeof(v_value) = 'BOOLEAN';
+          end if;
+          if (not v_value_valid) then
+            v_outcome := 'rejected_value';
+          elseif (v_request_revision > v_stored_revision) then
+            if (v_field_name = 'operator_rating') then
+              update app.cloud_roasts set operator_rating = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::int) where id = :v_id;
+            elseif (v_field_name = 'operator_notes') then
+              update app.cloud_roasts set operator_notes = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::string) where id = :v_id;
+            else
+              update app.cloud_roasts set contributed_to_learning = :v_value::boolean where id = :v_id;
+              v_consent_applied := true;
+            end if;
+            update app.cloud_roast_field_revisions set accepted_revision = :v_request_revision, accepted_write_seq = :v_write_seq
+              where cloud_roast_id = :v_id and field_name = :v_field_name;
+            v_stored_revision := v_request_revision;
+            v_any_applied := true;
+            v_outcome := 'applied';
+          elseif (v_request_revision = v_stored_revision and v_value is not distinct from v_current) then
+            v_outcome := 'already_applied';
+          elseif (v_request_revision = v_stored_revision) then
+            v_outcome := 'revision_conflict';
+          else
+            v_outcome := 'stale';
+          end if;
+          v_outcomes := object_insert(v_outcomes, v_field_name, object_construct('outcome', v_outcome, 'accepted_revision', v_stored_revision));
+        end for;
+        if (v_any_applied) then
+          update app.cloud_roasts set updated_at = current_timestamp() where id = :v_id;
+        end if;
+        if (v_consent_applied) then
+          call app.recompute_reference_summary(:v_new_bean_origin, :v_new_roast_level);
+        end if;
+      else
+        if (v_existing_count = 0) then
       merge into app.cloud_roasts as target
       using (
         select uuid_string() as id, :p_run_id as idempotency_key,
@@ -336,18 +371,6 @@ begin
                current_timestamp() as created_at, current_timestamp() as updated_at
       ) as source
       on target.idempotency_key = source.idempotency_key
-      when matched then update set
-        bean_origin = source.bean_origin,
-        bean_varietal = source.bean_varietal,
-        bean_weight_g = source.bean_weight_g,
-        profile_name = source.profile_name,
-        roast_level = source.roast_level,
-        summary = source.summary,
-        operator_rating = source.operator_rating,
-        operator_notes = source.operator_notes,
-        contributed_to_learning = source.contributed_to_learning,
-        roasted_at_utc = source.roasted_at_utc,
-        updated_at = current_timestamp()
       when not matched then insert (
         id, idempotency_key, owner_id, public_slug, visibility, bean_origin,
         bean_varietal, bean_weight_g, profile_name, roast_level, summary,
@@ -386,24 +409,8 @@ begin
         raise duplicate_public_slug;
       end if;
 
-      select bean_origin, roast_level into :v_new_bean_origin, :v_new_roast_level
-        from app.cloud_roasts where idempotency_key = :p_run_id;
-
-      call app.recompute_reference_summary(:v_new_bean_origin, :v_new_roast_level);
-      if (v_existing_count > 0
-          and v_old_bean_origin is not null
-          and v_old_roast_level is not null
-          and (v_old_bean_origin is distinct from v_new_bean_origin
-               or v_old_roast_level is distinct from v_new_roast_level)) then
-        call app.recompute_reference_summary(:v_old_bean_origin, :v_old_roast_level);
-      end if;
-
-      -- #419 requirement (a): purge telemetry only on opt-out as a consent revocation, not cleanup.
-      if (v_contributed_to_learning = false) then
-        delete from app.roast_telemetry where roast_id = :v_id;
-      end if;
-
-      delete from app.roast_artifacts where roast_id = :v_id;
+          insert into app.cloud_roast_field_revisions (cloud_roast_id, field_name, accepted_revision, accepted_write_seq)
+          select :v_id, column1, 0, :v_write_seq from values ('operator_rating'), ('operator_notes'), ('contributed_to_learning');
       insert into app.roast_artifacts (
         id, roast_id, kind, stage_path, byte_size, created_at
       )
@@ -416,13 +423,27 @@ begin
                end,
              null, current_timestamp()
         from table(flatten(input => :v_artifact_kinds)) artifact;
+          select bean_origin, roast_level into :v_new_bean_origin, :v_new_roast_level from app.cloud_roasts where id = :v_id;
+          call app.recompute_reference_summary(:v_new_bean_origin, :v_new_roast_level);
+        else
+          if (v_visibility is distinct from v_stored_visibility) then
+            raise visibility_change_not_supported;
+          end if;
+          select count(*) into :v_slug_count from app.cloud_roasts where public_slug = :v_slug;
+          if (v_slug_count <> 1) then
+            raise duplicate_public_slug;
+          end if;
+        end if;
+      end if;
     commit;
   exception
     when other then
       rollback;
       raise;
   end;
-
+  if (v_is_patch) then
+    return object_construct('patch_version', 1, 'cloud_roast_id', v_id, 'fields', v_outcomes);
+  end if;
   return object_construct('cloud_roast_id', v_id, 'public_slug', v_slug);
 end;
 $$;

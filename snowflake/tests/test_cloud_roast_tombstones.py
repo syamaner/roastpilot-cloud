@@ -28,4 +28,10 @@ def test_tomb2_no_payload_grant_or_constraint():
 
 
 def test_tomb3_table_only_in_its_migration():
-    assert [p.name for p in MIGRATIONS.rglob("*.sql") if "cloud_roast_tombstones" in p.read_text()] == [PATH.name]
+    assert sorted(p.name for p in MIGRATIONS.rglob("*.sql") if "cloud_roast_tombstones" in p.read_text()) == sorted(["V1.3.0__cloud_roast_tombstones.sql", "V1.4.0__cloud_sync_coordination.sql", "R__data_quality_view.sql", "R__proc_upsert_roast.sql", "R__proc_load_roast_telemetry.sql", "R__proc_delete_roast.sql", "R__proc_submit_review.sql"])
+
+from test_sync_coordination import has, sql
+
+
+def test_tomb4_v140_seq_column_and_nullable_id():
+    has(sql('V1.4.0__cloud_sync_coordination.sql'),'alter table cloud_roast_tombstones add column deletion_write_seq number(38,0); alter table cloud_roast_tombstones alter column cloud_roast_id drop not null;')

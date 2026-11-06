@@ -1,3 +1,5 @@
+-- C9-C2: load is consent-independent; controlled delete is agent-callable.
+-- cloud_sync_enter and coordination/revision/tombstone tables remain ungranted.
 -- C2-S7 roles/grants manifest (issue #317): the Snowflake object-level
 -- privilege boundary for PUBLIC_WEB and ROASTPILOT_AGENT.
 --
@@ -18,9 +20,8 @@
 -- part of this migration. PUBLIC_WEB is limited here to two secure views and
 -- SUBMIT_REVIEW. ROASTPILOT_AGENT receives the deferred-Option-B data plane:
 -- five tables, the internal artifact stage and file format, plus procedure
--- grants for LOAD_ROAST_TELEMETRY and UPSERT_ROAST. LOAD_ROAST_TELEMETRY is
--- owner-rights; Guard 3 plus its consent-conditioned INSERT are the enforcement
--- boundary for calls through the procedure, and its injection-free body makes
+-- grants for LOAD_ROAST_TELEMETRY, UPSERT_ROAST and controlled DELETE_ROAST.
+-- The coordinated, injection-free procedure body makes
 -- the owner's other privileges unreachable. UPSERT_ROAST is owner-rights so it
 -- can invoke the ungranted RECOMPUTE_REFERENCE_SUMMARY while its closed guards
 -- bound that authority.
@@ -44,6 +45,7 @@ grant read, write on stage app.roast_artifacts to role ROASTPILOT_AGENT;
 grant usage on file format app.roast_jsonl_format to role ROASTPILOT_AGENT;
 grant usage on procedure app.load_roast_telemetry(string, string) to role ROASTPILOT_AGENT;
 grant usage on procedure app.upsert_roast(string, string) to role ROASTPILOT_AGENT;
+grant usage on procedure app.delete_roast(string, string) to role ROASTPILOT_AGENT;
 
 revoke insert, update, delete on table app.cloud_roasts from role ROASTPILOT_AGENT;
 revoke insert, update, delete on table app.roast_telemetry from role ROASTPILOT_AGENT;

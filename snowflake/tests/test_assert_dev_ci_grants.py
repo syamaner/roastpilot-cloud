@@ -122,6 +122,7 @@ def _app_role_rows(role_name: str) -> list[dict[str, object]]:
             ("USAGE", "FILE_FORMAT", "ROASTPILOT_DEV.APP.ROAST_JSONL_FORMAT"),
             ("USAGE", "PROCEDURE", _LIVE_LOAD_TELEMETRY_SIGNATURE),
             ("USAGE", "PROCEDURE", _LIVE_UPSERT_ROAST_SIGNATURE),
+            ("USAGE", "PROCEDURE", "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR, VARCHAR)"),
         ]
     else:
         raise ValueError(f"unknown application role fixture: {role_name!r}")
@@ -886,6 +887,30 @@ class TestApplicationRoleManifest:
             assert_dev_ci_grants._ALLOWED_APP_ROLE_WAREHOUSES,
         )
 
+    def test_c2_delete_grant_missing_is_rejected(self) -> None:
+        rows = [row for row in _app_role_rows("ROASTPILOT_AGENT") if row["name"] != "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR, VARCHAR)"]
+        violations = self._violations("ROASTPILOT_AGENT", rows)
+        assert any("missing manifest grant" in item and "DELETE_ROAST(VARCHAR, VARCHAR)" in item for item in violations)
+
+    @pytest.mark.parametrize(("field", "value"), [
+        ("name", "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR)"),
+        ("name", "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR, NUMBER)"),
+        ("grantee_name", "PUBLIC_WEB"),
+        ("grant_option", "true"),
+    ])
+    def test_c2_delete_grant_wrong_capture_is_rejected(self, field: str, value: str) -> None:
+        rows = _app_role_rows("ROASTPILOT_AGENT")
+        target = next(row for row in rows if row["name"] == "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR, VARCHAR)")
+        target[field] = value
+        assert any("DELETE_ROAST" in item for item in self._violations("ROASTPILOT_AGENT", rows))
+
+    def test_c2_public_web_rejects_exact_controlled_delete(self) -> None:
+        rows = _app_role_rows("PUBLIC_WEB")
+        assert len(rows) == 6
+        rows.append({"privilege": "USAGE", "granted_on": "PROCEDURE", "name": "ROASTPILOT_DEV.APP.DELETE_ROAST(VARCHAR, VARCHAR)", "grantee_name": "PUBLIC_WEB", "grant_option": "false"})
+        violations = self._violations("PUBLIC_WEB", rows)
+        assert any("extra grant" in item and "DELETE_ROAST(VARCHAR, VARCHAR)" in item for item in violations)
+
     def test_confirmed_live_procedure_signature_is_pinned(self) -> None:
         assert (
             assert_dev_ci_grants._SUBMIT_REVIEW_LIVE_SIGNATURE
@@ -993,7 +1018,7 @@ class TestApplicationRoleManifest:
 
     @pytest.mark.parametrize(
         ("role_name", "row_count"),
-        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 13)],
+        [(assert_dev_ci_grants.PUBLIC_WEB_ROLE, 6), (assert_dev_ci_grants.ROASTPILOT_AGENT_ROLE, 14)],
     )
     def test_d345f_capture_with_shared_app_warehouse_is_compliant(
         self, role_name: str, row_count: int

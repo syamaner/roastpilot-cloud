@@ -6,10 +6,14 @@ literals. They do not emulate Snowflake; runtime semantics remain live-gated.
 
 from __future__ import annotations
 
+from test_sync_coordination import position
+
 import json
 import re
 from collections import Counter
 from pathlib import Path
+
+from test_sync_coordination import clean
 
 import pytest
 
@@ -19,7 +23,7 @@ import test_load_roast_telemetry as telemetry_contract
 SNOWFLAKE_DIR = Path(__file__).resolve().parent.parent
 MIGRATION_PATH = SNOWFLAKE_DIR / "migrations" / "R__proc_upsert_roast.sql"
 MIGRATION = MIGRATION_PATH.read_text(encoding="utf-8")
-STRIPPED = re.sub(r"--[^\n]*(?:\n|$)|/\*.*?\*/", "", MIGRATION, flags=re.DOTALL)
+STRIPPED = clean(MIGRATION)
 DELETE_MIGRATION = (
     SNOWFLAKE_DIR / "migrations" / "R__proc_delete_roast.sql"
 ).read_text(encoding="utf-8")
@@ -129,9 +133,9 @@ def _artifact_insert() -> str:
     )
 
 
-def _roast_id_guard_grammar(migration: str) -> str:
+def _roast_id_guard_grammar(migration: str, parameter: str = "p_roast_id") -> str:
     guard = re.search(
-        r"regexp_like\s*\(\s*p_roast_id\s*,\s*'(?P<grammar>\^[^']+\$)'",
+        r"regexp_like\s*\(\s*" + re.escape(parameter) + r"\s*,\s*'(?P<grammar>\^[^']+\$)'",
         migration,
         re.IGNORECASE,
     )
@@ -183,7 +187,7 @@ def test_t03_single_merge_has_exact_idempotency_on_clause() -> None:
     assert len(re.findall(r"merge\s+into\s+app\.cloud_roasts\b", STRIPPED, re.I)) == 1
     assert re.search(
         r"\)\s+as\s+source\s+on\s+target\.idempotency_key\s*=\s*"
-        r"source\.idempotency_key\s+when\s+matched",
+        r"source\.idempotency_key\s+when\s+not\s+matched",
         _merge(),
         re.I,
     )
@@ -193,32 +197,27 @@ def test_t03_single_merge_has_exact_idempotency_on_clause() -> None:
     "immutable",
     ["id", "idempotency_key", "owner_id", "public_slug", "visibility", "created_at"],
 )
-def test_t04_matched_update_excludes_each_immutable_column(immutable: str) -> None:
-    assignments = re.findall(r"\b([a-z_]+)\s*=", _matched_set(), re.I)
-    assert immutable not in assignments, f"matched update leaked immutable column {immutable}"
-
-
-def test_t05_matched_update_refreshes_updated_at() -> None:
-    assert re.search(r"updated_at\s*=\s*current_timestamp\(\)", _matched_set(), re.I)
-
-
-def test_t05b_matched_update_contains_only_payload_columns_or_updated_at() -> None:
-    assignments = set(re.findall(r"\b([a-z_]+)\s*=", _matched_set(), re.I))
+def test_t04_create_binds_each_immutable_column(immutable: str) -> None:
     expected = {
-        "bean_origin",
-        "bean_varietal",
-        "bean_weight_g",
-        "profile_name",
-        "roast_level",
-        "summary",
-        "operator_rating",
-        "operator_notes",
-        "contributed_to_learning",
-        "roasted_at_utc",
-        "updated_at",
+        'id': 'uuid_string() as id', 'idempotency_key': ':p_run_id as idempotency_key',
+        'owner_id': 'null::string as owner_id', 'public_slug': ':v_public_slug as public_slug',
+        'visibility': ':v_visibility as visibility', 'created_at': 'current_timestamp() as created_at',
     }
-    assert assignments == expected
-    assert assignments <= set(PAYLOAD_KEYS) | {"updated_at"}
+    has(_merge(), expected[immutable])
+    assert re.search(r"\b(?:insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
+
+
+def test_t05_applied_patch_refreshes_updated_at() -> None:
+    has(STRIPPED, 'if (v_any_applied) then update app.cloud_roasts set updated_at = current_timestamp() where id = :v_id; end if;')
+
+
+def test_t05b_patch_updates_only_three_mutable_fields_and_timestamp() -> None:
+    updates = re.findall(r'update\s+app\.cloud_roasts\s+set\s+(.*?)\s+where\s+id\s*=\s*:v_id\s*;', STRIPPED, re.I | re.S)
+    assert updates == [
+        "operator_rating = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::int)",
+        "operator_notes = iff(typeof(:v_value) = 'NULL_VALUE', null, :v_value::string)",
+        'contributed_to_learning = :v_value::boolean', 'updated_at = current_timestamp()',
+    ]
 
 
 def test_t06_insert_has_all_17_columns_and_explicit_generators() -> None:
@@ -244,7 +243,7 @@ def test_t07_return_pair_is_read_after_merge_from_stored_row() -> None:
 
 
 def test_t08_return_never_reads_payload() -> None:
-    returned = _match(r"return\s+object_construct\([^;]+\)\s*;").group(0)
+    returned = _match(r"return\s+object_construct\(\s*'cloud_roast_id'[^;]+\)\s*;").group(0)
     assert "p_payload" not in returned.lower()
     assert re.findall(r"\bv_[a-z_]+\b", returned, re.I) == ["v_id", "v_slug"]
 
@@ -255,53 +254,16 @@ def test_t09_seed_loader_slug_update_divergence_stays_pinned() -> None:
 
 
 def test_t10_artifact_replace_delete_is_bound_and_precedes_insert() -> None:
-    transaction = _transaction()
-    delete = _match(
-        r"delete\s+from\s+app\.roast_artifacts\s+where\s+roast_id\s*=\s*:v_id\s*;",
-        transaction,
-    )
-    insert = _match(r"insert\s+into\s+app\.roast_artifacts", transaction)
-    prefix = transaction[: delete.start()]
-    conditional_opens = len(re.findall(r"\bif\s*\(", prefix, re.I))
-    conditional_thens = len(re.findall(r"\)\s*then\b", prefix, re.I))
-    conditional_closes = len(re.findall(r"\bend\s+if\s*;", prefix, re.I))
-    # Equal opens, THENs, and closes prove depth zero; gap/name checks miss a wrapper around both DML statements.
-    assert conditional_opens == conditional_thens == conditional_closes
-    assert delete.start() < insert.start()
-    assert len(re.findall(r"delete\s+from\s+app\.roast_artifacts", STRIPPED, re.I)) == 1
-    assert ":p_run_id" not in delete.group(0)
-    assert re.search(r"\bif\b", transaction[delete.end() : insert.start()], re.I) is None
-    assert "v_artifact_count" not in transaction.lower()
+    assert re.search(r"delete\s+from\s+app\.roast_artifacts", STRIPPED, re.I) is None
+    region = _match(r"if\s*\(\s*v_existing_count\s*=\s*0\s*\)\s*then.*?insert\s+into\s+app\.roast_artifacts.*?end\s+if", _transaction()).group(0)
+    assert ":v_id" in _artifact_insert()
+    assert "v_artifact_count" not in region.lower()
+    assert re.search(r"\b(?:insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
 
 
 def test_t10b_opt_out_telemetry_purge_is_the_only_delete_path_and_exactly_scoped() -> None:
-    transaction = _transaction()
-    stored = _match(
-        r"select\s+id\s*,\s*public_slug\s+into\s+:v_id\s*,\s*:v_slug.*?;",
-        transaction,
-    )
-    slug_guard = _match(
-        r"if\s*\(\s*v_slug_count\s*<>\s*1\s*\)\s*then\s*"
-        r"raise\s+duplicate_public_slug\s*;\s*end\s+if\s*;",
-        transaction,
-    )
-    pattern = (
-        r"if\s*\(\s*v_contributed_to_learning\s*=\s*false\s*\)\s*then\s*"
-        r"delete\s+from\s+app\.roast_telemetry\s+where\s+roast_id\s*=\s*:v_id\s*;\s*"
-        r"end\s+if\s*;"
-    )
-    blocks = list(re.finditer(pattern, transaction, re.I | re.DOTALL))
-    assert len(blocks) == 1
-    block = blocks[0]
-    prefix = transaction[: block.start()]
-    conditional_opens = len(re.findall(r"\bif\s*\(", prefix, re.I))
-    conditional_thens = len(re.findall(r"\)\s*then\b", prefix, re.I))
-    conditional_closes = len(re.findall(r"\bend\s+if\s*;", prefix, re.I))
-    artifact_delete = _match(r"delete\s+from\s+app\.roast_artifacts", transaction)
-    assert conditional_opens == conditional_thens == conditional_closes
-    assert stored.start() < slug_guard.start() < block.start() < artifact_delete.start()
-    assert len(re.findall(r"delete\s+from\s+app\.roast_telemetry", STRIPPED, re.I)) == 1
-    assert ":p_run_id" not in block.group(0)
+    assert re.search(r"delete\s+from\s+app\.roast_telemetry", STRIPPED, re.I) is None
+    assert re.search(r"if\s*\(\s*v_contributed_to_learning\s*=\s*false", STRIPPED, re.I) is None
 
 
 @pytest.mark.parametrize("kind, expected_path", EXPECTED_STAGE_PATHS.items())
@@ -372,33 +334,22 @@ def test_t18_telemetry_adjacent_basename_pin_remains_green() -> None:
 
 def test_t19_exactly_two_recomputes_are_after_merge_inside_transaction() -> None:
     transaction = _transaction()
-    merge = _match(r"merge\s+into\s+app\.cloud_roasts", transaction)
     calls = list(re.finditer(r"call\s+app\.recompute_reference_summary\s*\(", transaction, re.I))
     assert len(calls) == 2
-    assert all(merge.start() < call.start() for call in calls)
+    assert calls[1].start() > _match(r"merge\s+into\s+app\.cloud_roasts", transaction).start()
+    assert re.search(r"if\s*\(v_consent_applied\)\s*then\s*call\s+app\.recompute_reference_summary", transaction, re.I)
 
 
 def test_t20_premerge_group_capture_precedes_merge() -> None:
     transaction = _transaction()
-    capture = _match(
-        r"select\s+count\(\*\)\s*,\s*any_value\(bean_origin\)\s*,\s*"
-        r"any_value\(roast_level\).*?where\s+idempotency_key\s*=\s*:p_run_id\s*;",
-        transaction,
-    )
-    merge = _match(r"merge\s+into\s+app\.cloud_roasts", transaction)
-    assert capture.start() < merge.start()
-    assert transaction[capture.end() : merge.start()].strip() == ""
+    count = _match(r"select\s+count\(\*\)\s+into\s+:v_existing_count\s+from\s+app.cloud_roasts\s+where\s+idempotency_key\s*=\s*:p_run_id", transaction)
+    assert count.start() < _match(r"merge\s+into\s+app.cloud_roasts", transaction).start()
+    assert "call app.cloud_sync_enter()" in transaction[:count.start()]
 
 
 def test_t21_old_group_call_requires_a_real_group_change() -> None:
-    guard = _match(
-        r"if\s*\(\s*v_existing_count\s*>\s*0.*?"
-        r"v_old_bean_origin\s+is\s+distinct\s+from\s+v_new_bean_origin.*?"
-        r"v_old_roast_level\s+is\s+distinct\s+from\s+v_new_roast_level.*?"
-        r"call\s+app\.recompute_reference_summary\s*"
-        r"\(\s*:v_old_bean_origin\s*,\s*:v_old_roast_level\s*\)\s*;.*?end\s+if\s*;"
-    )
-    assert re.search(r"\bor\b", guard.group(0), re.I)
+    assert re.search(r"call\s+app.recompute_reference_summary\s*\(\s*:v_old_", STRIPPED, re.I) is None
+    assert re.search(r"if\s*\(v_consent_applied\)\s*then\s*call\s+app.recompute_reference_summary", STRIPPED, re.I)
 
 
 def test_t22_new_group_call_is_unconditional_and_callee_owns_null_noop() -> None:
@@ -409,7 +360,8 @@ def test_t22_new_group_call_is_unconditional_and_callee_owns_null_noop() -> None
         transaction,
     )
     prefix = transaction[: new_call.start()]
-    assert re.search(r"if\s*\([^;]*v_new_(?:bean_origin|roast_level)", prefix, re.I) is None
+    conditions = re.findall(r"\b(?:if|elseif)\s*\(([^;]*?)\)\s*then\b", prefix, re.I | re.S)
+    assert not any(re.search(r"\bv_new_(?:bean_origin|roast_level)\b", condition, re.I) for condition in conditions)
     assert re.search(
         r"if\s*\(\s*bean_origin\s+is\s+null\s+or\s+roast_level\s+is\s+null\s*\)",
         RECOMPUTE_MIGRATION,
@@ -442,20 +394,17 @@ def test_t26_transaction_has_one_rollback_reraise_handler() -> None:
 
 
 def test_t27_exception_codes_are_the_unique_contiguous_allocation() -> None:
-    codes: list[str] = []
-    for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
-        codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 19)})
+    from test_sync_coordination import assert_error_allocations
+    assert_error_allocations()
 
 
 def test_t28_closed_payload_key_set_is_exactly_13() -> None:
-    actual = re.findall(
-        r"array_contains\(\s*'([^']+)'::variant\s*,\s*object_keys\(v_payload\)\s*\)",
-        STRIPPED,
-        re.I,
-    )
+    regions = list(re.finditer(r"if\s*\(array_size\(object_keys\(v_payload\)\)\s*<>\s*13.*?raise\s+invalid_payload;\s*end if;", STRIPPED, re.I | re.S))
+    assert len(regions) == 1
+    create = regions[0].group(0)
+    actual = re.findall(r"array_contains\(\s*'([^']+)'::variant\s*,\s*object_keys\(v_payload\)\s*\)", create, re.I)
     assert tuple(actual) == PAYLOAD_KEYS
-    assert re.search(r"array_size\(object_keys\(v_payload\)\)\s*<>\s*13", STRIPPED, re.I)
+    assert re.search(r"array_size\(object_keys\(v_payload\)\)\s*<>\s*13", create, re.I)
 
 
 def test_t29_slug_guard_rejects_hostile_table_and_accepts_boundaries() -> None:
@@ -554,37 +503,18 @@ def test_t32a_empty_artifact_manifest_is_allowed_for_both_learning_states() -> N
     assert STRIPPED.count(expected_guard) == 1
 
 
-def test_t32b_opted_out_nonempty_manifest_is_rejected_by_exact_guard() -> None:
-    pattern = (
-        r"if\s*\(\s*v_payload:contributed_to_learning::boolean\s*=\s*false\s+"
-        r"and\s+v_artifact_count\s*<>\s*0\s*\)\s*then\s*"
-        r"raise\s+invalid_payload\s*;\s*end\s+if\s*;"
-    )
-    assert len(re.findall(pattern, STRIPPED, re.I | re.DOTALL)) == 1
+def test_t32b_artifact_manifest_grammar_is_independent_of_consent() -> None:
+    assert re.search(r"v_payload:contributed_to_learning::boolean\s*=\s*false", STRIPPED, re.I) is None
+    has(STRIPPED, "if (v_distinct_artifact_count <> v_artifact_count or v_invalid_artifact_type_count <> 0 or v_unknown_artifact_count <> 0) then raise invalid_payload; end if;")
 
 
-def test_t32c_artifact_guard_and_telemetry_purge_share_exact_opt_out_rule() -> None:
-    artifact_predicate = _match(
-        r"if\s*\(\s*(?P<predicate>v_payload:contributed_to_learning::boolean\s*=\s*false)\s+"
-        r"and\s+v_artifact_count\s*<>\s*0\s*\)\s*then"
-    ).group("predicate")
-    assignment = _match(
-        r"(?P<assignment>v_contributed_to_learning\s*:=\s*"
-        r"v_payload:contributed_to_learning::boolean)\s*;"
-    ).group("assignment")
-    purge_predicate = _match(
-        r"if\s*\(\s*(?P<predicate>v_contributed_to_learning\s*=\s*false)\s*\)\s*then\s*"
-        r"delete\s+from\s+app\.roast_telemetry"
-    ).group("predicate")
-    assert artifact_predicate == "v_payload:contributed_to_learning::boolean = false"
-    assert assignment == (
-        "v_contributed_to_learning := v_payload:contributed_to_learning::boolean"
-    )
-    assert purge_predicate == "v_contributed_to_learning = false"
+def test_t32c_create_artifacts_bind_validated_run_id_without_optout_purge() -> None:
+    assert re.search(r"delete\s+from\s+app.roast_telemetry", STRIPPED, re.I) is None
+    has(STRIPPED, "select uuid_string(), :v_id, artifact.value::string, '@app.roast_artifacts/' || :p_run_id || '/' || case artifact.value::string when 'jsonl' then 'roast.jsonl' when 'csv' then 'roast.csv' when 'summary' then 'summary.json' end, null, current_timestamp() from table(flatten(input => :v_artifact_kinds)) artifact;")
 
 
 def test_t33_uuid_guard_literal_is_byte_equal_across_three_procedures() -> None:
-    expected = _roast_id_guard_grammar(DELETE_MIGRATION)
+    expected = _roast_id_guard_grammar(DELETE_MIGRATION, "p_run_id")
     assert _roast_id_guard_grammar(TELEMETRY_MIGRATION) == expected
     assert _run_id_guard_grammar(MIGRATION) == expected
 
@@ -645,7 +575,7 @@ def test_t36c_data_quality_view_flags_duplicate_public_slug_exactly() -> None:
         r"any_value\s*\(\s*id\s*\)\s+as\s+row_identity\s*,\s*"
         r"'public_slug'\s+as\s+field\s*,\s*"
         r"'duplicate public_slug'\s+as\s+rule\s+from\s+cloud_roasts\s+"
-        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*;"
+        r"group\s+by\s+public_slug\s+having\s+count\(\*\)\s*>\s*1\s*(?=union\s+all\b)"
     )
     assert len(re.findall(pattern, view, re.I | re.DOTALL)) == 1
 
@@ -750,8 +680,8 @@ def test_t40_value_guard_precedes_transaction() -> None:
     is not executed offline; RE2 equivalence and three-valued logic remain
     live-gate residuals.
     """
-    guard_offset = STRIPPED.index(_value_guard())
-    raise_offset = STRIPPED.index("raise invalid_payload;", guard_offset)
+    guard_offset = position(STRIPPED, _value_guard())
+    raise_offset = position(STRIPPED, 'raise invalid_payload;', guard_offset)
     transaction_offset = _match(r"begin\s+transaction\s*;").start()
     assert raise_offset < transaction_offset
 
@@ -902,19 +832,120 @@ def test_t50_real_summary_corpus_stays_clean() -> None:
 
 
 def test_t51_exception_and_static_sql_fences_are_unchanged() -> None:
-    """Reassert static fences.
-
-    Offline caveat: Python re is not Snowflake RE2, and NULL/absent-key runtime
-    is not executed offline; RE2 equivalence and three-valued logic remain
-    live-gate residuals.
-    """
-    declarations = re.findall(
-        r"exception\s*\(\s*(-200\d+)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I
-    )
-    assert declarations == ["-20008", "-20009", "-20010", "-20011", "-20012"]
-    codes: list[str] = []
-    for path in sorted((SNOWFLAKE_DIR / "migrations").glob("R__proc_*.sql")):
-        codes.extend(re.findall(r"exception\s*\(\s*(-200\d+)\s*,", path.read_text(), re.I))
-    assert Counter(codes) == Counter({f"-{20000 + number}": 1 for number in range(1, 19)})
+    declarations = re.findall(r"exception\s*\(\s*(-200\d+)\s*,\s*'[^']+'\s*\)", STRIPPED, re.I)
+    assert declarations == ["-20008", "-20009", "-20010", "-20011", "-20012", "-20021", "-20020", "-20023", "-20024"]
+    from test_sync_coordination import assert_error_allocations
+    assert_error_allocations()
     assert re.search(r"execute\s+immediate", STRIPPED, re.I) is None
     assert len(re.findall(r"\|\|", STRIPPED)) == 3
+
+
+def _c2_replay_region():
+    return _match(r"else\s+(if\s*\(v_visibility.*?end if;)\s*end if;\s*commit;", _transaction() + "commit;").group(1)
+
+from test_sync_coordination import has, sql
+
+
+def test_ups_c2_create_tombstone_before_existence():
+    has(STRIPPED, "else select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id or public_slug = :v_public_slug; if (v_tombstone_count > 0) then raise identity_tombstoned; end if; end if; select count(*) into :v_existing_count from app.cloud_roasts where idempotency_key = :p_run_id;")
+
+
+def test_ups_c2_merge_has_no_matched_branch():
+    assert re.search(r"when\s+matched\s+then", STRIPPED, re.I) is None
+    has(STRIPPED, "when not matched then insert")
+
+
+def test_ups_c2_create_inserts_three_baseline_revisions():
+    has(STRIPPED, "insert into app.cloud_roast_field_revisions (cloud_roast_id, field_name, accepted_revision, accepted_write_seq) select :v_id, column1, 0, :v_write_seq from values ('operator_rating'), ('operator_notes'), ('contributed_to_learning');")
+
+
+def test_ups_c2_replay_fsv_no_write():
+    has(STRIPPED, "if (v_existing_count = 1) then")
+    assert position(STRIPPED, 'from app.cloud_roast_field_revisions where cloud_roast_id = :v_id') < position(STRIPPED, 'if (v_is_patch) then', position(STRIPPED, 'from app.cloud_roast_field_revisions'))
+    assert re.search(r"\b(insert|update|delete|merge)\b", _c2_replay_region(), re.I) is None
+
+
+def test_ups_c2_return_two_keys():
+    has(STRIPPED, "return object_construct('cloud_roast_id', v_id, 'public_slug', v_slug);")
+
+
+def test_ups_c2_no_optout_purge():
+    assert re.search(r'delete\s+from\s+app.roast_telemetry',STRIPPED,re.I) is None
+
+
+def test_ups_c2_no_optout_manifest_guard():
+    assert re.search(r'contributed_to_learning::boolean\s*=\s*false',STRIPPED,re.I) is None
+
+
+def test_patch_c2_envelope_grammar():
+    has(STRIPPED, "v_is_patch := array_size(object_keys(v_payload)) = 2 and array_contains('patch_version'::variant, object_keys(v_payload)) and array_contains('fields'::variant, object_keys(v_payload));")
+    has(STRIPPED, "if (v_is_patch) then if (typeof(v_payload:patch_version) <> 'INTEGER') then raise invalid_payload; end if; if (v_payload:patch_version::number <> 1) then raise invalid_payload; end if; if (typeof(v_payload:fields) <> 'OBJECT') then raise invalid_payload; end if; if (array_size(object_keys(v_payload:fields)) < 1 or array_size(object_keys(v_payload:fields)) > 3) then raise invalid_payload; end if;")
+    has(STRIPPED, "v_entry := get(v_payload:fields, v_field_name); if (v_field_name not in ('operator_rating', 'operator_notes', 'contributed_to_learning')) then raise invalid_payload; end if; if (typeof(v_entry) <> 'OBJECT') then raise invalid_payload; end if; if (array_size(object_keys(v_entry)) <> 2 or not array_contains('revision'::variant, object_keys(v_entry)) or not array_contains('value'::variant, object_keys(v_entry))) then raise invalid_payload; end if;")
+
+
+def test_patch_c2_revision_integer_and_bound():
+    has(STRIPPED, "if (typeof(v_entry:revision) <> 'INTEGER') then raise invalid_payload; end if; if (v_entry:revision::number < 1 or v_entry:revision::number > 9007199254740991) then raise invalid_payload; end if;")
+
+
+def test_patch_c2_outcome_order():
+    has(STRIPPED, "if (not v_value_valid) then v_outcome := 'rejected_value'; elseif (v_request_revision > v_stored_revision) then")
+    has(STRIPPED, "elseif (v_request_revision = v_stored_revision and v_value is not distinct from v_current) then v_outcome := 'already_applied'; elseif (v_request_revision = v_stored_revision) then v_outcome := 'revision_conflict'; else v_outcome := 'stale';")
+    assert position(STRIPPED, "v_outcome := 'applied'") < position(STRIPPED, "v_outcome := 'already_applied'")
+
+
+def test_patch_c2_consent_not_clearable():
+    has(STRIPPED, "elseif (v_field_name = 'contributed_to_learning') then v_value_valid := typeof(v_value) = 'BOOLEAN'; end if;")
+
+
+def test_patch_c2_notes_guard_byte_identical():
+    create = re.findall(r"regexp_count\(v_payload:operator_notes::string, '([^']+)'\)", STRIPPED)
+    patch = re.findall(r"regexp_count\(v_entry:value::string, '([^']+)'\)", STRIPPED)
+    assert tuple(create) == tuple(patch) == (r'([0-9]{1,3}[.]){3}[0-9]{1,3}', r'(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)', r'(°[ ]?[Ff])|℉')
+
+
+def test_patch_c2_fsv_whole_state():
+    has(STRIPPED, 'if (v_state_count <> 3 or v_state_known <> 3 or coalesce(v_state_invalid, 0) <> 0) then raise field_state_invalid;')
+    has(STRIPPED, "count(distinct case when field_name in ('operator_rating', 'operator_notes', 'contributed_to_learning') then field_name end)")
+    has(STRIPPED, 'count_if(accepted_revision < 0 or accepted_revision > 9007199254740991 or accepted_write_seq < 0)')
+
+
+def test_patch_c2_tombstone_and_missing_roast():
+    has(STRIPPED, 'if (v_is_patch) then select count(*) into :v_tombstone_count from app.cloud_roast_tombstones where idempotency_key = :p_run_id; if (v_tombstone_count > 0) then raise identity_tombstoned;')
+    has(STRIPPED, 'if (v_is_patch and v_existing_count = 0) then raise roast_not_found;')
+    has(STRIPPED, 'where cloud_roast_id = :v_id or public_slug = :v_slug; if (v_tombstone_count > 0) then raise identity_tombstoned;')
+
+
+def test_patch_c2_response_shape():
+    has(STRIPPED, "object_construct('outcome', v_outcome, 'accepted_revision', v_stored_revision)")
+    has(STRIPPED, "return object_construct('patch_version', 1, 'cloud_roast_id', v_id, 'fields', v_outcomes);")
+
+
+def test_patch_c2_consent_apply_recomputes():
+    has(STRIPPED, 'if (v_consent_applied) then call app.recompute_reference_summary(:v_new_bean_origin, :v_new_roast_level); end if;')
+
+
+def test_ups_c2_stale_comments_absent():
+    assert not re.search(r'projected wholesale|available to PUBLIC_WEB through|consent-conditioned INSERT|read-side consent gate', MIGRATION,re.I)
+
+
+def test_patch_c2_rating_value_grammar():
+    # O3: null clears; only INTEGER1..5 converts. Numeric strings/other types stay false.
+    has(STRIPPED, "v_value_valid := false; if (v_field_name = 'operator_rating') then if (typeof(v_value) = 'NULL_VALUE') then v_value_valid := true; elseif (typeof(v_value) = 'INTEGER') then v_value_valid := v_value::number between 1 and 5; end if; elseif (v_field_name = 'operator_notes') then")
+
+
+def test_patch_c2_notes_value_grammar_and_typed_content():
+    # Empty VARCHAR is accepted by this branch; JSON null clears; no other type converts.
+    has(STRIPPED, """elseif (v_field_name = 'operator_notes') then
+      if (typeof(v_value) = 'NULL_VALUE') then v_value_valid := true;
+      elseif (typeof(v_value) = 'VARCHAR') then v_value_valid := true;
+        if (regexp_count(v_entry:value::string, '([0-9]{1,3}[.]){3}[0-9]{1,3}') > 0
+          or regexp_count(v_entry:value::string, '(([0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4})|(::([0-9A-Fa-f]{1,4}:?){1,})|(([0-9A-Fa-f]{1,4}:){1,}:)') > 0
+          or regexp_count(v_entry:value::string, '(°[ ]?[Ff])|℉') > 0) then v_value_valid := false; end if;
+      end if;
+      elseif (v_field_name = 'contributed_to_learning') then v_value_valid := typeof(v_value) = 'BOOLEAN'; end if;""")
+
+
+def test_patch_c2_omission_visits_only_present_entries_and_keeps_independent_outcomes():
+    has(STRIPPED, 'v_fields := object_keys(v_payload:fields); for v_index in 0 to array_size(v_fields) - 1 do v_field_name := get(v_fields, v_index)::string; v_entry := get(v_payload:fields, v_field_name);')
+    has(STRIPPED, "v_outcomes := object_insert(v_outcomes, v_field_name, object_construct('outcome', v_outcome, 'accepted_revision', v_stored_revision)); end for;")
+    has(STRIPPED, "if (not v_value_valid) then v_outcome := 'rejected_value'; elseif (v_request_revision > v_stored_revision) then")
