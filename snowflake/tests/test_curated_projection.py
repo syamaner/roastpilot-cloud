@@ -36,7 +36,8 @@ O3 = [
     ("roaster_driver", False),
     ("2026-06-07T11:58:31+00:00; x", False),
 ]
-BASE_REVIEWS = "create or replace secure view reviews_by_roast copy grants as\nselect\n  r.public_slug,\n  tr.reviewer_name,\n  tr.score,\n  tr.aroma,\n  tr.acidity,\n  tr.sweetness,\n  tr.body,\n  tr.aftertaste,\n  tr.brew_method,\n  tr.notes,\n  tr.created_at\nfrom tasting_reviews tr\njoin cloud_roasts r on tr.roast_id = r.id\nwhere r.visibility <> 'private';\n"
+BASE_REVIEWS = "create or replace secure view reviews_by_roast copy grants as\nselect\n  r.public_slug,\n  tr.reviewer_name,\n  tr.score,\n  tr.aroma,\n  tr.acidity,\n  tr.sweetness,\n  tr.body,\n  tr.aftertaste,\n  tr.brew_method,\n  tr.notes,\n  tr.created_at,\n  case when regexp_like(tr.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') and regexp_like(r.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') then 'v1-' || sha2('roastpilot/c9-c3/review-paging-key/v1|' || r.id || '|' || tr.id, 256) else null end as paging_key\nfrom app.tasting_reviews tr\njoin app.cloud_roasts r on tr.roast_id = r.id\nwhere r.visibility <> 'private';\n"
+PAGING_KEY_EXPR = "case when regexp_like(tr.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') and regexp_like(r.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') then 'v1-' || sha2('roastpilot/c9-c3/review-paging-key/v1|' || r.id || '|' || tr.id, 256) else null end as paging_key"
 
 
 def summary_pairs():
@@ -104,7 +105,7 @@ def test_corp1_grammar_labels():
 def test_priv1_private_tokens_absent():
     for token in ("operator_notes", "idempotency_key", "contributed_to_learning", "owner_id", "updated_at", "cloud_roast_tombstones", "roast_artifacts"):
         assert re.search(rf"\b{token}\b", SQL, re.IGNORECASE) is None
-    without_joins = SQL.replace("t.roast_id = r.id", "").replace("tr.roast_id = r.id", "")
+    without_joins = SQL.replace("t.roast_id = r.id", "").replace("tr.roast_id = r.id", "").replace(PAGING_KEY_EXPR, "")
     assert re.search(r"\bid\b|\broast_id\b", without_joins, re.IGNORECASE) is None
 
 

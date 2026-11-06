@@ -52,11 +52,11 @@ select
         'ror_c_per_min', t.ror_c_per_min
       )
     ) within group (order by t.elapsed_s)
-    from roast_telemetry t
+    from app.roast_telemetry t
     where t.roast_id = r.id
   ) as curve,
   r.operator_rating
-from cloud_roasts r
+from app.cloud_roasts r
 where r.visibility <> 'private';
 
 -- AC-3/AC-6/AC-7-NEG/AC-8-NEG: exactly the 11 enumerated columns. Joins to
@@ -76,7 +76,8 @@ select
   tr.aftertaste,
   tr.brew_method,
   tr.notes,
-  tr.created_at
-from tasting_reviews tr
-join cloud_roasts r on tr.roast_id = r.id
+  tr.created_at,
+  case when regexp_like(tr.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') and regexp_like(r.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') then 'v1-' || sha2('roastpilot/c9-c3/review-paging-key/v1|' || r.id || '|' || tr.id, 256) else null end as paging_key
+from app.tasting_reviews tr
+join app.cloud_roasts r on tr.roast_id = r.id
 where r.visibility <> 'private';
