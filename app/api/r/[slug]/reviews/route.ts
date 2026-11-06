@@ -6,6 +6,8 @@ import { checkHoneypot, checkRateLimit } from "../../../../../lib/ratelimit";
 import { ReviewSubmissionSchema } from "../../../../../lib/review-schema";
 import { submitReview } from "../../../../../lib/review-submit";
 import { isValidSlug } from "../../../../../lib/slug";
+import { reviewsGet } from "../../../../../lib/c3/reviews-get";
+import { createReviewPageReader } from "../../../../../lib/c3/review-page-sql";
 
 export const runtime = "nodejs";
 
@@ -88,4 +90,13 @@ export async function POST(
 
   revalidatePath(`/r/${slug}`);
   return successResponse();
+}
+
+/** Authenticated read; configuration and SQL effects occur only on invocation. */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await params;
+  return reviewsGet(request, slug, createReviewPageReader(), () => process.env.ROASTPILOT_C3_CALLER_SECRET);
 }
