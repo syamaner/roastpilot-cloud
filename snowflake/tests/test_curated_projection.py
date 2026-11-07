@@ -36,7 +36,8 @@ O3 = [
     ("roaster_driver", False),
     ("2026-06-07T11:58:31+00:00; x", False),
 ]
-BASE_REVIEWS = "create or replace secure view reviews_by_roast copy grants as\nselect\n  r.public_slug,\n  tr.reviewer_name,\n  tr.score,\n  tr.aroma,\n  tr.acidity,\n  tr.sweetness,\n  tr.body,\n  tr.aftertaste,\n  tr.brew_method,\n  tr.notes,\n  tr.created_at\nfrom tasting_reviews tr\njoin cloud_roasts r on tr.roast_id = r.id\nwhere r.visibility <> 'private';\n"
+BASE_REVIEWS = "create or replace secure view reviews_by_roast copy grants as\nselect\n  r.public_slug,\n  tr.reviewer_name,\n  tr.score,\n  tr.aroma,\n  tr.acidity,\n  tr.sweetness,\n  tr.body,\n  tr.aftertaste,\n  tr.brew_method,\n  tr.notes,\n  tr.created_at,\n  case when regexp_like(tr.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') and regexp_like(r.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') then 'v1-' || sha2('roastpilot/c9-c3/review-paging-key/v1|' || r.id || '|' || tr.id, 256) else null end as paging_key\nfrom app.tasting_reviews tr\njoin app.cloud_roasts r on tr.roast_id = r.id\nwhere r.visibility <> 'private';\n"
+PAGING_KEY_EXPR = "case when regexp_like(tr.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') and regexp_like(r.id, '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') then 'v1-' || sha2('roastpilot/c9-c3/review-paging-key/v1|' || r.id || '|' || tr.id, 256) else null end as paging_key"
 
 
 def summary_pairs():
@@ -104,7 +105,7 @@ def test_corp1_grammar_labels():
 def test_priv1_private_tokens_absent():
     for token in ("operator_notes", "idempotency_key", "contributed_to_learning", "owner_id", "updated_at", "cloud_roast_tombstones", "roast_artifacts"):
         assert re.search(rf"\b{token}\b", SQL, re.IGNORECASE) is None
-    without_joins = SQL.replace("t.roast_id = r.id", "").replace("tr.roast_id = r.id", "")
+    without_joins = SQL.replace("t.roast_id = r.id", "").replace("tr.roast_id = r.id", "").replace(PAGING_KEY_EXPR, "")
     assert re.search(r"\bid\b|\broast_id\b", without_joins, re.IGNORECASE) is None
 
 
@@ -122,3 +123,13 @@ def test_consent1_no_consent_token_in_views():
 
 def test_reviews_region_byte_identical():
     assert RAW[RAW.index("create or replace secure view reviews_by_roast"):] == BASE_REVIEWS
+
+
+BASE_SLUG_REGION = "create or replace secure view roast_by_slug copy grants as\nselect\n  r.public_slug,\n  r.bean_origin,\n  r.bean_varietal,\n  r.bean_weight_g,\n  r.profile_name,\n  r.roast_level,\n  r.roasted_at_utc,\n  r.created_at,\n  object_construct_keep_null(\n    'curated_version', 1,\n    'started_at_utc', case when typeof(r.summary:started_at_utc) = 'VARCHAR' and regexp_like(r.summary:started_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:started_at_utc::string else null end,\n    'first_crack_at_utc', case when typeof(r.summary:first_crack_at_utc) = 'VARCHAR' and regexp_like(r.summary:first_crack_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:first_crack_at_utc::string else null end,\n    'beans_added_at_utc', case when typeof(r.summary:beans_added_at_utc) = 'VARCHAR' and regexp_like(r.summary:beans_added_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:beans_added_at_utc::string else null end,\n    'beans_dropped_at_utc', case when typeof(r.summary:beans_dropped_at_utc) = 'VARCHAR' and regexp_like(r.summary:beans_dropped_at_utc::string, '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$') then r.summary:beans_dropped_at_utc::string else null end,\n    'total_roast_seconds', case when typeof(r.summary:total_roast_seconds) in ('INTEGER', 'DECIMAL', 'DOUBLE') then r.summary:total_roast_seconds else null end,\n    'development_time_percent', case when typeof(r.summary:development_time_percent) in ('INTEGER', 'DECIMAL', 'DOUBLE') then r.summary:development_time_percent else null end\n  ) as summary,\n  (\n    select array_agg(\n      object_construct_keep_null(\n        'elapsed_s', t.elapsed_s,\n        'bean_temp_c', t.bean_temp_c,\n        'env_temp_c', t.env_temp_c,\n        'heat_percent', t.heat_percent,\n        'fan_percent', t.fan_percent,\n        'ror_c_per_min', t.ror_c_per_min\n      )\n    ) within group (order by t.elapsed_s)\n    from roast_telemetry t\n    where t.roast_id = r.id\n  ) as curve,\n  r.operator_rating\nfrom cloud_roasts r\nwhere r.visibility <> 'private';\n"
+
+
+def test_cur_slug_region_unchanged_except_app_qualifiers():
+    expected = BASE_SLUG_REGION.replace("from roast_telemetry t", "from app.roast_telemetry t").replace("from cloud_roasts r", "from app.cloud_roasts r")
+    start = RAW.index("create or replace secure view roast_by_slug")
+    region = RAW[start:RAW.index(";\n", start) + 2]
+    assert region == expected

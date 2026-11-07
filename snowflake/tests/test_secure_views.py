@@ -20,7 +20,7 @@ EXPECTED_SLUG_COLS = [
 ]
 EXPECTED_REVIEW_COLS = [
     "public_slug", "reviewer_name", "score", "aroma", "acidity",
-    "sweetness", "body", "aftertaste", "brew_method", "notes", "created_at",
+    "sweetness", "body", "aftertaste", "brew_method", "notes", "created_at", "paging_key",
 ]
 EXPECTED_CURVE_KEYS = [
     "elapsed_s", "bean_temp_c", "env_temp_c", "heat_percent", "fan_percent", "ror_c_per_min",
@@ -96,7 +96,7 @@ def test_roast_by_slug_has_visibility_private_filter():
 def test_roast_by_slug_curve_is_not_consent_gated():
     assert re.search(
         r"\(\s*select\s+array_agg\s*\(.*?\)\s+within\s+group\s*\(\s*order\s+by\s+t\.elapsed_s\s*\)\s+"
-        r"from\s+roast_telemetry\s+t\s+where\s+t\.roast_id\s*=\s*r\.id\s*\)\s+as\s+curve",
+        r"from\s+app\.roast_telemetry\s+t\s+where\s+t\.roast_id\s*=\s*r\.id\s*\)\s+as\s+curve",
         SLUG_REGION, re.IGNORECASE | re.DOTALL,
     )
     assert re.search(r"end\s+as\s+curve", SLUG_REGION, re.IGNORECASE) is None
